@@ -15,9 +15,18 @@ def test_roster_init_writes_default_roster(tmp_target, capsys):
     text = path.read_text()
     assert 'orchestrator = "chef"' in text
     assert 'cli = "codex"' in text
-    assert 'cli = "ollama:llama3.3"' in text
+    assert 'cli = "ollama:llama3.2:3b"' in text
     assert "timeout_seconds = 600" in text
     assert str(path) in out
+
+
+def test_default_roster_ollama_model_is_small_and_documented():
+    # The starter roster must never name a model whose absence triggers a
+    # multi-GB auto-pull (a 43GB llama3.3 default once filled a root disk).
+    assert roster_cmd.DEFAULT_OLLAMA_MODEL == "llama3.2:3b"
+    text = roster_cmd.default_roster_text()
+    assert "llama3.3" not in text
+    assert "never auto-pulls" in text
 
 
 def test_roster_template_documents_model_pinning(tmp_target):
@@ -114,9 +123,39 @@ def test_roster_doctor_invalid_roster_fails(tmp_target, capsys):
 def test_roster_cli_init_and_doctor(monkeypatch, tmp_target, capsys):
     assert cli.main(["roster", "init", "--target", str(tmp_target), "--ollama-model", "mistral"]) == 0
     monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    monkeypatch.setattr(agents, "ollama_model_present", lambda model: (True, ""))
     assert cli.main(["roster", "doctor", "--target", str(tmp_target)]) == 0
     out = capsys.readouterr().out
     assert "ollama:mistral" in out
+
+
+def test_roster_cli_init_default_uses_small_ollama_model(tmp_target):
+    assert cli.main(["roster", "init", "--target", str(tmp_target)]) == 0
+    text = (tmp_target / ".brigade" / "roster.toml").read_text()
+    assert f'cli = "ollama:{roster_cmd.DEFAULT_OLLAMA_MODEL}"' in text
+
+
+def test_roster_doctor_warns_when_ollama_model_not_pulled(monkeypatch, tmp_target, capsys):
+    roster_cmd.init(tmp_target)
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    monkeypatch.setattr(
+        agents, "ollama_model_present", lambda model: (False, f"ollama model {model!r} is not pulled locally")
+    )
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[warn]" in out
+    assert "not pulled locally" in out
+
+
+def test_roster_doctor_ok_when_ollama_model_pulled(monkeypatch, tmp_target, capsys):
+    roster_cmd.init(tmp_target)
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    monkeypatch.setattr(agents, "ollama_model_present", lambda model: (True, ""))
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "pulled locally" in out
 
 
 def _write_roster(tmp_target, body: str) -> None:
@@ -156,6 +195,7 @@ def test_roster_doctor_fails_pin_on_ollama_ref(monkeypatch, tmp_target, capsys):
         'orchestrator = "chef"\n[agents.chef]\ncli = "ollama:llama3.3"\nmodel = "mistral"\nrole = "plan"\n',
     )
     monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    monkeypatch.setattr(agents, "ollama_model_present", lambda model: (True, ""))
     rc = roster_cmd.doctor(tmp_target)
     out = capsys.readouterr().out
     assert rc == 1

@@ -339,6 +339,62 @@ def test_run_agent_reports_missing(monkeypatch):
     assert "not installed" in res.detail
 
 
+_OLLAMA_LIST_HEADER = "NAME                ID              SIZE      MODIFIED\n"
+
+
+def _fake_ollama_env(monkeypatch, list_result, run_result=None):
+    """Route proc.run so `ollama list` returns list_result and record any other argv."""
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if argv[:2] == ["ollama", "list"]:
+            return list_result
+        return run_result if run_result is not None else agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    return calls
+
+
+def test_run_agent_ollama_refuses_model_not_pulled(monkeypatch):
+    # `ollama run` on a missing model silently auto-pulls it (43GB for
+    # llama3.3, once enough to fill a root disk); dispatch must refuse instead.
+    listing = agents.proc.Result(0, _OLLAMA_LIST_HEADER + "other:latest  abc  2.0 GB  2 days ago\n", "")
+    calls = _fake_ollama_env(monkeypatch, listing)
+    res = agents.run_agent("ollama:llama3.3", "hi")
+    assert res.ok is False
+    assert "not pulled locally" in res.detail
+    assert "never auto-pulls" in res.detail
+    assert calls == [["ollama", "list"]]
+
+
+def test_run_agent_ollama_runs_when_model_pulled(monkeypatch):
+    listing = agents.proc.Result(0, _OLLAMA_LIST_HEADER + "llama3.3:latest  abc  43 GB  2 days ago\n", "")
+    calls = _fake_ollama_env(monkeypatch, listing)
+    res = agents.run_agent("ollama:llama3.3", "hi")
+    assert res.ok is True
+    assert res.text == "answer"
+    assert calls[-1] == ["ollama", "run", "llama3.3", "hi"]
+
+
+def test_run_agent_ollama_matches_exact_tag(monkeypatch):
+    listing = agents.proc.Result(0, _OLLAMA_LIST_HEADER + "llama3.2:3b  abc  2.0 GB  2 days ago\n", "")
+    calls = _fake_ollama_env(monkeypatch, listing)
+    res = agents.run_agent("ollama:llama3.2:3b", "hi")
+    assert res.ok is True
+    assert calls[-1] == ["ollama", "run", "llama3.2:3b", "hi"]
+
+
+def test_run_agent_ollama_fails_seat_when_list_fails(monkeypatch):
+    listing = agents.proc.Result(1, "", "could not connect to ollama server")
+    calls = _fake_ollama_env(monkeypatch, listing)
+    res = agents.run_agent("ollama:llama3.2:3b", "hi")
+    assert res.ok is False
+    assert "could not list local ollama models" in res.detail
+    assert calls == [["ollama", "list"]]
+
+
 def test_run_agent_captures_output(monkeypatch):
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, "  answer  ", ""))

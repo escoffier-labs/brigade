@@ -11,9 +11,13 @@ from . import roster as roster_mod
 
 DEFAULT_ROSTER_REL = ".brigade/roster.toml"
 
+# Small on purpose: a starter roster must never name a model whose absence
+# triggers a multi-GB `ollama pull` (a 43GB default once filled a root disk).
+DEFAULT_OLLAMA_MODEL = "llama3.2:3b"
+
 
 def default_roster_text(
-    *, ollama_model: str = "llama3.3", max_workers: int = 4, review_model: str | None = None
+    *, ollama_model: str = DEFAULT_OLLAMA_MODEL, max_workers: int = 4, review_model: str | None = None
 ) -> str:
     return f"""# Brigade aboyeur roster.
 # Edit agent roles and CLI refs to match the tools installed on this machine.
@@ -28,6 +32,8 @@ role = "Plan the work, choose useful workers, and synthesize the final answer."
 cli = "codex"
 role = "Make precise code changes and report what changed."
 
+# Brigade never auto-pulls ollama models: dispatch fails unless the model is
+# already local. Run `ollama pull {ollama_model}` once before using this seat.
 [agents.local_researcher]
 cli = "ollama:{ollama_model}"
 role = "Research locally and summarize useful findings."
@@ -85,7 +91,7 @@ def init(
     target: Path,
     *,
     force: bool = False,
-    ollama_model: str = "llama3.3",
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
     max_workers: int = 4,
     review_model: str | None = None,
 ) -> int:
@@ -157,6 +163,13 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
         binary = agents.command_for(agent.cli)
         if agents.detect(agent.cli):
             checks.append((doctor_mod.OK, f"agent: {name}", f"{agent.cli} via {binary}; timeout={timeout:g}s"))
+            if agent.cli.startswith("ollama:"):
+                ollama_model = agent.cli[len("ollama:") :]
+                present, missing_detail = agents.ollama_model_present(ollama_model)
+                if present:
+                    checks.append((doctor_mod.OK, f"agent: {name} ollama model", f"{ollama_model} pulled locally"))
+                else:
+                    checks.append((doctor_mod.WARN, f"agent: {name} ollama model", missing_detail))
         else:
             detail = f"{agent.cli} needs `{binary}` on PATH; timeout={timeout:g}s"
             if agent.cli == "claude":

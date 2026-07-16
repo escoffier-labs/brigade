@@ -256,7 +256,7 @@ cli = "codex"
 role = "Plan the work, choose useful workers, and synthesize the final answer."
 
 [agents.local_researcher]
-cli = "ollama:llama3.3"
+cli = "ollama:llama3.2:3b"
 role = "Research locally and summarize useful findings."
 timeout_seconds = 300
 
@@ -272,6 +272,11 @@ sandbox = "workspace-write"
 ```
 
 Edit the roles, CLI refs, and timeouts to match the tools on your machine.
+Brigade never auto-pulls Ollama models: dispatch to an `ollama:<model>` seat
+fails with a clear message unless the model is already pulled locally, because
+a bare `ollama run` silently downloads the model first (tens of gigabytes for
+a large one). Pull the model yourself (`ollama pull llama3.2:3b`) or name one
+`ollama list` already shows; `brigade roster doctor` warns about missing ones.
 `limits.timeout_seconds` is the default per-agent timeout.
 `agents.<name>.timeout_seconds` overrides it for one agent.
 `limits.sandbox` is optional. When set to `read-only`, `workspace-write`, or
