@@ -747,6 +747,39 @@ def test_skills_fleet_suppresses_removal_for_malformed_receipt(tmp_path, capsys)
     assert row["remove_command"] is None
 
 
+def test_skills_fleet_does_not_remove_partial_unsupported_copy(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source", name="partial-unsupported")
+    metadata_path = source / "skill.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["supported_harnesses"] = ["cursor"]
+    metadata_path.write_text(json.dumps(metadata))
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+    assert (
+        skills_cmd.install(
+            workspace=tmp_path,
+            skill="registry:partial-unsupported",
+            harness="cursor",
+            json_output=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    installed = tmp_path / ".cursor" / "skills" / "partial-unsupported"
+    (installed / "SKILL.md").unlink()
+    registry_metadata = tmp_path / ".brigade" / "skills" / "registry" / "partial-unsupported" / "skill.json"
+    metadata = json.loads(registry_metadata.read_text())
+    metadata["supported_harnesses"] = ["codex"]
+    registry_metadata.write_text(json.dumps(metadata))
+
+    payload = skills_cmd._fleet_status_payload(tmp_path)
+    row = next(item for item in payload["copies"] if item["skill_id"] == "partial-unsupported")
+
+    assert row["drift"]["receipt_known"] is True
+    assert row["status"] == "missing"
+    assert row["remove_command"] is None
+
+
 def test_skills_fleet_status_is_stable_and_emits_one_update_per_stale_copy(tmp_path, capsys):
     for harness in ("cursor", "codex"):
         assert skills_cmd.install(workspace=tmp_path, skill="brigade-work", harness=harness, json_output=True) == 0
