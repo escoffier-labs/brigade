@@ -535,6 +535,56 @@ def test_skills_rollback_uses_snapshot_bound_to_current_receipt(tmp_path, capsys
     assert orphan.exists()
 
 
+def test_skills_rollback_rejects_malformed_current_receipt_before_mutation(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source", name="malformed-current")
+    installed = tmp_path / ".cursor" / "skills" / "malformed-current" / "SKILL.md"
+    (source / "SKILL.md").write_text("# A\n")
+    assert skills_cmd.install(workspace=tmp_path, skill=str(source), harness="cursor", json_output=True) == 0
+    capsys.readouterr()
+    (source / "SKILL.md").write_text("# B\n")
+    assert (
+        skills_cmd.install(workspace=tmp_path, skill=str(source), harness="cursor", force=True, json_output=True) == 0
+    )
+    capsys.readouterr()
+    receipt_path = tmp_path / ".brigade" / "skills" / "installs" / "malformed-current-cursor.json"
+    receipt = json.loads(receipt_path.read_text())
+    snapshot = Path(receipt["rollback_snapshot"])
+    receipt["source"].pop("kind")
+    receipt_path.write_text(json.dumps(receipt))
+
+    assert skills_cmd.rollback(workspace=tmp_path, skill="malformed-current", harness="cursor") == 1
+
+    assert "invalid rollback receipt" in capsys.readouterr().err
+    assert installed.read_text() == "# B\n"
+    assert snapshot.is_dir()
+    assert json.loads(receipt_path.read_text()) == receipt
+
+
+def test_skills_rollback_rejects_malformed_previous_receipt_before_mutation(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source", name="malformed-previous")
+    installed = tmp_path / ".cursor" / "skills" / "malformed-previous" / "SKILL.md"
+    (source / "SKILL.md").write_text("# A\n")
+    assert skills_cmd.install(workspace=tmp_path, skill=str(source), harness="cursor", json_output=True) == 0
+    capsys.readouterr()
+    (source / "SKILL.md").write_text("# B\n")
+    assert (
+        skills_cmd.install(workspace=tmp_path, skill=str(source), harness="cursor", force=True, json_output=True) == 0
+    )
+    capsys.readouterr()
+    receipt_path = tmp_path / ".brigade" / "skills" / "installs" / "malformed-previous-cursor.json"
+    receipt = json.loads(receipt_path.read_text())
+    snapshot = Path(receipt["rollback_snapshot"])
+    receipt["previous_receipt"]["source"].pop("kind")
+    receipt_path.write_text(json.dumps(receipt))
+
+    assert skills_cmd.rollback(workspace=tmp_path, skill="malformed-previous", harness="cursor") == 1
+
+    assert "invalid previous rollback receipt" in capsys.readouterr().err
+    assert installed.read_text() == "# B\n"
+    assert snapshot.is_dir()
+    assert json.loads(receipt_path.read_text()) == receipt
+
+
 def test_skills_history_and_diff_report_install_drift(tmp_path, capsys):
     source = _write_skill(tmp_path / "source")
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
