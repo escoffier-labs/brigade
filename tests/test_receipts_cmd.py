@@ -487,6 +487,63 @@ pathlib.Path(sys.argv[3]).parent.joinpath("import-argv.json").write_text("invoke
     assert list(work_dir.glob("miseledger-export-*.jsonl")) == []
 
 
+def test_receipts_export_miseledger_import_all_malformed_exits_nonzero(tmp_path, monkeypatch, capsys):
+    bad_dir = tmp_path / ".brigade" / "work" / "verify-runs" / "bad"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "receipt.json").write_text("{not json\n")
+    marker = tmp_path / "import.json"
+    _write_fake_miseledger(tmp_path / "bin" / "miseledger", marker)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+
+    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--import"]) == 1
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert "warning: skipped malformed receipt" in captured.err
+    assert not marker.exists()
+
+
+def test_receipts_export_miseledger_new_only_import_mixed_skip_and_malformed_exits_nonzero(
+    tmp_path, monkeypatch, capsys
+):
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120000-work-verify-seen",
+        started_at="2026-07-08T12:00:00Z",
+    )
+    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only"]) == 0
+    capsys.readouterr()
+    cursor_path = tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json"
+    cursor = cursor_path.read_text()
+    bad_dir = tmp_path / ".brigade" / "work" / "verify-runs" / "bad"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "receipt.json").write_text("{not json\n")
+    marker = tmp_path / "import.json"
+    _write_fake_miseledger(tmp_path / "bin" / "miseledger", marker)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+
+    assert (
+        cli.main(
+            [
+                "receipts",
+                "export",
+                "miseledger",
+                "--target",
+                str(tmp_path),
+                "--new-only",
+                "--import",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert "warning: skipped malformed receipt" in captured.err
+    assert cursor_path.read_text() == cursor
+    assert not marker.exists()
+
+
 def test_receipts_export_miseledger_copies_git_metadata_and_github_commit_link(tmp_path, capsys):
     head = _init_git_repo_with_head(tmp_path)
     subprocess.run(
@@ -645,6 +702,49 @@ def test_receipts_export_miseledger_json_empty_is_typed_and_healthy(tmp_path, ca
         "target_label": "repository",
     }
     assert captured.err == ""
+
+
+def test_receipts_export_miseledger_json_empty_write_failure_emits_failed_result(tmp_path, monkeypatch, capsys):
+    out_path = tmp_path / "empty.jsonl"
+    original_open = Path.open
+
+    def failed_open(self, *args, **kwargs):
+        if self == out_path:
+            raise OSError("disk full")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", failed_open)
+
+    assert (
+        cli.main(
+            [
+                "receipts",
+                "export",
+                "miseledger",
+                "--target",
+                str(tmp_path),
+                "--out",
+                str(out_path),
+                "--json",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert payload == {
+        "candidate_count": 0,
+        "error_count": 1,
+        "exported_count": 0,
+        "schema": "brigade.miseledger_export_result.v1",
+        "skipped_count": 0,
+        "status": "failed",
+        "target_label": "repository",
+    }
+    assert captured.out.count("\n") == 1
+    assert "could not write output" in captured.err
+    assert "disk full" in captured.err
 
 
 def test_receipts_export_miseledger_json_nothing_new_is_idempotent(tmp_path, capsys):
@@ -883,6 +983,70 @@ def test_receipts_export_miseledger_fleet_uses_configured_repo_outside_home_repo
     assert str(repo) not in json.dumps(payload)
 
 
+def test_receipts_export_miseledger_fleet_config_errors_fail_before_export(tmp_path, capsys):
+    valid_repo = tmp_path / "valid"
+    valid_repo.mkdir()
+    _write_verify_export_receipt(
+        valid_repo,
+        "20260708-120000-work-verify-valid",
+        started_at="2026-07-08T12:00:00Z",
+    )
+    cases = {
+        "invalid-toml": "repo = [\n",
+        "pathless-entry": "\n".join(
+            [
+                "[[repo]]",
+                'id = "valid"',
+                'label = "Valid"',
+                f"path = {json.dumps(str(valid_repo))}",
+                "enabled = true",
+                "",
+                "[[repo]]",
+                'id = "pathless"',
+                'label = "Pathless"',
+                "enabled = true",
+                "",
+            ]
+        ),
+    }
+
+    for case_name, config_text in cases.items():
+        fleet = tmp_path / case_name
+        config = fleet / ".brigade" / "repos.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text(config_text)
+        out_path = tmp_path / f"{case_name}.jsonl"
+
+        assert (
+            cli.main(
+                [
+                    "receipts",
+                    "export",
+                    "miseledger",
+                    "--target",
+                    str(fleet),
+                    "--fleet",
+                    "--out",
+                    str(out_path),
+                    "--json",
+                ]
+            )
+            == 1
+        )
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+
+        assert payload["schema"] == "brigade.miseledger_fleet_export_result.v1"
+        assert payload["status"] == "failed"
+        assert payload["repo_count"] == 0
+        assert payload["failed_count"] == 0
+        assert captured.out.count("\n") == 1
+        assert str(fleet) not in captured.out
+        assert "config" in captured.err
+        assert not out_path.exists()
+        assert not (valid_repo / ".brigade" / "work" / "miseledger-export-cursor.json").exists()
+
+
 def test_receipts_export_miseledger_fleet_empty_and_nothing_new_are_healthy(tmp_path, capsys):
     fleet = tmp_path / "fleet"
     empty_repo = tmp_path / "empty"
@@ -981,6 +1145,65 @@ def test_receipts_export_miseledger_fleet_preserves_failure_and_continues(tmp_pa
     assert payload["failed_count"] == 1
     assert len(_jsonl(imported["input"])) == 1
     assert "warning: skipped malformed receipt" in captured.err
+
+
+def test_receipts_export_miseledger_fleet_error_summaries_distinguish_collection_failures(
+    tmp_path, monkeypatch, capsys
+):
+    fleet = tmp_path / "fleet"
+    malformed_repo = tmp_path / "malformed"
+    unreadable_repo = tmp_path / "unreadable"
+    malformed_receipt = malformed_repo / ".brigade" / "work" / "verify-runs" / "bad" / "receipt.json"
+    malformed_receipt.parent.mkdir(parents=True)
+    malformed_receipt.write_text("{not json\n")
+    unreadable_receipt = _write_verify_export_receipt(
+        unreadable_repo,
+        "20260708-120000-work-verify-unreadable",
+        started_at="2026-07-08T12:00:00Z",
+    )
+    _write_repo_catalog(
+        fleet,
+        [
+            ("malformed", "Malformed", malformed_repo, True),
+            ("unreadable", "Unreadable", unreadable_repo, True),
+        ],
+    )
+    original_read_text = Path.read_text
+
+    def unreadable(self, *args, **kwargs):
+        if self == unreadable_receipt:
+            raise OSError("permission denied")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    out_path = tmp_path / "errors.jsonl"
+
+    assert (
+        cli.main(
+            [
+                "receipts",
+                "export",
+                "miseledger",
+                "--target",
+                str(fleet),
+                "--fleet",
+                "--out",
+                str(out_path),
+                "--json",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    repos = {repo["repo_id"]: repo for repo in payload["repos"]}
+
+    assert repos["malformed"]["errors"] == ["malformed: skipped 1 malformed receipt(s)"]
+    assert repos["unreadable"]["errors"] == ["unreadable: skipped 1 unreadable receipt(s)"]
+    assert str(malformed_repo) not in captured.out
+    assert str(unreadable_repo) not in captured.out
+    assert "warning: skipped malformed receipt" in captured.err
+    assert "warning: skipped unreadable receipt" in captured.err
 
 
 def test_receipts_export_miseledger_fleet_import_failure_does_not_count_as_repo_failure(tmp_path, monkeypatch, capsys):

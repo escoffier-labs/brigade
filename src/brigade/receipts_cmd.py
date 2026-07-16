@@ -731,19 +731,19 @@ def _metadata_with_digest_signature(metadata: dict[str, Any], payload: dict[str,
     return metadata
 
 
-def _read_export_receipt(path: Path, target: Path) -> dict[str, Any] | None:
+def _read_export_receipt(path: Path, target: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         payload = json.loads(path.read_text())
     except OSError as exc:
         print(f"warning: skipped unreadable receipt {_rel(path, target)}: {exc}", file=sys.stderr)
-        return None
+        return None, "unreadable"
     except json.JSONDecodeError as exc:
         print(f"warning: skipped malformed receipt {_rel(path, target)}: {exc}", file=sys.stderr)
-        return None
+        return None, "malformed"
     if not isinstance(payload, dict):
         print(f"warning: skipped malformed receipt {_rel(path, target)}: JSON is not an object", file=sys.stderr)
-        return None
-    return payload
+        return None, "malformed"
+    return payload, None
 
 
 def _timestamp_for_sort(payload: dict[str, Any], path: Path) -> str:
@@ -754,20 +754,23 @@ def _timestamp_for_sort(payload: dict[str, Any], path: Path) -> str:
     return path.parent.name
 
 
-def _collect_export_receipts(target: Path) -> tuple[list[dict[str, Any]], int]:
+def _collect_export_receipts(target: Path) -> tuple[list[dict[str, Any]], int, list[str]]:
     specs = [
         ("work_verify", target / ".brigade" / "work" / "verify-runs", "*/receipt.json"),
         ("run", target / ".brigade" / "runs", "*/run.json"),
     ]
     receipts: list[dict[str, Any]] = []
     candidate_count = 0
+    collection_error_kinds: list[str] = []
     for receipt_type, root, pattern in specs:
         if not root.is_dir():
             continue
         for path in sorted(root.glob(pattern)):
             candidate_count += 1
-            payload = _read_export_receipt(path, target)
+            payload, error_kind = _read_export_receipt(path, target)
             if payload is None:
+                if error_kind is not None:
+                    collection_error_kinds.append(error_kind)
                 continue
             receipts.append(
                 {
@@ -778,7 +781,7 @@ def _collect_export_receipts(target: Path) -> tuple[list[dict[str, Any]], int]:
                 }
             )
     receipts.sort(key=lambda item: item["sort_key"], reverse=True)
-    return receipts, candidate_count
+    return receipts, candidate_count, collection_error_kinds
 
 
 def _metadata_with_delta(metadata: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
@@ -1218,6 +1221,15 @@ def _fleet_repo_errors(result: dict[str, Any]) -> list[str]:
         return [str(error) for error in errors]
     repo_id = str(result.get("repo_id") or "repo")
     error_count = int(result.get("error_count") or 0)
+    collection_error_kinds = result.get("collection_error_kinds")
+    if isinstance(collection_error_kinds, list):
+        summaries: list[str] = []
+        for kind in ("malformed", "unreadable"):
+            count = collection_error_kinds.count(kind)
+            if count:
+                summaries.append(f"{repo_id}: skipped {count} {kind} receipt(s)")
+        if summaries:
+            return summaries
     if error_count > 0:
         return [f"{repo_id}: skipped {error_count} unreadable receipt(s)"]
     return []
@@ -1229,8 +1241,8 @@ def _repository_export_result(
     limit: int,
     new_only: bool,
 ) -> dict[str, Any]:
-    receipts, candidate_count = _collect_export_receipts(target)
-    collection_error_count = candidate_count - len(receipts)
+    receipts, candidate_count, collection_error_kinds = _collect_export_receipts(target)
+    collection_error_count = len(collection_error_kinds)
     selected = receipts[:limit] if limit else receipts
     records = [_miseledger_item(receipt, target, ordinal) for ordinal, receipt in enumerate(selected, start=1)]
     cursor_hashes: set[str] = set()
@@ -1260,6 +1272,7 @@ def _repository_export_result(
         "exported_count": exported_count,
         "skipped_count": skipped_count,
         "error_count": error_count,
+        "collection_error_kinds": collection_error_kinds,
         "lines": lines,
         "cursor_hashes": cursor_hashes,
         "target": target,
@@ -1322,10 +1335,16 @@ def _export_miseledger_fleet(
 ) -> int:
     from .repos_cmd import fleet as repo_fleet
 
-    entries, _errors, config_loaded = repo_fleet._load_config(target)
+    entries, config_errors, config_loaded = repo_fleet._load_config(target)
     if not config_loaded:
         print(f"error: no repo fleet config at {target / '.brigade' / 'repos.toml'}", file=sys.stderr)
         return 2
+    if config_errors:
+        for error in config_errors:
+            safe_error = repo_fleet._safe_text(error, target, "repo-fleet", "repo fleet")
+            print(f"error: repo fleet config: {safe_error}", file=sys.stderr)
+        _print_export_result(_fleet_export_payload([], status="failed"))
+        return 1
 
     enabled_entries = [entry for entry in entries if entry.enabled]
     repo_results: list[dict[str, Any]] = []
@@ -1487,14 +1506,6 @@ def export_miseledger(
     import_error_count = 0
 
     if json_output:
-        if candidate_count == 0:
-            json_output_path = Path(out).expanduser()
-            exit_code, _ = _write_miseledger_lines_to_path(json_output_path, lines)
-            if exit_code != 0:
-                return exit_code
-            _print_export_result(_single_repo_export_payload(result))
-            return 0
-
         json_output_path = Path(out).expanduser()
         exit_code, written_hashes = _write_miseledger_lines_to_path(json_output_path, lines)
         if new_only and written_hashes:
@@ -1513,6 +1524,7 @@ def export_miseledger(
         if exit_code != 0:
             failed_result = dict(result)
             failed_result["status"] = "failed"
+            failed_result["error_count"] = int(failed_result["error_count"]) + 1
             _print_export_result(_single_repo_export_payload(failed_result))
             return 1
 
@@ -1537,6 +1549,8 @@ def export_miseledger(
             exit_code, _ = _write_miseledger_lines_to_path(Path(out).expanduser(), lines)
             if exit_code != 0:
                 return exit_code
+        if int(result["error_count"]) > 0:
+            return 1
         print("nothing new; import skipped")
         return 0
 
