@@ -10,9 +10,11 @@ from brigade.repos_cmd import sweeps as repos_sweeps
 from tests.issue266_fixture import (
     FLEET_REPO_COUNT,
     FLEET_SWEEP_HISTORY_COUNT,
+    HEALTH_COMMAND_LABEL,
     OPERATOR_REPORT_HISTORY_COUNT,
     build_daily_status_workspace,
     build_fleet_workspace,
+    seed_fleet_repo_dirs,
     write_json,
 )
 
@@ -115,6 +117,77 @@ def test_repos_health_falls_back_for_receipt_missing_from_newest_sweep(tmp_path,
     assert health_by_repo["fake-repo-001"]["sweep_id"] == newest_dir.name
     assert health_by_repo["fake-repo-002"]["sweep_id"] == fallback_dir.name
     assert all(receipt["sweep_id"] != unused_dir.name for receipt in health_by_repo.values())
+
+
+def test_repos_health_orders_legacy_sweep_dirs_by_payload_timestamp(tmp_path):
+    target = build_fleet_workspace(
+        tmp_path / "fleet-legacy-order-ws",
+        repo_count=1,
+        sweep_history_count=2,
+    )
+    older_dir, newer_dir = repos_sweeps._list_sweep_dirs_newest_first(target)
+    older = repos_sweeps._read_sweep(older_dir)
+    newer = repos_sweeps._read_sweep(newer_dir)
+    assert older is not None
+    assert newer is not None
+    older["started_at"] = "2026-07-16T12:00:00+00:00"
+    newer["started_at"] = "2026-07-16T13:00:00+00:00"
+    older_legacy_dir = older_dir.with_name("zzz-renamed-older")
+    newer_legacy_dir = newer_dir.with_name("aaa-renamed-newer")
+    older_dir.rename(older_legacy_dir)
+    newer_dir.rename(newer_legacy_dir)
+    write_json(older_legacy_dir / "sweep.json", older)
+    write_json(newer_legacy_dir / "sweep.json", newer)
+
+    payload = repos_cmd.health(target)
+
+    assert payload["sweep"]["latest"]["sweep_id"] == newer["sweep_id"]
+    latest_receipt = payload["health_commands"]["repos"][0]["health_commands"][0]["latest_receipt"]
+    assert latest_receipt["sweep_id"] == newer["sweep_id"]
+
+
+def test_health_sweep_snapshot_retains_only_required_receipts(tmp_path):
+    target = build_fleet_workspace(
+        tmp_path / "fleet-required-receipts-ws",
+        repo_count=1,
+    )
+    sweep_dir = repos_sweeps._list_sweep_dirs_newest_first(target)[0]
+    sweep = repos_sweeps._read_sweep(sweep_dir)
+    assert sweep is not None
+    sweep["repos"][0]["commands"].extend(
+        {"label": f"removed-health-{index}", "status": "completed", "exit_code": 0}
+        for index in range(20)
+    )
+    write_json(sweep_dir / "sweep.json", sweep)
+    entries, issues, _config = repos_fleet._load_config(target)
+    assert issues == []
+
+    snapshot = repos_sweeps._health_sweep_snapshot(target, entries)
+
+    assert set(snapshot.receipt_index) == {("fake-repo-001", HEALTH_COMMAND_LABEL)}
+
+
+def test_seed_fleet_repo_dirs_preserves_explicit_empty_ids(tmp_path):
+    target = tmp_path / "empty-fleet"
+
+    assert seed_fleet_repo_dirs(target, []) == []
+    assert not (target / "fixtures" / "repos").exists()
+
+
+def test_build_fleet_workspace_rejects_nonempty_target(tmp_path):
+    target = tmp_path / "occupied"
+    target.mkdir()
+    marker = target / "keep.txt"
+    marker.write_text("do not overwrite\n")
+
+    try:
+        build_fleet_workspace(target)
+    except ValueError as exc:
+        assert "empty" in str(exc)
+    else:
+        raise AssertionError("expected a non-empty benchmark target to be rejected")
+
+    assert marker.read_text() == "do not overwrite\n"
 
 
 def test_operator_report_health_does_not_decode_full_report_history(tmp_path, monkeypatch):

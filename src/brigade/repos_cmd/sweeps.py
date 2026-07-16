@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
@@ -118,6 +119,10 @@ def _list_sweep_dirs_newest_first(target: Path) -> list[Path]:
     return dirs
 
 
+def _has_timestamp_sweep_name(path: Path) -> bool:
+    return re.match(r"^\d{8}-\d{6}(?:-|$)", path.name) is not None
+
+
 def _sweeps(target: Path) -> list[dict[str, Any]]:
     sweeps: list[dict[str, Any]] = []
     for child in _list_sweep_dirs_newest_first(target):
@@ -147,6 +152,7 @@ def _required_health_receipt_keys(entries: list[constants.RepoEntry]) -> set[tup
 def _index_sweep_health_receipts(
     sweep: dict[str, Any],
     receipt_index: dict[tuple[str, str], dict[str, Any]],
+    required: set[tuple[str, str]],
 ) -> None:
     sweep_id = sweep.get("sweep_id")
     sweep_status = sweep.get("status")
@@ -164,7 +170,7 @@ def _index_sweep_health_receipts(
             if not label:
                 continue
             key = (repo_id, label)
-            if key in receipt_index:
+            if key not in required or key in receipt_index:
                 continue
             receipt_index[key] = {
                 "sweep_id": sweep_id,
@@ -186,13 +192,18 @@ def _health_sweep_snapshot(target: Path, entries: list[constants.RepoEntry]) -> 
     required = _required_health_receipt_keys(entries)
     latest: dict[str, Any] | None = None
     receipt_index: dict[tuple[str, str], dict[str, Any]] = {}
-    for sweep_dir in _list_sweep_dirs_newest_first(target):
-        sweep = _read_sweep(sweep_dir)
+    sweep_dirs = _list_sweep_dirs_newest_first(target)
+    ordered_sweeps: Iterable[dict[str, Any] | None]
+    if all(_has_timestamp_sweep_name(path) for path in sweep_dirs):
+        ordered_sweeps = (_read_sweep(path) for path in sweep_dirs)
+    else:
+        ordered_sweeps = _sweeps(target)
+    for sweep in ordered_sweeps:
         if sweep is None:
             continue
         if latest is None:
             latest = sweep
-        _index_sweep_health_receipts(sweep, receipt_index)
+        _index_sweep_health_receipts(sweep, receipt_index, required)
         if not required or required.issubset(receipt_index):
             break
     return HealthSweepSnapshot(latest=latest, receipt_index=receipt_index)

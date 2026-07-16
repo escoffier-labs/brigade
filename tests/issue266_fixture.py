@@ -35,7 +35,7 @@ def init_workspace_git(target: Path) -> None:
 
 
 def seed_fleet_repo_dirs(target: Path, ids: list[str] | None = None) -> list[str]:
-    ids = ids or repo_ids()
+    ids = repo_ids() if ids is None else ids
     for repo_id in ids:
         repo_dir = target / "fixtures" / "repos" / repo_id
         repo_dir.mkdir(parents=True, exist_ok=True)
@@ -167,6 +167,8 @@ def build_fleet_workspace(
     sweep_history_count: int = 1,
     artifact_padding_bytes: int = DEFAULT_ARTIFACT_PADDING_BYTES,
 ) -> Path:
+    if target.exists() and (not target.is_dir() or any(target.iterdir())):
+        raise ValueError(f"benchmark workspace target must be absent or empty: {target}")
     target.mkdir(parents=True, exist_ok=True)
     init_workspace_git(target)
     ids = seed_fleet_repo_dirs(target, repo_ids(repo_count))

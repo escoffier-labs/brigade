@@ -18,6 +18,7 @@ if str(_TESTS_DIR) not in sys.path:
 
 from issue266_fixture import (  # noqa: E402
     FLEET_REPO_COUNT,
+    FLEET_SWEEP_HISTORY_COUNT,
     OPERATOR_REPORT_HISTORY_COUNT,
     build_daily_status_workspace,
 )
@@ -42,47 +43,71 @@ def _python_argv() -> list[str]:
     return [sys.executable, "-m", "brigade"]
 
 
-def _proc_peak_rss_kib(pid: int) -> int:
+def _proc_peak_rss_kib(pid: int) -> int | None:
     status_path = Path(f"/proc/{pid}/status")
-    if not status_path.is_file():
-        return 0
-    peak_kib = 0
-    for line in status_path.read_text().splitlines():
+    try:
+        lines = status_path.read_text().splitlines()
+    except OSError:
+        return None
+    peak_kib: int | None = None
+    for line in lines:
         if line.startswith(("VmRSS:", "VmHWM:")):
-            peak_kib = max(peak_kib, int(line.split()[1]))
+            value = int(line.split()[1])
+            peak_kib = value if peak_kib is None else max(peak_kib, value)
     return peak_kib
 
 
-def _run_command(argv: list[str], *, cwd: Path) -> dict[str, object]:
+def _run_command(argv: list[str], *, cwd: Path, wall_seconds_max: float) -> dict[str, object]:
     started = time.perf_counter()
-    proc = subprocess.Popen(
-        argv,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    peak_rss_kib = 0
-    while proc.poll() is None:
-        peak_rss_kib = max(peak_rss_kib, _proc_peak_rss_kib(proc.pid))
-        time.sleep(0.005)
-    peak_rss_kib = max(peak_rss_kib, _proc_peak_rss_kib(proc.pid))
-    stdout, stderr = proc.communicate()
+    deadline = started + wall_seconds_max
+    peak_rss_kib: int | None = None
+    timed_out = False
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        proc = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            stdout=stdout_file,
+            stderr=stderr_file,
+        )
+        while proc.poll() is None:
+            sample = _proc_peak_rss_kib(proc.pid)
+            if sample is not None:
+                peak_rss_kib = sample if peak_rss_kib is None else max(peak_rss_kib, sample)
+            if time.perf_counter() >= deadline:
+                timed_out = True
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                break
+            time.sleep(0.005)
+        if proc.returncode is None:
+            proc.wait()
+        stdout_file.seek(0, 2)
+        stderr_file.seek(0, 2)
+        stdout_bytes = stdout_file.tell()
+        stderr_bytes = stderr_file.tell()
     wall_seconds = round(time.perf_counter() - started, 3)
     return {
         "argv": argv,
         "exit_code": proc.returncode,
-        "stdout_bytes": len(stdout),
-        "stderr_bytes": len(stderr),
+        "stdout_bytes": stdout_bytes,
+        "stderr_bytes": stderr_bytes,
         "wall_seconds": wall_seconds,
         "peak_rss_kib": peak_rss_kib,
-        "peak_rss_mib": round(peak_rss_kib / 1024, 2),
+        "peak_rss_mib": None if peak_rss_kib is None else round(peak_rss_kib / 1024, 2),
+        "rss_sampling_supported": peak_rss_kib is not None,
+        "timed_out": timed_out,
     }
 
 
 def _budget_result(name: str, observed: dict[str, object], budget: dict[str, object]) -> dict[str, object]:
+    peak_rss_mib = observed["peak_rss_mib"]
     checks = {
         "exit_code": observed["exit_code"] == budget["exit_code"],
-        "peak_rss_mib": float(observed["peak_rss_mib"]) <= float(budget["peak_rss_mib_max"]),
+        "peak_rss_mib": peak_rss_mib is not None and float(peak_rss_mib) <= float(budget["peak_rss_mib_max"]),
         "stdout_bytes": int(observed["stdout_bytes"]) <= int(budget["stdout_bytes_max"]),
         "wall_seconds": float(observed["wall_seconds"]) <= float(budget["wall_seconds_max"]),
     }
@@ -92,7 +117,9 @@ def _budget_result(name: str, observed: dict[str, object], budget: dict[str, obj
         "observed": {
             "exit_code": observed["exit_code"],
             "peak_rss_mib": observed["peak_rss_mib"],
+            "rss_sampling_supported": observed["rss_sampling_supported"],
             "stdout_bytes": observed["stdout_bytes"],
+            "timed_out": observed["timed_out"],
             "wall_seconds": observed["wall_seconds"],
         },
         "checks": checks,
@@ -122,7 +149,7 @@ def _build_workspace(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--workspace", type=Path, default=None, help="Existing or new workspace path.")
+    parser.add_argument("--workspace", type=Path, default=None, help="Absent or empty workspace path.")
     parser.add_argument(
         "--results-out",
         type=Path,
@@ -138,7 +165,7 @@ def main() -> int:
     parser.add_argument("--phase", default="local", help="Phase label stored in the output JSON.")
     parser.add_argument("--repo-count", type=int, default=FLEET_REPO_COUNT)
     parser.add_argument("--report-count", type=int, default=OPERATOR_REPORT_HISTORY_COUNT)
-    parser.add_argument("--sweep-history-count", type=int, default=1)
+    parser.add_argument("--sweep-history-count", type=int, default=FLEET_SWEEP_HISTORY_COUNT)
     parser.add_argument("--artifact-padding-bytes", type=int, default=0)
     parser.add_argument(
         "--work-brief-peak-rss-mib-max",
@@ -165,10 +192,12 @@ def main() -> int:
         "work_brief": _run_command(
             [*brigade, "work", "brief", "--target", str(workspace), "--json"],
             cwd=_REPO_ROOT,
+            wall_seconds_max=float(DEFAULT_BUDGETS["work_brief"]["wall_seconds_max"]),
         ),
         "daily_status": _run_command(
             [*brigade, "daily", "status", "--target", str(workspace), "--json"],
             cwd=_REPO_ROOT,
+            wall_seconds_max=float(DEFAULT_BUDGETS["daily_status"]["wall_seconds_max"]),
         ),
     }
 
