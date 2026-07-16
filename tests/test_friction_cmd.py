@@ -498,3 +498,21 @@ def test_friction_scan_groups_repeated_timeout_warnings_with_child_evidence(tmp_
         "rejected": 0,
         "truncated": 0,
     }
+
+
+def test_friction_scan_groups_regex_cascade_from_one_command_log(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "compiler.log").write_text(
+        "TypeScript compile failed because module alpha cannot be resolved.\n"
+        "TypeScript compile failed because module beta cannot be resolved.\n"
+    )
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    candidate = payload["candidates"][0]
+    assert candidate["source_family"] == "regex"
+    assert len(candidate["evidence"]["children"]) == 2
+    assert payload["counts"]["by_source_family"]["regex"]["grouped"] == 1

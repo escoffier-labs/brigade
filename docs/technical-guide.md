@@ -708,8 +708,12 @@ Friction-log commands:
 - `brigade friction scan --include-agent-logs` also scans local Codex and Claude Code session/log directories.
 - `brigade friction scan --import-candidates` appends candidates to the work import inbox with `source=friction-scan`.
 - `brigade friction add "..."` manually captures a friction item as a reviewable work import.
+- `brigade repos friction scan` runs the same scanner across enabled entries in `.brigade/repos.toml`, keeps scanning when one repository fails, and groups matching signatures across repositories.
+- `brigade repos friction scan --include-agent-logs` scans the configured global agent-log roots once, then associates evidence with a repository only when its full path appears in the evidence.
+- `brigade repos friction show` reads the latest fleet report. Each scan also keeps a dated JSON and Markdown report under `.brigade/repos/friction/` for new, recurring, cleared, and unknown comparisons.
 
 Friction scan output is local and review-first. It writes `.brigade/friction/latest.json` and `.brigade/friction/latest.md`, and it does not create GitHub issues, edit memory, publish reports, or promote findings automatically.
+Fleet reports use configured repository ids and labels instead of local paths. A repository or agent-log scan failure produces a partial report and a non-zero exit code without discarding results from sources that completed.
 
 Handoff draft queue commands:
 

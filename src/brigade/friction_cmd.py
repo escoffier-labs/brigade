@@ -99,6 +99,9 @@ IGNORED_ATTACHMENT_TYPES = {"hook_success", "hook_additional_context", "skill_li
 # ('"timeout": 900', '"failed": 0'), never friction evidence in itself. Real
 # friction always carries textual evidence (an error string, a status word).
 JSON_NUMERIC_FIELD_RE = re.compile(r'^"[^"\n]+"\s*:\s*-?\d+(?:\.\d+)?\s*,?$')
+PASSING_ZERO_FAILURE_RE = re.compile(
+    r"(?i)(?:test result:\s*ok|\d+\s+passed)\b[^.\n]*\b0\s+failed\b|\b(?:all|tests?)\s+passed\b[^.\n]*\b0\s+failed\b"
+)
 DOCUMENTATION_NAMES = frozenset(
     {
         "agents.md",
@@ -148,16 +151,19 @@ def _parse_since(days: int) -> datetime:
     return _now() - timedelta(days=days)
 
 
-def _candidate_id(source: str, friction_type: str, text: str) -> str:
-    del source
-    digest = hashlib.sha256(f"{friction_type}\0{text}".encode("utf-8")).hexdigest()[:12]
+def _candidate_id(source: str, friction_type: str, text: str, *, stable_source: bool = False) -> str:
+    material = f"{friction_type}\0{source}" if stable_source else f"{friction_type}\0{text}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
     return f"friction-{digest}"
 
 
-def _iter_source_roots(target: Path, *, include_agent_logs: bool) -> list[Path]:
-    roots = [target / item for item in DEFAULT_SOURCE_DIRS]
-    if include_agent_logs:
-        roots.extend(Path(item).expanduser() for item in DEFAULT_AGENT_LOG_DIRS)
+def _iter_source_roots(target: Path, *, include_agent_logs: bool, agent_logs_only: bool = False) -> list[Path]:
+    if agent_logs_only:
+        roots = [Path(item).expanduser() for item in DEFAULT_AGENT_LOG_DIRS]
+    else:
+        roots = [target / item for item in DEFAULT_SOURCE_DIRS]
+        if include_agent_logs:
+            roots.extend(Path(item).expanduser() for item in DEFAULT_AGENT_LOG_DIRS)
     seen: set[Path] = set()
     resolved: list[Path] = []
     for root in roots:
@@ -259,6 +265,10 @@ def _extract_text(value: object) -> list[str]:
     return []
 
 
+def _is_passing_zero_failure_line(line: str) -> bool:
+    return bool(PASSING_ZERO_FAILURE_RE.search(line))
+
+
 def _scan_file(path: Path, *, max_line_length: int = 5000) -> list[Match]:
     matches: list[Match] = []
     try:
@@ -298,9 +308,7 @@ def _is_noise_file(path: Path) -> bool:
     lowered_parts = tuple(part.lower() for part in path.parts)
     processed_handoff = "memory-handoffs" in lowered_parts and "processed" in lowered_parts
     return (
-        path.name.lower() in DOCUMENTATION_NAMES
-        or path.stem.lower() in GENERATED_SUGGESTION_STEMS
-        or processed_handoff
+        path.name.lower() in DOCUMENTATION_NAMES or path.stem.lower() in GENERATED_SUGGESTION_STEMS or processed_handoff
     )
 
 
@@ -467,7 +475,7 @@ def _make_candidate(target: Path, match: Match) -> dict[str, Any]:
     snippet = _short(match.line)
     text = f"{match.title}: {snippet}"
     return {
-        "id": _candidate_id(source, match.friction_type, snippet),
+        "id": _candidate_id(source, match.friction_type, snippet, stable_source=True),
         "title": match.title,
         "text": text,
         "status": "candidate",
@@ -677,6 +685,7 @@ def scan_payload(
     target: Path,
     days: int = 30,
     include_agent_logs: bool = False,
+    agent_logs_only: bool = False,
     max_files: int = 5000,
     max_candidates: int = 200,
     miseledger_paths: list[Path] | None = None,
@@ -697,13 +706,14 @@ def scan_payload(
         print("error: --max-candidates must be a positive integer", file=sys.stderr)
         return None, 2
 
-    roots = _iter_source_roots(target, include_agent_logs=include_agent_logs)
+    roots = _iter_source_roots(target, include_agent_logs=include_agent_logs, agent_logs_only=agent_logs_only)
     files, skipped_files = _iter_files(roots, since=since, max_files=max_files)
-    families = _structured_families(target, miseledger_paths)
+    families = (
+        {name: [] for name in SOURCE_FAMILIES} if agent_logs_only else _structured_families(target, miseledger_paths)
+    )
     dispositions = _empty_family_dispositions()
     successful_verify_logs = _collect_successful_verify_log_paths(target)
     regex_candidates: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
     rejected_noise = 0
     for path in files:
         if _is_verify_receipt(path) or path.name in {"run.json", "worker-results.json", "cell.json"}:
@@ -720,10 +730,11 @@ def scan_payload(
                 dispositions["regex"]["rejected"] += 1
                 rejected_noise += 1
                 continue
-            candidate = _make_candidate(target, match)
-            if candidate["id"] in seen_ids:
+            if _is_passing_zero_failure_line(match.line):
+                dispositions["regex"]["rejected"] += 1
+                rejected_noise += 1
                 continue
-            seen_ids.add(str(candidate["id"]))
+            candidate = _make_candidate(target, match)
             candidate["source_family"] = "regex"
             regex_candidates.append(candidate)
     families["regex"] = regex_candidates
