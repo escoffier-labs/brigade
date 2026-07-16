@@ -760,6 +760,11 @@ def _install_history(target: Path, skill_id: str | None = None, harness: str | N
     return rows
 
 
+def _renderer_identity(contract: dict[str, Any]) -> str:
+    identity = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"skills-renderer:{identity}"
+
+
 def _renderer_contract(target: Path, harness: str) -> dict[str, Any]:
     adapter = _adapter_map(target).get(harness, {})
     contract = {
@@ -767,8 +772,7 @@ def _renderer_contract(target: Path, harness: str) -> dict[str, Any]:
         "harness": harness,
         "format": adapter.get("format"),
     }
-    identity = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-    return {**contract, "identity": f"skills-renderer:{identity}"}
+    return {**contract, "identity": _renderer_identity(contract)}
 
 
 def _valid_receipt_contract(receipt: dict[str, Any], *, skill_id: str, harness: str) -> bool:
@@ -811,6 +815,20 @@ def _valid_receipt_contract(receipt: dict[str, Any], *, skill_id: str, harness: 
     else:
         return False
     if not all(isinstance(render.get(key), str) and render.get(key) for key in ("identity", "fingerprint")):
+        return False
+    render_contract = {
+        "schema_version": render.get("schema_version"),
+        "harness": render.get("harness"),
+        "format": render.get("format"),
+    }
+    if (
+        type(render_contract["schema_version"]) is not int
+        or render_contract["schema_version"] < 1
+        or render_contract["harness"] != harness
+        or not isinstance(render_contract["format"], str)
+        or not render_contract["format"]
+        or render["identity"] != _renderer_identity(render_contract)
+    ):
         return False
     if not all(
         isinstance(installed.get(key), str) and installed.get(key)
@@ -1087,14 +1105,22 @@ def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = F
         print(f"error: unknown skill install target: {harness}", file=sys.stderr)
         return 2
     root = _rollback_root(workspace, skill_id, harness)
-    snapshots = sorted([path for path in root.iterdir() if path.is_dir()], reverse=True) if root.is_dir() else []
-    if not snapshots:
-        print(f"error: no rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
-        return 1
-    snapshot = snapshots[0]
     dest = _install_dir(workspace, harness, skill_id)
     canonical_receipt_path = _installs_root(workspace) / f"{skill_id}-{harness}.json"
     current_receipt = _read_json(canonical_receipt_path) if canonical_receipt_path.is_file() else {}
+    snapshot_value = current_receipt.get("rollback_snapshot")
+    if not isinstance(snapshot_value, str) or not snapshot_value:
+        print(f"error: no receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
+        return 1
+    snapshot = Path(snapshot_value).expanduser().resolve()
+    root_resolved = root.resolve()
+    try:
+        relative_snapshot = snapshot.relative_to(root_resolved)
+    except ValueError:
+        relative_snapshot = Path()
+    if len(relative_snapshot.parts) != 1 or not snapshot.is_dir():
+        print(f"error: invalid receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
+        return 1
     previous_receipt = current_receipt.get("previous_receipt")
     previous_receipt = previous_receipt if isinstance(previous_receipt, dict) else {}
     if dest.exists():
@@ -1235,7 +1261,7 @@ def _skill_pack_payload(target: Path) -> dict[str, Any]:
         skill_dir = Path(str(row["skill_dir"]))
         metadata = row["metadata"]
         skill_id = _slug(str(metadata.get("id") or skill_dir.name))
-        lint_payload = _lint_payload(target, str(row["skill_dir"]))
+        lint_payload = _lint_payload(target, f"registry:{skill_id}")
         skills.append(
             {
                 "id": skill_id,
@@ -1754,7 +1780,7 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
         if install_path:
             installed_dir = _install_dir(target, adapter_id, skill_id)
             installed_path = str(installed_dir)
-            installed = installed_dir.is_dir()
+            installed = _skill_md_path(installed_dir).is_file()
         supported_state = adapter_id in supported or not supported
         blockers: list[str] = []
         if adapter.get("status") == "planned":
