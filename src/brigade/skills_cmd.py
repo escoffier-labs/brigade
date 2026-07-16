@@ -1811,6 +1811,8 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
         )
         latest_receipt = drift.get("receipt") if drift else _latest_install_receipt(target, skill_id, adapter_id)
         latest_receipt = latest_receipt if isinstance(latest_receipt, dict) else {}
+        if not _valid_receipt_contract(latest_receipt, skill_id=skill_id, harness=adapter_id):
+            latest_receipt = {}
         history_count = len(_install_history(target, skill_id=skill_id, harness=adapter_id))
         installed_source_fingerprint = latest_receipt.get("source_fingerprint") or latest_receipt.get("fingerprint")
         installed_render_fingerprint = latest_receipt.get("render_fingerprint")
@@ -2044,7 +2046,9 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
             rendered=rendered,
             installed_dir=installed_dir,
         )
-        if installed_dir.exists() and not supported_state:
+        if not drift["receipt_known"]:
+            status = "unknown"
+        elif installed_dir.exists() and not supported_state:
             status = "unsupported"
         elif drift["overall"] == "missing":
             status = "missing"
@@ -2061,7 +2065,7 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
         )
         remove_command = (
             _fleet_remove_command(target=target, skill_id=skill_id, harness=harness)
-            if installed_dir.exists() and not supported_state
+            if status == "unsupported"
             else None
         )
         copies.append(
