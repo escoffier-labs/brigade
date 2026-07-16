@@ -95,6 +95,23 @@ def test_latest_bundles_timestamp_prefixed_decodes_only_limit_payloads(tmp_path:
     assert bundles[0]["report_id"].endswith(f"-{history_count - 1:03d}")
 
 
+def test_latest_bundles_rejects_long_timestamp_like_prefix_for_fast_path(tmp_path: Path):
+    _bundle(
+        tmp_path,
+        "20260716-1200009-older",
+        {"report_id": "older", "created_at": "2026-01-01T00:00:00+00:00"},
+    )
+    _bundle(
+        tmp_path,
+        "20260716-120000-newer",
+        {"report_id": "newer", "created_at": "2026-06-01T00:00:00+00:00"},
+    )
+
+    bundles = reportstore.latest_bundles([tmp_path], _read, id_field="report_id", limit=1)
+
+    assert [bundle["report_id"] for bundle in bundles] == ["newer"]
+
+
 def test_list_bundles_skips_missing_roots_and_skip_child(tmp_path: Path):
     _bundle(tmp_path, "keep", {"report_id": "keep", "created_at": "2026-01-01"})
     _bundle(tmp_path, "drop", {"report_id": "drop", "created_at": "2026-01-02"})

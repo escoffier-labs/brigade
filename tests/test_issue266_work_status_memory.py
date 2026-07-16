@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta, timezone
+
 from brigade import center_cmd
 from brigade import daily_cmd
 from brigade import repos_cmd
@@ -187,6 +190,31 @@ def test_build_fleet_workspace_rejects_nonempty_target(tmp_path):
         raise AssertionError("expected a non-empty benchmark target to be rejected")
 
     assert marker.read_text() == "do not overwrite\n"
+
+
+def test_daily_fixture_uses_one_current_base_time_for_evidence(tmp_path):
+    before = datetime.now(timezone.utc) - timedelta(seconds=1)
+    target = build_daily_status_workspace(
+        tmp_path / "current-evidence-ws",
+        repo_count=1,
+        report_count=2,
+        sweep_history_count=2,
+    )
+    after = datetime.now(timezone.utc) + timedelta(seconds=1)
+
+    newest_sweep_dir = repos_sweeps._list_sweep_dirs_newest_first(target)[0]
+    newest_sweep = repos_sweeps._read_sweep(newest_sweep_dir)
+    assert newest_sweep is not None
+    newest_report_dir = max((target / ".brigade" / "center" / "reports").iterdir())
+    newest_report = json.loads((newest_report_dir / "CENTER_EVIDENCE.json").read_text())
+
+    base_time = datetime.fromisoformat(newest_sweep["started_at"])
+    command = newest_sweep["repos"][0]["commands"][0]
+    assert before <= base_time <= after
+    assert datetime.fromisoformat(newest_report["created_at"]) == base_time
+    assert datetime.fromisoformat(command["started_at"]) == base_time + timedelta(seconds=1)
+    assert datetime.fromisoformat(command["completed_at"]) == base_time + timedelta(seconds=5)
+    assert datetime.fromisoformat(newest_sweep["completed_at"]) == base_time + timedelta(seconds=10)
 
 
 def test_operator_report_health_does_not_decode_full_report_history(tmp_path, monkeypatch):

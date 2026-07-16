@@ -30,7 +30,7 @@ from typing import Any, Callable, Iterable
 from .localio import read_json_dict, write_json
 
 CLOSEOUT_STATUSES = frozenset({"reviewed", "deferred", "superseded", "archived"})
-_TIMESTAMP_PREFIXED_DIR = re.compile(r"^\d{8}-\d{6}")
+_TIMESTAMP_PREFIXED_DIR = re.compile(r"^\d{8}-\d{6}(?:-|$)")
 
 
 def bundle_json_path(path: Path, evidence_name: str) -> Path:

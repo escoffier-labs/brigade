@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 FLEET_REPO_COUNT = 53
 FLEET_SWEEP_HISTORY_COUNT = 30
 OPERATOR_REPORT_HISTORY_COUNT = 30
-SHARED_SWEEP_ID = "20260716-120000-repo-fleet-sweep-fake01"
 HEALTH_COMMAND_LABEL = "fake-health-check"
 DEFAULT_ARTIFACT_PADDING_BYTES = 0
 
@@ -74,12 +74,18 @@ def _artifact_padding(padding_bytes: int) -> dict[str, str]:
     return {"_fixture_padding": "x" * padding_bytes}
 
 
-def _sweep_payload(ids: list[str], sweep_id: str, *, padding_bytes: int = 0) -> dict:
+def _sweep_payload(
+    ids: list[str],
+    sweep_id: str,
+    *,
+    started_at: datetime,
+    padding_bytes: int = 0,
+) -> dict:
     payload = {
         "sweep_id": sweep_id,
         "status": "completed",
-        "started_at": "2026-07-16T12:00:00+00:00",
-        "completed_at": "2026-07-16T12:00:10+00:00",
+        "started_at": started_at.isoformat(),
+        "completed_at": (started_at + timedelta(seconds=10)).isoformat(),
         "repos": [
             {
                 "repo_id": repo_id,
@@ -91,8 +97,8 @@ def _sweep_payload(ids: list[str], sweep_id: str, *, padding_bytes: int = 0) -> 
                         "status": "completed",
                         "exit_code": 0,
                         "timed_out": False,
-                        "started_at": "2026-07-16T12:00:01+00:00",
-                        "completed_at": "2026-07-16T12:00:05+00:00",
+                        "started_at": (started_at + timedelta(seconds=1)).isoformat(),
+                        "completed_at": (started_at + timedelta(seconds=5)).isoformat(),
                     }
                 ],
             }
@@ -107,11 +113,17 @@ def seed_shared_fleet_sweep(
     target: Path,
     ids: list[str],
     *,
-    sweep_id: str = SHARED_SWEEP_ID,
+    sweep_id: str | None = None,
+    started_at: datetime | None = None,
     padding_bytes: int = 0,
 ) -> None:
+    started_at = (started_at or datetime.now(timezone.utc)).replace(microsecond=0)
+    sweep_id = sweep_id or f"{started_at.strftime('%Y%m%d-%H%M%S')}-repo-fleet-sweep-fake01"
     sweep_dir = target / ".brigade" / "repos" / "sweeps" / sweep_id
-    write_json(sweep_dir / "sweep.json", _sweep_payload(ids, sweep_id, padding_bytes=padding_bytes))
+    write_json(
+        sweep_dir / "sweep.json",
+        _sweep_payload(ids, sweep_id, started_at=started_at, padding_bytes=padding_bytes),
+    )
 
 
 def seed_fleet_sweep_history(
@@ -119,13 +131,20 @@ def seed_fleet_sweep_history(
     ids: list[str],
     *,
     count: int = 1,
+    base_time: datetime | None = None,
     padding_bytes: int = 0,
 ) -> None:
+    base_time = (base_time or datetime.now(timezone.utc)).replace(microsecond=0)
     for index in range(count):
-        minute = index % 60
-        hour = 12 + index // 60
-        sweep_id = f"20260716-{hour:02d}{minute:02d}00-repo-fleet-sweep-{index:03d}"
-        seed_shared_fleet_sweep(target, ids, sweep_id=sweep_id, padding_bytes=padding_bytes)
+        started_at = base_time - timedelta(minutes=count - index - 1)
+        sweep_id = f"{started_at.strftime('%Y%m%d-%H%M%S')}-repo-fleet-sweep-{index:03d}"
+        seed_shared_fleet_sweep(
+            target,
+            ids,
+            sweep_id=sweep_id,
+            started_at=started_at,
+            padding_bytes=padding_bytes,
+        )
 
 
 def _operator_report_payload(report_id: str, created_at: str, *, padding_bytes: int = 0) -> dict:
@@ -147,13 +166,14 @@ def seed_operator_report_history(
     target: Path,
     count: int = OPERATOR_REPORT_HISTORY_COUNT,
     *,
+    base_time: datetime | None = None,
     padding_bytes: int = 0,
 ) -> None:
+    base_time = (base_time or datetime.now(timezone.utc)).replace(microsecond=0)
     for index in range(count):
-        minute = index % 60
-        hour = 12 + index // 60
-        report_id = f"20260716-{hour:02d}{minute:02d}00-operator-report-{index:03d}"
-        created_at = f"2026-07-16T{hour:02d}:{minute:02d}:00+00:00"
+        created = base_time - timedelta(minutes=count - index - 1)
+        report_id = f"{created.strftime('%Y%m%d-%H%M%S')}-operator-report-{index:03d}"
+        created_at = created.isoformat()
         write_json(
             target / ".brigade" / "center" / "reports" / report_id / "CENTER_EVIDENCE.json",
             _operator_report_payload(report_id, created_at, padding_bytes=padding_bytes),
@@ -166,6 +186,7 @@ def build_fleet_workspace(
     repo_count: int = FLEET_REPO_COUNT,
     sweep_history_count: int = 1,
     artifact_padding_bytes: int = DEFAULT_ARTIFACT_PADDING_BYTES,
+    base_time: datetime | None = None,
 ) -> Path:
     if target.exists() and (not target.is_dir() or any(target.iterdir())):
         raise ValueError(f"benchmark workspace target must be absent or empty: {target}")
@@ -177,6 +198,7 @@ def build_fleet_workspace(
         target,
         ids,
         count=sweep_history_count,
+        base_time=base_time,
         padding_bytes=artifact_padding_bytes,
     )
     return target
@@ -190,11 +212,18 @@ def build_daily_status_workspace(
     sweep_history_count: int = 1,
     artifact_padding_bytes: int = DEFAULT_ARTIFACT_PADDING_BYTES,
 ) -> Path:
+    base_time = datetime.now(timezone.utc).replace(microsecond=0)
     build_fleet_workspace(
         target,
         repo_count=repo_count,
         sweep_history_count=sweep_history_count,
         artifact_padding_bytes=artifact_padding_bytes,
+        base_time=base_time,
     )
-    seed_operator_report_history(target, report_count, padding_bytes=artifact_padding_bytes)
+    seed_operator_report_history(
+        target,
+        report_count,
+        base_time=base_time,
+        padding_bytes=artifact_padding_bytes,
+    )
     return target
