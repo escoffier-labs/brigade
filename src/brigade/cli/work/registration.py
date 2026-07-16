@@ -145,6 +145,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_work_verify_run.add_argument("--timeout", type=int, default=900, help="Timeout per command in seconds.")
     p_work_verify_run.add_argument(
+        "--graphtrail-timeout",
+        type=float,
+        default=None,
+        help="Timeout in seconds for each GraphTrail sync/diff during code graph delta capture.",
+    )
+    p_work_verify_run.add_argument(
         "--capture",
         default=None,
         metavar="ARTIFACT_ID",

@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +39,32 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
         if binary is None:
             return _status("unavailable", "code graph delta unavailable: graphtrail binary not found")
         db_path = target / ".graphtrail" / "graphtrail.db"
-        sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout)
+        sync_stage = "incremental-sync" if db_path.is_file() else "initial-index"
+        sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout, stage=sync_stage)
+        if sync.get("timed_out"):
+            if db_path.is_file():
+                snapshot_path = run_dir / SNAPSHOT_NAME
+                _backup_sqlite(db_path, snapshot_path)
+                return {
+                    "ok": True,
+                    "status": "captured",
+                    "summary": "code graph baseline captured from stale database",
+                    "binary": binary,
+                    "db_path": str(db_path),
+                    "before_snapshot_path": str(snapshot_path),
+                    "before_snapshot_sha256": _file_sha256(snapshot_path),
+                    "stale_graph_used": True,
+                    "graphtrail_timeout_seconds": timeout,
+                    "sync": sync,
+                }
+            return _status(
+                "sync_timed_out",
+                f"code graph delta unavailable: graphtrail {sync_stage} sync timed out after {timeout:g}s",
+                binary=binary,
+                db_path=str(db_path),
+                sync=sync,
+                graphtrail_timeout_seconds=timeout,
+            )
         if sync["returncode"] != 0:
             return _status(
                 "sync_failed",
@@ -46,6 +72,7 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
                 binary=binary,
                 db_path=str(db_path),
                 sync=sync,
+                graphtrail_timeout_seconds=timeout,
             )
         if not db_path.is_file():
             return _status(
@@ -65,6 +92,7 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
             "db_path": str(db_path),
             "before_snapshot_path": str(snapshot_path),
             "before_snapshot_sha256": _file_sha256(snapshot_path),
+            "graphtrail_timeout_seconds": timeout,
             "sync": sync,
         }
     except BaseException as exc:
@@ -86,13 +114,28 @@ def capture_after_and_diff(
         if before.get("status") == "unavailable":
             return _compact(_status("unavailable", str(before.get("summary") or "code graph delta unavailable")))
         if before.get("ok") is not True:
-            payload = _failure_payload(target, before, str(before.get("status") or "capture_failed"))
+            payload = _failure_payload(
+                target,
+                before,
+                str(before.get("status") or "capture_failed"),
+                graphtrail_timeout_seconds=float(before.get("graphtrail_timeout_seconds") or timeout),
+            )
             return _write_and_compact(run_dir, payload)
 
         binary = str(before.get("binary") or "")
         db_path = Path(str(before.get("db_path") or target / ".graphtrail" / "graphtrail.db"))
         snapshot_path = Path(str(before.get("before_snapshot_path") or run_dir / SNAPSHOT_NAME))
-        sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout)
+        sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout, stage="incremental-sync")
+        if sync.get("timed_out"):
+            payload = _failure_payload(
+                target,
+                before,
+                "sync_timed_out",
+                summary=f"code graph delta unavailable: graphtrail incremental-sync timed out after {timeout:g}s",
+                after_sync=sync,
+                graphtrail_timeout_seconds=timeout,
+            )
+            return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
         if sync["returncode"] != 0:
             payload = _failure_payload(
                 target,
@@ -100,6 +143,7 @@ def capture_after_and_diff(
                 "sync_failed",
                 summary=f"code graph delta unavailable: graphtrail sync failed ({sync['returncode']})",
                 after_sync=sync,
+                graphtrail_timeout_seconds=timeout,
             )
             return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
 
@@ -116,7 +160,21 @@ def capture_after_and_diff(
             str(after_snapshot_path),
             timeout=timeout,
             json_output=True,
+            stage="diff",
         )
+        if diff.get("timed_out"):
+            payload = _failure_payload(
+                target,
+                before,
+                "diff_timed_out",
+                summary=f"code graph delta unavailable: graphtrail diff timed out after {timeout:g}s",
+                after_sync=sync,
+                diff=diff,
+                graphtrail_timeout_seconds=timeout,
+            )
+            return _write_and_compact(
+                run_dir, payload, snapshot_path=snapshot_path, after_snapshot_path=after_snapshot_path
+            )
         if diff["returncode"] != 0:
             payload = _failure_payload(
                 target,
@@ -165,6 +223,7 @@ def capture_after_and_diff(
             "ok": True,
             "status": "ok",
             "target": str(target),
+            "graphtrail_timeout_seconds": timeout,
             "summary": _summary("ok", raw_counts, edge_churn, len(changed_symbols)),
             "raw_counts": raw_counts,
             "changed_symbols": changed_symbols,
@@ -181,6 +240,8 @@ def capture_after_and_diff(
                 "diff_stdout_sha256": _sha256_text(diff["stdout"]),
             },
         }
+        if before.get("stale_graph_used") is True:
+            payload["stale_graph_used"] = True
         return _write_and_compact(
             run_dir, payload, snapshot_path=snapshot_path, after_snapshot_path=after_snapshot_path
         )
@@ -214,12 +275,19 @@ def _graphtrail_bin() -> str | None:
 
 
 def _run_graphtrail(
-    binary: str, db_path: Path, command: str, *extra: str, timeout: float, json_output: bool = False
+    binary: str,
+    db_path: Path,
+    command: str,
+    *extra: str,
+    timeout: float,
+    json_output: bool = False,
+    stage: str | None = None,
 ) -> dict[str, Any]:
     # `graphtrail sync` rejects --json; only diff-style subcommands accept it.
     argv = [binary, "--db", str(db_path), command, *extra]
     if json_output:
         argv.append("--json")
+    started = time.monotonic()
     try:
         completed = subprocess.run(
             argv,
@@ -231,23 +299,66 @@ def _run_graphtrail(
             text=True,
             timeout=timeout,
         )
-        return {
-            "argv": argv,
-            "returncode": completed.returncode,
-            "stdout": completed.stdout or "",
-            "stderr": completed.stderr or "",
-            "timed_out": False,
-        }
+        return _command_result(
+            argv=argv,
+            returncode=completed.returncode,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
+            timed_out=False,
+            duration_seconds=time.monotonic() - started,
+            timeout=timeout,
+            stage=stage,
+        )
     except FileNotFoundError:
-        return {"argv": argv, "returncode": 127, "stdout": "", "stderr": "command not found", "timed_out": False}
+        return _command_result(
+            argv=argv,
+            returncode=127,
+            stdout="",
+            stderr="command not found",
+            timed_out=False,
+            duration_seconds=time.monotonic() - started,
+            timeout=timeout,
+            stage=stage,
+        )
     except subprocess.TimeoutExpired as exc:
-        return {
-            "argv": argv,
-            "returncode": 124,
-            "stdout": exc.stdout if isinstance(exc.stdout, str) else "",
-            "stderr": exc.stderr if isinstance(exc.stderr, str) else f"timeout after {timeout:g}s",
-            "timed_out": True,
-        }
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        if not stderr:
+            stderr = f"timeout after {timeout:g}s"
+        return _command_result(
+            argv=argv,
+            returncode=124,
+            stdout=exc.stdout if isinstance(exc.stdout, str) else "",
+            stderr=stderr,
+            timed_out=True,
+            duration_seconds=time.monotonic() - started,
+            timeout=timeout,
+            stage=stage,
+        )
+
+
+def _command_result(
+    *,
+    argv: list[str],
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    timed_out: bool,
+    duration_seconds: float,
+    timeout: float,
+    stage: str | None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "argv": argv,
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "timed_out": timed_out,
+        "duration_seconds": duration_seconds,
+        "graphtrail_timeout_seconds": timeout,
+    }
+    if stage:
+        result["stage"] = stage
+    return result
 
 
 def _backup_sqlite(source: Path, destination: Path) -> None:
@@ -267,8 +378,13 @@ def _failure_payload(
     summary: str | None = None,
     after_sync: dict[str, Any] | None = None,
     diff: dict[str, Any] | None = None,
+    graphtrail_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
-    return {
+    timeout_value = graphtrail_timeout_seconds
+    if timeout_value is None:
+        raw_timeout = before.get("graphtrail_timeout_seconds")
+        timeout_value = float(raw_timeout) if isinstance(raw_timeout, (int, float)) else None
+    payload: dict[str, Any] = {
         "ok": False,
         "status": status,
         "target": str(target),
@@ -286,6 +402,11 @@ def _failure_payload(
             "diff_stdout_sha256": _sha256_text(diff.get("stdout", "")) if isinstance(diff, dict) else None,
         },
     }
+    if timeout_value is not None:
+        payload["graphtrail_timeout_seconds"] = timeout_value
+    if before.get("stale_graph_used") is True:
+        payload["stale_graph_used"] = True
+    return payload
 
 
 def _write_and_compact(
@@ -307,7 +428,7 @@ def _write_and_compact(
 
 
 def _compact(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+    compact: dict[str, Any] = {
         "status": payload.get("status", "unknown"),
         "ok": bool(payload.get("ok")),
         "summary": _compact_summary(payload),
@@ -316,6 +437,15 @@ def _compact(payload: dict[str, Any]) -> dict[str, Any]:
         "changed_symbols": payload.get("changed_symbols") if isinstance(payload.get("changed_symbols"), list) else [],
         "changed_symbol_count": int(payload.get("changed_symbol_count") or 0),
     }
+    timeout = payload.get("graphtrail_timeout_seconds")
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+        compact["graphtrail_timeout_seconds"] = float(timeout)
+    if payload.get("stale_graph_used") is True:
+        compact["stale_graph_used"] = True
+    commands = payload.get("commands")
+    if isinstance(commands, dict):
+        compact["commands"] = commands
+    return compact
 
 
 def _status(status: str, summary: str, **extra: Any) -> dict[str, Any]:

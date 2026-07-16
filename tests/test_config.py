@@ -36,6 +36,21 @@ def test_write_then_load_round_trip(tmp_path):
     assert loaded.selection.includes == ["publisher"]
 
 
+def test_write_then_load_round_trip_preserves_graphtrail_delta_timeout_seconds(tmp_path):
+    sel = Selection(
+        depth="workspace",
+        harnesses=["claude", "codex", "openclaw"],
+        owner="openclaw",
+        includes=["publisher"],
+    )
+    cfg = Config(version=1, selection=sel, graphtrail_delta_timeout_seconds=25)
+    write_config(tmp_path, cfg)
+
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.graphtrail_delta_timeout_seconds == 25.0
+
+
 def test_write_creates_parent_dir(tmp_path):
     sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     write_config(tmp_path, Config(version=1, selection=sel))
@@ -81,3 +96,53 @@ def test_load_config_reads_legacy_solo_mise_dir(tmp_path):
     cfg = load_config(tmp_path)
     assert cfg is not None
     assert cfg.selection.harnesses == ["claude"]
+
+
+def test_load_config_defaults_graphtrail_delta_timeout_seconds(tmp_path):
+    sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+    write_config(tmp_path, Config(version=1, selection=sel))
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.graphtrail_delta_timeout_seconds == 10.0
+
+
+def test_load_config_reads_graphtrail_delta_timeout_seconds(tmp_path):
+    path = tmp_path / ".brigade" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "depth": "repo",
+                "harnesses": ["claude"],
+                "owner": "claude",
+                "includes": [],
+                "graphtrail_delta_timeout_seconds": 25,
+            }
+        )
+        + "\n"
+    )
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.graphtrail_delta_timeout_seconds == 25.0
+
+
+@pytest.mark.parametrize("value", [0, -1, "slow"])
+def test_load_config_rejects_invalid_graphtrail_delta_timeout_seconds(tmp_path, value):
+    path = tmp_path / ".brigade" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "depth": "repo",
+                "harnesses": ["claude"],
+                "owner": "claude",
+                "includes": [],
+                "graphtrail_delta_timeout_seconds": value,
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(ValueError, match="graphtrail_delta_timeout_seconds must be a positive number"):
+        load_config(tmp_path)
