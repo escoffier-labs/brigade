@@ -1,8 +1,55 @@
-use std::{fs, path::Path};
+use std::{collections::HashSet, fs, path::Path};
+
+use serde_json::Value;
 
 fn repository_file(path: impl AsRef<Path>) -> String {
     fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
         .expect("repository contract file should be readable")
+}
+
+fn assert_supported_read_only_command(command: &Value, context: &str) {
+    let command = command
+        .as_array()
+        .filter(|command| !command.is_empty())
+        .unwrap_or_else(|| panic!("{context} must be a non-empty command"));
+    let command: Vec<_> = command
+        .iter()
+        .map(|part| {
+            part.as_str()
+                .unwrap_or_else(|| panic!("{context} entries must be strings"))
+        })
+        .collect();
+
+    let supported = match command.as_slice() {
+        ["graphtrail", "--version"] => true,
+        ["graphtrail", subcommand, ..] => matches!(
+            *subcommand,
+            "search"
+                | "neighbors"
+                | "callers"
+                | "callees"
+                | "impact"
+                | "context"
+                | "dead-code"
+                | "cycles"
+                | "affected"
+                | "evaluate"
+                | "explain"
+                | "stats"
+                | "doctor"
+                | "diff"
+                | "blend"
+                | "links"
+        ),
+        ["graphtrail-mcp"] | ["graphtrail-mcp", "--help" | "--version"] => true,
+        ["brigade", "status", ..] | ["brigade", "work", "brief", ..] => true,
+        _ => false,
+    };
+    assert!(
+        supported,
+        "{context} must resolve to an explicitly supported read-only GraphTrail or Brigade command; found {}",
+        command.join(" ")
+    );
 }
 
 #[test]
@@ -140,6 +187,140 @@ fn supported_toolchain_and_agent_workflow_are_documented() {
             agents.contains(required),
             "AGENTS.md must document the refresh contract: {required}"
         );
+    }
+}
+
+#[test]
+fn agent_startup_requires_skill_selection_before_brigade_commands() {
+    let agents = repository_file("AGENTS.md");
+    let first_raw_command = agents
+        .find("brigade work brief --target .")
+        .expect("AGENTS.md must preserve the Brigade brief command");
+
+    for skill in ["`using-skillet`", "`brigade-work`"] {
+        let skill_position = agents.find(skill).unwrap_or_else(|| {
+            panic!("AGENTS.md must require agents to invoke {skill} at session start")
+        });
+        assert!(
+            skill_position < first_raw_command,
+            "AGENTS.md must require {skill} before the first raw Brigade command"
+        );
+    }
+}
+
+#[test]
+fn station_manifest_preserves_the_read_only_startup_contract() {
+    let manifest: Value = serde_json::from_str(&repository_file("station.json"))
+        .expect("station.json must contain valid JSON");
+    let manifest = manifest
+        .as_object()
+        .expect("station.json must contain a JSON object");
+
+    assert_eq!(
+        manifest.get("schema").and_then(Value::as_str),
+        Some("brigade.station.v1"),
+        "station.json must declare the supported station schema"
+    );
+    for field in ["name", "station", "summary", "lifecycle"] {
+        assert!(
+            manifest
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "station.json must provide a non-empty {field}"
+        );
+    }
+
+    let tools = manifest
+        .get("tools")
+        .and_then(Value::as_array)
+        .filter(|tools| !tools.is_empty())
+        .expect("station.json must declare at least one tool");
+    let mut tool_names = HashSet::new();
+    for tool in tools {
+        let tool = tool
+            .as_object()
+            .expect("each station tool must be a JSON object");
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .expect("each station tool must have a non-empty name");
+        assert!(
+            tool_names.insert(name),
+            "station tool identifiers must be unique; duplicate: {name}"
+        );
+        for field in ["kind", "command", "summary"] {
+            assert!(
+                tool.get(field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "station tool {name} must provide a non-empty {field}"
+            );
+        }
+        let executable = tool
+            .get("command")
+            .and_then(Value::as_str)
+            .expect("station tool command was validated above");
+        assert!(
+            matches!(executable, "graphtrail" | "graphtrail-mcp" | "brigade"),
+            "station tool {name} must use a supported GraphTrail or Brigade entry point; found {executable}"
+        );
+
+        let surfaces = tool
+            .get("surfaces")
+            .and_then(Value::as_array)
+            .filter(|surfaces| !surfaces.is_empty())
+            .unwrap_or_else(|| panic!("station tool {name} must declare at least one surface"));
+        let mut surface_kinds = HashSet::new();
+        for surface in surfaces {
+            let surface = surface
+                .as_object()
+                .unwrap_or_else(|| panic!("station tool {name} surfaces must be JSON objects"));
+            let kind = surface
+                .get("kind")
+                .and_then(Value::as_str)
+                .filter(|kind| !kind.trim().is_empty())
+                .unwrap_or_else(|| panic!("station tool {name} surfaces need a non-empty kind"));
+            assert!(
+                surface_kinds.insert(kind),
+                "station surface identifiers must be unique within {name}; duplicate: {kind}"
+            );
+
+            assert_supported_read_only_command(
+                surface
+                    .get("command")
+                    .unwrap_or_else(|| panic!("station surface {name}/{kind} needs a command")),
+                &format!("station surface {name}/{kind} command"),
+            );
+            if let Some(probe) = surface.get("probe") {
+                assert_supported_read_only_command(
+                    probe,
+                    &format!("station surface {name}/{kind} probe"),
+                );
+            }
+            assert_eq!(
+                surface.get("read_only").and_then(Value::as_bool),
+                Some(true),
+                "station surface {name}/{kind} must remain explicitly read-only"
+            );
+            assert!(
+                surface
+                    .get("timeout_seconds")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|timeout| (1..=30).contains(&timeout)),
+                "station surface {name}/{kind} needs an explicit timeout between 1 and 30 seconds"
+            );
+            if kind == "brief-markdown" {
+                assert!(
+                    surface
+                        .get("max_chars")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|max_chars| (1..=4000).contains(&max_chars)),
+                    "station surface {name}/{kind} needs an explicit output bound of at most 4000 characters"
+                );
+            }
+        }
     }
 }
 
