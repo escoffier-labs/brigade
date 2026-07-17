@@ -1,5 +1,5 @@
 use super::graph::*;
-use crate::model::Direction;
+use crate::model::{Direction, EdgeRow};
 use crate::store::init_schema;
 use rusqlite::{Connection, params};
 
@@ -138,6 +138,34 @@ fn cycles_do_not_revisit_symbols_forever() {
         rows.iter().map(|row| row.hops).collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
+}
+
+#[test]
+fn limit_edges_truncates_and_reports_shown_vs_total() {
+    let edges: Vec<EdgeRow> = (0..5)
+        .map(|index| EdgeRow {
+            source_id: format!("caller_{index}"),
+            source: format!("caller_{index}"),
+            target_id: "target".to_string(),
+            target: "target".to_string(),
+            kind: "calls".to_string(),
+            line: Some(index + 1),
+            source_file: format!("src/caller_{index}.py"),
+            target_file: "src/target.py".to_string(),
+            hops: 1,
+            confidence: None,
+        })
+        .collect();
+
+    let limited = limit_edges(edges, Some(2));
+
+    assert_eq!(limited.len(), 3);
+    assert_eq!(limited[0].source_id, "caller_0");
+    assert_eq!(limited[1].source_id, "caller_1");
+    let sentinel = limited.last().unwrap();
+    assert_eq!(sentinel.kind, TRUNCATED_EDGE_KIND);
+    assert!(sentinel.source.contains("2 of 5"));
+    assert!(sentinel.target.contains("pass a higher limit"));
 }
 
 #[test]

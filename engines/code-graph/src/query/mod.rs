@@ -24,7 +24,7 @@ pub use doctor::{DoctorReport, doctor, missing_db_report};
 pub use export::{ExportFormat, ExportScope, export_graph};
 pub use graph::{
     DEFAULT_IMPACT_DEPTH, file_neighbors, graph_edges, graph_edges_with_depth, impact_edges,
-    normalize_depth,
+    limit_edges, normalize_depth,
 };
 pub use health::{CycleReport, DeadCodeReport, cycles, dead_code};
 pub use search::{search_symbols, search_symbols_with_path};
