@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -196,11 +197,21 @@ def _progress_only(text: str) -> bool:
     return explicit_progress
 
 
-def validate_final_output(text: str) -> OutputFailure | None:
+def validate_final_output(
+    text: str,
+    *,
+    detail_transform: Callable[[str], str] | None = None,
+) -> OutputFailure | None:
     """Return a typed failure only for deterministic non-final output shapes."""
+
+    def safe_detail(detail: str) -> str:
+        if detail_transform is not None:
+            detail = detail_transform(detail)
+        return detail[:200]
+
     stripped = text.strip()
     if not stripped:
-        return OutputFailure("empty-output", "provider returned no final result")
+        return OutputFailure("empty-output", safe_detail("provider returned no final result"))
     if "```" not in stripped:
         provider_error = _PROVIDER_ERROR.search(stripped)
         if provider_error is not None:
@@ -209,7 +220,7 @@ def validate_final_output(text: str) -> OutputFailure | None:
                 diagnostic = stripped[provider_error.start() :].strip()
                 return OutputFailure(
                     "provider-error",
-                    f"provider returned an error instead of a final result: {diagnostic}"[:200],
+                    safe_detail(f"provider returned an error instead of a final result: {diagnostic}"),
                 )
         for kind, pattern in _OPERATIONAL_ERRORS:
             operational_error = pattern.search(stripped)
@@ -220,16 +231,16 @@ def validate_final_output(text: str) -> OutputFailure | None:
                 diagnostic = stripped[operational_error.start() :].strip()
                 return OutputFailure(
                     kind,
-                    f"provider returned an operational error instead of a final result: {diagnostic}"[:200],
+                    safe_detail(f"provider returned an operational error instead of a final result: {diagnostic}"),
                 )
     if _tool_only(stripped):
         return OutputFailure(
             "tool-only-output",
-            "provider returned tool-call data without a final result",
+            safe_detail("provider returned tool-call data without a final result"),
         )
     if _progress_only(stripped):
         return OutputFailure(
             "non-final-output",
-            "provider returned progress or intent without a final result",
+            safe_detail("provider returned progress or intent without a final result"),
         )
     return None

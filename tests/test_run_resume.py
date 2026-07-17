@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from brigade import agents, codex_appserver, runguard, run_resume
 
 
@@ -93,6 +95,38 @@ def test_roster_snapshot_preserves_invalid_final_fallback():
     roster = run_resume._roster_from_snapshot(snapshot)
 
     assert roster.agents["grok-review"].invalid_final_fallback == "cursor-grok"
+
+
+def test_roster_snapshot_rejects_inline_secret_env():
+    snapshot = {
+        "orchestrator": "chef",
+        "agents": {
+            "chef": {
+                "cli": "claude",
+                "role": "plan",
+                "env": {"ANTHROPIC_AUTH_TOKEN": "not-for-storage"},
+            }
+        },
+    }
+
+    with pytest.raises(ValueError, match="pass it by reference"):
+        run_resume._roster_from_snapshot(snapshot)
+
+
+def test_roster_snapshot_rejects_colliding_env_targets():
+    snapshot = {
+        "orchestrator": "chef",
+        "agents": {
+            "chef": {
+                "cli": "claude",
+                "role": "plan",
+                "env": {"LANE_MODE": "direct", "LANE_MODE_REF": "PARENT_LANE_MODE"},
+            }
+        },
+    }
+
+    with pytest.raises(ValueError, match="both resolve to LANE_MODE"):
+        run_resume._roster_from_snapshot(snapshot)
 
 
 def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
@@ -370,3 +404,31 @@ def test_resume_synthesis_carries_orchestrator_env(tmp_path, monkeypatch):
     monkeypatch.setattr(run_resume.agents, "run_agent", fake_run_agent)
     assert run_resume.resume(run_dir) == 0
     assert captured["env"] == {"ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"}
+
+
+def test_resume_rejects_invalid_snapshot_env_before_dispatch(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "timeout",
+                "text": "part",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            }
+        ],
+    )
+    roster_snapshot = json.loads((run_dir / "roster.json").read_text())
+    roster_snapshot["agents"]["chef"]["env"] = {"ANTHROPIC_AUTH_TOKEN": "not-for-storage"}
+    (run_dir / "roster.json").write_text(json.dumps(roster_snapshot))
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dispatch must not start")),
+    )
+
+    assert run_resume._resume_locked(run_dir) == 2
+    assert "invalid roster snapshot" in capsys.readouterr().err

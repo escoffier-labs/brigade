@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import aboyeur, agents, codex_appserver, runguard
-from .roster import Agent, Roster
+from .roster import Agent, Roster, _as_env
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
 _NONTERMINAL_RUN_STATUSES = frozenset(
@@ -44,7 +44,7 @@ def _roster_from_snapshot(snapshot: dict) -> Roster:
             reasoning=raw.get("reasoning"),
             transport=raw.get("transport", "direct"),
             transport_version=raw.get("transport_version"),
-            env=dict(raw["env"]) if raw.get("env") else None,
+            env=_as_env(raw.get("env"), name),
             invalid_final_fallback=raw.get("invalid_final_fallback"),
         )
     return Roster(
@@ -111,7 +111,11 @@ def _resume_locked(run_dir: Path) -> int:
         print("error: run artifact has no workspace cwd; cannot verify lock ownership", file=sys.stderr)
         return 2
     cwd = Path(raw_cwd).expanduser().resolve()
-    roster = _roster_from_snapshot(roster_snapshot)
+    try:
+        roster = _roster_from_snapshot(roster_snapshot)
+    except (KeyError, TypeError, ValueError) as exc:
+        print(f"error: invalid roster snapshot: {exc}", file=sys.stderr)
+        return 2
     results = list(worker_data.get("results") or [])
     resumable = [
         r
