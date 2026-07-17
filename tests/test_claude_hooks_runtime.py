@@ -454,6 +454,9 @@ def test_final_bash_handoff_write_does_not_require_verification_again(tmp_path: 
         "git commit -am fix > .claude/memory-handoffs/note.md",
         "mv src/app.py .claude/memory-handoffs/app.md",
         "truncate -s 0 src/app.py .claude/memory-handoffs/note.md",
+        "cp -t src .claude/memory-handoffs/note.md",
+        "cp --target-directory src .claude/memory-handoffs/note.md",
+        "install --target-directory=src .claude/memory-handoffs/note.md",
     ],
 )
 def test_mixed_bash_code_and_handoff_write_requires_new_verification(tmp_path: Path, monkeypatch, command: str):

@@ -913,8 +913,14 @@ def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
         ]
         if command_name in all_target_commands:
             targets.extend(positionals)
-        elif command_name in last_target_commands and positionals:
-            targets.append(positionals[-1])
+        elif command_name in last_target_commands:
+            if any(
+                token == "-t" or token.startswith("-t") or token.startswith("--target-directory")
+                for token in stripped[1:]
+            ):
+                return False
+            if positionals:
+                targets.append(positionals[-1])
         elif targets and command_name not in output_only_commands:
             return False
         if not targets:
