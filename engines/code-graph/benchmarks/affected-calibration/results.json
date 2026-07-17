@@ -1,0 +1,394 @@
+{
+ "schema_version": 1,
+ "description": "Affected-test calibration against 17 historical fix commits of this repo: changed src files at the parent commit are attributed to test files; ground truth is the test files each commit itself modified (existing at the parent). Compared against an off-the-shelf graph-navigation baseline at the same depths. File-level precision/recall; pred_n is mean predicted files.",
+ "caveats": [
+  "Small corpus: about 7 integration test files that exercise most modules, so recall saturates at depth 1 and precision has a low ceiling for any attributor.",
+  "Ground truth from commit-touched tests under-counts genuinely affected tests a commit author did not edit."
+ ],
+ "summary": {
+  "graphtrail_d1": {
+   "cases": 17,
+   "mean_prec": 0.414,
+   "mean_rec": 0.912,
+   "mean_pred_n": 4.88,
+   "errors": 0
+  },
+  "baseline_d1": {
+   "cases": 17,
+   "mean_prec": 0.44,
+   "mean_rec": 0.912,
+   "mean_pred_n": 4.53,
+   "errors": 0
+  },
+  "graphtrail_d3": {
+   "cases": 17,
+   "mean_prec": 0.414,
+   "mean_rec": 0.912,
+   "mean_pred_n": 4.94,
+   "errors": 0
+  },
+  "baseline_d3": {
+   "cases": 17,
+   "mean_prec": 0.26,
+   "mean_rec": 1.0,
+   "mean_pred_n": 6.47,
+   "errors": 0
+  },
+  "graphtrail_d5": {
+   "cases": 17,
+   "mean_prec": 0.412,
+   "mean_rec": 0.912,
+   "mean_pred_n": 5.06,
+   "errors": 0
+  },
+  "baseline_d5": {
+   "cases": 17,
+   "mean_prec": 0.26,
+   "mean_rec": 1.0,
+   "mean_pred_n": 6.47,
+   "errors": 0
+  }
+ },
+ "per_case": [
+  {
+   "commit": "54e29726e",
+   "truth": [
+    "tests/mcp.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/analysis.rs",
+    "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+    "tests/incremental.rs",
+    "tests/mcp.rs"
+   ],
+   "baseline_d1": [
+    "tests/incremental.rs",
+    "tests/mcp.rs"
+   ]
+  },
+  {
+   "commit": "acc6384d5",
+   "truth": [
+    "tests/incremental.rs",
+    "tests/mcp.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/analysis.rs",
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ],
+   "baseline_d1": [
+    "tests/analysis.rs",
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ]
+  },
+  {
+   "commit": "7835c1795",
+   "truth": [
+    "tests/analysis.rs",
+    "tests/cli_read_only.rs",
+    "tests/incremental.rs",
+    "tests/mcp.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/analysis.rs",
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ],
+   "baseline_d1": [
+    "tests/analysis.rs",
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ]
+  },
+  {
+   "commit": "6313a4a3e",
+   "truth": [
+    "tests/incremental.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ],
+   "baseline_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ]
+  },
+  {
+   "commit": "4961e6443",
+   "truth": [
+    "tests/incremental.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ],
+   "baseline_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ]
+  },
+  {
+   "commit": "43edebb26",
+   "truth": [
+    "tests/mcp.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+    "tests/mcp.rs"
+   ],
+   "baseline_d1": [
+    "tests/mcp.rs"
+   ]
+  },
+  {
+   "commit": "0027f4e09",
+   "truth": [
+    "tests/cli_read_only.rs",
+    "tests/mcp.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ],
+   "baseline_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ]
+  },
+  {
+   "commit": "b00eeeb1e",
+   "truth": [
+    "tests/diff.rs",
+    "tests/incremental.rs",
+    "tests/mcp.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ],
+   "baseline_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ]
+  },
+  {
+   "commit": "228850c4d",
+   "truth": [
+    "tests/incremental.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ],
+   "baseline_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ]
+  },
+  {
+   "commit": "5786dda6d",
+   "truth": [
+    "tests/diff.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ],
+   "baseline_d1": [
+    "tests/cli_read_only.rs",
+    "tests/diff.rs",
+    "tests/golden_corpus.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ]
+  },
+  {
+   "commit": "0f8818bd3",
+   "truth": [
+    "tests/mcp.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+    "tests/mcp.rs"
+   ],
+   "baseline_d1": [
+    "tests/mcp.rs"
+   ]
+  },
+  {
+   "commit": "0a80ff424",
+   "truth": [
+    "tests/cli_read_only.rs"
+   ],
+   "graphtrail_d1": [],
+   "baseline_d1": [
+    "tests/json_schema.rs"
+   ]
+  },
+  {
+   "commit": "eff5c81a9",
+   "truth": [
+    "tests/mcp.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/mcp.rs"
+   ],
+   "baseline_d1": [
+    "tests/json_schema.rs",
+    "tests/mcp.rs"
+   ]
+  },
+  {
+   "commit": "71789e334",
+   "truth": [
+    "tests/cli_read_only.rs",
+    "tests/mcp.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/mcp.rs"
+   ],
+   "baseline_d1": [
+    "tests/json_schema.rs",
+    "tests/mcp.rs"
+   ]
+  },
+  {
+   "commit": "dbabf6e2f",
+   "truth": [
+    "tests/resolution.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/cli_read_only.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ],
+   "baseline_d1": [
+    "tests/cli_read_only.rs",
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ]
+  },
+  {
+   "commit": "2d8426705",
+   "truth": [
+    "tests/incremental.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ],
+   "baseline_d1": [
+    "tests/incremental.rs",
+    "tests/json_schema.rs",
+    "tests/mcp.rs",
+    "tests/resolution.rs"
+   ]
+  },
+  {
+   "commit": "04be31023",
+   "truth": [
+    "tests/mcp.rs"
+   ],
+   "graphtrail_d1": [
+    "tests/mcp.rs"
+   ],
+   "baseline_d1": [
+    "tests/mcp.rs"
+   ]
+  }
+ ],
+ "finding": "graphtrail attributed tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs, a fixture source, as an affected test; is_test_file counts any tests/-nested path. Depth 1/3/5 recall identical (0.912) on this corpus: no depth-default change justified (null result)."
+}

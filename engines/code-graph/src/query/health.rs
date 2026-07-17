@@ -10,7 +10,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::query::affected::is_test_file;
+use crate::query::affected::is_test_support_file;
 
 /// In-band honesty note for uncalled-symbol reports.
 pub const UNCALLED_ATTRIBUTION: &str = "symbols with no incoming call edges in the graph; \
@@ -110,7 +110,7 @@ pub fn dead_code(conn: &Connection, limit: usize) -> Result<DeadCodeReport> {
     let mut symbols = Vec::new();
     for row in mapped {
         let symbol = row?;
-        if !is_test_file(&symbol.file_path) {
+        if !is_test_support_file(&symbol.file_path) {
             symbols.push(symbol);
         }
     }

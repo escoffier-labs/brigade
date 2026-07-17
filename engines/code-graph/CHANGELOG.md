@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `affected` no longer reports fixture sources as runnable tests: paths under `fixtures/`, `golden/`, `snapshots/`, or `testdata/` are excluded from the test-file heuristic unless the file name itself matches a test-name pattern. `dead_code` keeps excluding fixture paths through a broader test-support predicate, so fixture sources do not surface as dead-code candidates. Found by the calibration bench in `benchmarks/affected-calibration/`.
+
 ### Added
 - Optional `limit` argument on the `callers`, `callees`, and `impact` MCP tools. When set, the edge list is cut to the first N real edges and a marker row reports shown vs total; omitted, output is unchanged. Motivated by the tool-surface benchmark in `benchmarks/tool-surface/`, where an unbounded `impact` on a hot symbol cost ~9,150 tokens in one call.
 - `graphtrail evaluate <path>`: dry-run extraction that prints what a sync would store (symbols, imports, calls) for a file or tree, writing nothing. Pair with an extractor-fingerprint bump to diff extractor changes before they touch an index.
