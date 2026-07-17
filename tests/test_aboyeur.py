@@ -2026,6 +2026,30 @@ def test_invalid_plan_writes_attempt_artifact(monkeypatch, tmp_path, capsys):
     assert not (output_dir / "plan.json").exists()
 
 
+def test_plan_output_validation_failure_preserves_typed_receipts(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        return agents.AgentResult(
+            text="I will inspect the repository first.",
+            ok=False,
+            detail="provider returned progress or intent without a final result",
+            failure_phase="output-validation",
+            failure_kind="non-final-output",
+            exit_code=0,
+        )
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert aboyeur.run("build feature", _roster(), output_dir=output_dir) == 2
+    attempt = json.loads((output_dir / "plan-attempts.json").read_text())["attempts"][0]
+    assert attempt["failure_phase"] == "output-validation"
+    assert attempt["failure_kind"] == "non-final-output"
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure_phase"] == "output-validation"
+    assert run_meta["failure"]["kind"] == "non-final-output"
+
+
 def test_synthesis_failure_writes_artifact(monkeypatch, tmp_path, capsys):
     calls = []
 

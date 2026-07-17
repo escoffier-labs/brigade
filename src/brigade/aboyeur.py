@@ -642,6 +642,10 @@ def _record_plan_attempt(
         "detail": result.detail,
         "text": result.text,
     }
+    if result.failure_phase is not None:
+        payload["failure_phase"] = result.failure_phase
+    if result.failure_kind is not None:
+        payload["failure_kind"] = result.failure_kind
     if parse_error is not None:
         payload["parse_error"] = parse_error
     if coverage_missing:
@@ -1744,6 +1748,16 @@ def run(
                 route=route,
             )
         except RuntimeError as exc:
+            failed_attempt = next(
+                (attempt for attempt in reversed(plan_attempts or []) if attempt.get("ok") is False),
+                None,
+            )
+            failure_phase = (
+                failed_attempt.get("failure_phase") if isinstance(failed_attempt, dict) else None
+            )
+            failure_kind = (
+                failed_attempt.get("failure_kind") if isinstance(failed_attempt, dict) else None
+            )
             if output_dir is not None:
                 finished_at = datetime.now(timezone.utc)
                 _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
@@ -1760,6 +1774,8 @@ def run(
                         finished_at=finished_at,
                         output_dir=output_dir,
                         error=str(exc),
+                        failure_phase=(failure_phase if isinstance(failure_phase, str) else None),
+                        failure_kind=(failure_kind if isinstance(failure_kind, str) else None),
                         code_graph=code_graph,
                         drift_impact=drift_impact,
                         evidence=evidence,
