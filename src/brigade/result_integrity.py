@@ -51,11 +51,18 @@ _OPERATIONAL_ERRORS = (
 )
 _CLAUSE_SPLIT = re.compile(r"(?:\r?\n)+|(?<=[.!?])\s+")
 _FUTURE_INTENT = re.compile(
-    r"\A\s*(?:i\s+(?:will|shall|need to|plan to|am going to)|i['’]ll|let me)\b",
+    r"\A\s*(?:(?:first|next|now)\s*,?\s*)?"
+    r"(?:i\s+(?:will|shall|need to|plan to|am going to)|i['’](?:ll|m going to)|let me)\b",
     re.IGNORECASE,
 )
 _PROGRESS_ACTION = re.compile(
     r"\A\s*(?:reviewing|gathering|inspecting|reading|checking|searching|running|locating|"
+    r"listing|opening|looking|finding|examining|analyzing|exploring|tracing|investigating)\b",
+    re.IGNORECASE,
+)
+_ONGOING_PROGRESS = re.compile(
+    r"\A\s*(?:(?:first|next|now)\s*,?\s*)?i(?:\s+am|['’]m)\s+"
+    r"(?:reviewing|gathering|inspecting|reading|checking|searching|running|locating|"
     r"listing|opening|looking|finding|examining|analyzing|exploring|tracing|investigating)\b",
     re.IGNORECASE,
 )
@@ -97,6 +104,8 @@ def _contains_tool_marker(value: object) -> bool:
 
 def _contains_final_text(value: object) -> bool:
     if isinstance(value, dict):
+        if any(str(key).lower() in _TOOL_KEYS for key in value):
+            return False
         role = value.get("role")
         event_type = value.get("type")
         if isinstance(role, str) and role.lower() in {"function", "tool"}:
@@ -146,7 +155,7 @@ def _progress_only(text: str) -> bool:
         return False
     explicit_progress = False
     for clause in clauses:
-        if _FUTURE_INTENT.match(clause):
+        if _FUTURE_INTENT.match(clause) or _ONGOING_PROGRESS.match(clause):
             explicit_progress = True
             continue
         if _PROGRESS_ACTION.match(clause):
@@ -156,6 +165,7 @@ def _progress_only(text: str) -> bool:
                 tail = clause.split(":", 1)[1].strip()
                 tail_is_progress = bool(
                     _FUTURE_INTENT.match(tail)
+                    or _ONGOING_PROGRESS.match(tail)
                     or _PROGRESS_ACTION.match(tail)
                     or re.match(r"(?:first|next|now)\b", tail, re.IGNORECASE)
                 )

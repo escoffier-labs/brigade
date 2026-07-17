@@ -430,12 +430,22 @@ def test_run_agent_rejects_intent_only_antigravity_output(monkeypatch):
     assert result.detail == "provider returned progress or intent without a final result"
 
 
-def test_run_agent_rejects_bare_progress_only_output(monkeypatch):
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Reviewing repository files.",
+        "First, I will inspect the repo.",
+        "Now I will run the tests.",
+        "I'm going to inspect the files first.",
+        "I am inspecting the files first.",
+    ],
+)
+def test_run_agent_rejects_bare_progress_only_output(monkeypatch, output):
     monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
     monkeypatch.setattr(
         agents.proc,
         "run",
-        lambda argv, **kwargs: agents.proc.Result(0, "Reviewing repository files.\n", ""),
+        lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""),
     )
 
     result = agents.run_agent("antigravity", "review it")
@@ -506,6 +516,7 @@ def test_run_agent_rejects_tool_call_and_tool_result_transcript(monkeypatch):
             "messages": [
                 {
                     "role": "assistant",
+                    "content": "I will inspect the repository first.",
                     "tool_calls": [{"name": "read_file", "arguments": {"path": "README.md"}}],
                 },
                 {"role": "tool", "type": "tool_result", "content": "file contents"},
