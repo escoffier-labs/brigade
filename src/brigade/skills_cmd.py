@@ -1070,9 +1070,10 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
     items: list[dict[str, Any]] = []
     registry = _iter_registry(workspace)
     for registry_row in registry:
-        metadata = registry_row["metadata"]
-        skill_id = _slug(str(metadata.get("id") or Path(str(registry_row["skill_dir"])).name))
+        registry_metadata = registry_row["metadata"]
+        skill_id = _slug(str(registry_metadata.get("id") or Path(str(registry_row["skill_dir"])).name))
         lint_payload = _lint_payload(workspace, f"registry:{skill_id}")
+        metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else registry_metadata
         trust_score = lint_payload.get("trust_score") if isinstance(lint_payload.get("trust_score"), dict) else {}
         actual_trust = str(trust_score.get("trust_level") or "unreviewed")
         supported = metadata.get("supported_harnesses")
@@ -1235,7 +1236,8 @@ def sync(
             " ".join(f"{state}={counts[state]}" for state in ("current", "missing", "changed", "blocked", "excluded"))
         )
         for item in items:
-            detail = f" ({item['reason']})" if item.get("reason") else ""
+            detail_value = item.get("error") or item.get("reason")
+            detail = f" ({detail_value})" if detail_value else ""
             print(
                 f"- {item['skill_id']} [{item['harness']}] {item['state']} "
                 f"action={item['action']} result={item['result']}{detail}"

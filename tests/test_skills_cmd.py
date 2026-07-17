@@ -274,6 +274,10 @@ def test_skills_sync_records_later_target_filesystem_exception(tmp_path, capsys,
     assert rows[("exceptional", "cursor")]["error"] == "simulated read-only filesystem"
     assert (tmp_path / ".brigade" / "skills" / "installs" / "exceptional-codex.json").is_file()
 
+    assert skills_cmd.sync(workspace=tmp_path, harness="all", trust="workspace", write=True) == 1
+    text = capsys.readouterr().out
+    assert "exceptional [cursor] missing action=install result=failed (simulated read-only filesystem)" in text
+
 
 def test_skills_sync_excludes_unavailable_hermes_target(tmp_path, capsys, monkeypatch):
     source = _write_skill(tmp_path / "source", name="no-hermes")
@@ -289,6 +293,82 @@ def test_skills_sync_excludes_unavailable_hermes_target(tmp_path, capsys, monkey
     assert row["result"] == "excluded"
     assert row["reason"] == "Hermes home not found (is Hermes installed?)"
     assert payload["counts"]["blocked"] == 0
+
+
+def test_skills_sync_uses_same_metadata_fallback_for_plan_and_install(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source", name="fallback")
+    metadata_path = source / "skill.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata.pop("title")
+    metadata.pop("description", None)
+    metadata["supported_harnesses"] = ["codex"]
+    metadata_path.write_text(json.dumps(metadata))
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+
+    assert skills_cmd.sync(workspace=tmp_path, harness="codex", trust="workspace", write=True) == 0
+    capsys.readouterr()
+    assert skills_cmd.sync(workspace=tmp_path, harness="codex", trust="workspace", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["items"][0]["state"] == "current"
+    assert payload["items"][0]["drift"]["content_changed"] is False
+
+
+def test_skills_sync_enforces_higher_trust_floors(tmp_path, capsys):
+    for name, trust_level in (("workspace-only", "workspace"), ("team-skill", "team"), ("public-skill", "public")):
+        source = _write_skill(tmp_path / "sources", name=name)
+        metadata_path = source / "skill.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["trust_level"] = trust_level
+        metadata["supported_harnesses"] = ["cursor"]
+        metadata_path.write_text(json.dumps(metadata))
+        assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+        capsys.readouterr()
+
+    assert skills_cmd.sync(workspace=tmp_path, harness="cursor", trust="team", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["skill_id"]: row for row in payload["items"]}
+
+    assert rows["workspace-only"]["state"] == "excluded"
+    assert rows["team-skill"]["state"] == "missing"
+    assert rows["public-skill"]["state"] == "missing"
+
+    assert skills_cmd.sync(workspace=tmp_path, harness="cursor", trust="public", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["skill_id"]: row for row in payload["items"]}
+    assert rows["team-skill"]["state"] == "excluded"
+    assert rows["public-skill"]["state"] == "missing"
+
+
+def test_skills_sync_excludes_unsupported_and_blocks_unknown_provenance(tmp_path, capsys):
+    unsupported = _write_skill(tmp_path / "sources", name="unsupported")
+    metadata_path = unsupported / "skill.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["supported_harnesses"] = ["codex"]
+    metadata_path.write_text(json.dumps(metadata))
+    assert skills_cmd.import_skill(target=tmp_path, source=unsupported, json_output=True) == 0
+    capsys.readouterr()
+
+    unknown = _write_skill(tmp_path / "sources", name="unknown-copy")
+    metadata_path = unknown / "skill.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["supported_harnesses"] = ["cursor"]
+    metadata_path.write_text(json.dumps(metadata))
+    assert skills_cmd.import_skill(target=tmp_path, source=unknown, json_output=True) == 0
+    capsys.readouterr()
+    installed = tmp_path / ".cursor" / "skills" / "unknown-copy"
+    shutil.copytree(unknown, installed)
+
+    assert skills_cmd.sync(workspace=tmp_path, harness="cursor", trust="workspace", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["skill_id"]: row for row in payload["items"]}
+
+    assert rows["unsupported"]["state"] == "excluded"
+    assert rows["unsupported"]["reason"] == "harness cursor is not supported by registry metadata"
+    assert rows["unknown-copy"]["state"] == "blocked"
+    assert rows["unknown-copy"]["reason"] == "installed copy has no valid provenance receipt"
+    assert rows["unknown-copy"]["action"] == "none"
 
 
 def test_skills_sync_cli_is_dry_run_until_write(tmp_path, capsys):
