@@ -50,23 +50,33 @@ def init(
     results: list[dict[str, Any]] = []
     for step in _steps(target, profile=profile, handoff_inboxes=handoff_inboxes, default_tools=default_tools):
         path = step["path"]
-        if path.exists() and not force:
+        if path.exists() and not force and step["id"] != "handoff-sources":
             results.append({"id": step["id"], "path": str(path), "status": "skipped", "reason": "already exists"})
             continue
         kwargs = dict(step["kwargs"])
         kwargs.update({"target": target, "force": force})
+        if step["id"] == "handoff-sources":
+            kwargs["json_output"] = True
         output = StringIO()
         with redirect_stdout(output):
             rc = step["command"](**kwargs)
-        results.append(
-            {
-                "id": step["id"],
-                "path": str(path),
-                "status": "written" if rc == 0 else "error",
-                "return_code": rc,
-                "output": output.getvalue().strip().splitlines(),
-            }
-        )
+        output_text = output.getvalue().strip()
+        result = {
+            "id": step["id"],
+            "path": str(path),
+            "status": "written" if rc == 0 else "error",
+            "return_code": rc,
+            "output": output_text.splitlines(),
+        }
+        if step["id"] == "handoff-sources" and rc == 0:
+            try:
+                source_result = json.loads(output_text)
+            except json.JSONDecodeError:
+                source_result = None
+            if isinstance(source_result, dict) and source_result.get("written") is False:
+                result["status"] = "skipped"
+                result["reason"] = "source coverage already current"
+        results.append(result)
     post_actions = _post_init_actions(target, profile=profile, waive_public_release=waive_public_release)
     payload = {
         "target": str(target),

@@ -569,7 +569,7 @@ flowchart LR
 
 ```bash
 brigade init --target . --depth workspace --harnesses hermes
-brigade handoff sources init --target . --force
+brigade handoff sources init --target .
 ```
 
 ```bash

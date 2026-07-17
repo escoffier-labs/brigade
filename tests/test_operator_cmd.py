@@ -837,6 +837,74 @@ def test_operator_init_dry_run_does_not_write(tmp_path, capsys):
     assert not (tmp_path / ".brigade" / "daily.toml").exists()
 
 
+def test_operator_init_dry_run_previews_existing_handoff_source_merge(tmp_path, capsys):
+    path = tmp_path / ".brigade" / "handoff-sources.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"sources": [{"root": ".", "inboxes": [".codex/memory-handoffs"]}]}) + "\n")
+
+    assert (
+        operator_cmd.init(
+            target=tmp_path,
+            handoff_inboxes=[".grok/memory-handoffs"],
+            dry_run=True,
+            json_output=True,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    sources_step = next(row for row in payload["steps"] if row["id"] == "handoff-sources")
+
+    assert sources_step["action"] == "merge"
+
+
+def test_operator_init_merges_existing_handoff_source_coverage(tmp_path, capsys):
+    path = tmp_path / ".brigade" / "handoff-sources.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {
+                "custom": {"keep": True},
+                "sources": [
+                    {"root": ".", "inboxes": [".codex/memory-handoffs"]},
+                    {"root": "../shared", "inboxes": ["team/handoffs"]},
+                ],
+            }
+        )
+        + "\n"
+    )
+
+    assert (
+        operator_cmd.init(
+            target=tmp_path,
+            handoff_inboxes=[".grok/memory-handoffs"],
+            json_output=True,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    sources_step = next(row for row in payload["results"] if row["id"] == "handoff-sources")
+    sources = json.loads(path.read_text())
+
+    assert sources_step["status"] == "written"
+    assert sources["custom"] == {"keep": True}
+    assert sources["sources"][0]["inboxes"] == [".codex/memory-handoffs", ".grok/memory-handoffs"]
+    assert sources["sources"][1] == {"root": "../shared", "inboxes": ["team/handoffs"]}
+
+    assert (
+        operator_cmd.init(
+            target=tmp_path,
+            handoff_inboxes=[".grok/memory-handoffs"],
+            json_output=True,
+        )
+        == 0
+    )
+    rerun = json.loads(capsys.readouterr().out)
+    rerun_sources = next(row for row in rerun["results"] if row["id"] == "handoff-sources")
+    assert rerun_sources["status"] == "skipped"
+    assert rerun_sources["reason"] == "source coverage already current"
+    assert rerun["written_count"] == 0
+
+
 def test_operator_internal_dogfood_init_and_status(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
@@ -1102,6 +1170,17 @@ def test_operator_verify_harness_hermes_after_handoff_init_and_draft(tmp_path, c
         row["name"] == "hermes_adapter_workspace_handoff_inbox" and row["status"] == "ok" for row in payload["checks"]
     )
     assert any(row["name"] == "handoff_lint" and row["status"] == "ok" for row in payload["checks"])
+
+
+def test_operator_verify_harness_recommends_additive_source_init(tmp_path, capsys):
+    assert cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "grok"]) == 0
+    capsys.readouterr()
+
+    assert operator_cmd.verify_harness(target=tmp_path, harness="grok", json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["handoff_inbox"]["watched"] is False
+    assert payload["next_command"] == "brigade handoff sources init --target ."
 
 
 def test_operator_verify_harness_hermes_fails_broken_adapter_inbox(tmp_path, capsys):

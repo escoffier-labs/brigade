@@ -653,12 +653,37 @@ def _handoff_backlog(repo: Path) -> tuple[int, int | None]:
     return pending, oldest_days
 
 
+def _handoff_source_coverage(repo: Path) -> tuple[list[str], list[str], list[str]]:
+    if not repo.is_dir():
+        return [], [], []
+    try:
+        config = brigade_config.load_config(repo)
+    except (OSError, ValueError):
+        return [], [], []
+    if config is None:
+        return [], [], []
+
+    expected = [WRITER_INBOXES[harness] for harness in config.selection.harnesses if harness in WRITER_INBOXES]
+    missing = [inbox for inbox in expected if not (repo / inbox).is_dir()]
+
+    from .. import handoff_cmd
+
+    try:
+        health = handoff_cmd.inspect(repo)
+    except (OSError, ValueError):
+        return expected, missing, []
+    watched = {inbox.inbox for inbox in health.inboxes if inbox.watched}
+    unwatched = [inbox for inbox in expected if inbox not in missing and inbox not in watched]
+    return expected, missing, unwatched
+
+
 def _repo_summary(entry: constants.RepoEntry) -> dict[str, Any]:
     repo = entry.path
     tracked_dirty, untracked_dirty = _dirty_counts(repo) if repo.is_dir() else (0, 0)
     has_agents = (repo / "AGENTS.md").is_file()
     has_claude = (repo / "CLAUDE.md").is_file() or (repo / ".claude" / "CLAUDE.md").is_file()
     handoff_inboxes = [inbox for inbox in WRITER_INBOXES.values() if (repo / inbox).is_dir()]
+    handoff_expected, handoff_missing, handoff_unwatched = _handoff_source_coverage(repo)
     handoff_pending, handoff_backlog_oldest_days = _handoff_backlog(repo)
     hooks = repo / ".git" / "hooks"
     publish_guard_hooks = (
@@ -681,6 +706,9 @@ def _repo_summary(entry: constants.RepoEntry) -> dict[str, Any]:
         "has_changelog": (repo / "CHANGELOG.md").is_file(),
         "test_hints": _test_hints(repo) if repo.is_dir() else [],
         "handoff_inboxes": handoff_inboxes,
+        "handoff_inboxes_expected": handoff_expected,
+        "handoff_inboxes_missing": handoff_missing,
+        "handoff_inboxes_unwatched": handoff_unwatched,
         "handoff_pending": handoff_pending,
         "handoff_backlog_oldest_days": handoff_backlog_oldest_days,
         "publish_guard_hooks": publish_guard_hooks,
@@ -774,7 +802,26 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "repo_id": repo_id,
             }
         )
-    if not summary.get("handoff_inboxes"):
+    expected_inboxes = summary.get("handoff_inboxes_expected") or []
+    for inbox in summary.get("handoff_inboxes_missing") or []:
+        checks.append(
+            {
+                "status": constants.WARN,
+                "name": "repo_handoff_inbox_missing",
+                "detail": f"{repo_id} selected handoff inbox is missing: {inbox}",
+                "repo_id": repo_id,
+            }
+        )
+    for inbox in summary.get("handoff_inboxes_unwatched") or []:
+        checks.append(
+            {
+                "status": constants.WARN,
+                "name": "repo_handoff_inbox_unwatched",
+                "detail": f"{repo_id} selected handoff inbox is not watched: {inbox}",
+                "repo_id": repo_id,
+            }
+        )
+    if not expected_inboxes and not summary.get("handoff_inboxes"):
         checks.append(
             {
                 "status": constants.WARN,
