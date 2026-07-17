@@ -25,6 +25,7 @@ jobs:
         run: cargo check --locked --all-features
 
   build-and-test:
+    name: build-and-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,3 +41,39 @@ jobs:
         run: cargo test --all-features
       - name: Build (default, no-network)
         run: cargo build --release
+
+  feature-configurations:
+    name: Feature configuration (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: no-default
+            cargo_args: --no-default-features
+          - name: default
+            cargo_args: ""
+          - name: watch-only
+            cargo_args: --no-default-features --features watch
+          - name: codesearch-only
+            cargo_args: --no-default-features --features codesearch
+          - name: miseledger-only
+            cargo_args: --no-default-features --features miseledger
+          - name: all-features
+            cargo_args: --all-features
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check locked feature configuration
+        run: cargo check --locked ${{ matrix.cargo_args }}
+
+  windows:
+    name: Windows (stable, default features)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test locked default features
+        run: cargo test --locked

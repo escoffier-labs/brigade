@@ -46,6 +46,12 @@ git clone https://github.com/escoffier-labs/graphtrail.git
 cd graphtrail && cargo build --release
 ```
 
+## Release support
+
+Release-supported platforms are Linux, macOS, and Windows. Required CI exercises Linux and Windows; macOS shares the same Unix locking path exercised on Linux.
+
+The supported Cargo configurations are the minimal `--no-default-features` build, default features, each feature in isolation (`--no-default-features --features watch`, `--no-default-features --features codesearch`, and `--no-default-features --features miseledger`), and `--all-features`. CI uses locked compile checks for that bounded feature matrix, runs the full all-features suite on Linux, and runs default-feature tests on Windows.
+
 ## Quickstart
 
 ```bash

@@ -191,6 +191,51 @@ fn supported_toolchain_and_agent_workflow_are_documented() {
 }
 
 #[test]
+fn ci_covers_supported_platform_and_feature_configurations() {
+    let ci = repository_file(".github/workflows/ci.yml");
+    for required in [
+        "name: build-and-test",
+        "name: Windows (stable, default features)",
+        "runs-on: windows-latest",
+        "cargo test --locked",
+        "name: Feature configuration (${{ matrix.name }})",
+        "cargo check --locked ${{ matrix.cargo_args }}",
+        "name: no-default",
+        "cargo_args: --no-default-features",
+        "name: default",
+        "name: watch-only",
+        "cargo_args: --no-default-features --features watch",
+        "name: codesearch-only",
+        "cargo_args: --no-default-features --features codesearch",
+        "name: miseledger-only",
+        "cargo_args: --no-default-features --features miseledger",
+        "name: all-features",
+        "cargo_args: --all-features",
+    ] {
+        assert!(
+            ci.contains(required),
+            "CI must preserve the supported platform and feature check: {required}"
+        );
+    }
+
+    let readme = repository_file("README.md");
+    for required in [
+        "Release-supported platforms are Linux, macOS, and Windows.",
+        "Required CI exercises Linux and Windows",
+        "`--no-default-features`",
+        "`--no-default-features --features watch`",
+        "`--no-default-features --features codesearch`",
+        "`--no-default-features --features miseledger`",
+        "`--all-features`",
+    ] {
+        assert!(
+            readme.contains(required),
+            "README must document the release support contract: {required}"
+        );
+    }
+}
+
+#[test]
 fn agent_startup_requires_skill_selection_before_brigade_commands() {
     let agents = repository_file("AGENTS.md");
     let first_raw_command = agents
