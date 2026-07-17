@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import agents
 from . import doctor as doctor_mod
+from . import model_inventory
 from . import roster as roster_mod
 
 DEFAULT_ROSTER_REL = ".brigade/roster.toml"
@@ -148,6 +149,7 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
     else:
         checks.append((doctor_mod.WARN, "roster: allow_models", "not set; explicit model allow-list recommended"))
 
+    inventory_inspector = model_inventory.ModelInventoryInspector()
     for name, agent in loaded.agents.items():
         timeout = roster_mod.timeout_for(agent, loaded)
         if agent.cli is None:
@@ -161,15 +163,14 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
             )
             continue
         binary = agents.command_for(agent.cli)
-        if agents.detect(agent.cli):
+        detected = agents.detect(agent.cli)
+        if detected:
             checks.append((doctor_mod.OK, f"agent: {name}", f"{agent.cli} via {binary}; timeout={timeout:g}s"))
             if agent.cli.startswith("ollama:"):
                 ollama_model = agent.cli[len("ollama:") :]
-                present, missing_detail = agents.ollama_model_present(ollama_model)
-                if present:
-                    checks.append((doctor_mod.OK, f"agent: {name} ollama model", f"{ollama_model} pulled locally"))
-                else:
-                    checks.append((doctor_mod.WARN, f"agent: {name} ollama model", missing_detail))
+                inventory = inventory_inspector.inspect(agent.cli, ollama_model)
+                assert inventory is not None
+                checks.append(_model_inventory_check(name, inventory))
         else:
             detail = f"{agent.cli} needs `{binary}` on PATH; timeout={timeout:g}s"
             if agent.cli == "claude":
@@ -182,6 +183,10 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
                 )
             elif agents.supports_model_pinning(agent.cli):
                 checks.append((doctor_mod.OK, f"agent: {name} model", f"{agent.model} via {agent.cli}"))
+                if detected and agent.transport == "direct":
+                    inventory = inventory_inspector.inspect(agent.cli, agent.model)
+                    if inventory is not None:
+                        checks.append(_model_inventory_check(name, inventory))
             else:
                 checks.append(
                     (
@@ -223,3 +228,8 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
                     )
 
     return doctor_mod._report(checks)
+
+
+def _model_inventory_check(agent_name: str, result: model_inventory.ModelInventoryResult) -> doctor_mod.CheckResult:
+    status = doctor_mod.OK if result.state == "exact" else doctor_mod.WARN
+    return (status, f"agent: {agent_name} model inventory", f"{result.state}: {result.detail}")
