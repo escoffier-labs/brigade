@@ -158,6 +158,36 @@ def test_roster_doctor_ok_when_ollama_model_pulled(monkeypatch, tmp_target, caps
     assert "pulled locally" in out
 
 
+def test_roster_doctor_fails_unauthenticated_acpx_cursor_with_recovery(monkeypatch, tmp_target, capsys):
+    from brigade import acpx_adapter
+
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.composer]\ncli = "cursor"\nmodel = "composer-2.5"\n'
+        'transport = "acpx"\ntransport_version = "0.12.0"\nrole = "review"\n',
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "installed_version", lambda: ("0.12.0", ""))
+    diagnosis = (
+        "cursor-agent CLI is not logged in; run `cursor-agent login` once, then verify with `cursor-agent status`"
+    )
+    monkeypatch.setattr(
+        acpx_adapter,
+        "cursor_auth_status",
+        lambda: acpx_adapter.CursorAuthStatus("unauthenticated", diagnosis, "Not logged in", "", 0),
+    )
+
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "[fail]" in out
+    assert "agent: composer cursor auth" in out
+    assert diagnosis in out
+
+
 def _write_roster(tmp_target, body: str) -> None:
     path = tmp_target / ".brigade" / "roster.toml"
     path.parent.mkdir(parents=True, exist_ok=True)

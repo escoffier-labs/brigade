@@ -1345,6 +1345,71 @@ def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
     assert seen["read_only"] is True
 
 
+def test_direct_acpx_auth_failure_reaches_worker_run_receipt_and_human_summary(monkeypatch, capsys, tmp_path):
+    from brigade import acpx_adapter
+
+    diagnosis = (
+        "cursor-agent CLI is not logged in; run `cursor-agent login` once, then verify with `cursor-agent status`"
+    )
+
+    def fake_cursor(prompt, **kwargs):
+        return agents.AgentResult(
+            text="",
+            ok=False,
+            detail=diagnosis,
+            failure_phase="preflight",
+            failure_kind="provider-auth",
+            stdout="Not logged in",
+            stderr="",
+            exit_code=0,
+            transport="acpx",
+            requested_model="composer-2.5",
+            acpx_version="0.12.0",
+        )
+
+    monkeypatch.setattr(acpx_adapter, "run_cursor", fake_cursor)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "codex", "plan"),
+            "composer": Agent(
+                "composer",
+                "cursor",
+                "review",
+                model="composer-2.5",
+                transport="acpx",
+                transport_version="0.12.0",
+            ),
+        },
+    )
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "inspect",
+        roster,
+        worker="composer",
+        cwd=tmp_path,
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 2
+    assert capsys.readouterr().err.strip() == f"error: worker failed: {diagnosis}"
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["detail"] == diagnosis
+    assert worker["failure_phase"] == "preflight"
+    assert worker["failure_kind"] == "provider-auth"
+    assert (output_dir / worker["stdout_log"]).read_text() == "Not logged in"
+    run_payload = json.loads((output_dir / "run.json").read_text())
+    assert run_payload["error"] == diagnosis
+    assert run_payload["failure"] == {
+        "phase": "preflight",
+        "kind": "provider-auth",
+        "detail": diagnosis,
+    }
+
+
 def test_roster_payload_includes_model():
     payload = aboyeur._roster_payload(_model_roster())
     assert payload["agents"]["architect"]["model"] == "claude-fable-5"

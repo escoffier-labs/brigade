@@ -210,6 +210,9 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
                 installed, detail = acpx_adapter.installed_version()
                 if installed == agent.transport_version:
                     checks.append((doctor_mod.OK, f"agent: {name} acpx", f"version {installed}"))
+                    auth = acpx_adapter.cursor_auth_status()
+                    auth_status = doctor_mod.OK if auth.state == "authenticated" else doctor_mod.FAIL
+                    checks.append((auth_status, f"agent: {name} cursor auth", auth.detail))
                 else:
                     checks.append(
                         (
