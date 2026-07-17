@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/escoffier-labs/graphtrail/benchmarks/cross-tool/result-schema.v1.json",
+  "title": "GraphTrail cross-tool benchmark result v1",
+  "type": "object",
+  "required": [
+    "result_schema_version",
+    "corpus_schema_version",
+    "fixture_version",
+    "response_budget_chars",
+    "results"
+  ],
+  "properties": {
+    "result_schema_version": { "const": 1 },
+    "corpus_schema_version": { "const": 1 },
+    "fixture_version": { "type": "string" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "response_budget_chars": { "type": "integer", "minimum": 1 },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "implementation",
+          "case_id",
+          "task_sha256",
+          "status",
+          "correctness",
+          "setup_steps",
+          "tool_calls",
+          "response_chars",
+          "elapsed_ms",
+          "peak_memory_kib",
+          "truncated"
+        ],
+        "properties": {
+          "implementation": { "type": "string" },
+          "case_id": { "type": "string" },
+          "task_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "status": { "enum": ["completed", "failed"] },
+          "correctness": {
+            "type": "object",
+            "required": ["passed", "score", "matched_files", "missing_files", "matched_tokens", "missing_tokens"],
+            "properties": {
+              "passed": { "type": "boolean" },
+              "score": { "type": "number", "minimum": 0, "maximum": 1 },
+              "matched_files": { "type": "array", "items": { "type": "string" } },
+              "missing_files": { "type": "array", "items": { "type": "string" } },
+              "matched_tokens": { "type": "array", "items": { "type": "string" } },
+              "missing_tokens": { "type": "array", "items": { "type": "string" } }
+            },
+            "additionalProperties": false
+          },
+          "setup_steps": { "type": "integer", "minimum": 0 },
+          "tool_calls": { "type": "integer", "minimum": 0 },
+          "response_chars": { "type": "integer", "minimum": 0 },
+          "elapsed_ms": { "type": "number", "minimum": 0 },
+          "peak_memory_kib": { "type": ["integer", "null"], "minimum": 0 },
+          "truncated": { "type": "boolean" },
+          "error": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -160,6 +160,10 @@ graphtrail --db .graphtrail/graphtrail.db stats --json
 
 The response includes `files`, `symbols`, `edges`, `imports`, `language_files`, `schema_version`, `synced_at`, and `tool_version`.
 
+## Cross-tool benchmark corpus
+
+The versioned [cross-tool corpus](benchmarks/cross-tool/README.md) measures context and impact behavior on a synthetic Python, TypeScript, Rust, and Go repository. Its standard-library runner applies identical task text and response budgets to GraphTrail and explicitly supplied comparator adapters, then records correctness, setup steps, tool calls, response size, elapsed time, and peak memory. It is an evidence harness only and does not change default ranking or MCP behavior.
+
 ## Optional integrations
 
 GraphTrail's Brigade adapter is built in: `graphtrail context "<task>" --markdown` renders a context pack as a Brigade-friendly markdown document you can drop into a handoff's evidence section.
