@@ -3009,3 +3009,74 @@ def test_plan_records_unknown_covers(monkeypatch):
     aboyeur.plan("rename the config loader helper", _roster(), attempts=attempts, route=route)
     assert attempts[-1]["unknown_covers"] == ["ghost-review"]
     assert "coverage_missing" not in attempts[-1]  # real coverage is complete
+
+
+def test_plan_codex_orchestrator_feeds_prompt_on_stdin_for_both_transports(monkeypatch):
+    """Plan must invoke a codex orchestrator with stdin-fed `codex exec -`.
+
+    Both roster transports use this exec-shaped plan path today (app-server is
+    for workers); the prompt must not be a trailing argv token.
+    """
+    plan_json = json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]})
+    captured = []
+
+    def fake_run(argv, **kw):
+        captured.append({"argv": list(argv), "stdin": kw.get("stdin")})
+        return proc.Result(0, plan_json, "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/bin/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    for transport in ("exec", "app-server"):
+        captured.clear()
+        roster = Roster(
+            orchestrator="chef",
+            agents={
+                "chef": Agent("chef", "codex", "plan and synthesize", model="gpt-5.5"),
+                "coder": Agent("coder", "ollama:llama3.3", "write code"),
+            },
+            max_workers=1,
+            codex_transport=transport,
+        )
+        assignments = aboyeur.plan("build feature", roster)
+        assert len(assignments) == 1
+        assert len(captured) == 1
+        call = captured[0]
+        assert call["argv"][0:2] == ["codex", "exec"]
+        assert call["argv"][-1] == "-"
+        assert "-m" in call["argv"]
+        assert call["argv"][call["argv"].index("-m") + 1] == "gpt-5.5"
+        assert call["stdin"] is not None
+        assert b"build feature" in call["stdin"]
+        assert b"assignments" in call["stdin"]
+
+
+def test_plan_codex_stdin_hang_names_seat_and_transport(monkeypatch):
+    import pytest
+
+    def fake_run(argv, **kw):  # noqa: ARG001
+        return proc.Result(
+            124,
+            "",
+            "Reading additional input from stdin...\nOpenAI Codex v0.144.5\n--------\n"
+            "workdir: /tmp\nmodel: gpt-5.5\nprovider: openai\napproval: never\n",
+        )
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/bin/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "codex", "plan and synthesize"),
+            "coder": Agent("coder", "ollama:llama3.3", "write code"),
+        },
+        max_workers=1,
+        codex_transport="app-server",
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=r"orchestrator seat 'chef'.*transport='app-server'.*stdin",
+    ) as exc:
+        aboyeur.plan("build feature", roster, codex_transport="app-server")
+    assert "Reading additional input from stdin" not in str(exc.value)

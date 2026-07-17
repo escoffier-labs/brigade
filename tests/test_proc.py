@@ -51,3 +51,30 @@ def test_run_preserves_partial_output_on_timeout(monkeypatch):
     assert result.code == 124
     assert result.stdout == "partial stdout\n"
     assert result.stderr == "partial stderr\ntimeout after 3.0s"
+
+
+def test_run_feeds_stdin_when_provided(monkeypatch):
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args=kwargs.get("args") or args, returncode=0, stdout=b"ok\n", stderr=b"")
+
+    monkeypatch.setattr(proc.subprocess, "run", fake_run)
+    result = proc.run(["codex", "exec", "-"], stdin=b"plan prompt")
+    assert result.code == 0
+    assert captured["input"] == b"plan prompt"
+    assert "stdin" not in captured
+
+
+def test_run_uses_devnull_stdin_when_stdin_omitted(monkeypatch):
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args=kwargs.get("args") or args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(proc.subprocess, "run", fake_run)
+    proc.run(["true"])
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert "input" not in captured

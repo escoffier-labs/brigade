@@ -8,7 +8,7 @@ from brigade import agents
 
 def test_build_argv_for_known_clis():
     assert agents.build_argv("claude", "hi") == ["claude", "-p", "hi"]
-    assert agents.build_argv("codex", "hi") == ["codex", "exec", "hi"]
+    assert agents.build_argv("codex", "hi") == ["codex", "exec", "-"]
     assert agents.build_argv("opencode", "hi") == ["opencode", "run", "hi"]
     assert agents.build_argv("antigravity", "hi") == [
         "agy",
@@ -54,7 +54,7 @@ def test_build_argv_for_read_only_codex():
         "exec",
         "--sandbox",
         "read-only",
-        "hi",
+        "-",
     ]
     assert agents.build_argv("claude", "hi", read_only=True) == ["claude", "-p", "hi"]
     assert agents.build_argv("opencode", "hi", read_only=True) == ["opencode", "run", "hi"]
@@ -224,14 +224,14 @@ def test_build_argv_can_set_codex_sandbox():
         "exec",
         "--sandbox",
         "danger-full-access",
-        "hi",
+        "-",
     ]
     assert agents.build_argv("codex", "hi", read_only=True, sandbox="workspace-write") == [
         "codex",
         "exec",
         "--sandbox",
         "workspace-write",
-        "hi",
+        "-",
     ]
 
 
@@ -253,7 +253,7 @@ def test_build_argv_pins_model_for_claude_and_codex():
         "exec",
         "-m",
         "gpt-5.5-codex",
-        "hi",
+        "-",
     ]
     assert agents.build_argv("codex", "hi", read_only=True, model="gpt-5.5-codex") == [
         "codex",
@@ -262,7 +262,7 @@ def test_build_argv_pins_model_for_claude_and_codex():
         "read-only",
         "-m",
         "gpt-5.5-codex",
-        "hi",
+        "-",
     ]
     assert agents.build_argv("codex", "hi", sandbox="workspace-write", model="gpt-5.5-codex") == [
         "codex",
@@ -271,13 +271,13 @@ def test_build_argv_pins_model_for_claude_and_codex():
         "workspace-write",
         "-m",
         "gpt-5.5-codex",
-        "hi",
+        "-",
     ]
 
 
 def test_build_argv_without_model_is_unchanged():
     assert agents.build_argv("claude", "hi", model=None) == ["claude", "-p", "hi"]
-    assert agents.build_argv("codex", "hi", model=None) == ["codex", "exec", "hi"]
+    assert agents.build_argv("codex", "hi", model=None) == ["codex", "exec", "-"]
 
 
 def test_build_argv_model_on_unsupported_cli_raises():
@@ -610,10 +610,57 @@ def test_run_agent_forwards_model_to_argv(monkeypatch):
     assert captured["argv"] == ["claude", "--model", "claude-fable-5", "-p", "hi"]
 
 
+def test_run_agent_codex_feeds_prompt_on_stdin(monkeypatch):
+    """codex exec must take the prompt on stdin (`-`), not as a trailing argv token.
+
+    Codex 0.144+ treats a non-TTY open stdin as optional append input and can
+    hang on 'Reading additional input from stdin...' when the prompt is only
+    passed as an argument.
+    """
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        captured["stdin"] = kw.get("stdin")
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    res = agents.run_agent("codex", "plan this task", model="gpt-5.5", read_only=True)
+    assert res.ok is True
+    assert captured["argv"] == [
+        "codex",
+        "exec",
+        "--sandbox",
+        "read-only",
+        "-m",
+        "gpt-5.5",
+        "-",
+    ]
+    assert captured["stdin"] == b"plan this task"
+
+
+def test_run_agent_maps_codex_stdin_hang_banner(monkeypatch):
+    def fake_run(argv, **kw):
+        return agents.proc.Result(
+            124,
+            "",
+            "Reading additional input from stdin...\nOpenAI Codex v0.144.5\n--------\n",
+        )
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    res = agents.run_agent("codex", "hi")
+    assert res.ok is False
+    assert "Reading additional input from stdin" not in res.detail
+    assert "stdin" in res.detail.lower()
+    assert "codex" in res.detail.lower()
+
+
 @pytest.mark.parametrize(
     ("cli_ref", "expected"),
     [
-        ("codex", ["codex", "exec", "-c", 'model_reasoning_effort="xhigh"', "hi"]),
+        ("codex", ["codex", "exec", "-c", 'model_reasoning_effort="xhigh"', "-"]),
         ("opencode", ["opencode", "run", "--variant", "xhigh", "hi"]),
         ("pi", ["pi", "--thinking", "xhigh", "-p", "hi"]),
         ("grok", ["grok", "--reasoning-effort", "xhigh", "-p", "hi", "--always-approve"]),
