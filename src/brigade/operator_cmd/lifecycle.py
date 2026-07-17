@@ -50,7 +50,7 @@ def init(
     results: list[dict[str, Any]] = []
     for step in _steps(target, profile=profile, handoff_inboxes=handoff_inboxes, default_tools=default_tools):
         path = step["path"]
-        if path.exists() and not force:
+        if path.exists() and not force and step["id"] != "handoff-sources":
             results.append({"id": step["id"], "path": str(path), "status": "skipped", "reason": "already exists"})
             continue
         kwargs = dict(step["kwargs"])

@@ -195,36 +195,39 @@ def doctor(*, target: Path, sources: Path | None = None, json_output: bool = Fal
     return 1 if health.failures else 0
 
 
-def _merge_local_source_inboxes(payload: object, desired: list[str]) -> tuple[dict[str, Any] | None, bool, str | None]:
+def _merge_local_source_inboxes(
+    payload: object, desired: list[str]
+) -> tuple[dict[str, Any] | None, bool, str | None, list[str]]:
     if not isinstance(payload, dict):
-        return None, False, "root must be a JSON object"
+        return None, False, "root must be a JSON object", []
     sources = payload.get("sources")
     if not isinstance(sources, list):
-        return None, False, "sources must be a list"
+        return None, False, "sources must be a list", []
 
     for entry in sources:
         if isinstance(entry, str):
             if entry == ".":
-                return payload, False, None
+                return payload, False, None, list(WRITER_INBOXES)
             continue
         if not isinstance(entry, dict):
-            return None, False, "sources entries must be objects or strings"
+            return None, False, "sources entries must be objects or strings", []
         root = entry.get("root", ".")
         if root != ".":
             continue
         inbox_values = entry.get("inboxes")
         if inbox_values is None:
-            return payload, False, None
+            return payload, False, None, list(WRITER_INBOXES)
         if not isinstance(inbox_values, list) or not all(isinstance(item, str) for item in inbox_values):
-            return None, False, "local source inboxes must be a list of strings"
+            return None, False, "local source inboxes must be a list of strings", []
         merged = list(dict.fromkeys([*inbox_values, *desired]))
         if merged == inbox_values:
-            return payload, False, None
+            return payload, False, None, merged
         entry["inboxes"] = merged
-        return payload, True, None
+        return payload, True, None, merged
 
-    sources.append({"root": ".", "inboxes": list(dict.fromkeys(desired))})
-    return payload, True, None
+    merged = list(dict.fromkeys(desired))
+    sources.append({"root": ".", "inboxes": merged})
+    return payload, True, None, merged
 
 
 def sources_init(
@@ -254,11 +257,12 @@ def sources_init(
         except (OSError, json.JSONDecodeError) as exc:
             print(f"error: invalid handoff source config {path}: {exc}", file=sys.stderr)
             return 2
-        payload, written, error = _merge_local_source_inboxes(existing, inbox_values)
+        payload, written, error, effective_inboxes = _merge_local_source_inboxes(existing, inbox_values)
         if error or payload is None:
             print(f"error: invalid handoff source config {path}: {error}", file=sys.stderr)
             return 2
     else:
+        effective_inboxes = inbox_values
         payload = {
             "_description": "Local handoff source coverage. Relative roots resolve from this repo or workspace target.",
             "canonical_owner": "openclaw",
@@ -281,13 +285,13 @@ def sources_init(
         "target": str(target),
         "path": str(path),
         "written": written,
-        "inboxes": inbox_values,
+        "inboxes": effective_inboxes,
     }
     if json_output:
         print(json.dumps(output, indent=2, sort_keys=True))
         return 0
     print(f"handoff_sources: {path}")
-    print(f"inboxes: {', '.join(inbox_values) if inbox_values else '(none)'}")
+    print(f"inboxes: {', '.join(effective_inboxes) if effective_inboxes else '(none)'}")
     print("next_command: brigade handoff doctor")
     return 0
 

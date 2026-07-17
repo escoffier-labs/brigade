@@ -1571,6 +1571,7 @@ def test_handoff_sources_init_adds_grok_without_replacing_custom_sources(tmp_pat
     first_payload = json.loads(capsys.readouterr().out)
     first = json.loads(path.read_text())
     assert first_payload["written"] is True
+    assert first_payload["inboxes"] == [".codex/memory-handoffs", ".grok/memory-handoffs"]
     assert first["custom"] == original["custom"]
     assert first["sources"][1] == original["sources"][1]
     assert first["sources"][0]["inboxes"] == [".codex/memory-handoffs", ".grok/memory-handoffs"]

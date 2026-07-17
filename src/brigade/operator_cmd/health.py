@@ -456,7 +456,7 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
         elif inbox_health is None or not inbox_path.exists():
             next_command = f"brigade handoff draft --inbox {harness} --target . --title <title> --summary <summary> --content <content>"
         elif not (inbox_health and inbox_health.watched):
-            next_command = "brigade handoff sources init --target . --force"
+            next_command = "brigade handoff sources init --target ."
         elif invalid:
             next_command = f"brigade handoff lint {inbox_rel} --target ."
         else:
