@@ -183,14 +183,6 @@ def _decode_sse_event_block(event_block: bytes) -> tuple[dict[str, Any] | None, 
     return payload, None
 
 
-def _parse_sse_json_response(body: bytes) -> tuple[dict[str, Any] | None, str | None]:
-    if not body:
-        return {}, None
-    if len(body) > MAX_HTTP_BODY_BYTES:
-        return None, "response exceeded size limit"
-    return _decode_sse_event_block(body)
-
-
 def _set_response_socket_timeout(resp: Any, timeout: float) -> None:
     fp = getattr(resp, "fp", None)
     if fp is None:
@@ -627,6 +619,32 @@ def _probe_stdio(server: CanonicalServer, *, config_current: bool, timeout: floa
     ) -> VerifyResult:
         return _failure(name, transport, config_current=config_current, failure_class=failure_class, detail=detail)
 
+    def read_response(
+        expected_id: object,
+        *,
+        phase: str,
+        nonzero_exit_is_startup: bool = False,
+    ) -> tuple[dict[str, Any] | None, VerifyResult | None]:
+        while remaining() > 0:
+            line, read_error = stdout_reader.read_line(remaining())
+            if read_error == "timeout":
+                return None, fail("timeout", read_error)
+            if stdout_reader.overflow or stderr_reader.overflow:
+                return None, fail("protocol_failure", "output exceeded size limit")
+            if not line:
+                if nonzero_exit_is_startup and proc.poll() is not None and proc.returncode not in (None, 0):
+                    return None, fail("startup_failure", f"process exited with code {proc.returncode}")
+                return None, fail("protocol_failure", f"no {phase} response")
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                return None, fail("protocol_failure", f"{phase} response was not valid JSON")
+            if not isinstance(payload, dict):
+                return None, fail("protocol_failure", f"{phase} response was not a JSON object")
+            if payload.get("id") == expected_id and ("result" in payload or "error" in payload):
+                return payload, None
+        return None, fail("timeout", "timeout")
+
     try:
         try:
             _send_json_line(
@@ -645,20 +663,9 @@ def _probe_stdio(server: CanonicalServer, *, config_current: bool, timeout: floa
         except OSError:
             return fail("startup_failure", "failed to communicate with server process")
 
-        init_line, init_error = stdout_reader.read_line(remaining())
-        if init_error == "timeout":
-            return fail("timeout", init_error)
-        if stdout_reader.overflow or stderr_reader.overflow:
-            return fail("protocol_failure", "output exceeded size limit")
-        if not init_line:
-            if proc.poll() is not None and proc.returncode not in (None, 0):
-                return fail("startup_failure", f"process exited with code {proc.returncode}")
-            return fail("protocol_failure", "no initialize response")
-
-        try:
-            init_payload = json.loads(init_line)
-        except json.JSONDecodeError:
-            return fail("protocol_failure", "initialize response was not valid JSON")
+        init_payload, init_failure = read_response(1, phase="initialize", nonzero_exit_is_startup=True)
+        if init_failure is not None or init_payload is None:
+            return init_failure or fail("protocol_failure", "initialize failed")
 
         init_result, result_error = _rpc_result(init_payload)
         if result_error or init_result is None:
@@ -673,20 +680,9 @@ def _probe_stdio(server: CanonicalServer, *, config_current: bool, timeout: floa
         except OSError:
             return fail("startup_failure", "failed to communicate with server process")
 
-        tools_line, tools_error = stdout_reader.read_line(remaining())
-        if tools_error == "timeout":
-            return fail("timeout", tools_error)
-        if stdout_reader.overflow or stderr_reader.overflow:
-            return fail("protocol_failure", "output exceeded size limit")
-        if not tools_line:
-            if proc.poll() is not None:
-                return fail("protocol_failure", "no tools/list response")
-            return fail("protocol_failure", "no tools/list response")
-
-        try:
-            tools_payload = json.loads(tools_line)
-        except json.JSONDecodeError:
-            return fail("protocol_failure", "tools/list response was not valid JSON")
+        tools_payload, tools_failure = read_response(2, phase="tools/list")
+        if tools_failure is not None or tools_payload is None:
+            return tools_failure or fail("protocol_failure", "tools/list failed")
 
         tools_result, tools_result_error = _rpc_result(tools_payload)
         if tools_result_error or tools_result is None:

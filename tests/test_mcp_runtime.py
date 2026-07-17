@@ -63,6 +63,37 @@ for line in sys.stdin:
 """
 
 
+NOTIFYING_STDIO = """
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get("id") == 1:
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "fixture", "version": "1"},
+            },
+        }), flush=True)
+    elif request.get("method") == "notifications/initialized":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "method": "notifications/message",
+            "params": {"level": "info", "data": "starting"},
+        }), flush=True)
+    elif request.get("method") == "tools/list":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {"tools": [{"name": "echo", "description": "fixture"}]},
+        }), flush=True)
+"""
+
+
 def test_verify_valid_stdio_keeps_config_and_runtime_status_separate(tmp_path, capsys):
     script = _script(tmp_path, "valid_mcp.py", VALID_STDIO)
     _seed_stdio(tmp_path, "valid", script)
@@ -85,6 +116,18 @@ def test_verify_valid_stdio_keeps_config_and_runtime_status_separate(tmp_path, c
             "tool_count": 1,
         }
     ]
+
+
+def test_verify_skips_stdio_notification_before_tools_response(tmp_path, capsys):
+    script = _script(tmp_path, "notifying_mcp.py", NOTIFYING_STDIO)
+    _seed_stdio(tmp_path, "notifying", script)
+
+    capsys.readouterr()
+    assert mcp_cmd.verify(target=tmp_path, harness="claude", json_output=True) == 0
+    result = _payload(capsys)["results"][0]
+
+    assert result["runtime_healthy"] is True
+    assert result["tool_count"] == 1
 
 
 def test_verify_clean_exit_without_handshake_is_protocol_failure(tmp_path, capsys):
