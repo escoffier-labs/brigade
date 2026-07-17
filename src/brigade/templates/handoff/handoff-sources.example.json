@@ -33,6 +33,7 @@
         ".kimi/memory-handoffs",
         ".adal/memory-handoffs",
         ".openhands/memory-handoffs",
+        ".grok/memory-handoffs",
         ".hermes/memory-handoffs"
       ]
     }
