@@ -9,6 +9,7 @@ import statistics
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -391,6 +392,18 @@ def execute(
         if resume and current is not None and current.get("state") in TERMINAL_STATES:
             continue
         attempt = _attempt_number(cell_dir)
+        started_at = current.get("started_at") if isinstance(current, dict) and isinstance(current.get("started_at"), str) else datetime.now(timezone.utc).isoformat()
+        cell_dir.mkdir(parents=True, exist_ok=True)
+        localio.write_json(
+            cell_dir / "cell.json",
+            {
+                "schema": CELL_SCHEMA,
+                **cell.payload(),
+                "state": "running",
+                "attempt": attempt,
+                "started_at": started_at,
+            },
+        )
         run_dir = cell_dir / "attempts" / f"attempt-{attempt:03d}" / "run"
         cell_workspace = workspace
         worktree_path: Path | None = None
@@ -438,6 +451,7 @@ def execute(
             **cell.payload(),
             "state": state,
             "attempt": attempt,
+            "started_at": started_at,
             "exit_code": rc,
             "duration_seconds": run_meta.get("duration_seconds"),
             "run_dir": str(run_dir),
