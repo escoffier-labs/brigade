@@ -303,3 +303,46 @@ def test_resume_orchestrator_without_cli_errors(tmp_path, monkeypatch, capsys):
     # Resumed worker progress is still persisted even though synthesis was skipped.
     results = json.loads((run_dir / "worker-results.json").read_text())["results"]
     assert results[0]["text"] == "finished now"
+
+
+def test_resume_synthesis_carries_orchestrator_env(tmp_path, monkeypatch):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "timeout",
+                "text": "part",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            },
+        ],
+    )
+    roster_snapshot = json.loads((run_dir / "roster.json").read_text())
+    roster_snapshot["agents"]["chef"]["env"] = {"ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"}
+    (run_dir / "roster.json").write_text(json.dumps(roster_snapshot))
+    recovered = json.loads((run_dir / "run.json").read_text())
+    recovered.update(
+        {
+            "error": "run owner process 99999999 is no longer active",
+            "failure_phase": "stale-lock-recovery",
+            "failure": {
+                "phase": "stale-lock-recovery",
+                "kind": "owner-process-exited",
+                "owner_pid": 99999999,
+            },
+        }
+    )
+    (run_dir / "run.json").write_text(json.dumps(recovered))
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    captured = {}
+
+    def fake_run_agent(cli, prompt, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return agents.AgentResult(text="final synthesis", ok=True)
+
+    monkeypatch.setattr(run_resume.agents, "run_agent", fake_run_agent)
+    assert run_resume.resume(run_dir) == 0
+    assert captured["env"] == {"ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"}

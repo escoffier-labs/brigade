@@ -44,6 +44,7 @@ def _roster_from_snapshot(snapshot: dict) -> Roster:
             reasoning=raw.get("reasoning"),
             transport=raw.get("transport", "direct"),
             transport_version=raw.get("transport_version"),
+            env=dict(raw["env"]) if raw.get("env") else None,
         )
     return Roster(
         orchestrator=snapshot["orchestrator"],
@@ -206,6 +207,7 @@ def _resume_locked(run_dir: Path) -> int:
         read_only=read_only,
         model=orchestrator.model,
         reasoning=orchestrator.reasoning,
+        env=dict(orchestrator.env) if orchestrator.env is not None else None,
     )
     aboyeur._write_json(
         run_dir / "synthesis.json",

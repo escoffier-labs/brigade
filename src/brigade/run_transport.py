@@ -170,21 +170,11 @@ def dispatch(
                 read_only=effective_read_only,
                 writable_worktree=authorized_writable_worktree,
             )
-        elif agent.cli == "codex" and appserver is not None:
-            on_event = event_writer(events_dir, assignment.worker, verbose=verbose)
-            result = run_appserver_worker(
-                appserver,
-                agent,
-                assignment.worker,
-                prompt,
-                timeout=timeout_for(agent, roster),
-                cwd=cwd,
-                read_only=effective_read_only,
-                sandbox=sandbox,
-                registry=control_registry,
-                on_event=on_event,
-            )
         elif agent.env is not None:
+            # env seats always dispatch through the direct CLI path, even for
+            # codex under app-server transport: the app-server session cannot
+            # apply per-seat env, and silently dropping it would falsify the
+            # provenance recorded below.
             env_kwargs: dict[str, Any] = {}
             if sandbox is not None:
                 env_kwargs["sandbox"] = sandbox
@@ -200,6 +190,20 @@ def dispatch(
                 read_only=effective_read_only,
                 env=dict(agent.env),
                 **env_kwargs,
+            )
+        elif agent.cli == "codex" and appserver is not None:
+            on_event = event_writer(events_dir, assignment.worker, verbose=verbose)
+            result = run_appserver_worker(
+                appserver,
+                agent,
+                assignment.worker,
+                prompt,
+                timeout=timeout_for(agent, roster),
+                cwd=cwd,
+                read_only=effective_read_only,
+                sandbox=sandbox,
+                registry=control_registry,
+                on_event=on_event,
             )
         else:
             timeout = timeout_for(agent, roster)
@@ -301,8 +305,8 @@ def dispatch(
             request_id=result.request_id,
             acpx_version=result.acpx_version,
             safe_events=result.safe_events,
-            env_overrides=_env_override_names(agent.env),
-            endpoint_host=_env_endpoint_host(agent.env),
+            env_overrides=_env_override_names(agent.env) if result.failure_kind != "env-ref-missing" else (),
+            endpoint_host=_env_endpoint_host(agent.env) if result.failure_kind != "env-ref-missing" else None,
         )
 
     if not assignments:

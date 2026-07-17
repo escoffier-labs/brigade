@@ -461,10 +461,13 @@ def resolve_env_overrides(env: dict[str, str]) -> tuple[dict[str, str] | None, s
     resolved: dict[str, str] = {}
     for key, value in env.items():
         if key.endswith("_REF"):
+            target = key[: -len("_REF")]
+            if not target:
+                return None, f"env override {key}: resolved variable name is empty"
             referenced = os.environ.get(value)
             if referenced is None:
                 return None, f"env override {key}: referenced variable {value} is not set"
-            resolved[key[: -len("_REF")]] = referenced
+            resolved[target] = referenced
         else:
             resolved[key] = value
     return resolved, ""
@@ -483,14 +486,6 @@ def run_agent(
 ) -> AgentResult:
     if not detect(cli_ref):
         return AgentResult(text="", ok=False, detail=f"{command_for(cli_ref)} not installed")
-
-    child_env: dict[str, str] | None = None
-    if env is not None:
-        overrides, env_error = resolve_env_overrides(env)
-        if overrides is None:
-            return AgentResult(text="", ok=False, detail=env_error, requested_model=model)
-        child_env = dict(os.environ)
-        child_env.update(overrides)
 
     if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
         env_id = cli_ref[len(_CODEX_CLOUD_PREFIX) :]
@@ -516,6 +511,21 @@ def run_agent(
             present, missing_detail = ollama_model_present(ollama_model)
             if not present:
                 return AgentResult(text="", ok=False, detail=missing_detail)
+
+    child_env: dict[str, str] | None = None
+    if env is not None:
+        overrides, env_error = resolve_env_overrides(env)
+        if overrides is None:
+            return AgentResult(
+                text="",
+                ok=False,
+                detail=env_error,
+                failure_phase="dispatch",
+                failure_kind="env-ref-missing",
+                requested_model=model,
+            )
+        child_env = dict(os.environ)
+        child_env.update(overrides)
 
     cursor_limitation = None
     if cli_ref == "cursor" and (read_only or sandbox == "read-only"):

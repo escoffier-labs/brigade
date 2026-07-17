@@ -77,7 +77,20 @@ def _as_sandbox(value: object) -> str | None:
 
 
 _ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+_SECRET_HINTS = (
+    "KEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "AUTH",
+    "PAT",
+    "CRED",
+    "COOKIE",
+    "SESSION",
+    "BEARER",
+)
+_SECRET_VALUE_PREFIXES = ("sk-", "xoxb-", "ghp_", "github_pat_", "Bearer ", "sk_live_", "AKIA")
 
 
 def _as_env(value: object, agent_name: str) -> dict[str, str] | None:
@@ -86,21 +99,33 @@ def _as_env(value: object, agent_name: str) -> dict[str, str] | None:
     if not isinstance(value, dict):
         raise ValueError(f"agents.{agent_name}.env must be a TOML table")
     parsed: dict[str, str] = {}
+    targets: dict[str, str] = {}
     for key, raw in value.items():
         if not isinstance(raw, str):
             raise ValueError(f"agents.{agent_name}.env.{key} must be a string")
-        if not isinstance(key, str) or not _ENV_NAME_RE.match(key):
+        if not _ENV_NAME_RE.match(key):
             raise ValueError(f"agents.{agent_name}.env.{key} is not a valid environment variable name")
         if key.endswith("_REF"):
+            target = key[: -len("_REF")]
             if not _ENV_NAME_RE.match(raw):
                 raise ValueError(
                     f"agents.{agent_name}.env.{key} must name an environment variable to read the value from"
                 )
-        elif any(hint in key for hint in _SECRET_HINTS):
-            raise ValueError(
-                f"agents.{agent_name}.env.{key} looks like a secret; pass it by reference with a _REF suffix "
-                f"naming an environment variable instead of an inline value"
-            )
+        else:
+            target = key
+            if any(hint in key for hint in _SECRET_HINTS):
+                raise ValueError(
+                    f"agents.{agent_name}.env.{key} looks like a secret; pass it by reference with a _REF suffix "
+                    f"naming an environment variable instead of an inline value"
+                )
+            if raw.startswith(_SECRET_VALUE_PREFIXES):
+                raise ValueError(
+                    f"agents.{agent_name}.env.{key} looks like a secret value; pass it by reference with a "
+                    f"_REF suffix naming an environment variable instead"
+                )
+        if target in targets:
+            raise ValueError(f"agents.{agent_name}.env.{key} collides with {targets[target]}: both resolve to {target}")
+        targets[target] = key
         parsed[key] = raw
     return parsed
 

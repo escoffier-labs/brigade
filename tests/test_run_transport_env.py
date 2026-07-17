@@ -106,3 +106,50 @@ def test_worker_payload_omits_env_fields_without_overrides(monkeypatch):
     entry = worker_payload(_dispatch(_roster_with_env(None), monkeypatch, captured))[0]
     assert "env_overrides" not in entry
     assert "endpoint_host" not in entry
+
+
+def test_env_seat_dispatches_direct_even_under_appserver(monkeypatch):
+    """A codex seat with env must not silently lose it to the appserver branch."""
+    monkeypatch.setenv("LANE_KEY", "sk-lane-value")
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return agents.proc.Result(0, "worker answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    chef = Agent(name="chef", cli="codex", role="plan")
+    worker = Agent(
+        name="w",
+        cli="codex",
+        role="worker",
+        env={"OPENAI_BASE_URL": "https://api.example.com/v1", "OPENAI_API_KEY_REF": "LANE_KEY"},
+    )
+    roster = Roster(orchestrator="chef", agents={"chef": chef, "w": worker})
+    appserver_calls = []
+    results = run_transport.dispatch(
+        [Assignment(worker="w", task="do the thing")],
+        roster,
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: (
+            appserver_calls.append(a) or agents.AgentResult(text="appserver answer", ok=True)
+        ),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        appserver=object(),
+        read_only=True,
+    )
+    assert appserver_calls == []
+    assert results[0].ok
+    assert captured["env"]["OPENAI_API_KEY"] == "sk-lane-value"
+
+
+def test_env_provenance_absent_when_ref_missing_fails_before_spawn(monkeypatch):
+    monkeypatch.delenv("LANE_KEY", raising=False)
+    captured = {}
+    roster = _roster_with_env({"ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"})
+    result = _dispatch(roster, monkeypatch, captured)[0]
+    assert not result.ok
+    assert result.failure_kind == "env-ref-missing"
+    assert result.env_overrides == ()
+    assert result.endpoint_host is None

@@ -1599,6 +1599,10 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
                 "transport_version": agent.transport_version,
                 "role": agent.role,
                 "timeout_seconds": agent.timeout_seconds,
+                # env tables hold names and references only, never secret
+                # values (enforced at roster load), so persisting them for
+                # resume is safe.
+                "env": dict(agent.env) if agent.env is not None else None,
             }
             for name, agent in roster.agents.items()
         },

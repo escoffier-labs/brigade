@@ -1070,3 +1070,19 @@ def test_run_agent_env_default_leaves_child_environment_alone(monkeypatch):
 
     assert agents.run_agent("claude", "hi").ok
     assert captured["env"] is None
+
+
+def test_run_agent_env_ref_missing_is_typed_failure(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.delenv("MISSING_LANE_KEY", raising=False)
+    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "MISSING_LANE_KEY"})
+    assert not result.ok
+    assert result.failure_kind == "env-ref-missing"
+
+
+def test_run_agent_env_rejects_bare_ref_suffix(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setenv("HOME_VAR", "value")
+    result = agents.run_agent("claude", "hi", env={"_REF": "HOME_VAR"})
+    assert not result.ok
+    assert "empty" in result.detail

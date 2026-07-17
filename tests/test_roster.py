@@ -442,3 +442,25 @@ def test_env_rejected_on_codex_cloud_seat(tmp_path):
     )
     with pytest.raises(ValueError, match="env overrides support direct CLI seats only"):
         roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejects_ref_and_inline_collision(tmp_path):
+    bad = ENV_SEAT.replace(
+        'CLAUDE_CONFIG_DIR = "/tmp/claudex-config"',
+        'CLAUDE_CONFIG_DIR = "/tmp/claudex-config", ANTHROPIC_BASE_URL_REF = "OTHER_VAR"',
+    )
+    with pytest.raises(ValueError, match="collides with"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_secret_hints_cover_common_credential_names(tmp_path):
+    for name in ("GH_PAT", "DB_PASSWD", "SESSION_COOKIE", "ANTHROPIC_AUTH", "MY_CREDENTIAL", "API_BEARER"):
+        bad = ENV_SEAT.replace("CLAUDE_CONFIG_DIR", name)
+        with pytest.raises(ValueError, match="looks like a secret"):
+            roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejects_secret_shaped_inline_values(tmp_path):
+    bad = ENV_SEAT.replace('"/tmp/claudex-config"', '"sk-live-abc123"')
+    with pytest.raises(ValueError, match="looks like a secret value"):
+        roster_mod.load_roster(_write(tmp_path, bad))
