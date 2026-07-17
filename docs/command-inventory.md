@@ -58,7 +58,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 3 command path(s)
 - `brigade security`: 15 command path(s)
-- `brigade skills`: 28 command path(s)
+- `brigade skills`: 29 command path(s)
 - `brigade stations`: 3 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tokens`: 3 command path(s)
@@ -453,8 +453,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade skills publish`
 - `brigade skills rollback`
 - `brigade skills search`
-- `brigade skills sync`
 - `brigade skills serve-mcp`
+- `brigade skills sync`
 - `brigade skills uninstall`
 - `brigade stations discover`
 - `brigade stations list`
