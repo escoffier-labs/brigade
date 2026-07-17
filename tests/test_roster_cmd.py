@@ -2,6 +2,7 @@ from pathlib import Path
 
 from brigade import agents
 from brigade import cli
+from brigade import model_inventory
 from brigade import roster
 from brigade import roster_cmd
 
@@ -139,19 +140,34 @@ def test_roster_doctor_warns_when_ollama_model_not_pulled(monkeypatch, tmp_targe
     roster_cmd.init(tmp_target)
     monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
     monkeypatch.setattr(
-        agents, "ollama_model_present", lambda model: (False, f"ollama model {model!r} is not pulled locally")
+        model_inventory.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(
+            0,
+            "NAME ID SIZE MODIFIED\nother:latest abcdef123456 2.0 GB 2 days ago\n",
+            "",
+        ),
     )
     rc = roster_cmd.doctor(tmp_target)
     out = capsys.readouterr().out
     assert rc == 0
     assert "[warn]" in out
-    assert "not pulled locally" in out
+    assert "not listed locally" in out
+    assert "never auto-pulls" in out
 
 
 def test_roster_doctor_ok_when_ollama_model_pulled(monkeypatch, tmp_target, capsys):
     roster_cmd.init(tmp_target)
     monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
-    monkeypatch.setattr(agents, "ollama_model_present", lambda model: (True, ""))
+    monkeypatch.setattr(
+        model_inventory.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(
+            0,
+            f"NAME ID SIZE MODIFIED\n{roster_cmd.DEFAULT_OLLAMA_MODEL} abcdef123456 2.0 GB 2 days ago\n",
+            "",
+        ),
+    )
     rc = roster_cmd.doctor(tmp_target)
     out = capsys.readouterr().out
     assert rc == 0
@@ -206,6 +222,166 @@ def test_roster_doctor_ok_for_supported_model_pin(monkeypatch, tmp_target, capsy
     assert "grok-composer-2.5-fast via grok" in out
 
 
+def _write_grok_inventory_roster(tmp_target, model: str) -> None:
+    _write_roster(
+        tmp_target,
+        f'orchestrator = "chef"\n[agents.chef]\ncli = "grok"\nmodel = "{model}"\nrole = "plan"\n',
+    )
+
+
+def test_roster_doctor_reports_exact_live_model_inventory(monkeypatch, tmp_target, capsys):
+    _write_grok_inventory_roster(tmp_target, "grok-4.5")
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    monkeypatch.setattr(
+        model_inventory.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(0, "Available models:\n  * grok-4.5 (default)\n", ""),
+    )
+
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "agent: chef model inventory" in out
+    assert "exact:" in out
+
+
+def test_roster_doctor_warns_on_fuzzy_resolved_model(monkeypatch, tmp_target, capsys):
+    _write_grok_inventory_roster(tmp_target, "grok-4.5-xhigh")
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    monkeypatch.setattr(
+        model_inventory.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(0, "Available models:\n  * grok-4.5 (default)\n", ""),
+    )
+
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "[warn] agent: chef model inventory" in out
+    assert "fuzzy-resolved:" in out
+    assert "grok-4.5" in out
+
+
+def test_roster_doctor_warns_on_missing_live_model(monkeypatch, tmp_target, capsys):
+    _write_grok_inventory_roster(tmp_target, "grok-4.6")
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    monkeypatch.setattr(
+        model_inventory.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(0, "Available models:\n  * grok-4.5 (default)\n", ""),
+    )
+
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "[warn] agent: chef model inventory" in out
+    assert "missing:" in out
+    assert "absent" in out
+
+
+def test_roster_doctor_warns_when_live_inventory_is_unavailable(monkeypatch, tmp_target, capsys):
+    _write_grok_inventory_roster(tmp_target, "grok-4.5")
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    monkeypatch.setattr(
+        model_inventory.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(1, "", "inventory network error"),
+    )
+
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "[warn] agent: chef model inventory" in out
+    assert "unavailable:" in out
+    assert "inventory network error" in out
+
+
+def test_roster_doctor_warns_on_retired_ollama_cloud_model(monkeypatch, tmp_target, capsys):
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n[agents.chef]\ncli = "ollama:glm-5:cloud"\nrole = "plan"\n',
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+
+    def fake_run(argv, **kwargs):
+        if argv == ["ollama", "list"]:
+            return agents.proc.Result(
+                0,
+                "NAME ID SIZE MODIFIED\nglm-5:cloud abcdef123456 - 2 days ago\n",
+                "",
+            )
+        assert argv == ["ollama", "show", "glm-5:cloud"]
+        return agents.proc.Result(1, "", "Error: glm-5 was retired at 2026-07-15")
+
+    monkeypatch.setattr(model_inventory.proc, "run", fake_run)
+
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "[warn] agent: chef model inventory" in out
+    assert "missing:" in out
+    assert "retired" in out
+
+
+def test_roster_doctor_reuses_inventory_for_repeated_harness_seats(monkeypatch, tmp_target, capsys):
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "cursor"\nmodel = "composer-2.5"\nrole = "plan"\n'
+        '[agents.reviewer]\ncli = "cursor"\nmodel = "gpt-5.5-high"\nrole = "review"\n',
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return agents.proc.Result(
+            0,
+            "Available models\n\ncomposer-2.5 - Composer 2.5\ngpt-5.5-high - GPT-5.5 High\n",
+            "",
+        )
+
+    monkeypatch.setattr(model_inventory.proc, "run", fake_run)
+
+    assert roster_cmd.doctor(tmp_target) == 0
+    assert capsys.readouterr().out.count("model inventory") == 2
+    assert calls == [["cursor-agent", "models"]]
+
+
+def test_roster_doctor_does_not_apply_direct_cursor_inventory_to_acpx_seat(monkeypatch, tmp_target, capsys):
+    from brigade import acpx_adapter
+
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.reviewer]\ncli = "cursor"\nmodel = "grok-4.5"\nrole = "review"\n'
+        'transport = "acpx"\ntransport_version = "0.12.0"\n',
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    monkeypatch.setattr(acpx_adapter, "installed_version", lambda: ("0.12.0", ""))
+    monkeypatch.setattr(
+        acpx_adapter,
+        "cursor_auth_status",
+        lambda: acpx_adapter.CursorAuthStatus("authenticated", "authenticated", "", "", 0),
+    )
+    monkeypatch.setattr(
+        model_inventory.proc,
+        "run",
+        lambda argv, **kwargs: (_ for _ in ()).throw(AssertionError(f"unexpected direct inventory: {argv}")),
+    )
+
+    assert roster_cmd.doctor(tmp_target) == 0
+    out = capsys.readouterr().out
+    assert "agent: reviewer model inventory" not in out
+    assert "agent: reviewer acpx" in out
+
+
 def test_roster_doctor_fails_pin_on_unsupported_cli(monkeypatch, tmp_target, capsys):
     _write_roster(
         tmp_target,
@@ -225,7 +401,15 @@ def test_roster_doctor_fails_pin_on_ollama_ref(monkeypatch, tmp_target, capsys):
         'orchestrator = "chef"\n[agents.chef]\ncli = "ollama:llama3.3"\nmodel = "mistral"\nrole = "plan"\n',
     )
     monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
-    monkeypatch.setattr(agents, "ollama_model_present", lambda model: (True, ""))
+    monkeypatch.setattr(
+        model_inventory.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(
+            0,
+            "NAME ID SIZE MODIFIED\nllama3.3 abcdef123456 43 GB 2 days ago\n",
+            "",
+        ),
+    )
     rc = roster_cmd.doctor(tmp_target)
     out = capsys.readouterr().out
     assert rc == 1

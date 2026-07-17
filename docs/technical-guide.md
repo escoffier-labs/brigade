@@ -295,6 +295,21 @@ unsupported adapter with a `model =` pin fails `brigade roster doctor` before an
 dispatches, so a bad pin never reaches a worker. The pinned model is recorded in each
 run's `roster.json` artifact.
 
+`brigade roster doctor` also checks live inventory for direct Cursor and Grok pins and
+for `ollama:<model>` refs. `exact` means the configured ID appears verbatim, or a
+parameterized Cursor ID has an advertised base ID that appears verbatim. Ollama also
+treats an omitted `:latest` tag as the listed `<model>:latest` ID.
+`fuzzy-resolved` means the exact ID is absent but the harness lists the same model family
+and version under a recognized namespace, effort, or fast suffix. `missing` means no such
+live ID exists. `unavailable` means the inventory command failed or its output could not
+be parsed. Every non-exact state is a warning because authentication, network access, and
+provider inventory can fail transiently.
+
+Ollama models must still be present in `ollama list`. For a listed `:cloud` model, doctor
+also runs the read-only `ollama show <model>` probe so a retired remote model is warned
+even when its cached manifest remains in the local list. Doctor never pulls or invokes a
+model while checking inventory.
+
 The classic split is a strong planner orchestrating a cheaper executor: the architect
 plans and synthesizes, the builder does the token-heavy work, and the run handoff is the
 record you judge.
@@ -402,6 +417,7 @@ role = "Inspect the change and report concrete defects."
 This path requires user-installed `acpx 0.12.0` and `cursor-agent acp`. Read-only calls use `--approve-reads`, reject interactive permission requests, disable terminal capability, and parse strict ACP protocol 1 NDJSON. Brigade never falls back from ACP to direct Cursor. Writable ACP calls require `brigade run --worktree`, so approval applies only inside a Brigade-created detached worktree.
 
 ACP model ids follow the ids advertised by `cursor-agent acp`, which can differ from direct Cursor aliases. Authenticated checks with `acpx 0.12.0` passed `composer-2.5` and `grok-4.5`. The direct alias `grok-4.5-xhigh` is rejected by ACP; the ACP server advertises `grok-4.5` with `modelId` `grok-4.5[effort=high,fast=true]`. Acpx has no separate reasoning flag, so Brigade does not translate the direct alias or infer an effort setting. Pin the exact model id for the selected transport.
+Direct Cursor inventory is not applied to ACP seats because the two transports advertise different IDs. ACP version and authentication checks remain separate roster-doctor checks.
 Run `brigade roster doctor` to validate roster syntax and check which CLIs are on `PATH`.
 To decide which model belongs in which seat with receipt-backed evidence instead of reputation, see [model ratings](model-ratings.md).
 When `--roster` is omitted, `brigade run` first reads `--cwd/.brigade/roster.toml`;

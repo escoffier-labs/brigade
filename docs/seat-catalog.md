@@ -139,4 +139,4 @@ A seat that answers a smoke prompt is wired, not proven. The pattern:
 2. Bench it against an incumbent seat on a task with an objectively gradable answer (a planted bug with a known line and fix works well), and keep the receipts.
 3. Capture the outcome against the seat so `brigade outcome rank` learns something: a seat with no outcome history is a guess wearing a roster stanza.
 
-Retire stale IDs on sight. Harness model inventories drift: one roster carried a model ID its harness no longer listed (it worked only through fuzzy mapping), and a hosted model was retired upstream two days before a run tried to use it.
+Retire stale IDs on sight. Harness model inventories drift: one roster carried a model ID its harness no longer listed (it worked only through fuzzy mapping), and a hosted model was retired upstream two days before a run tried to use it. Run `brigade roster doctor` after changing direct Cursor, Grok, or Ollama seats. It reports `exact`, `fuzzy-resolved`, `missing`, or `unavailable`; the last three warn without rejecting the roster. A transient inventory failure is not evidence that a model disappeared.
