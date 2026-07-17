@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-17
+
 ### Fixed
 - Symbol search splits multi-part query terms on path separators, so a task string like `change src/store/sync.rs` matches the file's symbols instead of quoting the whole path as one FTS token that matches nothing. Personalized context packs seeded from path-bearing tasks were silently falling back to tiny unpersonalized packs; on the co-change bench in `benchmarks/context-cochange/` this took recall from 0.239 to 0.692 (Go) and 0.200 to 0.504 (Rust) at the same budget.
 - `affected` no longer reports fixture sources as runnable tests: paths under `fixtures/`, `golden/`, `snapshots/`, or `testdata/` are excluded from the test-file heuristic unless the file name itself matches a test-name pattern. `dead_code` keeps excluding fixture paths through a broader test-support predicate, so fixture sources do not surface as dead-code candidates. Found by the calibration bench in `benchmarks/affected-calibration/`.
@@ -85,7 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - README rewritten to lead with what GraphTrail is, why it exists, and how it differs from grep, embedding search, and an LSP. Adds a verified MCP tool table, a copy-paste quickstart, a real `stats` proof block, and a recorded terminal demo (`docs/assets/graphtrail-context.svg`, reproducible from the `.cast`) of init, sync, callers, and context.
 
-[Unreleased]: https://github.com/escoffier-labs/graphtrail/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/graphtrail/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/escoffier-labs/graphtrail/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/escoffier-labs/graphtrail/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/escoffier-labs/graphtrail/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/escoffier-labs/graphtrail/releases/tag/v0.1.0
