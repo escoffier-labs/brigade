@@ -110,7 +110,11 @@ def _contains_final_text(value: object) -> bool:
         event_type = value.get("type")
         if isinstance(role, str) and role.lower() in {"function", "tool"}:
             return False
-        if isinstance(event_type, str) and event_type.lower() in _TOOL_RESULT_TYPES:
+        if isinstance(event_type, str):
+            normalized_type = event_type.lower()
+            if normalized_type in _TOOL_RESULT_TYPES or normalized_type.endswith("_call_output"):
+                return False
+        if "call_id" in value and "output" in value:
             return False
         if isinstance(event_type, str) and event_type.lower() in _TOOL_KEYS:
             return False

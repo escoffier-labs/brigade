@@ -532,6 +532,25 @@ def test_run_agent_rejects_tool_call_and_tool_result_transcript(monkeypatch):
     assert result.failure_kind == "tool-only-output"
 
 
+@pytest.mark.parametrize("result_type", ["function_call_output", "tool_call_output"])
+def test_run_agent_rejects_call_output_without_final_text(monkeypatch, result_type):
+    output = json.dumps(
+        {
+            "items": [
+                {"type": "function_call", "name": "read_file", "arguments": "{}"},
+                {"type": result_type, "call_id": "call-1", "output": "file contents"},
+            ]
+        }
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "inspect it")
+
+    assert result.ok is False
+    assert result.failure_kind == "tool-only-output"
+
+
 @pytest.mark.parametrize(
     ("output", "failure_kind"),
     [
