@@ -1167,7 +1167,7 @@ For example, `brief hit rate 0.50 (2/4 files, 2 missed)` means two of four struc
 
 This is a coverage quality signal for skill and runbook ranking, not a claim that the context was useful, sufficient, or correct. Brief parsing is heuristic, and GraphTrail deltas only see structural code changes. Docs-only runs and runs without structural graph changes produce no context eval.
 
-`brigade operator checkup` reports optional loop station health alongside the first-run doctors: graph ok (graphtrail + db), ledger ok (miseledger on PATH), and last/mean brief hit rate from recent run receipts. Missing optional stations warn; they never block the checkup ready verdict.
+`brigade operator checkup` runs the six first-run doctors by default and reports optional loop station health alongside them. Missing optional stations warn and do not block the default ready verdict. Use repeatable `--surface` values to run only named checks, `--list-surfaces` to inspect the stable names, or `--preset evidence-loop` to gate only work receipt integrity and outcome capture, GraphTrail health and the latest work receipt delta, and MiseLedger work-receipt import state. Scoped JSON reports `selected_ready`, leaves `overall_ready` unevaluated, and includes selected, skipped, and per-surface elapsed data.
 
 Use `--handoff` to bridge a completed run back into the memory system.
 

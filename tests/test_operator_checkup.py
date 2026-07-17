@@ -141,7 +141,16 @@ def test_operator_checkup_scoped_runs_only_selected_doctor(monkeypatch, tmp_path
     assert payload["selected_ready"] is True
     assert payload["overall_ready"] is None
     assert payload["selected_surfaces"] == ["doctor"]
-    assert payload["skipped_surfaces"] == ["operator", "handoff", "tools", "skills", "security"]
+    assert payload["skipped_surfaces"] == [
+        "operator",
+        "handoff",
+        "tools",
+        "skills",
+        "security",
+        "work",
+        "graph",
+        "ledger",
+    ]
     assert payload["surfaces"][0]["name"] == "doctor"
     assert isinstance(payload["surfaces"][0]["elapsed_seconds"], float)
 
@@ -283,6 +292,26 @@ def test_operator_checkup_work_requires_receipt_integrity_and_outcome_capture(mo
     assert payload["outcome_capture"]["record_count"] == 1
 
 
+def test_operator_checkup_work_fails_tampered_receipt_without_double_counting_dormancy(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        "brigade.receipts_cmd.verify_payload",
+        lambda target: {"artifacts": [{"artifact_type": "work-verify-receipt", "status": "MISMATCH"}]},
+    )
+    monkeypatch.setattr("brigade.work_cmd.verification._verify_receipts", lambda target: [])
+    monkeypatch.setattr(
+        "brigade.outcome_cmd.health",
+        lambda target: {"issue_count": 1, "top_issue": {"name": "outcome_loop_dormant"}},
+    )
+
+    rc = lifecycle._checkup_work(target=tmp_path, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert payload["issue_count"] == 2
+    assert payload["receipt_integrity"]["failure_count"] == 1
+    assert payload["next_command"] == "brigade receipts verify --target ."
+
+
 def test_operator_checkup_graph_requires_live_db_and_fresh_delta(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         "brigade.search_cmd.status_payload",
@@ -313,6 +342,23 @@ def test_operator_checkup_graph_requires_live_db_and_fresh_delta(monkeypatch, tm
     assert payload["code_graph_delta"]["changed_symbol_count"] == 2
 
 
+def test_operator_checkup_graph_missing_delta_requests_new_verification(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        "brigade.search_cmd.status_payload",
+        lambda target: {"tools": {"graphtrail": {"installed": True, "db_present": True, "health": "ok"}}},
+    )
+    monkeypatch.setattr(
+        "brigade.work_cmd.verification._latest_verify_receipt",
+        lambda target: {"run_id": "verify-1"},
+    )
+
+    rc = lifecycle._checkup_graph(target=tmp_path, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert payload["next_command"] == ("brigade work verify run --target . --command '<check>' --capture brigade-work")
+
+
 def test_operator_checkup_ledger_reports_pending_work_receipt_imports(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         "brigade.evidence_cmd.status_payload",
@@ -339,3 +385,35 @@ def test_operator_checkup_ledger_reports_pending_work_receipt_imports(monkeypatc
     assert rc == 1
     assert payload["pending_work_receipt_count"] == 1
     assert payload["next_command"] == "brigade receipts export miseledger --target . --new-only --import"
+
+
+def test_operator_checkup_ledger_treats_empty_work_receipts_as_no_import_backlog(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        "brigade.evidence_cmd.status_payload",
+        lambda target, include_doctor: {
+            "installed": True,
+            "health": "ok",
+            "summary": "miseledger status ok",
+            "export_cursor_present": False,
+        },
+    )
+    monkeypatch.setattr("brigade.work_cmd.verification._verify_receipts", lambda target: [])
+    monkeypatch.setattr("brigade.receipts_cmd._read_miseledger_cursor_hashes", lambda target: set())
+
+    rc = lifecycle._checkup_ledger(target=tmp_path, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["ready"] is True
+    assert payload["pending_work_receipt_count"] == 0
+
+
+def test_operator_checkup_scoped_text_labels_selected_readiness(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(lifecycle.core_doctor, "run", _stub(0, {"ready": True, "summary": {"failed": 0}}))
+
+    rc = lifecycle.checkup(target=tmp_path, surfaces=["doctor"], json_output=False)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "selected_ready: yes" in out
+    assert "overall_ready: not evaluated" in out

@@ -866,18 +866,14 @@ def _resolve_checkup_surfaces(surfaces: list[str] | None, preset: str | None) ->
         if preset not in CHECKUP_PRESETS:
             raise ValueError(f"unknown checkup preset: {preset}")
         selected = list(CHECKUP_PRESETS[preset])
-        return selected, [], True
+        skipped = [name for name in CHECKUP_SURFACE_NAMES if name not in selected]
+        return selected, skipped, True
     if surfaces:
         selected = list(dict.fromkeys(surfaces))
         unknown = [name for name in selected if name not in CHECKUP_SURFACE_NAMES]
         if unknown:
             raise ValueError(f"unknown checkup surface: {', '.join(unknown)}")
-        if all(name in CHECKUP_DEFAULT_SURFACES for name in selected):
-            skipped = [name for name in CHECKUP_DEFAULT_SURFACES if name not in selected]
-        elif all(name in CHECKUP_EVIDENCE_SURFACES for name in selected):
-            skipped = [name for name in CHECKUP_EVIDENCE_SURFACES if name not in selected]
-        else:
-            skipped = [name for name in CHECKUP_SURFACE_NAMES if name not in selected]
+        skipped = [name for name in CHECKUP_SURFACE_NAMES if name not in selected]
         return selected, skipped, True
     return list(CHECKUP_DEFAULT_SURFACES), [], False
 
@@ -908,7 +904,9 @@ def _checkup_work(*, target: Path, json_output: bool = False) -> int:
     receipts = verification._verify_receipts(target)
     latest = receipts[0] if receipts else None
     outcomes = outcome_cmd.health(target)
-    issue_count = len(integrity_failures) + int(outcomes.get("issue_count") or 0) + (0 if latest else 1)
+    outcome_issue_count = int(outcomes.get("issue_count") or 0)
+    missing_receipt_issue = int(latest is None and outcome_issue_count == 0)
+    issue_count = len(integrity_failures) + outcome_issue_count + missing_receipt_issue
     ready = issue_count == 0
     payload = {
         "status": "ok" if ready else "warn",
@@ -940,7 +938,7 @@ def _checkup_work(*, target: Path, json_output: bool = False) -> int:
             else "brigade work verify run --target . --command '<check>' --capture brigade-work"
             if latest is None
             else "brigade outcome capture <skill-or-card-id> --run-id latest"
-            if int(outcomes.get("issue_count") or 0)
+            if outcome_issue_count
             else None
         ),
     }
@@ -987,9 +985,9 @@ def _checkup_graph(*, target: Path, json_output: bool = False) -> int:
         "next_command": (
             "brigade search doctor --target ."
             if not graph_ready
-            else "brigade work verify run --target . --command '<check>' --capture brigade-work"
-            if latest is None
             else "graphtrail sync"
+            if delta.get("stale_graph_used") is True
+            else "brigade work verify run --target . --command '<check>' --capture brigade-work"
         )
         if not ready
         else None,
@@ -1014,8 +1012,7 @@ def _checkup_ledger(*, target: Path, json_output: bool = False) -> int:
         receipt_hashes.add(digest)
     pending_hashes = receipt_hashes - cursor_hashes
     station_ready = station.get("installed") is True and station.get("health") == "ok"
-    cursor_ready = bool(receipts) and station.get("export_cursor_present") is True
-    import_ready = cursor_ready and not pending_hashes
+    import_ready = not receipts or (station.get("export_cursor_present") is True and not pending_hashes)
     issue_count = int(not station_ready) + int(not import_ready)
     ready = issue_count == 0
     payload = {
@@ -1257,7 +1254,11 @@ def checkup(
             detail = row.get("detail") or row.get("status") or ""
             label = "brief_hit_rate" if key == "context_eval" else key
             print(f"  [{mark}] {label}: {detail}")
-    print(f"ready: {'yes' if payload['ready'] else 'no'}")
+    if payload["overall_ready"] is None:
+        print(f"selected_ready: {'yes' if payload['selected_ready'] else 'no'}")
+        print("overall_ready: not evaluated")
+    else:
+        print(f"ready: {'yes' if payload['ready'] else 'no'}")
     print(f"blocking_surfaces: {payload['blocking_surface_count']}")
     if payload["next_command"]:
         print(f"next: {payload['next_command']}")
