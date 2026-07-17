@@ -156,9 +156,10 @@ def _claude_use(target: Path, *, window_start: datetime) -> dict[str, Any]:
         session_id = state.get("session_id")
         started = localio.parse_iso_datetime(state.get("started_at"))
         last_write = localio.parse_iso_datetime(state.get("last_write_at"))
+        last_verification_write = localio.parse_iso_datetime(state.get("last_verification_write_at"))
         if not isinstance(session_id, str) or not session_id or started is None or started < window_start:
             continue
-        threshold = last_write or started
+        threshold = last_verification_write or last_write or started
         fingerprint = state.get("session_fingerprint")
         if not isinstance(fingerprint, str) or not fingerprint:
             fingerprint = claude_runtime._session_fingerprint(session_id)
@@ -514,6 +515,7 @@ def adoption_repair(
         "would_write": False,
         "would_run_commands": False,
         "state_filter": state,
+        "window_days": days,
         "actions": actions,
     }
     if json_output:

@@ -42,21 +42,31 @@ def _wired_repo(workspace: Path, repo_id: str, harness: str) -> Path:
     return repo
 
 
-def _write_claude_session(repo: Path, session_id: str, *, started_at, last_write_at) -> str:
+def _write_claude_session(
+    repo: Path,
+    session_id: str,
+    *,
+    started_at,
+    last_write_at,
+    last_verification_write_at=None,
+) -> str:
     fingerprint = runtime._session_fingerprint(session_id)
+    state = {
+        "session_id": session_id,
+        "session_fingerprint": fingerprint,
+        "target": str(repo.resolve()),
+        "started_at": started_at.isoformat(),
+        "last_write_at": last_write_at.isoformat(),
+        "briefed": True,
+        "write_observed": True,
+        "verify_denied_count": 0,
+    }
+    if last_verification_write_at is not None:
+        state["last_verification_write_at"] = last_verification_write_at.isoformat()
     runtime.write_session_state(
         repo,
         session_id,
-        {
-            "session_id": session_id,
-            "session_fingerprint": fingerprint,
-            "target": str(repo.resolve()),
-            "started_at": started_at.isoformat(),
-            "last_write_at": last_write_at.isoformat(),
-            "briefed": True,
-            "write_observed": True,
-            "verify_denied_count": 0,
-        },
+        state,
     )
     return fingerprint
 
@@ -228,6 +238,29 @@ def test_adoption_counts_failed_or_rejected_verify_only_when_captured(tmp_path, 
     assert captured["rows"][0]["use"]["failed_or_rejected_captured_count"] == 1
 
 
+def test_adoption_accepts_verification_before_final_handoff_write(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repo = _wired_repo(workspace, "service", "claude")
+    capsys.readouterr()
+    _fleet_config(workspace, [("service", repo)])
+    now = localio.utc_now()
+    fingerprint = _write_claude_session(
+        repo,
+        "handoff-last",
+        started_at=now - timedelta(hours=2),
+        last_verification_write_at=now - timedelta(hours=1),
+        last_write_at=now - timedelta(minutes=20),
+    )
+    _write_compliant_evidence(repo, fingerprint, started_at=now - timedelta(minutes=30))
+
+    assert repos_cmd.adoption_report(target=workspace, harnesses=["claude"], days=7, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["rows"][0]["state"] == "active"
+    assert payload["rows"][0]["use"]["compliant_session_count"] == 1
+
+
 def test_adoption_scrubs_private_repo_path_from_claude_classifier_issues(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -246,7 +279,7 @@ def test_adoption_scrubs_private_repo_path_from_claude_classifier_issues(tmp_pat
     assert any("service repo/.claude/settings.json" in issue for issue in payload["rows"][0]["issues"])
 
 
-def test_adoption_repair_is_read_only_and_cli_dispatches(tmp_path, capsys):
+def test_adoption_repair_is_read_only_and_cli_dispatches_with_options_after_subcommand(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     repo = workspace / "repos" / "service"
@@ -265,7 +298,6 @@ def test_adoption_repair_is_read_only_and_cli_dispatches(tmp_path, capsys):
                 "unwired",
                 "--harness",
                 "claude",
-                "--dry-run",
                 "--json",
             ]
         )
@@ -283,6 +315,38 @@ def test_adoption_repair_is_read_only_and_cli_dispatches(tmp_path, capsys):
         }
     ]
     assert not (repo / ".brigade").exists()
+
+
+def test_adoption_repair_preserves_options_before_subcommand(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repo = workspace / "repos" / "service"
+    repo.mkdir(parents=True)
+    _fleet_config(workspace, [("service", repo)])
+
+    assert (
+        cli.main(
+            [
+                "repos",
+                "adoption",
+                "--target",
+                str(workspace),
+                "--harness",
+                "claude",
+                "--days",
+                "30",
+                "--json",
+                "repair",
+                "--state",
+                "unwired",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["window_days"] == 30
+    assert payload["actions"][0]["repo_id"] == "service"
 
 
 def test_adoption_rejects_invalid_days_and_harness(tmp_path, capsys):

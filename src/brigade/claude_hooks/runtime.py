@@ -1049,6 +1049,21 @@ def _new_state(target: Path, session_id: str) -> dict[str, Any]:
     }
 
 
+def _is_handoff_tool_write(target: Path, tool_input: dict[str, Any]) -> bool:
+    raw_path = tool_input.get("file_path") or tool_input.get("notebook_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return False
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = target / path
+    try:
+        path = path.resolve()
+        inbox = (target / ".claude" / "memory-handoffs").resolve()
+        return path.is_relative_to(inbox)
+    except OSError:
+        return False
+
+
 def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | None) -> dict[str, Any]:
     normalized = _new_state(target, session_id)
     if not isinstance(payload, dict):
@@ -1071,6 +1086,9 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
     last_write = localio.parse_iso_datetime(payload.get("last_write_at"))
     if last_write is not None and last_write <= now:
         normalized["last_write_at"] = last_write.isoformat()
+    last_verification_write = localio.parse_iso_datetime(payload.get("last_verification_write_at"))
+    if last_verification_write is not None and last_verification_write <= now:
+        normalized["last_verification_write_at"] = last_verification_write.isoformat()
     return normalized
 
 
@@ -1189,7 +1207,10 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             wrote = _bash_write_detected(target, state.get("pending_bash_fingerprint"))
         if wrote:
             state["write_observed"] = True
-            state["last_write_at"] = localio.utc_now_iso()
+            written_at = localio.utc_now_iso()
+            state["last_write_at"] = written_at
+            if tool_name not in _WRITE_TOOLS or not _is_handoff_tool_write(target, post_tool_input):
+                state["last_verification_write_at"] = written_at
             updated_fp = repo_worktree_fingerprint(target)
             if updated_fp is not None:
                 state["repo_fingerprint"] = updated_fp
@@ -1217,7 +1238,9 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         fingerprint = state.get("session_fingerprint")
         if not isinstance(fingerprint, str):
             fingerprint = _session_fingerprint(session_id)
-        receipt_threshold = state.get("last_write_at") or state.get("started_at")
+        receipt_threshold = (
+            state.get("last_verification_write_at") or state.get("last_write_at") or state.get("started_at")
+        )
         if not _receipt_since(target, receipt_threshold, session_fingerprint=fingerprint):
             replacement = _verify_replacement(target, "<test>", fingerprint)
             return {

@@ -99,12 +99,18 @@ def register(sub: argparse._SubParsersAction) -> None:
         "repair", help="Plan repairs for matching noncompliant rows."
     )
     p_repos_adoption_repair.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo fleet workspace to inspect."
+        "--target", "-t", type=Path, default=argparse.SUPPRESS, help="Repo fleet workspace to inspect."
     )
     p_repos_adoption_repair.add_argument(
-        "--harness", dest="harnesses", action="append", default=[], help="Harness to inspect. May be repeated."
+        "--harness",
+        dest="harnesses",
+        action="append",
+        default=argparse.SUPPRESS,
+        help="Harness to inspect. May be repeated.",
     )
-    p_repos_adoption_repair.add_argument("--days", type=int, default=7, help="Recent session window in days.")
+    p_repos_adoption_repair.add_argument(
+        "--days", type=int, default=argparse.SUPPRESS, help="Recent session window in days."
+    )
     p_repos_adoption_repair.add_argument(
         "--state",
         choices=("unwired", "partial", "advisory-only", "enforced-idle", "active", "bypassed", "stale"),
@@ -112,9 +118,8 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Repair only rows in this state.",
     )
     p_repos_adoption_repair.add_argument(
-        "--dry-run", action="store_true", help="Plan without writing or running commands."
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Print machine-readable JSON."
     )
-    p_repos_adoption_repair.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_repos_report = repos_sub.add_parser("report", help="Plan, build, and inspect local repo fleet reports.")
     repos_report_sub = p_repos_report.add_subparsers(dest="repos_report_command", metavar="<repos-report-command>")
     repos_report_sub.required = True
