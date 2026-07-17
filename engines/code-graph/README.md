@@ -40,8 +40,8 @@ cargo install graphtrail
 From git or a clone:
 
 ```bash
-# Install the exact v0.3.0 GitHub release independently of registry availability.
-cargo install --git https://github.com/escoffier-labs/graphtrail --tag v0.3.0
+# Install the exact v0.4.0 GitHub release independently of registry availability.
+cargo install --git https://github.com/escoffier-labs/graphtrail --tag v0.4.0
 # Or install current master.
 cargo install --git https://github.com/escoffier-labs/graphtrail
 # or
