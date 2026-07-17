@@ -890,8 +890,8 @@ def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
         else:
             segments[-1].append(token)
     found_target = False
-    all_target_commands = {"mkdir", "rm", "rmdir", "tee", "touch"}
-    last_target_commands = {"cp", "install", "mv", "truncate"}
+    all_target_commands = {"mkdir", "mv", "rm", "rmdir", "tee", "touch", "truncate"}
+    last_target_commands = {"cp", "install"}
     output_only_commands = {"cat", "echo", "printf"}
     for segment in segments:
         stripped = _strip_env(segment)
