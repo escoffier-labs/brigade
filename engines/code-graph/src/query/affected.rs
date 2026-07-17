@@ -214,9 +214,50 @@ pub(crate) fn is_test_file(path: &str) -> bool {
     in_test_dir || has_test_name
 }
 
+/// Broader predicate for code that exists to support tests: runnable test files
+/// plus anything under a test or fixture directory. `dead_code` uses this so
+/// fixture sources (intentionally uncalled) do not surface as dead-code
+/// candidates, while `affected` keeps the narrower [`is_test_file`] so fixtures
+/// are never reported as runnable tests.
+pub(crate) fn is_test_support_file(path: &str) -> bool {
+    if is_test_file(path) {
+        return true;
+    }
+    let lower = path.to_ascii_lowercase();
+    lower.split('/').any(|segment| {
+        matches!(
+            segment,
+            "tests"
+                | "test"
+                | "__tests__"
+                | "spec"
+                | "fixtures"
+                | "fixture"
+                | "golden"
+                | "snapshots"
+                | "testdata"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_test_file;
+    use super::{is_test_file, is_test_support_file};
+
+    #[test]
+    fn fixture_paths_are_test_support_but_not_tests() {
+        for path in [
+            "tests/fixtures/golden/mixed/go/caller.go",
+            "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+            "pkg/testdata/input.go",
+            "src/__tests__/fixtures/blob.ts",
+        ] {
+            assert!(!is_test_file(path), "{path} should not be a runnable test");
+            assert!(is_test_support_file(path), "{path} should be test support");
+        }
+        assert!(is_test_support_file("tests/incremental.rs"));
+        assert!(!is_test_support_file("src/store/sync.rs"));
+    }
 
     #[test]
     fn test_paths_are_detected_per_language() {
