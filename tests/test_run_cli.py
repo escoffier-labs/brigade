@@ -1039,12 +1039,14 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
         show_plan=False,
         verbose=False,
         cwd=None,
+        lock_workspace=None,
         output_dir=None,
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
     ):
         seen["cwd"] = cwd
+        seen["lock_workspace"] = lock_workspace
         seen["output_dir"] = output_dir
         assert cwd != repo
         assert (cwd / "tracked.txt").read_text() == "base\n"
@@ -1069,6 +1071,7 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
     assert seen["output_dir"] == output_dir
     expected_checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
     assert seen["cwd"] == expected_checkout
+    assert seen["lock_workspace"] == repo.resolve()
     assert not expected_checkout.exists()
     assert (repo / "tracked.txt").read_text() == "base\n"
     patch = (output_dir / "changes.patch").read_text()

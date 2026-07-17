@@ -64,6 +64,33 @@ def _continuation_prompt(task: str) -> str:
 def resume(run_dir: Path) -> int:
     run_dir = run_dir.expanduser().resolve()
     run_meta = _load_json(run_dir, "run.json")
+    if run_meta is None:
+        print(
+            f"error: missing run artifacts in {run_dir} (need run.json, roster.json, worker-results.json)",
+            file=sys.stderr,
+        )
+        return 2
+    status = run_meta.get("status")
+    if not isinstance(status, str) or status in _NONTERMINAL_RUN_STATUSES:
+        print("error: run is not terminal; recover or wait for the active run before resuming", file=sys.stderr)
+        return 2
+    raw_workspace = run_meta.get("lock_workspace") or run_meta.get("cwd")
+    if not isinstance(raw_workspace, str) or not raw_workspace:
+        print("error: run artifact has no workspace cwd; cannot verify lock ownership", file=sys.stderr)
+        return 2
+    workspace = Path(raw_workspace).expanduser().resolve()
+    try:
+        runguard.recover_stale_run(workspace, run_dir, required=False)
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            return _resume_locked(run_dir)
+    except runguard.RunLockError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+def _resume_locked(run_dir: Path) -> int:
+    run_dir = run_dir.expanduser().resolve()
+    run_meta = _load_json(run_dir, "run.json")
     roster_snapshot = _load_json(run_dir, "roster.json")
     worker_data = _load_json(run_dir, "worker-results.json")
     if run_meta is None or roster_snapshot is None or worker_data is None:
@@ -81,12 +108,6 @@ def resume(run_dir: Path) -> int:
         print("error: run artifact has no workspace cwd; cannot verify lock ownership", file=sys.stderr)
         return 2
     cwd = Path(raw_cwd).expanduser().resolve()
-    try:
-        runguard.recover_stale_run(cwd, run_dir, required=False)
-    except runguard.RunLockError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-
     roster = _roster_from_snapshot(roster_snapshot)
     results = list(worker_data.get("results") or [])
     resumable = [

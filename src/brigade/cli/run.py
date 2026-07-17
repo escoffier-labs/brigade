@@ -288,6 +288,8 @@ def dispatch(args) -> int:
             }
             if args.worktree and any(agent.transport == "acpx" for agent in loaded_roster.agents.values()):
                 run_kwargs["authorized_writable_worktree"] = True
+            if args.worktree:
+                run_kwargs["lock_workspace"] = run_cwd
             if args.worker is not None:
                 run_kwargs["worker"] = args.worker
             if args.codex_transport is not None:

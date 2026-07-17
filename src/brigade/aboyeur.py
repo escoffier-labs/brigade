@@ -1481,6 +1481,7 @@ def _run_payload(
     *,
     task: str,
     cwd: Path | None,
+    lock_workspace: Path | None,
     roster: Roster,
     dry_run: bool,
     read_only: bool,
@@ -1530,6 +1531,8 @@ def _run_payload(
             "attached": list(brief_set.attached) if brief_set is not None else [],
         },
     }
+    if lock_workspace is not None:
+        payload["lock_workspace"] = str(lock_workspace)
     if route is not None:
         payload["route"] = route.payload()
     if worker is not None:
@@ -1578,6 +1581,7 @@ def run(
     show_plan: bool = False,
     verbose: bool = False,
     cwd: Path | None = None,
+    lock_workspace: Path | None = None,
     output_dir: Path | None = None,
     handoff_inbox: Path | None = None,
     read_only: bool = False,
@@ -1599,9 +1603,14 @@ def run(
     started_at = datetime.now(timezone.utc)
     transport_for_payload = codex_transport or roster.codex_transport
     cwd = cwd.expanduser().resolve() if cwd is not None else None
+    lock_workspace = lock_workspace.expanduser().resolve() if lock_workspace is not None else cwd
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     direct_worker = worker is not None
+
+    def _payload(**kwargs: Any) -> dict[str, object]:
+        return _run_payload(lock_workspace=lock_workspace, **kwargs)
+
     if worker is not None:
         worker_error = _direct_worker_error(worker, roster)
         if worker_error is not None:
@@ -1647,7 +1656,7 @@ def run(
         _write_json(output_dir / "roster.json", _roster_payload(roster))
         _write_json(
             output_dir / "run.json",
-            _run_payload(
+            _payload(
                 task=task,
                 cwd=cwd,
                 roster=roster,
@@ -1675,7 +1684,7 @@ def run(
         if output_dir is not None:
             _write_json(
                 output_dir / "run.json",
-                _run_payload(
+                _payload(
                     task=task,
                     cwd=cwd,
                     roster=roster,
@@ -1714,7 +1723,7 @@ def run(
                 _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
                 _write_json(
                     output_dir / "run.json",
-                    _run_payload(
+                    _payload(
                         task=task,
                         cwd=cwd,
                         roster=roster,
@@ -1755,7 +1764,7 @@ def run(
             finished_at = datetime.now(timezone.utc)
             _write_json(
                 output_dir / "run.json",
-                _run_payload(
+                _payload(
                     task=task,
                     cwd=cwd,
                     roster=roster,
@@ -1793,7 +1802,7 @@ def run(
     if output_dir is not None:
         _write_json(
             output_dir / "run.json",
-            _run_payload(
+            _payload(
                 task=task,
                 cwd=cwd,
                 roster=roster,
@@ -1839,7 +1848,7 @@ def run(
     if output_dir is not None:
         _write_json(
             output_dir / "run.json",
-            _run_payload(
+            _payload(
                 task=task,
                 cwd=cwd,
                 roster=roster,
@@ -1934,7 +1943,7 @@ def run(
         if output_dir is not None:
             _write_json(
                 output_dir / "run.json",
-                _run_payload(
+                _payload(
                     task=task,
                     cwd=cwd,
                     roster=roster,
@@ -2000,7 +2009,7 @@ def run(
                 (output_dir / "final.txt").write_text(final.text + "\n")
             _write_json(
                 output_dir / "run.json",
-                _run_payload(
+                _payload(
                     task=task,
                     cwd=cwd,
                     roster=roster,
@@ -2035,7 +2044,7 @@ def run(
         (output_dir / "final.txt").write_text(final.text + "\n")
         _write_json(
             output_dir / "run.json",
-            _run_payload(
+            _payload(
                 task=task,
                 cwd=cwd,
                 roster=roster,
@@ -2076,7 +2085,7 @@ def run(
                 finished_at = datetime.now(timezone.utc)
                 _write_json(
                     output_dir / "run.json",
-                    _run_payload(
+                    _payload(
                         task=task,
                         cwd=cwd,
                         roster=roster,
@@ -2108,7 +2117,7 @@ def run(
             finished_at = datetime.now(timezone.utc)
             _write_json(
                 output_dir / "run.json",
-                _run_payload(
+                _payload(
                     task=task,
                     cwd=cwd,
                     roster=roster,

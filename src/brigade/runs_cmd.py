@@ -519,13 +519,21 @@ def _print_recovery_guidance(run_dir: Path) -> None:
         print("resume: unavailable (no resumable app-server worker thread)")
 
 
+def _lock_workspace(run_meta: dict[str, Any]) -> Path | None:
+    for key in ("lock_workspace", "cwd"):
+        raw_workspace = run_meta.get(key)
+        if isinstance(raw_workspace, str) and raw_workspace:
+            return Path(raw_workspace).expanduser().resolve()
+    return None
+
+
 def _lock_recovery_status(run_dir: Path, run_meta: dict[str, Any]) -> str:
-    raw_cwd = run_meta.get("cwd")
-    if not isinstance(raw_cwd, str) or not raw_cwd:
+    workspace = _lock_workspace(run_meta)
+    if workspace is None:
         return "unknown"
     from . import runguard
 
-    return runguard.run_recovery_status(Path(raw_cwd), run_dir)
+    return runguard.run_recovery_status(workspace, run_dir)
 
 
 def _print_terminal_guidance(run_dir: Path, run_meta: dict[str, Any]) -> None:
@@ -582,12 +590,11 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
         return 0
     if _is_terminal(run_meta):
         phase, _, _ = _failure_fields(run_meta)
-        raw_cwd = run_meta.get("cwd")
         if phase == "stale-lock-recovery":
-            if not isinstance(raw_cwd, str) or not raw_cwd:
+            workspace = _lock_workspace(run_meta)
+            if workspace is None:
                 print(f"error: recovered run artifact has no workspace cwd: {run_dir}", file=sys.stderr)
                 return 2
-            workspace = Path(raw_cwd).expanduser().resolve()
             try:
                 runguard.recover_stale_run(workspace, run_dir, required=False)
             except runguard.RunLockError as exc:
@@ -596,11 +603,10 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
         print(f"already terminal: {run_dir} [{run_meta.get('status', 'unknown')}]")
         _print_recovery_guidance(run_dir)
         return 0
-    raw_cwd = run_meta.get("cwd")
-    if not isinstance(raw_cwd, str) or not raw_cwd:
+    workspace = _lock_workspace(run_meta)
+    if workspace is None:
         print(f"error: run artifact has no workspace cwd: {run_dir}", file=sys.stderr)
         return 2
-    workspace = Path(raw_cwd).expanduser().resolve()
     try:
         runguard.recover_stale_run(workspace, run_dir)
     except runguard.RunLockError as exc:

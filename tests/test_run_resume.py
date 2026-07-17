@@ -194,6 +194,37 @@ def test_resume_refuses_matching_live_owner(tmp_path, monkeypatch, capsys):
     assert lock.is_dir()
 
 
+def test_resume_refuses_foreign_live_owner(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "thread_id": "t-1",
+                "status": "interrupted",
+            }
+        ],
+    )
+    foreign_run = tmp_path / "foreign-run"
+    lock = runguard.lock_path(tmp_path)
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+    (lock / "owner.json").write_text(
+        json.dumps({"owner_token": "live", "pid": os.getpid(), "run_dir": str(foreign_run.resolve())})
+    )
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("provider must not start")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert "another brigade run appears active" in capsys.readouterr().err
+    assert lock.is_dir()
+
+
 def test_runs_resume_cli_dispatches(tmp_path, monkeypatch):
     from brigade import cli
 

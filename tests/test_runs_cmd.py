@@ -181,6 +181,30 @@ def test_runs_recover_marks_dead_owner_run_terminal(tmp_path, capsys):
     assert "resume: unavailable" in out
 
 
+def test_runs_recover_uses_recorded_lock_workspace_for_worktree_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    detached = tmp_path / "detached"
+    detached.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "orphan"
+    _write_minimal_run(
+        run_dir,
+        task="orphaned worktree task",
+        status="dispatching",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update({"cwd": str(detached), "lock_workspace": str(workspace)})
+    _write_json(run_dir / "run.json", run_meta)
+    lock_path = _write_lock_owner(workspace, run_dir)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=detached)
+
+    assert rc == 0
+    assert not lock_path.exists()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+    assert f"recovered: {run_dir}" in capsys.readouterr().out
+
+
 def test_runs_recover_reconstructs_missing_run_json_from_matching_dead_lock(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     run_dir = workspace / ".brigade" / "runs" / "orphan"
