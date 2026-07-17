@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
-from brigade import agents, codex_appserver, run_resume
+from brigade import agents, codex_appserver, runguard, run_resume
 
 
 def _write_run_dir(tmp_path: Path, *, results: list[dict]) -> Path:
@@ -85,6 +86,19 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
             },
         ],
     )
+    recovered = json.loads((run_dir / "run.json").read_text())
+    recovered.update(
+        {
+            "error": "run owner process 99999999 is no longer active",
+            "failure_phase": "stale-lock-recovery",
+            "failure": {
+                "phase": "stale-lock-recovery",
+                "kind": "owner-process-exited",
+                "owner_pid": 99999999,
+            },
+        }
+    )
+    (run_dir / "run.json").write_text(json.dumps(recovered))
     monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
     monkeypatch.setattr(
         run_resume.agents,
@@ -100,6 +114,9 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
     run_json = json.loads((run_dir / "run.json").read_text())
     assert run_json["status"] == "ok"
     assert run_json["resumed_at"]
+    assert run_json["recovery_history"] == [recovered["failure"]]
+    assert "failure_phase" not in run_json
+    assert "failure" not in run_json
 
 
 def test_resume_with_nothing_resumable_reports_and_exits_2(tmp_path, capsys):
@@ -119,6 +136,134 @@ def test_resume_missing_artifacts_errors(tmp_path, capsys):
     empty.mkdir()
     assert run_resume.resume(empty) == 2
     assert "missing" in capsys.readouterr().err
+
+
+def test_resume_refuses_nonterminal_run(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "thread_id": "t-1",
+                "status": "interrupted",
+            }
+        ],
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["status"] = "dispatching"
+    (run_dir / "run.json").write_text(json.dumps(run_meta))
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("provider must not start")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert "run is not terminal" in capsys.readouterr().err
+
+
+def test_resume_refuses_matching_live_owner(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "thread_id": "t-1",
+                "status": "interrupted",
+            }
+        ],
+    )
+    lock = runguard.lock_path(tmp_path)
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+    (lock / "owner.json").write_text(
+        json.dumps({"owner_token": "live", "pid": os.getpid(), "run_dir": str(run_dir.resolve())})
+    )
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("provider must not start")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert "run owner process is still active" in capsys.readouterr().err
+    assert lock.is_dir()
+
+
+def test_resume_refuses_foreign_live_owner(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "thread_id": "t-1",
+                "status": "interrupted",
+            }
+        ],
+    )
+    foreign_run = tmp_path / "foreign-run"
+    lock = runguard.lock_path(tmp_path)
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+    (lock / "owner.json").write_text(
+        json.dumps({"owner_token": "live", "pid": os.getpid(), "run_dir": str(foreign_run.resolve())})
+    )
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("provider must not start")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert "another brigade run appears active" in capsys.readouterr().err
+    assert lock.is_dir()
+
+
+def test_resume_infers_lock_workspace_for_legacy_worktree_run(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    original_run_dir = _write_run_dir(
+        workspace,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "thread_id": "t-1",
+                "status": "interrupted",
+            }
+        ],
+    )
+    run_dir = workspace / ".brigade" / "runs" / "legacy"
+    run_dir.parent.mkdir(parents=True)
+    original_run_dir.rename(run_dir)
+    detached = tmp_path / "detached"
+    detached.mkdir()
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["cwd"] = str(detached)
+    (run_dir / "run.json").write_text(json.dumps(run_meta))
+    foreign_run = workspace / ".brigade" / "runs" / "foreign"
+    lock = runguard.lock_path(workspace)
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+    (lock / "owner.json").write_text(
+        json.dumps({"owner_token": "live", "pid": os.getpid(), "run_dir": str(foreign_run.resolve())})
+    )
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("provider must not start")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert "another brigade run appears active" in capsys.readouterr().err
+    assert lock.is_dir()
 
 
 def test_runs_resume_cli_dispatches(tmp_path, monkeypatch):

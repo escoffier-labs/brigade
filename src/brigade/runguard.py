@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import contextlib
+import errno
+import json
 import os
 import shutil
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
-from . import proc
+from . import localio, proc
+
+_NONTERMINAL_RUN_STATUSES = frozenset({"started", "planning", "dispatching", "synthesizing", "running"})
 
 
 class RunGuardError(RuntimeError):
@@ -37,6 +43,13 @@ class PatchSummary:
     changed: bool
     tracked_count: int
     untracked_count: int
+
+
+@dataclass(frozen=True)
+class _LockOwnership:
+    owner_token: str
+    device: int
+    inode: int
 
 
 def _git(cwd: Path, *args: str, timeout: float = 30.0) -> proc.Result:
@@ -87,38 +100,385 @@ def lock_path(cwd: Path) -> Path:
     return base / ".brigade" / "run.lock"
 
 
-def _lock_is_stale(path: Path) -> bool:
-    try:
-        pid = int((path / "pid").read_text().strip())
-    except (FileNotFoundError, ValueError):
-        return True
+def resolve_run_lock_workspace(
+    run_meta: dict[str, object],
+    run_dir: Path,
+    *,
+    fallback: Path | None = None,
+) -> Path | None:
+    raw_workspace = run_meta.get("lock_workspace")
+    if isinstance(raw_workspace, str) and raw_workspace:
+        return Path(raw_workspace).expanduser().resolve()
+    run_dir = run_dir.expanduser().resolve()
+    if run_dir.parent.name == "runs" and run_dir.parent.parent.name == ".brigade":
+        return run_dir.parent.parent.parent
+    if fallback is not None:
+        return fallback.expanduser().resolve()
+    raw_cwd = run_meta.get("cwd")
+    if isinstance(raw_cwd, str) and raw_cwd:
+        return Path(raw_cwd).expanduser().resolve()
+    return None
+
+
+def _pid_is_active(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return True
-    except PermissionError:
         return False
-    return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        if exc.errno == errno.ESRCH or getattr(exc, "winerror", None) == 87:
+            return False
+        return True
+    return True
 
 
-def _acquire_lock(path: Path) -> None:
-    for _ in range(2):
+def _lock_is_stale(path: Path) -> bool:
+    if path.exists() and not path.is_dir():
+        raise RunLockError(f"malformed run lock is not a directory: {path}")
+    recorded_pids: list[int] = []
+    try:
+        recorded_pids.append(int((path / "pid").read_text().strip()))
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        pass
+    except OSError as exc:
+        raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
+    owner = _read_lock_owner(path)
+    owner_pid = owner.get("pid") if owner is not None else None
+    if isinstance(owner_pid, int):
+        recorded_pids.append(owner_pid)
+    return not any(_pid_is_active(pid) for pid in set(recorded_pids))
+
+
+def _lock_owner_payload(*, owner_token: str, run_dir: Path | None) -> dict[str, object]:
+    return {
+        "schema": "brigade.run_lock.v1",
+        "owner_token": owner_token,
+        "pid": os.getpid(),
+        "run_dir": str(run_dir.expanduser().resolve()) if run_dir is not None else None,
+        "acquired_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _read_lock_owner(path: Path) -> dict[str, object] | None:
+    try:
+        payload = json.loads((path / "owner.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _publish_lock(path: Path, *, run_dir: Path | None) -> _LockOwnership:
+    owner_token = uuid4().hex
+    candidate = path.with_name(f".{path.name}.{owner_token}.tmp")
+    candidate.mkdir()
+    try:
+        (candidate / "pid").write_text(f"{os.getpid()}\n")
+        (candidate / "owner.json").write_text(json.dumps(_lock_owner_payload(owner_token=owner_token, run_dir=run_dir)))
         try:
-            path.mkdir()
+            candidate.rename(path)
+        except OSError:
+            if path.exists():
+                raise FileExistsError(path) from None
+            raise
+    finally:
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
+    published = path.stat()
+    return _LockOwnership(owner_token=owner_token, device=published.st_dev, inode=published.st_ino)
+
+
+def _recovery_claim_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.recovering-{os.getpid()}-{uuid4().hex}.stale")
+
+
+def _stale_claims(path: Path) -> list[Path]:
+    return sorted(path.parent.glob(f".{path.name}.*.stale"))
+
+
+def _recovery_claim_pid(path: Path, claimed: Path) -> int | None:
+    prefix = f".{path.name}.recovering-"
+    if not claimed.name.startswith(prefix) or not claimed.name.endswith(".stale"):
+        return None
+    raw = claimed.name[len(prefix) : -len(".stale")].split("-", 1)[0]
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _owner_with_workspace(owner: dict[str, object] | None, path: Path) -> dict[str, object] | None:
+    if owner is None:
+        return None
+    enriched = dict(owner)
+    enriched["_lock_workspace"] = str(path.parent.parent.resolve())
+    return enriched
+
+
+def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | None:
+    if not _lock_is_stale(path):
+        return None
+    claimed = _recovery_claim_path(path)
+    try:
+        path.rename(claimed)
+    except FileNotFoundError:
+        return None
+    if not _lock_is_stale(claimed):
+        if not path.exists():
+            claimed.rename(path)
+        return None
+    return claimed, _owner_with_workspace(_read_lock_owner(claimed), path)
+
+
+def _claim_existing_stale(path: Path, stale: Path) -> tuple[Path, dict[str, object] | None] | None:
+    recovery_pid = _recovery_claim_pid(path, stale)
+    if recovery_pid is not None and _pid_is_active(recovery_pid):
+        raise RunLockError(f"stale run lock recovery is still active: {stale}")
+    claimed = _recovery_claim_path(path)
+    try:
+        stale.rename(claimed)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RunLockError(f"could not claim stale run lock {stale}: {exc}") from exc
+    if not _lock_is_stale(claimed):
+        if not stale.exists():
+            claimed.rename(stale)
+        raise RunLockError(f"stale run lock owner process is still active: {stale}")
+    return claimed, _owner_with_workspace(_read_lock_owner(claimed), path)
+
+
+def _recover_run_artifact(owner: dict[str, object] | None) -> str:
+    if owner is None:
+        return "unattributable"
+    raw_run_dir = owner.get("run_dir")
+    owner_pid = owner.get("pid")
+    if not isinstance(raw_run_dir, str) or not raw_run_dir or not isinstance(owner_pid, int):
+        return "unattributable"
+    run_json = Path(raw_run_dir).expanduser().resolve() / "run.json"
+    prior_status = "artifact-unavailable"
+    try:
+        payload = json.loads(run_json.read_text())
+    except FileNotFoundError:
+        payload = {"schema": "brigade.run.v1", "artifacts": raw_run_dir}
+    except json.JSONDecodeError:
+        backup = run_json.with_name(f"run.json.corrupt-{uuid4().hex}")
+        try:
+            run_json.rename(backup)
+        except OSError:
+            return "write-failed"
+        payload = {
+            "schema": "brigade.run.v1",
+            "artifacts": raw_run_dir,
+            "recovery_preserved_artifact": str(backup),
+        }
+    except OSError:
+        return "write-failed"
+    if not isinstance(payload, dict):
+        backup = run_json.with_name(f"run.json.corrupt-{uuid4().hex}")
+        try:
+            run_json.rename(backup)
+        except OSError:
+            return "write-failed"
+        payload = {
+            "schema": "brigade.run.v1",
+            "artifacts": raw_run_dir,
+            "recovery_preserved_artifact": str(backup),
+        }
+    else:
+        status = payload.get("status")
+        if isinstance(status, str) and status:
+            prior_status = status
+            if status not in _NONTERMINAL_RUN_STATUSES:
+                return "terminal"
+    recovered_at = datetime.now(timezone.utc).isoformat()
+    detail = f"run owner process {owner_pid} is no longer active"
+    workspace = owner.get("_lock_workspace")
+    if isinstance(workspace, str) and workspace:
+        payload.setdefault("cwd", workspace)
+        payload.setdefault("lock_workspace", workspace)
+    acquired_at = owner.get("acquired_at")
+    if isinstance(acquired_at, str) and acquired_at:
+        payload.setdefault("started_at", acquired_at)
+    payload.update(
+        {
+            "status": "failed",
+            "finished_at": recovered_at,
+            "error": detail,
+            "failure_phase": "stale-lock-recovery",
+            "failure": {
+                "phase": "stale-lock-recovery",
+                "kind": "owner-process-exited",
+                "detail": detail,
+                "owner_pid": owner_pid,
+                "prior_status": prior_status,
+                "recovered_at": recovered_at,
+            },
+        }
+    )
+    try:
+        localio.write_json(run_json, payload)
+    except OSError:
+        return "write-failed"
+    return "recovered"
+
+
+def _restore_claimed_lock(path: Path, claimed: Path) -> Path:
+    if path.exists():
+        return claimed
+    try:
+        claimed.rename(path)
+    except OSError:
+        return claimed
+    return path
+
+
+def _owner_matches_run(owner: dict[str, object] | None, run_dir: Path) -> bool:
+    if owner is None:
+        return False
+    recorded = owner.get("run_dir")
+    return isinstance(recorded, str) and Path(recorded).expanduser().resolve() == run_dir
+
+
+def _quarantine_unattributable(path: Path, claimed: Path) -> None:
+    quarantined = path.with_name(f".{path.name}.{uuid4().hex}.orphaned")
+    try:
+        claimed.rename(quarantined)
+    except OSError:
+        pass
+
+
+def _finish_claimed_recovery(path: Path, claimed: Path, owner: dict[str, object] | None) -> str:
+    recovery = _recover_run_artifact(owner)
+    if recovery == "write-failed":
+        retained = _restore_claimed_lock(path, claimed)
+        raise RunLockError(f"could not preserve the stale run failure; lock retained at {retained}")
+    if recovery == "unattributable":
+        _quarantine_unattributable(path, claimed)
+        return recovery
+    shutil.rmtree(claimed, ignore_errors=True)
+    return recovery
+
+
+def _recover_pending_claims(path: Path, *, run_dir: Path | None = None, required: bool = False) -> bool:
+    recovered = False
+    for stale in _stale_claims(path):
+        owner = _read_lock_owner(stale)
+        if run_dir is not None and not _owner_matches_run(owner, run_dir):
+            continue
+        claimed_owner = _claim_existing_stale(path, stale)
+        if claimed_owner is None:
+            continue
+        claimed, owner = claimed_owner
+        _finish_claimed_recovery(path, claimed, owner)
+        recovered = True
+    if required and not recovered:
+        raise RunLockError(f"run lock not found for run: {run_dir}")
+    return recovered
+
+
+def recover_stale_run(cwd: Path, run_dir: Path, *, required: bool = True) -> bool:
+    run_dir = run_dir.expanduser().resolve()
+    path = lock_path(cwd)
+    if path.exists() and not path.is_dir():
+        raise RunLockError(f"malformed run lock is not a directory: {path}")
+    if path.is_dir():
+        owner = _read_lock_owner(path)
+        if owner is None:
+            raise RunLockError(f"run lock has no owner metadata: {path}")
+        if _owner_matches_run(owner, run_dir):
+            stale = _claim_stale_lock(path)
+            if stale is None:
+                if path.exists():
+                    raise RunLockError(f"run owner process is still active: {path}")
+            else:
+                claimed, claimed_owner = stale
+                if claimed_owner is None or claimed_owner.get("owner_token") != owner.get("owner_token"):
+                    retained = _restore_claimed_lock(path, claimed)
+                    raise RunLockError(f"run lock owner changed during recovery; lock retained at {retained}")
+                _finish_claimed_recovery(path, claimed, claimed_owner)
+                return True
+        elif required:
+            raise RunLockError(f"run lock belongs to a different run: {path}")
+    return _recover_pending_claims(path, run_dir=run_dir, required=required)
+
+
+def run_recovery_status(cwd: Path, run_dir: Path) -> str:
+    cwd = cwd.expanduser().resolve()
+    run_dir = run_dir.expanduser().resolve()
+    if not cwd.is_dir():
+        return "unknown"
+    path = lock_path(cwd)
+    if path.exists() and not path.is_dir():
+        return "unknown"
+    candidates = ([path] if path.is_dir() else []) + _stale_claims(path)
+    saw_unreadable = False
+    for candidate in candidates:
+        owner = _read_lock_owner(candidate)
+        if owner is None:
+            saw_unreadable = True
+        elif _owner_matches_run(owner, run_dir):
+            return "required"
+    return "unknown" if saw_unreadable else "cleared"
+
+
+def _acquire_lock(path: Path, *, run_dir: Path | None = None) -> _LockOwnership:
+    for _ in range(8):
+        try:
+            ownership = _publish_lock(path, run_dir=run_dir)
         except FileExistsError:
-            if _lock_is_stale(path):
-                shutil.rmtree(path, ignore_errors=True)
-                continue
-            raise RunLockError(
-                f"another brigade run appears active: {path}. Remove the lock only if no run is active."
-            ) from None
-        (path / "pid").write_text(f"{os.getpid()}\n")
-        return
+            if path.exists() and not path.is_dir():
+                raise RunLockError(f"malformed run lock is not a directory: {path}") from None
+            stale = _claim_stale_lock(path)
+            if stale is None:
+                if not path.exists():
+                    continue
+                raise RunLockError(
+                    f"another brigade run appears active: {path}. Remove the lock only if no run is active."
+                ) from None
+            claimed, owner = stale
+            _finish_claimed_recovery(path, claimed, owner)
+            continue
+        pending = _stale_claims(path)
+        if not pending:
+            return ownership
+        _release_lock(path, ownership)
+        _recover_pending_claims(path)
     raise RunLockError(f"could not acquire run lock: {path}")
 
 
+def _release_lock(path: Path, ownership: _LockOwnership) -> None:
+    try:
+        visible = path.stat()
+    except OSError:
+        return
+    if visible.st_dev != ownership.device or visible.st_ino != ownership.inode:
+        return
+    release_path = path.with_name(f".{path.name}.{ownership.owner_token}.release")
+    try:
+        path.rename(release_path)
+    except FileNotFoundError:
+        return
+    try:
+        released = release_path.stat()
+    except OSError:
+        return
+    if released.st_dev == ownership.device and released.st_ino == ownership.inode:
+        shutil.rmtree(release_path, ignore_errors=True)
+        return
+    if not path.exists():
+        release_path.rename(path)
+
+
 @contextlib.contextmanager
-def run_lock(cwd: Path, *, wait_seconds: float = 0.0, poll_interval: float = 0.1):
+def run_lock(
+    cwd: Path,
+    *,
+    run_dir: Path | None = None,
+    wait_seconds: float = 0.0,
+    poll_interval: float = 0.1,
+):
     if wait_seconds < 0:
         raise ValueError("run lock wait_seconds must be non-negative")
     if poll_interval <= 0:
@@ -126,9 +486,10 @@ def run_lock(cwd: Path, *, wait_seconds: float = 0.0, poll_interval: float = 0.1
     path = lock_path(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + wait_seconds
+    ownership: _LockOwnership | None = None
     while True:
         try:
-            _acquire_lock(path)
+            ownership = _acquire_lock(path, run_dir=run_dir)
             break
         except RunLockError as exc:
             if wait_seconds == 0:
@@ -140,7 +501,8 @@ def run_lock(cwd: Path, *, wait_seconds: float = 0.0, poll_interval: float = 0.1
     try:
         yield path
     finally:
-        shutil.rmtree(path, ignore_errors=True)
+        if ownership is not None:
+            _release_lock(path, ownership)
 
 
 def create_detached_worktree(repo: Path, worktree_path: Path) -> Path:

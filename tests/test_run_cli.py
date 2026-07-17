@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from brigade import aboyeur
+from brigade import agents
 from brigade import cli
 from brigade import proc
 from brigade import runguard
@@ -797,8 +798,9 @@ def test_run_cli_passes_bounded_wait_to_run_lock(tmp_path, monkeypatch, wait_arg
     seen = {}
 
     @contextmanager
-    def fake_lock(cwd, *, wait_seconds=0.0):
+    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0):
         seen["cwd"] = cwd
+        seen["run_dir"] = run_dir
         seen["wait_seconds"] = wait_seconds
         yield
 
@@ -808,7 +810,221 @@ def test_run_cli_passes_bounded_wait_to_run_lock(tmp_path, monkeypatch, wait_arg
     rc = cli.main(["run", "x", "--cwd", str(repo), wait_arg, "--no-artifacts"])
 
     assert rc == 0
-    assert seen == {"cwd": repo, "wait_seconds": expected}
+    assert seen == {"cwd": repo, "run_dir": None, "wait_seconds": expected}
+
+
+def test_run_cli_records_output_dir_in_run_lock(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+    seen = {}
+
+    @contextmanager
+    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0):
+        seen["cwd"] = cwd
+        seen["run_dir"] = run_dir
+        seen["wait_seconds"] = wait_seconds
+        yield
+
+    monkeypatch.setattr(runguard, "run_lock", fake_lock)
+    monkeypatch.setattr(aboyeur, "run", lambda *args, **kwargs: 0)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir)])
+
+    assert rc == 0
+    assert seen == {"cwd": repo, "run_dir": output_dir, "wait_seconds": 0.0}
+
+
+@pytest.mark.parametrize("lane", ["direct", "acpx"])
+def test_direct_worker_run_records_dispatching_before_provider_call(tmp_path, monkeypatch, lane):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+    seen = {}
+    worker = "coder"
+    if lane == "acpx":
+        worker = "composer"
+        (repo / ".brigade" / "roster.toml").write_text(
+            """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.composer]
+cli = "cursor"
+model = "composer-2.5"
+transport = "acpx"
+transport_version = "0.12.0"
+role = "code"
+"""
+        )
+
+    def fake_dispatch(*args, **kwargs):
+        seen.update(json.loads((output_dir / "run.json").read_text()))
+        return [
+            aboyeur.WorkerResult(
+                worker=worker,
+                task="inspect",
+                text="done",
+                ok=True,
+            )
+        ]
+
+    monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
+
+    rc = cli.main(
+        [
+            "run",
+            "inspect",
+            "--cwd",
+            str(repo),
+            "--output-dir",
+            str(output_dir),
+            "--worker",
+            worker,
+            "--allow-dirty",
+            "--no-code-graph",
+            "--no-evidence",
+            "--no-route",
+        ]
+    )
+
+    assert rc == 0
+    assert seen["status"] == "dispatching"
+
+
+def test_orchestrated_run_records_planning_and_synthesizing_phases(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+    seen = {}
+
+    def fake_plan(*args, **kwargs):
+        seen["plan"] = json.loads((output_dir / "run.json").read_text())["status"]
+        return [aboyeur.Assignment(worker="coder", task="inspect")]
+
+    def fake_dispatch(*args, **kwargs):
+        return [aboyeur.WorkerResult(worker="coder", task="inspect", text="done", ok=True)]
+
+    def fake_orchestrator(*args, **kwargs):
+        seen["synthesis"] = json.loads((output_dir / "run.json").read_text())["status"]
+        return agents.AgentResult(text="final", ok=True)
+
+    monkeypatch.setattr(aboyeur, "plan", fake_plan)
+    monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
+    monkeypatch.setattr(aboyeur, "_run_orchestrator", fake_orchestrator)
+
+    rc = cli.main(
+        [
+            "run",
+            "inspect",
+            "--cwd",
+            str(repo),
+            "--output-dir",
+            str(output_dir),
+            "--no-code-graph",
+            "--no-evidence",
+            "--no-route",
+        ]
+    )
+
+    assert rc == 0
+    assert seen == {"plan": "planning", "synthesis": "synthesizing"}
+
+
+def test_app_server_and_control_start_after_dispatching_is_recorded(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+    seen = {}
+
+    class StubAppServer:
+        def __init__(self, *, cwd):
+            self.cwd = cwd
+
+        def start(self):
+            seen["app_server"] = json.loads((output_dir / "run.json").read_text())["status"]
+
+        def close(self):
+            pass
+
+    class StubControlServer:
+        def __init__(self, socket_path, registry):
+            self.socket_path = socket_path
+            self.registry = registry
+
+        def start(self):
+            seen["control_server"] = json.loads((output_dir / "run.json").read_text())["status"]
+
+        def close(self):
+            pass
+
+    def fake_dispatch(*args, **kwargs):
+        return [aboyeur.WorkerResult(worker="coder", task="inspect", text="done", ok=True)]
+
+    monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", StubAppServer)
+    monkeypatch.setattr(aboyeur.run_control, "ControlServer", StubControlServer)
+    monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
+
+    rc = cli.main(
+        [
+            "run",
+            "inspect",
+            "--cwd",
+            str(repo),
+            "--output-dir",
+            str(output_dir),
+            "--worker",
+            "coder",
+            "--codex-transport",
+            "app-server",
+            "--no-code-graph",
+            "--no-evidence",
+            "--no-route",
+        ]
+    )
+
+    assert rc == 0
+    assert seen == {"app_server": "dispatching", "control_server": "dispatching"}
+
+
+def test_app_server_fallback_clears_uncreated_control_socket(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+
+    class UnavailableAppServer:
+        def __init__(self, *, cwd):
+            self.cwd = cwd
+
+        def start(self):
+            raise aboyeur.codex_appserver.AppServerError("unavailable")
+
+    def fake_dispatch(*args, **kwargs):
+        return [aboyeur.WorkerResult(worker="coder", task="inspect", text="done", ok=True)]
+
+    monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", UnavailableAppServer)
+    monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
+
+    rc = cli.main(
+        [
+            "run",
+            "inspect",
+            "--cwd",
+            str(repo),
+            "--output-dir",
+            str(output_dir),
+            "--worker",
+            "coder",
+            "--codex-transport",
+            "app-server",
+            "--no-code-graph",
+            "--no-evidence",
+            "--no-route",
+        ]
+    )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert rc == 0
+    assert run_meta["codex_transport"] == "exec"
+    assert "control_socket" not in run_meta
 
 
 def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path, monkeypatch):
@@ -823,12 +1039,14 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
         show_plan=False,
         verbose=False,
         cwd=None,
+        lock_workspace=None,
         output_dir=None,
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
     ):
         seen["cwd"] = cwd
+        seen["lock_workspace"] = lock_workspace
         seen["output_dir"] = output_dir
         assert cwd != repo
         assert (cwd / "tracked.txt").read_text() == "base\n"
@@ -853,6 +1071,7 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
     assert seen["output_dir"] == output_dir
     expected_checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
     assert seen["cwd"] == expected_checkout
+    assert seen["lock_workspace"] == repo.resolve()
     assert not expected_checkout.exists()
     assert (repo / "tracked.txt").read_text() == "base\n"
     patch = (output_dir / "changes.patch").read_text()

@@ -93,6 +93,23 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
     )
+    p_runs_recover = runs_sub.add_parser(
+        "recover",
+        help="Recover a nonterminal run whose recorded owner process has exited.",
+    )
+    p_runs_recover.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_runs_recover.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_runs_recover.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
     p_runs_resume = runs_sub.add_parser(
         "resume", help="Re-attach interrupted app-server workers from a run and re-synthesize."
     )
@@ -129,6 +146,8 @@ def dispatch(args) -> int:
         if args.worker is not None:
             payload["worker"] = args.worker
         return _control_request(args.run, cwd=args.cwd, runs_dir=args.runs_dir, payload=payload)
+    if args.runs_command == "recover":
+        return runs_cmd.recover(args.run, cwd=args.cwd, runs_dir=args.runs_dir)
     if args.runs_command == "resume":
         from .. import run_resume
 

@@ -237,6 +237,15 @@ def test_cli_interrupt_leaves_live_worker_resumable(tmp_path, monkeypatch, capsy
         "AppServer",
         lambda cwd=None: real_app_server(argv=FAKE, cwd=cwd),
     )
+    turn_registered = threading.Event()
+    real_register = run_control.LiveTurnRegistry.register
+
+    def register_and_signal(registry, worker, turn, turn_id):
+        real_register(registry, worker, turn, turn_id)
+        if worker == "cook":
+            turn_registered.set()
+
+    monkeypatch.setattr(run_control.LiveTurnRegistry, "register", register_and_signal)
 
     def fake_run_agent(cli_ref, prompt, **kwargs):
         if "Return exactly one JSON object" in prompt:
@@ -257,6 +266,7 @@ def test_cli_interrupt_leaves_live_worker_resumable(tmp_path, monkeypatch, capsy
 
     control_socket = _wait_for(lambda: _control_socket_from_run_json(run_dir))
     _wait_for(lambda: control_socket.exists())
+    assert turn_registered.wait(timeout=5.0)
 
     assert cli.main(["runs", "interrupt", str(run_dir), "cook"]) == 0
     thread.join(timeout=5.0)
