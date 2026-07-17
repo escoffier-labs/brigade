@@ -91,9 +91,17 @@ def _contains_tool_marker(value: object) -> bool:
         if any(str(key).lower() in _TOOL_KEYS for key in value):
             return True
         event_type = value.get("type")
-        if isinstance(event_type, str) and event_type.lower() in _TOOL_KEYS:
-            return True
+        if isinstance(event_type, str):
+            normalized_type = event_type.lower()
+            if (
+                normalized_type in _TOOL_KEYS
+                or normalized_type in _TOOL_RESULT_TYPES
+                or normalized_type.endswith("_call_output")
+            ):
+                return True
         normalized_keys = {str(key).lower() for key in value}
+        if "call_id" in normalized_keys and "output" in normalized_keys:
+            return True
         if "arguments" in normalized_keys and normalized_keys & {"function", "name"}:
             return True
         return any(_contains_tool_marker(item) for item in value.values())

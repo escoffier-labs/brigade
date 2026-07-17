@@ -477,6 +477,9 @@ def test_run_agent_rejects_progress_over_changed_files(monkeypatch):
         {"type": "tool_call", "name": "write_file", "arguments": {"text": "content"}},
         {"name": "read_file", "arguments": {"path": "README.md"}},
         {"name": "write_file", "arguments": {"text": "content"}},
+        {"type": "function_call_output", "call_id": "call-1", "output": "file contents"},
+        {"type": "tool_result", "content": "file contents"},
+        {"call_id": "call-1", "output": "file contents"},
     ],
 )
 def test_run_agent_rejects_tool_call_only_output(monkeypatch, payload):
