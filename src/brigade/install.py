@@ -386,6 +386,19 @@ def install_selection(
                 dst.write_text(skill_src.read_text())
                 wired_skills.append((h, skill_id))
 
+    # Claude Code project hooks enforce the same work loop described by the
+    # managed skill. The merge helper owns only Brigade handlers and preserves
+    # every unrelated setting and hook already present in the repo.
+    if wire_skills and "claude" in selection.harnesses:
+        from .claude_hooks.install_cmd import hooks_install
+
+        if hooks_install(target=target, quiet=True) != 0:
+            print(
+                "warning: unable to wire project-scoped Claude work-loop hooks; "
+                f"run `brigade work hooks install --target {target}` after checking .claude/settings.json",
+                file=sys.stderr,
+            )
+
     if update_gitignore:
         result = apply_gitignore(target, selection, use_git_exclude=use_git_exclude)
         print(f"brigade: gitignore {result}")

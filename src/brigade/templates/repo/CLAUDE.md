@@ -1,5 +1,7 @@
 # CLAUDE.md - Claude Code Rules
 
+@AGENTS.md
+
 ## Project rules
 
 - Follow `AGENTS.md` in this repo. This file is the Claude Code-specific bridge; cross-harness behavior lives in `AGENTS.md`.

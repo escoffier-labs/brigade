@@ -40,6 +40,23 @@ def dispatch(args) -> int:
         return work_cmd.resume(target=args.target)
     if args.work_command == "brief":
         return work_cmd.brief(target=args.target, limit=args.limit, json_output=args.json)
+    if args.work_command == "hooks":
+        from ...claude_hooks import install_cmd
+
+        if args.hooks_command == "install":
+            return install_cmd.hooks_install(target=args.target)
+        if args.hooks_command == "update":
+            return install_cmd.hooks_update(target=args.target)
+        if args.hooks_command == "status":
+            return install_cmd.hooks_status(target=args.target, json_output=args.json)
+        if args.hooks_command == "uninstall":
+            return install_cmd.hooks_uninstall(target=args.target)
+        args._brigade_parser.error(f"unknown hooks command: {args.hooks_command}")
+        return 2
+    if args.work_command == "hook-run":
+        from ...claude_hooks.runtime import hook_run
+
+        return hook_run(event=args.event, package=args.package)
     if args.work_command == "sweep":
         if args.sweep_args:
             if args.sweep_args[0] != "closeout":

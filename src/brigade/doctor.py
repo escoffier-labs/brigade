@@ -50,12 +50,26 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks.extend(_check_workspace_files(ctx.target))
     checks.extend(_check_agents_quality(ctx.target))
     checks.extend(_check_default_wired_skills(ctx.target, ctx.harnesses))
+    if "claude" in ctx.harnesses:
+        check = _check_claude_work_loop(ctx.target)
+        if check is not None:
+            checks.append(check)
     if "openclaw" in ctx.harnesses:
         checks.extend(_check_openclaw())
     if "hermes" in ctx.harnesses:
         checks.extend(_check_hermes(ctx.target))
     checks.extend(_check_orphan_inboxes(ctx.target, ctx.harnesses))
     return checks
+
+
+def _check_claude_work_loop(target: Path) -> CheckResult | None:
+    from .claude_hooks.classify import classify
+
+    payload = classify(target)
+    if payload is None:
+        return None
+    status = OK if payload["state"] == "enforced" else WARN
+    return (status, "claude work loop", str(payload["detail"]))
 
 
 def memory_station_checks(ctx: DoctorContext) -> List[CheckResult]:

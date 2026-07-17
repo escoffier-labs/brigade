@@ -199,6 +199,8 @@ brigade work verify run --target . --command "pytest -q" --capture <skill-or-car
 
 Skip this and Brigade is installed-but-dormant: the brief is empty and `outcome rank` says "ranking: none". `brigade work brief` reports the loop's own health, so you can see at a glance whether verify runs are piling up while the ledger stays empty.
 
+When Claude Code is selected during project setup, Brigade also installs project-scoped work-loop hooks in `.claude/settings.json`. The hooks brief once per session and repository, redirect direct test commands to `brigade work verify run`, and check for a verification receipt after write work. Use `brigade work hooks status --target .` to inspect the package, or `install`, `update`, and `uninstall` to manage it. Unrelated Claude settings and hooks are preserved.
+
 - `brigade outcome capture` records the result of a verify run (a real exit code, not an opinion) against the skill that produced it.
 - `brigade outcome score` ranks each skill by a Wilson lower bound, so something that passed twice never outranks something vetted across twenty runs.
 - `brigade outcome reconcile` is the gate. Dry-run by default; with `--apply` it installs a skill that earned it across your harnesses, or rolls a regressed one back to its last good version.
