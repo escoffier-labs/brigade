@@ -59,7 +59,11 @@ _PROGRESS_ACTION = re.compile(
     r"listing|opening|looking|finding|examining|analyzing|exploring|tracing|investigating)\b",
     re.IGNORECASE,
 )
-_PROGRESS_MARKER = re.compile(r"\b(?:first|next|now|before (?:i|we)|to begin|starting with)\b", re.IGNORECASE)
+_OUTCOME_MARKER = re.compile(
+    r"\b(?:found|identified|shows?|reveals?|completed|fixed|changed|"
+    r"no (?:actionable )?(?:issues|findings|changes))\b",
+    re.IGNORECASE,
+)
 _FINAL_TEXT_KEYS = frozenset({"answer", "content", "final", "final_answer", "output", "response", "text"})
 _TOOL_KEYS = frozenset(
     {
@@ -136,7 +140,18 @@ def _progress_only(text: str) -> bool:
             explicit_progress = True
             continue
         if _PROGRESS_ACTION.match(clause):
-            explicit_progress = explicit_progress or bool(_PROGRESS_MARKER.search(clause))
+            if _OUTCOME_MARKER.search(clause):
+                return False
+            if ":" in clause:
+                tail = clause.split(":", 1)[1].strip()
+                tail_is_progress = bool(
+                    _FUTURE_INTENT.match(tail)
+                    or _PROGRESS_ACTION.match(tail)
+                    or re.match(r"(?:first|next|now)\b", tail, re.IGNORECASE)
+                )
+                if tail and not tail_is_progress:
+                    return False
+            explicit_progress = True
             continue
         return False
     return explicit_progress

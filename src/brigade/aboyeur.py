@@ -22,6 +22,7 @@ from . import graphtrail_delta
 from . import localio
 from . import proc, runguard
 from . import run_control
+from .result_integrity import validate_final_output
 from .run_receipts import (
     agent_result_from_worker as _agent_result_from_worker,
     agent_result_payload as _agent_result_payload,
@@ -966,6 +967,20 @@ def _run_codex_appserver_worker(
             text="",
             ok=False,
             detail="empty output",
+            thread_id=turn.thread_id,
+            status=turn.status,
+            transport="codex-app-server",
+            requested_model=agent.model,
+            reasoning=agent.reasoning,
+        )
+    output_failure = validate_final_output(text)
+    if output_failure is not None:
+        return agents.AgentResult(
+            text=text,
+            ok=False,
+            detail=output_failure.detail,
+            failure_phase="output-validation",
+            failure_kind=output_failure.kind,
             thread_id=turn.thread_id,
             status=turn.status,
             transport="codex-app-server",

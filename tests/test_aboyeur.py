@@ -2215,6 +2215,37 @@ class _StubAppServer:
         return _StubAppServerThread(f"t-{len(self.started)}")
 
 
+class _IntentOnlyAppServer(_StubAppServer):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def start(self):
+        return None
+
+    def close(self):
+        return None
+
+    def start_thread(self, *, cwd, model=None, sandbox=None):
+        from brigade import codex_appserver
+
+        self.started.append({"cwd": cwd, "model": model, "sandbox": sandbox})
+
+        class _Thread:
+            thread_id = "t-intent"
+
+            def run_turn(self, prompt, *, timeout, on_event=None, on_turn_start=None):
+                if on_turn_start is not None:
+                    on_turn_start("turn-intent")
+                return codex_appserver.TurnResult(
+                    text="I will inspect the repository first.",
+                    ok=True,
+                    status="complete",
+                    thread_id=self.thread_id,
+                )
+
+        return _Thread()
+
+
 def test_dispatch_routes_codex_through_appserver(monkeypatch, tmp_path):
     roster = _appserver_roster()
     server = _StubAppServer()
@@ -2236,6 +2267,32 @@ def test_dispatch_routes_codex_through_appserver(monkeypatch, tmp_path):
     events_file = tmp_path / "cook.jsonl"
     assert events_file.is_file()
     assert '"item/completed"' in events_file.read_text()
+
+
+def test_run_appserver_worker_rejects_non_final_output_in_receipts(monkeypatch, tmp_path):
+    monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", _IntentOnlyAppServer)
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "review the repository",
+        _appserver_roster(),
+        worker="cook",
+        cwd=tmp_path,
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 2
+    run_payload = json.loads((output_dir / "run.json").read_text())
+    assert run_payload["status"] == "failed"
+    assert run_payload["failure_phase"] == "output-validation"
+    assert run_payload["failure"]["kind"] == "non-final-output"
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["ok"] is False
+    assert worker["transport"] == "codex-app-server"
+    assert worker["failure_phase"] == "output-validation"
+    assert worker["failure_kind"] == "non-final-output"
 
 
 def test_worker_payload_includes_thread_fields_only_for_appserver():

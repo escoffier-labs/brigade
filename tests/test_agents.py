@@ -430,6 +430,20 @@ def test_run_agent_rejects_intent_only_antigravity_output(monkeypatch):
     assert result.detail == "provider returned progress or intent without a final result"
 
 
+def test_run_agent_rejects_bare_progress_only_output(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(0, "Reviewing repository files.\n", ""),
+    )
+
+    result = agents.run_agent("antigravity", "review it")
+
+    assert result.ok is False
+    assert result.failure_kind == "non-final-output"
+
+
 @pytest.mark.parametrize(
     "payload",
     [

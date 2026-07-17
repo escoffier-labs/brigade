@@ -231,6 +231,27 @@ def run_cursor(
             requested_model=model,
             acpx_version=installed,
         )
+    if parsed["stop_reason"] != "end_turn":
+        stop_reason = parsed["stop_reason"] or "missing"
+        return AgentResult(
+            text=parsed["text"],
+            ok=False,
+            detail=f"ACP stream ended without a final completion (stopReason={stop_reason})",
+            failure_phase="output-validation",
+            failure_kind="non-final-stop",
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.code,
+            transport="acpx",
+            requested_model=model,
+            effective_model=parsed["effective_model"],
+            stop_reason=parsed["stop_reason"],
+            protocol_version=parsed["protocol_version"],
+            session_id=parsed["session_id"],
+            request_id=parsed["request_id"],
+            acpx_version=installed,
+            safe_events=tuple(parsed["events"]),
+        )
     output_failure = validate_final_output(parsed["text"])
     if output_failure is not None:
         return AgentResult(

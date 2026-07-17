@@ -159,6 +159,25 @@ def test_run_accepts_short_substantive_final(monkeypatch, tmp_path):
     assert result.text == "No findings."
 
 
+def test_run_rejects_non_final_stop_reason_with_partial_text(monkeypatch, tmp_path):
+    stream = _success_stream().replace('"stopReason": "end_turn"', '"stopReason": "cancelled"')
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(0, stream, "")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.text == "hello"
+    assert result.exit_code == 0
+    assert result.stop_reason == "cancelled"
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "non-final-stop"
+    assert result.detail == "ACP stream ended without a final completion (stopReason=cancelled)"
+
+
 def test_run_rejects_version_mismatch(monkeypatch, tmp_path):
     monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
     monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: proc.Result(0, "acpx 0.13.0\n", ""))
