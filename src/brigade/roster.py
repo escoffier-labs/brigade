@@ -77,19 +77,19 @@ def _as_sandbox(value: object) -> str | None:
 
 
 _ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_SECRET_HINTS = (
-    "KEY",
-    "TOKEN",
-    "SECRET",
-    "PASSWORD",
-    "PASSWD",
-    "AUTH",
-    "PAT",
-    "CRED",
-    "COOKIE",
-    "SESSION",
-    "BEARER",
-)
+# Prefix hints match the start of any underscore-separated segment; exact
+# hints must equal a whole segment (so PAT flags GH_PAT but not PATH).
+_SECRET_PREFIX_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "AUTH", "CRED", "COOKIE", "SESSION", "BEARER")
+_SECRET_EXACT_HINTS = ("PAT",)
+
+
+def _looks_like_secret_name(key: str) -> bool:
+    segments = key.split("_")
+    if any(seg in _SECRET_EXACT_HINTS for seg in segments):
+        return True
+    return any(seg.startswith(hint) for seg in segments for hint in _SECRET_PREFIX_HINTS)
+
+
 _SECRET_VALUE_PREFIXES = ("sk-", "xoxb-", "ghp_", "github_pat_", "Bearer ", "sk_live_", "AKIA")
 
 
@@ -113,7 +113,7 @@ def _as_env(value: object, agent_name: str) -> dict[str, str] | None:
                 )
         else:
             target = key
-            if any(hint in key for hint in _SECRET_HINTS):
+            if _looks_like_secret_name(key):
                 raise ValueError(
                     f"agents.{agent_name}.env.{key} looks like a secret; pass it by reference with a _REF suffix "
                     f"naming an environment variable instead of an inline value"
@@ -127,7 +127,7 @@ def _as_env(value: object, agent_name: str) -> dict[str, str] | None:
             raise ValueError(f"agents.{agent_name}.env.{key} collides with {targets[target]}: both resolve to {target}")
         targets[target] = key
         parsed[key] = raw
-    return parsed
+    return parsed or None
 
 
 def is_cli_allowed(cli_ref: str, roster: Roster) -> bool:
@@ -255,10 +255,15 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             if not _allowed(cli, allow_models):
                 raise ValueError(f"agents.{agent_name}.cli is not allowed by limits.allow_models: {cli!r}")
 
-        if env is not None and (transport_raw != "direct" or (cli is not None and cli.startswith("codex-cloud:"))):
+        if env is not None and (transport_raw != "direct" or cli is None or cli.startswith("codex-cloud:")):
             raise ValueError(
                 f"agents.{agent_name}.env overrides support direct CLI seats only; "
-                f"acpx and codex-cloud seats manage their own environment"
+                f"acpx, codex-cloud, and endpoint seats manage their own environment"
+            )
+        if env is not None and cli == "codex" and codex_transport == "app-server":
+            raise ValueError(
+                f'agents.{agent_name}.env on a codex seat requires codex_transport = "exec"; '
+                f"app-server sessions cannot apply per-seat env overrides"
             )
 
         if transport_raw == "acpx":

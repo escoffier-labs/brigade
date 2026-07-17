@@ -153,3 +153,12 @@ def test_env_provenance_absent_when_ref_missing_fails_before_spawn(monkeypatch):
     assert result.failure_kind == "env-ref-missing"
     assert result.env_overrides == ()
     assert result.endpoint_host is None
+
+
+def test_endpoint_host_resolves_ref_passed_base_url(monkeypatch):
+    monkeypatch.setenv("LANE_URL", "https://ref.example.com/anthropic")
+    monkeypatch.setenv("LANE_KEY", "sk-lane-value")
+    captured = {}
+    roster = _roster_with_env({"ANTHROPIC_BASE_URL_REF": "LANE_URL", "ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"})
+    result = _dispatch(roster, monkeypatch, captured)[0]
+    assert result.endpoint_host == "ref.example.com"

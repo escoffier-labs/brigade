@@ -464,3 +464,35 @@ def test_env_rejects_secret_shaped_inline_values(tmp_path):
     bad = ENV_SEAT.replace('"/tmp/claudex-config"', '"sk-live-abc123"')
     with pytest.raises(ValueError, match="looks like a secret value"):
         roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_allows_path_and_nonsecret_names(tmp_path):
+    ok = ENV_SEAT.replace("CLAUDE_CONFIG_DIR", "PATH")
+    r = roster_mod.load_roster(_write(tmp_path, ok))
+    assert r.agents["k3"].env["PATH"] == "/tmp/claudex-config"
+
+
+def test_env_rejected_on_codex_seat_under_appserver_transport(tmp_path):
+    bad = ENV_SEAT.replace('cli = "claude"\nmodel = "kimi-k3"', 'cli = "codex"').replace(
+        'orchestrator = "chef"', 'orchestrator = "chef"\ncodex_transport = "app-server"'
+    )
+    with pytest.raises(ValueError, match="codex_transport"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejected_on_endpoint_only_seat(tmp_path):
+    bad = ENV_SEAT.replace(
+        'cli = "claude"\nmodel = "kimi-k3"',
+        'endpoint = "https://api.example.com"\nmodel = "kimi-k3"',
+    )
+    with pytest.raises(ValueError, match="direct CLI seats only"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_empty_table_loads_as_none(tmp_path):
+    bad = ENV_SEAT.replace(
+        'env = { ANTHROPIC_BASE_URL = "https://api.example.com/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY", CLAUDE_CONFIG_DIR = "/tmp/claudex-config" }',
+        "env = { }",
+    )
+    r = roster_mod.load_roster(_write(tmp_path, bad))
+    assert r.agents["k3"].env is None

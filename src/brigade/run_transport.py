@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -33,9 +34,11 @@ def _env_endpoint_host(env: dict[str, str] | None) -> str | None:
     if not env:
         return None
     base_url = env.get("ANTHROPIC_BASE_URL")
+    if base_url is None and "ANTHROPIC_BASE_URL_REF" in env:
+        base_url = os.environ.get(env["ANTHROPIC_BASE_URL_REF"])
     if not base_url:
         return None
-    return urlparse(base_url).hostname
+    return urlparse(base_url).hostname or base_url
 
 
 @dataclass(frozen=True)

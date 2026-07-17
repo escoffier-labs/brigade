@@ -132,6 +132,7 @@ def expand_cells(manifest: dict[str, Any], roster: Roster, *, base_dir: Path = P
                 "reasoning": agent.reasoning,
                 "transport": getattr(agent, "transport", None),
                 "transport_version": getattr(agent, "transport_version", None),
+                "env": dict(agent.env) if agent.env else None,
                 "codex_transport": roster.codex_transport if agent.cli == "codex" else None,
             }
             for trial in range(1, trials + 1):
