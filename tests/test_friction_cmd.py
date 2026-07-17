@@ -1,8 +1,34 @@
 import json
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from brigade import cli
 from brigade import friction_cmd
+
+
+def test_iter_files_sorts_discovery_before_applying_cap(tmp_path, monkeypatch):
+    first = tmp_path / "a.log"
+    second = tmp_path / "b.log"
+    first.write_text("connection refused\n")
+    second.write_text("permission denied\n")
+    original_rglob = Path.rglob
+
+    def reversed_rglob(path: Path, pattern: str):
+        if path == tmp_path:
+            return iter([second, first])
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", reversed_rglob)
+
+    files, skipped = friction_cmd._iter_files(
+        [tmp_path],
+        since=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        max_files=1,
+    )
+
+    assert files == [first]
+    assert skipped == 1
 
 
 def test_friction_scan_writes_artifacts_and_imports_candidates(tmp_path, monkeypatch, capsys):
@@ -390,3 +416,214 @@ def test_structured_recurrence_dedupes_across_receipt_paths(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidate_count"] == 1
     assert payload["duplicates"] == 1
+
+
+def test_friction_scan_rejects_documentation_and_reports_family_dispositions(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "README.md").write_text("The fallback is blocked when a timeout occurs.\n")
+    (notes / "SKILL.md").write_text("Use a fallback if the command is blocked or times out.\n")
+    (notes / "suggestions.md").write_text("Suggested workaround: retry the failed command manually.\n")
+    (notes / "auth.log").write_text("permission denied while refreshing the session\n")
+    (notes / "network.log").write_text("connection refused by the local service\n")
+    processed = tmp_path / ".claude" / "memory-handoffs" / "processed"
+    processed.mkdir(parents=True)
+    (processed / "resolved.md").write_text("The previous timeout was fixed with a fallback.\n")
+
+    assert (
+        cli.main(
+            [
+                "friction",
+                "scan",
+                "--target",
+                str(tmp_path),
+                "--max-candidates",
+                "1",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    assert payload["rejected_noise"] == 4
+    assert payload["counts"]["by_source_family"]["regex"] == {
+        "accepted": 1,
+        "grouped": 0,
+        "rejected": 4,
+        "truncated": 1,
+    }
+
+
+def test_friction_scan_does_not_reemit_failure_text_from_successful_verify_run(tmp_path, capsys):
+    run = tmp_path / ".brigade" / "work" / "verify-runs" / "v1"
+    run.mkdir(parents=True)
+    (run / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "commands": [
+                    {
+                        "command": "pytest -q",
+                        "exit_code": 0,
+                        "status": "completed",
+                        "stdout_log_path": str(run / "command-1-stdout.log"),
+                    }
+                ],
+            }
+        )
+    )
+    (run / "command-1-stdout.log").write_text(
+        "The prior run failed because the MCP fallback timed out. Current result: 27 passed, 0 failed.\n"
+    )
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 0
+    assert payload["rejected_noise"] == 1
+    assert payload["counts"]["by_source_family"]["regex"]["rejected"] == 1
+
+
+def test_friction_scan_groups_repeated_timeout_warnings_with_child_evidence(tmp_path, capsys):
+    run = tmp_path / ".brigade" / "work" / "verify-runs" / "v1"
+    run.mkdir(parents=True)
+    (run / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "commands": [
+                    {
+                        "command": "brigade mcp doctor",
+                        "exit_code": 124,
+                        "status": "timed_out",
+                        "stderr_summary": "MCP server alpha timed out",
+                    },
+                    {
+                        "command": "brigade mcp doctor",
+                        "exit_code": 124,
+                        "status": "timed_out",
+                        "stderr_summary": "MCP server beta timed out",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    candidate = payload["candidates"][0]
+    assert candidate["source_family"] == "verification"
+    assert len(candidate["evidence"]["children"]) == 2
+    assert payload["counts"]["by_source_family"]["verification"] == {
+        "accepted": 1,
+        "grouped": 1,
+        "rejected": 0,
+        "truncated": 0,
+    }
+
+
+def test_friction_scan_groups_regex_cascade_from_one_command_log(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "compiler.log").write_text(
+        "TypeScript compile failed because module alpha cannot be resolved.\n"
+        "TypeScript compile failed because module beta cannot be resolved.\n"
+    )
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    candidate = payload["candidates"][0]
+    assert candidate["source_family"] == "regex"
+    assert len(candidate["evidence"]["children"]) == 2
+    assert payload["counts"]["by_source_family"]["regex"]["grouped"] == 1
+
+
+def test_friction_scan_excludes_structured_receipts_older_than_days(tmp_path, monkeypatch, capsys):
+    now = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(friction_cmd, "_now", lambda: now)
+    run = tmp_path / ".brigade" / "work" / "verify-runs" / "old-failure"
+    run.mkdir(parents=True)
+    receipt = run / "receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "commands": [
+                    {
+                        "command": "pytest -q",
+                        "exit_code": 1,
+                        "status": "failed",
+                        "stderr_summary": "compiler failed",
+                    }
+                ],
+            }
+        )
+    )
+    old = (now - timedelta(days=90)).timestamp()
+    os.utime(receipt, (old, old))
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--days", "1", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 0
+    assert payload["counts"]["by_source_family"]["verification"]["accepted"] == 0
+
+
+def test_friction_scan_keeps_real_failure_on_mixed_zero_failure_line(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "build.log").write_text("Build failed. Unit tests: 27 passed; 0 failed.\n")
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    assert payload["candidates"][0]["friction_type"] == "blocked"
+    assert payload["counts"]["by_source_family"]["regex"]["rejected"] == 0
+
+
+def test_friction_scan_rejects_exact_ok_zero_failure_summary(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "tests.log").write_text("test result: ok. 0 failed\n")
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 0
+    assert payload["rejected_noise"] == 1
+    assert payload["counts"]["by_source_family"]["regex"]["rejected"] == 1
+
+
+def test_friction_scan_rejects_pure_zero_failure_summary_variants(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "pytest.log").write_text("27 passed and 0 failed\n")
+    (notes / "suite.log").write_text("All tests passed with 0 failed\n")
+    (notes / "timed.log").write_text("12 passed in 3s 0 failed\n")
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 0
+    assert payload["rejected_noise"] == 3
+    assert payload["counts"]["by_source_family"]["regex"]["rejected"] == 3
+
+
+def test_friction_scan_mixed_network_and_zero_failure_line_has_no_blocked_duplicate(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "network.log").write_text("connection refused by service. 27 passed; 0 failed.\n")
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    assert payload["counts"]["by_type"] == {"network_timeout": 1}
+    assert payload["candidates"][0]["friction_type"] == "network_timeout"

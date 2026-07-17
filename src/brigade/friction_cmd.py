@@ -99,6 +99,26 @@ IGNORED_ATTACHMENT_TYPES = {"hook_success", "hook_additional_context", "skill_li
 # ('"timeout": 900', '"failed": 0'), never friction evidence in itself. Real
 # friction always carries textual evidence (an error string, a status word).
 JSON_NUMERIC_FIELD_RE = re.compile(r'^"[^"\n]+"\s*:\s*-?\d+(?:\.\d+)?\s*,?$')
+PASSING_ZERO_FAILURE_RE = re.compile(
+    r"(?i)(?:test result:\s*ok\.?[^.\n]*\b0\s+failed\b|"
+    r"\d+\s+passed\b[^.\n]*\b0\s+failed\b|(?:all\s+tests?|tests?)\s+passed\b[^.\n]*\b0\s+failed\b)"
+)
+DOCUMENTATION_NAMES = frozenset(
+    {
+        "agents.md",
+        "changelog.md",
+        "claude.md",
+        "contributing.md",
+        "install_for_agents.md",
+        "quickstart.md",
+        "readme.md",
+        "roadmap.md",
+        "skill.md",
+        "third_party_notices.md",
+    }
+)
+GENERATED_SUGGESTION_STEMS = frozenset({"recommendations", "suggestions"})
+SOURCE_FAMILIES = ("verification", "run", "evaluation", "miseledger", "regex")
 
 
 @dataclass(frozen=True)
@@ -132,16 +152,19 @@ def _parse_since(days: int) -> datetime:
     return _now() - timedelta(days=days)
 
 
-def _candidate_id(source: str, friction_type: str, text: str) -> str:
-    del source
-    digest = hashlib.sha256(f"{friction_type}\0{text}".encode("utf-8")).hexdigest()[:12]
+def _candidate_id(source: str, friction_type: str, text: str, *, stable_source: bool = False) -> str:
+    material = f"{friction_type}\0{source}" if stable_source else f"{friction_type}\0{text}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
     return f"friction-{digest}"
 
 
-def _iter_source_roots(target: Path, *, include_agent_logs: bool) -> list[Path]:
-    roots = [target / item for item in DEFAULT_SOURCE_DIRS]
-    if include_agent_logs:
-        roots.extend(Path(item).expanduser() for item in DEFAULT_AGENT_LOG_DIRS)
+def _iter_source_roots(target: Path, *, include_agent_logs: bool, agent_logs_only: bool = False) -> list[Path]:
+    if agent_logs_only:
+        roots = [Path(item).expanduser() for item in DEFAULT_AGENT_LOG_DIRS]
+    else:
+        roots = [target / item for item in DEFAULT_SOURCE_DIRS]
+        if include_agent_logs:
+            roots.extend(Path(item).expanduser() for item in DEFAULT_AGENT_LOG_DIRS)
     seen: set[Path] = set()
     resolved: list[Path] = []
     for root in roots:
@@ -163,7 +186,7 @@ def _iter_files(roots: list[Path], *, since: datetime, max_files: int) -> tuple[
     per_root = max(1, max_files // max(1, len(roots)))
     for root in roots:
         root_count = 0
-        candidates = [root] if root.is_file() else root.rglob("*")
+        candidates = [root] if root.is_file() else sorted(root.rglob("*"))
         for path in candidates:
             if len(files) >= max_files or root_count >= per_root:
                 skipped += 1
@@ -243,6 +266,13 @@ def _extract_text(value: object) -> list[str]:
     return []
 
 
+def _is_passing_zero_failure_line(line: str) -> bool:
+    if PASSING_ZERO_FAILURE_RE.search(line) is None:
+        return False
+    residual = PASSING_ZERO_FAILURE_RE.sub(" ", line).lower()
+    return not any(re.search(pattern, residual) for _friction_type, _severity, _title, pattern in PATTERNS)
+
+
 def _scan_file(path: Path, *, max_line_length: int = 5000) -> list[Match]:
     matches: list[Match] = []
     try:
@@ -276,6 +306,96 @@ def _scan_file(path: Path, *, max_line_length: int = 5000) -> list[Match]:
 
 def _is_verify_receipt(path: Path) -> bool:
     return path.name == "receipt.json" and "verify-runs" in path.parts
+
+
+def _is_noise_file(path: Path) -> bool:
+    lowered_parts = tuple(part.lower() for part in path.parts)
+    processed_handoff = "memory-handoffs" in lowered_parts and "processed" in lowered_parts
+    return (
+        path.name.lower() in DOCUMENTATION_NAMES or path.stem.lower() in GENERATED_SUGGESTION_STEMS or processed_handoff
+    )
+
+
+def _is_successful_verify_receipt(payload: dict[str, Any]) -> bool:
+    run_status = str(payload.get("status") or "completed")
+    if run_status != "completed":
+        return False
+    commands = payload.get("commands")
+    if not isinstance(commands, list) or not commands:
+        return True
+    for command in commands:
+        if not isinstance(command, dict):
+            return False
+        exit_code = command.get("exit_code")
+        status = str(command.get("status") or "")
+        if (isinstance(exit_code, int) and exit_code != 0) or status not in ("", "completed"):
+            return False
+    return True
+
+
+def _collect_successful_verify_log_paths(target: Path) -> set[Path]:
+    paths: set[Path] = set()
+    verify_root = target / ".brigade" / "work" / "verify-runs"
+    if not verify_root.is_dir():
+        return paths
+    for receipt_path in sorted(verify_root.glob("*/receipt.json")):
+        payload = _read_object(receipt_path)
+        if payload is None or not _is_successful_verify_receipt(payload):
+            continue
+        commands = payload.get("commands")
+        for command in commands if isinstance(commands, list) else []:
+            if not isinstance(command, dict):
+                continue
+            for key in ("stdout_log_path", "stderr_log_path"):
+                log_path = command.get(key)
+                if not isinstance(log_path, str) or not log_path.strip():
+                    continue
+                try:
+                    paths.add(Path(log_path).expanduser().resolve())
+                except OSError:
+                    continue
+    return paths
+
+
+def _empty_family_dispositions() -> dict[str, dict[str, int]]:
+    return {name: {"accepted": 0, "rejected": 0, "grouped": 0, "truncated": 0} for name in SOURCE_FAMILIES}
+
+
+def _evidence_child(item: dict[str, Any]) -> dict[str, Any]:
+    evidence = item.get("evidence")
+    if not isinstance(evidence, dict):
+        return {}
+    return {
+        "path": evidence.get("path"),
+        "line": evidence.get("line"),
+        "snippet": evidence.get("snippet"),
+    }
+
+
+def _group_candidates(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    indexed: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for item in items:
+        candidate_id = str(item.get("id") or "")
+        if candidate_id not in indexed:
+            indexed[candidate_id] = []
+            order.append(candidate_id)
+        indexed[candidate_id].append(item)
+    grouped = 0
+    result: list[dict[str, Any]] = []
+    for candidate_id in order:
+        bucket = indexed[candidate_id]
+        if len(bucket) == 1:
+            result.append(bucket[0])
+            continue
+        grouped += len(bucket) - 1
+        primary = dict(bucket[0])
+        raw_evidence = primary.get("evidence")
+        evidence = dict(raw_evidence) if isinstance(raw_evidence, dict) else {}
+        evidence["children"] = [_evidence_child(occurrence) for occurrence in bucket]
+        primary["evidence"] = evidence
+        result.append(primary)
+    return result, grouped
 
 
 def _scan_receipt(path: Path) -> list[Match]:
@@ -360,7 +480,7 @@ def _make_candidate(target: Path, match: Match) -> dict[str, Any]:
     snippet = _short(match.line)
     text = f"{match.title}: {snippet}"
     return {
-        "id": _candidate_id(source, match.friction_type, snippet),
+        "id": _candidate_id(source, match.friction_type, snippet, stable_source=True),
         "title": match.title,
         "text": text,
         "status": "candidate",
@@ -430,15 +550,30 @@ def _read_object(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _structured_families(target: Path, miseledger_paths: list[Path] | None) -> dict[str, list[dict[str, Any]]]:
+def _structured_families(
+    target: Path,
+    miseledger_paths: list[Path] | None,
+    *,
+    since: datetime,
+) -> dict[str, list[dict[str, Any]]]:
     families: dict[str, list[dict[str, Any]]] = {
         "verification": [],
         "run": [],
         "evaluation": [],
         "miseledger": [],
     }
+    cutoff = since.timestamp()
+
+    def _skip_old(path: Path) -> bool:
+        try:
+            return path.stat().st_mtime < cutoff
+        except OSError:
+            return True
+
     verify_root = target / ".brigade" / "work" / "verify-runs"
     for path in sorted(verify_root.glob("*/receipt.json")) if verify_root.is_dir() else []:
+        if _skip_old(path):
+            continue
         for match in _scan_receipt(path):
             families["verification"].append(
                 _structured_candidate(
@@ -455,6 +590,8 @@ def _structured_families(target: Path, miseledger_paths: list[Path] | None) -> d
             )
     runs_root = target / ".brigade" / "runs"
     for path in sorted(runs_root.glob("*/worker-results.json")) if runs_root.is_dir() else []:
+        if _skip_old(path):
+            continue
         payload = _read_object(path)
         for result in payload.get("results", []) if payload is not None else []:
             if not isinstance(result, dict) or result.get("ok") is True:
@@ -476,6 +613,8 @@ def _structured_families(target: Path, miseledger_paths: list[Path] | None) -> d
             )
     eval_root = target / ".brigade" / "evals"
     for path in sorted(eval_root.glob("*/cells/*/cell.json")) if eval_root.is_dir() else []:
+        if _skip_old(path):
+            continue
         payload = _read_object(path)
         if payload is None:
             continue
@@ -498,6 +637,8 @@ def _structured_families(target: Path, miseledger_paths: list[Path] | None) -> d
         )
     for path in miseledger_paths or []:
         resolved = path.expanduser().resolve()
+        if _skip_old(resolved):
+            continue
         try:
             lines = resolved.read_text(errors="replace").splitlines()
         except OSError:
@@ -550,19 +691,18 @@ def _quota_select(families: dict[str, list[dict[str, Any]]], limit: int) -> tupl
     return selected[:limit], use
 
 
-def _dedupe_families(families: dict[str, list[dict[str, Any]]]) -> int:
-    seen: set[str] = set()
+def _prepare_families(
+    families: dict[str, list[dict[str, Any]]],
+    *,
+    dispositions: dict[str, dict[str, int]],
+) -> int:
     duplicates = 0
-    for name, items in families.items():
-        unique: list[dict[str, Any]] = []
-        for item in items:
-            item_id = str(item.get("id") or "")
-            if item_id in seen:
-                duplicates += 1
-                continue
-            seen.add(item_id)
-            unique.append(item)
-        families[name] = unique
+    for name in SOURCE_FAMILIES:
+        items = families.get(name, [])
+        grouped_items, grouped = _group_candidates(items)
+        families[name] = grouped_items
+        dispositions[name]["grouped"] = grouped
+        duplicates += grouped
     return duplicates
 
 
@@ -571,6 +711,7 @@ def scan_payload(
     target: Path,
     days: int = 30,
     include_agent_logs: bool = False,
+    agent_logs_only: bool = False,
     max_files: int = 5000,
     max_candidates: int = 200,
     miseledger_paths: list[Path] | None = None,
@@ -591,34 +732,49 @@ def scan_payload(
         print("error: --max-candidates must be a positive integer", file=sys.stderr)
         return None, 2
 
-    roots = _iter_source_roots(target, include_agent_logs=include_agent_logs)
+    roots = _iter_source_roots(target, include_agent_logs=include_agent_logs, agent_logs_only=agent_logs_only)
     files, skipped_files = _iter_files(roots, since=since, max_files=max_files)
-    families = _structured_families(target, miseledger_paths)
+    families = (
+        {name: [] for name in SOURCE_FAMILIES}
+        if agent_logs_only
+        else _structured_families(target, miseledger_paths, since=since)
+    )
+    dispositions = _empty_family_dispositions()
+    successful_verify_logs = _collect_successful_verify_log_paths(target)
     regex_candidates: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    type_counts: dict[str, int] = {}
-    severity_counts: dict[str, int] = {}
-    workflow_counts: dict[str, int] = {}
+    rejected_noise = 0
     for path in files:
         if _is_verify_receipt(path) or path.name in {"run.json", "worker-results.json", "cell.json"}:
             continue
-        matches = _scan_receipt(path) if _is_verify_receipt(path) else _scan_file(path)
+        try:
+            resolved_path = path.expanduser().resolve()
+        except OSError:
+            resolved_path = path
+        reject_as_documentation = _is_noise_file(path)
+        reject_as_historical = resolved_path in successful_verify_logs
+        matches = _scan_file(path)
         for match in matches:
-            candidate = _make_candidate(target, match)
-            if candidate["id"] in seen_ids:
+            if reject_as_documentation or reject_as_historical:
+                dispositions["regex"]["rejected"] += 1
+                rejected_noise += 1
                 continue
-            seen_ids.add(str(candidate["id"]))
+            if _is_passing_zero_failure_line(match.line):
+                dispositions["regex"]["rejected"] += 1
+                rejected_noise += 1
+                continue
+            candidate = _make_candidate(target, match)
             candidate["source_family"] = "regex"
             regex_candidates.append(candidate)
-            type_counts[str(candidate["friction_type"])] = type_counts.get(str(candidate["friction_type"]), 0) + 1
-            severity_counts[str(candidate["severity"])] = severity_counts.get(str(candidate["severity"]), 0) + 1
-            workflow_counts[str(candidate["workflow"])] = workflow_counts.get(str(candidate["workflow"]), 0) + 1
     families["regex"] = regex_candidates
-    duplicate_count = _dedupe_families(families)
+    duplicate_count = _prepare_families(families, dispositions=dispositions)
     candidates, quota_use = _quota_select(families, max_candidates)
-    type_counts = {}
-    severity_counts = {}
-    workflow_counts = {}
+    for name in SOURCE_FAMILIES:
+        selected = quota_use.get(name, 0)
+        dispositions[name]["accepted"] = selected
+        dispositions[name]["truncated"] = max(0, len(families.get(name, [])) - selected)
+    type_counts: dict[str, int] = {}
+    severity_counts: dict[str, int] = {}
+    workflow_counts: dict[str, int] = {}
     for candidate in candidates:
         type_counts[str(candidate["friction_type"])] = type_counts.get(str(candidate["friction_type"]), 0) + 1
         severity_counts[str(candidate["severity"])] = severity_counts.get(str(candidate["severity"]), 0) + 1
@@ -639,12 +795,13 @@ def scan_payload(
         "structured_hits": sum(1 for item in candidates if item.get("detection") == "structured"),
         "regex_hits": sum(1 for item in candidates if item.get("detection") == "regex"),
         "duplicates": duplicate_count,
-        "rejected_noise": 0,
+        "rejected_noise": rejected_noise,
         "quota_use": quota_use,
         "counts": {
             "by_type": dict(sorted(type_counts.items())),
             "by_severity": dict(sorted(severity_counts.items())),
             "by_workflow": dict(sorted(workflow_counts.items())),
+            "by_source_family": dispositions,
         },
         "candidates": candidates,
     }
