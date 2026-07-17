@@ -45,6 +45,17 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_install.add_argument("--target", dest="install_target", required=True, help="Harness target or all.")
     p_skills_install.add_argument("--force", action="store_true", help="Overwrite an existing installed skill.")
     p_skills_install.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_sync = skills_sub.add_parser("sync", help="Reconcile the reviewed registry across one or all harnesses.")
+    p_skills_sync.add_argument("--workspace", type=Path, default=Path("."), help="Workspace to reconcile.")
+    p_skills_sync.add_argument("--target", dest="install_target", required=True, help="Harness target or all.")
+    p_skills_sync.add_argument(
+        "--trust",
+        choices=["unreviewed", "workspace", "team", "public"],
+        default="workspace",
+        help="Minimum registry trust level to install.",
+    )
+    p_skills_sync.add_argument("--write", action="store_true", help="Apply missing and changed registry skills.")
+    p_skills_sync.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_compat = skills_sub.add_parser("compatibility", help="Show skill compatibility across harness adapters.")
     p_skills_compat.add_argument("skill", help="Skill id, path, or directory.")
     p_skills_compat.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
@@ -212,6 +223,14 @@ def dispatch(args) -> int:
             skill=args.skill,
             harness=args.install_target,
             force=args.force,
+            json_output=args.json,
+        )
+    if args.skills_command == "sync":
+        return skills_cmd.sync(
+            workspace=args.workspace,
+            harness=args.install_target,
+            trust=args.trust,
+            write=args.write,
             json_output=args.json,
         )
     if args.skills_command == "uninstall":
