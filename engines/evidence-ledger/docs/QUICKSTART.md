@@ -78,13 +78,14 @@ Use `sessions` when the goal is to locate a resumable harness session rather tha
 
 ```bash
 miseledger sessions list --source codex --json
-miseledger sessions search "release audit" --source codex --json
-miseledger sessions search "auth timeout" --source claude --json
+miseledger sessions list --project miseledger --model gpt-5 --json
+miseledger sessions search "release audit" --project miseledger --model gpt-5 --json
+miseledger sessions search "auth timeout" --source claude --model claude-sonnet --json
 sessionfind list --source codex --json
 sessionfind "release audit" --source codex --json
 ```
 
-The search output is grouped by session/conversation and includes raw source path, raw ordinal, sample item ID, match count, and snippet.
+The project filter matches normalized project, workspace, workspace-directory, and working-directory metadata. The JSON `workspace` field prefers `workspace`, then `workspace_dir`, then `cwd`; an unmatched project value is omitted when a workspace-like value satisfied an active project filter. Session JSON also includes normalized model, harness, and source name fields when available.
 
 ## Import Local Sources
 
