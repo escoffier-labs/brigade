@@ -7,6 +7,7 @@ from pathlib import Path
 import json
 
 
+from brigade import cli
 from brigade import doctor as doctor_mod
 from brigade.install import install_selection
 from brigade.memory_cmd import MemoryCareConfig
@@ -21,7 +22,7 @@ def test_doctor_passes_against_workspace_profile(tmp_target: Path, capsys):
     rc = doctor_mod.run(target=tmp_target, harness="generic")
     assert rc == 0
     out = capsys.readouterr().out
-    assert "[ok]" in out
+    assert "triage:" in out
     assert "[fail]" not in out
 
 
@@ -56,7 +57,7 @@ def test_doctor_workspace_profile_wires_memory_care_decay_dir(tmp_target: Path, 
         Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
     )
     assert (tmp_target / ".brigade" / "memory-care" / "decay").is_dir()
-    doctor_mod.run(target=tmp_target, harness="generic")
+    doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
     assert "staleness scanner not wired" not in out
 
@@ -78,11 +79,66 @@ def test_doctor_json_output_is_structured(tmp_target: Path, capsys):
     assert payload["ready"] is (rc == 0)
 
 
+def test_doctor_triages_long_output_by_default(tmp_target: Path, capsys, monkeypatch):
+    checks = [(doctor_mod.OK, f"check-{index}", "ready") for index in range(48)]
+    checks.extend(
+        [
+            (doctor_mod.WARN, "warning-check", "run `brigade fix warning`"),
+            (doctor_mod.FAIL, "failed-check", "run `brigade fix failure`"),
+            (doctor_mod.MANUAL, "manual-check", "run `brigade configure`"),
+        ]
+    )
+    monkeypatch.setattr(doctor_mod, "_gather_checks", lambda _ctx: checks)
+
+    assert doctor_mod.run(target=tmp_target) == 1
+    out = capsys.readouterr().out
+    assert "triage: 51 checks, 48 ok, 1 warn, 1 failed, 1 manual, 0 info" in out
+    assert "warning-check" in out
+    assert "failed-check" in out
+    assert "manual-check" in out
+    assert "check-0" not in out
+    assert "run `brigade doctor --full` to show all checks" in out
+
+
+def test_doctor_full_preserves_exhaustive_text_output(tmp_target: Path, capsys, monkeypatch):
+    checks = [(doctor_mod.OK, f"check-{index}", "ready") for index in range(51)]
+    monkeypatch.setattr(doctor_mod, "_gather_checks", lambda _ctx: checks)
+
+    assert doctor_mod.run(target=tmp_target, full=True) == 0
+    out = capsys.readouterr().out
+    assert "check-0" in out
+    assert "check-50" in out
+    assert "brigade doctor --full" not in out
+
+
+def test_doctor_shared_reporter_is_exhaustive_by_default(capsys):
+    checks = [(doctor_mod.OK, f"shared-check-{index}", "ready") for index in range(51)]
+
+    assert doctor_mod._report(checks) == 0
+    out = capsys.readouterr().out
+    assert "shared-check-0" in out
+    assert "shared-check-50" in out
+    assert "brigade doctor --full" not in out
+
+
+def test_doctor_cli_forwards_full(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(doctor_mod, "run", fake_run)
+
+    assert cli.main(["doctor", "--target", str(tmp_path), "--harness", "hermes", "--full"]) == 0
+    assert seen == {"target": tmp_path, "harness": "hermes", "json_output": False, "full": True}
+
+
 def test_doctor_agents_quality_warns_without_definition_of_done(tmp_target: Path, capsys):
     # issue #84: AGENTS.md existing is not enough; nudge toward a definition of done.
     tmp_target.mkdir(parents=True, exist_ok=True)
     (tmp_target / "AGENTS.md").write_text("# AGENTS\n\nsome guidance, but no done criteria here\n")
-    doctor_mod.run(target=tmp_target, harness="generic")
+    doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
     assert "agents-quality: AGENTS.md" in out
     assert "Definition of Done" in out
@@ -108,7 +164,7 @@ def test_doctor_groups_machine_level_findings(tmp_target: Path, capsys):
         Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
     )
     capsys.readouterr()
-    doctor_mod.run(target=tmp_target, harness="generic")
+    doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
     assert "machine-level (not specific to this repo):" in out
     header_idx = out.index("machine-level (not specific to this repo):")
@@ -130,7 +186,7 @@ def test_doctor_json_tags_machine_scope(tmp_target: Path, capsys):
 
 def test_doctor_reports_failures_on_empty_dir(tmp_target: Path, capsys):
     tmp_target.mkdir()
-    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
     assert rc == 1
     out = capsys.readouterr().out
     assert "[fail]" in out
@@ -157,7 +213,7 @@ def test_doctor_reports_security_config_and_evidence_bundle(tmp_target: Path, ca
     )
     (security_dir / "security-report.md").write_text("# Brigade Security Report\n")
 
-    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
     assert rc == 0
     assert "security: config" in out
@@ -264,7 +320,7 @@ def test_doctor_reports_bootstrap_budget_ok(tmp_target: Path, capsys):
         Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
     )
 
-    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
     assert rc == 0
     assert "bootstrap-budget: AGENTS.md" in out
@@ -283,7 +339,7 @@ def test_doctor_openclaw_reports_manual_when_config_missing(tmp_target: Path, mo
     )
     monkeypatch.setenv("HOME", str(tmp_target))  # so ~/.openclaw resolves into the temp dir
     monkeypatch.setattr(Path, "home", lambda: tmp_target)
-    rc = doctor_mod.run(target=tmp_target, harness="openclaw")
+    rc = doctor_mod.run(target=tmp_target, harness="openclaw", full=True)
     out = capsys.readouterr().out
     assert "openclaw: config" in out
     # missing config is MANUAL, not FAIL -> exit 0
@@ -296,7 +352,7 @@ def test_doctor_hermes_runtime_validation(tmp_target: Path, capsys):
         tmp_target,
         Selection(depth="workspace", harnesses=["claude", "hermes"], owner="hermes", includes=[]),
     )
-    rc = doctor_mod.run(target=tmp_target, harness="hermes")
+    rc = doctor_mod.run(target=tmp_target, harness="hermes", full=True)
     out = capsys.readouterr().out
     assert "hermes:" in out
     assert "hermes: workspace handoff inbox" in out
@@ -323,7 +379,7 @@ def test_doctor_reports_memory_care_files(tmp_target: Path, monkeypatch, capsys)
     (decay / "scan-latest.json").write_text(json.dumps({"scan_date": "2026-05-13", "counts": {"stale": 2}}))
     (decay / "refresh-queue.json").write_text(json.dumps({"cards": [{"file": "x.md"}]}))
 
-    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
     assert rc == 0
     assert "memory-care: scan-latest" in out
@@ -345,7 +401,7 @@ def test_doctor_warns_when_memory_care_scan_is_stale(tmp_target: Path, monkeypat
     (decay / "scan-latest.json").write_text(json.dumps({"scan_date": "2026-05-01", "counts": {"stale": 4}}))
     (decay / "refresh-queue.json").write_text(json.dumps({"cards": []}))
 
-    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
     assert rc == 0
     assert "memory-care: scan freshness" in out
@@ -378,7 +434,7 @@ def test_doctor_verifies_memory_index_card_links(tmp_target: Path, capsys):
         Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
     )
 
-    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
     assert rc == 0
     assert "memory-index: card links" in out
@@ -520,7 +576,7 @@ def test_doctor_openclaw_reports_cron_memory_jobs(tmp_target: Path, monkeypatch,
     monkeypatch.setenv("HOME", str(tmp_target))
     monkeypatch.setattr(Path, "home", lambda: tmp_target)
 
-    rc = doctor_mod.run(target=tmp_target, harness="openclaw")
+    rc = doctor_mod.run(target=tmp_target, harness="openclaw", full=True)
     out = capsys.readouterr().out
     assert rc == 0
     assert "openclaw: handoff ingest cron" in out
@@ -656,7 +712,7 @@ def test_doctor_includes_embedded_content_guard_without_external_binary(monkeypa
 
     monkeypatch.setattr(managed.proc, "which", lambda c: None)
 
-    doctor_mod.run(target=tmp_target, harness="generic")
+    doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
     assert "guard: embedded content guard" in out
 
@@ -669,7 +725,7 @@ def test_doctor_reports_absent_tool_as_manual(monkeypatch, tmp_target, capsys):
     install_selection(tmp_target, Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]))
     monkeypatch.setattr(managed.proc, "which", lambda c: None)  # nothing installed
 
-    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
     # absent managed tools must not fail the run
     assert rc == 0
@@ -704,7 +760,7 @@ def test_doctor_includes_agent_notify_managed_tool(monkeypatch, tmp_target, caps
     monkeypatch.setenv("TEST_TELEGRAM_CHAT_ID", "chat")
     monkeypatch.setattr(managed.proc, "which", lambda c: "/x/" + c if c == "agent-notify" else None)
 
-    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
 
     assert rc == 0

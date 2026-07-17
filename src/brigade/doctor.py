@@ -24,6 +24,7 @@ WARN = "WARN"
 FAIL = "FAIL"
 MANUAL = "MANUAL"
 INFO = "INFO"
+DEFAULT_TEXT_CHECK_LIMIT = 50
 
 
 def build_context(target: Path, harness: str = "generic") -> DoctorContext:
@@ -209,7 +210,7 @@ def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return results
 
 
-def run(target: Path, harness: str = "generic", *, json_output: bool = False) -> int:
+def run(target: Path, harness: str = "generic", *, json_output: bool = False, full: bool = False) -> int:
     ctx = build_context(target, harness)
     checks = _gather_checks(ctx)
     if json_output:
@@ -221,7 +222,7 @@ def run(target: Path, harness: str = "generic", *, json_output: bool = False) ->
         print(f"  harnesses: {', '.join(sel.harnesses) or '(none)'} (owner={sel.owner}, depth={sel.depth})")
     else:
         print(f"  harnesses: (legacy target, no config; assuming {', '.join(ctx.harnesses)})")
-    return _report(checks)
+    return _report(checks, full=full)
 
 
 def _gather_checks(ctx: DoctorContext) -> List[CheckResult]:
@@ -848,32 +849,51 @@ def _is_machine_level(name: str) -> bool:
     return name.startswith(_MACHINE_LEVEL_PREFIXES) or name in _MACHINE_LEVEL_NAMES
 
 
-def _report(checks: List[CheckResult]) -> int:
+def _report(checks: List[CheckResult], *, full: bool = True) -> int:
     width = max((len(name) for _, name, _ in checks), default=20)
-    repo_checks = [check for check in checks if not _is_machine_level(check[1])]
-    machine_checks = [check for check in checks if _is_machine_level(check[1])]
+    counts = _status_counts(checks)
+    print(
+        f"triage: {len(checks)} checks, {counts[OK]} ok, {counts[WARN]} warn, "
+        f"{counts[FAIL]} failed, {counts[MANUAL]} manual, {counts[INFO]} info"
+    )
+
+    condensed = not full and len(checks) > DEFAULT_TEXT_CHECK_LIMIT
+    visible_checks = [check for check in checks if check[0] in {FAIL, WARN, MANUAL}] if condensed else checks
+    repo_checks = [check for check in visible_checks if not _is_machine_level(check[1])]
+    machine_checks = [check for check in visible_checks if _is_machine_level(check[1])]
 
     def _emit(items: List[CheckResult]) -> None:
         for status, name, detail in items:
             print(f"{_MARKERS[status]} {name.ljust(width)}  {detail}")
 
-    _emit(repo_checks)
+    print()
+    if visible_checks:
+        _emit(repo_checks)
+    else:
+        print("  no failures, warnings, or manual actions")
     if machine_checks:
         print()
         print("machine-level (not specific to this repo):")
         _emit(machine_checks)
 
-    failed = sum(1 for status, _, _ in checks if status == FAIL)
-    manual = sum(1 for status, _, _ in checks if status == MANUAL)
+    if condensed:
+        print()
+        print(f"showing {len(visible_checks)} actionable checks; run `brigade doctor --full` to show all checks")
+
     print()
-    print(f"summary: {len(checks)} checks, {failed} failed, {manual} manual")
-    return 1 if failed else 0
+    print(f"summary: {len(checks)} checks, {counts[FAIL]} failed, {counts[MANUAL]} manual")
+    return 1 if counts[FAIL] else 0
 
 
-def _report_json(ctx: DoctorContext, checks: List[CheckResult]) -> int:
+def _status_counts(checks: List[CheckResult]) -> dict[str, int]:
     counts = {OK: 0, WARN: 0, FAIL: 0, MANUAL: 0, INFO: 0}
     for status, _, _ in checks:
         counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _report_json(ctx: DoctorContext, checks: List[CheckResult]) -> int:
+    counts = _status_counts(checks)
     sel = ctx.selection
     payload = {
         "target": str(ctx.target),
