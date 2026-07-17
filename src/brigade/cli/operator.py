@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from ..operator_cmd import CHECKUP_PRESETS, CHECKUP_SURFACE_NAMES
+
 
 def register(sub: argparse._SubParsersAction) -> None:
     # operator
@@ -225,6 +227,22 @@ def register(sub: argparse._SubParsersAction) -> None:
         default="internal-dogfood",
         help="Operator profile to inspect.",
     )
+    p_operator_checkup.add_argument(
+        "--surface",
+        action="append",
+        choices=CHECKUP_SURFACE_NAMES,
+        help="Run only this named health surface. Repeat to select more than one.",
+    )
+    p_operator_checkup.add_argument(
+        "--preset",
+        choices=tuple(CHECKUP_PRESETS),
+        help="Run a named surface preset.",
+    )
+    p_operator_checkup.add_argument(
+        "--list-surfaces",
+        action="store_true",
+        help="List valid surfaces and presets without running checks.",
+    )
     p_operator_checkup.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_verify_harness = operator_sub.add_parser(
         "verify-harness", help="Verify repo-local wiring for one harness."
@@ -409,7 +427,14 @@ def dispatch(args) -> int:
     if args.operator_command == "doctor":
         return operator_cmd.doctor(target=args.target, profile=args.profile, json_output=args.json)
     if args.operator_command == "checkup":
-        return operator_cmd.checkup(target=args.target, profile=args.profile, json_output=args.json)
+        kwargs = {"target": args.target, "profile": args.profile, "json_output": args.json}
+        if args.surface:
+            kwargs["surfaces"] = args.surface
+        if args.preset:
+            kwargs["preset"] = args.preset
+        if args.list_surfaces:
+            kwargs["list_surfaces"] = True
+        return operator_cmd.checkup(**kwargs)
     if args.operator_command == "verify-harness":
         return operator_cmd.verify_harness(target=args.target, harness=args.harness, json_output=args.json)
     if args.operator_command == "sync-tools":
