@@ -7,6 +7,7 @@ does not store provider keys or import provider SDKs.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List
@@ -448,6 +449,30 @@ def ollama_model_present(model: str) -> tuple[bool, str]:
     )
 
 
+def resolve_env_overrides(env: dict[str, str]) -> tuple[dict[str, str] | None, str]:
+    """Resolve a seat env table into concrete child overrides.
+
+    Keys ending in _REF name a parent environment variable holding the value;
+    the override is injected under the key minus the suffix so secrets never
+    live in the roster. Returns (overrides, error): error is non-empty when a
+    referenced variable is not set, and never contains a secret value.
+    """
+
+    resolved: dict[str, str] = {}
+    for key, value in env.items():
+        if key.endswith("_REF"):
+            target = key[: -len("_REF")]
+            if not target:
+                return None, f"env override {key}: resolved variable name is empty"
+            referenced = os.environ.get(value)
+            if not referenced:
+                return None, f"env override {key}: referenced variable {value} is not set or is empty"
+            resolved[target] = referenced
+        else:
+            resolved[key] = value
+    return resolved, ""
+
+
 def run_agent(
     cli_ref: str,
     prompt: str,
@@ -457,6 +482,7 @@ def run_agent(
     sandbox: str | None = None,
     model: str | None = None,
     reasoning: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> AgentResult:
     if not detect(cli_ref):
         return AgentResult(text="", ok=False, detail=f"{command_for(cli_ref)} not installed")
@@ -485,6 +511,21 @@ def run_agent(
             present, missing_detail = ollama_model_present(ollama_model)
             if not present:
                 return AgentResult(text="", ok=False, detail=missing_detail)
+
+    child_env: dict[str, str] | None = None
+    if env is not None:
+        overrides, env_error = resolve_env_overrides(env)
+        if overrides is None:
+            return AgentResult(
+                text="",
+                ok=False,
+                detail=env_error,
+                failure_phase="dispatch",
+                failure_kind="env-ref-missing",
+                requested_model=model,
+            )
+        child_env = dict(os.environ)
+        child_env.update(overrides)
 
     cursor_limitation = None
     if cli_ref == "cursor" and (read_only or sandbox == "read-only"):
@@ -522,6 +563,7 @@ def run_agent(
         argv,
         timeout=timeout,
         cwd=cwd,
+        env=child_env,
     )
     text = result.stdout.strip()
     structured_error = ""

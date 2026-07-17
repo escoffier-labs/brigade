@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -36,6 +37,7 @@ class Agent:
     reasoning: str | None = None
     transport: str = "direct"
     transport_version: str | None = None
+    env: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,60 @@ def _as_sandbox(value: object) -> str | None:
         choices = ", ".join(SANDBOX_CHOICES)
         raise ValueError(f"limits.sandbox must be one of: {choices}")
     return value
+
+
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# Prefix hints match the start of any underscore-separated segment; exact
+# hints must equal a whole segment (so PAT flags GH_PAT but not PATH).
+_SECRET_PREFIX_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "AUTH", "CRED", "COOKIE", "SESSION", "BEARER")
+_SECRET_EXACT_HINTS = ("PAT",)
+
+
+def _looks_like_secret_name(key: str) -> bool:
+    segments = key.split("_")
+    if any(seg in _SECRET_EXACT_HINTS for seg in segments):
+        return True
+    return any(seg.startswith(hint) for seg in segments for hint in _SECRET_PREFIX_HINTS)
+
+
+_SECRET_VALUE_PREFIXES = ("sk-", "xoxb-", "ghp_", "github_pat_", "Bearer ", "sk_live_", "AKIA")
+
+
+def _as_env(value: object, agent_name: str) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"agents.{agent_name}.env must be a TOML table")
+    parsed: dict[str, str] = {}
+    targets: dict[str, str] = {}
+    for key, raw in value.items():
+        if not isinstance(raw, str):
+            raise ValueError(f"agents.{agent_name}.env.{key} must be a string")
+        if not _ENV_NAME_RE.match(key):
+            raise ValueError(f"agents.{agent_name}.env.{key} is not a valid environment variable name")
+        if key.endswith("_REF"):
+            target = key[: -len("_REF")]
+            if not _ENV_NAME_RE.match(raw):
+                raise ValueError(
+                    f"agents.{agent_name}.env.{key} must name an environment variable to read the value from"
+                )
+        else:
+            target = key
+            if _looks_like_secret_name(key):
+                raise ValueError(
+                    f"agents.{agent_name}.env.{key} looks like a secret; pass it by reference with a _REF suffix "
+                    f"naming an environment variable instead of an inline value"
+                )
+            if raw.startswith(_SECRET_VALUE_PREFIXES):
+                raise ValueError(
+                    f"agents.{agent_name}.env.{key} looks like a secret value; pass it by reference with a "
+                    f"_REF suffix naming an environment variable instead"
+                )
+        if target in targets:
+            raise ValueError(f"agents.{agent_name}.env.{key} collides with {targets[target]}: both resolve to {target}")
+        targets[target] = key
+        parsed[key] = raw
+    return parsed or None
 
 
 def is_cli_allowed(cli_ref: str, roster: Roster) -> bool:
@@ -184,6 +240,8 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             raise ValueError(f"agents.{agent_name}.headers must be a TOML table")
         headers = dict(headers_raw) if headers_raw is not None else None
 
+        env = _as_env(raw_agent.get("env"), agent_name)
+
         cli_raw = raw_agent.get("cli")
         has_endpoint = endpoint is not None and model is not None
         if cli_raw is None and has_endpoint:
@@ -196,6 +254,17 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
                 raise ValueError(f"agents.{agent_name}.cli is unknown: {cli!r}")
             if not _allowed(cli, allow_models):
                 raise ValueError(f"agents.{agent_name}.cli is not allowed by limits.allow_models: {cli!r}")
+
+        if env is not None and (transport_raw != "direct" or cli is None or cli.startswith("codex-cloud:")):
+            raise ValueError(
+                f"agents.{agent_name}.env overrides support direct CLI seats only; "
+                f"acpx, codex-cloud, and endpoint seats manage their own environment"
+            )
+        if env is not None and cli == "codex" and codex_transport == "app-server":
+            raise ValueError(
+                f'agents.{agent_name}.env on a codex seat requires codex_transport = "exec"; '
+                f"app-server sessions cannot apply per-seat env overrides"
+            )
 
         if transport_raw == "acpx":
             if cli != "cursor":
@@ -225,6 +294,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             reasoning=reasoning,
             transport=transport_raw,
             transport_version=transport_version,
+            env=env,
         )
 
     if orchestrator not in parsed_agents:
