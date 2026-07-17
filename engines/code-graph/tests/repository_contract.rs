@@ -328,9 +328,9 @@ fn release_publication_is_preflighted_protected_and_recoverable() {
     );
     assert!(
         readme.contains(
-            "cargo install --git https://github.com/escoffier-labs/graphtrail --tag v0.3.0"
+            "cargo install --git https://github.com/escoffier-labs/graphtrail --tag v0.4.0"
         ),
-        "README must distinguish the v0.3.0 Git tag from the registry install"
+        "README must distinguish the v0.4.0 Git tag from the registry install"
     );
 
     let recovery = repository_file("docs/releasing.md");
