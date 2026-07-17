@@ -24,14 +24,14 @@
 
 <p align="center">
   <img src="https://shieldcn.dev/github/ci/escoffier-labs/graphtrail.svg?branch=master&workflow=ci.yml" alt="CI status">
-  <img src="https://shieldcn.dev/badge/crate-v0.3.0-orange.svg?logo=rust&logoColor=white" alt="Crate version 0.3.0">
+  <img src="https://img.shields.io/crates/v/graphtrail.svg" alt="crates.io version">
   <img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license">
   <img src="https://shieldcn.dev/badge/MCP-server-8A2BE2.svg" alt="MCP server">
 </p>
 
 ## Install
 
-GraphTrail requires Rust 1.85 or newer. It installs two binaries: `graphtrail` for CLI use and `graphtrail-mcp` for MCP clients. From [crates.io](https://crates.io/crates/graphtrail):
+GraphTrail requires Rust 1.85 or newer. It installs two binaries: `graphtrail` for CLI use and `graphtrail-mcp` for MCP clients. The crates.io badge above is the source of truth for the version installed from the registry; a GitHub tag is not treated as registry-available until that exact version is verified. From [crates.io](https://crates.io/crates/graphtrail):
 
 ```bash
 cargo install graphtrail
@@ -40,6 +40,9 @@ cargo install graphtrail
 From git or a clone:
 
 ```bash
+# Install the exact v0.3.0 GitHub release independently of registry availability.
+cargo install --git https://github.com/escoffier-labs/graphtrail --tag v0.3.0
+# Or install current master.
 cargo install --git https://github.com/escoffier-labs/graphtrail
 # or
 git clone https://github.com/escoffier-labs/graphtrail.git

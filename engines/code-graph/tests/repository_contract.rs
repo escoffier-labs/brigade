@@ -236,6 +236,118 @@ fn ci_covers_supported_platform_and_feature_configurations() {
 }
 
 #[test]
+fn release_publication_is_preflighted_protected_and_recoverable() {
+    for path in [
+        ".github/workflows/publish.yml",
+        "scripts/release-preflight.sh",
+        "scripts/verify-crates-version.sh",
+        "docs/releasing.md",
+    ] {
+        assert!(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(path).is_file(),
+            "release publication contract must include {path}"
+        );
+    }
+
+    let workflow = repository_file(".github/workflows/publish.yml");
+    for required in [
+        "workflow_dispatch:",
+        "environment: release",
+        "if: github.ref == 'refs/heads/master'",
+        "id-token: write",
+        "ref: ${{ inputs.tag }}",
+        "TAG: ${{ inputs.tag }}",
+        "fetch-depth: 0",
+        "scripts/release-preflight.sh",
+        "cargo package --locked",
+        "rust-lang/crates-io-auth-action@v1",
+        "cargo publish --locked",
+        "scripts/verify-crates-version.sh",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "publish workflow must preserve the protected release step: {required}"
+        );
+    }
+    assert!(
+        !workflow.contains("pull_request:"),
+        "publish workflow must never expose publication on pull requests"
+    );
+    assert!(
+        !workflow.contains("\"${{ inputs.tag }}\""),
+        "workflow-dispatch input must reach shell steps through an environment variable"
+    );
+    assert_eq!(
+        workflow.matches("${{ inputs.tag }}").count(),
+        3,
+        "tag input must appear only as the checkout ref and two environment values"
+    );
+    let package = workflow.find("cargo package --locked").unwrap();
+    let authenticate = workflow.find("rust-lang/crates-io-auth-action@v1").unwrap();
+    let publish = workflow.find("cargo publish --locked").unwrap();
+    let registry = workflow.find("scripts/verify-crates-version.sh").unwrap();
+    assert!(
+        package < authenticate && authenticate < publish && publish < registry,
+        "publish workflow must package, authenticate, publish, then verify the registry"
+    );
+
+    let preflight = repository_file("scripts/release-preflight.sh");
+    for required in [
+        "Cargo.toml",
+        "CHANGELOG.md",
+        "git -C",
+        "rev-parse",
+        "refs/tags/${tag}^{commit}",
+        "merge-base --is-ancestor",
+        "origin/master",
+        "tag and manifest version differ",
+        "release tag does not point to checked-out source",
+    ] {
+        assert!(
+            preflight.contains(required),
+            "release preflight must verify version identity: {required}"
+        );
+    }
+
+    let registry = repository_file("scripts/verify-crates-version.sh");
+    for required in [
+        "https://crates.io/api/v1/crates/",
+        "User-Agent:",
+        "registry did not expose",
+    ] {
+        assert!(
+            registry.contains(required),
+            "registry verification must preserve exact-version polling: {required}"
+        );
+    }
+
+    let readme = repository_file("README.md");
+    assert!(
+        readme.contains("https://img.shields.io/crates/v/graphtrail.svg"),
+        "README crate badge must reflect the registry dynamically"
+    );
+    assert!(
+        readme.contains(
+            "cargo install --git https://github.com/escoffier-labs/graphtrail --tag v0.3.0"
+        ),
+        "README must distinguish the v0.3.0 Git tag from the registry install"
+    );
+
+    let recovery = repository_file("docs/releasing.md");
+    for required in [
+        "Trusted Publishing",
+        "do not move or recreate the tag",
+        "If the exact version is absent",
+        "If the exact version is present",
+    ] {
+        assert!(
+            recovery.contains(required),
+            "release recovery guide must preserve: {required}"
+        );
+    }
+}
+
+#[test]
 fn agent_startup_requires_skill_selection_before_brigade_commands() {
     let agents = repository_file("AGENTS.md");
     let first_raw_command = agents
