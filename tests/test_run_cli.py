@@ -1027,6 +1027,26 @@ def test_app_server_fallback_clears_uncreated_control_socket(tmp_path, monkeypat
     assert "control_socket" not in run_meta
 
 
+def _write_successful_worktree_run(output_dir: Path, cwd: Path, *, final: str = "done") -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run.v1",
+                "task": "x",
+                "cwd": str(cwd),
+                "status": "ok",
+                "started_at": "2026-07-09T12:00:00Z",
+                "finished_at": "2026-07-09T12:00:01Z",
+                "duration_seconds": 1,
+                "artifacts": str(output_dir),
+            }
+        )
+        + "\n"
+    )
+    (output_dir / "final.txt").write_text(final + "\n")
+
+
 def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path, monkeypatch):
     repo = _git_repo_with_roster(tmp_path)
     output_dir = tmp_path / "run"
@@ -1044,16 +1064,18 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        defer_artifact_collection=False,
     ):
         seen["cwd"] = cwd
         seen["lock_workspace"] = lock_workspace
         seen["output_dir"] = output_dir
+        seen["defer_artifact_collection"] = defer_artifact_collection
         assert cwd != repo
         assert (cwd / "tracked.txt").read_text() == "base\n"
         assert proc.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=cwd).code == 1
         (cwd / "tracked.txt").write_text("changed in worktree\n")
         (cwd / "created.txt").write_text("created\n")
-        output_dir.mkdir(parents=True)
+        _write_successful_worktree_run(output_dir, cwd)
         (output_dir / "worker-results.json").write_text(
             json.dumps({"results": [], "ground_truth": {"available": True, "patch_ref": None}}) + "\n"
         )
@@ -1072,6 +1094,7 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
     expected_checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
     assert seen["cwd"] == expected_checkout
     assert seen["lock_workspace"] == repo.resolve()
+    assert seen["defer_artifact_collection"] is True
     assert not expected_checkout.exists()
     assert (repo / "tracked.txt").read_text() == "base\n"
     patch = (output_dir / "changes.patch").read_text()
@@ -1079,6 +1102,15 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
     assert "created.txt" in patch
     assert "+changed in worktree" in patch
     assert "+created" in patch
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "ok"
+    assert run_meta["artifact_collection"] == {
+        "status": "ok",
+        "patch_ref": "changes.patch",
+        "changed": True,
+        "tracked_count": 1,
+        "untracked_count": 1,
+    }
     assert json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
     assert json.loads((output_dir / "synthesis.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
 
@@ -1138,6 +1170,13 @@ def test_run_cli_worktree_warns_on_empty_changes_patch_noop(tmp_path, monkeypatc
     assert rc == 0
     assert (output_dir / "changes.patch").read_text() == ""
     assert json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
+    assert json.loads((output_dir / "run.json").read_text())["artifact_collection"] == {
+        "status": "ok",
+        "patch_ref": "changes.patch",
+        "changed": False,
+        "tracked_count": 0,
+        "untracked_count": 0,
+    }
     assert "changes: none" in captured.err
     assert "changes.patch" in captured.err
     assert "warning: suspected no-op run" in captured.err
@@ -1150,6 +1189,20 @@ def test_run_cli_worktree_keeps_checkout_when_patch_invalid(tmp_path, monkeypatc
     def fake_run(task, loaded_roster, **kwargs):
         cwd = kwargs["cwd"]
         (cwd / "tracked.txt").write_text("changed in worktree\n")
+        output = kwargs["output_dir"]
+        _write_successful_worktree_run(output, cwd, final="implementation complete")
+        run_path = output / "run.json"
+        run_meta = json.loads(run_path.read_text())
+        run_meta["status"] = "artifact-collection"
+        run_meta.pop("finished_at")
+        run_meta.pop("duration_seconds")
+        run_path.write_text(json.dumps(run_meta) + "\n")
+        (output / "worker-results.json").write_text(
+            json.dumps({"results": [], "ground_truth": {"patch_ref": None}}) + "\n"
+        )
+        (output / "synthesis.json").write_text(
+            json.dumps({"result": {"ok": True}, "ground_truth": {"patch_ref": None}}) + "\n"
+        )
         return 0
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
@@ -1164,6 +1217,86 @@ def test_run_cli_worktree_keeps_checkout_when_patch_invalid(tmp_path, monkeypatc
     assert "changes.patch failed validation" in err
     assert str(checkout) in err
     assert checkout.exists()
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure_phase"] == "artifact-validation"
+    assert run_meta["failure"] == {
+        "phase": "artifact-validation",
+        "kind": "invalid-patch",
+        "detail": "changes.patch failed validation",
+    }
+    assert run_meta["artifact_collection"] == {
+        "status": "failed",
+        "patch_ref": "changes.patch",
+        "changed": True,
+        "tracked_count": 1,
+        "untracked_count": 0,
+        "worktree": str(checkout),
+        "failure": {
+            "phase": "artifact-validation",
+            "kind": "invalid-patch",
+            "detail": "changes.patch failed validation",
+        },
+    }
+    assert (output_dir / "final.txt").read_text() == "implementation complete\n"
+    assert json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]["patch_ref"] is None
+    assert json.loads((output_dir / "synthesis.json").read_text())["ground_truth"]["patch_ref"] is None
+    assert runs_cmd.show(output_dir) == 1
+    show_output = capsys.readouterr().out
+    assert "status: failed" in show_output
+    assert "failure phase: artifact-validation" in show_output
+    assert "final:\n  implementation complete" in show_output
+    assert runs_cmd.watch(output_dir, cwd=repo, interval=0) == 1
+    watch_output = capsys.readouterr().out
+    assert "status: failed" in watch_output
+    assert "failure phase: artifact-validation" in watch_output
+
+
+def test_run_cli_worktree_artifact_failure_preserves_model_failure(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        cwd = kwargs["cwd"]
+        (cwd / "tracked.txt").write_text("changed in worktree\n")
+        _write_successful_worktree_run(kwargs["output_dir"], cwd, final="provider diagnostic")
+        run_path = kwargs["output_dir"] / "run.json"
+        run_meta = json.loads(run_path.read_text())
+        run_meta.update(
+            {
+                "status": "failed",
+                "error": "provider inference failed",
+                "failure_phase": "inference",
+                "failure": {
+                    "phase": "inference",
+                    "kind": "provider-error",
+                    "detail": "provider inference failed",
+                },
+            }
+        )
+        run_path.write_text(json.dumps(run_meta) + "\n")
+        return 2
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(runguard, "verify_changes_patch", lambda cwd, patch_path: False)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    assert rc == 2
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure_phase"] == "inference"
+    assert run_meta["failure"] == {
+        "phase": "inference",
+        "kind": "provider-error",
+        "detail": "provider inference failed",
+    }
+    assert run_meta["artifact_collection"]["failure"] == {
+        "phase": "artifact-validation",
+        "kind": "invalid-patch",
+        "detail": "changes.patch failed validation",
+    }
 
 
 def test_run_cli_worktree_kept_when_patch_collection_raises(tmp_path, monkeypatch, capsys):
@@ -1173,10 +1306,13 @@ def test_run_cli_worktree_kept_when_patch_collection_raises(tmp_path, monkeypatc
     output_dir = tmp_path / "run"
 
     def fake_run(task, loaded_roster, **kwargs):
-        (kwargs["cwd"] / "tracked.txt").write_text("changed in worktree\n")
+        cwd = kwargs["cwd"]
+        (cwd / "tracked.txt").write_text("changed in worktree\n")
+        _write_successful_worktree_run(kwargs["output_dir"], cwd, final="implementation complete")
         return 0
 
     def raising_collect(cwd, patch_path):
+        patch_path.write_text("partial patch\n")
         raise runguard.RunGuardError("failed to collect tracked diff: boom")
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
@@ -1191,6 +1327,174 @@ def test_run_cli_worktree_kept_when_patch_collection_raises(tmp_path, monkeypatc
     assert checkout.exists()
     assert (checkout / "tracked.txt").read_text() == "changed in worktree\n"
     assert str(checkout) in err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure_phase"] == "artifact-collection"
+    assert run_meta["failure"] == {
+        "phase": "artifact-collection",
+        "kind": "collection-error",
+        "detail": "failed to collect tracked diff: boom",
+    }
+    assert run_meta["artifact_collection"] == {
+        "status": "failed",
+        "patch_ref": "changes.patch",
+        "worktree": str(checkout),
+        "failure": {
+            "phase": "artifact-collection",
+            "kind": "collection-error",
+            "detail": "failed to collect tracked diff: boom",
+        },
+    }
+    assert (output_dir / "final.txt").read_text() == "implementation complete\n"
+
+
+def test_run_cli_worktree_records_patch_write_error(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        cwd = kwargs["cwd"]
+        (cwd / "tracked.txt").write_text("changed in worktree\n")
+        _write_successful_worktree_run(kwargs["output_dir"], cwd, final="implementation complete")
+        return 0
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(
+        runguard,
+        "collect_changes_patch",
+        lambda cwd, patch_path: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    assert rc == 2
+    assert checkout.exists()
+    assert "failed to write changes.patch: disk full" in capsys.readouterr().err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure_phase"] == "artifact-collection"
+    assert run_meta["failure"]["kind"] == "collection-error"
+    assert run_meta["failure"]["detail"] == "failed to write changes.patch: disk full"
+    assert run_meta["artifact_collection"] == {
+        "status": "failed",
+        "worktree": str(checkout),
+        "failure": {
+            "phase": "artifact-collection",
+            "kind": "collection-error",
+            "detail": "failed to write changes.patch: disk full",
+        },
+    }
+
+
+def test_run_cli_worktree_keeps_checkout_when_receipt_finalization_fails(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        cwd = kwargs["cwd"]
+        (cwd / "tracked.txt").write_text("changed in worktree\n")
+        output = kwargs["output_dir"]
+        _write_successful_worktree_run(output, cwd, final="implementation complete")
+        run_path = output / "run.json"
+        run_meta = json.loads(run_path.read_text())
+        run_meta["status"] = "artifact-collection"
+        run_meta.pop("finished_at")
+        run_meta.pop("duration_seconds")
+        run_path.write_text(json.dumps(run_meta) + "\n")
+        return 0
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(
+        aboyeur,
+        "_write_json",
+        lambda path, payload: (_ for _ in ()).throw(OSError("receipt disk full")),
+    )
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    assert rc == 2
+    assert checkout.exists()
+    assert "failed to update run receipt after artifact collection: receipt disk full" in capsys.readouterr().err
+    assert json.loads((output_dir / "run.json").read_text())["status"] == "artifact-collection"
+    assert runguard.lock_path(repo).is_dir()
+
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert runs_cmd.watch(output_dir, cwd=repo, interval=0) == 1
+    recovered = json.loads((output_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure_phase"] == "stale-lock-recovery"
+    assert recovered["failure"]["prior_status"] == "artifact-collection"
+    assert not runguard.lock_path(repo).exists()
+
+
+def test_run_cli_worktree_records_patch_reference_failure(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        cwd = kwargs["cwd"]
+        output = kwargs["output_dir"]
+        (cwd / "tracked.txt").write_text("changed in worktree\n")
+        _write_successful_worktree_run(output, cwd, final="implementation complete")
+        (output / "worker-results.json").write_text(
+            json.dumps({"results": [], "ground_truth": {"patch_ref": None}}) + "\n"
+        )
+        return 0
+
+    original_write_json = aboyeur._write_json
+
+    def fail_worker_results(path, payload):
+        if path.name == "worker-results.json":
+            raise OSError("worker receipt disk full")
+        return original_write_json(path, payload)
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(aboyeur, "_write_json", fail_worker_results)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    assert rc == 2
+    assert checkout.exists()
+    detail = "failed to record artifact patch reference in worker-results.json: worker receipt disk full"
+    assert detail in capsys.readouterr().err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure_phase"] == "artifact-collection"
+    assert run_meta["failure"]["kind"] == "receipt-update-error"
+    assert run_meta["failure"]["detail"] == detail
+
+
+def test_run_cli_worktree_rejects_corrupt_worker_receipt_during_patch_reference(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        cwd = kwargs["cwd"]
+        output = kwargs["output_dir"]
+        (cwd / "tracked.txt").write_text("changed in worktree\n")
+        _write_successful_worktree_run(output, cwd, final="implementation complete")
+        (output / "worker-results.json").write_text("{not json\n")
+        return 0
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    assert rc == 2
+    assert checkout.exists()
+    assert "failed to parse worker-results.json while recording artifact patch reference" in capsys.readouterr().err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure_phase"] == "artifact-collection"
+    assert run_meta["failure"]["kind"] == "receipt-update-error"
 
 
 def test_run_cli_rejects_worktree_with_no_artifacts(tmp_path, capsys):

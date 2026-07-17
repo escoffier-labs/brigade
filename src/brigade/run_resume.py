@@ -16,7 +16,9 @@ from . import aboyeur, agents, codex_appserver, runguard
 from .roster import Agent, Roster
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
-_NONTERMINAL_RUN_STATUSES = frozenset({"started", "planning", "dispatching", "synthesizing", "running"})
+_NONTERMINAL_RUN_STATUSES = frozenset(
+    {"started", "planning", "dispatching", "synthesizing", "artifact-collection", "running"}
+)
 
 
 def _load_json(run_dir: Path, name: str) -> dict | None:

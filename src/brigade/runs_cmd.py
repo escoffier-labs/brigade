@@ -8,7 +8,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-_NONTERMINAL_STATUSES = frozenset({"started", "planning", "dispatching", "synthesizing", "running"})
+_NONTERMINAL_STATUSES = frozenset(
+    {"started", "planning", "dispatching", "synthesizing", "artifact-collection", "running"}
+)
 _SUCCESS_STATUSES = frozenset({"ok", "dry-run"})
 
 
@@ -660,6 +662,27 @@ def watch(
         if rc is not None:
             return rc
         assert run_meta is not None
+        if run_meta.get("status") == "artifact-collection":
+            workspace = _lock_workspace(run_dir, run_meta, fallback=cwd)
+            if workspace is not None:
+                from . import runguard
+
+                try:
+                    if runguard.recover_stale_run(workspace, run_dir, required=False):
+                        continue
+                    refreshed = _read_json(run_dir / "run.json")
+                    if refreshed is not None and _is_terminal(refreshed):
+                        continue
+                    print(
+                        "error: artifact-collection run has no matching recoverable lock",
+                        file=sys.stderr,
+                    )
+                    return 2
+                except runguard.RunLockError as exc:
+                    detail = str(exc)
+                    if "owner process is still active" not in detail and "recovery is still active" not in detail:
+                        print(f"error: artifact-collection recovery failed: {detail}", file=sys.stderr)
+                        return 2
         if _is_terminal(run_meta):
             if not summary_emitted:
                 _emit_summary(run_dir, run_meta, json_output=json_output)

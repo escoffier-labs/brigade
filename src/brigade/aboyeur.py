@@ -1467,12 +1467,107 @@ def set_artifact_patch_ref(output_dir: Path, patch_ref: str = "changes.patch") -
         path = output_dir / filename
         try:
             payload = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             continue
+        except OSError as exc:
+            raise runguard.RunGuardError(
+                f"failed to read {filename} while recording artifact patch reference: {exc}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise runguard.RunGuardError(
+                f"failed to parse {filename} while recording artifact patch reference: {exc}"
+            ) from exc
         if not isinstance(payload, dict) or "ground_truth" not in payload:
-            continue
+            raise runguard.RunGuardError(f"{filename} is missing ground_truth while recording artifact patch reference")
         payload["ground_truth"] = _with_patch_ref(payload.get("ground_truth"), patch_ref)
-        _write_json(path, payload)
+        try:
+            _write_json(path, payload)
+        except OSError as exc:
+            raise runguard.RunGuardError(f"failed to record artifact patch reference in {filename}: {exc}") from exc
+
+
+def record_artifact_collection(
+    output_dir: Path,
+    *,
+    status: str,
+    patch_ref: str | None = None,
+    changed: bool | None = None,
+    tracked_count: int | None = None,
+    untracked_count: int | None = None,
+    worktree: Path | None = None,
+    failure_phase: str | None = None,
+    failure_kind: str | None = None,
+    detail: str | None = None,
+) -> None:
+    run_path = output_dir / "run.json"
+    try:
+        payload = json.loads(run_path.read_text())
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to read run receipt during artifact collection: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise runguard.RetainRunLockError(f"run receipt is invalid during artifact collection: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise runguard.RetainRunLockError("run receipt must contain an object during artifact collection")
+
+    collection: dict[str, object] = {"status": status}
+    if patch_ref is not None:
+        collection["patch_ref"] = patch_ref
+    if changed is not None:
+        collection["changed"] = changed
+    if tracked_count is not None:
+        collection["tracked_count"] = tracked_count
+    if untracked_count is not None:
+        collection["untracked_count"] = untracked_count
+    if worktree is not None:
+        collection["worktree"] = str(worktree)
+
+    if status == "failed":
+        bounded_detail = _one_line(detail or "artifact collection failed")[:2000]
+        phase = failure_phase or "artifact-collection"
+        artifact_failure = {
+            "phase": phase,
+            "kind": failure_kind or "unknown",
+            "detail": bounded_detail,
+        }
+        collection["failure"] = artifact_failure
+        if payload.get("status") not in {"failed", "handoff-failed", "interrupted"}:
+            payload["status"] = "failed"
+            payload["error"] = bounded_detail
+            payload["failure_phase"] = phase
+            payload["failure"] = artifact_failure
+            finished_at = datetime.now(timezone.utc)
+            payload["finished_at"] = _utc_iso(finished_at)
+            started_at = payload.get("started_at")
+            if isinstance(started_at, str):
+                try:
+                    started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+                else:
+                    payload["duration_seconds"] = max(
+                        0.0,
+                        round((finished_at - started.astimezone(timezone.utc)).total_seconds(), 3),
+                    )
+    elif status == "ok" and payload.get("status") == "artifact-collection":
+        finished_at = datetime.now(timezone.utc)
+        payload["status"] = "ok"
+        payload["finished_at"] = _utc_iso(finished_at)
+        started_at = payload.get("started_at")
+        if isinstance(started_at, str):
+            try:
+                started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+            else:
+                payload["duration_seconds"] = max(
+                    0.0,
+                    round((finished_at - started.astimezone(timezone.utc)).total_seconds(), 3),
+                )
+    payload["artifact_collection"] = collection
+    try:
+        _write_json(run_path, payload)
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to update run receipt after artifact collection: {exc}") from exc
 
 
 def _roster_payload(roster: Roster) -> dict[str, object]:
@@ -1629,6 +1724,7 @@ def run(
     route_overrides: tuple[str, ...] = (),
     worker: str | None = None,
     authorized_writable_worktree: bool = False,
+    defer_artifact_collection: bool = False,
 ) -> int:
     started_at = datetime.now(timezone.utc)
     transport_for_payload = codex_transport or roster.codex_transport
@@ -2080,7 +2176,7 @@ def run(
             print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
         return 2
     if output_dir is not None:
-        finished_at = datetime.now(timezone.utc)
+        finished_at = None if defer_artifact_collection else datetime.now(timezone.utc)
         (output_dir / "final.txt").write_text(final.text + "\n")
         _write_json(
             output_dir / "run.json",
@@ -2090,7 +2186,7 @@ def run(
                 roster=roster,
                 dry_run=dry_run,
                 read_only=read_only,
-                status="ok",
+                status="artifact-collection" if defer_artifact_collection else "ok",
                 started_at=started_at,
                 finished_at=finished_at,
                 output_dir=output_dir,
@@ -2154,7 +2250,7 @@ def run(
             return 2
         print(f"handoff: {handoff}", file=sys.stderr)
         if output_dir is not None:
-            finished_at = datetime.now(timezone.utc)
+            finished_at = None if defer_artifact_collection else datetime.now(timezone.utc)
             _write_json(
                 output_dir / "run.json",
                 _payload(
@@ -2163,7 +2259,7 @@ def run(
                     roster=roster,
                     dry_run=dry_run,
                     read_only=read_only,
-                    status="ok",
+                    status="artifact-collection" if defer_artifact_collection else "ok",
                     started_at=started_at,
                     finished_at=finished_at,
                     output_dir=output_dir,
