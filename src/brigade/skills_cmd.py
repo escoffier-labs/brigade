@@ -7,8 +7,10 @@ reviewed packs into harness-specific folders.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import hashlib
+import io
 import json
 import os
 import shlex
@@ -1049,6 +1051,198 @@ def install(
     for item in skipped:
         print(f"- {item['target']}: skipped ({item['reason']})")
     return 0
+
+
+def _trust_at_least(actual: str, minimum: str) -> bool:
+    try:
+        return TRUST_LEVELS.index(actual) >= TRUST_LEVELS.index(minimum)
+    except ValueError:
+        return False
+
+
+def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[str, Any]], str | None]:
+    install_targets = _install_targets(workspace)
+    if harness not in (*install_targets, "all"):
+        return [], f"unknown skill install target: {harness}"
+    if trust not in TRUST_LEVELS:
+        return [], f"unknown skill trust level: {trust}"
+    targets = install_targets if harness == "all" else (harness,)
+    items: list[dict[str, Any]] = []
+    registry = _iter_registry(workspace)
+    for registry_row in registry:
+        registry_metadata = registry_row["metadata"]
+        skill_id = _slug(str(registry_metadata.get("id") or Path(str(registry_row["skill_dir"])).name))
+        lint_payload = _lint_payload(workspace, f"registry:{skill_id}")
+        metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else registry_metadata
+        trust_score = lint_payload.get("trust_score") if isinstance(lint_payload.get("trust_score"), dict) else {}
+        actual_trust = str(trust_score.get("trust_level") or "unreviewed")
+        supported = metadata.get("supported_harnesses")
+        supported_harnesses = set(supported) if isinstance(supported, list) else set()
+        source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
+        for install_target in targets:
+            item: dict[str, Any] = {
+                "skill_id": skill_id,
+                "harness": install_target,
+                "source": source,
+                "trust_level": actual_trust,
+                "minimum_trust": trust,
+                "state": "blocked",
+                "action": "none",
+                "result": "blocked",
+                "reason": None,
+                "receipt": None,
+                "error": None,
+            }
+            if not lint_payload.get("valid"):
+                errors = lint_payload.get("errors") if isinstance(lint_payload.get("errors"), list) else []
+                item["reason"] = "; ".join(str(error) for error in errors) or "skill lint failed"
+                items.append(item)
+                continue
+            if not _trust_at_least(actual_trust, trust):
+                item.update(
+                    state="excluded",
+                    result="excluded",
+                    reason=f"trust level {actual_trust} is below {trust}",
+                )
+                items.append(item)
+                continue
+            if supported_harnesses and install_target not in supported_harnesses:
+                item.update(
+                    state="excluded",
+                    result="excluded",
+                    reason=f"harness {install_target} is not supported by registry metadata",
+                )
+                items.append(item)
+                continue
+            if install_target == "hermes" and not _hermes_home().exists():
+                item.update(
+                    state="excluded",
+                    result="excluded",
+                    reason="Hermes home not found (is Hermes installed?)",
+                )
+                items.append(item)
+                continue
+            source_dir = Path(str(lint_payload["skill_dir"]))
+            source_text = _skill_md_path(source_dir).read_text(errors="replace")
+            rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, install_target)
+            render_errors = _rendered_skill_validation(rendered, install_target)
+            if render_errors:
+                item["reason"] = "; ".join(render_errors)
+                items.append(item)
+                continue
+            installed_dir = _install_dir(workspace, install_target, skill_id)
+            drift = _drift_payload(
+                target=workspace,
+                skill_id=skill_id,
+                harness=install_target,
+                lint_payload=lint_payload,
+                rendered=rendered,
+                installed_dir=installed_dir,
+            )
+            item["drift"] = {
+                key: drift[key]
+                for key in ("overall", "source", "render", "local_edit", "receipt_known", "content_changed")
+            }
+            if drift["overall"] == "current":
+                item.update(state="current", result="unchanged")
+            elif drift["overall"] == "missing":
+                item.update(state="missing", action="install", result="planned")
+            elif drift["overall"] == "changed":
+                item.update(state="changed", action="update", result="planned")
+            else:
+                item["reason"] = "installed copy has no valid provenance receipt"
+            items.append(item)
+    return items, None
+
+
+def sync(
+    *,
+    workspace: Path,
+    harness: str,
+    trust: str = "workspace",
+    write: bool = False,
+    json_output: bool = False,
+) -> int:
+    """Reconcile every eligible registry skill against one or all harness targets."""
+    workspace = workspace.expanduser().resolve()
+    items, error = _sync_plan(workspace=workspace, harness=harness, trust=trust)
+    if error is not None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    applied = {"installed": 0, "updated": 0, "failed": 0}
+    if write:
+        for item in items:
+            if item["action"] not in {"install", "update"}:
+                continue
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            exception_error: str | None = None
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                try:
+                    rc = install(
+                        workspace=workspace,
+                        skill=f"registry:{item['skill_id']}",
+                        harness=str(item["harness"]),
+                        force=True,
+                        json_output=True,
+                    )
+                except OSError as exc:
+                    rc = 1
+                    exception_error = str(exc)
+            if rc == 0:
+                result = "installed" if item["action"] == "install" else "updated"
+                item["result"] = result
+                applied[result] += 1
+                try:
+                    install_payload = json.loads(stdout.getvalue())
+                except json.JSONDecodeError:
+                    install_payload = {}
+                receipt = install_payload.get("receipt")
+                receipts = receipt.get("receipts", []) if isinstance(receipt, dict) else []
+                item["receipt"] = receipts[0] if isinstance(receipts, list) and receipts else None
+            else:
+                item["result"] = "failed"
+                item["error"] = (
+                    exception_error or stderr.getvalue().strip() or stdout.getvalue().strip() or f"install exited {rc}"
+                )
+                applied["failed"] += 1
+
+    counts = {
+        state: sum(item["state"] == state for item in items)
+        for state in ("current", "missing", "changed", "blocked", "excluded")
+    }
+    payload = {
+        "schema_version": 1,
+        "workspace": str(workspace),
+        "target": harness,
+        "minimum_trust": trust,
+        "write": write,
+        "registry_count": len({str(item["skill_id"]) for item in items}),
+        "item_count": len(items),
+        "counts": counts,
+        "applied": applied,
+        "items": items,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        mode = "write" if write else "dry-run"
+        print(f"skills sync: {workspace}")
+        print(f"mode: {mode}")
+        print(f"target: {harness}")
+        print(f"minimum_trust: {trust}")
+        print(
+            " ".join(f"{state}={counts[state]}" for state in ("current", "missing", "changed", "blocked", "excluded"))
+        )
+        for item in items:
+            detail_value = item.get("error") or item.get("reason")
+            detail = f" ({detail_value})" if detail_value else ""
+            print(
+                f"- {item['skill_id']} [{item['harness']}] {item['state']} "
+                f"action={item['action']} result={item['result']}{detail}"
+            )
+    return 1 if applied["failed"] else 0
 
 
 def uninstall(*, workspace: Path, skill: str, harness: str, json_output: bool = False) -> int:

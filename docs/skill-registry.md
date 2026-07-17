@@ -56,6 +56,13 @@ harness copies and the exact update command for each supported copy. If current
 metadata no longer supports an installed harness, it reports an uninstall
 command instead of recommending another install.
 
+Use `brigade skills sync --workspace . --target all --trust workspace` to plan
+the complete registry-to-harness matrix without changing files. Add `--write`
+to install only missing or changed pairs at or above the trust floor. Sync uses
+explicit registry identities, so a same-named bundled skill cannot replace the
+reviewed registry source. Completed targets keep their receipts and rollback
+snapshots if another target fails.
+
 ## What gets installed
 
 One markdown file per skill, byte-identical to its source in
