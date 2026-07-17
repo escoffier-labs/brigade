@@ -11,11 +11,12 @@ unless ``--force``); orphans are removed only with ``--prune`` and only when sti
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from pathlib import Path
 from typing import Any
 
-from . import localio, mcp_adapters
+from . import localio, mcp_adapters, mcp_runtime
 from .mcp_adapters import ADAPTERS, MCP_TARGETS, CanonicalServer
 from .render import emit as _emit
 
@@ -541,6 +542,113 @@ def plan(
     return _emit(payload, json_output, lines, rc)
 
 
+def _config_current_by_name(
+    target: Path,
+    servers: dict[str, CanonicalServer],
+    harnesses: list[str],
+    state: dict[str, Any],
+    *,
+    name_filter: str | None = None,
+) -> dict[str, bool]:
+    current = {name: False for name in servers}
+    for server_name, server in servers.items():
+        if name_filter is not None and server_name != name_filter:
+            continue
+        applicable_statuses: list[str] = []
+        for harness in harnesses:
+            if not _server_targets_harness(server, harness):
+                continue
+            for item in _plan_for_harness(
+                target,
+                harness,
+                servers,
+                state,
+                force=False,
+                prune=False,
+                adopt=False,
+                name_filter=server_name,
+            ):
+                if item["server"] == server_name:
+                    applicable_statuses.append(item["status"])
+                    break
+        if applicable_statuses and all(status == "current" for status in applicable_statuses):
+            current[server_name] = True
+    return current
+
+
+def _verify_timeout_error(timeout: float | None, *, flag: str = "--timeout") -> str | None:
+    if timeout is None:
+        return None
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > 300:
+        return f"{flag} must be greater than 0 and no more than 300 seconds"
+    return None
+
+
+def _servers_for_verification(
+    servers: dict[str, CanonicalServer],
+    harnesses: list[str],
+    *,
+    name_filter: str | None = None,
+) -> dict[str, CanonicalServer]:
+    selected: dict[str, CanonicalServer] = {}
+    for server_name, server in servers.items():
+        if name_filter is not None and server_name != name_filter:
+            continue
+        if not server.enabled:
+            continue
+        if any(_server_targets_harness(server, harness) for harness in harnesses):
+            selected[server_name] = server
+    return selected
+
+
+def verify(
+    *,
+    target: Path,
+    name: str | None = None,
+    harness: str | None = None,
+    user_scope: bool = False,
+    timeout: float | None = None,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    timeout_error = _verify_timeout_error(timeout)
+    if timeout_error:
+        return _emit({"errors": [timeout_error]}, json_output, [f"error: {timeout_error}"], 2)
+    servers, errors, _ = load_canonical(target)
+    if errors:
+        return _emit({"errors": errors}, json_output, [f"error: {e}" for e in errors], 2)
+    harnesses, notes = active_targets(target, harness=harness, user_scope=user_scope)
+    if not harnesses:
+        message = notes[0] if notes else "no MCP harnesses selected for verification"
+        return _emit({"errors": [message], "notes": notes}, json_output, [f"error: {message}"], 2)
+    state = _load_state(target)
+    selected = _servers_for_verification(servers, harnesses, name_filter=name)
+    if not selected:
+        message = f"no servers matched verification filters (name={name!r})"
+        return _emit({"errors": [message]}, json_output, [f"error: {message}"], 2)
+    config_current = _config_current_by_name(target, servers, harnesses, state, name_filter=name)
+    filters = {"name": name, "harness": harness, "user_scope": user_scope}
+    payload, rc = mcp_runtime.run_verification(
+        target,
+        selected,
+        config_current_by_name={server_name: config_current.get(server_name, False) for server_name in selected},
+        timeout_override=timeout,
+        filters=filters,
+    )
+    if notes:
+        payload["notes"] = notes
+    lines = [
+        f"brigade mcp verify: {target}",
+        f"receipt: {payload['receipt_path']}",
+    ]
+    lines += [
+        f"{result['name']:<20} config_current={result['config_current']} runtime_healthy={result['runtime_healthy']}"
+        for result in payload["results"]
+    ]
+    lines += notes
+    return _emit(payload, json_output, lines, rc)
+
+
 def sync(
     *,
     target: Path,
@@ -551,9 +659,17 @@ def sync(
     prune: bool = False,
     adopt: bool = False,
     user_scope: bool = False,
+    verify_runtime: bool = False,
+    verify_timeout: float | None = None,
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
+    if verify_runtime and not write:
+        message = "--verify requires --write"
+        return _emit({"errors": [message]}, json_output, [f"error: {message}"], 2)
+    timeout_error = _verify_timeout_error(verify_timeout, flag="--verify-timeout")
+    if timeout_error:
+        return _emit({"errors": [timeout_error]}, json_output, [f"error: {timeout_error}"], 2)
     servers, errors, _ = load_canonical(target)
     if errors:
         return _emit({"errors": errors}, json_output, [f"error: {e}" for e in errors], 2)
@@ -623,13 +739,39 @@ def sync(
         "items": _public_items(all_items),
         "counts": counts,
     }
+    if write and verify_runtime:
+        selected = _servers_for_verification(servers, harnesses, name_filter=name)
+        if selected:
+            config_current = _config_current_by_name(target, servers, harnesses, state, name_filter=name)
+            verification_payload, verify_rc = mcp_runtime.run_verification(
+                target,
+                selected,
+                config_current_by_name={
+                    server_name: config_current.get(server_name, False) for server_name in selected
+                },
+                timeout_override=verify_timeout,
+                filters={"name": name, "harness": harness, "user_scope": user_scope},
+            )
+            payload["verification"] = {
+                "receipt_path": verification_payload["receipt_path"],
+                "results": verification_payload["results"],
+            }
+        else:
+            verify_rc = 0
+    else:
+        verify_rc = 0
+
     verb = "wrote" if write else "would"
     lines = [f"brigade mcp sync ({'write' if write else 'dry-run'}): {target}", f"source: {source_catalog}"]
     lines += [f"destination: {path}" for path in destination_files]
     lines += [f"{i['harness']:<12} {i['server']:<20} {i['status']:<14} -> {i['action']}" for i in all_items]
     lines += [f"{verb}: {f}" for f in files_written]
+    if write and verify_runtime and payload.get("verification"):
+        lines.append(f"verification receipt: {payload['verification']['receipt_path']}")
     lines += notes
     rc = 1 if counts["conflict"] else 0
+    if verify_rc != 0:
+        rc = verify_rc
     return _emit(payload, json_output, lines, rc)
 
 

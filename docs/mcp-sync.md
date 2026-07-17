@@ -12,7 +12,8 @@ This is the one place Brigade writes runtime config into tool-owned files, so it
 on purpose: it is **explicit** (never runs from `doctor`/`brief`/`work run`), **dry-run by
 default**, **merges by server key** (servers you added by hand are never touched), and
 **never inlines secrets** (env values are written as `${VAR}` references). Brigade still does
-not start MCP servers or store auth.
+not start MCP servers during plan, doctor, or default sync, and it does not store auth.
+Runtime checks happen only through the explicit `mcp verify` command or `sync --write --verify`.
 
 ## The canonical catalog: `.brigade/mcp.json`
 
@@ -44,8 +45,9 @@ is machine-local and gitignored.
 
 `env` and `headers` values are references (`{"ref": "VAR"}`) or explicit literals
 (`{"literal": "..."}`). A bare string is treated as a literal and flagged by `doctor`. Brigade
-never reads the process environment to materialize a value; it writes the reference form each
-tool expands at launch.
+does not read the process environment while planning or syncing. Runtime verification resolves
+references only in the spawned process or HTTP request, then omits those values from output and
+receipts.
 
 ## Supported tools
 
@@ -82,8 +84,10 @@ brigade mcp list                       # show the catalog
 brigade mcp plan                       # preview what a sync would do (read-only)
 brigade mcp sync                       # dry-run across every configured tool
 brigade mcp sync --write               # actually merge into each tool's config
+brigade mcp sync --write --verify      # write, then verify the selected runtimes
 brigade mcp sync --write --user-scope  # also write configured user-global targets
 brigade mcp sync --harness cursor --user-scope --write  # write ~/.cursor/mcp.json
+brigade mcp verify --harness cursor --name github  # bounded runtime handshake
 brigade mcp doctor                     # validate the catalog, report unsupported tools
 brigade mcp import --harness cursor --merge   # read an existing config into the catalog
 brigade operator sync-mcp --write      # validate -> sync -> summary, one receipt
@@ -93,6 +97,24 @@ Cursor stays project-scoped unless both `--harness cursor` and `--user-scope`
 are present. A user-scoped Cursor projection drops a GraphTrail `--db` argument
 when that database resolves inside the source repository, so the global client
 does not pin every workspace to one repository.
+
+## Runtime verification
+
+`brigade mcp verify` checks runtime health without changing harness config. For each selected
+server, it reports `config_current` and `runtime_healthy` separately. `config_current` is true
+only when every selected harness projection for that server is current. `runtime_healthy` is
+true only after the server completes MCP initialization and returns a list from `tools/list`.
+
+Stdio checks launch `[command, *args]` without a shell. HTTP checks disable redirects and accept
+bounded JSON or event-stream responses. Both paths use one per-server deadline, cap captured
+output, send no `tools/call` request, and retain only the negotiated protocol version and tool
+count. Stdio timeouts terminate the spawned process group. Failures use 4 stable classes:
+`timeout`, `startup_failure`, `connection_failure`, and `protocol_failure`.
+
+Every runtime check writes a machine-readable receipt under
+`.brigade/mcp/verify-runs/<run-id>/receipt.json`. Receipts exclude command arguments, raw process
+output, header values, and environment values. Use `--name` and `--harness` to narrow execution,
+and `--timeout` or `sync --verify-timeout` to override the catalog timeout for that run.
 
 ## Merge and ownership
 
