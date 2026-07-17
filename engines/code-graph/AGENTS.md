@@ -26,7 +26,7 @@ cargo build --release
 
 ## Brigade work loop
 
-This repository is Brigade-wired. Read the work brief before editing:
+This repository is Brigade-wired. At session start, invoke `using-skillet` to select the applicable workflow, then invoke `brigade-work` before running raw Brigade commands. Read the work brief before editing:
 
 ```bash
 brigade work brief --target .
