@@ -914,10 +914,8 @@ def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
             targets.extend(positionals)
         elif command_name in last_target_commands and positionals:
             targets.append(positionals[-1])
-        elif command_name in _BASH_WRITE_COMMANDS and not targets:
-            return False
         if not targets:
-            continue
+            return False
         found_target = True
         if any(not _is_handoff_path(target, path) for path in targets):
             return False
