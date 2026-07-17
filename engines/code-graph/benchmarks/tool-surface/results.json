@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "description": "Narrow structural tools vs a single semantic-search MCP surface on one query set and corpus. Success = every expected string present in the tool text result. Response tokens approximated as ceil(chars/4).",
+  "corpus": "graphtrail repo @ 271e154 (84 files, 712 symbols, 1061 call edges)",
+  "schema_tokens_tools_list": {
+    "narrow_tools": 2289,
+    "single_search": 826
+  },
+  "summary": {
+    "narrow_tools": {
+      "tasks": 12,
+      "hits": 11,
+      "hit_rate": 0.917,
+      "resp_tokens_total": 22553
+    },
+    "single_search": {
+      "tasks": 12,
+      "hits": 4,
+      "hit_rate": 0.333,
+      "resp_tokens_total": 23545
+    }
+  },
+  "per_task": [
+    {
+      "task": "locate-incremental-sync",
+      "kind": "locate",
+      "narrow_tools": {
+        "hit": true,
+        "resp_tokens": 1919
+      },
+      "single_search": {
+        "hit": true,
+        "resp_tokens": 1999
+      }
+    },
+    {
+      "task": "locate-pending-call-persistence",
+      "kind": "locate",
+      "narrow_tools": {
+        "hit": false,
+        "resp_tokens": 470
+      },
+      "single_search": {
+        "hit": false,
+        "resp_tokens": 1967
+      }
+    },
+    {
+      "task": "locate-symbol-search",
+      "kind": "locate",
+      "narrow_tools": {
+        "hit": true,
+        "resp_tokens": 2013
+      },
+      "single_search": {
+        "hit": false,
+        "resp_tokens": 1969
+      }
+    },
+    {
+      "task": "locate-freshness-verdict",
+      "kind": "locate",
+      "narrow_tools": {
+        "hit": true,
+        "resp_tokens": 1922
+      },
+      "single_search": {
+        "hit": false,
+        "resp_tokens": 1893
+      }
+    },
+    {
+      "task": "locate-tool-schemas",
+      "kind": "locate",
+      "narrow_tools": {
+        "hit": true,
+        "resp_tokens": 1991
+      },
+      "single_search": {
+        "hit": false,
+        "resp_tokens": 1908
+      }
+    },
+    {
+      "task": "locate-schema-upgrade",
+      "kind": "locate",
+      "narrow_tools": {
+        "hit": true,
+        "resp_tokens": 557
+      },
+      "single_search": {
+        "hit": true,
+        "resp_tokens": 1834
+      }
+    },
+    {
+      "task": "locate-context-personalization",
+      "kind": "locate",
+      "narrow_tools": {
+        "hit": true,
+        "resp_tokens": 2046
+      },
+      "single_search": {
+        "hit": true,
+        "resp_tokens": 1896
+      }
+    },
+    {
+      "task": "callers-sync-repo",
+      "kind": "structural",
+      "narrow_tools": {
+        "hit": true,
+        "resp_tokens": 8370
+      },
+      "single_search": {
+        "hit": false,
+        "resp_tokens": 1942
+      }
+    },
+    {
+      "task": "callers-resolve-explained",
+      "kind": "structural",
+      "narrow_tools": {
+        "hit": true,
+        "resp_tokens": 206
+      },
+      "single_search": {
+        "hit": false,
+        "resp_tokens": 1898
+      }
+    },
+    {
+      "task": "callees-sync-repo",
+      "kind": "structural",
+      "narrow_tools": {
+        "hit": true,
+        "resp_tokens": 1911
+      },
+      "single_search": {
+        "hit": false,
+        "resp_tokens": 2021
+      }
+    },
+    {
+      "task": "affected-tests-sync",
+      "kind": "structural",
+      "narrow_tools": {
+        "hit": true,
+        "resp_tokens": 1002
+      },
+      "single_search": {
+        "hit": false,
+        "resp_tokens": 2215
+      }
+    },
+    {
+      "task": "explain-edge-resolution",
+      "kind": "structural",
+      "narrow_tools": {
+        "hit": true,
+        "resp_tokens": 146
+      },
+      "single_search": {
+        "hit": true,
+        "resp_tokens": 2003
+      }
+    }
+  ]
+}
