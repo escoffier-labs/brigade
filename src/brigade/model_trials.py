@@ -392,7 +392,11 @@ def execute(
         if resume and current is not None and current.get("state") in TERMINAL_STATES:
             continue
         attempt = _attempt_number(cell_dir)
-        started_at = current.get("started_at") if isinstance(current, dict) and isinstance(current.get("started_at"), str) else datetime.now(timezone.utc).isoformat()
+        started_at = (
+            current.get("started_at")
+            if isinstance(current, dict) and isinstance(current.get("started_at"), str)
+            else datetime.now(timezone.utc).isoformat()
+        )
         cell_dir.mkdir(parents=True, exist_ok=True)
         localio.write_json(
             cell_dir / "cell.json",
