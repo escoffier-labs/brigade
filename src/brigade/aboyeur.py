@@ -1752,12 +1752,8 @@ def run(
                 (attempt for attempt in reversed(plan_attempts or []) if attempt.get("ok") is False),
                 None,
             )
-            failure_phase = (
-                failed_attempt.get("failure_phase") if isinstance(failed_attempt, dict) else None
-            )
-            failure_kind = (
-                failed_attempt.get("failure_kind") if isinstance(failed_attempt, dict) else None
-            )
+            failure_phase = failed_attempt.get("failure_phase") if isinstance(failed_attempt, dict) else None
+            failure_kind = failed_attempt.get("failure_kind") if isinstance(failed_attempt, dict) else None
             if output_dir is not None:
                 finished_at = datetime.now(timezone.utc)
                 _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
