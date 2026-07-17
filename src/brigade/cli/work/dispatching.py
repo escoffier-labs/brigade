@@ -109,6 +109,7 @@ def dispatch(args) -> int:
                 target=args.target,
                 commands=commands,
                 timeout=args.timeout,
+                graphtrail_timeout=args.graphtrail_timeout,
                 json_output=args.json,
                 capture=args.capture,
                 capture_kind=args.capture_kind,

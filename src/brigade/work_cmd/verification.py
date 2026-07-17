@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from .. import graphtrail_delta, localio, receipt_signing
+from .. import config, graphtrail_delta, localio, receipt_signing
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -292,12 +292,18 @@ def _write_verify_markdown(run_dir: Path, receipt: dict[str, Any]) -> None:
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
 
-def _run_verify_commands(target: Path, commands: list[str | list[str]], timeout: int) -> tuple[dict[str, Any], int]:
+def _run_verify_commands(
+    target: Path,
+    commands: list[str | list[str]],
+    timeout: int,
+    *,
+    graphtrail_timeout: float,
+) -> tuple[dict[str, Any], int]:
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
     run_dir = helpers._verify_runs_root(target) / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
-    graph_delta_before = graphtrail_delta.capture_before(target, run_dir)
+    graph_delta_before = graphtrail_delta.capture_before(target, run_dir, timeout=graphtrail_timeout)
     receipt: dict[str, Any] = {
         "run_id": run_id,
         "target": str(target),
@@ -422,7 +428,9 @@ def _run_verify_commands(target: Path, commands: list[str | list[str]], timeout:
             if rc == 0:
                 rc = 127
         receipt["commands"].append(command_result)
-    receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(target, run_dir, graph_delta_before)
+    receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
+        target, run_dir, graph_delta_before, timeout=graphtrail_timeout
+    )
     completed_at = helpers._now()
     receipt["completed_at"] = completed_at.isoformat()
     receipt["duration_seconds"] = (completed_at - started).total_seconds()
@@ -657,6 +665,7 @@ def verify_run(
     target: Path,
     commands: list[str | list[str]] | None = None,
     timeout: int = 900,
+    graphtrail_timeout: float | None = None,
     json_output: bool = False,
     capture: str | None = None,
     capture_kind: str = "skill",
@@ -668,11 +677,16 @@ def verify_run(
     if timeout < 1:
         print("error: --timeout must be a positive integer", file=sys.stderr)
         return 2
+    try:
+        effective_graphtrail_timeout = config.resolve_graphtrail_delta_timeout(target, graphtrail_timeout)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     planned = commands if commands is not None else _default_verify_commands(target)
     if not planned:
         print("error: no verification commands found; pass --command", file=sys.stderr)
         return 2
-    receipt, rc = _run_verify_commands(target, planned, timeout)
+    receipt, rc = _run_verify_commands(target, planned, timeout, graphtrail_timeout=effective_graphtrail_timeout)
     if json_output:
         if capture:
             # Record the outcome in the same command (closes the loop without a

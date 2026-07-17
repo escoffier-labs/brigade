@@ -489,7 +489,14 @@ def _compact_code_graph_delta(receipt: dict) -> dict | None:
         return None
     compact = {
         key: delta[key]
-        for key in ("status", "summary", "changed_symbol_count", "edge_churn", "raw_counts")
+        for key in (
+            "status",
+            "summary",
+            "changed_symbol_count",
+            "edge_churn",
+            "raw_counts",
+            "stale_graph_used",
+        )
         if key in delta
     }
     return compact or None
@@ -762,6 +769,8 @@ def _graph_delta_counts(records: list[core.OutcomeRecord]) -> dict[str, int] | N
         return None
     counts = {"graph_changing": 0, "graph_no_op": 0}
     for delta in deltas:
+        if delta.get("stale_graph_used") is True:
+            continue
         if delta.get("status") != "ok":
             continue
         changed_symbols = _graph_count_value(delta.get("changed_symbol_count"))

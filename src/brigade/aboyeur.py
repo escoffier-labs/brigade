@@ -1429,6 +1429,8 @@ def _context_eval_for_run(
             return None
         if not isinstance(code_graph_delta, dict) or code_graph_delta.get("ok") is not True:
             return None
+        if code_graph_delta.get("stale_graph_used") is True:
+            return None
         sidecar_path = code_graph_delta.get("sidecar_path")
         if not isinstance(sidecar_path, str) or not sidecar_path:
             return None
