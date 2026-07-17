@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,9 @@ func TestDiscord_Send_ReturnsErrorOn5xx(t *testing.T) {
 	err := d.Send(context.Background(), canonical.Message{Body: "x"})
 	if err == nil {
 		t.Fatal("expected error on 500 response, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "provider=discord") || !strings.Contains(got, "status=500") {
+		t.Fatalf("error omitted safe HTTP diagnostics: %q", got)
 	}
 }
 

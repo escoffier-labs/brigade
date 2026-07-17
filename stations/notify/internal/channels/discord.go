@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -82,23 +81,23 @@ func (d *Discord) Send(ctx context.Context, m canonical.Message) error {
 	payload := discordRequest{Embeds: []discordEmbed{embed}}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
+		return encodingError(d.Type())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.webhookURL, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("new request: %w", err)
+		return requestError(d.Type())
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("post: %w", err)
+		return transportError(d.Type(), "send", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("discord returned %d", resp.StatusCode)
+		return statusError(d.Type(), resp.StatusCode)
 	}
 	return nil
 }
@@ -115,4 +114,3 @@ func colorFor(level string) int {
 		return colorInfo
 	}
 }
-

@@ -72,6 +72,9 @@ func TestSignal_Send_ReturnsErrorOnFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on 500, got nil")
 	}
+	if got := err.Error(); !strings.Contains(got, "provider=signal") || !strings.Contains(got, "status=500") {
+		t.Fatalf("error omitted safe HTTP diagnostics: %q", got)
+	}
 }
 
 func TestSignal_NameAndType(t *testing.T) {

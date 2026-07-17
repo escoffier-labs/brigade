@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Channel transport failures now return bounded provider, stage, status, and cause fields without retaining request URLs or credentials; the dispatcher sanitizes errors again before writing stderr.
+
 ### Documentation
 - README leads with a what / why / how-it-differs opening, a centered title and badge row, a prominent Website link, a keyword-rich "What it does" section, verified `doctor` and `status` output blocks, and "Why not <alternatives>?" plus "What agent-notify is not" sections.
 - Added maintainer-health files: `SECURITY.md` (trust model and report path), `CONTRIBUTING.md` (contribution scope and channel/hook adapter guides), `CODE_OF_CONDUCT.md`, GitHub issue templates (`bug.yml`, `feature.yml`, `config.yml` with blank issues disabled and contact links), a pull request template with a no-PII checklist, and this changelog.

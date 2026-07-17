@@ -407,7 +407,13 @@ func dispatch(reg *channels.Registry, names []string, msg canonical.Message, std
 	for r := range results {
 		if r.err != nil {
 			failed++
-			fmt.Fprintf(stderr, "[agent-notify] FAIL channel=%s type=%s error=%v\n", r.name, r.channel, r.err)
+			fmt.Fprintf(
+				stderr,
+				"[agent-notify] FAIL channel=%s type=%s error=%s\n",
+				r.name,
+				r.channel,
+				channels.SafeError(r.err),
+			)
 		}
 	}
 	return failed

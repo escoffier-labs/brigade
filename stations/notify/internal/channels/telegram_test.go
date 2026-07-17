@@ -77,6 +77,9 @@ func TestTelegram_Send_ReturnsErrorOnNonOK(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on 400, got nil")
 	}
+	if got := err.Error(); !strings.Contains(got, "provider=telegram") || !strings.Contains(got, "status=400") {
+		t.Fatalf("error omitted safe HTTP diagnostics: %q", got)
+	}
 }
 
 func TestTelegram_EscapeMDV2_EscapesBackslashFirst(t *testing.T) {

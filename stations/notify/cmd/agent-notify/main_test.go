@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +12,21 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/escoffier-labs/agent-notify/internal/canonical"
+	"github.com/escoffier-labs/agent-notify/internal/channels"
 )
+
+type leakingErrorChannel struct {
+	err error
+}
+
+func (c leakingErrorChannel) Name() string { return "leaking" }
+func (c leakingErrorChannel) Type() string { return "test" }
+func (c leakingErrorChannel) Send(context.Context, canonical.Message) error {
+	return c.err
+}
 
 // runMain calls the main package's run() function with the given args,
 // stdin, and env vars, returning the exit code, stdout, and stderr.
@@ -82,6 +98,67 @@ func TestRun_OneChannelFails_ExitsSendFailureCode(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "FAIL channel=discord") {
 		t.Errorf("expected FAIL line in stderr, got %q", stderr)
+	}
+}
+
+func TestDispatch_FinalSanitizerDropsUntrustedErrorText(t *testing.T) {
+	const sentinel = "SENTINEL-DISPATCH-CREDENTIAL"
+	reg := channels.NewRegistry()
+	reg.Register("leaking", leakingErrorChannel{err: fmt.Errorf(
+		"post https://example.invalid/hooks/%s?token=%s: connection refused",
+		sentinel,
+		sentinel,
+	)})
+	var stderr bytes.Buffer
+
+	failed := dispatch(
+		reg,
+		[]string{"leaking"},
+		canonical.Message{Body: "test"},
+		&stderr,
+		time.Second,
+	)
+
+	if failed != 1 {
+		t.Fatalf("failed = %d, want 1", failed)
+	}
+	if strings.Contains(stderr.String(), sentinel) || strings.Contains(stderr.String(), "example.invalid") {
+		t.Fatalf("dispatcher leaked untrusted error text: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stage=dispatch") || !strings.Contains(stderr.String(), "cause=connection") {
+		t.Fatalf("dispatcher omitted safe classification: %q", stderr.String())
+	}
+}
+
+func TestRun_TransportFailureNeverPrintsCredential(t *testing.T) {
+	const sentinel = "SENTINEL-CLI-CREDENTIAL"
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	endpoint := srv.URL + "/hooks/" + sentinel + "?token=" + sentinel
+	srv.Close()
+
+	code, stdout, stderr := runMain(t,
+		[]string{"agent-notify", "test"},
+		"",
+		map[string]string{
+			"DISCORD_WEBHOOK_URL": endpoint,
+			"TELEGRAM_BOT_TOKEN":  "",
+			"TELEGRAM_CHAT_ID":    "",
+			"SIGNAL_CLI_URL":      "",
+			"SIGNAL_FROM":         "",
+			"SIGNAL_TO":           "",
+		},
+	)
+
+	if code != exitFailures {
+		t.Fatalf("exit = %d, want %d", code, exitFailures)
+	}
+	for stream, value := range map[string]string{"stdout": stdout, "stderr": stderr} {
+		if strings.Contains(value, sentinel) || strings.Contains(value, "token=") {
+			t.Fatalf("%s leaked credential: %q", stream, value)
+		}
+	}
+	if !strings.Contains(stderr, "provider=discord") || !strings.Contains(stderr, "stage=send") {
+		t.Fatalf("stderr omitted safe transport fields: %q", stderr)
 	}
 }
 

@@ -53,24 +53,24 @@ func (t *Telegram) Send(ctx context.Context, m canonical.Message) error {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
+		return encodingError(t.Type())
 	}
 
 	url := fmt.Sprintf("%s/bot%s/sendMessage", t.apiBase, t.botToken)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("new request: %w", err)
+		return requestError(t.Type())
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("post: %w", err)
+		return transportError(t.Type(), "send", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("telegram returned %d", resp.StatusCode)
+		return statusError(t.Type(), resp.StatusCode)
 	}
 	return nil
 }
