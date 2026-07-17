@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Optional `limit` argument on the `callers`, `callees`, and `impact` MCP tools. When set, the edge list is cut to the first N real edges and a marker row reports shown vs total; omitted, output is unchanged. Motivated by the tool-surface benchmark in `benchmarks/tool-surface/`, where an unbounded `impact` on a hot symbol cost ~9,150 tokens in one call.
 - `graphtrail evaluate <path>`: dry-run extraction that prints what a sync would store (symbols, imports, calls) for a file or tree, writing nothing. Pair with an extractor-fingerprint bump to diff extractor changes before they touch an index.
 - `graphtrail explain <source> <target>` and a matching MCP `explain` tool: how each stored call from a source symbol to a called name resolved, with the resolution-path label, its confidence, the exact import that satisfied the call, and the resolved targets. Unresolved calls report their reason (`no-candidates`, `unresolved-external`, `unresolved-qualified`) instead of hiding.
 - `graphtrail export --format dot|graphml|jsonl --scope files|symbols [--out <path>]`: read-only graph export for visualization. File scope aggregates cross-file calls with counts; symbol scope carries line and confidence per edge.
