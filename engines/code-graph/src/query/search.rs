@@ -95,19 +95,32 @@ fn sqlite_limit(limit: usize) -> i64 {
 pub fn fts_query(query: &str) -> String {
     query
         .split_whitespace()
-        .filter_map(|term| {
-            let clean: String = term
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
-                .collect();
-            if clean.is_empty() {
-                None
-            } else {
-                Some(format!("\"{clean}\"*"))
-            }
-        })
+        .flat_map(split_fts_term)
         .collect::<Vec<_>>()
         .join(" OR ")
+}
+
+fn split_fts_term(term: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for c in term.chars() {
+        if c.is_alphanumeric() || c == '_' || c == '$' {
+            current.push(c);
+        } else if !current.is_empty() {
+            push_fts_token(&mut tokens, &current);
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        push_fts_token(&mut tokens, &current);
+    }
+    tokens
+}
+
+fn push_fts_token(tokens: &mut Vec<String>, token: &str) {
+    if token.len() >= 2 {
+        tokens.push(format!("\"{token}\"*"));
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +132,53 @@ mod tests {
     #[test]
     fn fts_query_quotes_terms_and_strips_punctuation() {
         assert_eq!(fts_query("handoff lint!"), "\"handoff\"* OR \"lint\"*");
+    }
+
+    #[test]
+    fn fts_query_splits_path_segments_instead_of_fusing_them() {
+        let fts = fts_query("change src/pages/Architecture.tsx");
+        assert!(
+            fts.contains("\"Architecture\"*"),
+            "expected Architecture token, got: {fts}"
+        );
+        assert!(
+            !fts.contains("srcpages"),
+            "path segments must not fuse into one token, got: {fts}"
+        );
+        assert!(
+            !fts.to_ascii_lowercase().contains("srcpagesarchitecturetsx"),
+            "must not produce fused garbage token, got: {fts}"
+        );
+    }
+
+    #[test]
+    fn search_symbols_finds_symbol_from_path_style_query() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let file_path = "src/pages/Architecture.tsx";
+        conn.execute(
+            "INSERT INTO files(path, content_hash, size, modified_at, indexed_at, language)
+             VALUES (?1, 'hash', 1, 1, 1, 'typescript')",
+            params![file_path],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, kind, name, qualified_name, file_path, start_line, end_line, signature, content_hash)
+             VALUES ('arch', 'function', 'Architecture', 'Architecture', ?1, 1, 10, 'function Architecture()', 'hash')",
+            params![file_path],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols_fts(symbol_id, name, qualified_name, signature, file_path)
+             VALUES ('arch', 'Architecture', 'Architecture', 'function Architecture()', ?1)",
+            params![file_path],
+        )
+        .unwrap();
+
+        let rows = search_symbols(&conn, "change src/pages/Architecture.tsx", 20).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Architecture");
     }
 
     #[test]
