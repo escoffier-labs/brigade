@@ -79,6 +79,8 @@ def lint(
         print(f"[{status}] {result.path}{action}")
         for error in result.errors:
             print(f"  - {error}")
+        for hint in result.hints:
+            print(f"  hint: {hint}")
         for warning in result.warnings:
             print(f"  warning: {warning}")
         signals = injection_counts.get(str(result.path), 0)
@@ -120,6 +122,7 @@ def lint_file(path: Path) -> HandoffLintResult:
     path = path.expanduser().resolve()
     errors: list[str] = []
     warnings: list[str] = []
+    hints: list[str] = []
     action: str | None = None
     try:
         text = path.read_text(errors="replace")
@@ -136,6 +139,14 @@ def lint_file(path: Path) -> HandoffLintResult:
     for required in ("Type", "Title", "Summary", "Recommended memory action"):
         if required not in sections or not _section_value(sections, required):
             errors.append(f"missing required section: {required}")
+
+    if any(error.startswith("missing required section:") for error in errors):
+        _, migration_gaps = _migrate_extract(text)
+        if not migration_gaps:
+            from ..untrusted import scan_untrusted
+
+            if not scan_untrusted(text).flagged:
+                hints.append("this looks like a freeform note; try `brigade handoff migrate --target .`")
 
     action_value = _section_value(sections, "Recommended memory action")
     if action_value:
@@ -154,6 +165,7 @@ def lint_file(path: Path) -> HandoffLintResult:
         valid=not errors,
         errors=tuple(errors),
         warnings=tuple(warnings),
+        hints=tuple(hints),
     )
 
 

@@ -180,6 +180,7 @@ class HandoffLintResult:
     valid: bool
     errors: tuple[str, ...]
     warnings: tuple[str, ...]
+    hints: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -188,6 +189,7 @@ class HandoffLintResult:
             "valid": self.valid,
             "errors": list(self.errors),
             "warnings": list(self.warnings),
+            "hints": list(self.hints),
         }
 
 

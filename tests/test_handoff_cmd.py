@@ -1967,6 +1967,27 @@ def _homegrown_note(inbox, name="2026-06-01-1200-good-note.md"):
     return inbox / name
 
 
+def test_handoff_lint_suggests_migrate_for_extractable_homegrown_note(tmp_path, capsys):
+    note = _homegrown_note(tmp_path / ".claude" / "memory-handoffs")
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[note]) == 1
+    out = capsys.readouterr().out
+    expected = "this looks like a freeform note; try `brigade handoff migrate --target .`"
+    assert f"hint: {expected}" in out
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[note], json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["results"][0]["hints"] == [expected]
+
+
+def test_handoff_lint_does_not_suggest_migrate_for_unextractable_note(tmp_path, capsys):
+    note = tmp_path / "garbage.md"
+    note.write_text("random unstructured note, nothing usable\n")
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[note]) == 1
+    assert "handoff migrate" not in capsys.readouterr().out
+
+
 def test_handoff_migrate_dry_run_plans_homegrown_note(tmp_path, capsys):
     inbox = tmp_path / ".claude" / "memory-handoffs"
     note = _homegrown_note(inbox)
@@ -2034,8 +2055,10 @@ def test_handoff_lint_surfaces_injection_signals(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     flagged = [r for r in payload["results"] if r.get("injection_signals")]
     assert flagged, "lint should report injection signal counts"
+    assert flagged[0]["hints"] == []
 
     handoff_cmd.lint(target=tmp_path)
     out = capsys.readouterr().out
     assert "injection" in out.lower()
     assert "security scan" in out.lower()
+    assert "handoff migrate" not in out
