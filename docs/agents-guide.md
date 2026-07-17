@@ -42,6 +42,27 @@ brigade operator quickstart --target . --harnesses codex,claude,opencode,antigra
 
 If you are unsure which harnesses the user uses, start with the current harness and explain how to add more later.
 
+### Cursor GUI work loop at user scope
+
+Cursor GUI agents need user-level wiring in addition to a repository handoff inbox. Preview the narrow profile before applying it:
+
+```bash
+brigade harness install cursor --scope user --dry-run
+brigade harness install cursor --scope user --write
+brigade harness doctor cursor --scope user
+```
+
+This profile manages a local plugin rule, the global `brigade-work` skill, one `sessionStart` hook, and the `brigade`, `graphtrail`, and `miseledger` entries in `~/.cursor/mcp.json`. It preserves unrelated plugins, hooks, MCP servers, and sibling JSON fields. Existing values with a managed name are reported as conflicts instead of being replaced. Reload Cursor windows after a successful write.
+
+To remove the profile, preview and then apply the ownership-aware uninstall:
+
+```bash
+brigade harness uninstall cursor --scope user --dry-run
+brigade harness uninstall cursor --scope user --write
+```
+
+Uninstall removes entries only when they still match Brigade's ownership record. User-edited managed entries are preserved and reported as conflicts.
+
 ## Adapting Existing Setups
 
 Before changing files, inspect the target directory for existing setup:
