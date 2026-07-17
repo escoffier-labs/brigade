@@ -115,6 +115,26 @@ def test_run_lock_publishes_complete_owner_metadata(tmp_path):
         assert (lock_path / "pid").read_text().strip() == str(os.getpid())
 
 
+def test_run_lock_is_retained_when_terminal_receipt_cannot_be_written(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(json.dumps({"status": "artifact-collection"}))
+    lock_path = runguard.lock_path(repo)
+
+    with pytest.raises(runguard.RetainRunLockError, match="receipt disk full"):
+        with runguard.run_lock(repo, run_dir=run_dir):
+            raise runguard.RetainRunLockError("receipt disk full")
+
+    assert lock_path.is_dir()
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert runguard.recover_stale_run(repo, run_dir) is True
+    assert not lock_path.exists()
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure"]["prior_status"] == "artifact-collection"
+
+
 def test_run_lock_release_does_not_delete_replacement_owner(tmp_path):
     repo = _repo(tmp_path)
     lock_path = runguard.lock_path(repo)
@@ -271,7 +291,7 @@ def test_run_lock_recovers_dead_owner_run_to_typed_terminal_state(tmp_path):
     abandoned_run = tmp_path / "abandoned-run"
     abandoned_run.mkdir()
     (abandoned_run / "run.json").write_text(
-        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+        json.dumps({"schema": "brigade.run.v1", "status": "artifact-collection", "task": "inspect"})
     )
     lock_path = runguard.lock_path(repo)
     lock_path.mkdir(parents=True)
@@ -297,7 +317,7 @@ def test_run_lock_recovers_dead_owner_run_to_typed_terminal_state(tmp_path):
             "kind": "owner-process-exited",
             "detail": "run owner process 99999999 is no longer active",
             "owner_pid": 99999999,
-            "prior_status": "dispatching",
+            "prior_status": "artifact-collection",
             "recovered_at": recovered["failure"]["recovered_at"],
         }
         assert recovered["finished_at"] == recovered["failure"]["recovered_at"]

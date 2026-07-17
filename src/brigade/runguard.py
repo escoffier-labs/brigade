@@ -15,11 +15,17 @@ from uuid import uuid4
 
 from . import localio, proc
 
-_NONTERMINAL_RUN_STATUSES = frozenset({"started", "planning", "dispatching", "synthesizing", "running"})
+_NONTERMINAL_RUN_STATUSES = frozenset(
+    {"started", "planning", "dispatching", "synthesizing", "artifact-collection", "running"}
+)
 
 
 class RunGuardError(RuntimeError):
     """Base error for run guard failures."""
+
+
+class RetainRunLockError(RunGuardError):
+    """A terminal receipt could not be written, so stale recovery still needs the lock."""
 
 
 class DirtyWorktreeError(RunGuardError):
@@ -498,10 +504,14 @@ def run_lock(
             if remaining <= 0:
                 raise RunLockError(f"timed out after {wait_seconds:g}s waiting for run lock: {path}") from exc
             time.sleep(min(poll_interval, remaining))
+    retain_lock = False
     try:
         yield path
+    except RetainRunLockError:
+        retain_lock = True
+        raise
     finally:
-        if ownership is not None:
+        if ownership is not None and not retain_lock:
             _release_lock(path, ownership)
 
 

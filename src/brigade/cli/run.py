@@ -290,6 +290,7 @@ def dispatch(args) -> int:
                 run_kwargs["authorized_writable_worktree"] = True
             if args.worktree:
                 run_kwargs["lock_workspace"] = run_cwd
+                run_kwargs["defer_artifact_collection"] = True
             if args.worker is not None:
                 run_kwargs["worker"] = args.worker
             if args.codex_transport is not None:
@@ -312,27 +313,81 @@ def dispatch(args) -> int:
                 # recoverable copy of the agents' edits; a collection failure
                 # must not let cleanup destroy it.
                 keep_worktree = True
-                summary = runguard.collect_changes_patch(effective_cwd, output_dir / "changes.patch")
-                if summary.path.is_file():
-                    aboyeur_mod.set_artifact_patch_ref(output_dir, "changes.patch")
+                patch_path = output_dir / "changes.patch"
+                try:
+                    summary = runguard.collect_changes_patch(effective_cwd, patch_path)
+                except (runguard.RunGuardError, OSError) as exc:
+                    detail = (
+                        str(exc) if isinstance(exc, runguard.RunGuardError) else f"failed to write changes.patch: {exc}"
+                    )
+                    patch_ref = "changes.patch" if patch_path.is_file() else None
+                    aboyeur_mod.record_artifact_collection(
+                        output_dir,
+                        status="failed",
+                        patch_ref=patch_ref,
+                        worktree=effective_cwd,
+                        failure_phase="artifact-collection",
+                        failure_kind="collection-error",
+                        detail=detail,
+                    )
+                    if isinstance(exc, runguard.RunGuardError):
+                        raise
+                    raise runguard.RunGuardError(detail) from exc
                 if summary.changed and not runguard.verify_changes_patch(effective_cwd, summary.path):
                     # A corrupt patch must never be the run's silent primary
                     # deliverable; keep the worktree as the recoverable copy.
+                    aboyeur_mod.record_artifact_collection(
+                        output_dir,
+                        status="failed",
+                        patch_ref="changes.patch",
+                        changed=True,
+                        tracked_count=summary.tracked_count,
+                        untracked_count=summary.untracked_count,
+                        worktree=effective_cwd,
+                        failure_phase="artifact-validation",
+                        failure_kind="invalid-patch",
+                        detail="changes.patch failed validation",
+                    )
                     print(
                         f"error: changes.patch failed validation ({summary.path}); "
                         f"worktree kept for recovery: {effective_cwd}",
                         file=sys.stderr,
                     )
                     rc = max(rc, 2)
-                elif summary.changed:
-                    keep_worktree = False
-                    print(
-                        f"changes: {summary.path} ({summary.tracked_count + summary.untracked_count} file(s))",
-                        file=sys.stderr,
-                    )
                 else:
+                    if summary.path.is_file():
+                        try:
+                            aboyeur_mod.set_artifact_patch_ref(output_dir, "changes.patch")
+                        except runguard.RunGuardError as exc:
+                            aboyeur_mod.record_artifact_collection(
+                                output_dir,
+                                status="failed",
+                                patch_ref="changes.patch",
+                                changed=summary.changed,
+                                tracked_count=summary.tracked_count,
+                                untracked_count=summary.untracked_count,
+                                worktree=effective_cwd,
+                                failure_phase="artifact-collection",
+                                failure_kind="receipt-update-error",
+                                detail=str(exc),
+                            )
+                            raise
+                    aboyeur_mod.record_artifact_collection(
+                        output_dir,
+                        status="ok",
+                        patch_ref="changes.patch",
+                        changed=summary.changed,
+                        tracked_count=summary.tracked_count,
+                        untracked_count=summary.untracked_count,
+                    )
                     keep_worktree = False
-                    print(f"changes: none ({summary.path})", file=sys.stderr)
+                    if summary.changed:
+                        print(
+                            f"changes: {summary.path} ({summary.tracked_count + summary.untracked_count} file(s))",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(f"changes: none ({summary.path})", file=sys.stderr)
     except runguard.RunGuardError as exc:
         print(f"error: {exc}", file=sys.stderr)
         if worktree_cwd is not None and keep_worktree:

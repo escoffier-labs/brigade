@@ -3,11 +3,78 @@ import os
 from pathlib import Path
 
 from brigade import cli
+from brigade import runguard
 from brigade import runs_cmd
 
 
 def _write_json(path, payload):
     path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def test_artifact_collection_status_is_nonterminal():
+    assert runs_cmd._is_terminal({"status": "artifact-collection"}) is False
+
+
+def test_watch_reports_unrecoverable_artifact_collection_lock_error(tmp_path, monkeypatch, capsys):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_json(
+        run_dir / "run.json",
+        {
+            "status": "artifact-collection",
+            "cwd": str(tmp_path),
+            "lock_workspace": str(tmp_path),
+            "started_at": "2026-07-17T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        runguard,
+        "recover_stale_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(runguard.RunLockError("run lock has no owner metadata")),
+    )
+
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 2
+    assert "artifact-collection recovery failed: run lock has no owner metadata" in capsys.readouterr().err
+
+
+def test_watch_reports_artifact_collection_without_matching_lock(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_json(
+        run_dir / "run.json",
+        {
+            "status": "artifact-collection",
+            "cwd": str(tmp_path),
+            "lock_workspace": str(tmp_path),
+            "started_at": "2026-07-17T00:00:00Z",
+        },
+    )
+
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 2
+    assert "artifact-collection run has no matching recoverable lock" in capsys.readouterr().err
+
+
+def test_watch_handles_artifact_collection_completion_race(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_path = run_dir / "run.json"
+    payload = {
+        "status": "artifact-collection",
+        "cwd": str(tmp_path),
+        "lock_workspace": str(tmp_path),
+        "started_at": "2026-07-17T00:00:00Z",
+    }
+    _write_json(run_path, payload)
+
+    def finish_without_recovery(*args, **kwargs):
+        payload["status"] = "ok"
+        payload["finished_at"] = "2026-07-17T00:00:01Z"
+        _write_json(run_path, payload)
+        return False
+
+    monkeypatch.setattr(runguard, "recover_stale_run", finish_without_recovery)
+
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 0
 
 
 def _write_run_artifacts(run_dir):

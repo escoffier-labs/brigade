@@ -151,17 +151,19 @@ def test_resume_refuses_nonterminal_run(tmp_path, monkeypatch, capsys):
             }
         ],
     )
-    run_meta = json.loads((run_dir / "run.json").read_text())
-    run_meta["status"] = "dispatching"
-    (run_dir / "run.json").write_text(json.dumps(run_meta))
     monkeypatch.setattr(
         run_resume.codex_appserver,
         "AppServer",
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("provider must not start")),
     )
 
-    assert run_resume.resume(run_dir) == 2
-    assert "run is not terminal" in capsys.readouterr().err
+    for status in ("dispatching", "artifact-collection"):
+        run_meta = json.loads((run_dir / "run.json").read_text())
+        run_meta["status"] = status
+        (run_dir / "run.json").write_text(json.dumps(run_meta))
+
+        assert run_resume.resume(run_dir) == 2
+        assert "run is not terminal" in capsys.readouterr().err
 
 
 def test_resume_refuses_matching_live_owner(tmp_path, monkeypatch, capsys):

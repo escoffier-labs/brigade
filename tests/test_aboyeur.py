@@ -1106,6 +1106,55 @@ def test_run_direct_grok_structured_final_succeeds_with_honest_artifacts(monkeyp
     assert (output_dir / "final.txt").read_text().strip() == answer
 
 
+def test_run_defers_success_until_worktree_artifact_collection(monkeypatch, tmp_path):
+    answer = "Implementation complete."
+    structured = {"kind": "answer", "answer": answer}
+    stdout = json.dumps(
+        {
+            "text": json.dumps(structured),
+            "stopReason": "EndTurn",
+            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "requestId": "00000000-0000-4000-8000-000000000001",
+            "structuredOutput": structured,
+        }
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "Implement the requested change.",
+        _grok_roster(),
+        cwd=tmp_path,
+        worker="grok_cli",
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+        defer_artifact_collection=True,
+    )
+
+    assert rc == 0
+    run_payload = json.loads((output_dir / "run.json").read_text())
+    assert run_payload["status"] == "artifact-collection"
+    assert "finished_at" not in run_payload
+    assert "duration_seconds" not in run_payload
+    assert (output_dir / "final.txt").read_text().strip() == answer
+
+    aboyeur.record_artifact_collection(
+        output_dir,
+        status="ok",
+        patch_ref="changes.patch",
+        changed=False,
+        tracked_count=0,
+        untracked_count=0,
+    )
+
+    run_payload = json.loads((output_dir / "run.json").read_text())
+    assert run_payload["status"] == "ok"
+    assert "finished_at" in run_payload
+    assert "duration_seconds" in run_payload
+
+
 def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
     def fake_run_agent(cli_ref, prompt, **kwargs):
         return agents.AgentResult(
