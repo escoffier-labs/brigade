@@ -1004,3 +1004,69 @@ def test_run_codex_appserver_server_error_is_failed():
 def test_agent_result_defaults_keep_exec_contract():
     res = agents.AgentResult(text="t", ok=True)
     assert res.thread_id is None and res.status == ""
+
+
+def test_run_agent_env_overrides_child_environment(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    monkeypatch.setenv("PRE_EXISTING", "kept")
+
+    result = agents.run_agent(
+        "claude",
+        "hi",
+        env={"ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"},
+    )
+    assert result.ok
+    assert captured["env"] is not None
+    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://api.example.com/anthropic"
+    assert captured["env"]["PRE_EXISTING"] == "kept"
+
+
+def test_run_agent_env_ref_resolves_from_parent(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    monkeypatch.setenv("KIMI_API_KEY", "sk-resolved-value")
+
+    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "KIMI_API_KEY"})
+    assert result.ok
+    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-resolved-value"
+    assert "ANTHROPIC_AUTH_TOKEN_REF" not in captured["env"]
+
+
+def test_run_agent_env_ref_missing_fails_before_spawn(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: calls.append(argv))
+    monkeypatch.delenv("MISSING_LANE_KEY", raising=False)
+
+    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "MISSING_LANE_KEY"})
+    assert not result.ok
+    assert "MISSING_LANE_KEY" in result.detail
+    assert "is not set" in result.detail
+    assert calls == []
+
+
+def test_run_agent_env_default_leaves_child_environment_alone(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    assert agents.run_agent("claude", "hi").ok
+    assert captured["env"] is None

@@ -204,8 +204,8 @@ def _resume_locked(run_dir: Path) -> int:
         timeout=orchestrator.timeout_seconds or roster.timeout_seconds,
         cwd=cwd,
         read_only=read_only,
-        **({"model": orchestrator.model} if orchestrator.model is not None else {}),
-        **({"reasoning": orchestrator.reasoning} if orchestrator.reasoning is not None else {}),
+        model=orchestrator.model,
+        reasoning=orchestrator.reasoning,
     )
     aboyeur._write_json(
         run_dir / "synthesis.json",

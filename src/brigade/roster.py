@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -36,6 +37,7 @@ class Agent:
     reasoning: str | None = None
     transport: str = "direct"
     transport_version: str | None = None
+    env: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,35 @@ def _as_sandbox(value: object) -> str | None:
         choices = ", ".join(SANDBOX_CHOICES)
         raise ValueError(f"limits.sandbox must be one of: {choices}")
     return value
+
+
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+
+
+def _as_env(value: object, agent_name: str) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"agents.{agent_name}.env must be a TOML table")
+    parsed: dict[str, str] = {}
+    for key, raw in value.items():
+        if not isinstance(raw, str):
+            raise ValueError(f"agents.{agent_name}.env.{key} must be a string")
+        if not isinstance(key, str) or not _ENV_NAME_RE.match(key):
+            raise ValueError(f"agents.{agent_name}.env.{key} is not a valid environment variable name")
+        if key.endswith("_REF"):
+            if not _ENV_NAME_RE.match(raw):
+                raise ValueError(
+                    f"agents.{agent_name}.env.{key} must name an environment variable to read the value from"
+                )
+        elif any(hint in key for hint in _SECRET_HINTS):
+            raise ValueError(
+                f"agents.{agent_name}.env.{key} looks like a secret; pass it by reference with a _REF suffix "
+                f"naming an environment variable instead of an inline value"
+            )
+        parsed[key] = raw
+    return parsed
 
 
 def is_cli_allowed(cli_ref: str, roster: Roster) -> bool:
@@ -184,6 +215,8 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             raise ValueError(f"agents.{agent_name}.headers must be a TOML table")
         headers = dict(headers_raw) if headers_raw is not None else None
 
+        env = _as_env(raw_agent.get("env"), agent_name)
+
         cli_raw = raw_agent.get("cli")
         has_endpoint = endpoint is not None and model is not None
         if cli_raw is None and has_endpoint:
@@ -196,6 +229,12 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
                 raise ValueError(f"agents.{agent_name}.cli is unknown: {cli!r}")
             if not _allowed(cli, allow_models):
                 raise ValueError(f"agents.{agent_name}.cli is not allowed by limits.allow_models: {cli!r}")
+
+        if env is not None and (transport_raw != "direct" or (cli is not None and cli.startswith("codex-cloud:"))):
+            raise ValueError(
+                f"agents.{agent_name}.env overrides support direct CLI seats only; "
+                f"acpx and codex-cloud seats manage their own environment"
+            )
 
         if transport_raw == "acpx":
             if cli != "cursor":
@@ -225,6 +264,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             reasoning=reasoning,
             transport=transport_raw,
             transport_version=transport_version,
+            env=env,
         )
 
     if orchestrator not in parsed_agents:

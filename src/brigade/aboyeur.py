@@ -689,6 +689,8 @@ def _run_orchestrator(
         kwargs["model"] = orchestrator.model
     if orchestrator.reasoning is not None:
         kwargs["reasoning"] = orchestrator.reasoning
+    if orchestrator.env is not None:
+        kwargs["env"] = dict(orchestrator.env)
     return agents.run_agent(orchestrator.cli, prompt, **kwargs)
 
 

@@ -361,3 +361,84 @@ def test_codex_transport_rejects_unknown(tmp_path):
     p.write_text('orchestrator = "chef"\ncodex_transport = "daemon"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
     with pytest.raises(ValueError, match="codex_transport"):
         roster_mod.load_roster(p)
+
+
+ENV_SEAT = """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan and synthesize"
+
+[agents.k3]
+cli = "claude"
+model = "kimi-k3"
+role = "open-weight worker"
+env = { ANTHROPIC_BASE_URL = "https://api.example.com/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY", CLAUDE_CONFIG_DIR = "/tmp/claudex-config" }
+
+[limits]
+allow_models = ["codex", "claude"]
+"""
+
+
+def test_env_table_parses_onto_agent(tmp_path):
+    r = roster_mod.load_roster(_write(tmp_path, ENV_SEAT))
+    assert r.agents["k3"].env == {
+        "ANTHROPIC_BASE_URL": "https://api.example.com/anthropic",
+        "ANTHROPIC_AUTH_TOKEN_REF": "KIMI_API_KEY",
+        "CLAUDE_CONFIG_DIR": "/tmp/claudex-config",
+    }
+    assert r.agents["chef"].env is None
+
+
+def test_env_rejects_non_table(tmp_path):
+    bad = ENV_SEAT.replace(
+        'env = { ANTHROPIC_BASE_URL = "https://api.example.com/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY", CLAUDE_CONFIG_DIR = "/tmp/claudex-config" }',
+        'env = "ANTHROPIC_BASE_URL=https://api.example.com"',
+    )
+    with pytest.raises(ValueError, match="agents.k3.env must be a TOML table"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejects_non_string_values(tmp_path):
+    bad = ENV_SEAT.replace(
+        '"/tmp/claudex-config" }',
+        '"/tmp/claudex-config", RETRIES = 3 }',
+    )
+    with pytest.raises(ValueError, match="agents.k3.env.RETRIES must be a string"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejects_invalid_variable_names(tmp_path):
+    bad = ENV_SEAT.replace("CLAUDE_CONFIG_DIR", "claude-config-dir")
+    with pytest.raises(ValueError, match="not a valid environment variable name"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejects_inline_secret_values(tmp_path):
+    bad = ENV_SEAT.replace('ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY"', 'ANTHROPIC_AUTH_TOKEN = "sk-live-secret"')
+    with pytest.raises(ValueError, match="looks like a secret; pass it by reference"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_ref_value_must_be_variable_name(tmp_path):
+    bad = ENV_SEAT.replace('ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY"', 'ANTHROPIC_AUTH_TOKEN_REF = "sk-live-inline"')
+    with pytest.raises(ValueError, match="must name an environment variable"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejected_on_acpx_transport(tmp_path):
+    bad = ENV_SEAT.replace(
+        'cli = "claude"\nmodel = "kimi-k3"',
+        'cli = "cursor"\nmodel = "kimi-k3"\ntransport = "acpx"\ntransport_version = "0.12.0"',
+    ).replace('allow_models = ["codex", "claude"]', 'allow_models = ["codex", "cursor"]')
+    with pytest.raises(ValueError, match="env overrides support direct CLI seats only"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejected_on_codex_cloud_seat(tmp_path):
+    bad = ENV_SEAT.replace('cli = "claude"\nmodel = "kimi-k3"\n', 'cli = "codex-cloud:brigade"\n').replace(
+        'allow_models = ["codex", "claude"]', 'allow_models = ["codex", "codex-cloud:*"]'
+    )
+    with pytest.raises(ValueError, match="env overrides support direct CLI seats only"):
+        roster_mod.load_roster(_write(tmp_path, bad))

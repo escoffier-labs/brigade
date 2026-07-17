@@ -65,6 +65,10 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
                 entry[key] = value
         if result.safe_events:
             entry["events"] = list(result.safe_events)
+        if result.env_overrides:
+            entry["env_overrides"] = list(result.env_overrides)
+        if result.endpoint_host is not None:
+            entry["endpoint_host"] = result.endpoint_host
         payload.append(entry)
     return payload
 

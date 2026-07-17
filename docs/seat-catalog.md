@@ -83,14 +83,17 @@ Remember: every seat's `cli` value must appear in `limits.allow_models`, in the 
 
 ### Anthropic-compatible API lanes (Kimi, GLM, and friends)
 
-Several open-weight providers expose Anthropic-compatible endpoints, which means the `claude` CLI can drive them and Brigade can seat them. Until per-seat env overrides land (issue #301), route these through a wrapper that exports `ANTHROPIC_BASE_URL`, an isolated `CLAUDE_CONFIG_DIR`, and the lane's auth token before invoking `brigade`:
+Several open-weight providers expose Anthropic-compatible endpoints, which means the `claude` CLI can drive them and Brigade can seat them directly. Declare the lane's environment on the seat: plain values inline, secrets by reference with a `_REF` suffix naming the environment variable that holds the value (the roster never stores the secret itself):
 
 ```toml
 [agents.k3]
 cli = "claude"
 model = "kimi-k3"
 role = "Open-weight worker on a coding-plan quota; relief for orchestrator-tier work."
+env = { ANTHROPIC_BASE_URL = "https://api.moonshot.ai/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY", CLAUDE_CONFIG_DIR = "/home/operator/.claude-lanes" }
 ```
+
+Overrides apply to the spawned CLI process only, `run.json` records the override names and endpoint host (never values), and a missing referenced variable fails the worker before dispatch. Direct CLI seats only: acpx and codex-cloud seats manage their own environment.
 
 The isolated `CLAUDE_CONFIG_DIR` is load-bearing: with the default config directory, the `claude` CLI prefers its subscription OAuth over env auth, the upstream returns 401, and the CLI retries silently, which presents as an indefinite hang.
 

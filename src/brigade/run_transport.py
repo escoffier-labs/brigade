@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
+from urllib.parse import urlparse
 
 from . import agents, run_control
 from .roster import Agent, Roster, is_cli_allowed, timeout_for
@@ -18,6 +19,23 @@ class Assignment:
     task: str
     stage: int = 1
     covers: tuple[str, ...] = ()
+
+
+def _env_override_names(env: dict[str, str] | None) -> tuple[str, ...]:
+    """Resolved override names for provenance: key names only, never values."""
+
+    if not env:
+        return ()
+    return tuple(sorted(key[: -len("_REF")] if key.endswith("_REF") else key for key in env))
+
+
+def _env_endpoint_host(env: dict[str, str] | None) -> str | None:
+    if not env:
+        return None
+    base_url = env.get("ANTHROPIC_BASE_URL")
+    if not base_url:
+        return None
+    return urlparse(base_url).hostname
 
 
 @dataclass(frozen=True)
@@ -48,6 +66,8 @@ class WorkerResult:
     safe_events: tuple[dict[str, object], ...] = ()
     failure_phase: str | None = None
     failure_kind: str | None = None
+    env_overrides: tuple[str, ...] = ()
+    endpoint_host: str | None = None
 
 
 class PromptBuilder(Protocol):
@@ -164,6 +184,23 @@ def dispatch(
                 registry=control_registry,
                 on_event=on_event,
             )
+        elif agent.env is not None:
+            env_kwargs: dict[str, Any] = {}
+            if sandbox is not None:
+                env_kwargs["sandbox"] = sandbox
+            if agent.model is not None:
+                env_kwargs["model"] = agent.model
+            if agent.reasoning is not None:
+                env_kwargs["reasoning"] = agent.reasoning
+            result = agents.run_agent(
+                cli_ref,
+                prompt,
+                timeout=timeout_for(agent, roster),
+                cwd=cwd,
+                read_only=effective_read_only,
+                env=dict(agent.env),
+                **env_kwargs,
+            )
         else:
             timeout = timeout_for(agent, roster)
             if sandbox is None and agent.model is None and agent.reasoning is None:
@@ -264,6 +301,8 @@ def dispatch(
             request_id=result.request_id,
             acpx_version=result.acpx_version,
             safe_events=result.safe_events,
+            env_overrides=_env_override_names(agent.env),
+            endpoint_host=_env_endpoint_host(agent.env),
         )
 
     if not assignments:
