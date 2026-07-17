@@ -295,6 +295,12 @@ Each action stores:
 
 ## Repo Fleet Rollups
 
+`brigade repos adoption` scans enabled `.brigade/repos.toml` entries and reports harness wiring separately from recent use. Repeat `--harness` to select Claude or Cursor and set the observation window with `--days`. JSON rows use safe repo ids and labels, stable `<repo-id>:<harness>` keys, one of seven adoption states, wiring dimensions, aggregate session evidence, and one read-only next command. The monitor block identifies current `unwired`, `stale`, and `bypassed` rows and provides a fingerprint that a scheduled caller can compare with its prior result.
+
+Claude use is compliant only when a repo-scoped write session was briefed and has a session-matched verification receipt whose outcome was captured, GraphTrail delta completed, MiseLedger receipt hash was exported, and a handoff followed the session. A failed or rejected receipt does not count as use until capture records it. Current Cursor user wiring remains `advisory-only`: its rule, skill, session reminder, MCP projections, and version are checked, but the reminder does not establish repo-scoped enforcement.
+
+`brigade repos adoption repair --state <state> --dry-run` filters the report into a command plan. It does not execute commands or write fleet or target state.
+
 `brigade repos sweep plan/run/runs/show/closeout` explicitly refreshes safe local evidence across configured repos. A sweep runs only configured foreground local read/report commands inside each enabled repo, records per-command status and safe stdout/stderr summaries, stores raw logs only in gitignored local files, and writes one receipt under `.brigade/repos/sweeps/`. Sweep receipts use safe repo ids, labels, command labels, status counts, receipt labels, and local log labels.
 
 `brigade repos report plan/build/list/show/archive/closeout` builds a local fleet rollup from configured `.brigade/repos.toml` entries. Fleet reports live under `.brigade/repos/reports/` and use safe repo ids, labels, counts, statuses, fingerprints, and receipt labels only. They do not copy exact private repo names, owner names, org names, local paths, raw logs, raw scanner output, or raw evidence into public artifacts.
