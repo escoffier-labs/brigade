@@ -31,6 +31,7 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/sources/hermes"
 	"github.com/escoffier-labs/miseledger/internal/sources/openclaw"
 	"github.com/escoffier-labs/miseledger/internal/sources/opencode"
+	"github.com/escoffier-labs/miseledger/internal/sources/pi"
 	"github.com/escoffier-labs/miseledger/internal/sources/providerexports"
 	"github.com/escoffier-labs/miseledger/internal/toolpath"
 )
@@ -410,6 +411,7 @@ func discoverSources() []map[string]any {
 		{"codex", filepath.Join(home, ".codex", "sessions"), "native-jsonl"},
 		{"openclaw", filepath.Join(home, ".openclaw", "agents"), "native-jsonl"},
 		{"claude", filepath.Join(home, ".claude", "projects"), "native-jsonl"},
+		{"pi", pi.DefaultRoot(), "native-jsonl"},
 		{"hermes", filepath.Join(home, ".hermes", "sessions"), "native-json"},
 		{"opencode", opencode.DefaultRoot(), "native-json"},
 		{"cursor", cursor.DefaultRoot(), "native-cursor"},
@@ -959,7 +961,7 @@ func checkPrivate(path string) bool {
 
 func cmdImport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger import adapter|stationtrail|codex|openclaw|claude|hermes|opencode|cursor|grok|chatgpt-export|claude-export <path>")
+		return fatalf(errw, "usage: miseledger import adapter|stationtrail|codex|openclaw|claude|pi|hermes|opencode|cursor|grok|chatgpt-export|claude-export <path>")
 	}
 	switch args[0] {
 	case "adapter":
@@ -976,6 +978,8 @@ func cmdImport(args []string, out, errw io.Writer) int {
 		return cmdImportNative("openclaw", openclaw.Generate, args[1:], out, errw)
 	case "claude":
 		return cmdImportNative("claude", claude.Generate, args[1:], out, errw)
+	case "pi":
+		return cmdImportNative("pi", pi.Generate, args[1:], out, errw)
 	case "hermes":
 		return cmdImportNative("hermes", hermes.Generate, args[1:], out, errw)
 	case "opencode":
@@ -989,7 +993,7 @@ func cmdImport(args []string, out, errw io.Writer) int {
 	case "claude-export":
 		return cmdImportNative("claude-export", providerexports.GenerateClaude, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|hermes|opencode|cursor|grok|chatgpt-export|claude-export <path>")
+		return fatalf(errw, "usage: miseledger import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|pi|hermes|opencode|cursor|grok|chatgpt-export|claude-export <path>")
 	}
 }
 
@@ -1229,7 +1233,7 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 
 func cmdAdapter(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes|opencode|cursor|grok <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|pi|hermes|opencode|cursor|grok <path-or-dir> --out <file|->")
 	}
 	switch args[0] {
 	case "codex":
@@ -1238,6 +1242,8 @@ func cmdAdapter(args []string, out, errw io.Writer) int {
 		return cmdAdapterGenerate("openclaw", openclaw.Generate, args[1:], out, errw)
 	case "claude":
 		return cmdAdapterGenerate("claude", claude.Generate, args[1:], out, errw)
+	case "pi":
+		return cmdAdapterGenerate("pi", pi.Generate, args[1:], out, errw)
 	case "hermes":
 		return cmdAdapterGenerate("hermes", hermes.Generate, args[1:], out, errw)
 	case "opencode":
@@ -1247,7 +1253,7 @@ func cmdAdapter(args []string, out, errw io.Writer) int {
 	case "grok":
 		return cmdAdapterGenerate("grok", grok.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes|opencode|cursor|grok <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|pi|hermes|opencode|cursor|grok <path-or-dir> --out <file|->")
 	}
 }
 
@@ -1456,7 +1462,7 @@ func nativeFastPathOptions(db *sql.DB, name string, opts sources.Options) (sourc
 
 func supportsNativeFastPath(name string) bool {
 	switch name {
-	case "codex", "openclaw", "claude", "hermes", "opencode", "cursor", "grok":
+	case "codex", "openclaw", "claude", "pi", "hermes", "opencode", "cursor", "grok":
 		return true
 	default:
 		return false
