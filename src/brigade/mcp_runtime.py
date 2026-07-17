@@ -173,7 +173,7 @@ def _decode_sse_event_block(event_block: bytes) -> tuple[dict[str, Any] | None, 
     if current_data:
         data_payload = "\n".join(current_data)
     if data_payload is None:
-        return None, "invalid response"
+        return None, None
     try:
         payload = json.loads(data_payload)
     except json.JSONDecodeError:
@@ -202,7 +202,12 @@ def _set_response_socket_timeout(resp: Any, timeout: float) -> None:
         sock.settimeout(max(0.0, timeout))
 
 
-def _read_one_sse_json_response(resp: Any, *, deadline: float) -> tuple[dict[str, Any] | None, str | None]:
+def _read_one_sse_json_response(
+    resp: Any,
+    *,
+    deadline: float,
+    expected_id: object | None,
+) -> tuple[dict[str, Any] | None, str | None]:
     event_lines: list[bytes] = []
     total_bytes = 0
 
@@ -229,6 +234,18 @@ def _read_one_sse_json_response(resp: Any, *, deadline: float) -> tuple[dict[str
                 return joined, None
         return None, "timeout"
 
+    def decode_event() -> tuple[dict[str, Any] | None, str | None]:
+        block = b"\n".join(event_lines)
+        event_lines.clear()
+        if len(block) > MAX_HTTP_BODY_BYTES:
+            return None, "response exceeded size limit"
+        return _decode_sse_event_block(block)
+
+    def is_expected_response(payload: dict[str, Any]) -> bool:
+        if expected_id is None:
+            return True
+        return payload.get("id") == expected_id and ("result" in payload or "error" in payload)
+
     while remaining() > 0:
         line, read_error = read_line()
         if read_error:
@@ -237,17 +254,21 @@ def _read_one_sse_json_response(resp: Any, *, deadline: float) -> tuple[dict[str
         if not line:
             if not event_lines:
                 return {}, None
-            block = b"\n".join(event_lines)
-            if len(block) > MAX_HTTP_BODY_BYTES:
-                return None, "response exceeded size limit"
-            return _decode_sse_event_block(block)
+            payload, decode_error = decode_event()
+            if decode_error:
+                return None, decode_error
+            if payload is not None and is_expected_response(payload):
+                return payload, None
+            return None, "response stream ended before matching JSON-RPC response"
 
         stripped = line.rstrip(b"\r\n")
         if stripped == b"":
-            block = b"\n".join(event_lines)
-            if len(block) > MAX_HTTP_BODY_BYTES:
-                return None, "response exceeded size limit"
-            return _decode_sse_event_block(block)
+            payload, decode_error = decode_event()
+            if decode_error:
+                return None, decode_error
+            if payload is not None and is_expected_response(payload):
+                return payload, None
+            continue
 
         event_lines.append(stripped)
 
@@ -313,7 +334,11 @@ def _probe_http(server: CanonicalServer, *, config_current: bool, timeout: float
                 new_session = resp.headers.get("Mcp-Session-Id")
                 content_type = resp.headers.get("Content-Type", "").lower()
                 if "text/event-stream" in content_type:
-                    payload, parse_error = _read_one_sse_json_response(resp, deadline=deadline)
+                    payload, parse_error = _read_one_sse_json_response(
+                        resp,
+                        deadline=deadline,
+                        expected_id=message.get("id"),
+                    )
                 else:
                     raw = resp.read(MAX_HTTP_BODY_BYTES + 1)
                     payload, parse_error = _read_json_response(raw)

@@ -576,14 +576,11 @@ def _config_current_by_name(
     return current
 
 
-_VERIFY_TIMEOUT_ERROR = "--timeout must be greater than 0 and no more than 300 seconds"
-
-
-def _verify_timeout_error(timeout: float | None) -> str | None:
+def _verify_timeout_error(timeout: float | None, *, flag: str = "--timeout") -> str | None:
     if timeout is None:
         return None
     if not math.isfinite(timeout) or timeout <= 0 or timeout > 300:
-        return _VERIFY_TIMEOUT_ERROR
+        return f"{flag} must be greater than 0 and no more than 300 seconds"
     return None
 
 
@@ -670,7 +667,7 @@ def sync(
     if verify_runtime and not write:
         message = "--verify requires --write"
         return _emit({"errors": [message]}, json_output, [f"error: {message}"], 2)
-    timeout_error = _verify_timeout_error(verify_timeout)
+    timeout_error = _verify_timeout_error(verify_timeout, flag="--verify-timeout")
     if timeout_error:
         return _emit({"errors": [timeout_error]}, json_output, [f"error: {timeout_error}"], 2)
     servers, errors, _ = load_canonical(target)

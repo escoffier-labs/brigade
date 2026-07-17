@@ -243,6 +243,40 @@ class _StreamingSseMcpHandler(_SseMcpHandler):
         time.sleep(1)
 
 
+class _PrefixedSseMcpHandler(_SseMcpHandler):
+    def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+        length = int(self.headers.get("Content-Length", "0"))
+        request = json.loads(self.rfile.read(length))
+        if request.get("method") == "notifications/initialized":
+            self.send_response(202)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if request.get("method") == "initialize":
+            result = {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "prefixed-fixture", "version": "1"},
+            }
+        else:
+            result = {"tools": [{"name": "prefixed-echo"}]}
+        notification = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/message",
+                "params": {"level": "info", "data": "starting"},
+            }
+        )
+        response = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result})
+        body = (f": keepalive\n\nevent: message\ndata: {notification}\n\nevent: message\ndata: {response}\n\n").encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Mcp-Session-Id", "prefixed-session")
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class _LongLineSseMcpHandler(_SseMcpHandler):
     tool_description = "x" * 5000
 
@@ -303,6 +337,17 @@ def test_verify_reads_one_event_without_waiting_for_stream_close(tmp_path, capsy
         _seed_http(tmp_path, url)
         capsys.readouterr()
         assert mcp_cmd.verify(target=tmp_path, harness="claude", timeout=0.5, json_output=True) == 0
+
+    result = _payload(capsys)["results"][0]
+    assert result["runtime_healthy"] is True
+    assert result["tool_count"] == 1
+
+
+def test_verify_skips_sse_keepalive_and_notification_before_response(tmp_path, capsys):
+    with _http_mcp_server(_PrefixedSseMcpHandler) as url:
+        _seed_http(tmp_path, url)
+        capsys.readouterr()
+        assert mcp_cmd.verify(target=tmp_path, harness="claude", json_output=True) == 0
 
     result = _payload(capsys)["results"][0]
     assert result["runtime_healthy"] is True
@@ -556,6 +601,23 @@ def test_sync_verify_requires_write(tmp_path, capsys):
     payload = _payload(capsys)
 
     assert payload["errors"] == ["--verify requires --write"]
+
+
+def test_sync_verify_timeout_error_names_sync_flag(tmp_path, capsys):
+    capsys.readouterr()
+    assert (
+        mcp_cmd.sync(
+            target=tmp_path,
+            write=True,
+            verify_runtime=True,
+            verify_timeout=0,
+            json_output=True,
+        )
+        == 2
+    )
+    payload = _payload(capsys)
+
+    assert payload["errors"] == ["--verify-timeout must be greater than 0 and no more than 300 seconds"]
 
 
 def test_mcp_verify_cli_supports_harness_and_name_filters(tmp_path, capsys):
