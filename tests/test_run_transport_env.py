@@ -3,6 +3,7 @@
 from brigade import agents
 from brigade import run_transport
 from brigade.roster import Agent, Roster
+from brigade.run_receipts import write_worker_logs
 from brigade.run_transport import Assignment
 
 
@@ -12,10 +13,10 @@ def _roster_with_env(env):
     return Roster(orchestrator="chef", agents={"chef": chef, "k3": k3})
 
 
-def _dispatch(roster, monkeypatch, captured):
+def _dispatch(roster, monkeypatch, captured, *, stdout="worker answer", stderr=""):
     def fake_run(argv, **kw):
         captured["env"] = kw.get("env")
-        return agents.proc.Result(0, "worker answer", "")
+        return agents.proc.Result(0, stdout, stderr)
 
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setattr(agents.proc, "run", fake_run)
@@ -60,6 +61,34 @@ def test_worker_result_records_env_provenance_without_values(monkeypatch):
     assert result.endpoint_host == "api.example.com"
     serialized = str(result)
     assert "sk-lane-value" not in serialized
+
+
+def test_worker_logs_scrub_resolved_env_values_before_persistence(monkeypatch, tmp_path):
+    token = "lane-token-value-for-test"
+    monkeypatch.setenv("LANE_KEY", token)
+    captured = {}
+    roster = _roster_with_env({"ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"})
+
+    result = _dispatch(
+        roster,
+        monkeypatch,
+        captured,
+        stdout=f"worker answer token={token}\n",
+        stderr=f"adapter diagnostic bearer={token}\n",
+    )[0]
+    recorded = write_worker_logs(tmp_path, [result])[0]
+
+    assert token not in result.text
+    assert token not in result.stdout
+    assert token not in result.stderr
+    assert recorded.stdout_log is not None
+    assert recorded.stderr_log is not None
+    stdout_log = (tmp_path / recorded.stdout_log).read_text()
+    stderr_log = (tmp_path / recorded.stderr_log).read_text()
+    assert token not in stdout_log
+    assert token not in stderr_log
+    assert stdout_log == "worker answer token=[ANTHROPIC_AUTH_TOKEN]\n"
+    assert stderr_log == "adapter diagnostic bearer=[ANTHROPIC_AUTH_TOKEN]\n"
 
 
 def test_worker_env_missing_ref_fails_the_worker(monkeypatch):

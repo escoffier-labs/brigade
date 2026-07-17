@@ -1086,6 +1086,223 @@ def test_run_agent_env_ref_resolves_from_parent(monkeypatch):
     assert "ANTHROPIC_AUTH_TOKEN_REF" not in captured["env"]
 
 
+def test_run_agent_scrubs_resolved_env_values_from_success_output(monkeypatch):
+    token = "lane-token-value-for-test"
+    endpoint = "https://lane.example.test/anthropic"
+
+    def fake_run(argv, **kw):
+        return agents.proc.Result(
+            0,
+            f"answer used {token} at {endpoint}\n",
+            f"debug auth={token}\n",
+        )
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    monkeypatch.setenv("LANE_KEY", token)
+
+    result = agents.run_agent(
+        "claude",
+        "hi",
+        env={"ANTHROPIC_BASE_URL": endpoint, "ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"},
+    )
+
+    assert result.ok
+    assert token not in result.text
+    assert token not in result.stdout
+    assert token not in result.stderr
+    assert endpoint not in result.text
+    assert result.text == "answer used [ANTHROPIC_AUTH_TOKEN] at [ANTHROPIC_BASE_URL]"
+    assert result.stderr == "debug auth=[ANTHROPIC_AUTH_TOKEN]\n"
+
+
+def test_run_agent_scrubs_resolved_env_value_from_failure_detail(monkeypatch):
+    token = "lane-token-value-for-test"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(1, f"request used {token}\n", f"401 bearer {token}\n"),
+    )
+    monkeypatch.setenv("LANE_KEY", token)
+
+    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"})
+
+    assert not result.ok
+    assert token not in result.text
+    assert token not in result.detail
+    assert token not in result.stdout
+    assert token not in result.stderr
+    assert result.detail == "401 bearer [ANTHROPIC_AUTH_TOKEN]"
+
+
+def test_run_agent_scrubs_longer_overlapping_env_value_first(monkeypatch):
+    endpoint = "https://api.example.test/v1"
+    host = "api.example.test"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"connected to {endpoint}\n", ""),
+    )
+
+    result = agents.run_agent("claude", "hi", env={"ENDPOINT": endpoint, "HOST_FRAGMENT": host})
+
+    assert result.ok
+    assert result.text == "connected to [ENDPOINT]"
+
+
+def test_run_agent_scrubs_equal_env_values_with_stable_target(monkeypatch):
+    shared = "shared-override-value"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"configured {shared}\n", ""),
+    )
+
+    result = agents.run_agent("claude", "hi", env={"Z_MODE": shared, "A_MODE": shared})
+
+    assert result.ok
+    assert result.text == "configured [A_MODE]"
+
+
+def test_run_agent_scrubs_structured_grok_after_parsing(monkeypatch):
+    token = "lane-token-value-for-test"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, _grok_json_output(f"answer used {token}"), ""),
+    )
+    monkeypatch.setenv("LANE_KEY", token)
+
+    result = agents.run_agent(
+        "grok",
+        "review it",
+        read_only=True,
+        env={"GROK_AUTH_TOKEN_REF": "LANE_KEY"},
+    )
+
+    assert result.ok
+    assert result.text == "answer used [GROK_AUTH_TOKEN]"
+    assert token not in result.stdout
+
+
+def test_run_agent_classifies_output_before_scrubbing_env_values(monkeypatch):
+    diagnostic = "rate limit exceeded"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"Error: {diagnostic} for this provider.\n", ""),
+    )
+    monkeypatch.setenv("LANE_DIAGNOSTIC", diagnostic)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_MODE_REF": "LANE_DIAGNOSTIC"})
+
+    assert not result.ok
+    assert result.failure_kind == "rate-limit-error"
+    assert diagnostic not in result.text
+    assert diagnostic not in result.detail
+    assert diagnostic not in result.stdout
+    assert result.text == "Error: [LANE_MODE] for this provider."
+    assert "Error: [LANE_MODE] for this provider." in result.detail
+
+
+def test_run_agent_classifies_invalid_grok_before_scrubbing_env_values(monkeypatch):
+    diagnostic = "rate limit exceeded"
+    stdout = _grok_json_output(f"Error: {diagnostic} for this provider.", structured=False)
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, stdout + "\n", ""),
+    )
+    monkeypatch.setenv("LANE_DIAGNOSTIC", diagnostic)
+
+    result = agents.run_agent(
+        "grok",
+        "review it",
+        read_only=True,
+        env={"GROK_MODE_REF": "LANE_DIAGNOSTIC"},
+    )
+
+    assert not result.ok
+    assert result.failure_kind == "rate-limit-error"
+    assert diagnostic not in result.text
+    assert diagnostic not in result.detail
+    assert diagnostic not in result.stdout
+    assert result.text == "Error: [GROK_MODE] for this provider."
+    assert "Error: [GROK_MODE] for this provider." in result.detail
+
+
+def test_run_agent_scrubs_long_env_value_before_detail_truncation(monkeypatch):
+    token = "secret-boundary-" + "x" * 240
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(
+            0,
+            f"Error: rate limit exceeded while using {token}.\n",
+            "",
+        ),
+    )
+    monkeypatch.setenv("LONG_LANE_TOKEN", token)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LONG_LANE_TOKEN"})
+
+    assert not result.ok
+    assert result.failure_kind == "rate-limit-error"
+    assert token[:80] not in result.detail
+    assert "[LANE_TOKEN]" in result.detail
+    assert len(result.detail) <= 200
+
+
+def test_run_agent_scrubs_long_grok_error_before_detail_truncation(monkeypatch):
+    token = "secret-boundary-" + "x" * 240
+    payload = json.loads(_grok_json_output("No findings."))
+    payload["structuredOutputError"] = f"schema rejected token {token}"
+    stdout = json.dumps(payload)
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, stdout + "\n", ""),
+    )
+    monkeypatch.setenv("LONG_GROK_TOKEN", token)
+
+    result = agents.run_agent(
+        "grok",
+        "review it",
+        read_only=True,
+        env={"GROK_TOKEN_REF": "LONG_GROK_TOKEN"},
+    )
+
+    assert not result.ok
+    assert result.failure_kind == "malformed-final-output"
+    assert token[:80] not in result.detail
+    assert "[GROK_TOKEN]" in result.detail
+    assert len(result.detail) <= 200
+
+
+def test_run_agent_does_not_scrub_unrelated_parent_environment(monkeypatch):
+    unrelated = "parent-value-not-overridden"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"diagnostic {unrelated}\n", ""),
+    )
+    monkeypatch.setenv("UNRELATED_VALUE", unrelated)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_MODE": "test"})
+
+    assert result.ok
+    assert unrelated in result.text
+
+
 def test_run_agent_env_ref_missing_fails_before_spawn(monkeypatch):
     calls = []
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)

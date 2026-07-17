@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List
@@ -291,7 +292,7 @@ def _parse_grok_final_output(stdout: str) -> _GrokFinal:
         detail = f"{base_error} ({'; '.join(diagnostic_parts)})" if diagnostic_parts else base_error
         return _GrokFinal(
             text=fallback,
-            error=detail[:200],
+            error=detail,
             diagnostic=(structured_output_error if isinstance(structured_output_error, str) else ""),
             session_id=payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None,
             request_id=payload.get("requestId") if isinstance(payload.get("requestId"), str) else None,
@@ -517,6 +518,22 @@ def resolve_env_overrides(env: dict[str, str]) -> tuple[dict[str, str] | None, s
     return resolved, ""
 
 
+def _scrub_env_override_values(text: str, overrides: dict[str, str] | None) -> str:
+    """Replace exact resolved override values with stable target-name labels."""
+
+    if not text or not overrides:
+        return text
+    replacements: dict[str, str] = {}
+    for target, value in sorted(overrides.items()):
+        if value:
+            replacements.setdefault(value, f"[{target}]")
+    if not replacements:
+        return text
+    values = sorted(replacements, key=lambda value: (-len(value), value))
+    pattern = re.compile("|".join(re.escape(value) for value in values))
+    return pattern.sub(lambda match: replacements[match.group(0)], text)
+
+
 def run_agent(
     cli_ref: str,
     prompt: str,
@@ -569,6 +586,7 @@ def run_agent(
                 return AgentResult(text="", ok=False, detail=missing_detail)
 
     child_env: dict[str, str] | None = None
+    resolved_overrides: dict[str, str] | None = None
     if env is not None:
         overrides, env_error = resolve_env_overrides(env)
         if overrides is None:
@@ -580,6 +598,7 @@ def run_agent(
                 failure_kind="env-ref-missing",
                 requested_model=model,
             )
+        resolved_overrides = overrides
         child_env = dict(os.environ)
         child_env.update(overrides)
 
@@ -636,14 +655,22 @@ def run_agent(
         grok_session_id = grok_final.session_id
         grok_request_id = grok_final.request_id
         grok_stop_reason = grok_final.stop_reason
+    safe_text = _scrub_env_override_values(text, resolved_overrides)
+    safe_stdout = _scrub_env_override_values(result.stdout, resolved_overrides)
+    safe_stderr = _scrub_env_override_values(result.stderr, resolved_overrides)
+    safe_structured_error = _scrub_env_override_values(structured_error, resolved_overrides)[:200]
+
+    def scrub_detail(detail: str) -> str:
+        return _scrub_env_override_values(detail, resolved_overrides)
+
     if result.code != 0:
-        detail = result.stderr.strip() or f"exit {result.code}"
+        detail = safe_stderr.strip() or f"exit {result.code}"
         return AgentResult(
-            text=text,
+            text=safe_text,
             ok=False,
             detail=detail[:200],
-            stdout=result.stdout,
-            stderr=result.stderr,
+            stdout=safe_stdout,
+            stderr=safe_stderr,
             exit_code=result.code,
             timed_out=result.code == 124,
             requested_model=model,
@@ -654,16 +681,16 @@ def run_agent(
         )
     if structured_error:
         for diagnostic in (text, structured_diagnostic, result.stderr):
-            output_failure = validate_final_output(diagnostic)
+            output_failure = validate_final_output(diagnostic, detail_transform=scrub_detail)
             if output_failure is not None and output_failure.kind in _NONRECOVERABLE_GROK_OUTPUT_FAILURES:
                 return AgentResult(
-                    text=text,
+                    text=safe_text,
                     ok=False,
                     detail=output_failure.detail,
                     failure_phase="output-validation",
                     failure_kind=output_failure.kind,
-                    stdout=result.stdout,
-                    stderr=result.stderr,
+                    stdout=safe_stdout,
+                    stderr=safe_stderr,
                     exit_code=result.code,
                     requested_model=model,
                     reasoning=reasoning,
@@ -672,13 +699,13 @@ def run_agent(
                     request_id=grok_request_id,
                 )
         return AgentResult(
-            text=text,
+            text=safe_text,
             ok=False,
-            detail=structured_error,
+            detail=safe_structured_error,
             failure_phase="output-validation",
             failure_kind="malformed-final-output",
-            stdout=result.stdout,
-            stderr=result.stderr,
+            stdout=safe_stdout,
+            stderr=safe_stderr,
             exit_code=result.code,
             requested_model=model,
             reasoning=reasoning,
@@ -696,8 +723,8 @@ def run_agent(
             text="",
             ok=False,
             detail=detail,
-            stdout=result.stdout,
-            stderr=result.stderr,
+            stdout=safe_stdout,
+            stderr=safe_stderr,
             exit_code=result.code,
             requested_model=model,
             reasoning=reasoning,
@@ -705,16 +732,16 @@ def run_agent(
             session_id=grok_session_id,
             request_id=grok_request_id,
         )
-    output_failure = validate_final_output(text)
+    output_failure = validate_final_output(text, detail_transform=scrub_detail)
     if output_failure is not None:
         return AgentResult(
-            text=text,
+            text=safe_text,
             ok=False,
             detail=output_failure.detail,
             failure_phase="output-validation",
             failure_kind=output_failure.kind,
-            stdout=result.stdout,
-            stderr=result.stderr,
+            stdout=safe_stdout,
+            stderr=safe_stderr,
             exit_code=result.code,
             requested_model=model,
             reasoning=reasoning,
@@ -723,10 +750,10 @@ def run_agent(
             request_id=grok_request_id,
         )
     return AgentResult(
-        text=text,
+        text=safe_text,
         ok=True,
-        stdout=result.stdout,
-        stderr=result.stderr,
+        stdout=safe_stdout,
+        stderr=safe_stderr,
         exit_code=result.code,
         requested_model=model,
         reasoning=reasoning,

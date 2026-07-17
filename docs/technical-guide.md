@@ -376,6 +376,14 @@ contains one assignment with the full task text, `worker-results.json` records
 the selected worker output, `final.txt` is that worker's text, and
 `synthesis.json` is marked with `mode: direct-worker`.
 
+Direct CLI seats may declare per-seat environment overrides in their roster entry. Values
+whose keys end in `_REF` are read from the named parent environment variable and injected
+under the key without `_REF`. After execution, Brigade replaces every exact nonempty
+resolved override value in returned text, detail, stdout, and stderr with `[TARGET_NAME]`
+before run logs or receipts are written. This bounded replacement covers only values
+resolved for that seat; it is not a heuristic scan of the parent environment or historical
+logs. Resume revalidates stored environment tables before any synthesis dispatch.
+
 Detached runs require artifacts, so `--detach` cannot be combined with `--no-artifacts`.
 It also refuses `--dry-run` and `--inspect`, because the parent process exits before it can print a plan or inspect final artifacts.
 Use `brigade runs watch <run>` to follow a detached run from its artifacts:

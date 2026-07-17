@@ -115,7 +115,7 @@ role = "Open-weight worker on a coding-plan quota; relief for orchestrator-tier 
 env = { ANTHROPIC_BASE_URL = "https://api.moonshot.ai/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY", CLAUDE_CONFIG_DIR = "/home/operator/.claude-lanes" }
 ```
 
-Overrides apply to the spawned CLI process only, `run.json` records the override names and endpoint host (never values), and a missing referenced variable fails the worker before dispatch. Direct CLI seats only: acpx and codex-cloud seats manage their own environment.
+Overrides apply to the spawned CLI process only, `run.json` records the override names and endpoint host (never values), and a missing referenced variable fails the worker before dispatch. If the CLI echoes any resolved override value, Brigade replaces the exact value with its target name in brackets before worker text, detail, stdout, or stderr can be stored. Direct CLI seats only: acpx and codex-cloud seats manage their own environment.
 
 The isolated `CLAUDE_CONFIG_DIR` is load-bearing: with the default config directory, the `claude` CLI prefers its subscription OAuth over env auth, the upstream returns 401, and the CLI retries silently, which presents as an indefinite hang.
 
