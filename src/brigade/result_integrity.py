@@ -123,7 +123,10 @@ def _tool_only(text: str) -> bool:
         return True
     return bool(
         re.fullmatch(
-            r"\s*<(?P<tag>tool_call|function_call|tool_use)>[\s\S]*</(?P=tag)>\s*",
+            r"\s*(?:(?:"
+            r"<(?P<tag>tool_call|function_call|tool_use)\b[^>]*>[\s\S]*?</(?P=tag)>|"
+            r"<(?:tool_call|function_call|tool_use)\b[^>]*/>"
+            r")\s*)+",
             text,
             re.IGNORECASE,
         )

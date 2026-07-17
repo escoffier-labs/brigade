@@ -482,8 +482,15 @@ def test_run_agent_rejects_tool_call_only_output(monkeypatch, payload):
     assert result.detail == "provider returned tool-call data without a final result"
 
 
-def test_run_agent_rejects_tool_use_markup_without_final_text(monkeypatch):
-    output = '<tool_use>{"name":"read_file","path":"README.md"}</tool_use>'
+@pytest.mark.parametrize(
+    "output",
+    [
+        '<tool_use>{"name":"read_file","path":"README.md"}</tool_use>',
+        '<tool_use name="read_file">{"path":"README.md"}</tool_use>',
+        '<tool_call name="read_file"/><function_call>{"name":"inspect"}</function_call>',
+    ],
+)
+def test_run_agent_rejects_tool_use_markup_without_final_text(monkeypatch, output):
     monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
 
