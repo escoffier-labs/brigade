@@ -261,6 +261,45 @@ def test_adoption_accepts_verification_before_final_handoff_write(tmp_path, caps
     assert payload["rows"][0]["use"]["compliant_session_count"] == 1
 
 
+def test_adoption_explains_evidence_split_across_receipts(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repo = _wired_repo(workspace, "service", "claude")
+    capsys.readouterr()
+    _fleet_config(workspace, [("service", repo)])
+    now = localio.utc_now()
+    fingerprint = _write_claude_session(
+        repo,
+        "split-evidence",
+        started_at=now - timedelta(hours=2),
+        last_write_at=now - timedelta(hours=1),
+    )
+    _write_compliant_evidence(repo, fingerprint, started_at=now - timedelta(minutes=30))
+    second_dir = repo / ".brigade" / "work" / "verify-runs" / "verify-exported"
+    second_dir.mkdir()
+    second_path = second_dir / "receipt.json"
+    second = {
+        "run_id": "verify-exported",
+        "path": str(second_dir),
+        "status": "completed",
+        "started_at": (now - timedelta(minutes=20)).isoformat(),
+        "harness_session": {"harness": "claude", "fingerprint": fingerprint},
+        "commands": [{"status": "completed", "exit_code": 0}],
+        "code_graph_delta": {"status": "unavailable", "ok": False},
+    }
+    second_path.write_text(json.dumps(second) + "\n")
+    second_hash, _ = _receipt_hash(second, second_path)
+    cursor = repo / ".brigade" / "work" / "miseledger-export-cursor.json"
+    cursor.write_text(json.dumps({"raw_hashes": [second_hash]}) + "\n")
+
+    assert repos_cmd.adoption_report(target=workspace, harnesses=["claude"], days=7, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    session = payload["rows"][0]["use"]["sessions"][0]
+
+    assert session["status"] == "bypassed"
+    assert session["missing"] == ["complete-verification-evidence"]
+
+
 def test_adoption_scrubs_private_repo_path_from_claude_classifier_issues(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

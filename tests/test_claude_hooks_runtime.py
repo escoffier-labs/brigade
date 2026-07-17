@@ -390,6 +390,60 @@ def test_posttooluse_snapshot_fails_open_when_state_cannot_be_inspected(tmp_path
     )
 
 
+def test_final_bash_handoff_write_does_not_require_verification_again(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    session_id = "bash-handoff-last"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "file.py")},
+        ),
+    )
+    state = runtime.read_session_state(target, session_id)
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": state["last_verification_write_at"],
+                "harness_session": {
+                    "harness": "claude",
+                    "fingerprint": state["session_fingerprint"],
+                },
+            }
+        )
+        + "\n"
+    )
+    handoff = target / ".claude" / "memory-handoffs" / "handoff.md"
+    handoff.write_text("durable finding\n")
+    command = "printf '%s\\n' finding >> .claude/memory-handoffs/handoff.md"
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Bash",
+            tool_input={"command": command},
+        ),
+    )
+
+    updated = runtime.read_session_state(target, session_id)
+    assert updated["last_write_at"] >= updated["last_verification_write_at"]
+    assert updated["last_verification_write_at"] == state["last_verification_write_at"]
+    assert (
+        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
+    )
+
+
 def test_repo_worktree_fingerprint_detects_dirty_tracked_same_size_rewrite(tmp_path: Path):
     target = _git_wired_claude(tmp_path)
     tracked = target / "tracked.txt"

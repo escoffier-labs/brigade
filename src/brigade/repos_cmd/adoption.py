@@ -211,6 +211,8 @@ def _claude_use(target: Path, *, window_start: datetime) -> dict[str, Any]:
             missing.append("miseledger")
         if not handoff:
             missing.append("handoff")
+        if not receipt_compliant and not missing:
+            missing.append("complete-verification-evidence")
         compliant = briefed and handoff and receipt_compliant
         sessions.append(
             {

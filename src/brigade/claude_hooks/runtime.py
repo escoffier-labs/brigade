@@ -876,6 +876,54 @@ def _is_confident_bash_write(command: object) -> bool:
     return False
 
 
+def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
+    if not isinstance(command, str) or not command.strip():
+        return False
+    try:
+        tokens = _shell_tokens(command)
+    except ValueError:
+        return False
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _SHELL_SEPARATORS:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    found_target = False
+    all_target_commands = {"mkdir", "rm", "rmdir", "tee", "touch"}
+    last_target_commands = {"cp", "install", "mv", "truncate"}
+    for segment in segments:
+        stripped = _strip_env(segment)
+        if not stripped:
+            continue
+        targets: list[str] = []
+        redirected_indexes: set[int] = set()
+        for index, token in enumerate(stripped[:-1]):
+            if token and set(token) <= set(";&|<>") and ">" in token:
+                targets.append(stripped[index + 1])
+                redirected_indexes.add(index + 1)
+        command_name = Path(stripped[0]).name
+        positionals = [
+            token
+            for index, token in enumerate(stripped[1:], start=1)
+            if index not in redirected_indexes
+            and not token.startswith("-")
+            and not (token and set(token) <= set(";&|<>"))
+        ]
+        if command_name in all_target_commands:
+            targets.extend(positionals)
+        elif command_name in last_target_commands and positionals:
+            targets.append(positionals[-1])
+        elif command_name in _BASH_WRITE_COMMANDS and not targets:
+            return False
+        if not targets:
+            continue
+        found_target = True
+        if any(not _is_handoff_path(target, path) for path in targets):
+            return False
+    return found_target
+
+
 def _snapshot_ignore_relative(path: Path) -> bool:
     parts = path.parts
     if not parts:
@@ -1049,8 +1097,7 @@ def _new_state(target: Path, session_id: str) -> dict[str, Any]:
     }
 
 
-def _is_handoff_tool_write(target: Path, tool_input: dict[str, Any]) -> bool:
-    raw_path = tool_input.get("file_path") or tool_input.get("notebook_path")
+def _is_handoff_path(target: Path, raw_path: object) -> bool:
     if not isinstance(raw_path, str) or not raw_path:
         return False
     path = Path(raw_path).expanduser()
@@ -1062,6 +1109,10 @@ def _is_handoff_tool_write(target: Path, tool_input: dict[str, Any]) -> bool:
         return path.is_relative_to(inbox)
     except OSError:
         return False
+
+
+def _is_handoff_tool_write(target: Path, tool_input: dict[str, Any]) -> bool:
+    return _is_handoff_path(target, tool_input.get("file_path") or tool_input.get("notebook_path"))
 
 
 def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -1209,7 +1260,10 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             state["write_observed"] = True
             written_at = localio.utc_now_iso()
             state["last_write_at"] = written_at
-            if tool_name not in _WRITE_TOOLS or not _is_handoff_tool_write(target, post_tool_input):
+            handoff_write = (tool_name in _WRITE_TOOLS and _is_handoff_tool_write(target, post_tool_input)) or (
+                tool_name == "Bash" and _bash_write_targets_handoffs(target, post_tool_input.get("command"))
+            )
+            if not handoff_write:
                 state["last_verification_write_at"] = written_at
             updated_fp = repo_worktree_fingerprint(target)
             if updated_fp is not None:
