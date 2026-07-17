@@ -519,16 +519,14 @@ def _print_recovery_guidance(run_dir: Path) -> None:
         print("resume: unavailable (no resumable app-server worker thread)")
 
 
-def _lock_workspace(run_meta: dict[str, Any]) -> Path | None:
-    for key in ("lock_workspace", "cwd"):
-        raw_workspace = run_meta.get(key)
-        if isinstance(raw_workspace, str) and raw_workspace:
-            return Path(raw_workspace).expanduser().resolve()
-    return None
+def _lock_workspace(run_dir: Path, run_meta: dict[str, Any], *, fallback: Path | None = None) -> Path | None:
+    from . import runguard
+
+    return runguard.resolve_run_lock_workspace(run_meta, run_dir, fallback=fallback)
 
 
 def _lock_recovery_status(run_dir: Path, run_meta: dict[str, Any]) -> str:
-    workspace = _lock_workspace(run_meta)
+    workspace = _lock_workspace(run_dir, run_meta)
     if workspace is None:
         return "unknown"
     from . import runguard
@@ -569,8 +567,10 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
     else:
         read_error = f"run.json not found in {run_dir}" if run_meta is None else None
     if run_meta is None:
+        workspace = _lock_workspace(run_dir, {}, fallback=cwd)
+        assert workspace is not None
         try:
-            runguard.recover_stale_run(cwd.expanduser().resolve(), run_dir)
+            runguard.recover_stale_run(workspace, run_dir)
         except runguard.RunLockError as exc:
             detail = read_error if str(exc).startswith("run lock not found for run:") else str(exc)
             print(f"error: {detail}", file=sys.stderr)
@@ -591,7 +591,7 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
     if _is_terminal(run_meta):
         phase, _, _ = _failure_fields(run_meta)
         if phase == "stale-lock-recovery":
-            workspace = _lock_workspace(run_meta)
+            workspace = _lock_workspace(run_dir, run_meta, fallback=cwd)
             if workspace is None:
                 print(f"error: recovered run artifact has no workspace cwd: {run_dir}", file=sys.stderr)
                 return 2
@@ -603,7 +603,7 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
         print(f"already terminal: {run_dir} [{run_meta.get('status', 'unknown')}]")
         _print_recovery_guidance(run_dir)
         return 0
-    workspace = _lock_workspace(run_meta)
+    workspace = _lock_workspace(run_dir, run_meta, fallback=cwd)
     if workspace is None:
         print(f"error: run artifact has no workspace cwd: {run_dir}", file=sys.stderr)
         return 2

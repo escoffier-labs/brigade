@@ -205,6 +205,30 @@ def test_runs_recover_uses_recorded_lock_workspace_for_worktree_run(tmp_path, ca
     assert f"recovered: {run_dir}" in capsys.readouterr().out
 
 
+def test_runs_recover_infers_lock_workspace_for_legacy_worktree_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    detached = tmp_path / "detached"
+    detached.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "legacy"
+    _write_minimal_run(
+        run_dir,
+        task="legacy worktree task",
+        status="dispatching",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["cwd"] = str(detached)
+    _write_json(run_dir / "run.json", run_meta)
+    lock_path = _write_lock_owner(workspace, run_dir)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=tmp_path)
+
+    assert rc == 0
+    assert not lock_path.exists()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+    assert f"recovered: {run_dir}" in capsys.readouterr().out
+
+
 def test_runs_recover_reconstructs_missing_run_json_from_matching_dead_lock(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     run_dir = workspace / ".brigade" / "runs" / "orphan"

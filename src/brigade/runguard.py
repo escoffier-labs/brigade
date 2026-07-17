@@ -100,6 +100,26 @@ def lock_path(cwd: Path) -> Path:
     return base / ".brigade" / "run.lock"
 
 
+def resolve_run_lock_workspace(
+    run_meta: dict[str, object],
+    run_dir: Path,
+    *,
+    fallback: Path | None = None,
+) -> Path | None:
+    raw_workspace = run_meta.get("lock_workspace")
+    if isinstance(raw_workspace, str) and raw_workspace:
+        return Path(raw_workspace).expanduser().resolve()
+    run_dir = run_dir.expanduser().resolve()
+    if run_dir.parent.name == "runs" and run_dir.parent.parent.name == ".brigade":
+        return run_dir.parent.parent.parent
+    if fallback is not None:
+        return fallback.expanduser().resolve()
+    raw_cwd = run_meta.get("cwd")
+    if isinstance(raw_cwd, str) and raw_cwd:
+        return Path(raw_cwd).expanduser().resolve()
+    return None
+
+
 def _pid_is_active(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -277,6 +297,7 @@ def _recover_run_artifact(owner: dict[str, object] | None) -> str:
     workspace = owner.get("_lock_workspace")
     if isinstance(workspace, str) and workspace:
         payload.setdefault("cwd", workspace)
+        payload.setdefault("lock_workspace", workspace)
     acquired_at = owner.get("acquired_at")
     if isinstance(acquired_at, str) and acquired_at:
         payload.setdefault("started_at", acquired_at)

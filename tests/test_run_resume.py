@@ -225,6 +225,47 @@ def test_resume_refuses_foreign_live_owner(tmp_path, monkeypatch, capsys):
     assert lock.is_dir()
 
 
+def test_resume_infers_lock_workspace_for_legacy_worktree_run(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    original_run_dir = _write_run_dir(
+        workspace,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "thread_id": "t-1",
+                "status": "interrupted",
+            }
+        ],
+    )
+    run_dir = workspace / ".brigade" / "runs" / "legacy"
+    run_dir.parent.mkdir(parents=True)
+    original_run_dir.rename(run_dir)
+    detached = tmp_path / "detached"
+    detached.mkdir()
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["cwd"] = str(detached)
+    (run_dir / "run.json").write_text(json.dumps(run_meta))
+    foreign_run = workspace / ".brigade" / "runs" / "foreign"
+    lock = runguard.lock_path(workspace)
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+    (lock / "owner.json").write_text(
+        json.dumps({"owner_token": "live", "pid": os.getpid(), "run_dir": str(foreign_run.resolve())})
+    )
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("provider must not start")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert "another brigade run appears active" in capsys.readouterr().err
+    assert lock.is_dir()
+
+
 def test_runs_resume_cli_dispatches(tmp_path, monkeypatch):
     from brigade import cli
 
