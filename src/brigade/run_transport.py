@@ -31,19 +31,28 @@ def _env_override_names(env: dict[str, str] | None) -> tuple[str, ...]:
 
 
 def _env_endpoint_host(env: dict[str, str] | None) -> str | None:
+    """Every distinct endpoint host the overrides point at, comma-joined.
+
+    A seat normally declares one base URL; recording all of them keeps the
+    provenance honest when a table carries more than one instead of letting
+    key order pick a winner.
+    """
+
     if not env:
         return None
-    base_url: str | None = None
+    hosts: list[str] = []
     for key in sorted(env):
+        base_url: str | None = None
         if key.endswith("_BASE_URL"):
             base_url = env[key]
-            break
-        if key.endswith("_BASE_URL_REF"):
+        elif key.endswith("_BASE_URL_REF"):
             base_url = os.environ.get(env[key])
-            break
-    if not base_url:
-        return None
-    return urlparse(base_url).hostname or base_url
+        if not base_url:
+            continue
+        host = urlparse(base_url).hostname or base_url
+        if host not in hosts:
+            hosts.append(host)
+    return ",".join(hosts) if hosts else None
 
 
 @dataclass(frozen=True)

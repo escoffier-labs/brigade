@@ -172,3 +172,18 @@ def test_endpoint_host_generalizes_to_any_base_url(monkeypatch):
     )
     result = _dispatch(roster, monkeypatch, captured)[0]
     assert result.endpoint_host == "openai-lane.example.com"
+
+
+def test_endpoint_host_records_all_distinct_hosts(monkeypatch):
+    monkeypatch.setenv("LANE_URL", "https://ref.example.com/v1")
+    monkeypatch.setenv("LANE_KEY", "sk-lane-value")
+    captured = {}
+    roster = _roster_with_env(
+        {
+            "ANTHROPIC_BASE_URL": "https://anthropic-lane.example.com/anthropic",
+            "OPENAI_BASE_URL_REF": "LANE_URL",
+            "OPENAI_API_KEY_REF": "LANE_KEY",
+        }
+    )
+    result = _dispatch(roster, monkeypatch, captured)[0]
+    assert result.endpoint_host == "anthropic-lane.example.com,ref.example.com"
