@@ -231,9 +231,7 @@ def validate_final_output(
                 diagnostic = stripped[operational_error.start() :].strip()
                 return OutputFailure(
                     kind,
-                    safe_detail(
-                        f"provider returned an operational error instead of a final result: {diagnostic}"
-                    ),
+                    safe_detail(f"provider returned an operational error instead of a final result: {diagnostic}"),
                 )
     if _tool_only(stripped):
         return OutputFailure(
