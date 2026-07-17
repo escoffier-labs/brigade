@@ -9,6 +9,8 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 from brigade import cli, localio
 from brigade.claude_hooks import runtime
 from brigade.install import install_selection
@@ -659,6 +661,71 @@ def test_stop_accepts_failed_or_rejected_routed_receipt_and_nudges_handoff(tmp_p
     )
 
     result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id="receipt", stop_hook_active=False))
+    assert "decision" not in result
+    assert "Memory Handoff" in result["hookSpecificOutput"]["additionalContext"]
+
+
+@pytest.mark.parametrize("wrapper", ["tokenjuice", "token-glace"])
+def test_stop_accepts_session_receipt_after_wrapped_verify_posttooluse(tmp_path: Path, monkeypatch, wrapper: str):
+    target = _wired_claude(tmp_path)
+    session_id = f"wrapped-verify-{wrapper}"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "file.py")},
+        ),
+    )
+    state = runtime.read_session_state(target, session_id)
+    original = 'brigade work verify run --target . --command "true" --capture brigade-work'
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": original},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    assert runtime.read_session_state(target, session_id)["pending_bash_fingerprint"]
+
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "wrapped-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "wrapped-run",
+                "status": "completed",
+                "started_at": state["last_write_at"],
+                "harness_session": {
+                    "harness": "claude",
+                    "fingerprint": state["session_fingerprint"],
+                },
+            }
+        )
+        + "\n"
+    )
+
+    wrapped = f"{wrapper} wrap --source claude-code -- /bin/bash -lc {shlex.quote(original)}"
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Bash",
+            tool_input={"command": wrapped},
+        ),
+    )
+    posttool_state = runtime.read_session_state(target, session_id)
+    assert posttool_state["last_write_at"] == state["last_write_at"]
+    assert "pending_bash_fingerprint" not in posttool_state
+
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
     assert "decision" not in result
     assert "Memory Handoff" in result["hookSpecificOutput"]["additionalContext"]
 
