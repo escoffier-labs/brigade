@@ -155,3 +155,42 @@ func TestDefaultRoot(t *testing.T) {
 		t.Fatalf("DefaultRoot() = %q, want suffix .pi/agent/sessions", root)
 	}
 }
+
+func TestGenerateThinkingAndToolCallText(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "parts.jsonl")
+	content := strings.Join([]string{
+		`{"type":"session","version":3,"id":"s","timestamp":"2026-06-03T19:00:00Z","cwd":"/tmp/example-project"}`,
+		`{"type":"message","id":"think-1","timestamp":"2026-06-03T19:01:00Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"I should list the directory first."}]}}`,
+		`{"type":"message","id":"tool-1","timestamp":"2026-06-03T19:02:00Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tc-1","name":"bash","arguments":{"command":"ls -la"}}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	recs, _ := parseRecords(t, path, sources.Options{})
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 message records, got %d", len(recs))
+	}
+
+	var thinkingText, toolCallText string
+	var toolCallKind string
+	for _, rec := range recs {
+		if strings.Contains(rec.Item.Text, "I should list the directory first.") {
+			thinkingText = rec.Item.Text
+		}
+		if strings.Contains(rec.Item.Text, "ls -la") {
+			toolCallText = rec.Item.Text
+			toolCallKind = rec.Item.Kind
+		}
+	}
+	if thinkingText == "" {
+		t.Fatalf("expected thinking text in a record, got %#v", recs)
+	}
+	if toolCallText == "" {
+		t.Fatalf("expected tool call text containing ls -la, got %#v", recs)
+	}
+	if toolCallKind != "tool_call" {
+		t.Fatalf("tool call message kind = %q, want tool_call", toolCallKind)
+	}
+}

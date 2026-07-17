@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -93,13 +94,16 @@ func normalize(ev sources.RawEvent, ctx sessionCtx) (adapter.Record, string) {
 	role := sources.String(message, "role")
 	cwd := ctx.cwd
 	project := filepath.Base(filepath.Dir(ev.Path))
-	text := piText(message)
+	text, hasToolCall := piText(message)
 	if text == "" {
 		return adapter.Record{}, fmt.Sprintf("%s:%d: no searchable text for event type %q", ev.Path, ev.Ordinal, eventType)
 	}
 	itemHash := sources.HashBytes([]byte(text))
 	externalID := "pi:" + sources.StableID(ev.Path, sessionID, msgID, fmt.Sprint(ev.Ordinal), eventType, ts, itemHash)
 	kind := sources.KindFromEvent(eventType, text)
+	if hasToolCall {
+		kind = "tool_call"
+	}
 	meta := map[string]any{
 		"harness":    "pi",
 		"event_type": eventType,
@@ -136,9 +140,69 @@ func normalize(ev sources.RawEvent, ctx sessionCtx) (adapter.Record, string) {
 	return rec, ""
 }
 
-func piText(message map[string]any) string {
+func piText(message map[string]any) (string, bool) {
 	if message == nil {
-		return ""
+		return "", false
 	}
-	return strings.TrimSpace(sources.TextFromAny(message["content"], 4000))
+	content, ok := message["content"].([]any)
+	if !ok {
+		text := strings.TrimSpace(sources.TextFromAny(message["content"], 4000))
+		return text, false
+	}
+	var parts []string
+	hasToolCall := false
+	for _, item := range content {
+		part, ok := item.(map[string]any)
+		if !ok {
+			if s := strings.TrimSpace(sources.TextFromAny(item, 4000)); s != "" {
+				parts = append(parts, s)
+			}
+			continue
+		}
+		if sources.String(part, "type") == "toolCall" {
+			hasToolCall = true
+		}
+		if s := piContentPart(part); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	text := strings.TrimSpace(strings.Join(parts, "\n"))
+	if len(text) > 4000 {
+		text = text[:4000] + "\n[truncated]"
+	}
+	return text, hasToolCall
+}
+
+func piContentPart(part map[string]any) string {
+	switch sources.String(part, "type") {
+	case "text":
+		return strings.TrimSpace(sources.String(part, "text"))
+	case "thinking":
+		return strings.TrimSpace(sources.String(part, "thinking"))
+	case "toolCall":
+		return piToolCallText(part)
+	default:
+		return strings.TrimSpace(sources.TextFromAny(part, 4000))
+	}
+}
+
+func piToolCallText(part map[string]any) string {
+	name := strings.TrimSpace(sources.String(part, "name"))
+	args := part["arguments"]
+	argText := ""
+	if args != nil {
+		if b, err := json.Marshal(args); err == nil {
+			argText = string(b)
+		} else {
+			argText = strings.TrimSpace(sources.TextFromAny(args, 4000))
+		}
+	}
+	switch {
+	case name != "" && argText != "":
+		return name + " " + argText
+	case name != "":
+		return name
+	default:
+		return argText
+	}
 }
