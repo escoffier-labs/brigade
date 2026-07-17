@@ -390,6 +390,129 @@ def test_posttooluse_snapshot_fails_open_when_state_cannot_be_inspected(tmp_path
     )
 
 
+def test_final_bash_handoff_write_does_not_require_verification_again(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    session_id = "bash-handoff-last"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "file.py")},
+        ),
+    )
+    state = runtime.read_session_state(target, session_id)
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": state["last_verification_write_at"],
+                "harness_session": {
+                    "harness": "claude",
+                    "fingerprint": state["session_fingerprint"],
+                },
+            }
+        )
+        + "\n"
+    )
+    handoff = target / ".claude" / "memory-handoffs" / "handoff.md"
+    handoff.write_text("durable finding\n")
+    command = "printf '%s\\n' finding >> .claude/memory-handoffs/handoff.md"
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Bash",
+            tool_input={"command": command},
+        ),
+    )
+
+    updated = runtime.read_session_state(target, session_id)
+    assert updated["last_write_at"] >= updated["last_verification_write_at"]
+    assert updated["last_verification_write_at"] == state["last_verification_write_at"]
+    assert (
+        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -i 's/old/new/' src/app.py && printf done >> .claude/memory-handoffs/note.md",
+        "sed -i 's/old/new/' src/app.py > .claude/memory-handoffs/note.md",
+        "ruff format src/app.py > .claude/memory-handoffs/note.md",
+        "python fix.py > .claude/memory-handoffs/note.md",
+        "git commit -am fix > .claude/memory-handoffs/note.md",
+        "mv src/app.py .claude/memory-handoffs/app.md",
+        "truncate -s 0 src/app.py .claude/memory-handoffs/note.md",
+        "cp -t src .claude/memory-handoffs/note.md",
+        "cp --target-directory src .claude/memory-handoffs/note.md",
+        "install --target-directory=src .claude/memory-handoffs/note.md",
+        "install -d src .claude/memory-handoffs/note",
+        "install --directory src .claude/memory-handoffs/note",
+        "mv -tsrc .claude/memory-handoffs/note.md",
+        "mv --target-directory=src .claude/memory-handoffs/note.md",
+        "install -dm755 src .claude/memory-handoffs/note",
+    ],
+)
+def test_mixed_bash_code_and_handoff_write_requires_new_verification(tmp_path: Path, monkeypatch, command: str):
+    target = _wired_claude(tmp_path)
+    session_id = "mixed-bash-handoff"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "file.py")},
+        ),
+    )
+    state = runtime.read_session_state(target, session_id)
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": state["last_verification_write_at"],
+                "harness_session": {
+                    "harness": "claude",
+                    "fingerprint": state["session_fingerprint"],
+                },
+            }
+        )
+        + "\n"
+    )
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Bash",
+            tool_input={"command": command},
+        ),
+    )
+
+    updated = runtime.read_session_state(target, session_id)
+    assert updated["last_verification_write_at"] > state["last_verification_write_at"]
+    blocked = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    assert blocked["decision"] == "block"
+
+
 def test_repo_worktree_fingerprint_detects_dirty_tracked_same_size_rewrite(tmp_path: Path):
     target = _git_wired_claude(tmp_path)
     tracked = target / "tracked.txt"
@@ -663,6 +786,58 @@ def test_stop_accepts_failed_or_rejected_routed_receipt_and_nudges_handoff(tmp_p
     result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id="receipt", stop_hook_active=False))
     assert "decision" not in result
     assert "Memory Handoff" in result["hookSpecificOutput"]["additionalContext"]
+
+
+def test_final_handoff_write_does_not_require_verification_again(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    session_id = "handoff-last"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "file.py")},
+        ),
+    )
+    state = runtime.read_session_state(target, session_id)
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": state["last_write_at"],
+                "harness_session": {
+                    "harness": "claude",
+                    "fingerprint": state["session_fingerprint"],
+                },
+            }
+        )
+        + "\n"
+    )
+    handoff = target / ".claude" / "memory-handoffs" / "handoff.md"
+    handoff.write_text("durable finding\n")
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(handoff)},
+        ),
+    )
+
+    updated = runtime.read_session_state(target, session_id)
+    assert updated["last_write_at"] >= updated["last_verification_write_at"]
+    assert (
+        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
+    )
 
 
 @pytest.mark.parametrize("wrapper", ["tokenjuice", "token-glace"])

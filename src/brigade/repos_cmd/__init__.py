@@ -12,7 +12,19 @@ import sys
 from types import ModuleType
 from typing import Any
 
-from . import actions_dispatch, constants, fleet, fleet_health, friction_fleet, release_ops, release_train, sweeps
+from . import (
+    adoption,
+    actions_dispatch,
+    constants,
+    fleet,
+    fleet_health,
+    friction_fleet,
+    release_ops,
+    release_train,
+    sweeps,
+)
+
+from .adoption import adoption_payload, adoption_repair, adoption_report
 
 from .constants import (
     BACKLOG_STALE_DAYS,
@@ -131,7 +143,17 @@ from .fleet_health import (
 
 from .friction_fleet import friction_scan, friction_show
 
-_MODULES = (constants, fleet, sweeps, actions_dispatch, release_train, release_ops, fleet_health, friction_fleet)
+_MODULES = (
+    constants,
+    fleet,
+    adoption,
+    sweeps,
+    actions_dispatch,
+    release_train,
+    release_ops,
+    fleet_health,
+    friction_fleet,
+)
 
 
 class _ReposFacade(ModuleType):

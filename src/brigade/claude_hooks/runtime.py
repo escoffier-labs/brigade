@@ -876,6 +876,39 @@ def _is_confident_bash_write(command: object) -> bool:
     return False
 
 
+def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
+    if not isinstance(command, str) or not command.strip():
+        return False
+    try:
+        tokens = _shell_tokens(command)
+    except ValueError:
+        return False
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _SHELL_SEPARATORS:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    found_target = False
+    output_only_commands = {"cat", "echo", "printf"}
+    for segment in segments:
+        stripped = _strip_env(segment)
+        if not stripped:
+            continue
+        if Path(stripped[0]).name not in output_only_commands:
+            return False
+        targets: list[str] = []
+        for index, token in enumerate(stripped[:-1]):
+            if token and set(token) <= set(";&|<>") and ">" in token:
+                targets.append(stripped[index + 1])
+        if not targets:
+            return False
+        found_target = True
+        if any(not _is_handoff_path(target, path) for path in targets):
+            return False
+    return found_target
+
+
 def _snapshot_ignore_relative(path: Path) -> bool:
     parts = path.parts
     if not parts:
@@ -1049,6 +1082,24 @@ def _new_state(target: Path, session_id: str) -> dict[str, Any]:
     }
 
 
+def _is_handoff_path(target: Path, raw_path: object) -> bool:
+    if not isinstance(raw_path, str) or not raw_path:
+        return False
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = target / path
+    try:
+        path = path.resolve()
+        inbox = (target / ".claude" / "memory-handoffs").resolve()
+        return path.is_relative_to(inbox)
+    except OSError:
+        return False
+
+
+def _is_handoff_tool_write(target: Path, tool_input: dict[str, Any]) -> bool:
+    return _is_handoff_path(target, tool_input.get("file_path") or tool_input.get("notebook_path"))
+
+
 def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | None) -> dict[str, Any]:
     normalized = _new_state(target, session_id)
     if not isinstance(payload, dict):
@@ -1071,6 +1122,9 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
     last_write = localio.parse_iso_datetime(payload.get("last_write_at"))
     if last_write is not None and last_write <= now:
         normalized["last_write_at"] = last_write.isoformat()
+    last_verification_write = localio.parse_iso_datetime(payload.get("last_verification_write_at"))
+    if last_verification_write is not None and last_verification_write <= now:
+        normalized["last_verification_write_at"] = last_verification_write.isoformat()
     return normalized
 
 
@@ -1189,7 +1243,13 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             wrote = _bash_write_detected(target, state.get("pending_bash_fingerprint"))
         if wrote:
             state["write_observed"] = True
-            state["last_write_at"] = localio.utc_now_iso()
+            written_at = localio.utc_now_iso()
+            state["last_write_at"] = written_at
+            handoff_write = (tool_name in _WRITE_TOOLS and _is_handoff_tool_write(target, post_tool_input)) or (
+                tool_name == "Bash" and _bash_write_targets_handoffs(target, post_tool_input.get("command"))
+            )
+            if not handoff_write:
+                state["last_verification_write_at"] = written_at
             updated_fp = repo_worktree_fingerprint(target)
             if updated_fp is not None:
                 state["repo_fingerprint"] = updated_fp
@@ -1217,7 +1277,9 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         fingerprint = state.get("session_fingerprint")
         if not isinstance(fingerprint, str):
             fingerprint = _session_fingerprint(session_id)
-        receipt_threshold = state.get("last_write_at") or state.get("started_at")
+        receipt_threshold = (
+            state.get("last_verification_write_at") or state.get("last_write_at") or state.get("started_at")
+        )
         if not _receipt_since(target, receipt_threshold, session_fingerprint=fingerprint):
             replacement = _verify_replacement(target, "<test>", fingerprint)
             return {
