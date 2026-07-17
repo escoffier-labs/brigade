@@ -147,8 +147,13 @@ fn tools_call_doctor_returns_freshness_report() {
     assert_eq!(resp["result"]["isError"], false);
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let report: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(report["repo_root"], dir.path().to_string_lossy().as_ref());
-    assert_eq!(report["db_path"], db.to_string_lossy().as_ref());
+    let expected_root = dir.path().canonicalize().unwrap();
+    let expected_db = db.canonicalize().unwrap();
+    assert_eq!(
+        report["repo_root"],
+        expected_root.to_string_lossy().as_ref()
+    );
+    assert_eq!(report["db_path"], expected_db.to_string_lossy().as_ref());
     assert_eq!(report["verdict"], "FRESH");
     assert_eq!(report["pending"]["new_files"], 0);
     assert_eq!(report["pending"]["changed_files"], 0);
