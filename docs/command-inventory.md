@@ -453,6 +453,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade skills publish`
 - `brigade skills rollback`
 - `brigade skills search`
+- `brigade skills sync`
 - `brigade skills serve-mcp`
 - `brigade skills uninstall`
 - `brigade stations discover`
