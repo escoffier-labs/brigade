@@ -17,6 +17,16 @@ from .result_integrity import validate_final_output
 
 _OLLAMA_PREFIX = "ollama:"
 _CODEX_CLOUD_PREFIX = "codex-cloud:"
+_NONRECOVERABLE_GROK_OUTPUT_FAILURES = frozenset(
+    {
+        "provider-error",
+        "authentication-error",
+        "rate-limit-error",
+        "provider-setting-error",
+        "network-error",
+        "permission-error",
+    }
+)
 _GROK_RESULT_SCHEMA = json.dumps(
     {
         "type": "object",
@@ -29,6 +39,16 @@ _GROK_RESULT_SCHEMA = json.dumps(
     },
     separators=(",", ":"),
 )
+
+
+@dataclass(frozen=True)
+class _GrokFinal:
+    text: str
+    error: str
+    diagnostic: str = ""
+    session_id: str | None = None
+    request_id: str | None = None
+    stop_reason: str | None = None
 
 
 def _claude_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
@@ -221,16 +241,16 @@ def direct_cursor_read_only_limitation(model: str | None) -> str | None:
     return None
 
 
-def _parse_grok_final_output(stdout: str) -> tuple[str, str]:
+def _parse_grok_final_output(stdout: str) -> _GrokFinal:
     """Extract a schema-constrained final answer from Grok's JSON envelope."""
     base_error = "grok exited 0 without a structured final response"
     raw = stdout.strip()
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return raw, base_error
+        return _GrokFinal(text=raw, error=base_error)
     if not isinstance(payload, dict):
-        return raw, base_error
+        return _GrokFinal(text=raw, error=base_error)
 
     diagnostic_parts: list[str] = []
     stop_reason = payload.get("stopReason")
@@ -269,9 +289,22 @@ def _parse_grok_final_output(stdout: str) -> tuple[str, str]:
     no_structured_error = not structured_error_present
     if not successful_stop or not no_structured_error or not exact_shape:
         detail = f"{base_error} ({'; '.join(diagnostic_parts)})" if diagnostic_parts else base_error
-        return fallback, detail[:200]
+        return _GrokFinal(
+            text=fallback,
+            error=detail[:200],
+            diagnostic=(structured_output_error if isinstance(structured_output_error, str) else ""),
+            session_id=payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None,
+            request_id=payload.get("requestId") if isinstance(payload.get("requestId"), str) else None,
+            stop_reason=stop_reason if isinstance(stop_reason, str) else None,
+        )
     assert isinstance(answer, str)
-    return answer.strip(), ""
+    return _GrokFinal(
+        text=answer.strip(),
+        error="",
+        session_id=payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None,
+        request_id=payload.get("requestId") if isinstance(payload.get("requestId"), str) else None,
+        stop_reason=stop_reason if isinstance(stop_reason, str) else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -395,7 +428,16 @@ def build_argv(
     model: str | None = None,
     reasoning: str | None = None,
     cwd: Path | None = None,
+    resume_session_id: str | None = None,
 ) -> List[str]:
+    if resume_session_id is not None:
+        if cli_ref != "grok":
+            raise ValueError("exact-session continuation supports grok only")
+        if not (read_only or sandbox == "read-only"):
+            raise ValueError("grok exact-session continuation requires read-only dispatch")
+        if not resume_session_id.strip():
+            raise ValueError("grok exact-session continuation requires a session id")
+
     if cli_ref.startswith(_OLLAMA_PREFIX):
         ollama_model = cli_ref[len(_OLLAMA_PREFIX) :]
         if not ollama_model:
@@ -417,6 +459,8 @@ def build_argv(
             "codex-cloud:<env-id>)"
         )
     argv = builder(prompt, read_only, sandbox, cwd)
+    if resume_session_id is not None:
+        argv = [argv[0], "--resume", resume_session_id, *argv[1:]]
     if model is not None:
         argv = _with_model(cli_ref, argv, model)
     if reasoning is not None:
@@ -483,9 +527,21 @@ def run_agent(
     model: str | None = None,
     reasoning: str | None = None,
     env: dict[str, str] | None = None,
+    resume_session_id: str | None = None,
 ) -> AgentResult:
     if not detect(cli_ref):
         return AgentResult(text="", ok=False, detail=f"{command_for(cli_ref)} not installed")
+
+    if resume_session_id is not None and (cli_ref != "grok" or not (read_only or sandbox == "read-only")):
+        return AgentResult(
+            text="",
+            ok=False,
+            detail="exact-session continuation requires a read-only grok worker",
+            failure_phase="dispatch",
+            failure_kind="invalid-session-continuation",
+            requested_model=model,
+            reasoning=reasoning,
+        )
 
     if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
         env_id = cli_ref[len(_CODEX_CLOUD_PREFIX) :]
@@ -546,6 +602,7 @@ def run_agent(
         model=model,
         reasoning=reasoning,
         cwd=cwd,
+        resume_session_id=resume_session_id,
     )
     structured_grok = cli_ref == "grok" and (read_only or sandbox == "read-only")
     if structured_grok:
@@ -567,8 +624,18 @@ def run_agent(
     )
     text = result.stdout.strip()
     structured_error = ""
+    structured_diagnostic = ""
+    grok_session_id = None
+    grok_request_id = None
+    grok_stop_reason = None
     if structured_grok:
-        text, structured_error = _parse_grok_final_output(result.stdout)
+        grok_final = _parse_grok_final_output(result.stdout)
+        text = grok_final.text
+        structured_error = grok_final.error
+        structured_diagnostic = grok_final.diagnostic
+        grok_session_id = grok_final.session_id
+        grok_request_id = grok_final.request_id
+        grok_stop_reason = grok_final.stop_reason
     if result.code != 0:
         detail = result.stderr.strip() or f"exit {result.code}"
         return AgentResult(
@@ -581,8 +648,29 @@ def run_agent(
             timed_out=result.code == 124,
             requested_model=model,
             reasoning=reasoning,
+            stop_reason=grok_stop_reason,
+            session_id=grok_session_id,
+            request_id=grok_request_id,
         )
     if structured_error:
+        for diagnostic in (text, structured_diagnostic, result.stderr):
+            output_failure = validate_final_output(diagnostic)
+            if output_failure is not None and output_failure.kind in _NONRECOVERABLE_GROK_OUTPUT_FAILURES:
+                return AgentResult(
+                    text=text,
+                    ok=False,
+                    detail=output_failure.detail,
+                    failure_phase="output-validation",
+                    failure_kind=output_failure.kind,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    exit_code=result.code,
+                    requested_model=model,
+                    reasoning=reasoning,
+                    stop_reason=grok_stop_reason,
+                    session_id=grok_session_id,
+                    request_id=grok_request_id,
+                )
         return AgentResult(
             text=text,
             ok=False,
@@ -594,6 +682,9 @@ def run_agent(
             exit_code=result.code,
             requested_model=model,
             reasoning=reasoning,
+            stop_reason=grok_stop_reason,
+            session_id=grok_session_id,
+            request_id=grok_request_id,
         )
     if not text:
         detail = "empty output"
@@ -610,6 +701,9 @@ def run_agent(
             exit_code=result.code,
             requested_model=model,
             reasoning=reasoning,
+            stop_reason=grok_stop_reason,
+            session_id=grok_session_id,
+            request_id=grok_request_id,
         )
     output_failure = validate_final_output(text)
     if output_failure is not None:
@@ -624,6 +718,9 @@ def run_agent(
             exit_code=result.code,
             requested_model=model,
             reasoning=reasoning,
+            stop_reason=grok_stop_reason,
+            session_id=grok_session_id,
+            request_id=grok_request_id,
         )
     return AgentResult(
         text=text,
@@ -633,6 +730,9 @@ def run_agent(
         exit_code=result.code,
         requested_model=model,
         reasoning=reasoning,
+        stop_reason=grok_stop_reason,
+        session_id=grok_session_id,
+        request_id=grok_request_id,
     )
 
 

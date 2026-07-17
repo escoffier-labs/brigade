@@ -746,6 +746,9 @@ def test_run_agent_rejects_grok_json_without_structured_final_output(monkeypatch
     )
     assert result.text == output
     assert result.stdout == stdout + "\n"
+    assert result.session_id == "019f0000-0000-7000-8000-000000000001"
+    assert result.request_id == "00000000-0000-4000-8000-000000000001"
+    assert result.stop_reason == "Cancelled"
 
 
 @pytest.mark.parametrize("case", ["cancelled", "extra-property", "structured-error"])
@@ -815,6 +818,9 @@ def test_run_agent_accepts_concise_grok_no_findings(monkeypatch):
     assert result.ok is True
     assert result.text == "No actionable findings."
     assert result.exit_code == 0
+    assert result.session_id == "019f0000-0000-7000-8000-000000000001"
+    assert result.request_id == "00000000-0000-4000-8000-000000000001"
+    assert result.stop_reason == "EndTurn"
     assert seen["argv"][-2:] == [
         "--json-schema",
         (
@@ -831,6 +837,41 @@ def test_run_agent_accepts_concise_grok_no_findings(monkeypatch):
         "--json-schema",
         seen["argv"][-1],
     ]
+
+
+def test_run_agent_resumes_exact_grok_session_with_original_settings(monkeypatch, tmp_path):
+    output = _grok_json_output("Recovered final answer.")
+    seen = {}
+    session_id = "019f0000-0000-7000-8000-000000000001"
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return agents.proc.Result(0, output + "\n", "")
+
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    result = agents.run_agent(
+        "grok",
+        "Return the final answer now.",
+        timeout=47,
+        cwd=tmp_path,
+        read_only=True,
+        sandbox="read-only",
+        model="grok-4.5",
+        reasoning="high",
+        resume_session_id=session_id,
+    )
+
+    assert result.ok is True
+    assert seen["argv"].count("--resume") == 1
+    assert seen["argv"][seen["argv"].index("--resume") + 1] == session_id
+    assert seen["argv"][seen["argv"].index("-p") + 1] == "Return the final answer now."
+    assert seen["argv"][seen["argv"].index("-m") + 1] == "grok-4.5"
+    assert seen["argv"][seen["argv"].index("--reasoning-effort") + 1] == "high"
+    assert seen["kwargs"]["timeout"] == 47
+    assert seen["kwargs"]["cwd"] == tmp_path
 
 
 def test_run_agent_keeps_permission_mode_prompt_separate_from_grok_flags(monkeypatch):

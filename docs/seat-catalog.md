@@ -81,6 +81,28 @@ role = "Cross-model reviewer on the Google lane; verify claims without spending 
 
 Remember: every seat's `cli` value must appear in `limits.allow_models`, in the same edit. Brigade validates at roster load, not at edit time, and a missing entry fails every run against that roster.
 
+### Direct Grok invalid-final recovery
+
+A direct Grok read-only worker can continue its exact session once when the CLI exits 0 without the required structured final. To allow the one terminal fallback after another invalid final, name a reviewed Cursor-Grok ACP seat on the direct seat:
+
+```toml
+[agents.grok-review]
+cli = "grok"
+model = "grok-4.5"
+reasoning = "high"
+role = "Review the requested change and report actionable findings."
+invalid_final_fallback = "cursor-grok"
+
+[agents.cursor-grok]
+cli = "cursor"
+model = "grok-4.5"
+transport = "acpx"
+transport_version = "0.12.0"
+role = "Fallback review through the reviewed ACP transport."
+```
+
+The reference is fail-closed: it must resolve to a non-orchestrator Cursor seat with a `grok-*` model and the reviewed ACPX version. Brigade does not search the roster for a similar model. The policy applies only to a typed malformed-final result from a direct Grok `--worker` read-only run; startup, authentication, network, timeout, permission, and nonzero failures are terminal.
+
 ### Anthropic-compatible API lanes (Kimi, GLM, and friends)
 
 Several open-weight providers expose Anthropic-compatible endpoints, which means the `claude` CLI can drive them and Brigade can seat them directly. Declare the lane's environment on the seat: plain values inline, secrets by reference with a `_REF` suffix naming the environment variable that holds the value (the roster never stores the secret itself):

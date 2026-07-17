@@ -71,6 +71,30 @@ class _StubServer:
         return _StubThread(thread_id)
 
 
+def test_roster_snapshot_preserves_invalid_final_fallback():
+    snapshot = {
+        "orchestrator": "chef",
+        "agents": {
+            "chef": {"cli": "codex", "role": "plan"},
+            "grok-review": {
+                "cli": "grok",
+                "role": "review",
+                "invalid_final_fallback": "cursor-grok",
+            },
+            "cursor-grok": {
+                "cli": "cursor",
+                "role": "fallback review",
+                "transport": "acpx",
+                "transport_version": "0.12.0",
+            },
+        },
+    }
+
+    roster = run_resume._roster_from_snapshot(snapshot)
+
+    assert roster.agents["grok-review"].invalid_final_fallback == "cursor-grok"
+
+
 def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
     run_dir = _write_run_dir(
         tmp_path,
