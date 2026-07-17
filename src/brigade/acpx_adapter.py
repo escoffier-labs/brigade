@@ -18,13 +18,21 @@ CURSOR_AUTH_RECOVERY = "run `cursor-agent login` once, then verify with `cursor-
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _AUTH_IDENTITY = re.compile(r"(?i)(\blogged in as)\s+[^\r\n]+")
-_SENSITIVE_VALUE = re.compile(r"(?i)\b(token|secret|password|api[_ -]?key)\b\s*[:=]\s*[^\s,;]+")
+_SENSITIVE_VALUE = re.compile(r"(?i)\b(token|secret|password|api[_ -]?key)\b(?:\s*[:=]\s*|\s+)[^\s,;]+")
 _BEARER = re.compile(r"(?i)\b(bearer)\s+[^\s,;]+")
-_UNAUTHENTICATED = re.compile(
-    r"\b(?:not logged in|not authenticated|unauthenticated|authentication required)\b",
+_UNAUTHENTICATED_LINE = re.compile(
+    r"^(?:[x✗✘]\s*)?(?:not logged in|not authenticated|unauthenticated|authentication required)[.!]?$",
     re.IGNORECASE,
 )
-_AUTHENTICATED = re.compile(r"\b(?:logged in|authenticated)\b", re.IGNORECASE)
+_AUTHENTICATED_LINE = re.compile(
+    r"^(?:[✓✔]\s*)?(?:logged in as\s+\S+|authenticated)[.!]?$",
+    re.IGNORECASE,
+)
+_PERMISSION_FAILURE = re.compile(
+    r"\b(?:permission denied|permission required|not permitted|auto-denied)\b",
+    re.IGNORECASE,
+)
+_SAFE_STATUS_KEYS = ("hasAccessToken", "hasRefreshToken", "isAuthenticated", "status")
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,18 @@ def _diagnostic_line(stdout: str, stderr: str) -> str:
     return " ".join(text.split())[:500] or "no diagnostic output"
 
 
+def _status_payload(stdout: str) -> tuple[dict[str, Any] | None, str]:
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None, _safe_diagnostic(stdout)
+    if not isinstance(payload, dict):
+        return None, _safe_diagnostic(stdout)
+    safe_payload = {key: value for key in _SAFE_STATUS_KEYS if isinstance((value := payload.get(key)), (bool, str))}
+    safe_stdout = json.dumps(safe_payload, sort_keys=True, separators=(",", ":"))
+    return payload, _safe_diagnostic(safe_stdout)
+
+
 def cursor_auth_status() -> CursorAuthStatus:
     """Return a bounded, prompt-free diagnosis for the headless Cursor CLI."""
     if proc.which("cursor-agent") is None:
@@ -60,12 +80,16 @@ def cursor_auth_status() -> CursorAuthStatus:
             "",
             127,
         )
-    result = proc.run(["cursor-agent", "status"], timeout=CURSOR_AUTH_TIMEOUT_SECONDS)
-    stdout = _safe_diagnostic(result.stdout)
+    result = proc.run(
+        ["cursor-agent", "status", "--format", "json"],
+        timeout=CURSOR_AUTH_TIMEOUT_SECONDS,
+    )
+    payload, stdout = _status_payload(result.stdout)
     stderr = _safe_diagnostic(result.stderr)
     diagnostic = _diagnostic_line(stdout, stderr)
-    combined = f"{stdout}\n{stderr}"
-    if _UNAUTHENTICATED.search(combined):
+    authenticated = payload.get("isAuthenticated") if payload is not None else None
+    primary_line = next((line.strip() for line in stdout.splitlines() if line.strip()), "")
+    if authenticated is False or (payload is None and _UNAUTHENTICATED_LINE.fullmatch(primary_line)):
         return CursorAuthStatus(
             "unauthenticated",
             f"cursor-agent CLI is not logged in; {CURSOR_AUTH_RECOVERY}",
@@ -81,7 +105,7 @@ def cursor_auth_status() -> CursorAuthStatus:
             stderr,
             result.code,
         )
-    if _AUTHENTICATED.search(combined):
+    if authenticated is True or (payload is None and _AUTHENTICATED_LINE.fullmatch(primary_line)):
         return CursorAuthStatus(
             "authenticated",
             "cursor-agent CLI is authenticated",
@@ -349,12 +373,21 @@ def run_cursor(
         detail = result.stderr.strip() or parse_error or f"acpx exit {result.code}"
         timed_out = result.code in {3, 124}
         provider_startup = parsed is None
+        permission_denied = bool(_PERMISSION_FAILURE.search(detail))
         return AgentResult(
             text=parsed["text"] if parsed is not None else "",
             ok=False,
             detail=detail[:200],
             failure_phase="inference" if timed_out or not provider_startup else "dispatch",
-            failure_kind=("timeout" if timed_out else "provider-startup" if provider_startup else "transport-error"),
+            failure_kind=(
+                "timeout"
+                if timed_out
+                else "permission-denied"
+                if permission_denied
+                else "provider-startup"
+                if provider_startup
+                else "transport-error"
+            ),
             stdout=result.stdout,
             stderr=result.stderr,
             exit_code=result.code,
