@@ -146,6 +146,35 @@ fn direct_edges_for_symbol_id(
     Ok(rows)
 }
 
+pub fn limit_edges(edges: Vec<EdgeRow>, limit: Option<usize>) -> Vec<EdgeRow> {
+    let Some(limit) = limit else {
+        return edges;
+    };
+
+    let real_count = edges
+        .iter()
+        .filter(|edge| edge.kind != TRUNCATED_EDGE_KIND)
+        .count();
+    if real_count <= limit {
+        return edges;
+    }
+
+    let max_hops = edges.iter().map(|edge| edge.hops).max().unwrap_or(1);
+    let mut out = Vec::with_capacity(limit + 1);
+    let mut kept = 0usize;
+    for edge in edges {
+        if edge.kind == TRUNCATED_EDGE_KIND {
+            continue;
+        }
+        if kept < limit {
+            out.push(edge);
+            kept += 1;
+        }
+    }
+    out.push(limit_truncated_edge(limit, real_count, max_hops));
+    out
+}
+
 pub fn normalize_depth(depth: usize) -> usize {
     depth.clamp(DEFAULT_IMPACT_DEPTH, MAX_IMPACT_DEPTH)
 }
@@ -159,6 +188,21 @@ pub fn sort_impact_edges(edges: &mut [EdgeRow]) {
             .then_with(|| a.target.cmp(&b.target))
             .then_with(|| a.kind.cmp(&b.kind))
     });
+}
+
+fn limit_truncated_edge(shown: usize, total: usize, hops: usize) -> EdgeRow {
+    EdgeRow {
+        source_id: "__graphtrail_limit_truncated__".to_string(),
+        source: format!("results limited to {shown} of {total} edges"),
+        target_id: "__graphtrail_limit_truncated_target__".to_string(),
+        target: "pass a higher limit to see more".to_string(),
+        kind: TRUNCATED_EDGE_KIND.to_string(),
+        line: None,
+        source_file: String::new(),
+        target_file: String::new(),
+        hops,
+        confidence: None,
+    }
 }
 
 fn truncated_edge(direction: Direction, hops: usize, current_symbol: &str) -> EdgeRow {

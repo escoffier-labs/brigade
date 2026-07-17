@@ -26,9 +26,9 @@ use crate::model::Direction;
 use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
     DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, affected, build_context_pack, cycles, dead_code,
-    diff_graphs, doctor, file_neighbors, graph_edges_with_depth, impact_edges, normalize_depth,
-    personalize_context_pack, render_markdown, render_markdown_budgeted, search_symbols_with_path,
-    stats,
+    diff_graphs, doctor, file_neighbors, graph_edges_with_depth, impact_edges, limit_edges,
+    normalize_depth, personalize_context_pack, render_markdown, render_markdown_budgeted,
+    search_symbols_with_path, stats,
 };
 use crate::store::{init_schema, open_db, open_read_only, sync_repo};
 
@@ -203,25 +203,34 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
             optional_str_arg(args, "path").as_deref(),
             usize_arg(args, "limit", 20),
         )?),
-        ToolId::Callers => to_pretty(&graph_edges_with_depth(
-            &conn,
-            &str_arg(args, "symbol"),
-            Direction::Incoming,
-            normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
-        )?),
-        ToolId::Callees => to_pretty(&graph_edges_with_depth(
-            &conn,
-            &str_arg(args, "symbol"),
-            Direction::Outgoing,
-            normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
-        )?),
+        ToolId::Callers => to_pretty(&limit_edges(
+            graph_edges_with_depth(
+                &conn,
+                &str_arg(args, "symbol"),
+                Direction::Incoming,
+                normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
+            )?,
+            optional_usize_arg(args, "limit"),
+        )),
+        ToolId::Callees => to_pretty(&limit_edges(
+            graph_edges_with_depth(
+                &conn,
+                &str_arg(args, "symbol"),
+                Direction::Outgoing,
+                normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
+            )?,
+            optional_usize_arg(args, "limit"),
+        )),
         ToolId::Impact => {
             let symbol = str_arg(args, "symbol");
-            let edges = impact_edges(
-                &conn,
-                &symbol,
-                normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
-            )?;
+            let edges = limit_edges(
+                impact_edges(
+                    &conn,
+                    &symbol,
+                    normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
+                )?,
+                optional_usize_arg(args, "limit"),
+            );
             to_pretty(&edges)
         }
         #[cfg(feature = "codesearch")]
@@ -317,6 +326,7 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
         ToolId::Callers | ToolId::Callees | ToolId::Impact => {
             require_string(args, "symbol")?;
             require_usize(args, "depth")?;
+            require_usize(args, "limit")?;
         }
         #[cfg(feature = "codesearch")]
         ToolId::SemanticSearch => {
@@ -401,7 +411,8 @@ fn build_tool_specs() -> Vec<ToolSpec> {
         with_location(
             with_refresh(json!({
                 "symbol": { "type": "string", "description": desc },
-                "depth": { "type": "integer", "description": "Traversal depth, clamped to 1..5 (default 1)." }
+                "depth": { "type": "integer", "description": "Traversal depth, clamped to 1..5 (default 1)." },
+                "limit": { "type": "integer", "description": "Optional max edges returned; omit for all (up to the internal 500-per-direction cap). Truncated results append a marker row." }
             })),
             json!(["symbol"]),
         )
@@ -707,6 +718,12 @@ fn usize_arg(args: &Value, key: &str, default: usize) -> usize {
         .and_then(|v| v.as_u64())
         .and_then(|n| usize::try_from(n).ok())
         .unwrap_or(default)
+}
+
+fn optional_usize_arg(args: &Value, key: &str) -> Option<usize> {
+    args.get(key)
+        .and_then(|v| v.as_u64())
+        .and_then(|n| usize::try_from(n).ok())
 }
 
 #[cfg(feature = "codesearch")]
