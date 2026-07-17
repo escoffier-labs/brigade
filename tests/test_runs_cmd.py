@@ -275,6 +275,28 @@ def test_runs_recover_is_idempotent_for_terminal_run(tmp_path, capsys):
     assert "resume: unavailable" in out
 
 
+def test_runs_recover_treats_lost_concurrent_claim_as_already_terminal(tmp_path, monkeypatch, capsys):
+    from brigade import runguard
+
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "orphan"
+    _write_minimal_run(run_dir, task="orphaned task", status="dispatching", started_at="2026-07-16T00:00:00Z")
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["cwd"] = str(workspace)
+    _write_json(run_dir / "run.json", run_meta)
+
+    def lose_claim(cwd, requested_run, *, required=True):
+        terminal = json.loads((run_dir / "run.json").read_text())
+        terminal.update({"status": "failed", "failure_phase": "stale-lock-recovery"})
+        _write_json(run_dir / "run.json", terminal)
+        raise runguard.RunLockError(f"run lock not found for run: {requested_run}")
+
+    monkeypatch.setattr(runguard, "recover_stale_run", lose_claim)
+
+    assert runs_cmd.recover(str(run_dir), cwd=workspace) == 0
+    assert f"already terminal: {run_dir} [failed]" in capsys.readouterr().out
+
+
 def test_runs_recover_terminal_run_ignores_foreign_workspace_lock(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     run_dir = workspace / ".brigade" / "runs" / "failed"

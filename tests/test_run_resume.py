@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
-from brigade import agents, codex_appserver, run_resume
+from brigade import agents, codex_appserver, runguard, run_resume
 
 
 def _write_run_dir(tmp_path: Path, *, results: list[dict]) -> Path:
@@ -135,6 +136,62 @@ def test_resume_missing_artifacts_errors(tmp_path, capsys):
     empty.mkdir()
     assert run_resume.resume(empty) == 2
     assert "missing" in capsys.readouterr().err
+
+
+def test_resume_refuses_nonterminal_run(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "thread_id": "t-1",
+                "status": "interrupted",
+            }
+        ],
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["status"] = "dispatching"
+    (run_dir / "run.json").write_text(json.dumps(run_meta))
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("provider must not start")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert "run is not terminal" in capsys.readouterr().err
+
+
+def test_resume_refuses_matching_live_owner(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "thread_id": "t-1",
+                "status": "interrupted",
+            }
+        ],
+    )
+    lock = runguard.lock_path(tmp_path)
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text(f"{os.getpid()}\n")
+    (lock / "owner.json").write_text(
+        json.dumps({"owner_token": "live", "pid": os.getpid(), "run_dir": str(run_dir.resolve())})
+    )
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("provider must not start")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert "run owner process is still active" in capsys.readouterr().err
+    assert lock.is_dir()
 
 
 def test_runs_resume_cli_dispatches(tmp_path, monkeypatch):

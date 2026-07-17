@@ -1672,6 +1672,28 @@ def run(
     if worker is not None:
         assignments = [Assignment(worker=worker, task=task, stage=1)]
     else:
+        if output_dir is not None:
+            _write_json(
+                output_dir / "run.json",
+                _run_payload(
+                    task=task,
+                    cwd=cwd,
+                    roster=roster,
+                    dry_run=dry_run,
+                    read_only=read_only,
+                    status="planning",
+                    started_at=started_at,
+                    output_dir=output_dir,
+                    code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    evidence=evidence,
+                    brief_set=brief_set,
+                    codex_transport=transport_for_payload,
+                    route=route,
+                    code_graph_delta=code_graph_delta,
+                    worker=worker,
+                ),
+            )
         try:
             assignments = plan(
                 task,
@@ -1909,6 +1931,29 @@ def run(
         )
         final = _agent_result_from_worker(direct_result)
     else:
+        if output_dir is not None:
+            _write_json(
+                output_dir / "run.json",
+                _run_payload(
+                    task=task,
+                    cwd=cwd,
+                    roster=roster,
+                    dry_run=dry_run,
+                    read_only=read_only,
+                    status="synthesizing",
+                    started_at=started_at,
+                    output_dir=output_dir,
+                    code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    evidence=evidence,
+                    brief_set=brief_set,
+                    codex_transport=transport_for_payload,
+                    route=route,
+                    control_socket=control_socket,
+                    code_graph_delta=code_graph_delta,
+                    worker=worker,
+                ),
+            )
         synthesis_started = time.monotonic()
         final = _run_orchestrator(
             roster,

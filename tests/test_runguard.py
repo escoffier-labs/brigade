@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -243,6 +244,28 @@ def test_run_lock_replaces_lock_with_dead_pid(tmp_path):
     assert not lock_path.exists()
 
 
+@pytest.mark.parametrize("pid_text", [None, "not-a-pid\n"])
+def test_run_lock_preserves_live_owner_when_pid_sidecar_is_missing_or_corrupt(tmp_path, pid_text):
+    repo = _repo(tmp_path)
+    abandoned_run = tmp_path / "active-run"
+    abandoned_run.mkdir()
+    (abandoned_run / "run.json").write_text(json.dumps({"status": "dispatching"}))
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    if pid_text is not None:
+        (lock_path / "pid").write_text(pid_text)
+    (lock_path / "owner.json").write_text(
+        json.dumps({"owner_token": "live-owner", "pid": os.getpid(), "run_dir": str(abandoned_run.resolve())})
+    )
+
+    with pytest.raises(runguard.RunLockError, match="another brigade run appears active"):
+        with runguard.run_lock(repo, run_dir=tmp_path / "new-run"):
+            pass
+
+    assert lock_path.is_dir()
+    assert json.loads((abandoned_run / "run.json").read_text())["status"] == "dispatching"
+
+
 def test_run_lock_recovers_dead_owner_run_to_typed_terminal_state(tmp_path):
     repo = _repo(tmp_path)
     abandoned_run = tmp_path / "abandoned-run"
@@ -392,7 +415,45 @@ def test_run_lock_finishes_abandoned_stale_claim_before_new_owner_enters(tmp_pat
 
     with runguard.run_lock(repo, run_dir=tmp_path / "new-run"):
         assert json.loads((abandoned_run / "run.json").read_text())["status"] == "failed"
-        assert not claimed.exists()
+    assert not claimed.exists()
+
+
+def test_recover_stale_run_refuses_pending_claim_with_live_owner(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "active-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(json.dumps({"status": "dispatching"}))
+    lock_path = runguard.lock_path(repo)
+    claimed = lock_path.with_name(f".{lock_path.name}.recovering-99999999-dead.stale")
+    claimed.mkdir(parents=True)
+    (claimed / "pid").write_text(f"{os.getpid()}\n")
+    (claimed / "owner.json").write_text(
+        json.dumps({"owner_token": "live-owner", "pid": os.getpid(), "run_dir": str(run_dir.resolve())})
+    )
+
+    with pytest.raises(runguard.RunLockError, match="owner process is still active"):
+        runguard.recover_stale_run(repo, run_dir)
+
+    assert claimed.is_dir()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_recovery_preserves_non_object_run_json(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text("[]")
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text("99999999\n")
+    (lock_path / "owner.json").write_text(
+        json.dumps({"owner_token": "dead", "pid": 99999999, "run_dir": str(run_dir.resolve())})
+    )
+
+    assert runguard.recover_stale_run(repo, run_dir) is True
+    recovered = json.loads((run_dir / "run.json").read_text())
+    preserved = Path(recovered["recovery_preserved_artifact"])
+    assert preserved.read_text() == "[]"
 
 
 def test_run_lock_does_not_admit_new_owner_while_stale_recovery_is_in_progress(tmp_path, monkeypatch):

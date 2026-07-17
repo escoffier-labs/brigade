@@ -117,13 +117,18 @@ def _pid_is_active(pid: int) -> bool:
 def _lock_is_stale(path: Path) -> bool:
     if path.exists() and not path.is_dir():
         raise RunLockError(f"malformed run lock is not a directory: {path}")
+    recorded_pids: list[int] = []
     try:
-        pid = int((path / "pid").read_text().strip())
+        recorded_pids.append(int((path / "pid").read_text().strip()))
     except (FileNotFoundError, NotADirectoryError, ValueError):
-        return True
+        pass
     except OSError as exc:
         raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
-    return not _pid_is_active(pid)
+    owner = _read_lock_owner(path)
+    owner_pid = owner.get("pid") if owner is not None else None
+    if isinstance(owner_pid, int):
+        recorded_pids.append(owner_pid)
+    return not any(_pid_is_active(pid) for pid in set(recorded_pids))
 
 
 def _lock_owner_payload(*, owner_token: str, run_dir: Path | None) -> dict[str, object]:
@@ -217,6 +222,10 @@ def _claim_existing_stale(path: Path, stale: Path) -> tuple[Path, dict[str, obje
         return None
     except OSError as exc:
         raise RunLockError(f"could not claim stale run lock {stale}: {exc}") from exc
+    if not _lock_is_stale(claimed):
+        if not stale.exists():
+            claimed.rename(stale)
+        raise RunLockError(f"stale run lock owner process is still active: {stale}")
     return claimed, _owner_with_workspace(_read_lock_owner(claimed), path)
 
 
@@ -247,7 +256,16 @@ def _recover_run_artifact(owner: dict[str, object] | None) -> str:
     except OSError:
         return "write-failed"
     if not isinstance(payload, dict):
-        payload = {"schema": "brigade.run.v1", "artifacts": raw_run_dir}
+        backup = run_json.with_name(f"run.json.corrupt-{uuid4().hex}")
+        try:
+            run_json.rename(backup)
+        except OSError:
+            return "write-failed"
+        payload = {
+            "schema": "brigade.run.v1",
+            "artifacts": raw_run_dir,
+            "recovery_preserved_artifact": str(backup),
+        }
     else:
         status = payload.get("status")
         if isinstance(status, str) and status:

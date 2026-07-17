@@ -604,6 +604,15 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
     try:
         runguard.recover_stale_run(workspace, run_dir)
     except runguard.RunLockError as exc:
+        if str(exc).startswith("run lock not found for run:"):
+            try:
+                concurrent_meta = _read_json(run_dir / "run.json")
+            except ValueError:
+                concurrent_meta = None
+            if concurrent_meta is not None and _is_terminal(concurrent_meta):
+                print(f"already terminal: {run_dir} [{concurrent_meta.get('status', 'unknown')}]")
+                _print_recovery_guidance(run_dir)
+                return 0
         print(f"error: {exc}", file=sys.stderr)
         return 2
     print(f"recovered: {run_dir}")

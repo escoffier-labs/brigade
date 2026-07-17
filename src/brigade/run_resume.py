@@ -12,10 +12,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import aboyeur, agents, codex_appserver
+from . import aboyeur, agents, codex_appserver, runguard
 from .roster import Agent, Roster
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
+_NONTERMINAL_RUN_STATUSES = frozenset({"started", "planning", "dispatching", "synthesizing", "running"})
 
 
 def _load_json(run_dir: Path, name: str) -> dict | None:
@@ -71,6 +72,20 @@ def resume(run_dir: Path) -> int:
             file=sys.stderr,
         )
         return 2
+    status = run_meta.get("status")
+    if not isinstance(status, str) or status in _NONTERMINAL_RUN_STATUSES:
+        print("error: run is not terminal; recover or wait for the active run before resuming", file=sys.stderr)
+        return 2
+    raw_cwd = run_meta.get("cwd")
+    if not isinstance(raw_cwd, str) or not raw_cwd:
+        print("error: run artifact has no workspace cwd; cannot verify lock ownership", file=sys.stderr)
+        return 2
+    cwd = Path(raw_cwd).expanduser().resolve()
+    try:
+        runguard.recover_stale_run(cwd, run_dir, required=False)
+    except runguard.RunLockError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     roster = _roster_from_snapshot(roster_snapshot)
     results = list(worker_data.get("results") or [])
@@ -89,7 +104,6 @@ def resume(run_dir: Path) -> int:
         print("error: no resumable workers in this run", file=sys.stderr)
         return 2
 
-    cwd = Path(run_meta["cwd"]) if run_meta.get("cwd") else None
     read_only = bool(run_meta.get("read_only"))
     sandbox = roster_snapshot.get("sandbox")
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from brigade import aboyeur
+from brigade import agents
 from brigade import cli
 from brigade import proc
 from brigade import runguard
@@ -890,6 +891,44 @@ role = "code"
 
     assert rc == 0
     assert seen["status"] == "dispatching"
+
+
+def test_orchestrated_run_records_planning_and_synthesizing_phases(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+    seen = {}
+
+    def fake_plan(*args, **kwargs):
+        seen["plan"] = json.loads((output_dir / "run.json").read_text())["status"]
+        return [aboyeur.Assignment(worker="coder", task="inspect")]
+
+    def fake_dispatch(*args, **kwargs):
+        return [aboyeur.WorkerResult(worker="coder", task="inspect", text="done", ok=True)]
+
+    def fake_orchestrator(*args, **kwargs):
+        seen["synthesis"] = json.loads((output_dir / "run.json").read_text())["status"]
+        return agents.AgentResult(text="final", ok=True)
+
+    monkeypatch.setattr(aboyeur, "plan", fake_plan)
+    monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
+    monkeypatch.setattr(aboyeur, "_run_orchestrator", fake_orchestrator)
+
+    rc = cli.main(
+        [
+            "run",
+            "inspect",
+            "--cwd",
+            str(repo),
+            "--output-dir",
+            str(output_dir),
+            "--no-code-graph",
+            "--no-evidence",
+            "--no-route",
+        ]
+    )
+
+    assert rc == 0
+    assert seen == {"plan": "planning", "synthesis": "synthesizing"}
 
 
 def test_app_server_and_control_start_after_dispatching_is_recorded(tmp_path, monkeypatch):
