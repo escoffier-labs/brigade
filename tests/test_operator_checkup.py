@@ -58,6 +58,7 @@ def test_operator_checkup_is_ready_when_all_surfaces_pass(monkeypatch, capsys):
     assert payload["ready"] is True
     assert payload["blocking_surface_count"] == 0
     assert payload["next_command"] is None
+    assert payload["skipped_surfaces"] == ["work", "graph", "ledger"]
 
 
 def test_operator_checkup_loop_reports_graph_ledger_and_brief_hit_rate(monkeypatch, tmp_path, capsys):
@@ -264,6 +265,13 @@ def test_operator_checkup_rejects_surface_with_preset(tmp_path, capsys):
     assert "--surface and --preset cannot be combined" in capsys.readouterr().err
 
 
+def test_operator_checkup_rejects_list_surfaces_with_selector(tmp_path, capsys):
+    rc = lifecycle.checkup(target=tmp_path, surfaces=["work"], list_surfaces=True, json_output=True)
+
+    assert rc == 2
+    assert "--list-surfaces cannot be combined" in capsys.readouterr().err
+
+
 def test_operator_checkup_work_requires_receipt_integrity_and_outcome_capture(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         "brigade.receipts_cmd.verify_payload",
@@ -350,6 +358,23 @@ def test_operator_checkup_graph_missing_delta_requests_new_verification(monkeypa
     monkeypatch.setattr(
         "brigade.work_cmd.verification._latest_verify_receipt",
         lambda target: {"run_id": "verify-1"},
+    )
+
+    rc = lifecycle._checkup_graph(target=tmp_path, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert payload["next_command"] == ("brigade work verify run --target . --command '<check>' --capture brigade-work")
+
+
+def test_operator_checkup_graph_stale_delta_requests_new_verification(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        "brigade.search_cmd.status_payload",
+        lambda target: {"tools": {"graphtrail": {"installed": True, "db_present": True, "health": "ok"}}},
+    )
+    monkeypatch.setattr(
+        "brigade.work_cmd.verification._latest_verify_receipt",
+        lambda target: {"run_id": "verify-1", "code_graph_delta": {"status": "ok", "stale_graph_used": True}},
     )
 
     rc = lifecycle._checkup_graph(target=tmp_path, json_output=True)

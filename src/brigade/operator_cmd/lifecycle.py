@@ -875,7 +875,7 @@ def _resolve_checkup_surfaces(surfaces: list[str] | None, preset: str | None) ->
             raise ValueError(f"unknown checkup surface: {', '.join(unknown)}")
         skipped = [name for name in CHECKUP_SURFACE_NAMES if name not in selected]
         return selected, skipped, True
-    return list(CHECKUP_DEFAULT_SURFACES), [], False
+    return list(CHECKUP_DEFAULT_SURFACES), list(CHECKUP_EVIDENCE_SURFACES), False
 
 
 def _print_checkup_surface(payload: dict[str, Any], *, json_output: bool) -> None:
@@ -985,8 +985,6 @@ def _checkup_graph(*, target: Path, json_output: bool = False) -> int:
         "next_command": (
             "brigade search doctor --target ."
             if not graph_ready
-            else "graphtrail sync"
-            if delta.get("stale_graph_used") is True
             else "brigade work verify run --target . --command '<check>' --capture brigade-work"
         )
         if not ready
@@ -1215,6 +1213,9 @@ def checkup(
     list_surfaces: bool = False,
     json_output: bool = False,
 ) -> int:
+    if list_surfaces and (surfaces or preset):
+        print("error: --list-surfaces cannot be combined with --surface or --preset", file=sys.stderr)
+        return 2
     if list_surfaces:
         payload = checkup_catalog_payload()
         if json_output:
