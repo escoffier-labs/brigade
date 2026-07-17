@@ -500,6 +500,27 @@ def test_run_agent_rejects_tool_use_markup_without_final_text(monkeypatch, outpu
     assert result.failure_kind == "tool-only-output"
 
 
+def test_run_agent_rejects_tool_call_and_tool_result_transcript(monkeypatch):
+    output = json.dumps(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [{"name": "read_file", "arguments": {"path": "README.md"}}],
+                },
+                {"role": "tool", "type": "tool_result", "content": "file contents"},
+            ]
+        }
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "inspect it")
+
+    assert result.ok is False
+    assert result.failure_kind == "tool-only-output"
+
+
 @pytest.mark.parametrize(
     ("output", "failure_kind"),
     [
@@ -527,6 +548,8 @@ def test_run_agent_rejects_in_band_operational_diagnostics(monkeypatch, output, 
         "No findings.",
         "OK",
         "I will inspect the repository first. No findings.",
+        "Running the targeted tests passed.",
+        "Checking the implementation, I do not see any regressions.",
         "```text\nError: NonRetriableError: Provider Error\n```\nThis is the requested fixture.",
     ],
 )
@@ -668,6 +691,8 @@ def test_run_agent_rejects_grok_progress_without_structured_final_output(monkeyp
 
     assert result.ok is False
     assert result.detail == "grok exited 0 without a structured final response"
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "malformed-final-output"
     assert result.text == output
     assert result.stdout == output + "\n"
     assert result.exit_code == 0

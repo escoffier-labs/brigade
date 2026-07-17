@@ -545,6 +545,8 @@ def run_agent(
             text=text,
             ok=False,
             detail=structured_error,
+            failure_phase="output-validation",
+            failure_kind="malformed-final-output",
             stdout=result.stdout,
             stderr=result.stderr,
             exit_code=result.code,

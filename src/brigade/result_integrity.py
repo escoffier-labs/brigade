@@ -61,7 +61,8 @@ _PROGRESS_ACTION = re.compile(
 )
 _OUTCOME_MARKER = re.compile(
     r"\b(?:found|identified|shows?|reveals?|"
-    r"no (?:actionable )?(?:issues|findings|changes))\b",
+    r"no (?:actionable )?(?:issues|findings|changes|regressions)|"
+    r"(?:tests?|checks?) passed|(?:do not|don['’]t) see)\b",
     re.IGNORECASE,
 )
 _FINAL_TEXT_KEYS = frozenset({"answer", "content", "final", "final_answer", "output", "response", "text"})
@@ -75,6 +76,7 @@ _TOOL_KEYS = frozenset(
         "tool_uses",
     }
 )
+_TOOL_RESULT_TYPES = frozenset({"function_result", "tool_result", "tool_response"})
 
 
 def _contains_tool_marker(value: object) -> bool:
@@ -95,7 +97,12 @@ def _contains_tool_marker(value: object) -> bool:
 
 def _contains_final_text(value: object) -> bool:
     if isinstance(value, dict):
+        role = value.get("role")
         event_type = value.get("type")
+        if isinstance(role, str) and role.lower() in {"function", "tool"}:
+            return False
+        if isinstance(event_type, str) and event_type.lower() in _TOOL_RESULT_TYPES:
+            return False
         if isinstance(event_type, str) and event_type.lower() in _TOOL_KEYS:
             return False
         normalized_keys = {str(key).lower() for key in value}
