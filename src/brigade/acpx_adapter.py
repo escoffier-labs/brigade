@@ -110,6 +110,7 @@ def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
     session_id: str | None = None
     request_id: str | None = None
     stop_reason: str | None = None
+    stop_reasons: dict[str, str] = {}
     effective_model: str | None = None
     safe_events: list[dict[str, Any]] = []
     for message in messages:
@@ -119,10 +120,8 @@ def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
             if isinstance(version, int):
                 protocol_version = version
             stop = result.get("stopReason")
-            if isinstance(stop, str):
-                stop_reason = stop
-                if isinstance(message.get("id"), (str, int)):
-                    request_id = str(message["id"])
+            if isinstance(stop, str) and isinstance(message.get("id"), (str, int)):
+                stop_reasons[str(message["id"])] = stop
         params = message.get("params")
         if isinstance(params, dict):
             candidate_session = params.get("sessionId")
@@ -144,6 +143,10 @@ def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
             content = update.get("content")
             if isinstance(content, dict) and content.get("type") == "text" and isinstance(content.get("text"), str):
                 text_parts.append(content["text"])
+    if request_id is not None:
+        stop_reason = stop_reasons.get(request_id)
+    elif len(stop_reasons) == 1:
+        request_id, stop_reason = next(iter(stop_reasons.items()))
     if protocol_version not in (None, 1):
         return None, f"unsupported ACP protocol version: {protocol_version}"
     text = "".join(text_parts).strip()

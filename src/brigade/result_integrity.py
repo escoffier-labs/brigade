@@ -60,7 +60,7 @@ _PROGRESS_ACTION = re.compile(
     re.IGNORECASE,
 )
 _OUTCOME_MARKER = re.compile(
-    r"\b(?:found|identified|shows?|reveals?|completed|fixed|changed|"
+    r"\b(?:found|identified|shows?|reveals?|"
     r"no (?:actionable )?(?:issues|findings|changes))\b",
     re.IGNORECASE,
 )
@@ -123,7 +123,7 @@ def _tool_only(text: str) -> bool:
         return True
     return bool(
         re.fullmatch(
-            r"\s*<(?P<tag>tool_call|function_call)>[\s\S]*</(?P=tag)>\s*",
+            r"\s*<(?P<tag>tool_call|function_call|tool_use)>[\s\S]*</(?P=tag)>\s*",
             text,
             re.IGNORECASE,
         )

@@ -178,6 +178,40 @@ def test_run_rejects_non_final_stop_reason_with_partial_text(monkeypatch, tmp_pa
     assert result.detail == "ACP stream ended without a final completion (stopReason=cancelled)"
 
 
+def test_run_correlates_stop_reason_to_prompt_request(monkeypatch, tmp_path):
+    stream = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial"}},
+            },
+        },
+        {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "cancelled"}},
+        {"jsonrpc": "2.0", "id": "unrelated", "result": {"stopReason": "end_turn"}},
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(0, stream, "")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.request_id == "req-1"
+    assert result.stop_reason == "cancelled"
+    assert result.failure_kind == "non-final-stop"
+
+
 def test_run_rejects_version_mismatch(monkeypatch, tmp_path):
     monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
     monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: proc.Result(0, "acpx 0.13.0\n", ""))

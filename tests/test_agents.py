@@ -444,6 +444,20 @@ def test_run_agent_rejects_bare_progress_only_output(monkeypatch):
     assert result.failure_kind == "non-final-output"
 
 
+def test_run_agent_rejects_progress_over_changed_files(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(0, "Reviewing changed files.\n", ""),
+    )
+
+    result = agents.run_agent("antigravity", "review it")
+
+    assert result.ok is False
+    assert result.failure_kind == "non-final-output"
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -466,6 +480,17 @@ def test_run_agent_rejects_tool_call_only_output(monkeypatch, payload):
     assert result.failure_phase == "output-validation"
     assert result.failure_kind == "tool-only-output"
     assert result.detail == "provider returned tool-call data without a final result"
+
+
+def test_run_agent_rejects_tool_use_markup_without_final_text(monkeypatch):
+    output = '<tool_use>{"name":"read_file","path":"README.md"}</tool_use>'
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "inspect it")
+
+    assert result.ok is False
+    assert result.failure_kind == "tool-only-output"
 
 
 @pytest.mark.parametrize(
