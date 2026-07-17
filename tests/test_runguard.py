@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time as stdlib_time
 from pathlib import Path
 
 import pytest
@@ -244,6 +245,25 @@ def test_run_lock_wait_timeout_is_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(runguard.time, "monotonic", lambda: next(monotonic))
     monkeypatch.setattr(runguard.time, "sleep", sleeps.append)
 
+    with pytest.raises(runguard.RunLockError, match=r"timed out after 0.2s waiting for run lock"):
+        with runguard.run_lock(repo, wait_seconds=0.2, poll_interval=0.05):
+            pass
+
+    assert sleeps == [0.05]
+    assert lock_path.is_dir()
+
+
+def test_run_lock_timeout_clock_is_isolated_from_process_clock(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text(f"{os.getpid()}\n")
+    monotonic = iter((10.0, 10.0, 10.25))
+    sleeps = []
+    monkeypatch.setattr(runguard.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(runguard.time, "sleep", sleeps.append)
+
+    stdlib_time.monotonic()
     with pytest.raises(runguard.RunLockError, match=r"timed out after 0.2s waiting for run lock"):
         with runguard.run_lock(repo, wait_seconds=0.2, poll_interval=0.05):
             pass

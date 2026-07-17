@@ -7,10 +7,11 @@ import errno
 import json
 import os
 import shutil
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic as _monotonic
+from time import sleep as _sleep
 from uuid import uuid4
 
 from . import localio, proc
@@ -18,6 +19,15 @@ from . import localio, proc
 _NONTERMINAL_RUN_STATUSES = frozenset(
     {"started", "planning", "dispatching", "synthesizing", "artifact-collection", "running"}
 )
+
+
+class _RunLockClock:
+    monotonic = staticmethod(_monotonic)
+    sleep = staticmethod(_sleep)
+
+
+# Keep lock-clock patches local instead of replacing the process-wide time module.
+time = _RunLockClock()
 
 
 class RunGuardError(RuntimeError):
