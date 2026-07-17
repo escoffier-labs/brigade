@@ -890,39 +890,17 @@ def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
         else:
             segments[-1].append(token)
     found_target = False
-    all_target_commands = {"mkdir", "mv", "rm", "rmdir", "tee", "touch", "truncate"}
-    last_target_commands = {"cp", "install"}
     output_only_commands = {"cat", "echo", "printf"}
     for segment in segments:
         stripped = _strip_env(segment)
         if not stripped:
             continue
+        if Path(stripped[0]).name not in output_only_commands:
+            return False
         targets: list[str] = []
-        redirected_indexes: set[int] = set()
         for index, token in enumerate(stripped[:-1]):
             if token and set(token) <= set(";&|<>") and ">" in token:
                 targets.append(stripped[index + 1])
-                redirected_indexes.add(index + 1)
-        command_name = Path(stripped[0]).name
-        positionals = [
-            token
-            for index, token in enumerate(stripped[1:], start=1)
-            if index not in redirected_indexes
-            and not token.startswith("-")
-            and not (token and set(token) <= set(";&|<>"))
-        ]
-        if command_name in all_target_commands:
-            targets.extend(positionals)
-        elif command_name in last_target_commands:
-            if any(
-                token == "-t" or token.startswith("-t") or token.startswith("--target-directory")
-                for token in stripped[1:]
-            ) or (command_name == "install" and any(token in {"-d", "--directory"} for token in stripped[1:])):
-                return False
-            if positionals:
-                targets.append(positionals[-1])
-        elif targets and command_name not in output_only_commands:
-            return False
         if not targets:
             return False
         found_target = True
