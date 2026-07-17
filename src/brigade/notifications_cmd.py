@@ -50,6 +50,24 @@ def _profile_args(profile: str | None) -> list[str]:
     return ["--profile", profile] if profile else []
 
 
+def _doctor_argv(profile: str | None) -> list[str]:
+    return ["agent-notify", "doctor", "--json", "--skip-network", *_profile_args(profile)]
+
+
+def _failure_class(code: int) -> str | None:
+    if code == 0:
+        return None
+    if code == 2:
+        return "configuration_error"
+    if code == 3:
+        return "delivery_error"
+    if code == 124:
+        return "timeout"
+    if code == 127:
+        return "not_found"
+    return "child_error"
+
+
 def _codex_snippet(profile: str | None) -> str:
     parts = ["agent-notify", "--hook", "codex-notify"] + _profile_args(profile)
     rendered = ", ".join(json.dumps(part) for part in parts)
@@ -191,61 +209,61 @@ def _status_payload(profile: str | None = None) -> dict[str, Any]:
             "stores_secrets": False,
         }
 
-    config, config_error = _read_config()
-    checks: list[dict[str, Any]] = []
-    selected_profile: str | None = profile
-    selected_channels: list[str] = []
-    missing_env: dict[str, list[str]] = {}
-    if config_error:
-        checks.append({"status": "WARN", "name": "agent-notify-config", "detail": f"config unreadable: {config_error}"})
-    elif config is not None:
-        selected_profile, selected_channels, selection_error = _selected_config_channels(config, profile)
-        if selection_error:
-            checks.append({"status": "WARN", "name": "agent-notify-profile", "detail": selection_error})
-        channels_value = config.get("channels")
-        channels = channels_value if isinstance(channels_value, dict) else {}
-        for name in selected_channels:
-            channel = channels.get(name)
-            if not isinstance(channel, dict):
-                continue
-            missing = [env for env in _required_env_names(channel) if not os.environ.get(env)]
-            if missing:
-                missing_env[name] = missing
-    else:
-        selected_channels = _env_only_channels()
+    result = proc.run(_doctor_argv(profile), timeout=30.0)
+    doctor = result.json() if result.code == 0 else None
+    valid_doctor = isinstance(doctor, dict)
+    configured = bool(valid_doctor and doctor.get("configured") is True)
+    failure_class = _failure_class(result.code)
+    if result.code == 0 and not configured:
+        failure_class = "child_error"
 
-    if not selected_channels:
-        checks.append(
+    selected_profile = profile
+    selected_channels: list[str] = []
+    fail_count = 0
+    warn_count = 0
+    config_exists: bool | None = None
+    if valid_doctor:
+        doctor_profile = doctor.get("selected_profile")
+        if isinstance(doctor_profile, str) and doctor_profile:
+            selected_profile = doctor_profile
+        channels_value = doctor.get("selected_channels")
+        if isinstance(channels_value, list):
+            selected_channels = [item for item in channels_value if isinstance(item, str)]
+        if type(doctor.get("fail_count")) is int:
+            fail_count = doctor["fail_count"]
+        if type(doctor.get("warn_count")) is int:
+            warn_count = doctor["warn_count"]
+        if isinstance(doctor.get("config_file_exists"), bool):
+            config_exists = doctor["config_file_exists"]
+
+    if configured:
+        checks: list[dict[str, Any]] = [
             {
-                "status": "WARN",
-                "name": "agent-notify-channels",
-                "detail": "no configured notification channels selected",
+                "status": "OK",
+                "name": "agent-notify-doctor",
+                "detail": f"{len(selected_channels)} local channel(s) configured",
             }
-        )
-    for name, envs in missing_env.items():
-        checks.append(
-            {"status": "WARN", "name": "agent-notify-env", "detail": f"{name} missing env: {', '.join(envs)}"}
-        )
-    if not checks:
-        checks.append(
-            {"status": "OK", "name": "agent-notify", "detail": f"{len(selected_channels)} local channel(s) configured"}
-        )
-    configured = (
-        bool(selected_channels) and not missing_env and not any(str(check.get("status")) == "WARN" for check in checks)
-    )
+        ]
+    else:
+        detail = f"doctor exited {result.code} ({failure_class})"
+        checks = [{"status": "WARN", "name": "agent-notify-doctor", "detail": detail}]
     status = "ok" if configured else "warn"
     suggested = "brigade notifications setup plan" if not configured else "brigade notifications status --json"
     return {
         "installed": True,
         "binary": binary,
         "config_path": str(CONFIG_PATH),
-        "config_exists": config is not None,
+        "config_exists": config_exists,
         "configured": configured,
         "status": status,
         "checks": checks,
         "selected_profile": selected_profile,
         "selected_channels": selected_channels,
-        "missing_env": missing_env,
+        "missing_env": {},
+        "doctor_fail_count": fail_count,
+        "doctor_warn_count": warn_count,
+        "probe_exit_code": result.code,
+        "probe_failure_class": failure_class,
         "suggested_next_command": suggested,
         "sends_notifications": False,
         "writes_hook_config": False,
@@ -339,6 +357,7 @@ def status(*, target: Path, profile: str | None = None, json_output: bool = Fals
 
 def setup_plan(*, target: Path, profile: str = "operator", json_output: bool = False) -> int:
     del target
+    status_payload = _status_payload(profile)
     payload: dict[str, Any] = {
         "profile": profile,
         "config_path": str(CONFIG_PATH),
@@ -352,9 +371,14 @@ def setup_plan(*, target: Path, profile: str = "operator", json_output: bool = F
             "codex_config_toml": _codex_snippet(profile),
             "claude_code_settings_json": _claude_snippet(profile),
         },
+        "doctor_probe": {
+            "configured": status_payload["configured"],
+            "probe_exit_code": status_payload.get("probe_exit_code"),
+            "probe_failure_class": status_payload.get("probe_failure_class"),
+        },
         "notes": [
             "Config references environment variable names only; keep webhook URLs and tokens in the environment.",
-            "agent-notify has no init or doctor subcommand; Brigade status inspects local config and env names without sending.",
+            "Brigade checks Agent Notify with `agent-notify doctor --json --skip-network`; the probe never sends.",
             "Brigade does not write harness notification hooks or send test notifications from setup plan.",
         ],
     }

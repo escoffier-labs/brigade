@@ -25,39 +25,74 @@ def test_notifications_status_reports_missing_agent_notify(monkeypatch, tmp_targ
     assert payload["stores_secrets"] is False
 
 
-def test_notifications_status_reads_config_and_env(monkeypatch, tmp_target, capsys):
-    config_path = tmp_target / ".config" / "agent-notify" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "\n".join(
-            [
-                "[channels.telegram-personal]",
-                'type = "telegram"',
-                'bot_token_env = "TEST_TELEGRAM_BOT_TOKEN"',
-                'chat_id_env = "TEST_TELEGRAM_CHAT_ID"',
-                "",
-                "[profiles.operator]",
-                'channels = ["telegram-personal"]',
-                "default = true",
-                "",
-            ]
+def test_notifications_status_uses_non_sending_doctor_probe(monkeypatch, tmp_target, capsys):
+    seen = {}
+
+    def fake_run(args, timeout=30.0, env=None, cwd=None, stdin=None):
+        seen["args"] = args
+        seen["timeout"] = timeout
+        seen["stdin"] = stdin
+        return notifications_cmd.proc.Result(
+            code=0,
+            stdout=json.dumps(
+                {
+                    "configured": True,
+                    "selected_profile": "operator",
+                    "selected_channels": ["telegram-personal"],
+                    "fail_count": 0,
+                    "warn_count": 0,
+                }
+            ),
+            stderr="",
         )
-    )
-    monkeypatch.setattr(notifications_cmd, "CONFIG_PATH", config_path)
+
     monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
-    monkeypatch.setenv("TEST_TELEGRAM_BOT_TOKEN", "token")
-    monkeypatch.setenv("TEST_TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
 
     rc = notifications_cmd.status(target=tmp_target, profile="operator", json_output=True)
     out = capsys.readouterr().out
     payload = json.loads(out)
 
     assert rc == 0
+    assert seen == {
+        "args": ["agent-notify", "doctor", "--json", "--skip-network", "--profile", "operator"],
+        "timeout": 30.0,
+        "stdin": None,
+    }
     assert payload["installed"] is True
     assert payload["configured"] is True
     assert payload["status"] == "ok"
     assert payload["selected_profile"] == "operator"
     assert payload["selected_channels"] == ["telegram-personal"]
+    assert payload["probe_exit_code"] == 0
+    assert payload["probe_failure_class"] is None
+
+
+def test_notifications_status_discards_failed_doctor_output(monkeypatch, tmp_target, capsys):
+    sentinel_url = "https://example.invalid/hook?token=SENTINEL_SECRET"
+
+    def fake_run(args, timeout=30.0, env=None, cwd=None, stdin=None):
+        return notifications_cmd.proc.Result(
+            code=2,
+            stdout=json.dumps({"configured": False, "summary": sentinel_url}),
+            stderr=f"provider request failed: {sentinel_url}",
+        )
+
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
+
+    assert notifications_cmd.status(target=tmp_target, profile="operator", json_output=True) == 0
+    rendered = capsys.readouterr().out
+    payload = json.loads(rendered)
+
+    assert payload["status"] == "warn"
+    assert payload["configured"] is False
+    assert payload["probe_exit_code"] == 2
+    assert payload["probe_failure_class"] == "configuration_error"
+    assert "SENTINEL_SECRET" not in rendered
+    assert "example.invalid" not in rendered
+    assert "stdout_summary" not in rendered
+    assert "stderr_summary" not in rendered
 
 
 def test_notifications_setup_plan_prints_hook_snippets(tmp_target, capsys):
@@ -69,6 +104,27 @@ def test_notifications_setup_plan_prints_hook_snippets(tmp_target, capsys):
     assert "claude-code-stop --profile agent-stop" in out
     assert "agent-notify has no init or doctor subcommand" not in out
     assert "agent-notify init" not in out
+
+
+def test_notifications_setup_plan_runs_non_sending_doctor(monkeypatch, tmp_target, capsys):
+    seen = {}
+
+    def fake_run(args, timeout=30.0, env=None, cwd=None, stdin=None):
+        seen["args"] = args
+        return notifications_cmd.proc.Result(code=2, stdout="{}", stderr="ignored")
+
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
+
+    assert notifications_cmd.setup_plan(target=tmp_target, profile="operator", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert seen["args"] == ["agent-notify", "doctor", "--json", "--skip-network", "--profile", "operator"]
+    assert payload["doctor_probe"] == {
+        "configured": False,
+        "probe_exit_code": 2,
+        "probe_failure_class": "configuration_error",
+    }
 
 
 def test_notifications_health_is_read_only_when_missing(monkeypatch, tmp_target):
