@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Symbol search splits multi-part query terms on path separators, so a task string like `change src/store/sync.rs` matches the file's symbols instead of quoting the whole path as one FTS token that matches nothing. Personalized context packs seeded from path-bearing tasks were silently falling back to tiny unpersonalized packs; on the co-change bench in `benchmarks/context-cochange/` this took recall from 0.239 to 0.692 (Go) and 0.200 to 0.504 (Rust) at the same budget.
 - `affected` no longer reports fixture sources as runnable tests: paths under `fixtures/`, `golden/`, `snapshots/`, or `testdata/` are excluded from the test-file heuristic unless the file name itself matches a test-name pattern. `dead_code` keeps excluding fixture paths through a broader test-support predicate, so fixture sources do not surface as dead-code candidates. Found by the calibration bench in `benchmarks/affected-calibration/`.
 
 ### Added
