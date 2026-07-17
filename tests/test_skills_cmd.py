@@ -248,6 +248,49 @@ def test_skills_sync_preserves_completed_receipts_when_later_target_fails(tmp_pa
     assert not (tmp_path / ".brigade" / "skills" / "installs" / "partial-cursor.json").exists()
 
 
+def test_skills_sync_records_later_target_filesystem_exception(tmp_path, capsys, monkeypatch):
+    source = _write_skill(tmp_path / "source", name="exceptional")
+    metadata_path = source / "skill.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["supported_harnesses"] = ["codex", "cursor"]
+    metadata_path.write_text(json.dumps(metadata))
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+
+    real_install = skills_cmd.install
+
+    def fail_cursor(**kwargs):
+        if kwargs["harness"] == "cursor":
+            raise OSError("simulated read-only filesystem")
+        return real_install(**kwargs)
+
+    monkeypatch.setattr(skills_cmd, "install", fail_cursor)
+    assert skills_cmd.sync(workspace=tmp_path, harness="all", trust="workspace", write=True, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    rows = {(row["skill_id"], row["harness"]): row for row in payload["items"]}
+
+    assert rows[("exceptional", "codex")]["result"] == "installed"
+    assert rows[("exceptional", "cursor")]["result"] == "failed"
+    assert rows[("exceptional", "cursor")]["error"] == "simulated read-only filesystem"
+    assert (tmp_path / ".brigade" / "skills" / "installs" / "exceptional-codex.json").is_file()
+
+
+def test_skills_sync_excludes_unavailable_hermes_target(tmp_path, capsys, monkeypatch):
+    source = _write_skill(tmp_path / "source", name="no-hermes")
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "absent-hermes"))
+
+    assert skills_cmd.sync(workspace=tmp_path, harness="all", trust="workspace", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    row = next(item for item in payload["items"] if item["skill_id"] == "no-hermes" and item["harness"] == "hermes")
+
+    assert row["state"] == "excluded"
+    assert row["result"] == "excluded"
+    assert row["reason"] == "Hermes home not found (is Hermes installed?)"
+    assert payload["counts"]["blocked"] == 0
+
+
 def test_skills_sync_cli_is_dry_run_until_write(tmp_path, capsys):
     source = _write_skill(tmp_path / "source", name="cli-sync")
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0

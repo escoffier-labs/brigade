@@ -1114,7 +1114,11 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
                 items.append(item)
                 continue
             if install_target == "hermes" and not _hermes_home().exists():
-                item["reason"] = "Hermes home not found (is Hermes installed?)"
+                item.update(
+                    state="excluded",
+                    result="excluded",
+                    reason="Hermes home not found (is Hermes installed?)",
+                )
                 items.append(item)
                 continue
             source_dir = Path(str(lint_payload["skill_dir"]))
@@ -1172,14 +1176,19 @@ def sync(
                 continue
             stdout = io.StringIO()
             stderr = io.StringIO()
+            exception_error: str | None = None
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                rc = install(
-                    workspace=workspace,
-                    skill=f"registry:{item['skill_id']}",
-                    harness=str(item["harness"]),
-                    force=True,
-                    json_output=True,
-                )
+                try:
+                    rc = install(
+                        workspace=workspace,
+                        skill=f"registry:{item['skill_id']}",
+                        harness=str(item["harness"]),
+                        force=True,
+                        json_output=True,
+                    )
+                except OSError as exc:
+                    rc = 1
+                    exception_error = str(exc)
             if rc == 0:
                 result = "installed" if item["action"] == "install" else "updated"
                 item["result"] = result
@@ -1193,7 +1202,9 @@ def sync(
                 item["receipt"] = receipts[0] if isinstance(receipts, list) and receipts else None
             else:
                 item["result"] = "failed"
-                item["error"] = stderr.getvalue().strip() or stdout.getvalue().strip() or f"install exited {rc}"
+                item["error"] = (
+                    exception_error or stderr.getvalue().strip() or stdout.getvalue().strip() or f"install exited {rc}"
+                )
                 applied["failed"] += 1
 
     counts = {
