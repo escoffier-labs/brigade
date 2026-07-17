@@ -135,7 +135,7 @@ def test_hooks_status_reports_matcher_drift_as_stale(tmp_path: Path):
     assert status["stale_events"] == ["PreToolUse"]
 
 
-def test_hooks_uninstall_preserves_mismatched_event_and_noncommand_handlers(tmp_path: Path):
+def test_hooks_uninstall_removes_mismatched_managed_command_but_preserves_prompt_handlers(tmp_path: Path):
     target = _wired_claude(tmp_path)
     settings = target / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True, exist_ok=True)
@@ -149,7 +149,27 @@ def test_hooks_uninstall_preserves_mismatched_event_and_noncommand_handlers(tmp_
     assert hooks_uninstall(target=target) == 0
 
     payload = json.loads(settings.read_text())
-    assert payload["hooks"]["SessionStart"] == [{"hooks": foreign_handlers}]
+    assert payload["hooks"]["SessionStart"] == [{"hooks": [foreign_handlers[1]]}]
+
+
+def test_hooks_install_removes_managed_command_filed_under_wrong_event(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    settings = target / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    misplaced = {"type": "command", "command": managed_command("Stop")}
+    settings.write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [misplaced]}]}}, indent=2) + "\n")
+
+    assert hooks_install(target=target) == 0
+
+    payload = json.loads(settings.read_text())
+    session_cmds = [
+        handler["command"]
+        for group in payload["hooks"]["SessionStart"]
+        for handler in group.get("hooks", [])
+        if isinstance(handler, dict)
+    ]
+    assert managed_command("Stop") not in session_cmds
+    assert managed_command("SessionStart") in session_cmds
 
 
 def test_hooks_uninstall_leaves_foreign(tmp_path: Path):
@@ -295,4 +315,4 @@ def test_claude_templates_import_agents_md():
     root = template_root()
     for rel in ("repo/CLAUDE.md", "workspace/CLAUDE.md"):
         text = (root / rel).read_text()
-        assert "@AGENTS.md" in text
+        assert any(line.strip() == "@AGENTS.md" for line in text.splitlines())

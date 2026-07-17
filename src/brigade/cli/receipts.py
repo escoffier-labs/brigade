@@ -32,6 +32,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_miseledger.add_argument(
         "--import", dest="import_miseledger", action="store_true", help="Import the JSONL with miseledger."
     )
+    p_miseledger.add_argument(
+        "--json", action="store_true", help="Print a brigade.miseledger_export_result.v1 summary to stdout."
+    )
+    p_miseledger.add_argument(
+        "--fleet",
+        action="store_true",
+        help="Export from enabled [[repo]] entries in the target fleet config instead of the target itself.",
+    )
     p_miseledger.set_defaults(func=dispatch)
     for projection in ("otel-genai", "openinference"):
         parser = export_sub.add_parser(projection, help=f"Export privacy-safe {projection} span JSONL.")
@@ -54,6 +62,8 @@ def dispatch(args) -> int:
             limit=args.limit,
             new_only=args.new_only,
             import_miseledger=args.import_miseledger,
+            json_output=args.json,
+            fleet=args.fleet,
         )
     if args.receipts_command == "export" and args.receipts_export_command in {"otel-genai", "openinference"}:
         from .. import telemetry_export

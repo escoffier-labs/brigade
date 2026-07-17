@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import shlex
+import subprocess
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -17,6 +19,26 @@ def _wired_claude(tmp_path: Path) -> Path:
     target = tmp_path / "repo"
     selection = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     assert install_selection(target, selection) == 0
+    return target
+
+
+def _git_wired_claude(tmp_path: Path) -> Path:
+    target = _wired_claude(tmp_path)
+    subprocess.run(["git", "init"], cwd=target, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     return target
 
 
@@ -150,6 +172,7 @@ def test_pretooluse_denies_confident_verifier_wrappers(tmp_path: Path):
         "pnpm --filter app run test",
         "yarn run -- test",
         "bun run -- test",
+        "make -p test",
     ):
         result = runtime.handle_payload(
             "PreToolUse",
@@ -298,6 +321,207 @@ def test_pretooluse_guidance_preserves_safe_verifier_context(tmp_path: Path):
         replacement = shlex.split(reason.split("Use: ", 1)[1])
         routed_command = replacement[replacement.index("--command") + 1]
         assert routed_command == expected, command
+
+
+def test_pretooluse_denies_make_with_global_options(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    for command in (
+        "make -C src test",
+        "make --directory=src test",
+        "make -j4 test",
+        "make -j 4 check",
+        "make -s verify",
+    ):
+        result = runtime.handle_payload(
+            "PreToolUse",
+            _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command}),
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny", command
+
+
+def test_posttooluse_records_python_c_write_via_repo_snapshot(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    session_id = "python-c-write"
+    out_file = target / "snapshot.py"
+    command = f"{sys.executable} -c \"from pathlib import Path; Path({str(out_file)!r}).write_text('x')\""
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": command},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    assert runtime.read_session_state(target, session_id)["write_observed"] is False
+    assert "pending_bash_fingerprint" in runtime.read_session_state(target, session_id)
+
+    out_file.write_text("x")
+    succeeded = {**pretool, "hook_event_name": "PostToolUse"}
+    assert runtime.handle_payload("PostToolUse", succeeded) is None
+    state = runtime.read_session_state(target, session_id)
+    assert state["write_observed"] is True
+    assert "pending_bash_fingerprint" not in state
+
+    blocked = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    assert blocked["decision"] == "block"
+
+
+def test_posttooluse_snapshot_fails_open_when_state_cannot_be_inspected(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    session_id = "snapshot-unavailable"
+    monkeypatch.setattr(runtime, "repo_worktree_fingerprint", lambda repo: None)
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": f"{sys.executable} -c \"print('noop')\""},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    assert runtime.read_session_state(target, session_id).get("pending_bash_fingerprint") is None
+
+    succeeded = {**pretool, "hook_event_name": "PostToolUse"}
+    assert runtime.handle_payload("PostToolUse", succeeded) is None
+    assert runtime.read_session_state(target, session_id)["write_observed"] is False
+    assert (
+        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
+    )
+
+
+def test_repo_worktree_fingerprint_detects_dirty_tracked_same_size_rewrite(tmp_path: Path):
+    target = _git_wired_claude(tmp_path)
+    tracked = target / "tracked.txt"
+    tracked.write_text("version-a\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=target, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=target, check=True, capture_output=True, text=True)
+    tracked.write_text("version-b\n")
+    assert len("version-a\n") == len("version-b\n")
+    status_before = subprocess.check_output(
+        ["git", "-C", str(target), "status", "--porcelain", "-u", "--no-renames"],
+        text=True,
+    )
+    baseline = runtime.repo_worktree_fingerprint(target)
+    tracked.write_text("version-c\n")
+    assert len("version-b\n") == len("version-c\n")
+    status_after = subprocess.check_output(
+        ["git", "-C", str(target), "status", "--porcelain", "-u", "--no-renames"],
+        text=True,
+    )
+    assert status_before == status_after
+    updated = runtime.repo_worktree_fingerprint(target)
+    assert baseline is not None
+    assert updated is not None
+    assert baseline != updated
+
+
+def test_repo_worktree_fingerprint_detects_untracked_same_size_rewrite(tmp_path: Path):
+    target = _git_wired_claude(tmp_path)
+    untracked = target / "new.txt"
+    untracked.write_text("aaaa")
+    status_before = subprocess.check_output(
+        ["git", "-C", str(target), "status", "--porcelain", "-u", "--no-renames"],
+        text=True,
+    )
+    baseline = runtime.repo_worktree_fingerprint(target)
+    untracked.write_text("bbbb")
+    status_after = subprocess.check_output(
+        ["git", "-C", str(target), "status", "--porcelain", "-u", "--no-renames"],
+        text=True,
+    )
+    assert status_before == status_after
+    updated = runtime.repo_worktree_fingerprint(target)
+    assert baseline is not None
+    assert updated is not None
+    assert baseline != updated
+
+
+def test_repo_worktree_fingerprint_detects_untracked_tail_byte_change(tmp_path: Path):
+    target = _git_wired_claude(tmp_path)
+    untracked = target / "large.bin"
+    content_a = b"a" * 65536 + b"x"
+    content_b = b"a" * 65536 + b"y"
+    assert len(content_a) == 65537 == len(content_b)
+    untracked.write_bytes(content_a)
+    baseline = runtime.repo_worktree_fingerprint(target)
+    untracked.write_bytes(content_b)
+    updated = runtime.repo_worktree_fingerprint(target)
+    assert baseline is not None
+    assert updated is not None
+    assert baseline != updated
+
+
+def test_repo_worktree_fingerprint_returns_none_when_hash_object_fails_for_untracked(tmp_path: Path, monkeypatch):
+    target = _git_wired_claude(tmp_path)
+    (target / "new.txt").write_text("content")
+    real_run = runtime._run_snapshot_git
+
+    def fake_run(repo: Path, *git_args: str):
+        if git_args[:1] == ("hash-object",):
+            return None
+        return real_run(repo, *git_args)
+
+    monkeypatch.setattr(runtime, "_run_snapshot_git", fake_run)
+    assert runtime.repo_worktree_fingerprint(target) is None
+
+
+def test_posttooluse_does_not_record_bash_write_when_hash_object_fails_for_untracked(tmp_path: Path, monkeypatch):
+    target = _git_wired_claude(tmp_path)
+    session_id = "hash-object-fail"
+    out_file = target / "new.txt"
+    out_file.write_text("before")
+    real_run = runtime._run_snapshot_git
+
+    def fake_run(repo: Path, *git_args: str):
+        if git_args[:1] == ("hash-object",):
+            return None
+        return real_run(repo, *git_args)
+
+    monkeypatch.setattr(runtime, "_run_snapshot_git", fake_run)
+    command = f"{sys.executable} -c \"from pathlib import Path; Path({str(out_file)!r}).write_text('after')\""
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": command},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    state = runtime.read_session_state(target, session_id)
+    assert state["write_observed"] is False
+    assert "pending_bash_fingerprint" not in state
+
+    out_file.write_text("after")
+    succeeded = {**pretool, "hook_event_name": "PostToolUse"}
+    assert runtime.handle_payload("PostToolUse", succeeded) is None
+    assert runtime.read_session_state(target, session_id)["write_observed"] is False
+    assert (
+        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
+    )
+
+
+def test_posttooluse_records_bash_write_on_dirty_tracked_same_size_rewrite(tmp_path: Path):
+    target = _git_wired_claude(tmp_path)
+    session_id = "dirty-tracked-rewrite"
+    tracked = target / "tracked.txt"
+    tracked.write_text("version-a\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=target, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=target, check=True, capture_output=True, text=True)
+    tracked.write_text("version-b\n")
+    command = f"{sys.executable} -c \"from pathlib import Path; Path({str(tracked)!r}).write_text('version-c\\\\n')\""
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": command},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    assert runtime.read_session_state(target, session_id)["write_observed"] is False
+
+    tracked.write_text("version-c\n")
+    succeeded = {**pretool, "hook_event_name": "PostToolUse"}
+    assert runtime.handle_payload("PostToolUse", succeeded) is None
+    assert runtime.read_session_state(target, session_id)["write_observed"] is True
 
 
 def test_posttooluse_records_only_successful_writes(tmp_path: Path):

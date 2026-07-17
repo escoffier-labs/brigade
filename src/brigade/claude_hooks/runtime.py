@@ -24,6 +24,17 @@ _SHELL_WRAPPERS = {"bash", "dash", "ksh", "sh", "zsh"}
 _SHELL_CONTROL_PREFIXES = {"!", "{", "do", "elif", "if", "then", "time", "until", "while"}
 _SHELL_CONTROL_TOKENS = _SHELL_CONTROL_PREFIXES | {"}", "case", "done", "else", "esac", "fi", "for", "select"}
 _WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
+_SNAPSHOT_IGNORE_DIRS = {
+    ".brigade",
+    ".git",
+    ".hg",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+}
+_SNAPSHOT_GIT_TIMEOUT_SECONDS = 3
 _BASH_WRITE_COMMANDS = {
     "apply_patch",
     "cp",
@@ -300,6 +311,73 @@ def _package_runner_script(tokens: list[str]) -> str | None:
             return None
         break
     return remaining[0] if remaining else None
+
+
+def _strip_make_global_options(tokens: list[str]) -> tuple[list[str], bool]:
+    remaining = list(tokens)
+    no_value = {
+        "-k",
+        "-n",
+        "-q",
+        "-s",
+        "-t",
+        "--always-make",
+        "--dry-run",
+        "--ignore-errors",
+        "--just-print",
+        "--keep-going",
+        "--no-builtin-rules",
+        "--no-print-directory",
+        "--print-directory",
+        "--question",
+        "--quiet",
+        "--recon",
+        "--silent",
+        "--touch",
+        "--version",
+        "-v",
+        "-w",
+        "-p",
+    }
+    with_value = {
+        "-I",
+        "--include-dir",
+        "-C",
+        "--directory",
+        "-j",
+        "--jobs",
+        "-o",
+        "--old-file",
+        "-W",
+        "--what-if",
+        "--load-average",
+    }
+    while remaining:
+        option = remaining[0]
+        if option == "--":
+            remaining.pop(0)
+            break
+        if option in no_value:
+            remaining.pop(0)
+            continue
+        if option in with_value:
+            if len(remaining) < 2:
+                return [], True
+            del remaining[:2]
+            continue
+        if any(option.startswith(f"{known}=") for known in with_value):
+            remaining.pop(0)
+            continue
+        if option.startswith("-j") and len(option) > 2 and option[2:].isdigit():
+            remaining.pop(0)
+            continue
+        if option.startswith(("-C", "-I", "-o", "-W")) and len(option) > 2:
+            remaining.pop(0)
+            continue
+        if option.startswith("-"):
+            return remaining, True
+        break
+    return remaining, False
 
 
 def _strip_runner_global_options(command: str, tokens: list[str]) -> tuple[list[str], bool]:
@@ -652,8 +730,12 @@ def _segment_is_verifier(segment: list[str], *, depth: int = 0) -> bool:
         return True
     if command == "cargo" and names[1:2] in (["test"], ["clippy"]):
         return True
-    if command == "make" and len(names) > 1 and names[1] in {"test", "check", "verify"}:
-        return True
+    if command == "make":
+        tail, ambiguous = _strip_make_global_options(tokens[1:])
+        if ambiguous:
+            return _ambiguous_tail_contains_verifier(tokens[1:], depth=depth)
+        tail_names = [Path(token).name for token in tail]
+        return bool(tail_names and tail_names[0] in {"test", "check", "verify"})
     if command == "ruff":
         tail = names[1:]
         return tail[:1] == ["check"] or (tail[:1] == ["format"] and "--check" in tail[1:])
@@ -794,6 +876,154 @@ def _is_confident_bash_write(command: object) -> bool:
     return False
 
 
+def _snapshot_ignore_relative(path: Path) -> bool:
+    parts = path.parts
+    if not parts:
+        return True
+    if parts[0] in _SNAPSHOT_IGNORE_DIRS:
+        return True
+    return any(part in _SNAPSHOT_IGNORE_DIRS for part in parts)
+
+
+def _porcelain_path(line: str) -> str:
+    path = line[3:]
+    if len(path) >= 2 and path[0] == '"' and path[-1] == '"':
+        return bytes(path[1:-1], "utf-8").decode("unicode_escape")
+    return path
+
+
+def _snapshot_git_args(target: Path, *git_args: str) -> list[str]:
+    return ["git", "-C", str(target), *git_args]
+
+
+def _snapshot_pathspec_excludes() -> list[str]:
+    excludes: list[str] = []
+    for name in sorted(_SNAPSHOT_IGNORE_DIRS):
+        excludes.append(f":(exclude){name}")
+        excludes.append(f":(exclude){name}/**")
+    return excludes
+
+
+def _run_snapshot_git(target: Path, *git_args: str) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            _snapshot_git_args(target, *git_args),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=_SNAPSHOT_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _git_worktree_lines(target: Path) -> list[str] | None:
+    result = _run_snapshot_git(target, "status", "--porcelain", "--untracked-files=all", "--no-renames")
+    if result is None or result.returncode != 0:
+        return None
+    lines = [line.rstrip() for line in result.stdout.splitlines() if line.strip()]
+    filtered = [line for line in lines if not _snapshot_ignore_relative(Path(_porcelain_path(line)))]
+    return filtered
+
+
+def _git_diff_head(target: Path) -> str | None:
+    head = _run_snapshot_git(target, "rev-parse", "--verify", "HEAD")
+    if head is None or head.returncode != 0:
+        return ""
+    result = _run_snapshot_git(
+        target,
+        "diff",
+        "HEAD",
+        "--no-renames",
+        "--",
+        ".",
+        *_snapshot_pathspec_excludes(),
+    )
+    if result is None or result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _confirmed_git_worktree(target: Path) -> bool | None:
+    result = _run_snapshot_git(target, "rev-parse", "--is-inside-work-tree")
+    if result is None:
+        return None
+    if result.returncode != 0:
+        return False
+    return result.stdout.strip() == "true"
+
+
+def _git_untracked_content_signature(target: Path, relative: Path) -> str | None:
+    result = _run_snapshot_git(target, "hash-object", "--", relative.as_posix())
+    if result is None or result.returncode != 0:
+        return None
+    digest = result.stdout.strip()
+    return digest or None
+
+
+def _git_worktree_fingerprint_lines(target: Path) -> list[str] | None:
+    status_lines = _git_worktree_lines(target)
+    if status_lines is None:
+        return None
+    lines = [f"status\t{line}" for line in sorted(status_lines)]
+    diff = _git_diff_head(target)
+    if diff is None:
+        return None
+    lines.append(f"diff\t{localio.stable_hash(diff)}")
+    for line in status_lines:
+        if not line.startswith("??"):
+            continue
+        relative = Path(_porcelain_path(line))
+        if _snapshot_ignore_relative(relative):
+            continue
+        signature = _git_untracked_content_signature(target, relative)
+        if signature is None:
+            return None
+        lines.append(f"untracked\t{relative.as_posix()}\t{signature}")
+    return lines
+
+
+def _directory_worktree_lines(target: Path) -> list[str] | None:
+    entries: list[str] = []
+    try:
+        for path in target.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                relative = path.relative_to(target)
+            except ValueError:
+                continue
+            if _snapshot_ignore_relative(relative):
+                continue
+            stat = path.stat()
+            entries.append(f"{relative.as_posix()}\t{stat.st_mtime_ns}\t{stat.st_size}")
+    except OSError:
+        return None
+    return entries
+
+
+def repo_worktree_fingerprint(target: Path) -> str | None:
+    git_worktree = _confirmed_git_worktree(target)
+    if git_worktree is True:
+        lines = _git_worktree_fingerprint_lines(target)
+    elif git_worktree is False:
+        lines = _directory_worktree_lines(target)
+    else:
+        return None
+    if lines is None:
+        return None
+    return localio.stable_hash(sorted(lines))
+
+
+def _bash_write_detected(target: Path, baseline: object) -> bool:
+    if not isinstance(baseline, str) or not baseline:
+        return False
+    current = repo_worktree_fingerprint(target)
+    return current is not None and current != baseline
+
+
 def _session_fingerprint(session_id: str) -> str:
     return localio.stable_hash({"claude_session_id": session_id})
 
@@ -815,6 +1045,7 @@ def _new_state(target: Path, session_id: str) -> dict[str, Any]:
         "briefed": False,
         "write_observed": False,
         "verify_denied_count": 0,
+        "repo_fingerprint": repo_worktree_fingerprint(target),
     }
 
 
@@ -828,6 +1059,12 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
         normalized["started_at"] = started.isoformat()
     normalized["briefed"] = payload.get("briefed") is True
     normalized["write_observed"] = payload.get("write_observed") is True
+    repo_fp = payload.get("repo_fingerprint")
+    if isinstance(repo_fp, str) and repo_fp:
+        normalized["repo_fingerprint"] = repo_fp
+    pending_fp = payload.get("pending_bash_fingerprint")
+    if isinstance(pending_fp, str) and pending_fp:
+        normalized["pending_bash_fingerprint"] = pending_fp
     denied = payload.get("verify_denied_count")
     if isinstance(denied, int) and not isinstance(denied, bool) and denied >= 0:
         normalized["verify_denied_count"] = denied
@@ -909,6 +1146,10 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         raw_tool_input = payload.get("tool_input")
         tool_input: dict[str, Any] = raw_tool_input if isinstance(raw_tool_input, dict) else {}
         command = tool_input.get("command")
+        baseline = repo_worktree_fingerprint(target)
+        if baseline is not None:
+            state["pending_bash_fingerprint"] = baseline
+            write_session_state(target, session_id, state)
         if not is_raw_verification(command):
             return None
         state["verify_denied_count"] = int(state.get("verify_denied_count") or 0) + 1
@@ -941,11 +1182,21 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         tool_name = payload.get("tool_name")
         raw_post_tool_input = payload.get("tool_input")
         post_tool_input: dict[str, Any] = raw_post_tool_input if isinstance(raw_post_tool_input, dict) else {}
-        if tool_name in _WRITE_TOOLS or (
+        wrote = tool_name in _WRITE_TOOLS or (
             tool_name == "Bash" and _is_confident_bash_write(post_tool_input.get("command"))
-        ):
+        )
+        if not wrote and tool_name == "Bash":
+            wrote = _bash_write_detected(target, state.get("pending_bash_fingerprint"))
+        if wrote:
             state["write_observed"] = True
             state["last_write_at"] = localio.utc_now_iso()
+            updated_fp = repo_worktree_fingerprint(target)
+            if updated_fp is not None:
+                state["repo_fingerprint"] = updated_fp
+            state.pop("pending_bash_fingerprint", None)
+            write_session_state(target, session_id, state)
+        elif state.get("pending_bash_fingerprint") is not None:
+            state.pop("pending_bash_fingerprint", None)
             write_session_state(target, session_id, state)
         return None
 

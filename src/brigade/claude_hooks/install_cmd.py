@@ -47,7 +47,7 @@ def _without_managed(groups: object, event: str) -> list[object]:
         if not isinstance(handlers, list):
             kept.append(group)
             continue
-        foreign = [handler for handler in handlers if not is_managed_handler(handler, event)]
+        foreign = [handler for handler in handlers if not is_managed_handler(handler)]
         if foreign:
             updated = dict(group)
             updated["hooks"] = foreign

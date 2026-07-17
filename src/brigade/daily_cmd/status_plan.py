@@ -206,17 +206,28 @@ def status_payload(target: Path) -> dict[str, Any]:
     )
     status_section_checks.append(check)
     config, config_checks = _load_config(target)
-    candidates = _all_candidates(target, diagnostics=status_section_checks)
+    operator_report_health, check = _bounded_status_call(
+        "operator-report-health",
+        lambda: center_cmd.report_health(target),
+        {"latest": None, "checks": [], "issue_count": 0, "top_issue": None},
+    )
+    status_section_checks.append(check)
+    candidates = _all_candidates(
+        target,
+        diagnostics=status_section_checks,
+        operator_report_health=operator_report_health,
+    )
     selected = _selected(candidates)
     handoffs = center.get("handoff_drafts") if isinstance(center.get("handoff_drafts"), dict) else {}
     memory = center.get("memory_care") if isinstance(center.get("memory_care"), dict) else {}
     security = center.get("security") if isinstance(center.get("security"), dict) else {}
     notifications = center.get("notifications") if isinstance(center.get("notifications"), dict) else {}
     tools = center.get("tool_catalog") if isinstance(center.get("tool_catalog"), dict) else {}
-    latest_report, check = _bounded_status_call(
-        "latest-operator-report", lambda: center_cmd.latest_report(target), None
+    latest_report = (
+        operator_report_health.get("latest")
+        if isinstance(operator_report_health, dict) and isinstance(operator_report_health.get("latest"), dict)
+        else None
     )
-    status_section_checks.append(check)
     daily_health_fallback = {
         "schema_version": SCHEMA_VERSION,
         "config_path": str(_config_path(target)),
