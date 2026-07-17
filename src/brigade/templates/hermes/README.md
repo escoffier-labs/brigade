@@ -12,7 +12,7 @@
 ## Smoke test
 
 ```bash
-brigade handoff sources init --target . --force
+brigade handoff sources init --target .
 brigade handoff draft --target . --inbox hermes \
   --title "Hermes smoke handoff" \
   --summary "Hermes can write a local Brigade Memory Handoff." \

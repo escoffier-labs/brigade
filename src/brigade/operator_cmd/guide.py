@@ -155,12 +155,16 @@ def plan_payload(
     steps = []
     for step in _steps(target, profile=profile, handoff_inboxes=handoff_inboxes):
         path = step["path"]
+        if path.exists() and step["id"] == "handoff-sources":
+            action = "merge"
+        else:
+            action = "skip" if path.exists() else "write"
         steps.append(
             {
                 "id": step["id"],
                 "path": str(path),
                 "exists": path.exists(),
-                "action": "skip" if path.exists() else "write",
+                "action": action,
             }
         )
     return {

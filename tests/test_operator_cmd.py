@@ -837,6 +837,26 @@ def test_operator_init_dry_run_does_not_write(tmp_path, capsys):
     assert not (tmp_path / ".brigade" / "daily.toml").exists()
 
 
+def test_operator_init_dry_run_previews_existing_handoff_source_merge(tmp_path, capsys):
+    path = tmp_path / ".brigade" / "handoff-sources.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"sources": [{"root": ".", "inboxes": [".codex/memory-handoffs"]}]}) + "\n")
+
+    assert (
+        operator_cmd.init(
+            target=tmp_path,
+            handoff_inboxes=[".grok/memory-handoffs"],
+            dry_run=True,
+            json_output=True,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    sources_step = next(row for row in payload["steps"] if row["id"] == "handoff-sources")
+
+    assert sources_step["action"] == "merge"
+
+
 def test_operator_init_merges_existing_handoff_source_coverage(tmp_path, capsys):
     path = tmp_path / ".brigade" / "handoff-sources.json"
     path.parent.mkdir()
@@ -869,6 +889,20 @@ def test_operator_init_merges_existing_handoff_source_coverage(tmp_path, capsys)
     assert sources["custom"] == {"keep": True}
     assert sources["sources"][0]["inboxes"] == [".codex/memory-handoffs", ".grok/memory-handoffs"]
     assert sources["sources"][1] == {"root": "../shared", "inboxes": ["team/handoffs"]}
+
+    assert (
+        operator_cmd.init(
+            target=tmp_path,
+            handoff_inboxes=[".grok/memory-handoffs"],
+            json_output=True,
+        )
+        == 0
+    )
+    rerun = json.loads(capsys.readouterr().out)
+    rerun_sources = next(row for row in rerun["results"] if row["id"] == "handoff-sources")
+    assert rerun_sources["status"] == "skipped"
+    assert rerun_sources["reason"] == "source coverage already current"
+    assert rerun["written_count"] == 0
 
 
 def test_operator_internal_dogfood_init_and_status(tmp_path, capsys, monkeypatch):
