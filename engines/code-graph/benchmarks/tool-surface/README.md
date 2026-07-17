@@ -42,3 +42,14 @@ query the same way it bounds a search. Omitting `limit` preserves the prior outp
 byte-for-byte.
 
 `results.json` holds the per-task numbers.
+
+## Navigation-baseline round
+
+`navigation-baseline.json` re-runs the same 12 tasks against an npm-distributed
+graph-navigation baseline with its own indexer. Setup cost on the same corpus:
+ours 0.12s / 14MB peak / 2.1MB on disk, baseline 0.74s / 389MB / 4.4MB. Hits:
+ours 11/12, baseline 9/12 - its `callees` returned 2 of 12 real callees on a
+hot symbol and its affected-test attribution returned nothing on this Rust
+corpus. Its default-bounded responses were the prior round's lesson, already
+shipped here as the optional `limit`. No further change justified (null result).
+
