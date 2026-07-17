@@ -1,0 +1,7 @@
+[package]
+name = "synthetic-cross-tool-rust"
+version = "0.0.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
