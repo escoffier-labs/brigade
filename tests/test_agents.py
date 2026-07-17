@@ -1086,3 +1086,12 @@ def test_run_agent_env_rejects_bare_ref_suffix(monkeypatch):
     result = agents.run_agent("claude", "hi", env={"_REF": "HOME_VAR"})
     assert not result.ok
     assert "empty" in result.detail
+
+
+def test_run_agent_env_ref_empty_value_is_typed_failure(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setenv("EMPTY_LANE_KEY", "")
+    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "EMPTY_LANE_KEY"})
+    assert not result.ok
+    assert result.failure_kind == "env-ref-missing"
+    assert "is not set or is empty" in result.detail

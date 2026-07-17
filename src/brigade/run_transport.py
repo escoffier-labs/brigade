@@ -33,9 +33,14 @@ def _env_override_names(env: dict[str, str] | None) -> tuple[str, ...]:
 def _env_endpoint_host(env: dict[str, str] | None) -> str | None:
     if not env:
         return None
-    base_url = env.get("ANTHROPIC_BASE_URL")
-    if base_url is None and "ANTHROPIC_BASE_URL_REF" in env:
-        base_url = os.environ.get(env["ANTHROPIC_BASE_URL_REF"])
+    base_url: str | None = None
+    for key in sorted(env):
+        if key.endswith("_BASE_URL"):
+            base_url = env[key]
+            break
+        if key.endswith("_BASE_URL_REF"):
+            base_url = os.environ.get(env[key])
+            break
     if not base_url:
         return None
     return urlparse(base_url).hostname or base_url

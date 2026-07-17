@@ -162,3 +162,13 @@ def test_endpoint_host_resolves_ref_passed_base_url(monkeypatch):
     roster = _roster_with_env({"ANTHROPIC_BASE_URL_REF": "LANE_URL", "ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"})
     result = _dispatch(roster, monkeypatch, captured)[0]
     assert result.endpoint_host == "ref.example.com"
+
+
+def test_endpoint_host_generalizes_to_any_base_url(monkeypatch):
+    monkeypatch.setenv("LANE_KEY", "sk-lane-value")
+    captured = {}
+    roster = _roster_with_env(
+        {"OPENAI_BASE_URL": "https://openai-lane.example.com/v1", "OPENAI_API_KEY_REF": "LANE_KEY"}
+    )
+    result = _dispatch(roster, monkeypatch, captured)[0]
+    assert result.endpoint_host == "openai-lane.example.com"

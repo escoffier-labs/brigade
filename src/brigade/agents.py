@@ -465,8 +465,8 @@ def resolve_env_overrides(env: dict[str, str]) -> tuple[dict[str, str] | None, s
             if not target:
                 return None, f"env override {key}: resolved variable name is empty"
             referenced = os.environ.get(value)
-            if referenced is None:
-                return None, f"env override {key}: referenced variable {value} is not set"
+            if not referenced:
+                return None, f"env override {key}: referenced variable {value} is not set or is empty"
             resolved[target] = referenced
         else:
             resolved[key] = value

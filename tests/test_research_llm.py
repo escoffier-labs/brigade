@@ -24,7 +24,7 @@ class FakeRoster:
 
 def test_resolve_cli_backend(monkeypatch):
     r = FakeRoster([FakeAgent("chef", cli="codex", role="researcher")])
-    monkeypatch.setattr(llm, "_run_cli", lambda cli, prompt, timeout, model=None: f"[{cli}] ok")
+    monkeypatch.setattr(llm, "_run_cli", lambda cli, prompt, timeout, model=None, env=None: f"[{cli}] ok")
     backend = llm.resolve_backend(r)
     assert backend.complete([{"role": "user", "content": "hi"}]) == "[codex] ok"
 
@@ -33,7 +33,7 @@ def test_resolve_cli_backend_passes_model(monkeypatch):
     r = FakeRoster([FakeAgent("architect", cli="claude", model="claude-fable-5", role="researcher")])
     captured = {}
 
-    def fake_run_cli(cli, prompt, timeout, model=None):
+    def fake_run_cli(cli, prompt, timeout, model=None, env=None):
         captured["model"] = model
         return f"[{cli}] ok"
 
@@ -62,3 +62,28 @@ def test_no_researcher_raises():
 
     with pytest.raises(llm.NoResearcherError):
         llm.resolve_backend(FakeRoster([]))
+
+
+def test_cli_backend_forwards_seat_env(monkeypatch):
+    from brigade import agents
+    from brigade.research import llm
+    from brigade.roster import Agent, Roster
+
+    captured = {}
+
+    def fake_run_agent(cli, prompt, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return agents.AgentResult(text="answer", ok=True)
+
+    monkeypatch.setattr("brigade.agents.run_agent", fake_run_agent)
+    seat = Agent(
+        name="r",
+        cli="claude",
+        role="researcher",
+        model="kimi-k3",
+        env={"ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"},
+    )
+    roster = Roster(orchestrator="r", agents={"r": seat})
+    backend = llm.resolve_backend(roster)
+    assert backend.complete([{"role": "user", "content": "q"}]) == "answer"
+    assert captured["env"] == {"ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"}
