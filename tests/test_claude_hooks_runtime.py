@@ -444,7 +444,17 @@ def test_final_bash_handoff_write_does_not_require_verification_again(tmp_path: 
     )
 
 
-def test_mixed_bash_code_and_handoff_write_requires_new_verification(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -i 's/old/new/' src/app.py && printf done >> .claude/memory-handoffs/note.md",
+        "sed -i 's/old/new/' src/app.py > .claude/memory-handoffs/note.md",
+        "ruff format src/app.py > .claude/memory-handoffs/note.md",
+        "python fix.py > .claude/memory-handoffs/note.md",
+        "git commit -am fix > .claude/memory-handoffs/note.md",
+    ],
+)
+def test_mixed_bash_code_and_handoff_write_requires_new_verification(tmp_path: Path, monkeypatch, command: str):
     target = _wired_claude(tmp_path)
     session_id = "mixed-bash-handoff"
     monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
@@ -476,7 +486,6 @@ def test_mixed_bash_code_and_handoff_write_requires_new_verification(tmp_path: P
         )
         + "\n"
     )
-    command = "sed -i 's/old/new/' src/app.py && printf done >> .claude/memory-handoffs/note.md"
     runtime.handle_payload(
         "PostToolUse",
         _payload(

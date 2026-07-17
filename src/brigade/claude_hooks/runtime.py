@@ -892,6 +892,7 @@ def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
     found_target = False
     all_target_commands = {"mkdir", "rm", "rmdir", "tee", "touch"}
     last_target_commands = {"cp", "install", "mv", "truncate"}
+    output_only_commands = {"cat", "echo", "printf"}
     for segment in segments:
         stripped = _strip_env(segment)
         if not stripped:
@@ -914,6 +915,8 @@ def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
             targets.extend(positionals)
         elif command_name in last_target_commands and positionals:
             targets.append(positionals[-1])
+        elif targets and command_name not in output_only_commands:
+            return False
         if not targets:
             return False
         found_target = True
