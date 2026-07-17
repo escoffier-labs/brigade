@@ -115,6 +115,66 @@ def test_graders_distinguish_zero_score_from_error(tmp_path):
     assert results[1]["exit_code"] is None
 
 
+def test_execute_writes_running_marker_before_aboyeur_run(tmp_path, monkeypatch):
+    manifest = _manifest()
+    manifest["trials"] = 1
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+    cell = model_trials.expand_cells(manifest, _roster())[0]
+    started_at_seen: list[str] = []
+    root = tmp_path / "results"
+
+    def fake_run(task, roster, **kwargs):
+        cell_path = root / "cells" / cell.cell_id / "cell.json"
+        assert cell_path.is_file()
+        running = json.loads(cell_path.read_text())
+        assert running["schema"] == model_trials.CELL_SCHEMA
+        assert running["state"] == "running"
+        assert running["attempt"] == 1
+        for key, value in cell.payload().items():
+            assert running[key] == value
+        assert isinstance(running.get("started_at"), str)
+        started_at_seen.append(running["started_at"])
+        out = kwargs["output_dir"]
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "final.txt").write_text("hello\n")
+        (out / "run.json").write_text(json.dumps({"status": "ok", "duration_seconds": 0.5}))
+        return 0
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 0
+    final = json.loads((root / "cells" / cell.cell_id / "cell.json").read_text())
+    assert final["state"] == "accepted"
+    assert final["started_at"] == started_at_seen[0]
+
+
+def test_resume_does_not_skip_running_cells(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(_manifest()))
+    calls: list[str] = []
+
+    def fake_run(task, roster, **kwargs):
+        calls.append(kwargs["worker"])
+        out = kwargs["output_dir"]
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "final.txt").write_text("hello\n")
+        (out / "run.json").write_text(json.dumps({"status": "ok", "duration_seconds": 0.5}))
+        return 0
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    root = tmp_path / "results"
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 0
+    assert calls == ["cursor", "cursor"]
+
+    crashed_path = next((root / "cells").glob("*/cell.json"))
+    crashed = json.loads(crashed_path.read_text())
+    crashed["state"] = "running"
+    crashed_path.write_text(json.dumps(crashed))
+
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True) == 0
+    assert calls == ["cursor", "cursor", "cursor"]
+
+
 def test_run_then_resume_skips_matching_terminal_cells(tmp_path, monkeypatch):
     manifest_path = tmp_path / "eval.json"
     manifest_path.write_text(json.dumps(_manifest()))
