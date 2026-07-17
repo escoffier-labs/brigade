@@ -457,6 +457,8 @@ def test_final_bash_handoff_write_does_not_require_verification_again(tmp_path: 
         "cp -t src .claude/memory-handoffs/note.md",
         "cp --target-directory src .claude/memory-handoffs/note.md",
         "install --target-directory=src .claude/memory-handoffs/note.md",
+        "install -d src .claude/memory-handoffs/note",
+        "install --directory src .claude/memory-handoffs/note",
     ],
 )
 def test_mixed_bash_code_and_handoff_write_requires_new_verification(tmp_path: Path, monkeypatch, command: str):

@@ -917,7 +917,7 @@ def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
             if any(
                 token == "-t" or token.startswith("-t") or token.startswith("--target-directory")
                 for token in stripped[1:]
-            ):
+            ) or (command_name == "install" and any(token in {"-d", "--directory"} for token in stripped[1:])):
                 return False
             if positionals:
                 targets.append(positionals[-1])
