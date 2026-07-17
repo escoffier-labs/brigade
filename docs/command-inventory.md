@@ -30,6 +30,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade guard`: 1 command path(s)
 - `brigade handoff`: 17 command path(s)
 - `brigade handoff-template`: 1 command path(s)
+- `brigade harness`: 3 command path(s)
 - `brigade hermes-fragments` (extras): 1 command path(s)
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
@@ -174,6 +175,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade handoff sources init`
 - `brigade handoff sync-issues`
 - `brigade handoff-template`
+- `brigade harness doctor`
+- `brigade harness install`
+- `brigade harness uninstall`
 - `brigade hermes-fragments` (extras)
 - `brigade ingest`
 - `brigade init`

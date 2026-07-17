@@ -40,6 +40,7 @@ from . import (
     budgets as _budgets_group,
     untrusted as _untrusted_group,
     skills as _skills_group,
+    harness as _harness_group,
     operator as _operator_group,
     runbook as _runbook_group,
     dogfood as _dogfood_group,
@@ -138,6 +139,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _register_extras(sub, "untrusted", extras_enabled)
 
     _skills_group.register(sub)
+    _harness_group.register(sub)
     _operator_group.register(sub)
     _register_extras(sub, "runbook", extras_enabled)
     _register_extras(sub, "dogfood", extras_enabled)
