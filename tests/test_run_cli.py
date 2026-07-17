@@ -424,6 +424,103 @@ role = "code"
     assert seen["orchestrator"] == "chef"
 
 
+def test_run_cli_records_workspace_roster_provenance_and_shadow_warning(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace_roster = workspace / ".brigade" / "roster.toml"
+    home = tmp_path / "home"
+    user_roster = home / ".brigade" / "roster.toml"
+    workspace_roster.parent.mkdir(parents=True)
+    user_roster.parent.mkdir(parents=True)
+    roster_text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.coder]\ncli = "codex"\nrole = "code"\n'
+    )
+    workspace_roster.write_text(roster_text)
+    user_roster.write_text(roster_text)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(
+        aboyeur.agents,
+        "run_agent",
+        lambda *args, **kwargs: agents.AgentResult(
+            text=json.dumps({"assignments": [{"worker": "coder", "task": "inspect"}]}),
+            ok=True,
+        ),
+    )
+
+    rc = cli.main(
+        [
+            "run",
+            "inspect",
+            "--cwd",
+            str(workspace),
+            "--output-dir",
+            str(output_dir),
+            "--dry-run",
+            "--no-code-graph",
+            "--no-evidence",
+            "--no-route",
+        ]
+    )
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert f"roster: {workspace_roster.resolve()} (workspace)" in err
+    assert f"workspace roster {workspace_roster.resolve()} shadows user roster {user_roster.resolve()}" in err
+    assert "--roster" in err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["roster"] == {
+        "path": str(workspace_roster.resolve()),
+        "source": "workspace",
+        "shadowed": [str(user_roster.resolve())],
+    }
+    roster_meta = json.loads((output_dir / "roster.json").read_text())
+    assert roster_meta["resolution"] == {
+        "path": str(workspace_roster.resolve()),
+        "source": "workspace",
+        "shadowed": [str(user_roster.resolve())],
+    }
+
+
+def test_run_cli_explicit_direct_worker_reports_choice_without_shadow_warning(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    user_roster = home / ".brigade" / "roster.toml"
+    workspace_roster = tmp_path / ".brigade" / "roster.toml"
+    explicit_roster = tmp_path / "chosen.toml"
+    user_roster.parent.mkdir(parents=True)
+    workspace_roster.parent.mkdir(parents=True)
+    roster_text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.coder]\ncli = "codex"\nrole = "code"\n'
+    )
+    for path in (user_roster, workspace_roster, explicit_roster):
+        path.write_text(roster_text)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(aboyeur, "run", lambda *args, **kwargs: 0)
+
+    rc = cli.main(
+        [
+            "run",
+            "inspect",
+            "--cwd",
+            str(tmp_path),
+            "--roster",
+            str(explicit_roster),
+            "--worker",
+            "coder",
+            "--no-artifacts",
+            "--read-only",
+        ]
+    )
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert f"roster: {explicit_roster.resolve()} (explicit)" in err
+    assert "shadows user roster" not in err
+
+
 def test_run_cli_identifies_fallback_roster_in_validation_error(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     roster_path = home / ".brigade" / "roster.toml"

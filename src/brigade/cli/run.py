@@ -35,6 +35,19 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Path to roster.toml. Defaults to .brigade/roster.toml under the current directory.",
     )
+    p_run.add_argument(
+        "--resolved-roster-source",
+        choices=("explicit", "workspace", "user"),
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    p_run.add_argument(
+        "--resolved-roster-shadowed",
+        action="append",
+        default=[],
+        type=Path,
+        help=argparse.SUPPRESS,
+    )
     p_run.add_argument("--dry-run", action="store_true", help="Print the plan without dispatching workers.")
     p_run.add_argument(
         "--worker",
@@ -198,12 +211,19 @@ def dispatch(args) -> int:
         print(f"error: --worktree requires a git worktree: {run_cwd}", file=sys.stderr)
         return 2
     try:
-        roster_path = roster_mod.resolve_roster_path(run_cwd, args.roster)
+        roster_resolution = roster_mod.resolve_roster(run_cwd, args.roster)
     except FileNotFoundError as exc:
         print(f"error: {exc}. Create .brigade/roster.toml or pass --roster.", file=sys.stderr)
         return 2
+    if args.resolved_roster_source is not None:
+        roster_resolution = roster_mod.RosterResolution(
+            path=roster_resolution.path,
+            source=args.resolved_roster_source,
+            shadowed=tuple(path.expanduser().resolve() for path in args.resolved_roster_shadowed),
+        )
+    roster_path = roster_resolution.path
     try:
-        loaded_roster = roster_mod.load_roster(roster_path)
+        loaded_roster = roster_mod.load_roster(roster_path, resolution=roster_resolution)
     except FileNotFoundError:
         print(
             f"error: roster not found: {roster_path}. Create .brigade/roster.toml or pass --roster.",
@@ -213,6 +233,13 @@ def dispatch(args) -> int:
     except ValueError as exc:
         print(f"error: invalid roster at {roster_path}: {exc}", file=sys.stderr)
         return 2
+    print(f"roster: {roster_resolution.path} ({roster_resolution.source})", file=sys.stderr)
+    for shadowed in roster_resolution.shadowed:
+        print(
+            f"warning: workspace roster {roster_resolution.path} shadows user roster {shadowed}; "
+            "pass --roster PATH to choose either file explicitly.",
+            file=sys.stderr,
+        )
     if args.worker is not None:
         worker_error = _direct_worker_error(args.worker, loaded_roster, roster_mod)
         if worker_error is not None:
@@ -265,7 +292,12 @@ def dispatch(args) -> int:
 
     if args.detach:
         assert output_dir is not None
-        return _dispatch_detached(args, run_cwd=run_cwd, roster_path=roster_path, output_dir=output_dir)
+        return _dispatch_detached(
+            args,
+            run_cwd=run_cwd,
+            roster_resolution=roster_resolution,
+            output_dir=output_dir,
+        )
 
     worktree_cwd = None
     effective_cwd = run_cwd
@@ -406,11 +438,16 @@ def dispatch(args) -> int:
     return rc
 
 
-def _dispatch_detached(args, *, run_cwd: Path, roster_path: Path, output_dir: Path) -> int:
+def _dispatch_detached(args, *, run_cwd: Path, roster_resolution, output_dir: Path) -> int:
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "detached.log"
-    argv = _detached_child_argv(args, run_cwd=run_cwd, roster_path=roster_path, output_dir=output_dir)
+    argv = _detached_child_argv(
+        args,
+        run_cwd=run_cwd,
+        roster_resolution=roster_resolution,
+        output_dir=output_dir,
+    )
     try:
         with log_path.open("a", encoding="utf-8") as log:
             proc = Popen(
@@ -445,7 +482,7 @@ def _dispatch_detached(args, *, run_cwd: Path, roster_path: Path, output_dir: Pa
     return 0
 
 
-def _detached_child_argv(args, *, run_cwd: Path, roster_path: Path, output_dir: Path) -> list[str]:
+def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: Path) -> list[str]:
     argv = [
         sys.executable,
         "-m",
@@ -453,12 +490,16 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_path: Path, output_dir: 
         "run",
         args.task,
         "--roster",
-        str(roster_path.expanduser().resolve()),
+        str(roster_resolution.path),
+        "--resolved-roster-source",
+        roster_resolution.source,
         "--cwd",
         str(run_cwd),
         "--output-dir",
         str(output_dir),
     ]
+    for shadowed in roster_resolution.shadowed:
+        argv.extend(["--resolved-roster-shadowed", str(shadowed)])
     if args.allow_dirty:
         argv.append("--allow-dirty")
     if args.worktree:

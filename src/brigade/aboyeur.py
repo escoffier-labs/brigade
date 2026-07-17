@@ -1570,8 +1570,18 @@ def record_artifact_collection(
         raise runguard.RetainRunLockError(f"failed to update run receipt after artifact collection: {exc}") from exc
 
 
-def _roster_payload(roster: Roster) -> dict[str, object]:
+def _roster_resolution_payload(roster: Roster) -> dict[str, object] | None:
+    if roster.resolution is None:
+        return None
     return {
+        "path": str(roster.resolution.path),
+        "source": roster.resolution.source,
+        "shadowed": [str(path) for path in roster.resolution.shadowed],
+    }
+
+
+def _roster_payload(roster: Roster) -> dict[str, object]:
+    payload: dict[str, object] = {
         "schema": "brigade.roster_snapshot.v1",
         "orchestrator": roster.orchestrator,
         "max_workers": roster.max_workers,
@@ -1591,6 +1601,9 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
             for name, agent in roster.agents.items()
         },
     }
+    if resolution := _roster_resolution_payload(roster):
+        payload["resolution"] = resolution
+    return payload
 
 
 def _run_payload(
@@ -1649,6 +1662,8 @@ def _run_payload(
             "attached": list(brief_set.attached) if brief_set is not None else [],
         },
     }
+    if resolution := _roster_resolution_payload(roster):
+        payload["roster"] = resolution
     if lock_workspace is not None:
         payload["lock_workspace"] = str(lock_workspace)
     if route is not None:
