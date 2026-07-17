@@ -297,6 +297,52 @@ def test_repos_friction_sanitizes_global_agent_log_roots(tmp_path, monkeypatch, 
     assert str(private_agent_root) not in json.dumps(payload)
 
 
+def test_repos_friction_sanitizes_unconfigured_home_paths(tmp_path, monkeypatch, capsys):
+    alpha = tmp_path / "repo-alpha"
+    alpha.mkdir()
+    _write_config(tmp_path, [("alpha", "service alpha", alpha)])
+    private_path = Path.home() / "private-not-in-fleet" / "failure.log"
+
+    def fake_scan_payload(**kwargs):
+        families = {
+            family: {"accepted": 0, "grouped": 0, "rejected": 0, "truncated": 0}
+            for family in friction_cmd.SOURCE_FAMILIES
+        }
+        candidates = []
+        if kwargs.get("include_agent_logs"):
+            candidates.append(
+                {
+                    "id": "unconfigured-home-path",
+                    "friction_type": "blocked_workflow",
+                    "source_family": "regex",
+                    "evidence": {
+                        "path": str(private_path),
+                        "line": 1,
+                        "snippet": f"command failed in {private_path}",
+                    },
+                }
+            )
+        return (
+            {
+                "generated_at": "2026-07-16T12:00:00+00:00",
+                "files_scanned": 1 if candidates else 0,
+                "files_skipped": 0,
+                "candidate_count": len(candidates),
+                "counts": {"by_source_family": families},
+                "candidates": candidates,
+            },
+            0,
+        )
+
+    monkeypatch.setattr(friction_cmd, "scan_payload", fake_scan_payload)
+
+    assert repos_cmd.friction_scan(target=tmp_path, include_agent_logs=True, json_output=True) == 0
+    rendered = capsys.readouterr().out
+
+    assert str(Path.home()) not in rendered
+    assert "~/private-not-in-fleet/failure.log" in rendered
+
+
 def test_repos_friction_catches_one_repo_scanner_exception(tmp_path, monkeypatch, capsys):
     alpha = tmp_path / "repo-alpha"
     beta = tmp_path / "repo-beta"

@@ -1,9 +1,34 @@
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from brigade import cli
 from brigade import friction_cmd
+
+
+def test_iter_files_sorts_discovery_before_applying_cap(tmp_path, monkeypatch):
+    first = tmp_path / "a.log"
+    second = tmp_path / "b.log"
+    first.write_text("connection refused\n")
+    second.write_text("permission denied\n")
+    original_rglob = Path.rglob
+
+    def reversed_rglob(path: Path, pattern: str):
+        if path == tmp_path:
+            return iter([second, first])
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", reversed_rglob)
+
+    files, skipped = friction_cmd._iter_files(
+        [tmp_path],
+        since=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        max_files=1,
+    )
+
+    assert files == [first]
+    assert skipped == 1
 
 
 def test_friction_scan_writes_artifacts_and_imports_candidates(tmp_path, monkeypatch, capsys):

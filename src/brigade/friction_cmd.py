@@ -186,7 +186,7 @@ def _iter_files(roots: list[Path], *, since: datetime, max_files: int) -> tuple[
     per_root = max(1, max_files // max(1, len(roots)))
     for root in roots:
         root_count = 0
-        candidates = [root] if root.is_file() else root.rglob("*")
+        candidates = [root] if root.is_file() else sorted(root.rglob("*"))
         for path in candidates:
             if len(files) >= max_files or root_count >= per_root:
                 skipped += 1

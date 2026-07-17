@@ -383,6 +383,10 @@ def _path_safe_value(value: object, *, target: Path, entries: list[constants.Rep
         replacements.append((str(entry.path), entry.repo_id))
         replacements.append((str(entry.path.resolve()), entry.repo_id))
     replacements.extend(_agent_log_root_replacements())
+    try:
+        replacements.append((str(Path.home().expanduser().resolve()), "~"))
+    except OSError:
+        pass
     for private, label in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
         if private:
             rendered = rendered.replace(private, label)
