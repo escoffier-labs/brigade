@@ -34,6 +34,10 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
             "detail": result.detail,
             "text": result.text,
         }
+        if result.failure_phase is not None:
+            entry["failure_phase"] = result.failure_phase
+        if result.failure_kind is not None:
+            entry["failure_kind"] = result.failure_kind
         if result.thread_id is not None:
             entry["thread_id"] = result.thread_id
             entry["status"] = result.status
@@ -71,6 +75,10 @@ def agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
         "detail": result.detail,
         "text": result.text,
     }
+    if result.failure_phase is not None:
+        payload["failure_phase"] = result.failure_phase
+    if result.failure_kind is not None:
+        payload["failure_kind"] = result.failure_kind
     if result.exit_code is not None:
         payload["exit_code"] = result.exit_code
         payload["timed_out"] = result.timed_out
@@ -103,6 +111,8 @@ def agent_result_from_worker(result: WorkerResult) -> agents.AgentResult:
         text=result.text,
         ok=result.ok,
         detail=result.detail,
+        failure_phase=result.failure_phase,
+        failure_kind=result.failure_kind,
         thread_id=result.thread_id,
         status=result.status,
         stdout=result.stdout,

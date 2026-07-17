@@ -22,6 +22,7 @@ from . import graphtrail_delta
 from . import localio
 from . import proc, runguard
 from . import run_control
+from .result_integrity import validate_final_output
 from .run_receipts import (
     agent_result_from_worker as _agent_result_from_worker,
     agent_result_payload as _agent_result_payload,
@@ -641,6 +642,10 @@ def _record_plan_attempt(
         "detail": result.detail,
         "text": result.text,
     }
+    if result.failure_phase is not None:
+        payload["failure_phase"] = result.failure_phase
+    if result.failure_kind is not None:
+        payload["failure_kind"] = result.failure_kind
     if parse_error is not None:
         payload["parse_error"] = parse_error
     if coverage_missing:
@@ -966,6 +971,20 @@ def _run_codex_appserver_worker(
             text="",
             ok=False,
             detail="empty output",
+            thread_id=turn.thread_id,
+            status=turn.status,
+            transport="codex-app-server",
+            requested_model=agent.model,
+            reasoning=agent.reasoning,
+        )
+    output_failure = validate_final_output(text)
+    if output_failure is not None:
+        return agents.AgentResult(
+            text=text,
+            ok=False,
+            detail=output_failure.detail,
+            failure_phase="output-validation",
+            failure_kind=output_failure.kind,
             thread_id=turn.thread_id,
             status=turn.status,
             transport="codex-app-server",
@@ -1493,6 +1512,8 @@ def _run_payload(
     output_dir: Path | None = None,
     handoff_path: Path | None = None,
     error: str | None = None,
+    failure_phase: str | None = None,
+    failure_kind: str | None = None,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
@@ -1555,6 +1576,13 @@ def _run_payload(
         payload["handoff"] = str(handoff_path)
     if error is not None:
         payload["error"] = error
+        if failure_phase is not None or failure_kind is not None:
+            payload["failure_phase"] = failure_phase or "unknown"
+            payload["failure"] = {
+                "phase": failure_phase or "unknown",
+                "kind": failure_kind or "unknown",
+                "detail": error,
+            }
     if codex_transport is not None:
         payload["codex_transport"] = codex_transport
     if control_socket is not None:
@@ -1720,6 +1748,12 @@ def run(
                 route=route,
             )
         except RuntimeError as exc:
+            failed_attempt = next(
+                (attempt for attempt in reversed(plan_attempts or []) if attempt.get("ok") is False),
+                None,
+            )
+            failure_phase = failed_attempt.get("failure_phase") if isinstance(failed_attempt, dict) else None
+            failure_kind = failed_attempt.get("failure_kind") if isinstance(failed_attempt, dict) else None
             if output_dir is not None:
                 finished_at = datetime.now(timezone.utc)
                 _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
@@ -1736,6 +1770,8 @@ def run(
                         finished_at=finished_at,
                         output_dir=output_dir,
                         error=str(exc),
+                        failure_phase=(failure_phase if isinstance(failure_phase, str) else None),
+                        failure_kind=(failure_kind if isinstance(failure_kind, str) else None),
                         code_graph=code_graph,
                         drift_impact=drift_impact,
                         evidence=evidence,
@@ -2022,6 +2058,8 @@ def run(
                     finished_at=finished_at,
                     output_dir=output_dir,
                     error=final.detail,
+                    failure_phase=final.failure_phase,
+                    failure_kind=final.failure_kind,
                     code_graph=code_graph,
                     drift_impact=drift_impact,
                     evidence=evidence,

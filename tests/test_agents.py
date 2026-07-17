@@ -408,6 +408,194 @@ def test_run_agent_captures_output(monkeypatch):
     assert res.timed_out is False
 
 
+def test_run_agent_rejects_intent_only_antigravity_output(monkeypatch):
+    output = "\n".join(
+        [
+            "I will locate the relevant files in the repository.",
+            "I will list the repository contents to understand its structure.",
+            "I will run a search for the provider dispatch path.",
+            "I will inspect the matching source files next.",
+        ]
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
+
+    result = agents.run_agent("antigravity", "trace it", model="Gemini 3.5 Flash (High)")
+
+    assert result.ok is False
+    assert result.text == output
+    assert result.exit_code == 0
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "non-final-output"
+    assert result.detail == "provider returned progress or intent without a final result"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Reviewing repository files.",
+        "First, I will inspect the repo.",
+        "Now I will run the tests.",
+        "I'm going to inspect the files first.",
+        "I am inspecting the files first.",
+    ],
+)
+def test_run_agent_rejects_bare_progress_only_output(monkeypatch, output):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""),
+    )
+
+    result = agents.run_agent("antigravity", "review it")
+
+    assert result.ok is False
+    assert result.failure_kind == "non-final-output"
+
+
+def test_run_agent_rejects_progress_over_changed_files(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(0, "Reviewing changed files.\n", ""),
+    )
+
+    result = agents.run_agent("antigravity", "review it")
+
+    assert result.ok is False
+    assert result.failure_kind == "non-final-output"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"tool_calls": [{"name": "read_file", "arguments": {"path": "README.md"}}]},
+        {"tool_calls": [{"name": "write_file", "arguments": {"text": "content"}}]},
+        {"type": "tool_call", "name": "read_file", "arguments": {"path": "README.md"}},
+        {"type": "tool_call", "name": "write_file", "arguments": {"text": "content"}},
+        {"name": "read_file", "arguments": {"path": "README.md"}},
+        {"name": "write_file", "arguments": {"text": "content"}},
+        {"type": "function_call_output", "call_id": "call-1", "output": "file contents"},
+        {"type": "tool_result", "content": "file contents"},
+        {"call_id": "call-1", "output": "file contents"},
+    ],
+)
+def test_run_agent_rejects_tool_call_only_output(monkeypatch, payload):
+    output = json.dumps(payload)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "inspect it")
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "tool-only-output"
+    assert result.detail == "provider returned tool-call data without a final result"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        '<tool_use>{"name":"read_file","path":"README.md"}</tool_use>',
+        '<tool_use name="read_file">{"path":"README.md"}</tool_use>',
+        '<tool_call name="read_file"/><function_call>{"name":"inspect"}</function_call>',
+    ],
+)
+def test_run_agent_rejects_tool_use_markup_without_final_text(monkeypatch, output):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "inspect it")
+
+    assert result.ok is False
+    assert result.failure_kind == "tool-only-output"
+
+
+def test_run_agent_rejects_tool_call_and_tool_result_transcript(monkeypatch):
+    output = json.dumps(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "I will inspect the repository first.",
+                    "tool_calls": [{"name": "read_file", "arguments": {"path": "README.md"}}],
+                },
+                {"role": "tool", "type": "tool_result", "content": "file contents"},
+            ]
+        }
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "inspect it")
+
+    assert result.ok is False
+    assert result.failure_kind == "tool-only-output"
+
+
+@pytest.mark.parametrize("result_type", ["function_call_output", "tool_call_output"])
+def test_run_agent_rejects_call_output_without_final_text(monkeypatch, result_type):
+    output = json.dumps(
+        {
+            "items": [
+                {"type": "function_call", "name": "read_file", "arguments": "{}"},
+                {"type": result_type, "call_id": "call-1", "output": "file contents"},
+            ]
+        }
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "inspect it")
+
+    assert result.ok is False
+    assert result.failure_kind == "tool-only-output"
+
+
+@pytest.mark.parametrize(
+    ("output", "failure_kind"),
+    [
+        ("Error: authentication required. Run provider login.", "authentication-error"),
+        ("Error: failed to connect to the model provider.", "network-error"),
+        ("Error: model gemini-example is not available.", "provider-setting-error"),
+        ("Error: rate limit exceeded for this provider.", "rate-limit-error"),
+    ],
+)
+def test_run_agent_rejects_in_band_operational_diagnostics(monkeypatch, output, failure_kind):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "answer directly")
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == failure_kind
+    assert result.detail.startswith("provider returned an operational error instead of a final result:")
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "No findings.",
+        "OK",
+        "I will inspect the repository first. No findings.",
+        "Running the targeted tests passed.",
+        "Checking the implementation, I do not see any regressions.",
+        "```text\nError: NonRetriableError: Provider Error\n```\nThis is the requested fixture.",
+    ],
+)
+def test_run_agent_accepts_short_or_quoted_substantive_output(monkeypatch, output):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "answer directly")
+
+    assert result.ok is True
+    assert result.text == output
+
+
 def test_run_agent_forwards_model_to_argv(monkeypatch):
     captured = {}
 
@@ -536,6 +724,8 @@ def test_run_agent_rejects_grok_progress_without_structured_final_output(monkeyp
 
     assert result.ok is False
     assert result.detail == "grok exited 0 without a structured final response"
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "malformed-final-output"
     assert result.text == output
     assert result.stdout == output + "\n"
     assert result.exit_code == 0
@@ -785,6 +975,24 @@ def test_run_codex_appserver_empty_text_not_ok():
     server = _StubServer(turn)
     res = agents.run_codex_appserver(server, "p", timeout=5.0, cwd=None)
     assert not res.ok and res.detail == "empty output"
+
+
+def test_run_codex_appserver_rejects_intent_only_final():
+    from brigade import codex_appserver
+
+    turn = codex_appserver.TurnResult(
+        text="I will inspect the repository first. I will report the result next.",
+        ok=True,
+        status="complete",
+        thread_id="t-1",
+    )
+    server = _StubServer(turn)
+
+    result = agents.run_codex_appserver(server, "p", timeout=5.0, cwd=None)
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "non-final-output"
 
 
 def test_run_codex_appserver_server_error_is_failed():
