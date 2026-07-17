@@ -46,6 +46,12 @@ def test_load_valid_roster(tmp_path):
     assert not roster_mod.is_cli_allowed("claude", r)
 
 
+def test_load_roster_without_resolution_does_not_invent_source(tmp_path):
+    loaded = roster_mod.load_roster(_write(tmp_path, VALID))
+
+    assert loaded.resolution is None
+
+
 def test_load_roster_fallback_parser(monkeypatch, tmp_path):
     # Force the pure-Python TOML fallback (the Python 3.10 path, where tomllib
     # is absent) and confirm a real roster still loads through it.
@@ -65,7 +71,62 @@ def test_resolve_roster_path_prefers_workspace(monkeypatch, tmp_path):
     local.write_text(VALID)
     user.write_text(VALID)
     monkeypatch.setattr(Path, "home", lambda: home)
-    assert roster_mod.resolve_roster_path(workspace) == local
+    assert roster_mod.resolve_roster_path(workspace) == local.resolve()
+
+
+def test_resolve_roster_reports_workspace_shadowing_user_roster(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    local = workspace / ".brigade" / "roster.toml"
+    user = home / ".brigade" / "roster.toml"
+    local.parent.mkdir(parents=True)
+    user.parent.mkdir(parents=True)
+    local.write_text(VALID)
+    user.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(workspace)
+
+    assert resolution.path == local.resolve()
+    assert resolution.source == "workspace"
+    assert resolution.shadowed == (user.resolve(),)
+
+
+def test_resolve_roster_does_not_shadow_same_file_through_workspace_symlink(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    user = home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text(VALID)
+    workspace.mkdir()
+    (workspace / ".brigade").symlink_to(user.parent, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(workspace)
+
+    assert resolution.path == user.resolve()
+    assert resolution.source == "workspace"
+    assert resolution.shadowed == ()
+
+
+def test_resolve_roster_explicit_choice_has_no_implicit_shadow(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    local = workspace / ".brigade" / "roster.toml"
+    user = home / ".brigade" / "roster.toml"
+    explicit = tmp_path / "chosen.toml"
+    local.parent.mkdir(parents=True)
+    user.parent.mkdir(parents=True)
+    local.write_text(VALID)
+    user.write_text(VALID)
+    explicit.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(workspace, explicit)
+
+    assert resolution.path == explicit.resolve()
+    assert resolution.source == "explicit"
+    assert resolution.shadowed == ()
 
 
 def test_resolve_roster_path_uses_user_fallback(monkeypatch, tmp_path):
@@ -74,7 +135,21 @@ def test_resolve_roster_path_uses_user_fallback(monkeypatch, tmp_path):
     user.parent.mkdir(parents=True)
     user.write_text(VALID)
     monkeypatch.setattr(Path, "home", lambda: home)
-    assert roster_mod.resolve_roster_path(tmp_path / "workspace") == user
+    assert roster_mod.resolve_roster_path(tmp_path / "workspace") == user.resolve()
+
+
+def test_resolve_roster_reports_user_fallback_source(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    user = home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(tmp_path / "workspace")
+
+    assert resolution.path == user.resolve()
+    assert resolution.source == "user"
+    assert resolution.shadowed == ()
 
 
 def test_resolve_roster_path_explicit_never_falls_back(monkeypatch, tmp_path):

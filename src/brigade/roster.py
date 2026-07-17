@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from . import agents as agent_adapters
 from . import toml_compat
@@ -13,6 +14,14 @@ SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
 CODEX_TRANSPORT_CHOICES = ("exec", "app-server")
 AGENT_TRANSPORT_CHOICES = ("direct", "acpx")
 ACPX_TRANSPORT_VERSION = "0.12.0"
+RosterSource = Literal["explicit", "workspace", "user"]
+
+
+@dataclass(frozen=True)
+class RosterResolution:
+    path: Path
+    source: RosterSource
+    shadowed: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -38,6 +47,7 @@ class Roster:
     timeout_seconds: float = 600.0
     sandbox: str | None = None
     codex_transport: str = "exec"
+    resolution: RosterResolution | None = None
 
     def find_role(self, role: str) -> Agent | None:
         return next((a for a in self.agents.values() if a.role == role), None)
@@ -78,23 +88,31 @@ def _allowed(cli_ref: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(cli_ref, pattern) for pattern in patterns)
 
 
-def resolve_roster_path(target: Path, explicit: Path | None = None) -> Path:
+def resolve_roster(target: Path, explicit: Path | None = None) -> RosterResolution:
     if explicit is not None:
-        path = explicit.expanduser()
+        path = explicit.expanduser().resolve()
         if path.exists():
-            return path
+            return RosterResolution(path=path, source="explicit")
         raise FileNotFoundError(f"roster not found: {path}")
 
-    workspace_path = target.expanduser() / ".brigade" / "roster.toml"
-    user_path = Path.home() / ".brigade" / "roster.toml"
+    workspace_path = (target.expanduser() / ".brigade" / "roster.toml").resolve()
+    user_path = (Path.home() / ".brigade" / "roster.toml").expanduser().resolve()
     if workspace_path.exists():
-        return workspace_path
+        shadowed = (user_path,) if user_path != workspace_path and user_path.exists() else ()
+        return RosterResolution(path=workspace_path, source="workspace", shadowed=shadowed)
     if user_path.exists():
-        return user_path
+        return RosterResolution(path=user_path, source="user")
     raise FileNotFoundError(f"roster not found: checked {workspace_path} and {user_path}")
 
 
-def load_roster(path: Path) -> Roster:
+def resolve_roster_path(target: Path, explicit: Path | None = None) -> Path:
+    """Return only the selected path for callers that do not need provenance."""
+
+    return resolve_roster(target, explicit).path
+
+
+def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Roster:
+    path = path.expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"roster not found: {path}")
 
@@ -220,6 +238,7 @@ def load_roster(path: Path) -> Roster:
         timeout_seconds=timeout_seconds,
         sandbox=sandbox,
         codex_transport=codex_transport,
+        resolution=resolution,
     )
 
 
