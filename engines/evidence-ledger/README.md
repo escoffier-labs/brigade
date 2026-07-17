@@ -299,13 +299,14 @@ For harness-style "find the session I was working in" workflows, use the session
 
 ```bash
 miseledger sessions list --source codex --json
-miseledger sessions search "release audit" --source codex --json
-miseledger sessions search "auth timeout" --source claude --json
+miseledger sessions list --project miseledger --model gpt-5 --json
+miseledger sessions search "release audit" --project miseledger --model gpt-5 --json
+miseledger sessions search "auth timeout" --source claude --model claude-sonnet --json
 sessionfind list --source codex --json
 sessionfind "release audit" --source codex --json
 ```
 
-`sessions search` groups matching item hits by session/conversation collection and returns the source kind, collection ID, item count, match count, sample item ID, raw source path, raw ordinal, and a snippet. It is meant for quickly finding the local harness session to inspect or resume.
+`--project` matches normalized `project`, `workspace`, `workspace_dir`, or `cwd` metadata with the same exact-or-contains behavior as general search. `--model` applies the same matching behavior to normalized model metadata. Both filters operate across the session collection, so the matching project and model may be recorded on different events in that session. The JSON `workspace` field prefers `workspace`, then `workspace_dir`, then `cwd`; an unmatched `project` value is omitted when a workspace-like value satisfied an active project filter. Session JSON also includes model, harness, and source name when provided; unavailable fields are omitted. `sessions search` groups matching item hits by session/conversation collection and returns the locator and match context needed to inspect or resume the local harness session.
 
 The scanners accept a file or directory, walk relevant source files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events. Hermes native support covers `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`; Hermes `state.db` is not parsed directly. OpenCode native support reads sanitized `opencode export` JSON files under `~/.local/share/opencode` by default. Cursor is the one native source that also reads a known SQLite search database.
 
@@ -450,6 +451,10 @@ The local HTTP API binds to loopback only by default:
 miseledger serve --addr 127.0.0.1:8765
 curl "http://127.0.0.1:8765/search?q=auth+timeout"
 curl "http://127.0.0.1:8765/sessions?q=auth+timeout&source=cursor"
+curl --get "http://127.0.0.1:8765/sessions" \
+  --data-urlencode "q=release audit" \
+  --data-urlencode "project=miseledger" \
+  --data-urlencode "model=gpt-5"
 curl "http://127.0.0.1:8765/items/<item-id>"
 curl -X POST http://127.0.0.1:8765/evidence -d '{"query":"auth timeout","limit":10}'
 ```

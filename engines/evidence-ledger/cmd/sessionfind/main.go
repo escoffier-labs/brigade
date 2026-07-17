@@ -25,7 +25,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stdout, "sessionfind list [--source KIND] [--limit N] [--json]")
-	fmt.Fprintln(os.Stdout, "sessionfind search <query> [--source KIND] [--limit N] [--json]")
-	fmt.Fprintln(os.Stdout, "sessionfind <query> [--source KIND] [--limit N] [--json]")
+	fmt.Fprintln(os.Stdout, "sessionfind list [--source KIND] [--project NAME] [--model NAME] [--limit N] [--json]")
+	fmt.Fprintln(os.Stdout, "sessionfind search <query> [--source KIND] [--project NAME] [--model NAME] [--limit N] [--json]")
+	fmt.Fprintln(os.Stdout, "sessionfind <query> [--source KIND] [--project NAME] [--model NAME] [--limit N] [--json]")
 }

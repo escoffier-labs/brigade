@@ -692,6 +692,122 @@ func TestSessionsListAndSearch(t *testing.T) {
 	}
 }
 
+func TestSessionsFilterAndExposeNormalizedMetadata(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	runOK(t, "import", "codex", repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), "--json")
+	runOK(t, "import", "claude", repoPath(t, "testdata/harnesses/claude-project.fixture.jsonl"), "--json")
+	runOK(t, "crawl", "chatgpt-export", repoPath(t, "testdata/exports/chatgpt-conversations.json"), "--json")
+
+	codex := runJSON(t, "sessions", "list", "--project", "miseledger", "--model", "gpt-5", "--json")
+	codexRows := codex["sessions"].([]any)
+	if len(codexRows) != 1 {
+		t.Fatalf("filtered codex sessions = %v", codex)
+	}
+	codexRow := codexRows[0].(map[string]any)
+	for key, want := range map[string]string{
+		"workspace":   "/workspace/miseledger",
+		"model":       "gpt-5",
+		"harness":     "codex",
+		"source_name": "Codex Sessions",
+	} {
+		if got := codexRow[key]; got != want {
+			t.Fatalf("codex %s=%v want %q: %v", key, got, want, codexRow)
+		}
+	}
+
+	wrongModel := runJSON(t, "sessions", "list", "--source", "codex", "--model", "claude-sonnet", "--json")
+	switch rows := wrongModel["sessions"].(type) {
+	case nil:
+	case []any:
+		if len(rows) != 0 {
+			t.Fatalf("wrong-model sessions = %v", wrongModel)
+		}
+	default:
+		t.Fatalf("wrong-model sessions have unexpected shape: %v", wrongModel)
+	}
+	codexSearch := runJSON(t, "sessions", "search", "exec_command", "--project", "miseledger", "--model", "gpt-5", "--json")
+	if rows := codexSearch["sessions"].([]any); len(rows) != 1 {
+		t.Fatalf("filtered codex search = %v", codexSearch)
+	}
+
+	claude := runJSON(t, "sessions", "search", "Claude native import", "--project", "miseledger", "--model", "claude-sonnet", "--json")
+	claudeRows := claude["sessions"].([]any)
+	if len(claudeRows) != 1 {
+		t.Fatalf("filtered claude sessions = %v", claude)
+	}
+	claudeRow := claudeRows[0].(map[string]any)
+	if claudeRow["workspace"] != "/workspace/miseledger" || claudeRow["model"] != "claude-sonnet" || claudeRow["harness"] != "claude" || claudeRow["source_name"] != "Claude Project Logs" {
+		t.Fatalf("claude session missing normalized metadata: %v", claudeRow)
+	}
+	if project, ok := claudeRow["project"]; ok && project != "" {
+		t.Fatalf("claude session exposed an unmatched project fallback: %v", claudeRow)
+	}
+
+	chatGPT := runJSON(t, "sessions", "search", "archive crawler", "--source", "chatgpt", "--json")
+	chatGPTRows := chatGPT["sessions"].([]any)
+	if len(chatGPTRows) != 1 {
+		t.Fatalf("chatgpt sessions = %v", chatGPT)
+	}
+	chatGPTRow := chatGPTRows[0].(map[string]any)
+	for _, key := range []string{"project", "workspace", "model", "harness"} {
+		if value, ok := chatGPTRow[key]; ok && value != "" {
+			t.Fatalf("chatgpt session unexpectedly has %s: %v", key, chatGPTRow)
+		}
+	}
+
+	handler := newHTTPHandler()
+	req := httptest.NewRequest(http.MethodGet, "/sessions?q=exec_command&source=codex&project=miseledger&model=gpt-5", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("filtered sessions http status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad filtered sessions body: %v", err)
+	}
+	rows := body["sessions"].([]any)
+	if len(rows) != 1 || rows[0].(map[string]any)["model"] != "gpt-5" {
+		t.Fatalf("filtered sessions body = %v", body)
+	}
+
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('source-sibling','codex','Sibling Codex','','1900-01-01','1900-01-01');
+insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('collection-sibling','source-sibling','codex:session:codex-demo','agent_session','Sibling','{}','1900-01-01','1900-01-01');
+insert into actors(id, source_id, external_id, type, name, metadata_json) values('actor-sibling','source-sibling','sibling:actor','human','Sibling','{}');
+insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, text, content_hash, raw_json, metadata_json) values('item-sibling','source-sibling','collection-sibling','actor-sibling','sibling:item','message','1900-01-01','sibling preview leak','sha256:sibling','{}','{}');
+insert into item_metadata(item_id, key, value) values('item-sibling','model','aaa-wrong')`); err != nil {
+		t.Fatal(err)
+	}
+	allCodex, err := listSessions(db, SessionFilters{Source: "codex"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range allCodex {
+		if row.SourceName == "Codex Sessions" && (row.Model != "gpt-5" || strings.Contains(row.Preview, "sibling preview")) {
+			t.Fatalf("session display crossed collection identity: %v", row)
+		}
+	}
+	if _, err := db.Exec(`insert into item_metadata(item_id, key, value)
+select id, 'model', 'gpt-5-codex' from items
+where collection_id = (select id from collections where source_id != 'source-sibling' and external_id = 'codex:session:codex-demo')
+order by id limit 1`); err != nil {
+		t.Fatal(err)
+	}
+	matchedModel, err := listSessions(db, SessionFilters{Source: "codex", Model: "codex"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matchedModel) != 1 || matchedModel[0].Model != "gpt-5-codex" {
+		t.Fatalf("session display did not preserve the matched model: %v", matchedModel)
+	}
+}
+
 func TestCrawlCursorImportsFromDefaultRoot(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")

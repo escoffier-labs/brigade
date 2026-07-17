@@ -127,8 +127,8 @@ func handleSessionItems(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSessions powers the browser session finder. With ?q it searches and
-// groups by session; without ?q it lists recent sessions. Optional ?source
-// and ?limit narrow the result set.
+// groups by session; without ?q it lists recent sessions. Optional ?source,
+// ?project, ?model, and ?limit narrow the result set.
 func handleSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -136,7 +136,11 @@ func handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	query := strings.TrimSpace(q.Get("q"))
-	source := q.Get("source")
+	filters := SessionFilters{
+		Source:  strings.TrimSpace(q.Get("source")),
+		Project: strings.TrimSpace(q.Get("project")),
+		Model:   strings.TrimSpace(q.Get("model")),
+	}
 	limit := 50
 	if raw := firstQuery(q, "limit"); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
@@ -151,9 +155,9 @@ func handleSessions(w http.ResponseWriter, r *http.Request) {
 	defer db.Close()
 	var rows []SessionResult
 	if query == "" {
-		rows, err = listSessions(db, source, limit)
+		rows, err = listSessions(db, filters, limit)
 	} else {
-		rows, err = searchSessions(db, query, source, limit)
+		rows, err = searchSessions(db, query, filters, limit)
 	}
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
