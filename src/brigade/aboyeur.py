@@ -1493,6 +1493,8 @@ def _run_payload(
     output_dir: Path | None = None,
     handoff_path: Path | None = None,
     error: str | None = None,
+    failure_phase: str | None = None,
+    failure_kind: str | None = None,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
@@ -1555,6 +1557,13 @@ def _run_payload(
         payload["handoff"] = str(handoff_path)
     if error is not None:
         payload["error"] = error
+        if failure_phase is not None or failure_kind is not None:
+            payload["failure_phase"] = failure_phase or "unknown"
+            payload["failure"] = {
+                "phase": failure_phase or "unknown",
+                "kind": failure_kind or "unknown",
+                "detail": error,
+            }
     if codex_transport is not None:
         payload["codex_transport"] = codex_transport
     if control_socket is not None:
@@ -2022,6 +2031,8 @@ def run(
                     finished_at=finished_at,
                     output_dir=output_dir,
                     error=final.detail,
+                    failure_phase=final.failure_phase,
+                    failure_kind=final.failure_kind,
                     code_graph=code_graph,
                     drift_impact=drift_impact,
                     evidence=evidence,

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, List
 
 from . import proc
+from .result_integrity import validate_final_output
 
 _OLLAMA_PREFIX = "ollama:"
 _CODEX_CLOUD_PREFIX = "codex-cloud:"
@@ -297,6 +298,8 @@ class AgentResult:
     request_id: str | None = None
     acpx_version: str | None = None
     safe_events: tuple[dict[str, object], ...] = ()
+    failure_phase: str | None = None
+    failure_kind: str | None = None
 
 
 def is_known(cli_ref: str) -> bool:
@@ -564,6 +567,20 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
         )
+    output_failure = validate_final_output(text)
+    if output_failure is not None:
+        return AgentResult(
+            text=text,
+            ok=False,
+            detail=output_failure.detail,
+            failure_phase="output-validation",
+            failure_kind=output_failure.kind,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.code,
+            requested_model=model,
+            reasoning=reasoning,
+        )
     return AgentResult(
         text=text,
         ok=True,
@@ -627,6 +644,20 @@ def run_codex_appserver(
             text="",
             ok=False,
             detail="empty output",
+            thread_id=turn.thread_id,
+            status=turn.status,
+            transport="codex-app-server",
+            requested_model=model,
+            reasoning=reasoning,
+        )
+    output_failure = validate_final_output(text)
+    if output_failure is not None:
+        return AgentResult(
+            text=text,
+            ok=False,
+            detail=output_failure.detail,
+            failure_phase="output-validation",
+            failure_kind=output_failure.kind,
             thread_id=turn.thread_id,
             status=turn.status,
             transport="codex-app-server",

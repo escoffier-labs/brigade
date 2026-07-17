@@ -46,6 +46,8 @@ class WorkerResult:
     request_id: str | None = None
     acpx_version: str | None = None
     safe_events: tuple[dict[str, object], ...] = ()
+    failure_phase: str | None = None
+    failure_kind: str | None = None
 
 
 class PromptBuilder(Protocol):
@@ -243,6 +245,8 @@ def dispatch(
             text=result.text,
             ok=result.ok,
             detail=result.detail,
+            failure_phase=result.failure_phase,
+            failure_kind=result.failure_kind,
             thread_id=result.thread_id,
             status=result.status,
             stdout=result.stdout,

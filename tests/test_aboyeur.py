@@ -996,7 +996,14 @@ def test_run_direct_worker_skips_plan_and_synthesis(monkeypatch, capsys, tmp_pat
 
 def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_path):
     def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
-        return agents.AgentResult(text="partial output", ok=False, detail="boom")
+        return agents.AgentResult(
+            text="partial output",
+            ok=False,
+            detail="provider returned progress or intent without a final result",
+            exit_code=0,
+            failure_phase="output-validation",
+            failure_kind="non-final-output",
+        )
 
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
@@ -1013,9 +1020,22 @@ def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_
     assert (output_dir / "final.txt").read_text().strip() == "partial output"
     run_payload = json.loads((output_dir / "run.json").read_text())
     assert run_payload["worker"] == "coder"
+    assert run_payload["status"] == "failed"
+    assert run_payload["failure_phase"] == "output-validation"
+    assert run_payload["failure"] == {
+        "phase": "output-validation",
+        "kind": "non-final-output",
+        "detail": "provider returned progress or intent without a final result",
+    }
     synthesis = json.loads((output_dir / "synthesis.json").read_text())
     assert synthesis["mode"] == "direct-worker"
     assert synthesis["result"]["ok"] is False
+    assert synthesis["result"]["failure_phase"] == "output-validation"
+    assert synthesis["result"]["failure_kind"] == "non-final-output"
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["exit_code"] == 0
+    assert worker["failure_phase"] == "output-validation"
+    assert worker["failure_kind"] == "non-final-output"
 
 
 def test_run_direct_grok_progress_only_output_fails_with_honest_artifacts(monkeypatch, tmp_path):

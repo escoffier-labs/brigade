@@ -119,6 +119,46 @@ def test_run_parses_protocol_and_final_text(monkeypatch, tmp_path):
     assert result.effective_model == "composer-2.5"
 
 
+def test_run_rejects_in_band_provider_error_with_protocol_evidence(monkeypatch, tmp_path):
+    diagnostic = (
+        "I will check the provider first.\n"
+        "Error: NonRetriableError: Provider Error We're having trouble connecting "
+        "to the model provider. This might be temporary - please try again in a moment."
+    )
+    stream = _success_stream().replace('"text": "hello"', f'"text": {json.dumps(diagnostic)}')
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(0, stream, "")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="grok-4.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.text == diagnostic
+    assert result.exit_code == 0
+    assert result.stop_reason == "end_turn"
+    assert result.session_id == "session-1"
+    assert result.request_id == "req-1"
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "provider-error"
+    assert result.detail.startswith("provider returned an error instead of a final result:")
+
+
+def test_run_accepts_short_substantive_final(monkeypatch, tmp_path):
+    stream = _success_stream().replace('"text": "hello"', '"text": "No findings."')
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(0, stream, "")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is True
+    assert result.text == "No findings."
+
+
 def test_run_rejects_version_mismatch(monkeypatch, tmp_path):
     monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
     monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: proc.Result(0, "acpx 0.13.0\n", ""))
