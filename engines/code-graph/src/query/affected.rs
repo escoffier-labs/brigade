@@ -184,24 +184,34 @@ pub fn affected(conn: &Connection, files: &[String], depth: usize) -> Result<Aff
     })
 }
 
-/// Path-based test heuristic for the supported languages. Rust `#[cfg(test)]`
+/// Path-based test heuristic for the supported languages. A path under
+/// `tests/`, `test/`, `__tests__/`, or `spec/` counts as a test file; paths
+/// under fixture directories (`fixtures/`, `fixture/`, `golden/`, `snapshots/`,
+/// `testdata/`) do not, unless the file name matches a test-name pattern
+/// (`test_*`, `*_test.{rs,go,py}`, `*.test.*`, `*.spec.*`). Rust `#[cfg(test)]`
 /// modules inside src files are invisible to this and stay classified as source.
 pub(crate) fn is_test_file(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let file_name = lower.rsplit('/').next().unwrap_or(&lower);
-    let in_test_dir = lower.split('/').any(|segment| {
-        matches!(
-            segment,
-            "tests" | "test" | "__tests__" | "testdata" | "spec"
-        )
-    });
-    in_test_dir
-        || file_name.starts_with("test_")
+    let has_test_name = file_name.starts_with("test_")
         || file_name.ends_with("_test.py")
         || file_name.ends_with("_test.go")
         || file_name.ends_with("_test.rs")
         || file_name.contains(".test.")
-        || file_name.contains(".spec.")
+        || file_name.contains(".spec.");
+    let in_fixture_dir = lower.split('/').any(|segment| {
+        matches!(
+            segment,
+            "fixtures" | "fixture" | "golden" | "snapshots" | "testdata"
+        )
+    });
+    if in_fixture_dir {
+        return has_test_name;
+    }
+    let in_test_dir = lower
+        .split('/')
+        .any(|segment| matches!(segment, "tests" | "test" | "__tests__" | "spec"));
+    in_test_dir || has_test_name
 }
 
 #[cfg(test)]
@@ -231,8 +241,23 @@ mod tests {
             "app/contest.py",
             "src/latest.ts",
             "pkg/attestation.go",
+            "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+            "tests/fixtures/sample.rs",
+            "pkg/testdata/input.go",
+            "src/__tests__/fixtures/blob.ts",
         ] {
             assert!(!is_test_file(path), "{path} should not be a test file");
+        }
+    }
+
+    #[test]
+    fn fixture_paths_still_allow_test_named_files() {
+        for path in [
+            "tests/fixtures/golden/test_sync.py",
+            "pkg/testdata/store_test.go",
+            "fixtures/app.test.ts",
+        ] {
+            assert!(is_test_file(path), "{path} should be a test file");
         }
     }
 }
