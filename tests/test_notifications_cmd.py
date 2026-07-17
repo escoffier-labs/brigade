@@ -1,12 +1,31 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
 
 from brigade import cli
 from brigade import notifications_cmd
 from brigade import center_cmd
 from brigade import daily_cmd
 from brigade import work_cmd
+
+
+def _configured_doctor_result(profile: str = "operator") -> notifications_cmd.proc.Result:
+    return notifications_cmd.proc.Result(
+        code=0,
+        stdout=json.dumps(
+            {
+                "configured": True,
+                "selected_profile": profile,
+                "selected_channels": ["discord-main"],
+                "fail_count": 0,
+                "warn_count": 0,
+            }
+        ),
+        stderr="",
+    )
 
 
 def test_notifications_status_reports_missing_agent_notify(monkeypatch, tmp_target, capsys):
@@ -19,6 +38,8 @@ def test_notifications_status_reports_missing_agent_notify(monkeypatch, tmp_targ
     assert rc == 0
     assert payload["installed"] is False
     assert payload["configured"] is False
+    assert payload["probe_exit_code"] == 127
+    assert payload["probe_failure_class"] == "not_found"
     assert payload["suggested_next_command"] == "brigade add notifications"
     assert payload["sends_notifications"] is False
     assert payload["writes_hook_config"] is False
@@ -95,7 +116,9 @@ def test_notifications_status_discards_failed_doctor_output(monkeypatch, tmp_tar
     assert "stderr_summary" not in rendered
 
 
-def test_notifications_setup_plan_prints_hook_snippets(tmp_target, capsys):
+def test_notifications_setup_plan_prints_hook_snippets(monkeypatch, tmp_target, capsys):
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: None)
+
     rc = notifications_cmd.setup_plan(target=tmp_target, profile="agent-stop")
     out = capsys.readouterr().out
 
@@ -162,7 +185,14 @@ def test_notifications_surface_in_center_work_and_daily(monkeypatch, tmp_target,
 
 def test_notifications_event_record_writes_local_receipt_without_sending(monkeypatch, tmp_target, capsys):
     tmp_target.mkdir()
+    calls = []
+
+    def fake_run(args, timeout=30.0, env=None, cwd=None, stdin=None):
+        calls.append(args)
+        return _configured_doctor_result()
+
     monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
 
     rc = notifications_cmd.event_record(
         target=tmp_target,
@@ -183,40 +213,27 @@ def test_notifications_event_record_writes_local_receipt_without_sending(monkeyp
     receipt = tmp_target / payload["path"]
     assert receipt.exists()
     assert "agent-notify" in payload["planned_argv"][0]
+    assert all(args[1] == "doctor" for args in calls)
 
     health = notifications_cmd.health(tmp_target)
     assert health["latest_event"]["event_type"] == "handoff-waiting"
+    assert all(args[1] == "doctor" for args in calls)
 
 
 def test_notifications_event_record_can_explicitly_send(monkeypatch, tmp_target, capsys):
     tmp_target.mkdir()
-    config_path = tmp_target / ".config" / "agent-notify" / "config.toml"
-    config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        "\n".join(
-            [
-                "[channels.discord-main]",
-                'type = "discord"',
-                'webhook_url_env = "TEST_DISCORD_WEBHOOK_URL"',
-                "",
-                "[profiles.operator]",
-                'channels = ["discord-main"]',
-                "default = true",
-                "",
-            ]
-        )
-    )
     seen = {}
 
-    def fake_run(args, timeout=30.0, env=None, cwd=None):
+    def fake_run(args, timeout=30.0, env=None, cwd=None, stdin=None):
+        if args[1] == "doctor":
+            return _configured_doctor_result()
         seen["args"] = args
         seen["cwd"] = cwd
+        seen["stdin"] = stdin
         return notifications_cmd.proc.Result(code=0, stdout="sent", stderr="")
 
-    monkeypatch.setattr(notifications_cmd, "CONFIG_PATH", config_path)
     monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
     monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
-    monkeypatch.setenv("TEST_DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
 
     assert (
         cli.main(
@@ -247,6 +264,97 @@ def test_notifications_event_record_can_explicitly_send(monkeypatch, tmp_target,
     payload = json.loads(capsys.readouterr().out)
     assert payload["sent"] is True
     assert payload["send_exit_code"] == 0
-    assert "--hook" in seen["args"]
-    assert "brigade-event" in seen["args"]
+    assert payload["send_failure_class"] is None
+    assert seen["args"] == ["agent-notify", "send", "--profile", "operator"]
+    assert seen["stdin"] == (
+        b'{"body":"Brigade CI passed.","level":"success","source":"ci","tags":["ci-green"],"title":"CI green"}\n'
+    )
     assert seen["cwd"] == tmp_target.resolve()
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "failure_class", "command_exit"),
+    [(0, None, 0), (2, "configuration_error", 1), (3, "delivery_error", 1)],
+)
+def test_notifications_event_record_preserves_send_exit_meanings(
+    monkeypatch,
+    tmp_target,
+    capsys,
+    exit_code,
+    failure_class,
+    command_exit,
+):
+    tmp_target.mkdir()
+    seen = {}
+
+    def fake_run(args, timeout=30.0, env=None, cwd=None, stdin=None):
+        if args[1] == "doctor":
+            return _configured_doctor_result()
+        seen["stdin"] = stdin
+        return notifications_cmd.proc.Result(code=exit_code, stdout="ignored", stderr="ignored")
+
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
+
+    rc = notifications_cmd.event_record(
+        target=tmp_target,
+        event_type="operator-alert",
+        title="Operator alert",
+        message="Review the queue.",
+        level="warning",
+        profile="operator",
+        source="brigade",
+        send=True,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == command_exit
+    assert payload["send_exit_code"] == exit_code
+    assert payload["send_failure_class"] == failure_class
+    assert json.loads(seen["stdin"])["level"] == "warn"
+
+
+def test_notifications_event_record_discards_child_failure_output(monkeypatch, tmp_target, capsys):
+    tmp_target.mkdir()
+    sentinel_url = "https://example.invalid/hook?token=SENTINEL_SECRET"
+    sentinel_token = "TOKEN_VALUE_MUST_NOT_PERSIST"
+
+    def fake_run(args, timeout=30.0, env=None, cwd=None, stdin=None):
+        if args[1] == "doctor":
+            return _configured_doctor_result()
+        return notifications_cmd.proc.Result(
+            code=3,
+            stdout=f"request={sentinel_url}",
+            stderr=f"authorization={sentinel_token}",
+        )
+
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
+
+    assert (
+        notifications_cmd.event_record(
+            target=tmp_target,
+            event_type="ci-failed",
+            title="CI failed",
+            message="The test job failed.",
+            level="error",
+            profile="operator",
+            source="ci",
+            send=True,
+            json_output=True,
+        )
+        == 1
+    )
+    rendered = capsys.readouterr().out
+    payload = json.loads(rendered)
+    receipt = json.loads(Path(payload["path"]).read_text())
+    persisted = rendered + json.dumps(receipt, sort_keys=True)
+
+    assert payload["send_exit_code"] == 3
+    assert payload["send_failure_class"] == "delivery_error"
+    assert "SENTINEL_SECRET" not in persisted
+    assert sentinel_token not in persisted
+    assert "example.invalid" not in persisted
+    assert "stdout_summary" not in persisted
+    assert "stderr_summary" not in persisted

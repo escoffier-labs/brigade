@@ -6,7 +6,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from . import proc, toml_compat as tomllib
 
@@ -203,6 +203,8 @@ def _status_payload(profile: str | None = None) -> dict[str, Any]:
                     "detail": "not installed; run `brigade add notifications`",
                 }
             ],
+            "probe_exit_code": 127,
+            "probe_failure_class": "not_found",
             "suggested_next_command": "brigade add notifications",
             "sends_notifications": False,
             "writes_hook_config": False,
@@ -212,7 +214,8 @@ def _status_payload(profile: str | None = None) -> dict[str, Any]:
     result = proc.run(_doctor_argv(profile), timeout=30.0)
     doctor = result.json() if result.code == 0 else None
     valid_doctor = isinstance(doctor, dict)
-    configured = bool(valid_doctor and doctor.get("configured") is True)
+    doctor_payload = cast(dict[str, Any], doctor) if valid_doctor else {}
+    configured = doctor_payload.get("configured") is True
     failure_class = _failure_class(result.code)
     if result.code == 0 and not configured:
         failure_class = "child_error"
@@ -223,18 +226,18 @@ def _status_payload(profile: str | None = None) -> dict[str, Any]:
     warn_count = 0
     config_exists: bool | None = None
     if valid_doctor:
-        doctor_profile = doctor.get("selected_profile")
+        doctor_profile = doctor_payload.get("selected_profile")
         if isinstance(doctor_profile, str) and doctor_profile:
             selected_profile = doctor_profile
-        channels_value = doctor.get("selected_channels")
+        channels_value = doctor_payload.get("selected_channels")
         if isinstance(channels_value, list):
             selected_channels = [item for item in channels_value if isinstance(item, str)]
-        if type(doctor.get("fail_count")) is int:
-            fail_count = doctor["fail_count"]
-        if type(doctor.get("warn_count")) is int:
-            warn_count = doctor["warn_count"]
-        if isinstance(doctor.get("config_file_exists"), bool):
-            config_exists = doctor["config_file_exists"]
+        if type(doctor_payload.get("fail_count")) is int:
+            fail_count = doctor_payload["fail_count"]
+        if type(doctor_payload.get("warn_count")) is int:
+            warn_count = doctor_payload["warn_count"]
+        if isinstance(doctor_payload.get("config_file_exists"), bool):
+            config_exists = doctor_payload["config_file_exists"]
 
     if configured:
         checks: list[dict[str, Any]] = [
@@ -416,24 +419,10 @@ def _event_payload(
 ) -> dict[str, Any]:
     created_at = _now()
     event_id = f"{created_at.replace(':', '').replace('+00:00', 'Z')}-{_safe_id(event_type)}"
-    argv = [
-        "agent-notify",
-        "--hook",
-        "brigade-event",
-        "--event",
-        event_type,
-        "--level",
-        level,
-        "--title",
-        title,
-        "--message",
-        message,
-    ]
-    if profile:
-        argv.extend(["--profile", profile])
-    if source:
-        argv.extend(["--source", source])
     health_payload = health(target, profile=profile)
+    selected_profile = health_payload.get("profile")
+    effective_profile = selected_profile if isinstance(selected_profile, str) else profile
+    argv = ["agent-notify", "send", *_profile_args(effective_profile)]
     return {
         "target": str(target),
         "event_id": event_id,
@@ -442,7 +431,7 @@ def _event_payload(
         "title": title,
         "message": message,
         "source": source,
-        "profile": profile,
+        "profile": effective_profile,
         "created_at": created_at,
         "planned_argv": argv,
         "send_requested": send,
@@ -453,6 +442,19 @@ def _event_payload(
         "writes_hook_config": False,
         "stores_secrets": False,
     }
+
+
+def _canonical_event_bytes(payload: dict[str, Any]) -> bytes:
+    level = "warn" if payload["level"] == "warning" else payload["level"]
+    canonical = {
+        "body": payload["message"],
+        "level": level,
+        "source": payload.get("source") or "brigade",
+        "tags": [payload["event_type"]],
+        "title": payload["title"],
+    }
+    rendered = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return (rendered + "\n").encode()
 
 
 def event_plan(
@@ -523,19 +525,28 @@ def event_record(
     )
     result = None
     if send:
-        if not payload["installed"] or not payload["configured"]:
+        if not payload["installed"]:
             payload["sent"] = False
-            payload["send_exit_code"] = 1
-            payload["send_error"] = "agent-notify is not installed or configured"
+            payload["send_exit_code"] = 127
+            payload["send_failure_class"] = _failure_class(127)
+        elif not payload["configured"]:
+            payload["sent"] = False
+            payload["send_exit_code"] = 2
+            payload["send_failure_class"] = _failure_class(2)
         else:
-            result = proc.run(payload["planned_argv"], timeout=30.0, cwd=target)
+            result = proc.run(
+                payload["planned_argv"],
+                timeout=30.0,
+                cwd=target,
+                stdin=_canonical_event_bytes(payload),
+            )
             payload["sent"] = result.code == 0
             payload["send_exit_code"] = result.code
-            payload["stdout_summary"] = " ".join(result.stdout.split())[:400]
-            payload["stderr_summary"] = " ".join(result.stderr.split())[:400]
+            payload["send_failure_class"] = _failure_class(result.code)
     else:
         payload["sent"] = False
         payload["send_exit_code"] = None
+        payload["send_failure_class"] = None
     path = _events_root(target) / f"{payload['event_id']}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload["path"] = str(path)
