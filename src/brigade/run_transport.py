@@ -5,13 +5,19 @@ from __future__ import annotations
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
 from . import agents, run_control
 from .roster import Agent, Roster, is_cli_allowed, timeout_for
+
+_GROK_CONTINUATION_PROMPT = (
+    "Return the final answer now using the required structured answer schema. "
+    "Do not narrate progress or repeat the task."
+)
 
 
 @dataclass(frozen=True)
@@ -20,6 +26,82 @@ class Assignment:
     task: str
     stage: int = 1
     covers: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WorkerAttempt:
+    kind: str
+    worker: str
+    task: str
+    transport: str
+    model: str | None
+    reasoning: str | None
+    started_at: str
+    finished_at: str
+    exit_code: int | None
+    terminal_reason: str
+    failure_phase: str | None
+    failure_kind: str | None
+    session_id: str | None
+    selected: bool = False
+    stdout: str | None = None
+    stderr: str | None = None
+    stdout_log: str | None = None
+    stderr_log: str | None = None
+
+
+def _attempt_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _is_direct_grok_invalid_final(
+    agent: Agent,
+    result: agents.AgentResult,
+    *,
+    direct: bool,
+    read_only: bool,
+) -> bool:
+    return (
+        direct
+        and read_only
+        and agent.cli == "grok"
+        and agent.transport == "direct"
+        and result.failure_phase == "output-validation"
+        and result.failure_kind == "malformed-final-output"
+    )
+
+
+def _worker_attempt(
+    *,
+    kind: str,
+    worker: Agent,
+    task: str,
+    result: agents.AgentResult,
+    started_at: str,
+    finished_at: str,
+    selected: bool = False,
+) -> WorkerAttempt:
+    terminal_reason = result.stop_reason or (
+        "completed" if result.ok else result.failure_kind or result.detail or "failed"
+    )
+    return WorkerAttempt(
+        kind=kind,
+        worker=worker.name,
+        task=task,
+        transport=worker.transport,
+        model=result.requested_model or worker.model,
+        reasoning=result.reasoning or worker.reasoning,
+        started_at=started_at,
+        finished_at=finished_at,
+        exit_code=result.exit_code,
+        terminal_reason=terminal_reason,
+        failure_phase=result.failure_phase,
+        failure_kind=result.failure_kind,
+        session_id=result.session_id,
+        selected=selected,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
 
 
 def _env_override_names(env: dict[str, str] | None) -> tuple[str, ...]:
@@ -85,6 +167,7 @@ class WorkerResult:
     failure_kind: str | None = None
     env_overrides: tuple[str, ...] = ()
     endpoint_host: str | None = None
+    attempts: tuple[WorkerAttempt, ...] = ()
 
 
 class PromptBuilder(Protocol):
@@ -162,7 +245,6 @@ def dispatch(
                     else f"{agent.cli} is not allowed by limits.allow_models"
                 ),
             )
-        cli_ref = agent.cli
         prompt = build_prompt(
             agent,
             assignment,
@@ -175,156 +257,272 @@ def dispatch(
         )
         started = time.monotonic()
         effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
-        if agent.transport == "acpx":
-            from . import acpx_adapter
 
-            result = acpx_adapter.run_cursor(
-                prompt,
-                cwd=cwd or Path.cwd(),
-                timeout=timeout_for(agent, roster),
-                model=agent.model or "",
-                version=agent.transport_version or "",
-                read_only=effective_read_only,
-                writable_worktree=authorized_writable_worktree,
-            )
-        elif agent.env is not None:
-            # env seats always dispatch through the direct CLI path, even for
-            # codex under app-server transport: the app-server session cannot
-            # apply per-seat env, and silently dropping it would falsify the
-            # provenance recorded below.
-            env_kwargs: dict[str, Any] = {}
-            if sandbox is not None:
-                env_kwargs["sandbox"] = sandbox
-            if agent.model is not None:
-                env_kwargs["model"] = agent.model
-            if agent.reasoning is not None:
-                env_kwargs["reasoning"] = agent.reasoning
-            result = agents.run_agent(
+        def invoke(
+            selected_agent: Agent,
+            selected_prompt: str,
+            *,
+            resume_session_id: str | None = None,
+        ) -> agents.AgentResult:
+            assert selected_agent.cli is not None
+            cli_ref = selected_agent.cli
+            if selected_agent.transport == "acpx":
+                from . import acpx_adapter
+
+                return acpx_adapter.run_cursor(
+                    selected_prompt,
+                    cwd=cwd or Path.cwd(),
+                    timeout=timeout_for(selected_agent, roster),
+                    model=selected_agent.model or "",
+                    version=selected_agent.transport_version or "",
+                    read_only=effective_read_only,
+                    writable_worktree=authorized_writable_worktree,
+                )
+            if resume_session_id is not None:
+                return agents.run_agent(
+                    cli_ref,
+                    selected_prompt,
+                    timeout=timeout_for(selected_agent, roster),
+                    cwd=cwd,
+                    read_only=effective_read_only,
+                    sandbox=sandbox,
+                    model=selected_agent.model,
+                    reasoning=selected_agent.reasoning,
+                    env=dict(selected_agent.env) if selected_agent.env is not None else None,
+                    resume_session_id=resume_session_id,
+                )
+            if selected_agent.env is not None:
+                # Env seats always dispatch through the direct CLI path. The
+                # app-server session cannot apply per-seat env safely.
+                env_kwargs: dict[str, Any] = {}
+                if sandbox is not None:
+                    env_kwargs["sandbox"] = sandbox
+                if selected_agent.model is not None:
+                    env_kwargs["model"] = selected_agent.model
+                if selected_agent.reasoning is not None:
+                    env_kwargs["reasoning"] = selected_agent.reasoning
+                return agents.run_agent(
+                    cli_ref,
+                    selected_prompt,
+                    timeout=timeout_for(selected_agent, roster),
+                    cwd=cwd,
+                    read_only=effective_read_only,
+                    env=dict(selected_agent.env),
+                    **env_kwargs,
+                )
+            if selected_agent.cli == "codex" and appserver is not None:
+                on_event = event_writer(events_dir, selected_agent.name, verbose=verbose)
+                return run_appserver_worker(
+                    appserver,
+                    selected_agent,
+                    selected_agent.name,
+                    selected_prompt,
+                    timeout=timeout_for(selected_agent, roster),
+                    cwd=cwd,
+                    read_only=effective_read_only,
+                    sandbox=sandbox,
+                    registry=control_registry,
+                    on_event=on_event,
+                )
+
+            timeout = timeout_for(selected_agent, roster)
+            if sandbox is None and selected_agent.model is None and selected_agent.reasoning is None:
+                return agents.run_agent(
+                    cli_ref, selected_prompt, timeout=timeout, cwd=cwd, read_only=effective_read_only
+                )
+            if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is None:
+                return agents.run_agent(
+                    cli_ref,
+                    selected_prompt,
+                    timeout=timeout,
+                    cwd=cwd,
+                    read_only=effective_read_only,
+                    sandbox=sandbox,
+                )
+            if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is None:
+                return agents.run_agent(
+                    cli_ref,
+                    selected_prompt,
+                    timeout=timeout,
+                    cwd=cwd,
+                    read_only=effective_read_only,
+                    model=selected_agent.model,
+                )
+            if sandbox is None and selected_agent.model is None and selected_agent.reasoning is not None:
+                return agents.run_agent(
+                    cli_ref,
+                    selected_prompt,
+                    timeout=timeout,
+                    cwd=cwd,
+                    read_only=effective_read_only,
+                    reasoning=selected_agent.reasoning,
+                )
+            if sandbox is not None and selected_agent.model is not None and selected_agent.reasoning is None:
+                return agents.run_agent(
+                    cli_ref,
+                    selected_prompt,
+                    timeout=timeout,
+                    cwd=cwd,
+                    read_only=effective_read_only,
+                    sandbox=sandbox,
+                    model=selected_agent.model,
+                )
+            if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is not None:
+                return agents.run_agent(
+                    cli_ref,
+                    selected_prompt,
+                    timeout=timeout,
+                    cwd=cwd,
+                    read_only=effective_read_only,
+                    sandbox=sandbox,
+                    reasoning=selected_agent.reasoning,
+                )
+            if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is not None:
+                return agents.run_agent(
+                    cli_ref,
+                    selected_prompt,
+                    timeout=timeout,
+                    cwd=cwd,
+                    read_only=effective_read_only,
+                    model=selected_agent.model,
+                    reasoning=selected_agent.reasoning,
+                )
+            assert sandbox is not None
+            assert selected_agent.model is not None
+            assert selected_agent.reasoning is not None
+            return agents.run_agent(
                 cli_ref,
-                prompt,
-                timeout=timeout_for(agent, roster),
-                cwd=cwd,
-                read_only=effective_read_only,
-                env=dict(agent.env),
-                **env_kwargs,
-            )
-        elif agent.cli == "codex" and appserver is not None:
-            on_event = event_writer(events_dir, assignment.worker, verbose=verbose)
-            result = run_appserver_worker(
-                appserver,
-                agent,
-                assignment.worker,
-                prompt,
-                timeout=timeout_for(agent, roster),
+                selected_prompt,
+                timeout=timeout,
                 cwd=cwd,
                 read_only=effective_read_only,
                 sandbox=sandbox,
-                registry=control_registry,
-                on_event=on_event,
+                model=selected_agent.model,
+                reasoning=selected_agent.reasoning,
             )
-        else:
-            timeout = timeout_for(agent, roster)
-            if sandbox is None and agent.model is None and agent.reasoning is None:
-                result = agents.run_agent(cli_ref, prompt, timeout=timeout, cwd=cwd, read_only=effective_read_only)
-            elif sandbox is not None and agent.model is None and agent.reasoning is None:
-                result = agents.run_agent(
-                    cli_ref,
-                    prompt,
-                    timeout=timeout,
-                    cwd=cwd,
-                    read_only=effective_read_only,
-                    sandbox=sandbox,
-                )
-            elif sandbox is None and agent.model is not None and agent.reasoning is None:
-                result = agents.run_agent(
-                    cli_ref,
-                    prompt,
-                    timeout=timeout,
-                    cwd=cwd,
-                    read_only=effective_read_only,
-                    model=agent.model,
-                )
-            elif sandbox is None and agent.model is None and agent.reasoning is not None:
-                result = agents.run_agent(
-                    cli_ref,
-                    prompt,
-                    timeout=timeout,
-                    cwd=cwd,
-                    read_only=effective_read_only,
-                    reasoning=agent.reasoning,
-                )
-            elif sandbox is not None and agent.model is not None and agent.reasoning is None:
-                result = agents.run_agent(
-                    cli_ref,
-                    prompt,
-                    timeout=timeout,
-                    cwd=cwd,
-                    read_only=effective_read_only,
-                    sandbox=sandbox,
-                    model=agent.model,
-                )
-            elif sandbox is not None and agent.model is None and agent.reasoning is not None:
-                result = agents.run_agent(
-                    cli_ref,
-                    prompt,
-                    timeout=timeout,
-                    cwd=cwd,
-                    read_only=effective_read_only,
-                    sandbox=sandbox,
-                    reasoning=agent.reasoning,
-                )
-            elif sandbox is None and agent.model is not None and agent.reasoning is not None:
-                result = agents.run_agent(
-                    cli_ref,
-                    prompt,
-                    timeout=timeout,
-                    cwd=cwd,
-                    read_only=effective_read_only,
-                    model=agent.model,
-                    reasoning=agent.reasoning,
-                )
-            else:
-                assert sandbox is not None
-                assert agent.model is not None
-                assert agent.reasoning is not None
-                result = agents.run_agent(
-                    cli_ref,
-                    prompt,
-                    timeout=timeout,
-                    cwd=cwd,
-                    read_only=effective_read_only,
-                    sandbox=sandbox,
-                    model=agent.model,
-                    reasoning=agent.reasoning,
-                )
-        return WorkerResult(
-            worker=assignment.worker,
-            task=assignment.task,
-            text=result.text,
-            ok=result.ok,
-            detail=result.detail,
-            failure_phase=result.failure_phase,
-            failure_kind=result.failure_kind,
-            thread_id=result.thread_id,
-            status=result.status,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            exit_code=result.exit_code,
-            timed_out=result.timed_out,
-            duration_seconds=max(0.0, round(time.monotonic() - started, 3)),
-            transport=result.transport,
-            requested_model=result.requested_model,
-            effective_model=result.effective_model,
-            reasoning=result.reasoning,
-            stop_reason=result.stop_reason,
-            protocol_version=result.protocol_version,
-            session_id=result.session_id,
-            request_id=result.request_id,
-            acpx_version=result.acpx_version,
-            safe_events=result.safe_events,
-            env_overrides=_env_override_names(agent.env) if result.failure_kind != "env-ref-missing" else (),
-            endpoint_host=_env_endpoint_host(agent.env) if result.failure_kind != "env-ref-missing" else None,
+
+        def finish(
+            result: agents.AgentResult,
+            terminal_agent: Agent,
+            attempts: list[WorkerAttempt] | None = None,
+        ) -> WorkerResult:
+            return WorkerResult(
+                worker=assignment.worker,
+                task=assignment.task,
+                text=result.text,
+                ok=result.ok,
+                detail=result.detail,
+                failure_phase=result.failure_phase,
+                failure_kind=result.failure_kind,
+                thread_id=result.thread_id,
+                status=result.status,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.exit_code,
+                timed_out=result.timed_out,
+                duration_seconds=max(0.0, round(time.monotonic() - started, 3)),
+                transport=result.transport,
+                requested_model=result.requested_model,
+                effective_model=result.effective_model,
+                reasoning=result.reasoning,
+                stop_reason=result.stop_reason,
+                protocol_version=result.protocol_version,
+                session_id=result.session_id,
+                request_id=result.request_id,
+                acpx_version=result.acpx_version,
+                safe_events=result.safe_events,
+                env_overrides=(
+                    _env_override_names(terminal_agent.env) if result.failure_kind != "env-ref-missing" else ()
+                ),
+                endpoint_host=(
+                    _env_endpoint_host(terminal_agent.env) if result.failure_kind != "env-ref-missing" else None
+                ),
+                attempts=tuple(attempts or ()),
+            )
+
+        initial_started = _attempt_timestamp()
+        result = invoke(agent, prompt)
+        initial_finished = _attempt_timestamp()
+        recovery_candidate = direct and effective_read_only and agent.cli == "grok" and agent.transport == "direct"
+        if not recovery_candidate:
+            return finish(result, agent)
+
+        attempts = [
+            _worker_attempt(
+                kind="initial",
+                worker=agent,
+                task=assignment.task,
+                result=result,
+                started_at=initial_started,
+                finished_at=initial_finished,
+                selected=result.ok,
+            )
+        ]
+        if result.ok or not _is_direct_grok_invalid_final(agent, result, direct=direct, read_only=effective_read_only):
+            return finish(result, agent, attempts)
+        if not result.session_id:
+            missing_session = replace(
+                result,
+                detail="grok invalid-final result did not include the session id required for exact continuation",
+                failure_kind="grok-session-missing",
+            )
+            return finish(missing_session, agent, attempts)
+
+        continuation_started = _attempt_timestamp()
+        continuation = invoke(agent, _GROK_CONTINUATION_PROMPT, resume_session_id=result.session_id)
+        continuation_finished = _attempt_timestamp()
+        attempts.append(
+            _worker_attempt(
+                kind="continuation",
+                worker=agent,
+                task=assignment.task,
+                result=continuation,
+                started_at=continuation_started,
+                finished_at=continuation_finished,
+                selected=continuation.ok,
+            )
         )
+        if continuation.ok or not _is_direct_grok_invalid_final(
+            agent, continuation, direct=direct, read_only=effective_read_only
+        ):
+            return finish(continuation, agent, attempts)
+
+        fallback_name = agent.invalid_final_fallback
+        if fallback_name is None:
+            missing_fallback = replace(
+                continuation,
+                detail="grok continuation also lacked a structured final; invalid_final_fallback is not configured",
+                failure_phase="dispatch",
+                failure_kind="grok-fallback-missing",
+            )
+            return finish(missing_fallback, agent, attempts)
+
+        fallback_agent = roster.agents[fallback_name]
+        fallback_prompt = build_prompt(
+            fallback_agent,
+            assignment,
+            prior_results=prior_results,
+            read_only=read_only,
+            direct=direct,
+            code_graph=code_graph,
+            drift_impact=drift_impact,
+            evidence=evidence,
+        )
+        fallback_started = _attempt_timestamp()
+        fallback_result = invoke(fallback_agent, fallback_prompt)
+        fallback_finished = _attempt_timestamp()
+        attempts.append(
+            _worker_attempt(
+                kind="fallback",
+                worker=fallback_agent,
+                task=assignment.task,
+                result=fallback_result,
+                started_at=fallback_started,
+                finished_at=fallback_finished,
+                selected=fallback_result.ok,
+            )
+        )
+        return finish(fallback_result, fallback_agent, attempts)
 
     if not assignments:
         return []

@@ -1599,6 +1599,7 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
                 "transport_version": agent.transport_version,
                 "role": agent.role,
                 "timeout_seconds": agent.timeout_seconds,
+                "invalid_final_fallback": agent.invalid_final_fallback,
                 # env tables hold names and references only, never secret
                 # values (enforced at roster load), so persisting them for
                 # resume is safe.

@@ -38,6 +38,7 @@ class Agent:
     transport: str = "direct"
     transport_version: str | None = None
     env: dict[str, str] | None = None
+    invalid_final_fallback: str | None = None
 
 
 @dataclass(frozen=True)
@@ -241,6 +242,10 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
         headers = dict(headers_raw) if headers_raw is not None else None
 
         env = _as_env(raw_agent.get("env"), agent_name)
+        fallback_raw = raw_agent.get("invalid_final_fallback")
+        invalid_final_fallback = (
+            _as_str(fallback_raw, f"agents.{agent_name}.invalid_final_fallback") if fallback_raw is not None else None
+        )
 
         cli_raw = raw_agent.get("cli")
         has_endpoint = endpoint is not None and model is not None
@@ -295,10 +300,32 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             transport=transport_raw,
             transport_version=transport_version,
             env=env,
+            invalid_final_fallback=invalid_final_fallback,
         )
 
     if orchestrator not in parsed_agents:
         raise ValueError(f"orchestrator {orchestrator!r} is not defined in [agents]")
+
+    for agent_name, agent in parsed_agents.items():
+        fallback_name = agent.invalid_final_fallback
+        if fallback_name is None:
+            continue
+        if agent.cli != "grok" or agent.transport != "direct":
+            raise ValueError(f"agents.{agent_name}.invalid_final_fallback requires a direct grok seat")
+        fallback = parsed_agents.get(fallback_name)
+        if fallback is None:
+            raise ValueError(
+                f"agents.{agent_name}.invalid_final_fallback references {fallback_name!r}, which is not defined"
+            )
+        if fallback_name == orchestrator or fallback.cli != "cursor" or fallback.transport != "acpx":
+            raise ValueError(f"agents.{agent_name}.invalid_final_fallback must name a reviewed cursor-grok acpx seat")
+        if fallback.model is None or not fallback.model.lower().startswith("grok-"):
+            raise ValueError(f"agents.{agent_name}.invalid_final_fallback target must use a grok model")
+        if fallback.transport_version != ACPX_TRANSPORT_VERSION:
+            raise ValueError(
+                f"agents.{agent_name}.invalid_final_fallback target requires reviewed acpx version "
+                f"{ACPX_TRANSPORT_VERSION}"
+            )
 
     return Roster(
         orchestrator=orchestrator,

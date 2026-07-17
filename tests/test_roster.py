@@ -496,3 +496,66 @@ def test_env_empty_table_loads_as_none(tmp_path):
     )
     r = roster_mod.load_roster(_write(tmp_path, bad))
     assert r.agents["k3"].env is None
+
+
+GROK_FALLBACK_ROSTER = """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.grok-review]
+cli = "grok"
+model = "grok-4.5"
+reasoning = "high"
+role = "review"
+invalid_final_fallback = "cursor-grok"
+
+[agents.cursor-grok]
+cli = "cursor"
+model = "grok-4.5"
+transport = "acpx"
+transport_version = "0.12.0"
+role = "fallback review"
+"""
+
+
+def test_grok_invalid_final_fallback_names_reviewed_acpx_seat(tmp_path):
+    loaded = roster_mod.load_roster(_write(tmp_path, GROK_FALLBACK_ROSTER))
+
+    assert loaded.agents["grok-review"].invalid_final_fallback == "cursor-grok"
+
+
+@pytest.mark.parametrize(
+    ("roster_text", "match"),
+    [
+        (
+            GROK_FALLBACK_ROSTER.replace(
+                'invalid_final_fallback = "cursor-grok"', 'invalid_final_fallback = "missing"'
+            ),
+            "is not defined",
+        ),
+        (
+            GROK_FALLBACK_ROSTER.replace('cli = "grok"\nmodel = "grok-4.5"', 'cli = "codex"\nmodel = "gpt-5.6"'),
+            "direct grok seat",
+        ),
+        (
+            GROK_FALLBACK_ROSTER.replace('transport = "acpx"\ntransport_version = "0.12.0"\n', ""),
+            "reviewed cursor-grok acpx seat",
+        ),
+        (
+            GROK_FALLBACK_ROSTER.replace(
+                'model = "grok-4.5"\ntransport = "acpx"', 'model = "composer-2.5"\ntransport = "acpx"'
+            ),
+            "grok model",
+        ),
+        (
+            GROK_FALLBACK_ROSTER.replace('transport_version = "0.12.0"', 'transport_version = "0.11.0"'),
+            "reviewed version is 0.12.0",
+        ),
+    ],
+)
+def test_grok_invalid_final_fallback_rejects_unreviewed_routes(tmp_path, roster_text, match):
+    with pytest.raises(ValueError, match=match):
+        roster_mod.load_roster(_write(tmp_path, roster_text))

@@ -3,6 +3,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from brigade import aboyeur
 from brigade import agents
 from brigade import context_eval
@@ -47,21 +49,62 @@ def _model_roster():
     )
 
 
-def _grok_roster():
+def _grok_roster(*, fallback=False):
+    seats = {
+        "chef": Agent("chef", "codex", "plan and synthesize"),
+        "grok_cli": Agent(
+            "grok_cli",
+            "grok",
+            "review focused code changes",
+            model="grok-4.5",
+            reasoning="high",
+            invalid_final_fallback="cursor_grok" if fallback else None,
+        ),
+    }
+    if fallback:
+        seats["cursor_grok"] = Agent(
+            "cursor_grok",
+            "cursor",
+            "fallback review",
+            model="grok-4.5",
+            transport="acpx",
+            transport_version="0.12.0",
+        )
     return Roster(
         orchestrator="chef",
-        agents={
-            "chef": Agent("chef", "codex", "plan and synthesize"),
-            "grok_cli": Agent(
-                "grok_cli",
-                "grok",
-                "review focused code changes",
-                model="grok-4.5",
-                reasoning="high",
-            ),
-        },
+        agents=seats,
         max_workers=1,
     )
+
+
+def _grok_envelope(answer, *, valid=True, stop_reason="EndTurn"):
+    structured = {"kind": "answer", "answer": answer}
+    return json.dumps(
+        {
+            "text": json.dumps(structured),
+            "stopReason": stop_reason,
+            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "requestId": "00000000-0000-4000-8000-000000000001",
+            "structuredOutput": structured if valid else None,
+            "structuredOutputError": None if valid else "model did not produce structured output",
+        }
+    )
+
+
+def _stub_grok_process(monkeypatch, *results):
+    real_run = agents.proc.run
+    outputs = iter(results)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        if argv and argv[0] == "grok":
+            calls.append(argv)
+            return next(outputs)
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    return calls
 
 
 def _restricted_roster():
@@ -1060,12 +1103,20 @@ def test_run_direct_grok_progress_only_output_fails_with_honest_artifacts(monkey
     assert rc == 2
     run_payload = json.loads((output_dir / "run.json").read_text())
     assert run_payload["status"] == "failed"
-    assert run_payload["error"] == "grok exited 0 without a structured final response"
+    assert run_payload["error"] == (
+        "grok invalid-final result did not include the session id required for exact continuation"
+    )
     assert run_payload["suspected_noop"] is False
     worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
     assert worker["ok"] is False
-    assert worker["detail"] == "grok exited 0 without a structured final response"
+    assert worker["detail"] == (
+        "grok invalid-final result did not include the session id required for exact continuation"
+    )
+    assert worker["failure_kind"] == "grok-session-missing"
     assert worker["exit_code"] == 0
+    assert len(worker["attempts"]) == 1
+    assert worker["attempts"][0]["failure_kind"] == "malformed-final-output"
+    assert worker["attempts"][0]["selected"] is False
     assert (output_dir / worker["stdout_log"]).read_text() == output + "\n"
     assert (output_dir / "final.txt").read_text().strip() == output
 
@@ -1102,8 +1153,226 @@ def test_run_direct_grok_structured_final_succeeds_with_honest_artifacts(monkeyp
     assert worker["ok"] is True
     assert worker["text"] == answer
     assert worker["exit_code"] == 0
+    assert len(worker["attempts"]) == 1
+    assert worker["attempts"][0]["kind"] == "initial"
+    assert worker["attempts"][0]["selected"] is True
+    assert (output_dir / worker["attempts"][0]["stdout_log"]).read_text() == stdout + "\n"
     assert (output_dir / worker["stdout_log"]).read_text() == stdout + "\n"
     assert (output_dir / "final.txt").read_text().strip() == answer
+
+
+def test_run_direct_grok_continuation_recovery_preserves_both_attempts(monkeypatch, tmp_path):
+    invalid = _grok_envelope("Reviewing files first.", valid=False, stop_reason="Cancelled")
+    recovered = _grok_envelope("Recovered final answer.")
+    _stub_grok_process(
+        monkeypatch,
+        agents.proc.Result(0, invalid + "\n", ""),
+        agents.proc.Result(0, recovered + "\n", ""),
+    )
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "Review the current diff.",
+        _grok_roster(),
+        cwd=tmp_path,
+        worker="grok_cli",
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 0
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["text"] == "Recovered final answer."
+    assert [attempt["kind"] for attempt in worker["attempts"]] == ["initial", "continuation"]
+    assert [attempt["selected"] for attempt in worker["attempts"]] == [False, True]
+    assert (output_dir / worker["attempts"][0]["stdout_log"]).read_text() == invalid + "\n"
+    assert (output_dir / worker["attempts"][1]["stdout_log"]).read_text() == recovered + "\n"
+    synthesis = json.loads((output_dir / "synthesis.json").read_text())
+    assert synthesis["result"]["text"] == "Recovered final answer."
+    assert (output_dir / "final.txt").read_text().strip() == "Recovered final answer."
+
+
+def test_run_direct_grok_fallback_recovery_selects_explicit_acpx_seat(monkeypatch, tmp_path):
+    invalid = _grok_envelope("Reviewing files first.", valid=False, stop_reason="Cancelled")
+    _stub_grok_process(
+        monkeypatch,
+        agents.proc.Result(0, invalid + "\n", ""),
+        agents.proc.Result(0, invalid + "\n", ""),
+    )
+    monkeypatch.setattr(
+        "brigade.acpx_adapter.run_cursor",
+        lambda *args, **kwargs: agents.AgentResult(
+            text="Fallback final answer.",
+            ok=True,
+            stdout="fallback stdout\n",
+            stderr="",
+            exit_code=0,
+            transport="acpx",
+            requested_model="grok-4.5",
+            effective_model="grok-4.5",
+            stop_reason="end_turn",
+            session_id="cursor-session",
+        ),
+    )
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "Review the current diff.",
+        _grok_roster(fallback=True),
+        cwd=tmp_path,
+        worker="grok_cli",
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 0
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["transport"] == "acpx"
+    assert worker["text"] == "Fallback final answer."
+    assert [attempt["worker"] for attempt in worker["attempts"]] == ["grok_cli", "grok_cli", "cursor_grok"]
+    assert [attempt["selected"] for attempt in worker["attempts"]] == [False, False, True]
+    assert [(output_dir / attempt["stdout_log"]).read_text() for attempt in worker["attempts"]] == [
+        invalid + "\n",
+        invalid + "\n",
+        "fallback stdout\n",
+    ]
+    synthesis = json.loads((output_dir / "synthesis.json").read_text())
+    assert synthesis["result"]["transport"] == "acpx"
+    assert synthesis["result"]["text"] == "Fallback final answer."
+
+
+def test_run_direct_grok_missing_fallback_is_typed_after_continuation(monkeypatch, tmp_path):
+    invalid = _grok_envelope("Reviewing files first.", valid=False, stop_reason="Cancelled")
+    _stub_grok_process(
+        monkeypatch,
+        agents.proc.Result(0, invalid + "\n", ""),
+        agents.proc.Result(0, invalid + "\n", ""),
+    )
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "Review the current diff.",
+        _grok_roster(),
+        cwd=tmp_path,
+        worker="grok_cli",
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 2
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["failure_kind"] == "grok-fallback-missing"
+    assert [attempt["selected"] for attempt in worker["attempts"]] == [False, False]
+
+
+def test_run_direct_grok_all_attempts_invalid_preserves_terminal_failure(monkeypatch, tmp_path):
+    invalid = _grok_envelope("Reviewing files first.", valid=False, stop_reason="Cancelled")
+    _stub_grok_process(
+        monkeypatch,
+        agents.proc.Result(0, invalid + "\n", ""),
+        agents.proc.Result(0, invalid + "\n", ""),
+    )
+    monkeypatch.setattr(
+        "brigade.acpx_adapter.run_cursor",
+        lambda *args, **kwargs: agents.AgentResult(
+            text="Still reviewing.",
+            ok=False,
+            detail="ACP stream contained no final assistant text",
+            stdout="fallback invalid\n",
+            stderr="",
+            exit_code=0,
+            transport="acpx",
+            requested_model="grok-4.5",
+            failure_phase="output-validation",
+            failure_kind="empty-output",
+        ),
+    )
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "Review the current diff.",
+        _grok_roster(fallback=True),
+        cwd=tmp_path,
+        worker="grok_cli",
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 2
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["failure_kind"] == "empty-output"
+    assert len(worker["attempts"]) == 3
+    assert not any(attempt["selected"] for attempt in worker["attempts"])
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "failure_kind"),
+    [
+        ("Error: authentication required. Run provider login.", "authentication-error"),
+        ("Error: model grok-example is not available.", "provider-setting-error"),
+        ("Error: failed to connect to the model provider.", "network-error"),
+        ("Error: permission denied while reading the workspace.", "permission-error"),
+    ],
+)
+def test_run_direct_grok_operational_envelope_never_enters_recovery(monkeypatch, tmp_path, diagnostic, failure_kind):
+    envelope = _grok_envelope(diagnostic, valid=False, stop_reason="Cancelled")
+    calls = _stub_grok_process(monkeypatch, agents.proc.Result(0, envelope + "\n", ""))
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "Review the current diff.",
+        _grok_roster(fallback=True),
+        cwd=tmp_path,
+        worker="grok_cli",
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 2
+    assert len(calls) == 1
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["failure_kind"] == failure_kind
+    assert len(worker["attempts"]) == 1
+    assert worker["attempts"][0]["selected"] is False
+
+
+@pytest.mark.parametrize("diagnostic_location", ["structured_error", "stderr"])
+def test_run_direct_grok_operational_diagnostic_outside_answer_never_enters_recovery(
+    monkeypatch, tmp_path, diagnostic_location
+):
+    diagnostic = "Error: authentication required. Run provider login."
+    payload = json.loads(_grok_envelope("Reviewing files first.", valid=False, stop_reason="Cancelled"))
+    stderr = ""
+    if diagnostic_location == "structured_error":
+        payload["structuredOutputError"] = diagnostic
+    else:
+        stderr = diagnostic
+    calls = _stub_grok_process(
+        monkeypatch,
+        agents.proc.Result(0, json.dumps(payload) + "\n", stderr),
+    )
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "Review the current diff.",
+        _grok_roster(fallback=True),
+        cwd=tmp_path,
+        worker="grok_cli",
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 2
+    assert len(calls) == 1
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["failure_kind"] == "authentication-error"
+    assert len(worker["attempts"]) == 1
 
 
 def test_run_defers_success_until_worktree_artifact_collection(monkeypatch, tmp_path):
@@ -1422,6 +1691,12 @@ def test_roster_payload_includes_reasoning():
         agents={"chef": Agent("chef", "codex", "plan", reasoning="xhigh")},
     )
     assert aboyeur._roster_payload(roster)["agents"]["chef"]["reasoning"] == "xhigh"
+
+
+def test_roster_payload_includes_invalid_final_fallback():
+    payload = aboyeur._roster_payload(_grok_roster(fallback=True))
+
+    assert payload["agents"]["grok_cli"]["invalid_final_fallback"] == "cursor_grok"
 
 
 def test_roster_payload_includes_sandbox():

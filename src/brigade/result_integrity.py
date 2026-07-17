@@ -48,6 +48,13 @@ _OPERATIONAL_ERRORS = (
             re.IGNORECASE | re.MULTILINE,
         ),
     ),
+    (
+        "permission-error",
+        re.compile(
+            r"^\s*error:.*\b(?:permission (?:denied|required)|not permitted|auto-denied)\b",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
 )
 _CLAUSE_SPLIT = re.compile(r"(?:\r?\n)+|(?<=[.!?])\s+")
 _FUTURE_INTENT = re.compile(

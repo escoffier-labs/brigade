@@ -45,6 +45,7 @@ def _roster_from_snapshot(snapshot: dict) -> Roster:
             transport=raw.get("transport", "direct"),
             transport_version=raw.get("transport_version"),
             env=dict(raw["env"]) if raw.get("env") else None,
+            invalid_final_fallback=raw.get("invalid_final_fallback"),
         )
     return Roster(
         orchestrator=snapshot["orchestrator"],
