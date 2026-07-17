@@ -23,6 +23,7 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/sources/hermes"
 	"github.com/escoffier-labs/miseledger/internal/sources/openclaw"
 	"github.com/escoffier-labs/miseledger/internal/sources/opencode"
+	"github.com/escoffier-labs/miseledger/internal/sources/pi"
 	"github.com/escoffier-labs/miseledger/internal/toolpath"
 )
 
@@ -369,6 +370,7 @@ func discoveredRoots() []discoveredRoot {
 		{Kind: "codex", Root: filepath.Join(home, ".codex", "sessions"), Generator: codex.Generate},
 		{Kind: "openclaw", Root: filepath.Join(home, ".openclaw", "agents"), Generator: openclaw.Generate},
 		{Kind: "claude", Root: filepath.Join(home, ".claude", "projects"), Generator: claude.Generate},
+		{Kind: "pi", Root: pi.DefaultRoot(), Generator: pi.Generate},
 		{Kind: "hermes", Root: filepath.Join(home, ".hermes", "sessions"), Generator: hermes.Generate},
 		{Kind: "opencode", Root: opencode.DefaultRoot(), Generator: opencode.Generate},
 		{Kind: "cursor", Root: cursor.DefaultRoot(), Generator: cursor.Generate},
