@@ -97,7 +97,7 @@ def _stub_grok_process(monkeypatch, *results):
     calls = []
 
     def fake_run(argv, **kwargs):
-        if argv and argv[0] == "grok":
+        if argv and Path(argv[0]).name == "grok":
             calls.append(argv)
             return next(outputs)
         return real_run(argv, **kwargs)
@@ -3192,7 +3192,7 @@ def test_plan_codex_orchestrator_feeds_prompt_on_stdin_for_both_transports(monke
         assert len(assignments) == 1
         assert len(captured) == 1
         call = captured[0]
-        assert call["argv"][0:2] == ["codex", "exec"]
+        assert call["argv"][0:2] == ["/bin/codex", "exec"]
         assert call["argv"][-1] == "-"
         assert "-m" in call["argv"]
         assert call["argv"][call["argv"].index("-m") + 1] == "gpt-5.5"

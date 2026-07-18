@@ -364,6 +364,33 @@ def command_for(cli_ref: str) -> str:
     return cli_ref
 
 
+def resolve_agent_executable(cli_ref: str, path: str | None = None) -> proc.ExecutableIdentity:
+    """Resolve the adapter executable Brigade would launch for cli_ref."""
+
+    return proc.resolve_executable(command_for(cli_ref), path=path)
+
+
+_PROVIDER_PREFLIGHT_RE = re.compile(
+    r"(?:"
+    r"\bnot (?:a )?git (?:repo(?:sitory)?|worktree)\b|"
+    r"\b(?:workspace|directory|folder) (?:is )?not trusted\b|"
+    r"\btrust (?:this )?(?:workspace|directory|folder)\b|"
+    r"\buntrusted (?:workspace|directory|folder)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _provider_preflight_detail(cli_ref: str, stdout: str, stderr: str) -> str | None:
+    combined = "\n".join(part for part in (stderr, stdout) if part).strip()
+    if not combined or not _PROVIDER_PREFLIGHT_RE.search(combined):
+        return None
+    return (
+        f"{cli_ref} launched but refused the workspace preflight check; "
+        "use a Git worktree or complete the provider trust step"
+    )
+
+
 def _pin_after_cmd(argv: List[str], flag: str, model: str) -> List[str]:
     """Insert `flag model` right after the command (argv[0])."""
     return [argv[0], flag, model, *argv[1:]]
@@ -477,17 +504,20 @@ def build_argv(
 
 
 def detect(cli_ref: str) -> bool:
-    return proc.which(command_for(cli_ref)) is not None
+    return resolve_agent_executable(cli_ref).runnable
 
 
-def ollama_model_present(model: str) -> tuple[bool, str]:
+def ollama_model_present(model: str, executable: proc.ExecutableIdentity | None = None) -> tuple[bool, str]:
     """Check whether an ollama model is already pulled locally.
 
     `ollama run` on a missing model silently auto-pulls it (tens of GB for
     large models), so callers must refuse to dispatch instead of letting the
     pull start. Returns (present, detail); detail explains a False result.
     """
-    listing = proc.run(["ollama", "list"], timeout=15.0)
+    ollama = executable or proc.resolve_executable("ollama")
+    if not ollama.runnable or ollama.path is None:
+        return False, "ollama is not installed"
+    listing = proc.run([ollama.path, "list"], timeout=15.0)
     if listing.code != 0:
         reason = listing.stderr.strip() or f"exit {listing.code}"
         return False, f"could not list local ollama models ({reason[:120]}); is the ollama server running?"
@@ -628,8 +658,39 @@ def run_agent(
     env: dict[str, str] | None = None,
     resume_session_id: str | None = None,
 ) -> AgentResult:
-    if not detect(cli_ref):
-        return AgentResult(text="", ok=False, detail=f"{command_for(cli_ref)} not installed")
+    child_env: dict[str, str] | None = None
+    resolved_overrides: dict[str, str] | None = None
+    resolved_secret_targets: set[str] | None = None
+    if env is not None:
+        resolved_secret_targets = secret_ref_targets(env)
+        overrides, env_error = resolve_env_overrides(env)
+        if overrides is None:
+            return AgentResult(
+                text="",
+                ok=False,
+                detail=env_error,
+                failure_phase="dispatch",
+                failure_kind="env-ref-missing",
+                requested_model=model,
+            )
+        resolved_overrides = overrides
+        child_env = dict(os.environ)
+        child_env.update(overrides)
+
+    executable_path = None
+    if resolved_overrides is not None and "PATH" in resolved_overrides:
+        assert child_env is not None
+        executable_path = child_env["PATH"]
+    executable = resolve_agent_executable(cli_ref, path=executable_path)
+    if not executable.runnable:
+        failure_kind = "command-not-found" if executable.kind == "missing" else "unsupported-command-shim"
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=executable.detail if executable.kind != "missing" else f"{command_for(cli_ref)} not installed",
+            failure_phase="dispatch",
+            failure_kind=failure_kind,
+        )
 
     if resume_session_id is not None and (cli_ref != "grok" or not (read_only or sandbox == "read-only")):
         return AgentResult(
@@ -663,29 +724,9 @@ def run_agent(
     if cli_ref.startswith(_OLLAMA_PREFIX):
         ollama_model = cli_ref[len(_OLLAMA_PREFIX) :]
         if ollama_model:
-            present, missing_detail = ollama_model_present(ollama_model)
+            present, missing_detail = ollama_model_present(ollama_model, executable)
             if not present:
                 return AgentResult(text="", ok=False, detail=missing_detail)
-
-    child_env: dict[str, str] | None = None
-    resolved_overrides: dict[str, str] | None = None
-    resolved_secret_targets: set[str] | None = None
-    if env is not None:
-        resolved_secret_targets = secret_ref_targets(env)
-        overrides, env_error = resolve_env_overrides(env)
-        if overrides is None:
-            return AgentResult(
-                text="",
-                ok=False,
-                detail=env_error,
-                failure_phase="dispatch",
-                failure_kind="env-ref-missing",
-                requested_model=model,
-            )
-        resolved_overrides = overrides
-        child_env = dict(os.environ)
-        child_env.update(overrides)
-
     cursor_limitation = None
     if cli_ref == "cursor" and (read_only or sandbox == "read-only"):
         cursor_limitation = direct_cursor_read_only_limitation(model)
@@ -719,6 +760,8 @@ def run_agent(
             )
         argv[-2:] = ["--sandbox", "read-only", "--always-approve"]
         argv.extend(["--json-schema", _GROK_RESULT_SCHEMA])
+    assert executable.path is not None
+    argv = [executable.path, *argv[1:]]
     if cli_ref == "codex":
         result = proc.run(
             argv,
@@ -777,6 +820,41 @@ def run_agent(
         :200
     ]
     if result.code != 0:
+        provider_preflight = _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr)
+        if provider_preflight is not None:
+            return AgentResult(
+                text=safe_text,
+                ok=False,
+                detail=provider_preflight,
+                failure_phase="provider-preflight",
+                failure_kind="workspace-trust",
+                stdout=safe_stdout,
+                stderr=safe_stderr,
+                exit_code=result.code,
+                timed_out=result.code == 124,
+                requested_model=model,
+                reasoning=reasoning,
+                stop_reason=grok_stop_reason,
+                session_id=grok_session_id,
+                request_id=grok_request_id,
+            )
+        if result.code == 127 and "command not found" in safe_stderr.lower():
+            return AgentResult(
+                text=safe_text,
+                ok=False,
+                detail=executable.detail,
+                failure_phase="dispatch",
+                failure_kind="command-not-found",
+                stdout=safe_stdout,
+                stderr=safe_stderr,
+                exit_code=result.code,
+                timed_out=False,
+                requested_model=model,
+                reasoning=reasoning,
+                stop_reason=grok_stop_reason,
+                session_id=grok_session_id,
+                request_id=grok_request_id,
+            )
         raw_detail = safe_stderr.strip() or f"exit {result.code}"
         detail = codex_stdin_hang_detail(raw_detail) if cli_ref == "codex" else None
         if detail is None:
@@ -831,7 +909,14 @@ def run_agent(
         )
     if not text:
         detail = "empty output"
-        if cursor_limitation is not None:
+        empty_failure_phase: str | None = None
+        empty_failure_kind: str | None = None
+        provider_preflight = _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr)
+        if provider_preflight is not None:
+            detail = provider_preflight
+            empty_failure_phase = "provider-preflight"
+            empty_failure_kind = "workspace-trust"
+        elif cursor_limitation is not None:
             detail = cursor_limitation
         elif cli_ref in {"cursor", "grok"}:
             detail = f"{cli_ref} exited 0 without output; check trust, permissions, and model availability"
@@ -839,6 +924,8 @@ def run_agent(
             text="",
             ok=False,
             detail=detail,
+            failure_phase=empty_failure_phase,
+            failure_kind=empty_failure_kind,
             stdout=safe_stdout,
             stderr=safe_stderr,
             exit_code=result.code,

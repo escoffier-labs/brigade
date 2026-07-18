@@ -1,6 +1,9 @@
+import errno
 import locale
 import subprocess
 import sys
+
+import pytest
 
 from brigade import proc
 
@@ -35,6 +38,46 @@ def test_run_json_returns_none_on_nonjson():
 def test_which_detects_present_and_absent():
     assert proc.which("python3") is not None
     assert proc.which("definitely-not-a-real-binary-xyz") is None
+
+
+def test_resolve_executable_reports_missing_without_paths():
+    identity = proc.resolve_executable("definitely-not-a-real-binary-xyz")
+
+    assert identity.path is None
+    assert identity.kind == "missing"
+    assert identity.runnable is False
+    assert "not on PATH" in identity.detail
+
+
+@pytest.mark.parametrize(
+    ("launch_error", "expected_code", "expected_stderr"),
+    [
+        (FileNotFoundError(errno.ENOENT, "not found", "/private/bin/worker"), 127, "command not found: worker"),
+        (
+            PermissionError(errno.EACCES, "permission denied", "/private/bin/worker"),
+            126,
+            "command permission denied: worker",
+        ),
+        (
+            OSError(errno.ENOEXEC, "exec format error", "/private/bin/worker"),
+            126,
+            "command has invalid executable format: worker",
+        ),
+        (OSError(errno.EIO, "launch failed", "/private/bin/worker"), 126, "command launch failed: worker"),
+    ],
+    ids=("missing", "permission-denied", "exec-format", "generic-launch-error"),
+)
+def test_run_classifies_launch_errors_without_absolute_paths(monkeypatch, launch_error, expected_code, expected_stderr):
+    def raise_launch_error(*args, **kwargs):
+        raise launch_error
+
+    monkeypatch.setattr(proc.subprocess, "run", raise_launch_error)
+
+    result = proc.run(["/private/bin/worker"])
+
+    assert result.code == expected_code
+    assert result.stderr == expected_stderr
+    assert "/private/bin/worker" not in result.stderr
 
 
 def test_run_preserves_partial_output_on_timeout(monkeypatch):
