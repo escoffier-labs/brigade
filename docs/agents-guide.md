@@ -16,6 +16,8 @@ Brigade is local-first workspace wiring. Local-first means local data on the ope
 
 ## Installing Brigade For A User
 
+Brigade supports Linux, macOS, and native Windows PowerShell with Python 3.10 or newer. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required.
+
 When the user wants Brigade installed in a target repo or operator workspace, work in that target directory and run:
 
 ```bash

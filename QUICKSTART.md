@@ -4,6 +4,48 @@ Five minutes from install to a working agent kitchen.
 
 ## 1. Install
 
+Brigade supports Linux, macOS, and Windows with Python 3.10 or newer. Install `pipx` with the package manager for your OS, then install Brigade.
+
+### Linux
+
+Ubuntu 23.04+, Debian 12+, and Fedora use an externally managed system Python. Install `pipx` from the distribution package instead of using `pip install --user`:
+
+```bash
+# Ubuntu or Debian
+sudo apt update
+sudo apt install pipx
+
+# Fedora
+sudo dnf install pipx
+
+pipx ensurepath
+```
+
+On another distribution, use its `pipx` package when available. The [pipx install guide](https://pipx.pypa.io/latest/how-to/install-pipx.html) covers the virtual-environment fallback.
+
+### macOS
+
+```bash
+brew install pipx
+pipx ensurepath
+```
+
+### Windows PowerShell
+
+```powershell
+scoop install pipx
+pipx ensurepath
+```
+
+Without Scoop, use Python's Windows launcher:
+
+```powershell
+py -m pip install --user pipx
+# Run pipx.exe ensurepath from the directory printed by pip if it is not on PATH yet.
+```
+
+Open a new terminal after `pipx ensurepath`, then continue on any OS:
+
 ```bash
 pipx install brigade-cli
 ```
@@ -12,13 +54,6 @@ To track the latest `main` branch instead of the latest package release:
 
 ```bash
 pipx install git+https://github.com/escoffier-labs/brigade
-```
-
-If you do not have `pipx`:
-
-```bash
-python3 -m pip install --user pipx
-python3 -m pipx ensurepath
 ```
 
 ## First install
@@ -34,6 +69,15 @@ brigade operator quickstart --target ~/agent-workspace --depth workspace --harne
 ```
 
 Pass `--dry-run` first to preview the planned steps without writing anything.
+
+PowerShell uses Windows path spelling when you provide a path explicitly:
+
+```powershell
+brigade operator quickstart --target .\my-repo --harnesses codex
+brigade operator doctor --target .\my-repo --profile local-operator
+```
+
+No WSL is required. Worker CLIs must resolve to native executables; when an npm tool resolves only to a `.cmd` or `.bat` shim, Brigade reports the shim and asks for a native launcher. Shell completions currently cover bash, zsh, and fish. `brigade stations verify` is POSIX-only and reports `unsupported-platform` on Windows; quickstart, doctor, the work loop, and native worker runs are supported.
 
 Two commands share this surface: `brigade init` installs the template files only, and `brigade operator quickstart` wraps it with operator config, the MCP and dogfood on-ramps, writer verification, and health checks. Use `init` when you want the interactive harness picker or just the files:
 

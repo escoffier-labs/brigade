@@ -149,7 +149,12 @@ jobs:
           esac
 
   quickstart-smoke:
-    runs-on: ubuntu-latest
+    name: quickstart-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -160,7 +165,8 @@ jobs:
           python -m pip install --upgrade pip pipx
           pipx install .
           brigade --version
-      - name: Quickstart (minimal default)
+      - name: Quickstart (minimal default, Linux/macOS)
+        if: runner.os != 'Windows'
         run: |
           target="$(mktemp -d)"
           git init -q -b main "$target"
@@ -173,7 +179,23 @@ jobs:
           test ! -e "$target/tools"
           test ! -e "$target/rules"
           test ! -e "$target/INSTALL_FOR_AGENTS.md"
-      - name: Quickstart (--full)
+      - name: Quickstart (minimal default, PowerShell)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP "brigade-quickstart-minimal"
+          git init -q -b main $target
+          brigade operator quickstart --target $target --harnesses codex --json
+          brigade operator doctor --target $target --profile local-operator --json
+          if (-not (Test-Path (Join-Path $target ".brigade/config.json"))) { throw "missing Brigade config" }
+          if (-not (Test-Path (Join-Path $target ".codex/memory-handoffs"))) { throw "missing Codex handoff inbox" }
+          if (-not (Test-Path (Join-Path $target ".codex/skills/brigade-work/SKILL.md"))) { throw "missing brigade-work skill" }
+          if (-not (Test-Path (Join-Path $target "AGENTS.md"))) { throw "missing AGENTS.md" }
+          if (Test-Path (Join-Path $target "tools")) { throw "minimal install unexpectedly created tools" }
+          if (Test-Path (Join-Path $target "rules")) { throw "minimal install unexpectedly created rules" }
+          if (Test-Path (Join-Path $target "INSTALL_FOR_AGENTS.md")) { throw "minimal install unexpectedly created full-kit guide" }
+      - name: Quickstart (--full, Linux/macOS)
+        if: runner.os != 'Windows'
         run: |
           target="$(mktemp -d)"
           git init -q -b main "$target"
@@ -183,3 +205,15 @@ jobs:
           test -f "$target/tools/antislop.md"
           test -f "$target/INSTALL_FOR_AGENTS.md"
           test -f "$target/rules/issue-tdd-loop.md"
+      - name: Quickstart (--full, PowerShell)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP "brigade-quickstart-full"
+          git init -q -b main $target
+          brigade operator quickstart --target $target --harnesses codex --full --json
+          brigade operator doctor --target $target --profile local-operator --json
+          if (-not (Test-Path (Join-Path $target ".codex/skills/frontend/SKILL.md"))) { throw "missing frontend skill" }
+          if (-not (Test-Path (Join-Path $target "tools/antislop.md"))) { throw "missing antislop tool" }
+          if (-not (Test-Path (Join-Path $target "INSTALL_FOR_AGENTS.md"))) { throw "missing full-kit guide" }
+          if (-not (Test-Path (Join-Path $target "rules/issue-tdd-loop.md"))) { throw "missing issue/TDD rule" }
