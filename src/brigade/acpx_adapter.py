@@ -32,6 +32,12 @@ _PERMISSION_FAILURE = re.compile(
     r"\b(?:permission denied|permission required|not permitted|auto-denied)\b",
     re.IGNORECASE,
 )
+_LATE_PERMISSION_CODE = -32072
+_LATE_PERMISSION_DETAIL = "PERMISSION_PROMPT_UNAVAILABLE"
+_LATE_PERMISSION_MARKER = re.compile(
+    r"PERMISSION_PROMPT_UNAVAILABLE|-32072",
+    re.IGNORECASE,
+)
 _SAFE_STATUS_KEYS = ("hasAccessToken", "hasRefreshToken", "isAuthenticated", "status")
 
 
@@ -168,6 +174,48 @@ def installed_version() -> tuple[str | None, str]:
     return match.group(1), ""
 
 
+def _permission_prompt_diagnostic(error: object) -> dict[str, object] | None:
+    if not isinstance(error, dict):
+        return None
+    if error.get("code") != _LATE_PERMISSION_CODE:
+        return None
+    return {
+        "phase": "post-final",
+        "kind": "permission-prompt-unavailable",
+        "code": _LATE_PERMISSION_CODE,
+        "detail": _LATE_PERMISSION_DETAIL,
+    }
+
+
+def _late_permission_from_stderr(stderr: str, *, prompt_completed: bool) -> dict[str, object] | None:
+    if not prompt_completed or not stderr.strip():
+        return None
+    if not _LATE_PERMISSION_MARKER.search(stderr):
+        return None
+    return {
+        "phase": "post-final",
+        "kind": "permission-prompt-unavailable",
+        "code": _LATE_PERMISSION_CODE,
+        "detail": _LATE_PERMISSION_DETAIL,
+    }
+
+
+def _usable_with_late_permission(parsed: dict[str, Any], warning: dict[str, object]) -> bool:
+    return (
+        parsed.get("stop_reason") == "end_turn"
+        and bool(str(parsed.get("text", "")).strip())
+        and warning.get("phase") == "post-final"
+        and warning.get("kind") == "permission-prompt-unavailable"
+    )
+
+
+def _late_permission_detail(warning: dict[str, object]) -> str:
+    code = warning.get("code")
+    code_text = f"code {code}" if isinstance(code, int) else "code -32072"
+    base = str(warning.get("detail") or "PERMISSION_PROMPT_UNAVAILABLE")
+    return f"late permission prompt unavailable ({code_text}); preserved completed final answer: {base}"[:200]
+
+
 def _objects(stdout: str) -> tuple[list[dict[str, Any]] | None, str]:
     messages: list[dict[str, Any]] = []
     for line_number, line in enumerate(stdout.splitlines(), start=1):
@@ -221,6 +269,10 @@ def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
     stop_reasons: dict[str, str] = {}
     effective_model: str | None = None
     safe_events: list[dict[str, Any]] = []
+    prompt_completed = False
+    late_permission: dict[str, object] | None = None
+    stream_finalized = False
+    has_structured_jsonrpc_error = False
     for message in messages:
         result = message.get("result")
         if isinstance(result, dict):
@@ -230,6 +282,8 @@ def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
             stop = result.get("stopReason")
             if isinstance(stop, str) and isinstance(message.get("id"), (str, int)):
                 stop_reasons[str(message["id"])] = stop
+                if request_id is not None and str(message["id"]) == request_id and stop == "end_turn":
+                    prompt_completed = True
         params = message.get("params")
         if isinstance(params, dict):
             candidate_session = params.get("sessionId")
@@ -238,19 +292,29 @@ def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
             if message.get("method") == "session/prompt" and isinstance(message.get("id"), (str, int)):
                 request_id = str(message["id"])
         update = _update(message)
-        if update is None:
-            continue
-        kind = update.get("sessionUpdate")
-        safe_event: dict[str, Any] = {"type": str(kind or "session_update")}
-        status = update.get("status")
-        if isinstance(status, str):
-            safe_event["status"] = status
-        safe_events.append(safe_event)
-        effective_model = _model_from(update) or effective_model
-        if kind == "agent_message_chunk":
-            content = update.get("content")
-            if isinstance(content, dict) and content.get("type") == "text" and isinstance(content.get("text"), str):
-                text_parts.append(content["text"])
+        if update is not None:
+            kind = update.get("sessionUpdate")
+            safe_event: dict[str, Any] = {"type": str(kind or "session_update")}
+            status = update.get("status")
+            if isinstance(status, str):
+                safe_event["status"] = status
+            safe_events.append(safe_event)
+            effective_model = _model_from(update) or effective_model
+            if not stream_finalized and kind == "agent_message_chunk":
+                content = update.get("content")
+                if isinstance(content, dict) and content.get("type") == "text" and isinstance(content.get("text"), str):
+                    text_parts.append(content["text"])
+        rpc_error = message.get("error")
+        if isinstance(rpc_error, dict):
+            has_structured_jsonrpc_error = True
+        permission_error = _permission_prompt_diagnostic(rpc_error)
+        if permission_error is not None:
+            if prompt_completed:
+                if "".join(text_parts).strip():
+                    late_permission = permission_error
+                stream_finalized = True
+            else:
+                return None, str(permission_error["detail"])
     if request_id is not None:
         stop_reason = stop_reasons.get(request_id)
     elif len(stop_reasons) == 1:
@@ -260,7 +324,7 @@ def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
     text = "".join(text_parts).strip()
     if not text:
         return None, "ACP stream contained no final assistant text"
-    return {
+    parsed: dict[str, Any] = {
         "text": text,
         "protocol_version": protocol_version or 1,
         "session_id": session_id,
@@ -268,7 +332,12 @@ def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
         "stop_reason": stop_reason,
         "effective_model": effective_model,
         "events": safe_events,
-    }, ""
+        "prompt_completed": prompt_completed,
+        "has_structured_jsonrpc_error": has_structured_jsonrpc_error,
+    }
+    if late_permission is not None:
+        parsed["late_permission"] = late_permission
+    return parsed, ""
 
 
 def run_cursor(
@@ -370,6 +439,57 @@ def run_cursor(
     result = proc.run(argv, timeout=timeout + 5.0, cwd=cwd)
     parsed, parse_error = parse_stream(result.stdout)
     if result.code != 0:
+        late_warning: dict[str, object] | None = None
+        if parsed is not None:
+            candidate = parsed.get("late_permission")
+            late_warning = candidate if isinstance(candidate, dict) else None
+            if late_warning is None and not parsed.get("has_structured_jsonrpc_error"):
+                late_warning = _late_permission_from_stderr(
+                    result.stderr,
+                    prompt_completed=bool(parsed.get("prompt_completed")),
+                )
+        if parsed is not None and late_warning is not None and _usable_with_late_permission(parsed, late_warning):
+            output_failure = validate_final_output(parsed["text"])
+            if output_failure is not None:
+                return AgentResult(
+                    text=parsed["text"],
+                    ok=False,
+                    detail=output_failure.detail,
+                    failure_phase="output-validation",
+                    failure_kind=output_failure.kind,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    exit_code=result.code,
+                    transport="acpx",
+                    requested_model=model,
+                    effective_model=parsed["effective_model"],
+                    stop_reason=parsed["stop_reason"],
+                    protocol_version=parsed["protocol_version"],
+                    session_id=parsed["session_id"],
+                    request_id=parsed["request_id"],
+                    acpx_version=installed,
+                    safe_events=(auth_event, *parsed["events"]),
+                    transport_warning=late_warning,
+                )
+            warning_detail = _late_permission_detail(late_warning)
+            return AgentResult(
+                text=parsed["text"],
+                ok=True,
+                detail=warning_detail,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.code,
+                transport="acpx",
+                requested_model=model,
+                effective_model=parsed["effective_model"],
+                stop_reason=parsed["stop_reason"],
+                protocol_version=parsed["protocol_version"],
+                session_id=parsed["session_id"],
+                request_id=parsed["request_id"],
+                acpx_version=installed,
+                safe_events=(auth_event, *parsed["events"]),
+                transport_warning=late_warning,
+            )
         detail = result.stderr.strip() or parse_error or f"acpx exit {result.code}"
         timed_out = result.code in {3, 124}
         provider_startup = parsed is None
@@ -395,6 +515,10 @@ def run_cursor(
             transport="acpx",
             requested_model=model,
             effective_model=parsed.get("effective_model") if parsed is not None else None,
+            stop_reason=parsed.get("stop_reason") if parsed is not None else None,
+            protocol_version=parsed.get("protocol_version") if parsed is not None else None,
+            session_id=parsed.get("session_id") if parsed is not None else None,
+            request_id=parsed.get("request_id") if parsed is not None else None,
             acpx_version=installed,
             safe_events=(auth_event, *(parsed["events"] if parsed is not None else [])),
         )

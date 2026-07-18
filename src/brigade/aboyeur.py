@@ -1629,6 +1629,7 @@ def _run_payload(
     error: str | None = None,
     failure_phase: str | None = None,
     failure_kind: str | None = None,
+    transport_warning: dict[str, object] | None = None,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
@@ -1700,6 +1701,8 @@ def _run_payload(
                 "kind": failure_kind or "unknown",
                 "detail": error,
             }
+    if transport_warning is not None:
+        payload["transport_warning"] = dict(transport_warning)
     if codex_transport is not None:
         payload["codex_transport"] = codex_transport
     if control_socket is not None:
@@ -2188,6 +2191,7 @@ def run(
                     context_eval_payload=context_eval_payload,
                     suspected_noop=suspected_noop,
                     worker=worker,
+                    transport_warning=final.transport_warning,
                 ),
             )
         if direct_worker:
@@ -2223,6 +2227,7 @@ def run(
                 context_eval_payload=context_eval_payload,
                 suspected_noop=suspected_noop,
                 worker=worker,
+                transport_warning=direct_result.transport_warning if direct_worker else None,
             ),
         )
     if handoff_inbox is not None:

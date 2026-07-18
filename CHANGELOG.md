@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- ACPX late permission prompts after a completed `end_turn` answer no longer discard the usable final result. Brigade now preserves the terminal text, stdout/stderr, exit code, session/request metadata, and records a typed `transport_warning` while marking the worker `ok` with warning instead of failing the run. Post-permission assistant chunks and permission errors without pre-final text no longer qualify as usable-with-warning. Pre-final permission failures remain failed. Stderr fallback infers late `-32072` only when the stream has no structured JSON-RPC error; any structured error takes precedence over stderr markers. (#277)
+
 ### Added
 - `brigade repos adoption` separates configured harness wiring from observed work-loop use across the local repository fleet. It reports `unwired`, `partial`, `advisory-only`, `enforced-idle`, `active`, `bypassed`, and `stale` rows, correlates Claude session writes with brief, verify, outcome, GraphTrail, MiseLedger, and handoff evidence, exposes fleet denominators and stable JSON monitor keys, and provides a read-only `repair` plan. (#257)
 - `brigade operator checkup` accepts repeatable `--surface` selectors, lists stable surface names with `--list-surfaces`, and provides an `evidence-loop` preset for work receipt integrity and outcome capture, GraphTrail health and receipt deltas, and MiseLedger work-receipt import state. Scoped JSON separates `selected_ready` from unevaluated `overall_ready` and reports selected, skipped, and per-surface elapsed data. The default six-doctor checkup is unchanged. (#256)

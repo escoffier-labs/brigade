@@ -1679,6 +1679,156 @@ def test_direct_acpx_auth_failure_reaches_worker_run_receipt_and_human_summary(m
     }
 
 
+def test_direct_acpx_late_permission_preserves_final_in_artifacts(monkeypatch, tmp_path):
+    from brigade import acpx_adapter
+
+    final_text = "Actionable review findings."
+    warning = {
+        "phase": "post-final",
+        "kind": "permission-prompt-unavailable",
+        "code": -32072,
+        "detail": "PERMISSION_PROMPT_UNAVAILABLE",
+    }
+
+    def fake_cursor(prompt, **kwargs):
+        return agents.AgentResult(
+            text=final_text,
+            ok=True,
+            detail="late permission prompt unavailable (code -32072); preserved completed final answer",
+            stdout="acp stdout preserved",
+            stderr="PERMISSION_PROMPT_UNAVAILABLE",
+            exit_code=5,
+            transport="acpx",
+            requested_model="composer-2.5",
+            effective_model="composer-2.5",
+            stop_reason="end_turn",
+            protocol_version=1,
+            session_id="session-1",
+            request_id="req-1",
+            acpx_version="0.12.0",
+            transport_warning=warning,
+        )
+
+    monkeypatch.setattr(acpx_adapter, "run_cursor", fake_cursor)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "codex", "plan"),
+            "composer": Agent(
+                "composer",
+                "cursor",
+                "review",
+                model="composer-2.5",
+                transport="acpx",
+                transport_version="0.12.0",
+            ),
+        },
+    )
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "inspect",
+        roster,
+        worker="composer",
+        cwd=tmp_path,
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 0
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["ok"] is True
+    assert worker["text"] == final_text
+    assert worker["exit_code"] == 5
+    assert worker["stop_reason"] == "end_turn"
+    assert worker["session_id"] == "session-1"
+    assert worker["request_id"] == "req-1"
+    assert worker["transport_warning"] == warning
+    assert (output_dir / worker["stdout_log"]).read_text() == "acp stdout preserved"
+    assert (output_dir / worker["stderr_log"]).read_text() == "PERMISSION_PROMPT_UNAVAILABLE"
+    assert (output_dir / "final.txt").read_text() == f"{final_text}\n"
+    run_payload = json.loads((output_dir / "run.json").read_text())
+    assert run_payload["status"] == "ok"
+    assert run_payload["transport_warning"] == warning
+
+
+def test_direct_acpx_late_permission_output_validation_failure_preserves_warning(monkeypatch, tmp_path):
+    from brigade import acpx_adapter
+
+    final_text = "Reviewing repository files."
+    warning = {
+        "phase": "post-final",
+        "kind": "permission-prompt-unavailable",
+        "code": -32072,
+        "detail": "PERMISSION_PROMPT_UNAVAILABLE",
+    }
+
+    def fake_cursor(prompt, **kwargs):
+        return agents.AgentResult(
+            text=final_text,
+            ok=False,
+            detail="provider returned progress or intent without a final result",
+            stdout="acp stdout preserved",
+            stderr="PERMISSION_PROMPT_UNAVAILABLE",
+            exit_code=5,
+            transport="acpx",
+            requested_model="composer-2.5",
+            effective_model="composer-2.5",
+            stop_reason="end_turn",
+            protocol_version=1,
+            session_id="session-1",
+            request_id="req-1",
+            acpx_version="0.12.0",
+            failure_phase="output-validation",
+            failure_kind="non-final-output",
+            transport_warning=warning,
+        )
+
+    monkeypatch.setattr(acpx_adapter, "run_cursor", fake_cursor)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "codex", "plan"),
+            "composer": Agent(
+                "composer",
+                "cursor",
+                "review",
+                model="composer-2.5",
+                transport="acpx",
+                transport_version="0.12.0",
+            ),
+        },
+    )
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "inspect",
+        roster,
+        worker="composer",
+        cwd=tmp_path,
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 2
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["ok"] is False
+    assert worker["failure_phase"] == "output-validation"
+    assert worker["failure_kind"] == "non-final-output"
+    assert worker["transport_warning"] == warning
+    synthesis = json.loads((output_dir / "synthesis.json").read_text())
+    assert synthesis["mode"] == "direct-worker"
+    assert synthesis["result"]["ok"] is False
+    assert synthesis["result"]["transport_warning"] == warning
+    run_payload = json.loads((output_dir / "run.json").read_text())
+    assert run_payload["status"] == "failed"
+    assert run_payload["failure_phase"] == "output-validation"
+    assert run_payload["transport_warning"] == warning
+    assert (output_dir / "final.txt").read_text().strip() == final_text
+
+
 def test_roster_payload_includes_model():
     payload = aboyeur._roster_payload(_model_roster())
     assert payload["agents"]["architect"]["model"] == "claude-fable-5"
