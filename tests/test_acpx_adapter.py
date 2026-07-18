@@ -593,6 +593,84 @@ def test_run_distinguishes_timeout_permission_and_provider_startup(monkeypatch, 
     assert startup.failure_kind == "provider-startup"
 
 
+def test_run_parses_large_ndjson_with_non_ascii_final(monkeypatch, tmp_path):
+    padding = "x" * 400_000
+    final_text = f"{padding} résumé validé — aucun problème."
+    stream = _success_stream().replace('"text": "hello"', f'"text": {json.dumps(final_text)}')
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(0, stream, "")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is True
+    assert result.text == final_text
+    assert result.exit_code == 0
+
+
+def test_run_handles_absent_decoded_output_without_counting_verdict(monkeypatch, tmp_path):
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    decode_error = "child stdout is not valid UTF-8 (utf-8): 'utf-8' codec can't decode byte 0x9d in position 0"
+    outputs = iter(
+        [
+            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(
+                0,
+                "",
+                decode_error,
+                stdout_decode_error=decode_error,
+            ),
+        ]
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.text == ""
+    assert result.stdout == ""
+    assert result.exit_code == 0
+    assert result.failure_phase == "harness"
+    assert result.failure_kind == "decode-failure"
+    assert decode_error in result.detail
+
+
+def test_run_rejects_invalid_utf8_stderr_with_valid_acp_stdout(monkeypatch, tmp_path):
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    decode_error = "child stderr is not valid UTF-8 (utf-8): 'utf-8' codec can't decode byte 0x9d in position 0"
+    outputs = iter(
+        [
+            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(
+                0,
+                _success_stream(),
+                decode_error,
+                stderr_decode_error=decode_error,
+            ),
+        ]
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.text == ""
+    assert result.exit_code == 0
+    assert result.failure_phase == "harness"
+    assert result.failure_kind == "decode-failure"
+    assert decode_error in result.detail
+    assert "hello" not in result.text
+
+
 def test_run_preserves_end_turn_final_after_late_permission_prompt(monkeypatch, tmp_path):
     stream = _late_permission_stream()
     monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")

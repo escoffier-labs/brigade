@@ -408,6 +408,60 @@ def test_run_agent_captures_output(monkeypatch):
     assert res.timed_out is False
 
 
+def test_run_agent_rejects_decode_failure_even_when_exit_zero(monkeypatch):
+    decode_error = "child stderr is not valid UTF-8 (utf-8): 'utf-8' codec can't decode byte 0x9d in position 0"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(
+            0,
+            "final answer\n",
+            decode_error,
+            stderr_decode_error=decode_error,
+        ),
+    )
+
+    result = agents.run_agent("codex", "do it")
+
+    assert result.ok is False
+    assert result.text == "final answer"
+    assert result.exit_code == 0
+    assert result.failure_phase == "harness"
+    assert result.failure_kind == "decode-failure"
+    assert decode_error in result.detail
+
+
+def test_run_agent_rejects_structured_grok_decode_failure_before_parsing(monkeypatch):
+    decode_error = "child stdout is not valid UTF-8 (utf-8): 'utf-8' codec can't decode byte 0x9d in position 7"
+    partial_stdout = "prefix\n\ufffd"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(
+            0,
+            partial_stdout,
+            decode_error,
+            stdout_decode_error=decode_error,
+        ),
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("_parse_grok_final_output must not run when decode_failed")
+
+    monkeypatch.setattr(agents, "_parse_grok_final_output", fail_if_called)
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert result.text == partial_stdout.strip()
+    assert result.exit_code == 0
+    assert result.failure_phase == "harness"
+    assert result.failure_kind == "decode-failure"
+    assert decode_error in result.detail
+
+
 def test_run_agent_rejects_intent_only_antigravity_output(monkeypatch):
     output = "\n".join(
         [
