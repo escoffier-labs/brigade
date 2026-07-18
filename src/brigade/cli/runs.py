@@ -168,7 +168,7 @@ def _control_request(run: str, *, cwd: Path, runs_dir: Path | None, payload: Map
     assert run_dir is not None
     try:
         socket_path = run_control.control_socket_from_run(run_dir)
-        response = run_control.send_request(socket_path, dict(payload))
+        response = run_control.send_request_with_retry(run_dir, socket_path, dict(payload))
     except run_control.ControlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
