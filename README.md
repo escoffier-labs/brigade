@@ -299,6 +299,7 @@ I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions. 
 - [Overview](docs/overview.md): the full tour of every station and diagram.
 - [Technical guide](docs/technical-guide.md): the detailed command walkthrough.
 - [MCP sync](docs/mcp-sync.md): the canonical catalog, supported tools, and merge rules.
+- [Wiring GraphTrail and MiseLedger](docs/wiring-graphtrail-miseledger.md): register the code-graph and evidence MCP servers in Claude Code and Codex, verify the wiring, and keep them from going dormant.
 - [Security and Content Guard](docs/security.md): scanner policies, handoff guards, import flow.
 - [Handoff promotion](docs/handoff-promotion.md): how notes move toward memory.
 - [Repo fleet](docs/repo-fleet.md) and [Tool catalog](docs/tool-catalog.md).
