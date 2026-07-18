@@ -11,7 +11,7 @@ brigade --version
 
 Expected: `brigade X.Y.Z` matching the [latest release](https://pypi.org/project/brigade-cli/).
 
-If `pipx` is missing, install it with your OS package manager or Python packaging tool, then rerun the command above. Brigade requires Python 3.10 or newer.
+If `pipx` is missing, follow the [Linux, macOS, or Windows install steps](../QUICKSTART.md#1-install), then rerun the command above. Brigade requires Python 3.10 or newer and does not require WSL on Windows.
 
 ## 2. Pick A Target
 
@@ -21,12 +21,20 @@ For a code repo:
 cd ./my-repo
 ```
 
-For a scratch check:
+For a scratch check on Linux or macOS:
 
 ```bash
 target="$(mktemp -d)"
 git init -q -b main "$target"
 cd "$target"
+```
+
+In PowerShell:
+
+```powershell
+$target = Join-Path $env:TEMP "brigade-scratch"
+git init -q -b main $target
+Set-Location $target
 ```
 
 For an operator workspace such as an OpenClaw or Hermes home, use that workspace directory instead of a code repo.

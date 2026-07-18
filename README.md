@@ -32,6 +32,8 @@
 
 ## Install
 
+Brigade runs on Linux, macOS, and Windows with Python 3.10 or newer. The CLI and quickstart commands are the same on every platform; only the one-time `pipx` setup differs. See the [per-OS install guide](https://brigade.tools/docs/getting-started/install) for apt, Homebrew, Scoop, and PowerShell instructions.
+
 ```bash
 pipx install brigade-cli
 pipx ensurepath          # then open a new shell so `brigade` is on PATH
