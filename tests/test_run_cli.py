@@ -1122,6 +1122,7 @@ def test_app_server_fallback_clears_uncreated_control_socket(tmp_path, monkeypat
     assert rc == 0
     assert run_meta["codex_transport"] == "exec"
     assert "control_socket" not in run_meta
+    assert "control_transport" not in run_meta
 
 
 def _write_successful_worktree_run(output_dir: Path, cwd: Path, *, final: str = "done") -> None:
