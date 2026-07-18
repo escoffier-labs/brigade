@@ -1,0 +1,15 @@
+{
+  "provenance": "direct_native_windows_command_probe",
+  "date": "2026-07-18",
+  "platform": "windows",
+  "miseledger_evidence_id": null,
+  "scope": "Bare command availability and --version output on native Windows without Brigade synthesis",
+  "fields": {
+    "codex_cli_version": "codex-cli 0.144.5",
+    "codex_desktop_package_version": "26.707.9981.0",
+    "cursor_agent_version": "2026.07.13-7fe37d2",
+    "cursor_desktop_present": true,
+    "agy_present": false,
+    "antigravity_present": false
+  }
+}
