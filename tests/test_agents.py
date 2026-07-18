@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -1212,8 +1213,9 @@ def test_run_agent_scrubs_resolved_env_values_from_success_output(monkeypatch):
     assert token not in result.text
     assert token not in result.stdout
     assert token not in result.stderr
-    assert endpoint not in result.text
-    assert result.text == "answer used [ANTHROPIC_AUTH_TOKEN] at [ANTHROPIC_BASE_URL]"
+    # ANTHROPIC_BASE_URL is plain roster config, not a *_REF secret: it stays
+    # readable in output (#323).
+    assert result.text == f"answer used [ANTHROPIC_AUTH_TOKEN] at {endpoint}"
     assert result.stderr == "debug auth=[ANTHROPIC_AUTH_TOKEN]\n"
 
 
@@ -1238,16 +1240,18 @@ def test_run_agent_scrubs_resolved_env_value_from_failure_detail(monkeypatch):
 
 
 def test_run_agent_scrubs_longer_overlapping_env_value_first(monkeypatch):
-    endpoint = "https://api.example.test/v1"
-    host = "api.example.test"
+    secret = "https://token.example.test/v1-secret"
+    fragment = "token.example.test/v1"
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setattr(
         agents.proc,
         "run",
-        lambda argv, **kw: agents.proc.Result(0, f"connected to {endpoint}\n", ""),
+        lambda argv, **kw: agents.proc.Result(0, f"connected to {secret}\n", ""),
     )
+    monkeypatch.setenv("LANE_SECRET", secret)
+    monkeypatch.setenv("LANE_FRAGMENT", fragment)
 
-    result = agents.run_agent("claude", "hi", env={"ENDPOINT": endpoint, "HOST_FRAGMENT": host})
+    result = agents.run_agent("claude", "hi", env={"ENDPOINT_REF": "LANE_SECRET", "HOST_FRAGMENT_REF": "LANE_FRAGMENT"})
 
     assert result.ok
     assert result.text == "connected to [ENDPOINT]"
@@ -1261,11 +1265,196 @@ def test_run_agent_scrubs_equal_env_values_with_stable_target(monkeypatch):
         "run",
         lambda argv, **kw: agents.proc.Result(0, f"configured {shared}\n", ""),
     )
+    monkeypatch.setenv("LANE_SHARED", shared)
 
-    result = agents.run_agent("claude", "hi", env={"Z_MODE": shared, "A_MODE": shared})
+    result = agents.run_agent("claude", "hi", env={"Z_MODE_REF": "LANE_SHARED", "A_MODE_REF": "LANE_SHARED"})
 
     assert result.ok
     assert result.text == "configured [A_MODE]"
+
+
+def test_run_agent_never_scrubs_short_plain_flag_values(monkeypatch):
+    """Regression for #323: a proxy seat with a '1'-valued flag corrupted plan JSON."""
+    plan = '{"assignments":[{"stage":1,"worker":"coder"},{"stage":2,"worker":"reviewer"}]}'
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, plan + "\n", ""),
+    )
+    monkeypatch.setenv("CLIPROXY_API_KEY", "proxy-secret-value-long-enough")
+
+    result = agents.run_agent(
+        "claude",
+        "plan it",
+        env={
+            "ANTHROPIC_BASE_URL": "https://proxy.local.test/anthropic",
+            "ANTHROPIC_AUTH_TOKEN_REF": "CLIPROXY_API_KEY",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        },
+    )
+
+    assert result.ok
+    assert result.text == plan
+
+
+def test_run_agent_skips_short_secret_values(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, "stage 1 of 3 done\n", ""),
+    )
+    monkeypatch.setenv("LANE_SHORT", "1")
+
+    result = agents.run_agent("claude", "hi", env={"LANE_MODE_REF": "LANE_SHORT"})
+
+    assert result.ok
+    assert result.text == "stage 1 of 3 done"
+
+
+def test_run_agent_scrubs_alnum_secret_only_on_word_boundaries(monkeypatch):
+    secret = "abcd1234efgh"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"token {secret} inside receiptabcd1234efghtail\n", ""),
+    )
+    monkeypatch.setenv("LANE_ALNUM", secret)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
+
+    assert result.ok
+    assert result.text == "token [LANE_TOKEN] inside receiptabcd1234efghtail"
+
+
+def test_run_agent_skips_alnum_secret_embedded_in_unicode_identifier(monkeypatch):
+    secret = "abcd1234efgh"
+    embedded = f"é{secret}終"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"token {embedded}\n", ""),
+    )
+    monkeypatch.setenv("LANE_ALNUM", secret)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
+
+    assert result.ok
+    assert result.text == f"token {embedded}"
+
+
+def test_scrub_secret_boundary_treats_left_combining_mark_as_identifier_continuation():
+    secret = "abcd1234efgh"
+    overrides = {"LANE_TOKEN": secret}
+    targets = {"LANE_TOKEN"}
+    # NFD é (e + combining acute) before the secret: \w-only boundaries treat U+0301 as a
+    # delimiter and would scrub the secret inside this decomposed identifier.
+    left_embedded = f"token e\u0301{secret} done"
+    old_pattern = re.compile(rf"(?<!\w){re.escape(secret)}(?!\w)")
+    assert old_pattern.search(left_embedded) is not None
+
+    scrubbed = agents._scrub_env_override_values(left_embedded, overrides, targets)
+    assert scrubbed == left_embedded
+    assert secret in scrubbed
+
+    standalone = f"token {secret} done"
+    assert agents._scrub_env_override_values(standalone, overrides, targets) == "token [LANE_TOKEN] done"
+
+
+def test_scrub_secret_boundary_treats_right_combining_mark_as_identifier_continuation():
+    secret = "abcd1234efgh"
+    overrides = {"LANE_TOKEN": secret}
+    targets = {"LANE_TOKEN"}
+    # Combining acute on the secret's trailing character continues the identifier; \w-only
+    # boundaries treat U+0301 as a delimiter and would scrub the secret here.
+    right_embedded = f"token {secret}\u0301x done"
+    old_pattern = re.compile(rf"(?<!\w){re.escape(secret)}(?!\w)")
+    assert old_pattern.search(right_embedded) is not None
+
+    scrubbed = agents._scrub_env_override_values(right_embedded, overrides, targets)
+    assert scrubbed == right_embedded
+    assert secret in scrubbed
+
+    standalone = f"token {secret} done"
+    assert agents._scrub_env_override_values(standalone, overrides, targets) == "token [LANE_TOKEN] done"
+
+
+def test_run_agent_skips_alnum_secret_embedded_with_decomposed_left_combining_mark(monkeypatch):
+    secret = "abcd1234efgh"
+    embedded = f"e\u0301{secret}"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"token {embedded}\n", ""),
+    )
+    monkeypatch.setenv("LANE_ALNUM", secret)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
+
+    assert result.ok
+    assert result.text == f"token {embedded}"
+
+
+def test_run_agent_skips_alnum_secret_embedded_with_decomposed_right_combining_mark(monkeypatch):
+    secret = "abcd1234efgh"
+    embedded = f"{secret}\u0301x"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"token {embedded}\n", ""),
+    )
+    monkeypatch.setenv("LANE_ALNUM", secret)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
+
+    assert result.ok
+    assert result.text == f"token {embedded}"
+
+
+def test_run_agent_scrubs_alnum_secret_delimited_by_unicode_punctuation(monkeypatch):
+    secret = "abcd1234efgh"
+    delimited = f"《{secret}》"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"token {delimited}\n", ""),
+    )
+    monkeypatch.setenv("LANE_ALNUM", secret)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
+
+    assert result.ok
+    assert result.text == "token 《[LANE_TOKEN]》"
+
+
+@pytest.mark.parametrize(
+    ("secret", "embedded", "standalone"),
+    [
+        ("alpha-beta-gamma", "prefixalpha-beta-gammasuffix", "token alpha-beta-gamma done"),
+        ("alpha_beta_gamma", "prefixalpha_beta_gammasuffix", "token alpha_beta_gamma done"),
+        ("alpha.beta.gamma", "prefixalpha.beta.gammasuffix", "token alpha.beta.gamma done"),
+        ("alpha/beta/gamma", "prefixalpha/beta/gammasuffix", "token alpha/beta/gamma done"),
+    ],
+)
+def test_run_agent_scrubs_secret_only_on_identifier_edges(monkeypatch, secret, embedded, standalone):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"{standalone} inside {embedded}\n", ""),
+    )
+    monkeypatch.setenv("LANE_SECRET", secret)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_SECRET"})
+
+    assert result.ok
+    assert result.text == f"token [LANE_TOKEN] done inside {embedded}"
 
 
 def test_run_agent_scrubs_structured_grok_after_parsing(monkeypatch):
