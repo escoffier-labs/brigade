@@ -7,8 +7,8 @@ This path gets MiseLedger from a fresh install to a local evidence archive that 
 Install MiseLedger:
 
 ```bash
-MISELEDGER_VERSION=v0.5.0
-curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.5.0/install.sh
+MISELEDGER_VERSION=v0.6.0
+curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.6.0/install.sh
 cat install.sh  # review before running
 MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
 miseledger version
@@ -85,7 +85,7 @@ sessionfind list --source codex --json
 sessionfind "release audit" --source codex --json
 ```
 
-The project filter matches normalized project, workspace, workspace-directory, and working-directory metadata. The JSON `workspace` field prefers `workspace`, then `workspace_dir`, then `cwd`; an unmatched project value is omitted when a workspace-like value satisfied an active project filter. Session JSON also includes normalized model, harness, and source name fields when available.
+The project filter matches normalized project, workspace, workspace-directory, and working-directory metadata. The JSON `workspace` field prefers `workspace`, then `workspace_dir`, then `cwd`. An unmatched project value is omitted when a workspace-like value satisfied an active project filter. Session JSON also includes normalized model, harness, and source name fields when available.
 
 ## Import Local Sources
 
@@ -133,7 +133,7 @@ miseledger import adapter old-export.adapter.jsonl   # any adapter JSONL you exp
 
 Rules that keep re-ingestion clean when the same records can arrive by more than one path:
 
-1. Pick one canonical path per source and keep using it. `crawl <provider>` pins the source kind; a historical adapter file from the same crawler carries the same kind, so the two paths deduplicate against each other. Items are content-addressed (source kind, collection, external id, normalized text), and re-runs skip known items.
+1. Pick one canonical path per source and keep using it. `crawl <provider>` pins the source kind. A historical adapter file from the same crawler carries the same kind, so the two paths deduplicate against each other. Items are content-addressed (source kind, collection, external id, normalized text), and re-runs skip known items.
 2. Do not rename kinds with `--source` (see above). This is the one way to create duplicates from a single crawler.
 3. Pick one redaction posture per source. The content hash is part of the item identity, so importing the same session once raw and once with `--redact paths,secrets` stores two near-identical items. Redact everywhere or nowhere for a given source.
 4. Wiring Brigade next to MiseLedger adds no dedupe risk: Brigade's memory cards and handoffs are a separate store, and its evidence bundles only read from the archive.

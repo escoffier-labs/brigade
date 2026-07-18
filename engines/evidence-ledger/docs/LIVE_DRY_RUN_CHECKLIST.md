@@ -53,7 +53,7 @@ miseledger crawl gmail --account you@example.com --query "subject:miseledger" --
 scripts/smoke_gmail_metadata.sh
 ```
 
-Gmail account selection stays explicit. `scripts/smoke_gmail_metadata.sh` reads the first configured Gog account and runs a metadata-only dry-run with `MISELEDGER_GMAIL_SMOKE_QUERY`, defaulting to `subject:miseledger`; it does not import mail.
+Gmail account selection stays explicit. `scripts/smoke_gmail_metadata.sh` reads the first configured Gog account and runs a metadata-only dry-run with `MISELEDGER_GMAIL_SMOKE_QUERY`, defaulting to `subject:miseledger`. It does not import mail.
 
 ## Safe Import
 

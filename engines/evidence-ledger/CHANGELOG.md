@@ -8,6 +8,8 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-18
+
 ### Added
 
 - `miseledger schedule run|daemon` for repeatable local crawler schedules from a
@@ -17,6 +19,10 @@ Releases before this changelog was started are on the [releases page](https://gi
 - Current Cursor conversation ingestion from the read-only
   `User/globalStorage/conversation-search.db` search database, including WAL
   scan tracking and body search. Legacy Cursor Agent JSON remains supported.
+- Native Pi agent session JSONL ingestion for `~/.pi/agent/sessions`, including
+  `import pi`, `crawl sessions`, watch, and sources discover coverage.
+- `sessions list` and `sessions search` (and the `sessionfind` wrapper) accept
+  `--project` and `--model` filters backed by stored session metadata.
 - Contract tests for all six source-owned adapter exporters: Discrawl,
   Gitcrawl, Slacrawl, Graincrawl, Notcrawl, and Mailcrawl.
 
@@ -27,6 +33,8 @@ Releases before this changelog was started are on the [releases page](https://gi
 - `crawl telegram` now converts Telecrawl's public `--json messages` output to
   adapter records. This supports installed Telecrawl 0.1.0 builds that do not
   provide an `export adapter` command.
+- The Pi adapter now indexes thinking blocks and tool-call arguments so extended
+  reasoning and tool use are searchable.
 
 ## [0.5.0] - 2026-07-11
 
@@ -43,7 +51,7 @@ Releases before this changelog was started are on the [releases page](https://gi
   evidence Markdown, and version conformance. `doctor --help` and
   `evidence --help` now return without opening the archive or creating cache
   state (#24).
-- Release assets now carry GitHub build provenance; verify a download with
+- Release assets now carry GitHub build provenance. Verify a download with
   `gh attestation verify <asset> --repo escoffier-labs/miseledger` (#30).
 - A redacted Cursor fixture under `testdata/harnesses` exercises the cursor
   adapter the same way the other harness fixtures do (#26).
@@ -53,11 +61,11 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ### Changed
 
-- Session listing and preview queries use a new collection-leading items index;
-  existing archives pick it up automatically on next open (#25).
+- Session listing and preview queries use a new collection-leading items index.
+  Existing archives pick it up automatically on next open (#25).
 - Relation backfill resolves targets through a dedicated
   `items(source_id, external_id)` index (#18).
-- Install docs lead with a pinned, checksum-verified path; the mutable-HEAD
+- Install docs lead with a pinned, checksum-verified path. The mutable-HEAD
   one-liner is a labeled alternative (#28).
 - The CLI dispatch and top-level help are generated from one command table, and
   flag parsing is consolidated into shared helpers. Help output and command
@@ -69,8 +77,8 @@ Releases before this changelog was started are on the [releases page](https://gi
   print an `ok: true` line, `--addr 127.0.0.1:0` reports the actual bound
   address, and shutdown exits cleanly (#27, #32).
 - The release workflow no longer fails when the GitHub release for the tag
-  already exists; it uploads assets to it instead. The v0.4.0 release shipped
-  with no assets for five days because of this failure mode; assets were
+  already exists. It uploads assets to it instead. The v0.4.0 release shipped
+  with no assets for five days because of this failure mode. Assets were
   rebuilt from the tag and re-uploaded (#30).
 
 ## [0.4.0] - 2026-07-06
@@ -108,7 +116,7 @@ Releases before this changelog was started are on the [releases page](https://gi
   `files_parsed`/`files_skipped`, and persist each file's scan row as soon as
   its records are committed, so interrupted catch-up runs on large archives
   make durable progress instead of restarting from zero. `--since` and `--full`
-  bypass the fast path; dry runs record nothing (#10).
+  bypass the fast path. Dry runs record nothing (#10).
 - The OpenCode adapter skips `session_diff` JSON arrays instead of emitting a
   parse warning for every file (#11).
 
@@ -163,7 +171,7 @@ integration surface for external exporters.
 - MCP stdio server now accepts newline-delimited JSON-RPC (the ratified MCP stdio
   transport used by Claude Desktop, the MCP Inspector, and Glama) in addition to the
   LSP-style `Content-Length` framing. A spec-compliant client previously got a server
-  that silently produced no output; the framing is detected from the first message and
+  that silently produced no output. The framing is detected from the first message and
   responses match it.
 - Commit the synthetic `testdata/exports/*.json` fixtures that an over-broad
   `exports/` `.gitignore` rule had excluded, so `go test ./...` passes on a clean

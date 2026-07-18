@@ -79,7 +79,7 @@ Scanner rules:
 - Stream generated adapter records into ingest during native imports.
 - Record source-file scan manifests with path, size, mtime, content hash, generated hash, record count, and warnings.
 
-Claude support targets `~/.claude/projects/**/*.jsonl` style project logs. The MVP scanner imports ordinary project session JSONL and does not special-case subagents yet; subagent lines are treated as normal agent-session evidence unless a future fixture shows a safer split.
+Claude support targets `~/.claude/projects/**/*.jsonl` style project logs. The MVP scanner imports ordinary project session JSONL and does not special-case subagents yet. Subagent lines are treated as normal agent-session evidence unless a future fixture shows a safer split.
 
 Hermes support targets `~/.hermes/sessions/session_*.json` snapshots and trajectory JSONL. MiseLedger does not parse Hermes `state.db` directly.
 

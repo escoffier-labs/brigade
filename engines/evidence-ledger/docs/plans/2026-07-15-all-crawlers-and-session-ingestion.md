@@ -53,7 +53,7 @@ Verification: focused RED/GREEN tests per task, then `go vet ./...`, `go test ./
 - Modify: `internal/app/watch.go`
 - Modify: `internal/app/app_test.go`
 
-- [x] Add the synthetic summary fixture with title `Synthetic Grok crawler audit`, model `grok-code-fast-1`, timestamps, branch, commit, workspace, and a fake session summary. Add chat lines for `system`, `user`, `assistant`, `reasoning`, and `tool_result`; content must use only invented project names and text.
+- [x] Add the synthetic summary fixture with title `Synthetic Grok crawler audit`, model `grok-code-fast-1`, timestamps, branch, commit, workspace, and a fake session summary. Add chat lines for `system`, `user`, `assistant`, `reasoning`, and `tool_result`. Content must use only invented project names and text.
 - [x] Write `grok_test.go` with this failing behavior:
 
 ```go
@@ -83,7 +83,7 @@ brigade work verify run --target . --command "go test ./internal/sources/grok" -
 
 Expected failure: package `internal/sources/grok` does not exist.
 
-- [x] Implement `grok.Generate` with the existing `sources.Options`, `PrepareFileScan`, `WriteRecord`, `TextFromAny`, `StableID`, `ApplyRedaction`, and `KeepTimestamp` helpers. Walk only `summary.json` and `chat_history.jsonl`; sort paths; use `url.PathUnescape` for the encoded workspace directory; count warnings per file; call `AfterFile` exactly once per candidate file.
+- [x] Implement `grok.Generate` with the existing `sources.Options`, `PrepareFileScan`, `WriteRecord`, `TextFromAny`, `StableID`, `ApplyRedaction`, and `KeepTimestamp` helpers. Walk only `summary.json` and `chat_history.jsonl`. Sort paths. Use `url.PathUnescape` for the encoded workspace directory. Count warnings per file. Call `AfterFile` exactly once per candidate file.
 - [x] Add Grok to `discoverSources`, `cmdImport`, `cmdAdapter`, `supportsNativeFastPath`, and `discoveredRoots`. Use `filepath.Join(home, ".grok", "sessions")` everywhere.
 - [x] Add a CLI test that copies the synthetic fixture into `<temp HOME>/.grok/sessions`, runs `crawl sessions --json`, and finds `fixture crawl contract` through `sessions search --source grok`.
 - [x] Run GREEN:
@@ -152,8 +152,8 @@ brigade work verify run --target . --command "go test ./internal/sources/cursor"
 
 Expected failure: 0 database records and the old lowercase default root.
 
-- [x] Extend `cursor.Generate` to recognize a direct `conversation-search.db`, a Cursor user-data root containing `globalStorage/conversation-search.db`, and the existing legacy JSON layout. Open SQLite with `mode=ro`; query only the six named columns; convert `updated_at` from seconds or milliseconds; emit stable IDs `cursor:conversation:<id>` and `cursor:conversation-body:<id>`; apply redaction before writing.
-- [x] Use `conversation-search.db-wal` as the `PrepareFileScan` target when it exists. Keep `Raw.Path` and `source_file` on the main database. Treat `no such table` as one warning and a successful zero-record result; return other open/query failures.
+- [x] Extend `cursor.Generate` to recognize a direct `conversation-search.db`, a Cursor user-data root containing `globalStorage/conversation-search.db`, and the existing legacy JSON layout. Open SQLite with `mode=ro`. Query only the six named columns. Convert `updated_at` from seconds or milliseconds. Emit stable IDs `cursor:conversation:<id>` and `cursor:conversation-body:<id>`. Apply redaction before writing.
+- [x] Use `conversation-search.db-wal` as the `PrepareFileScan` target when it exists. Keep `Raw.Path` and `source_file` on the main database. Treat `no such table` as one warning and a successful zero-record result. Return other open/query failures.
 - [x] Update `countCursorSessions` to count rows in the current database without returning titles or bodies. Update the app default-root test so `crawl cursor` builds a synthetic database under the current user-data root and proves its body is searchable.
 - [x] Run GREEN:
 
@@ -243,7 +243,7 @@ git commit -m "fix(crawl): support installed Telecrawl JSON output"
 - Modify: `docs/ROADMAP.md`
 - Modify: `docs/STATIONTRAIL_PARITY.md`
 
-- [x] Add Grok fixture import and search to `scripts/smoke_archive.sh`. Add Cursor database smoke only if the script can create the SQL fixture with the existing `sqlite3` prerequisite; otherwise keep it in Go tests and state that boundary in `docs/INSTALL_SMOKE.md`.
+- [x] Add Grok fixture import and search to `scripts/smoke_archive.sh`. Add Cursor database smoke only if the script can create the SQL fixture with the existing `sqlite3` prerequisite. Otherwise keep it in Go tests and state that boundary in `docs/INSTALL_SMOKE.md`.
 - [x] Update every native-source list to include Grok. Document the current Cursor database path and retained legacy JSON support. Document Telegram's `telecrawl --json messages` compatibility route. Keep external-tool configuration examples explicit.
 - [x] Add Unreleased changelog entries for Grok, current Cursor, complete wrapper tests, and Telecrawl 0.1.0 compatibility.
 - [x] Run the public-writing checklist from `~/bin/writing-rules.md`, inspect the changed prose for private infrastructure or identity details, and run the whitespace check:
@@ -261,7 +261,7 @@ brigade work verify run --target . --command "scripts/check_docs_drift.sh" --cap
 brigade work verify run --target . --command "scripts/smoke_archive.sh" --capture brigade-work
 ```
 
-Expected output: both commands exit 0; archive smoke prints `smoke archive ok`.
+Expected output: both commands exit 0. Archive smoke prints `smoke archive ok`.
 
 - [x] Commit:
 

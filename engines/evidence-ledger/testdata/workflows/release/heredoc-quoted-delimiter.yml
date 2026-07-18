@@ -5,31 +5,11 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
-
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
-      - name: Build
-        run: |
-          mkdir -p dist
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
-            goos="${target%/*}"
-            goarch="${target#*/}"
-            suffix=""
-            if [ "$goos" = "windows" ]; then suffix=".exe"; fi
-            GOOS="$goos" GOARCH="$goarch" go build -o "dist/miseledger-${goos}-${goarch}${suffix}" ./cmd/miseledger
-            GOOS="$goos" GOARCH="$goarch" go build -o "dist/sessionfind-${goos}-${goarch}${suffix}" ./cmd/sessionfind
-          done
-          (cd dist && sha256sum * > checksums.txt)
       - name: Verify built release binaries
         run: |
           expected="${GITHUB_REF_NAME#v}"
@@ -41,10 +21,6 @@ jobs:
               exit 1
             fi
           done
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: dist/*
       - name: Validate release workflow contract
         run: scripts/check_release_workflow.sh
       - name: Publish release
@@ -65,6 +41,7 @@ jobs:
           (cd verify && sha256sum -c checksums.txt --ignore-missing)
           chmod +x verify/miseledger-linux-amd64
           chmod +x verify/sessionfind-linux-amd64
+          cat <<'CONTRACT' >/dev/null
           expected="${GITHUB_REF_NAME#v}"
           for bin in miseledger sessionfind; do
             got="$(./verify/${bin}-linux-amd64 version)"
@@ -74,4 +51,5 @@ jobs:
               exit 1
             fi
           done
+          CONTRACT
           MISELEDGER="$PWD/verify/miseledger-linux-amd64" scripts/smoke_archive.sh

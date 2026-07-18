@@ -54,11 +54,11 @@ Policy pruning deletes only matched items and dependent rows. It does not remove
 
 For each matched item, MiseLedger:
 
-- exports the original adapter JSON line to gzip-compressed JSONL;
-- deletes item tags, item metadata, events, artifacts, and FTS rows;
-- deletes relations where the pruned item is the source;
-- tombstones relations where the pruned item is the target by setting `target_item_id` to null while preserving `target_external_id`;
-- deletes the item row;
+- exports the original adapter JSON line to gzip-compressed JSONL.
+- deletes item tags, item metadata, events, artifacts, and FTS rows.
+- deletes relations where the pruned item is the source.
+- tombstones relations where the pruned item is the target by setting `target_item_id` to null while preserving `target_external_id`.
+- deletes the item row.
 - optimizes FTS and checkpoints the WAL.
 
 Keeping scan manifests prevents routine re-crawls from resurrecting intentionally pruned source files.

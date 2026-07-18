@@ -29,6 +29,7 @@ jobs:
       - run: govulncheck ./...
       - run: go build -o bin/miseledger ./cmd/miseledger
       - run: go build -o bin/sessionfind ./cmd/sessionfind
+      - run: scripts/check_release_workflow.sh
       - run: scripts/smoke_archive.sh
       - run: scripts/smoke_mcp.sh
       - run: scripts/smoke_http.sh

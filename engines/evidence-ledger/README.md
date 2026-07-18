@@ -30,9 +30,9 @@
 ## Install
 
 ```bash
-# install pinned release 0.5.0 (Linux/macOS)
-MISELEDGER_VERSION=v0.5.0
-curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.5.0/install.sh
+# install pinned release 0.6.0 (Linux/macOS)
+MISELEDGER_VERSION=v0.6.0
+curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.6.0/install.sh
 cat install.sh  # review before running
 MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
 miseledger init
@@ -306,9 +306,9 @@ sessionfind list --source codex --json
 sessionfind "release audit" --source codex --json
 ```
 
-`--project` matches normalized `project`, `workspace`, `workspace_dir`, or `cwd` metadata with the same exact-or-contains behavior as general search. `--model` applies the same matching behavior to normalized model metadata. Both filters operate across the session collection, so the matching project and model may be recorded on different events in that session. The JSON `workspace` field prefers `workspace`, then `workspace_dir`, then `cwd`; an unmatched `project` value is omitted when a workspace-like value satisfied an active project filter. Session JSON also includes model, harness, and source name when provided; unavailable fields are omitted. `sessions search` groups matching item hits by session/conversation collection and returns the locator and match context needed to inspect or resume the local harness session.
+`--project` matches normalized `project`, `workspace`, `workspace_dir`, or `cwd` metadata with the same exact-or-contains behavior as general search. `--model` applies the same matching behavior to normalized model metadata. Both filters operate across the session collection, so the matching project and model may be recorded on different events in that session. The JSON `workspace` field prefers `workspace`, then `workspace_dir`, then `cwd`. An unmatched `project` value is omitted when a workspace-like value satisfied an active project filter. Session JSON also includes model, harness, and source name when provided. Unavailable fields are omitted. `sessions search` groups matching item hits by session/conversation collection and returns the locator and match context needed to inspect or resume the local harness session.
 
-The scanners accept a file or directory, walk relevant source files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events. Hermes native support covers `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`; Hermes `state.db` is not parsed directly. OpenCode native support reads sanitized `opencode export` JSON files under `~/.local/share/opencode` by default. Cursor is the one native source that also reads a known SQLite search database.
+The scanners accept a file or directory, walk relevant source files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events. Hermes native support covers `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`. Hermes `state.db` is not parsed directly. OpenCode native support reads sanitized `opencode export` JSON files under `~/.local/share/opencode` by default. Cursor is the one native source that also reads a known SQLite search database.
 
 ## Built-In Crawlers
 
@@ -359,9 +359,9 @@ miseledger import adapter discrawl.adapter.jsonl --json
 
 Archived StationTrail and SourceHarvest exports are still ordinary `miseledger.adapter.v1` JSONL, so already-generated files can be imported with `miseledger import adapter`.
 
-Discord, Slack, Granola, Notion, and Gmail call each crawler's adapter exporter. GitHub calls current Gitcrawl's `sync` and `threads --json` commands, then converts those thread rows locally. Telegram calls `telecrawl --json messages`; MiseLedger converts the returned message array locally and maps `--since` to Telecrawl's `--after` flag.
+Discord, Slack, Granola, Notion, and Gmail call each crawler's adapter exporter. GitHub calls current Gitcrawl's `sync` and `threads --json` commands, then converts those thread rows locally. Telegram calls `telecrawl --json messages`. MiseLedger converts the returned message array locally and maps `--since` to Telecrawl's `--after` flag.
 
-Gmail remains explicit about account selection. Gog may have configured accounts, but MiseLedger requires `--account` so a crawl cannot silently pick a mailbox. Use `--metadata-only`, a narrow `--query`, and `--dry-run` first; `scripts/smoke_gmail_metadata.sh` does exactly that with the first configured Gog account and does not import mail.
+Gmail remains explicit about account selection. Gog may have configured accounts, but MiseLedger requires `--account` so a crawl cannot silently pick a mailbox. Use `--metadata-only`, a narrow `--query`, and `--dry-run` first. `scripts/smoke_gmail_metadata.sh` does exactly that with the first configured Gog account and does not import mail.
 
 Scheduled crawls use the same commands as manual crawls. Put the jobs in a local config file:
 
@@ -441,7 +441,7 @@ miseledger serve --addr 127.0.0.1:8765
 # open http://127.0.0.1:8765/
 ```
 
-It offers live full-text search in two modes (Sessions, which groups hits by session and shows the raw path plus a harness resume hint; and Everything, which searches all imported items), a source filter, and a detail pane. Press `/` or Ctrl+F to focus the search box. The page is served from the same loopback binding and talks only to the local `/search`, `/sessions`, `/items/`, and `/status` endpoints.
+It offers live full-text search in two modes (Sessions, which groups hits by session and shows the raw path plus a harness resume hint, and Everything, which searches all imported items), a source filter, and a detail pane. Press `/` or Ctrl+F to focus the search box. The page is served from the same loopback binding and talks only to the local `/search`, `/sessions`, `/items/`, and `/status` endpoints.
 
 ## Local API and MCP
 
@@ -525,7 +525,7 @@ It does not:
 
 - make network calls in its core path or send your transcripts anywhere
 - install system schedulers or background services for you
-- execute imported text; every imported record is treated as untrusted evidence, not instructions
+- execute imported text. Every imported record is treated as untrusted evidence, not instructions
 - replace upstream crawler binaries for domain-specific sync and query behavior
 - embed, rank with a model, or call an LLM to answer a query
 - mutate or delete your normalized evidence on `prune` or `compact` (those touch import metadata, scan rows, and SQLite housekeeping only)
