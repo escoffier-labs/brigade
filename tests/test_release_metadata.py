@@ -18,10 +18,10 @@ def test_current_release_has_one_added_section_with_recent_release_notes():
 
     assert text.count("### Added") == 1
     for expected in (
-        "brigade run --wait",
-        "adapter execution modes",
-        "GraphTrail personalized ranking benchmark",
-        "typed run transport and receipt modules",
+        "brigade repos adoption",
+        "brigade operator checkup",
+        "brigade work hooks",
+        "brigade receipts export miseledger",
     ):
         assert expected in text
 
