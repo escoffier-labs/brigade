@@ -6,9 +6,11 @@ does not store provider keys or import provider SDKs.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List
@@ -523,19 +525,73 @@ def resolve_env_overrides(env: dict[str, str]) -> tuple[dict[str, str] | None, s
     return resolved, ""
 
 
-def _scrub_env_override_values(text: str, overrides: dict[str, str] | None) -> str:
-    """Replace exact resolved override values with stable target-name labels."""
+def secret_ref_targets(env: dict[str, str]) -> set[str]:
+    """Target keys resolved from *_REF entries: the only values scrub may touch."""
+
+    return {key[: -len("_REF")] for key in env if key.endswith("_REF") and key != "_REF"}
+
+
+_MIN_SCRUB_VALUE_LENGTH = 8
+_COMBINING_MARK_CATEGORIES = frozenset({"Mn", "Mc", "Me"})
+
+
+@functools.lru_cache(maxsize=1)
+def _identifier_continuation_class() -> str:
+    """Regex char class for identifier continuation: letters, digits, _, combining marks."""
+
+    combining = "".join(
+        chr(code_point)
+        for code_point in range(0x110000)
+        if unicodedata.category(chr(code_point)) in _COMBINING_MARK_CATEGORIES
+    )
+    escaped = "".join("\\" + ch if ch in "\\^-][" else ch for ch in combining)
+    return rf"[\w{escaped}]"
+
+
+def _secret_value_boundary_pattern(escaped: str) -> str:
+    """Match a secret value only when not embedded in a larger identifier/token."""
+
+    continuation = _identifier_continuation_class()
+    return rf"(?<!{continuation}){escaped}(?!{continuation})"
+
+
+def _scrub_env_override_values(
+    text: str,
+    overrides: dict[str, str] | None,
+    secret_targets: set[str] | None = None,
+) -> str:
+    """Replace resolved secret values with stable target-name labels.
+
+    Only *_REF-resolved values are secrets; plain roster literals are
+    configuration and stay untouched in output, otherwise a value like "1"
+    (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) rewrites every literal 1 in
+    plan JSON and the run dies on invalid JSON (#323). Values shorter than
+    _MIN_SCRUB_VALUE_LENGTH are skipped for the same corruption reason, and
+    every secret matches on identifier-edge boundaries so a value embedded
+    inside a longer token is left alone. secret_targets=None preserves the
+    scrub-everything behavior for callers that cannot say which overrides
+    were *_REF-resolved.
+    """
 
     if not text or not overrides:
         return text
     replacements: dict[str, str] = {}
     for target, value in sorted(overrides.items()):
-        if value:
-            replacements.setdefault(value, f"[{target}]")
+        if not value:
+            continue
+        if secret_targets is not None and target not in secret_targets:
+            continue
+        if len(value) < _MIN_SCRUB_VALUE_LENGTH:
+            continue
+        replacements.setdefault(value, f"[{target}]")
     if not replacements:
         return text
     values = sorted(replacements, key=lambda value: (-len(value), value))
-    pattern = re.compile("|".join(re.escape(value) for value in values))
+    parts = []
+    for value in values:
+        escaped = _secret_value_boundary_pattern(re.escape(value))
+        parts.append(escaped)
+    pattern = re.compile("|".join(parts))
     return pattern.sub(lambda match: replacements[match.group(0)], text)
 
 
@@ -613,7 +669,9 @@ def run_agent(
 
     child_env: dict[str, str] | None = None
     resolved_overrides: dict[str, str] | None = None
+    resolved_secret_targets: set[str] | None = None
     if env is not None:
+        resolved_secret_targets = secret_ref_targets(env)
         overrides, env_error = resolve_env_overrides(env)
         if overrides is None:
             return AgentResult(
@@ -678,13 +736,13 @@ def run_agent(
         )
 
     def scrub_detail(detail: str) -> str:
-        return _scrub_env_override_values(detail, resolved_overrides)
+        return _scrub_env_override_values(detail, resolved_overrides, resolved_secret_targets)
 
-    safe_stdout = _scrub_env_override_values(result.stdout, resolved_overrides)
-    safe_stderr = _scrub_env_override_values(result.stderr, resolved_overrides)
+    safe_stdout = _scrub_env_override_values(result.stdout, resolved_overrides, resolved_secret_targets)
+    safe_stderr = _scrub_env_override_values(result.stderr, resolved_overrides, resolved_secret_targets)
 
     if result.decode_failed:
-        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides)
+        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
         failure_detail = scrub_detail(safe_stderr.strip() or result.decode_failure_detail)[:200]
         return AgentResult(
             text=safe_text,
@@ -714,8 +772,10 @@ def run_agent(
         grok_session_id = grok_final.session_id
         grok_request_id = grok_final.request_id
         grok_stop_reason = grok_final.stop_reason
-    safe_text = _scrub_env_override_values(text, resolved_overrides)
-    safe_structured_error = _scrub_env_override_values(structured_error, resolved_overrides)[:200]
+    safe_text = _scrub_env_override_values(text, resolved_overrides, resolved_secret_targets)
+    safe_structured_error = _scrub_env_override_values(structured_error, resolved_overrides, resolved_secret_targets)[
+        :200
+    ]
     if result.code != 0:
         raw_detail = safe_stderr.strip() or f"exit {result.code}"
         detail = codex_stdin_hang_detail(raw_detail) if cli_ref == "codex" else None
