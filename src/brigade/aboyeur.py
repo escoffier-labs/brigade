@@ -1690,6 +1690,7 @@ def _run_payload(
     brief_set: BriefSet | None = None,
     codex_transport: str | None = None,
     control_socket: Path | None = None,
+    control_transport: run_control.ControlTransport | None = None,
     code_graph_delta: dict[str, object] | None = None,
     context_eval_payload: dict[str, object] | None = None,
     suspected_noop: bool = False,
@@ -1759,7 +1760,11 @@ def _run_payload(
         payload["transport_warning"] = dict(transport_warning)
     if codex_transport is not None:
         payload["codex_transport"] = codex_transport
-    if control_socket is not None:
+    if control_transport is not None:
+        payload["control_transport"] = control_transport.to_metadata()
+        if control_transport.kind == "unix" and control_transport.path:
+            payload["control_socket"] = control_transport.path
+    elif control_socket is not None:
         payload["control_socket"] = str(control_socket)
     return payload
 
@@ -1882,6 +1887,7 @@ def run(
         )
 
     control_socket = None
+    control_transport = None
     plan_attempts: list[dict[str, object]] | None = [] if output_dir is not None else None
     if worker is not None:
         assignments = [Assignment(worker=worker, task=task, stage=1)]
@@ -1955,6 +1961,7 @@ def run(
                         codex_transport=transport_for_payload,
                         route=route,
                         control_socket=control_socket,
+                        control_transport=control_transport,
                         code_graph_delta=code_graph_delta,
                         worker=worker,
                     ),
@@ -2032,6 +2039,7 @@ def run(
                 codex_transport=transport_for_payload,
                 route=route,
                 control_socket=control_socket,
+                control_transport=control_transport,
                 code_graph_delta=code_graph_delta,
                 worker=worker,
             ),
@@ -2052,11 +2060,12 @@ def run(
             control_registry = run_control.LiveTurnRegistry()
             control_server = run_control.ControlServer(control_socket, control_registry)
             try:
-                control_server.start()
+                control_transport = control_server.start()
             except run_control.ControlError as exc:
                 print(f"warning: run control unavailable ({exc})", file=sys.stderr)
                 control_registry = None
                 control_server = None
+                control_transport = None
                 control_socket = None
     transport_for_payload = effective_transport
     if output_dir is not None:
@@ -2078,6 +2087,7 @@ def run(
                 codex_transport=transport_for_payload,
                 route=route,
                 control_socket=control_socket,
+                control_transport=control_transport,
                 code_graph_delta=code_graph_delta,
                 worker=worker,
             ),
@@ -2173,6 +2183,7 @@ def run(
                     codex_transport=transport_for_payload,
                     route=route,
                     control_socket=control_socket,
+                    control_transport=control_transport,
                     code_graph_delta=code_graph_delta,
                     worker=worker,
                 ),
@@ -2279,6 +2290,7 @@ def run(
                 codex_transport=transport_for_payload,
                 route=route,
                 control_socket=control_socket,
+                control_transport=control_transport,
                 code_graph_delta=code_graph_delta,
                 context_eval_payload=context_eval_payload,
                 suspected_noop=suspected_noop,
@@ -2322,6 +2334,7 @@ def run(
                         codex_transport=transport_for_payload,
                         route=route,
                         control_socket=control_socket,
+                        control_transport=control_transport,
                         code_graph_delta=code_graph_delta,
                         context_eval_payload=context_eval_payload,
                         suspected_noop=suspected_noop,
@@ -2354,6 +2367,7 @@ def run(
                     codex_transport=transport_for_payload,
                     route=route,
                     control_socket=control_socket,
+                    control_transport=control_transport,
                     code_graph_delta=code_graph_delta,
                     context_eval_payload=context_eval_payload,
                     suspected_noop=suspected_noop,

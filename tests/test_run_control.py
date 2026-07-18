@@ -31,7 +31,7 @@ def _wait_for(predicate, *, timeout: float = 5.0):
     raise AssertionError("timed out waiting for condition")
 
 
-def _control_socket_from_run_json(run_dir: Path) -> Path | None:
+def _control_transport_from_run_json(run_dir: Path) -> run_control.ControlTransport | None:
     # Polled while aboyeur.run rewrites run.json on another thread, so tolerate
     # a file that is missing or not yet parseable and let _wait_for retry.
     try:
@@ -40,8 +40,32 @@ def _control_socket_from_run_json(run_dir: Path) -> Path | None:
         return None
     if not isinstance(meta, dict):
         return None
+    transport_value = meta.get("control_transport")
+    if transport_value is not None:
+        try:
+            return run_control.ControlTransport.from_metadata(transport_value)
+        except run_control.ControlError:
+            return None
     socket_value = meta.get("control_socket")
-    return Path(socket_value) if socket_value else None
+    if isinstance(socket_value, str) and socket_value:
+        return run_control.ControlTransport(kind="unix", path=socket_value)
+    return None
+
+
+def _control_transport_active(transport: run_control.ControlTransport) -> bool:
+    if transport.kind == "unix":
+        return bool(transport.path and Path(transport.path).exists())
+    if transport.kind == "loopback-tcp" and transport.port is not None:
+        probe = run_control.socket.socket(run_control.socket.AF_INET, run_control.socket.SOCK_STREAM)
+        probe.settimeout(0.1)
+        try:
+            probe.connect((run_control._LOOPBACK_HOST, transport.port))
+        except OSError:
+            return False
+        else:
+            probe.close()
+            return True
+    return False
 
 
 class _FakeTurn:
@@ -62,19 +86,20 @@ def test_control_socket_round_trip_with_fake_registry(tmp_path):
     turn = _FakeTurn()
     registry.register("coder", turn, "turn-1")
     server = run_control.ControlServer(tmp_path / "control.sock", registry)
-    server.start()
+    transport = server.start()
     try:
         steer = run_control.send_request(
-            tmp_path / "control.sock",
+            transport,
             {"op": "steer", "worker": "coder", "text": "please focus on tests"},
         )
         interrupt = run_control.send_request(
-            tmp_path / "control.sock",
+            transport,
             {"op": "interrupt", "worker": "coder"},
         )
     finally:
         server.close()
 
+    assert transport.kind == "unix"
     assert steer == {"ok": True, "worker": "coder", "thread_id": "thread-1", "turn_id": "turn-1"}
     assert interrupt == {"ok": True, "interrupted": 1, "workers": ["coder"]}
     assert turn.calls == [
@@ -205,8 +230,8 @@ def test_run_records_control_socket_and_cli_steers_live_worker(tmp_path, monkeyp
     )
     thread.start()
 
-    control_socket = _wait_for(lambda: _control_socket_from_run_json(run_dir))
-    _wait_for(lambda: control_socket.exists())
+    control_transport = _wait_for(lambda: _control_transport_from_run_json(run_dir))
+    _wait_for(lambda: _control_transport_active(control_transport))
 
     assert cli.main(["runs", "steer", str(run_dir), "cook", "please finish"]) == 0
     thread.join(timeout=5.0)
@@ -214,8 +239,10 @@ def test_run_records_control_socket_and_cli_steers_live_worker(tmp_path, monkeyp
     assert result == {"rc": 0}
     assert "steer: cook" in capsys.readouterr().out
     run_meta = json.loads((run_dir / "run.json").read_text())
-    assert run_meta["control_socket"] == str(control_socket)
-    assert not control_socket.exists()
+    assert run_meta["control_transport"]["kind"] == "unix"
+    assert run_meta["control_socket"] == control_transport.path
+    if control_transport.kind == "unix" and control_transport.path:
+        assert not Path(control_transport.path).exists()
     worker_results = json.loads((run_dir / "worker-results.json").read_text())["results"]
     assert worker_results[0]["text"] == "steered: please finish"
 
@@ -267,8 +294,8 @@ def test_cli_steer_retries_until_worker_turn_registers(tmp_path, monkeypatch, ca
     )
     thread.start()
 
-    control_socket = _wait_for(lambda: _control_socket_from_run_json(run_dir))
-    _wait_for(lambda: control_socket.exists())
+    control_transport = _wait_for(lambda: _control_transport_from_run_json(run_dir))
+    _wait_for(lambda: _control_transport_active(control_transport))
 
     assert cli.main(["runs", "steer", str(run_dir), "cook", "please finish"]) == 0
     thread.join(timeout=5.0)
@@ -282,16 +309,17 @@ def test_cli_steer_retries_until_worker_turn_registers(tmp_path, monkeypatch, ca
 def test_cli_steer_does_not_retry_when_run_is_finished(tmp_path, capsys):
     registry = run_control.LiveTurnRegistry()
     socket_path = tmp_path / "run" / "control.sock"
+    server = run_control.ControlServer(socket_path, registry)
+    transport = server.start()
     _write_json(
         tmp_path / "run" / "run.json",
         {
             "status": "ok",
             "codex_transport": "app-server",
+            "control_transport": transport.to_metadata(),
             "control_socket": str(socket_path),
         },
     )
-    server = run_control.ControlServer(socket_path, registry)
-    server.start()
     try:
         rc = cli.main(["runs", "steer", str(tmp_path / "run"), "cook", "keep going"])
     finally:
@@ -345,8 +373,8 @@ def test_cli_interrupt_leaves_live_worker_resumable(tmp_path, monkeypatch, capsy
     )
     thread.start()
 
-    control_socket = _wait_for(lambda: _control_socket_from_run_json(run_dir))
-    _wait_for(lambda: control_socket.exists())
+    control_transport = _wait_for(lambda: _control_transport_from_run_json(run_dir))
+    _wait_for(lambda: _control_transport_active(control_transport))
     assert turn_registered.wait(timeout=5.0)
 
     assert cli.main(["runs", "interrupt", str(run_dir), "cook"]) == 0
@@ -354,9 +382,219 @@ def test_cli_interrupt_leaves_live_worker_resumable(tmp_path, monkeypatch, capsy
 
     assert "rc" in result
     assert "interrupt: 1 (cook)" in capsys.readouterr().out
-    assert not control_socket.exists()
+    assert not _control_transport_active(control_transport)
     worker_results = json.loads((run_dir / "worker-results.json").read_text())["results"]
     entry = worker_results[0]
     assert entry["status"] == "interrupted"
     assert entry["ok"] is False
     assert isinstance(entry["thread_id"], str) and entry["thread_id"]
+
+
+def test_plan_control_transport_selects_loopback_when_af_unix_missing(tmp_path, monkeypatch):
+    monkeypatch.delattr(run_control.socket, "AF_UNIX", raising=False)
+    assert run_control.plan_control_transport(tmp_path / "control.sock") == "loopback-tcp"
+
+
+def test_plan_control_transport_selects_loopback_for_deep_unix_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_control, "_unix_path_limit", lambda: 10)
+    deep = tmp_path / ("a" * 50) / "control.sock"
+    assert run_control.plan_control_transport(deep) == "loopback-tcp"
+
+
+def test_loopback_control_transport_round_trip_with_owner_token(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_control, "plan_control_transport", lambda _path: "loopback-tcp")
+    registry = run_control.LiveTurnRegistry()
+    turn = _FakeTurn()
+    registry.register("coder", turn, "turn-1")
+    server = run_control.ControlServer(tmp_path / "control.sock", registry)
+    transport = server.start()
+    try:
+        assert transport.kind == "loopback-tcp"
+        steer = run_control.send_request(
+            transport,
+            {"op": "steer", "worker": "coder", "text": "focus"},
+        )
+        sock = run_control.socket.socket(run_control.socket.AF_INET, run_control.socket.SOCK_STREAM)
+        sock.settimeout(5.0)
+        sock.connect((run_control._LOOPBACK_HOST, transport.port))
+        with sock, sock.makefile("rwb") as fh:
+            fh.write(
+                json.dumps(
+                    {"op": "steer", "owner_token": "wrong", "text": "nope", "worker": "coder"},
+                    sort_keys=True,
+                ).encode()
+                + b"\n"
+            )
+            fh.flush()
+            denied = json.loads(fh.readline().decode())
+    finally:
+        server.close()
+
+    assert steer == {"ok": True, "worker": "coder", "thread_id": "thread-1", "turn_id": "turn-1"}
+    assert denied == {"code": "auth-denied", "error": "control request denied", "ok": False}
+
+
+def test_loopback_control_rejects_foreign_owner_token_without_leaking(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_control, "plan_control_transport", lambda _path: "loopback-tcp")
+    registry_a = run_control.LiveTurnRegistry()
+    registry_b = run_control.LiveTurnRegistry()
+    registry_a.register("coder", _FakeTurn(), "turn-a")
+    registry_b.register("coder", _FakeTurn(), "turn-b")
+    server_a = run_control.ControlServer(tmp_path / "a.sock", registry_a)
+    server_b = run_control.ControlServer(tmp_path / "b.sock", registry_b)
+    transport_a = server_a.start()
+    transport_b = server_b.start()
+    try:
+        assert transport_a.owner_token and transport_b.owner_token
+        assert transport_a.owner_token != transport_b.owner_token
+        sock = run_control.socket.socket(run_control.socket.AF_INET, run_control.socket.SOCK_STREAM)
+        sock.settimeout(5.0)
+        sock.connect((run_control._LOOPBACK_HOST, transport_b.port))
+        with sock, sock.makefile("rwb") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "op": "steer",
+                        "owner_token": transport_a.owner_token,
+                        "text": "foreign",
+                        "worker": "coder",
+                    },
+                    sort_keys=True,
+                ).encode()
+                + b"\n"
+            )
+            fh.flush()
+            denied = json.loads(fh.readline().decode())
+    finally:
+        server_a.close()
+        server_b.close()
+
+    assert denied == {"code": "auth-denied", "error": "control request denied", "ok": False}
+    response_text = json.dumps(denied)
+    assert transport_a.owner_token not in response_text
+    assert transport_b.owner_token not in response_text
+
+
+def test_control_transport_from_run_rejects_malformed_descriptor(tmp_path):
+    run_dir = tmp_path / "run"
+    _write_json(
+        run_dir / "run.json",
+        {
+            "status": "started",
+            "codex_transport": "app-server",
+            "control_transport": {"schema": "brigade.run_control_transport.v1", "kind": "loopback-tcp"},
+        },
+    )
+    with pytest.raises(run_control.ControlError, match="requires valid port"):
+        run_control.control_transport_from_run(run_dir)
+
+
+def test_control_transport_from_run_rejects_boolean_port(tmp_path):
+    run_dir = tmp_path / "run"
+    _write_json(
+        run_dir / "run.json",
+        {
+            "status": "started",
+            "codex_transport": "app-server",
+            "control_transport": {
+                "schema": "brigade.run_control_transport.v1",
+                "kind": "loopback-tcp",
+                "port": True,
+                "owner_token": "secret-token",
+            },
+        },
+    )
+    with pytest.raises(run_control.ControlError, match="requires valid port"):
+        run_control.control_transport_from_run(run_dir)
+
+
+def test_loopback_transport_ready_before_serving_thread_accepts(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_control, "plan_control_transport", lambda _path: "loopback-tcp")
+    registry = run_control.LiveTurnRegistry()
+    turn = _FakeTurn()
+    registry.register("coder", turn, "turn-1")
+    server = run_control.ControlServer(tmp_path / "control.sock", registry)
+    observed: dict[str, object] = {}
+    real_start = threading.Thread.start
+
+    def recording_start(thread_self):
+        transport = server.transport
+        observed["transport_ready"] = (
+            transport is not None
+            and transport.kind == "loopback-tcp"
+            and transport.port is not None
+            and bool(transport.owner_token)
+        )
+        real_start(thread_self)
+
+    monkeypatch.setattr(threading.Thread, "start", recording_start)
+    transport = server.start()
+    try:
+        assert observed["transport_ready"] is True
+        sock = run_control.socket.socket(run_control.socket.AF_INET, run_control.socket.SOCK_STREAM)
+        sock.settimeout(5.0)
+        sock.connect((run_control._LOOPBACK_HOST, transport.port))
+        with sock, sock.makefile("rwb") as fh:
+            fh.write(json.dumps({"op": "steer", "text": "nope", "worker": "coder"}, sort_keys=True).encode() + b"\n")
+            fh.flush()
+            denied = json.loads(fh.readline().decode())
+    finally:
+        server.close()
+
+    assert denied == {"code": "auth-denied", "error": "control request denied", "ok": False}
+    assert turn.calls == []
+
+
+def test_runs_watch_json_omits_control_transport_secrets(tmp_path, capsys, monkeypatch):
+    from brigade import runs_cmd
+
+    run_dir = tmp_path / "run"
+    private_path = str(tmp_path / "private" / "control.sock")
+    _write_json(
+        run_dir / "run.json",
+        {
+            "task": "watch the run",
+            "cwd": str(tmp_path),
+            "status": "ok",
+            "started_at": "2026-07-08T10:00:00Z",
+            "finished_at": "2026-07-08T10:00:03Z",
+            "duration_seconds": 3.0,
+            "codex_transport": "app-server",
+            "control_socket": private_path,
+            "control_transport": {
+                "schema": "brigade.run_control_transport.v1",
+                "kind": "loopback-tcp",
+                "host": "127.0.0.1",
+                "port": 54321,
+                "owner_token": "secret-token",
+            },
+        },
+    )
+
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.0, json_output=True) == 0
+
+    emitted = capsys.readouterr().out
+    assert "secret-token" not in emitted
+    assert private_path not in emitted
+    assert "control_transport" not in emitted
+    assert "control_socket" not in emitted
+    run_records = [json.loads(line) for line in emitted.splitlines() if json.loads(line).get("type") == "run"]
+    assert run_records
+    assert "owner_token" not in json.dumps(run_records[0])
+
+
+def test_deep_unix_path_linux_regression_uses_loopback_transport(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_control, "_unix_path_limit", lambda: 10)
+    deep = tmp_path / ("nested" * 20) / "control.sock"
+    registry = run_control.LiveTurnRegistry()
+    turn = _FakeTurn()
+    registry.register("coder", turn, "turn-1")
+    server = run_control.ControlServer(deep, registry)
+    transport = server.start()
+    try:
+        assert transport.kind == "loopback-tcp"
+        assert not deep.exists()
+        response = run_control.send_request(transport, {"op": "interrupt", "worker": "coder"})
+    finally:
+        server.close()
+    assert response == {"interrupted": 1, "ok": True, "workers": ["coder"]}
