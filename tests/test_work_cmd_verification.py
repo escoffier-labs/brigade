@@ -571,6 +571,12 @@ def _count_verify_run_dirs(target: Path) -> int:
     return sum(1 for entry in root.iterdir() if entry.is_dir())
 
 
+# Tight-timeout tests must leave headroom for subprocess startup on CI while keeping
+# deliberate stage delays well above the configured graphtrail timeout.
+_GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS = 0.25
+_GRAPHTRAIL_SLOW_STAGE_DELAY_SECONDS = 0.6
+
+
 def _write_fake_graphtrail(
     tmp_path,
     *,
@@ -693,7 +699,8 @@ raise SystemExit(9)
         f"FAKE_GRAPHTRAIL_SYNC_DELAY_FROM_CALL={sync_delay_from_call}\n"
         "export FAKE_GRAPHTRAIL_MODE FAKE_GRAPHTRAIL_SYNC_SECONDS FAKE_GRAPHTRAIL_DIFF_SECONDS "
         "FAKE_GRAPHTRAIL_CREATE_DB_BEFORE_DELAY FAKE_GRAPHTRAIL_SYNC_DELAY_FROM_CALL\n"
-        f'exec {os.environ.get("PYTHON", "python3")} {script} "$@"\n'
+        "export PYTHONDONTWRITEBYTECODE=1\n"
+        f'exec {os.environ.get("PYTHON", "python3")} -S {script} "$@"\n'
     )
     wrapper.chmod(0o755)
     return wrapper
@@ -948,7 +955,7 @@ def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_syn
     _init_git_repo(tmp_path)
     graphtrail = _write_fake_graphtrail(
         tmp_path,
-        sync_delay_seconds=0.2,
+        sync_delay_seconds=_GRAPHTRAIL_SLOW_STAGE_DELAY_SECONDS,
         sync_delay_from_call=2,
     )
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
@@ -957,7 +964,7 @@ def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_syn
         work_cmd.verify_run(
             target=tmp_path,
             commands=["python3 -c \"print('ok')\""],
-            graphtrail_timeout=0.05,
+            graphtrail_timeout=_GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS,
             json_output=True,
         )
         == 0
@@ -1027,14 +1034,17 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
 
 def test_work_verify_graphtrail_delta_diff_timeout_is_distinct_from_sync_timeout(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    graphtrail = _write_fake_graphtrail(tmp_path, diff_delay_seconds=0.2)
+    graphtrail = _write_fake_graphtrail(
+        tmp_path,
+        diff_delay_seconds=_GRAPHTRAIL_SLOW_STAGE_DELAY_SECONDS,
+    )
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
 
     assert (
         work_cmd.verify_run(
             target=tmp_path,
             commands=["python3 -c \"print('ok')\""],
-            graphtrail_timeout=0.05,
+            graphtrail_timeout=_GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS,
             json_output=True,
         )
         == 0
@@ -1050,7 +1060,7 @@ def test_work_verify_graphtrail_delta_diff_timeout_is_distinct_from_sync_timeout
     assert diff_command["stage"] == "diff"
     assert diff_command["timed_out"] is True
     assert diff_command["returncode"] == 124
-    assert diff_command["duration_seconds"] >= 0.05
+    assert diff_command["duration_seconds"] >= _GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS
     assert diff_command["stderr"]
 
 
