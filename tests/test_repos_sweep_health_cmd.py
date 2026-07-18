@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +20,8 @@ def _write_json(path: Path, payload: dict):
 
 def _init_repo(path: Path):
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=path, check=True, stdout=subprocess.DEVNULL)
+    # Match `memory_doctor.init_git`: fixture repos must not depend on init.defaultBranch.
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "config", "user.email", "dev@example.invalid"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "Dev"], cwd=path, check=True)
     (path / "AGENTS.md").write_text("local guidance\n")
@@ -106,6 +108,21 @@ def _seed_release_prereqs(path: Path):
         path / ".brigade" / "work" / "closeouts" / "closeout-one" / "closeout.json",
         {"closeout_id": "closeout-one", "status": "ready", "ready": True, "created_at": "2026-05-30T01:01:00+00:00"},
     )
+
+
+def test_repos_sweep_fixture_init_repo_uses_main_branch(tmp_path, monkeypatch):
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text("[init]\n\tdefaultBranch = master\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    branch = subprocess.check_output(
+        ["git", "branch", "--show-current"],
+        cwd=repo,
+        text=True,
+    ).strip()
+    assert branch == "main"
 
 
 def test_repos_sweep_plan_filters_disabled_stale_and_cli(tmp_path, capsys):
