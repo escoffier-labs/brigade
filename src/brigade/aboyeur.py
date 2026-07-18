@@ -655,6 +655,32 @@ def _record_plan_attempt(
     attempts.append(payload)
 
 
+def _orchestrator_failure_detail(
+    result: agents.AgentResult,
+    *,
+    seat: str,
+    cli: str | None,
+    transport: str,
+) -> str:
+    if cli != "codex":
+        return result.detail or ""
+    # Prefer stderr: it still carries the raw codex banner after run_agent maps detail.
+    source = result.stderr or result.detail or ""
+    mapped = agents.codex_stdin_hang_detail(source, seat=seat, transport=transport)
+    if mapped is not None:
+        return mapped
+    if "blocked waiting for stdin" in (result.detail or "").lower():
+        return (
+            agents.codex_stdin_hang_detail(
+                "Reading additional input from stdin",
+                seat=seat,
+                transport=transport,
+            )
+            or result.detail
+        )
+    return result.detail or ""
+
+
 def _run_orchestrator(
     roster: Roster,
     prompt: str,
@@ -662,8 +688,10 @@ def _run_orchestrator(
     read_only: bool = False,
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
+    codex_transport: str | None = None,
 ) -> agents.AgentResult:
     orchestrator = roster.agents[roster.orchestrator]
+    transport = codex_transport or roster.codex_transport
     if not is_cli_allowed(orchestrator.cli, roster):
         return agents.AgentResult(
             text="",
@@ -691,7 +719,28 @@ def _run_orchestrator(
         kwargs["reasoning"] = orchestrator.reasoning
     if orchestrator.env is not None:
         kwargs["env"] = dict(orchestrator.env)
-    return agents.run_agent(orchestrator.cli, prompt, **kwargs)
+    result = agents.run_agent(orchestrator.cli, prompt, **kwargs)
+    if not result.ok and orchestrator.cli == "codex":
+        detail = _orchestrator_failure_detail(
+            result,
+            seat=roster.orchestrator,
+            cli=orchestrator.cli,
+            transport=transport,
+        )
+        if detail != result.detail:
+            return agents.AgentResult(
+                text=result.text,
+                ok=False,
+                detail=detail,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                exit_code=result.exit_code,
+                timed_out=result.timed_out,
+                requested_model=result.requested_model,
+                reasoning=result.reasoning,
+                transport=result.transport,
+            )
+    return result
 
 
 def _coverage_missing(route: RouteBrief | None, assignments: list[Assignment]) -> list[str]:
@@ -718,7 +767,9 @@ def plan(
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
     route: RouteBrief | None = None,
+    codex_transport: str | None = None,
 ) -> list[Assignment]:
+    transport = codex_transport or roster.codex_transport
     first = _run_orchestrator(
         roster,
         build_plan_prompt(
@@ -734,6 +785,7 @@ def plan(
         read_only=read_only,
         sandbox_read_only=sandbox_read_only,
         sandbox=sandbox,
+        codex_transport=transport,
     )
     if not first.ok:
         _record_plan_attempt(attempts, stage="initial", result=first)
@@ -766,6 +818,7 @@ def plan(
             read_only=read_only,
             sandbox_read_only=sandbox_read_only,
             sandbox=sandbox,
+            codex_transport=transport,
         )
         if not second.ok:
             _record_plan_attempt(attempts, stage="correction", result=second)
@@ -815,6 +868,7 @@ def plan(
         read_only=read_only,
         sandbox_read_only=sandbox_read_only,
         sandbox=sandbox,
+        codex_transport=transport,
     )
     if not revised_result.ok:
         _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result)
@@ -1864,6 +1918,7 @@ def run(
                 drift_impact=drift_impact,
                 evidence=evidence,
                 route=route,
+                codex_transport=transport_for_payload,
             )
         except RuntimeError as exc:
             failed_attempt = next(
@@ -2135,6 +2190,7 @@ def run(
             read_only=read_only,
             sandbox_read_only=sandbox_read_only,
             sandbox=sandbox,
+            codex_transport=transport_for_payload,
         )
         final = replace(final, duration_seconds=max(0.0, round(time.monotonic() - synthesis_started, 3)))
     if output_dir is not None:

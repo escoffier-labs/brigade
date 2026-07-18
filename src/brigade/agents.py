@@ -57,11 +57,15 @@ def _claude_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | 
 
 
 def _codex_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
+    # Prompt is fed on stdin via `-`. Codex 0.144+ treats a non-TTY open stdin as
+    # optional append input and can hang on "Reading additional input from stdin..."
+    # when the prompt is only a trailing argv token.
+    _ = prompt  # carried by run_agent via proc.run(stdin=...)
     if sandbox:
-        return ["codex", "exec", "--sandbox", sandbox, prompt]
+        return ["codex", "exec", "--sandbox", sandbox, "-"]
     if read_only:
-        return ["codex", "exec", "--sandbox", "read-only", prompt]
-    return ["codex", "exec", prompt]
+        return ["codex", "exec", "--sandbox", "read-only", "-"]
+    return ["codex", "exec", "-"]
 
 
 def _opencode_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
@@ -534,6 +538,27 @@ def _scrub_env_override_values(text: str, overrides: dict[str, str] | None) -> s
     return pattern.sub(lambda match: replacements[match.group(0)], text)
 
 
+_CODEX_STDIN_HANG_MARKER = "Reading additional input from stdin"
+
+
+def codex_stdin_hang_detail(raw: str, *, seat: str | None = None, transport: str | None = None) -> str | None:
+    """Rewrite the codex stdin-hang banner into a clear, actionable detail."""
+    if _CODEX_STDIN_HANG_MARKER.lower() not in raw.lower():
+        return None
+    where = "codex"
+    if seat is not None:
+        where = f"orchestrator seat {seat!r} (cli=codex"
+        if transport is not None:
+            where += f", transport={transport!r}"
+        where += ")"
+    elif transport is not None:
+        where = f"codex (transport={transport!r})"
+    return (
+        f"{where} blocked waiting for stdin during a non-interactive run; "
+        "feed the prompt via `codex exec -` on stdin (and close stdin after the prompt)"
+    )
+
+
 def run_agent(
     cli_ref: str,
     prompt: str,
@@ -635,12 +660,21 @@ def run_agent(
             )
         argv[-2:] = ["--sandbox", "read-only", "--always-approve"]
         argv.extend(["--json-schema", _GROK_RESULT_SCHEMA])
-    result = proc.run(
-        argv,
-        timeout=timeout,
-        cwd=cwd,
-        env=child_env,
-    )
+    if cli_ref == "codex":
+        result = proc.run(
+            argv,
+            timeout=timeout,
+            cwd=cwd,
+            env=child_env,
+            stdin=prompt.encode(),
+        )
+    else:
+        result = proc.run(
+            argv,
+            timeout=timeout,
+            cwd=cwd,
+            env=child_env,
+        )
     text = result.stdout.strip()
     structured_error = ""
     structured_diagnostic = ""
@@ -664,7 +698,10 @@ def run_agent(
         return _scrub_env_override_values(detail, resolved_overrides)
 
     if result.code != 0:
-        detail = safe_stderr.strip() or f"exit {result.code}"
+        raw_detail = safe_stderr.strip() or f"exit {result.code}"
+        detail = codex_stdin_hang_detail(raw_detail) if cli_ref == "codex" else None
+        if detail is None:
+            detail = raw_detail
         return AgentResult(
             text=safe_text,
             ok=False,

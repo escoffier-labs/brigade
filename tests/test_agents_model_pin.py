@@ -162,7 +162,7 @@ def test_claude_and_codex_argv_unchanged_by_registry():
         "exec",
         "-m",
         "gpt-5.5-codex",
-        "P",
+        "-",
     ]
     assert agents.build_argv("codex", "P", read_only=True, model="gpt-5.5-codex") == [
         "codex",
@@ -171,7 +171,7 @@ def test_claude_and_codex_argv_unchanged_by_registry():
         "read-only",
         "-m",
         "gpt-5.5-codex",
-        "P",
+        "-",
     ]
 
 
