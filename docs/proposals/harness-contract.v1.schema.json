@@ -1,0 +1,152 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brigade.tools/schemas/harness-contract.v1.schema.json",
+  "title": "Harness contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "harness", "capabilities", "deep_probes"],
+  "properties": {
+    "schema": {"const": "harness-contract.v1"},
+    "harness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "surface"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "surface": {"enum": ["cli", "desktop", "gui"]}
+      }
+    },
+    "binary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "version_args"],
+      "properties": {
+        "command": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+        "version_args": {"const": ["--version"]}
+      }
+    },
+    "availability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "external_only": {"const": true},
+        "command_candidates": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"}
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "claim",
+          "provenance",
+          "support_state",
+          "implementation_layers",
+          "evidence",
+          "tested_version",
+          "platform",
+          "scope"
+        ],
+        "properties": {
+          "id": {
+            "enum": [
+              "instructions",
+              "skills",
+              "hooks",
+              "mcp",
+              "workspace",
+              "session",
+              "verification",
+              "handoff",
+              "reload",
+              "telemetry",
+              "platform"
+            ]
+          },
+          "claim": {"type": "string"},
+          "provenance": {"enum": ["documented", "observed", "inferred", "unknown"]},
+          "support_state": {
+            "enum": ["native", "emulated", "advisory", "unsupported", "externally_blocked"]
+          },
+          "implementation_layers": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "enum": ["native", "hook_composed", "extension_composed", "brigade_adapter", "unknown"]
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "reference"],
+              "properties": {
+                "kind": {"enum": ["vendor_documentation", "probe_receipt", "local_probe", "direct_probe"]},
+                "reference": {"type": "string"}
+              }
+            }
+          },
+          "tested_version": {"type": ["string", "null"]},
+          "platform": {"type": "string"},
+          "scope": {"type": "string"}
+        }
+      }
+    },
+    "deep_probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instruction",
+        "skill",
+        "hook",
+        "mcp",
+        "workspace",
+        "session",
+        "verification",
+        "handoff",
+        "reload",
+        "telemetry",
+        "platform"
+      ],
+      "properties": {
+        "instruction": {"const": "declared"},
+        "skill": {"const": "declared"},
+        "hook": {"const": "declared"},
+        "mcp": {"const": "declared"},
+        "workspace": {"const": "declared"},
+        "session": {"const": "declared"},
+        "verification": {"const": "declared"},
+        "handoff": {"const": "declared"},
+        "reload": {"const": "declared"},
+        "telemetry": {"const": "declared"},
+        "platform": {"const": "declared"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"harness": {"properties": {"surface": {"const": "cli"}}}}},
+      "then": {"required": ["binary"]}
+    },
+    {
+      "if": {
+        "properties": {
+          "harness": {"properties": {"surface": {"enum": ["desktop", "gui"]}}}
+        }
+      },
+      "then": {"required": ["availability"]}
+    }
+  ]
+}
