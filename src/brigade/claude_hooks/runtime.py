@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -20,9 +21,11 @@ BRIEF_MAX_CHARS = 8_000
 MAX_RECENT_SESSION_STATES = 512
 CLAUDE_SESSION_ENV = "BRIGADE_CLAUDE_SESSION"
 _SHELL_SEPARATORS = {"&&", "||", ";", "|", "|&", "&", "\n"}
+_PIPELINE_SEPARATORS = {"|", "|&"}
 _SHELL_WRAPPERS = {"bash", "dash", "ksh", "sh", "zsh"}
 _SHELL_CONTROL_PREFIXES = {"!", "{", "do", "elif", "if", "then", "time", "until", "while"}
 _SHELL_CONTROL_TOKENS = _SHELL_CONTROL_PREFIXES | {"}", "case", "done", "else", "esac", "fi", "for", "select"}
+_HEREDOC_DELIMITER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
 _SNAPSHOT_IGNORE_DIRS = {
     ".brigade",
@@ -133,6 +136,452 @@ def resolve_wired_target(cwd: object) -> Path | None:
             return candidate
         return None
     return None
+
+
+def _advance_quote_state(text: str, quote: str | None) -> str | None:
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            if char == "\\" and index + 1 < len(text):
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        if char == "#" and (index == 0 or text[index - 1] in " \t"):
+            break
+        if char == "'":
+            quote = "'"
+            index += 1
+            continue
+        if char == '"':
+            quote = '"'
+            index += 1
+            continue
+        index += 1
+    return quote
+
+
+def _strip_shell_comment_suffix(line: str) -> str:
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            if char == "\\" and index + 1 < len(line):
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        if char == "#" and (index == 0 or line[index - 1] in " \t"):
+            return line[:index].rstrip(" \t")
+        if char == "'":
+            quote = "'"
+            index += 1
+            continue
+        if char == '"':
+            quote = '"'
+            index += 1
+            continue
+        index += 1
+    return line
+
+
+def _parse_heredoc_delimiter(text: str, start: int) -> tuple[str, bool, int] | None:
+    index = start + 2
+    strip_tabs = False
+    while index < len(text) and text[index] in " \t":
+        index += 1
+    if index < len(text) and text[index] == "-":
+        strip_tabs = True
+        index += 1
+        while index < len(text) and text[index] in " \t":
+            index += 1
+    if index >= len(text):
+        return None
+    char = text[index]
+    if char == "'":
+        end = text.find("'", index + 1)
+        if end < 0:
+            return None
+        return text[index + 1 : end], strip_tabs, end + 1
+    if char == '"':
+        end = index + 1
+        value: list[str] = []
+        while end < len(text):
+            if text[end] == "\\" and end + 1 < len(text):
+                value.append(text[end + 1])
+                end += 2
+                continue
+            if text[end] == '"':
+                return "".join(value), strip_tabs, end + 1
+            value.append(text[end])
+            end += 1
+        return None
+    if char == "\\":
+        match = _HEREDOC_DELIMITER.match(text, index + 1)
+        if not match:
+            return None
+        return match.group(0), strip_tabs, match.end()
+    match = _HEREDOC_DELIMITER.match(text, index)
+    if not match:
+        return None
+    return match.group(0), strip_tabs, match.end()
+
+
+def _heredoc_delimiters_on_line(line: str) -> list[tuple[str, bool]]:
+    tags: list[tuple[str, bool]] = []
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if quote == '"':
+            if char == "\\" and index + 1 < len(line):
+                index += 2
+                continue
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        if char == "'" and quote is None:
+            quote = "'"
+            index += 1
+            continue
+        if char == '"' and quote is None:
+            quote = '"'
+            index += 1
+            continue
+        if char == "#" and quote is None and (index == 0 or line[index - 1] in " \t"):
+            break
+        if line.startswith("<<", index) and quote is None:
+            parsed = _parse_heredoc_delimiter(line, index)
+            if parsed is None:
+                index += 2
+                continue
+            tag, strip_tabs, end = parsed
+            tags.append((tag, strip_tabs))
+            index = end
+            continue
+        index += 1
+    return tags
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """Drop heredoc document lines so their content is data, not commands."""
+    lines = command.split("\n")
+    kept: list[str] = []
+    terminators: list[tuple[str, bool]] = []
+    quote: str | None = None
+    for line in lines:
+        if terminators:
+            tag, strip_tabs = terminators[0]
+            body = line.lstrip("\t") if strip_tabs else line
+            if body == tag or (not strip_tabs and line.rstrip("\r") == tag):
+                terminators.pop(0)
+            continue
+        if quote is not None:
+            kept.append(line)
+            quote = _advance_quote_state(line, quote)
+            continue
+        kept.append(_strip_shell_comment_suffix(line))
+        quote = _advance_quote_state(line, None)
+        if quote is not None:
+            continue
+        terminators.extend(_heredoc_delimiters_on_line(line))
+    return "\n".join(kept)
+
+
+def _resolve_command_path(raw: str, cwd: Path) -> Path:
+    expanded = Path(os.path.expandvars(raw)).expanduser()
+    if not expanded.is_absolute():
+        return (cwd / expanded).resolve(strict=False)
+    return expanded.resolve(strict=False)
+
+
+def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
+    result = list(tokens)
+    while result and Path(result[0]).name in {"tokenjuice", "token-glace"} and "--" in result:
+        result = result[result.index("--") + 1 :]
+    return result
+
+
+def _strip_command_prefixes(tokens: list[str]) -> list[str]:
+    result = _unwrap_command_tokens(tokens)
+    while result and _is_env_assignment(result[0]):
+        result.pop(0)
+    while result and Path(result[0]).name in {"command", "env", "nice", "sudo", "time"}:
+        result.pop(0)
+        while result and result[0].startswith("-"):
+            result.pop(0)
+        while result and _is_env_assignment(result[0]):
+            result.pop(0)
+    return result
+
+
+def _nested_shell_script(tokens: list[str]) -> str | None:
+    return _shell_wrapper_payload(_strip_command_prefixes(tokens))
+
+
+def _command_segment_groups(command: str) -> tuple[bool, list[tuple[str | None, list[str]]]]:
+    try:
+        tokens = _shell_tokens(command)
+    except ValueError:
+        return False, []
+    groups: list[tuple[str | None, list[str]]] = []
+    current: list[str] = []
+    separator: str | None = None
+    for token in tokens:
+        if token in _SHELL_SEPARATORS:
+            if current:
+                groups.append((separator, current))
+                current = []
+            separator = token
+        else:
+            current.append(token)
+    if current:
+        groups.append((separator, current))
+    return True, groups
+
+
+def _segment_effective_cwd(segment: list[str], cwd: Path) -> Path:
+    index = 0
+    while index < len(segment):
+        if segment[index] == "cd" and index + 1 < len(segment):
+            raw = segment[index + 1]
+            if raw != "-":
+                cwd = _resolve_command_path(raw, cwd)
+            index += 2
+            continue
+        index += 1
+    return cwd
+
+
+def _segment_cd_targets(segment: list[str], cwd: Path) -> list[Path]:
+    targets: list[Path] = []
+    index = 0
+    effective = cwd
+    while index < len(segment):
+        if segment[index] == "cd" and index + 1 < len(segment):
+            raw = segment[index + 1]
+            if raw != "-":
+                effective = _resolve_command_path(raw, effective)
+                targets.append(effective)
+            index += 2
+            continue
+        index += 1
+    return targets
+
+
+def _effective_cwd_at_position(command: str, cwd: Path, position: int) -> Path:
+    tokenized, groups = _command_segment_groups(command[:position])
+    if not tokenized:
+        return cwd
+    effective = cwd
+    for separator, segment in groups:
+        if separator in _PIPELINE_SEPARATORS:
+            effective = cwd
+        effective = _segment_effective_cwd(segment, effective)
+    return effective
+
+
+def _verifier_target_from_tokens(tokens: list[str], cwd: Path) -> Path | None:
+    stripped = _strip_env(tokens)
+    if not _is_brigade_verify(stripped):
+        return None
+    for index, token in enumerate(stripped[:-1]):
+        if token in ("--target", "-t"):
+            return _resolve_command_path(stripped[index + 1], cwd)
+    return cwd.resolve(strict=False)
+
+
+def _verifier_target_from_command(command: str, cwd: Path, *, depth: int = 0) -> Path | None:
+    stripped_command = _strip_heredoc_bodies(command)
+    try:
+        tokens = shlex.split(stripped_command, posix=True)
+    except ValueError:
+        tokens = []
+    nested = _nested_shell_script(tokens)
+    if nested is not None and depth < 4:
+        found = _verifier_target_from_command(nested, cwd, depth=depth + 1)
+        if found is not None:
+            return found
+    tokenized, groups = _command_segment_groups(stripped_command)
+    if not tokenized:
+        return None
+    if depth < 4:
+        for position, nested in _nested_shell_command_spans(stripped_command):
+            nested_cwd = _effective_cwd_at_position(stripped_command, cwd, position)
+            found = _verifier_target_from_command(nested, nested_cwd, depth=depth + 1)
+            if found is not None:
+                return found
+    effective = cwd
+    for separator, segment in groups:
+        if separator in _PIPELINE_SEPARATORS:
+            effective = cwd
+        effective = _segment_effective_cwd(segment, effective)
+        nested_segment = _nested_shell_script(_strip_command_prefixes(segment))
+        if nested_segment is not None and depth < 4:
+            found = _verifier_target_from_command(nested_segment, effective, depth=depth + 1)
+            if found is not None:
+                return found
+        target = _verifier_target_from_tokens(segment, effective)
+        if target is not None:
+            return target
+    return None
+
+
+def _command_candidate_paths(command: str, cwd: Path, *, depth: int = 0) -> list[Path]:
+    command = _strip_heredoc_bodies(command)
+    candidates: list[Path] = []
+    tokenized, groups = _command_segment_groups(command)
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        tokens = []
+    nested = _nested_shell_script(tokens)
+    if nested is not None and depth < 4:
+        candidates.extend(_command_candidate_paths(nested, cwd, depth=depth + 1))
+    if tokenized:
+        effective = cwd
+        for separator, segment in groups:
+            if separator in _PIPELINE_SEPARATORS:
+                effective = cwd
+            candidates.extend(_segment_cd_targets(segment, effective))
+            effective = _segment_effective_cwd(segment, effective)
+    for flag in ("--target", "-t"):
+        for index, token in enumerate(tokens[:-1]):
+            if token == flag:
+                candidates.append(_resolve_command_path(tokens[index + 1], cwd))
+    for index, token in enumerate(tokens[:-1]):
+        if Path(token).name == "git" and tokens[index + 1] == "-C" and index + 2 < len(tokens):
+            candidates.append(_resolve_command_path(tokens[index + 2], cwd))
+    for token in tokens:
+        if token.startswith("-") or token in _SHELL_SEPARATORS:
+            continue
+        if any(ch.isspace() for ch in token):
+            continue
+        if token in {".", ".."} or "/" in token or "\\" in token or token.startswith("~"):
+            candidates.append(_resolve_command_path(token, cwd))
+    return candidates
+
+
+def _as_tool_input(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def wired_target_from_payload(payload: dict[str, Any]) -> Path | None:
+    try:
+        cwd = Path(str(payload.get("cwd") or ".")).expanduser().resolve(strict=False)
+    except OSError:
+        return resolve_wired_target(payload.get("cwd"))
+    tool_name = str(payload.get("tool_name") or "")
+    tool_input = _as_tool_input(payload.get("tool_input"))
+    if tool_name == "Bash":
+        command = str(tool_input.get("command") or "")
+        verifier_target = _verifier_target_from_command(command, cwd)
+        if verifier_target is not None:
+            wired = resolve_wired_target(str(verifier_target))
+            if wired is not None:
+                return wired
+        for candidate in _command_candidate_paths(command, cwd):
+            wired = resolve_wired_target(str(candidate))
+            if wired is not None:
+                return wired
+    for key in ("file_path", "path", "notebook_path"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            wired = resolve_wired_target(str(_resolve_command_path(value, cwd)))
+            if wired is not None:
+                return wired
+    return resolve_wired_target(payload.get("cwd"))
+
+
+def _session_repo_union(session_id: str, *seeds: Path) -> list[str]:
+    repos: set[str] = set()
+    pending = [seed.expanduser().resolve() for seed in seeds]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        key = str(current)
+        if key in seen:
+            continue
+        seen.add(key)
+        repos.add(key)
+        state = read_session_state(current, session_id)
+        if state is None:
+            continue
+        raw_repos = state.get("session_repos")
+        if not isinstance(raw_repos, list):
+            continue
+        for raw in raw_repos:
+            if isinstance(raw, str) and raw and raw not in seen:
+                pending.append(Path(raw))
+    return sorted(repos)
+
+
+def _link_session_targets(session_id: str, *targets: Path) -> None:
+    sorted_repos = _session_repo_union(session_id, *targets)
+    for repo in sorted_repos:
+        target = Path(repo)
+        state = read_session_state(target, session_id)
+        if state is None:
+            continue
+        if state.get("session_repos") == sorted_repos:
+            continue
+        updated = dict(state)
+        updated["session_repos"] = sorted_repos
+        write_session_state(target, session_id, updated)
+
+
+def _touch_session_targets(session_id: str, target: Path, payload: dict[str, Any]) -> None:
+    cwd_target = resolve_wired_target(payload.get("cwd"))
+    if cwd_target is not None:
+        _link_session_targets(session_id, target, cwd_target)
+    else:
+        _link_session_targets(session_id, target)
+
+
+def _stop_targets(payload: dict[str, Any], session_id: str) -> list[Path]:
+    cwd_target = resolve_wired_target(payload.get("cwd"))
+    ordered: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        key = str(path.expanduser().resolve())
+        if key in seen:
+            return
+        seen.add(key)
+        ordered.append(path)
+
+    if cwd_target is None:
+        return ordered
+    state = read_session_state(cwd_target, session_id)
+    raw_repos = state.get("session_repos") if isinstance(state, dict) else None
+    if isinstance(raw_repos, list):
+        for raw in raw_repos:
+            if isinstance(raw, str) and raw:
+                add(Path(raw))
+    add(cwd_target)
+    return ordered
 
 
 def _run_brief(target: Path) -> str:
@@ -573,8 +1022,8 @@ def _read_parenthesized(command: str, start: int) -> tuple[str, int] | None:
     return None
 
 
-def _nested_shell_commands(command: str) -> list[str]:
-    nested: list[str] = []
+def _nested_shell_command_spans(command: str) -> list[tuple[int, str]]:
+    spans: list[tuple[int, str]] = []
     quote: str | None = None
     escaped = False
     index = 0
@@ -604,32 +1053,36 @@ def _nested_shell_commands(command: str) -> list[str]:
         if char == "$" and command[index + 1 : index + 2] == "(":
             parsed = _read_parenthesized(command, index + 2)
             if parsed is None:
-                return nested
+                return spans
             text, end = parsed
-            nested.append(text)
+            spans.append((index + 2, text))
             index = end + 1
             continue
         if char == "`":
             end = index + 1
             while end < len(command):
                 if command[end] == "`" and command[end - 1] != "\\":
-                    nested.append(command[index + 1 : end])
+                    spans.append((index + 1, command[index + 1 : end]))
                     index = end + 1
                     break
                 end += 1
             else:
-                return nested
+                return spans
             continue
         if char == "(" and quote is None:
             parsed = _read_parenthesized(command, index + 1)
             if parsed is None:
-                return nested
+                return spans
             text, end = parsed
-            nested.append(text)
+            spans.append((index, text))
             index = end + 1
             continue
         index += 1
-    return nested
+    return spans
+
+
+def _nested_shell_commands(command: str) -> list[str]:
+    return [text for _, text in _nested_shell_command_spans(command)]
 
 
 def _python_module_invocation(tokens: list[str]) -> tuple[str, list[str]] | None:
@@ -748,6 +1201,7 @@ def _segment_is_verifier(segment: list[str], *, depth: int = 0) -> bool:
 
 
 def _is_raw_verification_text(command: str, *, depth: int) -> bool:
+    command = _strip_heredoc_bodies(command)
     try:
         tokens = _shell_tokens(command)
     except ValueError:
@@ -1125,6 +1579,9 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
     last_verification_write = localio.parse_iso_datetime(payload.get("last_verification_write_at"))
     if last_verification_write is not None and last_verification_write <= now:
         normalized["last_verification_write_at"] = last_verification_write.isoformat()
+    session_repos = payload.get("session_repos")
+    if isinstance(session_repos, list) and all(isinstance(item, str) for item in session_repos):
+        normalized["session_repos"] = list(session_repos)
     return normalized
 
 
@@ -1173,7 +1630,7 @@ def _additional_context(event: str, text: str) -> dict[str, Any]:
 
 
 def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-    target = resolve_wired_target(payload.get("cwd"))
+    target = wired_target_from_payload(payload)
     if target is None:
         return None
     session_id = payload.get("session_id")
@@ -1184,6 +1641,8 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     state = _normalize_state(target, session_id, persisted_state)
     if persisted_state != state:
         write_session_state(target, session_id, state)
+    if event != "Stop":
+        _touch_session_targets(session_id, target, payload)
     if event == "SessionStart":
         if state.get("briefed"):
             return None
@@ -1272,24 +1731,39 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         return None
 
     if event == "Stop":
-        if payload.get("stop_hook_active") is True or not state.get("write_observed"):
+        if payload.get("stop_hook_active") is True:
             return None
-        fingerprint = state.get("session_fingerprint")
-        if not isinstance(fingerprint, str):
-            fingerprint = _session_fingerprint(session_id)
-        receipt_threshold = (
-            state.get("last_verification_write_at") or state.get("last_write_at") or state.get("started_at")
-        )
-        if not _receipt_since(target, receipt_threshold, session_fingerprint=fingerprint):
-            replacement = _verify_replacement(target, "<test>", fingerprint)
+        blocking_failures: list[str] = []
+        handoff_target: Path | None = None
+        for stop_target in _stop_targets(payload, session_id):
+            if not stop_target.is_dir():
+                continue
+            stop_state = read_session_state(stop_target, session_id)
+            stop_state = _normalize_state(stop_target, session_id, stop_state)
+            if not stop_state.get("write_observed"):
+                continue
+            fingerprint = stop_state.get("session_fingerprint")
+            if not isinstance(fingerprint, str):
+                fingerprint = _session_fingerprint(session_id)
+            receipt_threshold = (
+                stop_state.get("last_verification_write_at")
+                or stop_state.get("last_write_at")
+                or stop_state.get("started_at")
+            )
+            if not _receipt_since(stop_target, receipt_threshold, session_fingerprint=fingerprint):
+                replacement = _verify_replacement(stop_target, "<test>", fingerprint)
+                blocking_failures.append(f"{stop_target}: run `{replacement}`")
+            elif not _handoff_since(stop_target, stop_state.get("started_at")):
+                handoff_target = stop_target
+        if blocking_failures:
             return {
                 "decision": "block",
                 "reason": (
-                    "Recent write work in this Brigade-wired repo has no verification receipt for this session. "
-                    f"Run `{replacement}`, then finish again."
+                    "Recent write work in Brigade-wired repos has no verification receipt for this session.\n- "
+                    + "\n- ".join(blocking_failures)
                 ),
             }
-        if not _handoff_since(target, state.get("started_at")):
+        if handoff_target is not None:
             return _additional_context(
                 "Stop",
                 "Verification is recorded. If this work produced durable knowledge, write a Memory Handoff in `.claude/memory-handoffs/` before finishing.",

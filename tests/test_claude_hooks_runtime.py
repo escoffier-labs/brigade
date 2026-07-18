@@ -1089,3 +1089,410 @@ def test_posttool_failure_keeps_routed_failure_in_the_loop(tmp_path: Path):
     context = result["hookSpecificOutput"]["additionalContext"]
     assert "failed or rejected verification" in context
     assert "before retrying" in context
+
+
+def _configured_git_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    selection = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+    assert install_selection(path, selection) == 0
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (path / "tracked.txt").write_text("before\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-qm", "test baseline"], cwd=path, check=True, capture_output=True, text=True)
+    return path
+
+
+def test_wrapped_verify_credits_target_repo_not_cwd_repo(tmp_path: Path, monkeypatch):
+    target = _configured_git_repo(tmp_path / "target")
+    cwd_repo = _configured_git_repo(tmp_path / "cwdrepo")
+    session_id = "wrapped-cross-repo"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "tracked.txt"), "content": "after\n"},
+        ),
+    )
+    state = runtime.read_session_state(target, session_id)
+
+    inner = f"cd {target} && brigade work verify run --target . --command 'true' --capture brigade-work 2>&1 | tail -3"
+    wrapped = "tokenjuice wrap --source claude-code --min-reduce-chars 2000 -- /bin/bash -lc " + shlex.quote(inner)
+    assert (
+        runtime.wired_target_from_payload(
+            _payload(
+                cwd_repo,
+                "PostToolUse",
+                session_id=session_id,
+                tool_name="Bash",
+                tool_input={"command": wrapped},
+            )
+        )
+        == target.resolve()
+    )
+
+    other = _configured_git_repo(tmp_path / "other")
+    combined = f"cd {target} && echo one 2>&1 | tail -1; cd {other} && echo two 2>&1 | tail -1"
+    combined_wrapped = "tokenjuice wrap --source claude-code --min-reduce-chars 2000 -- /bin/bash -lc " + shlex.quote(
+        combined
+    )
+    assert (
+        runtime.wired_target_from_payload(
+            _payload(
+                cwd_repo,
+                "PostToolUse",
+                session_id=session_id,
+                tool_name="Bash",
+                tool_input={"command": combined_wrapped},
+            )
+        )
+        == target.resolve()
+    )
+
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "wrapped-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "wrapped-run",
+                "status": "completed",
+                "started_at": state["last_write_at"],
+                "harness_session": {
+                    "harness": "claude",
+                    "fingerprint": state["session_fingerprint"],
+                },
+            }
+        )
+        + "\n"
+    )
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            cwd_repo,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Bash",
+            tool_input={"command": wrapped},
+        ),
+    )
+    handoff = target / ".claude" / "memory-handoffs" / "note.md"
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text("note")
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(handoff)},
+        ),
+    )
+
+    stopped = runtime.handle_payload("Stop", _payload(cwd_repo, "Stop", session_id=session_id, stop_hook_active=False))
+    assert stopped is None
+
+
+def test_heredoc_bodies_are_data_not_commands(tmp_path: Path):
+    repo = _wired_claude(tmp_path / "repo")
+    other = _wired_claude(tmp_path / "other")
+    prose = (
+        f"cd {repo} && cat > notes.md <<'EOF'\n"
+        "Run checks through `brigade work verify run` with atomic capture.\n"
+        f"Earlier this failed in {other} after a bare pytest run.\n"
+        "EOF\n"
+        "echo done"
+    )
+    assert not runtime.is_raw_verification(prose)
+    assert (
+        runtime.wired_target_from_payload(
+            _payload(tmp_path, "PreToolUse", tool_name="Bash", tool_input={"command": prose})
+        )
+        == repo.resolve()
+    )
+    assert runtime._is_confident_bash_write(prose)
+
+    captured = (
+        f"cd {repo} && brigade work verify run --target . "
+        "--command 'true' --capture brigade-work <<'EOF'\n"
+        "unrelated document text\n"
+        "EOF"
+    )
+    assert not runtime.is_raw_verification(captured)
+    pretool = runtime.handle_payload(
+        "PreToolUse",
+        _payload(repo, "PreToolUse", tool_name="Bash", tool_input={"command": captured}),
+    )
+    assert pretool is None
+
+
+def test_stop_skips_repos_that_no_longer_exist(tmp_path: Path, monkeypatch):
+    import shutil
+
+    target = _configured_git_repo(tmp_path / "target")
+    cwd_repo = _configured_git_repo(tmp_path / "cwdrepo")
+    session_id = "vanished-repo"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "tracked.txt"), "content": "after\n"},
+        ),
+    )
+    runtime.handle_payload("SessionStart", _payload(cwd_repo, "SessionStart", session_id=session_id, cwd=str(cwd_repo)))
+    shutil.rmtree(target)
+
+    stopped = runtime.handle_payload("Stop", _payload(cwd_repo, "Stop", session_id=session_id, stop_hook_active=False))
+    assert stopped is None
+
+
+def test_stop_blocks_linked_mutated_repo_without_receipt(tmp_path: Path, monkeypatch):
+    target = _configured_git_repo(tmp_path / "target")
+    cwd_repo = _configured_git_repo(tmp_path / "cwdrepo")
+    session_id = "linked-mutated-stop"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "tracked.txt"), "content": "after\n"},
+        ),
+    )
+    runtime.handle_payload("SessionStart", _payload(cwd_repo, "SessionStart", session_id=session_id, cwd=str(cwd_repo)))
+
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            cwd_repo,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Bash",
+            tool_input={"command": f"cd {target} && pwd"},
+        ),
+    )
+
+    blocked = runtime.handle_payload("Stop", _payload(cwd_repo, "Stop", session_id=session_id, stop_hook_active=False))
+    assert blocked is not None
+    assert blocked["decision"] == "block"
+    assert str(target.resolve()) in blocked["reason"]
+
+
+def test_wrapped_verify_uses_effective_cwd_not_first_cd(tmp_path: Path):
+    first = _configured_git_repo(tmp_path / "first")
+    actual = _configured_git_repo(tmp_path / "actual")
+    cwd_repo = _configured_git_repo(tmp_path / "cwdrepo")
+    session_id = "effective-cwd"
+
+    inner = f"cd {first} && cd {actual} && brigade work verify run --target . --command 'true' --capture brigade-work"
+    wrapped = "tokenjuice wrap --source claude-code --min-reduce-chars 2000 -- /bin/bash -lc " + shlex.quote(inner)
+    assert (
+        runtime.wired_target_from_payload(
+            _payload(
+                cwd_repo,
+                "PostToolUse",
+                session_id=session_id,
+                tool_name="Bash",
+                tool_input={"command": wrapped},
+            )
+        )
+        == actual.resolve()
+    )
+
+    nested_inner = f"cd {first} && /bin/bash -lc {shlex.quote(f'cd {actual} && brigade work verify run --target . --command true --capture brigade-work')}"
+    nested_wrapped = "tokenjuice wrap --source claude-code --min-reduce-chars 2000 -- /bin/bash -lc " + shlex.quote(
+        nested_inner
+    )
+    assert (
+        runtime.wired_target_from_payload(
+            _payload(
+                cwd_repo,
+                "PostToolUse",
+                session_id=session_id,
+                tool_name="Bash",
+                tool_input={"command": nested_wrapped},
+            )
+        )
+        == actual.resolve()
+    )
+
+
+def test_pipeline_cd_does_not_carry_into_right_side(tmp_path: Path):
+    first = _configured_git_repo(tmp_path / "first")
+    actual = _configured_git_repo(tmp_path / "actual")
+    cwd_repo = _configured_git_repo(tmp_path / "cwdrepo")
+    session_id = "pipeline-scope"
+
+    piped = f"cd {first} | brigade work verify run --target . --command 'true' --capture brigade-work"
+    assert (
+        runtime.wired_target_from_payload(
+            _payload(
+                cwd_repo,
+                "PostToolUse",
+                session_id=session_id,
+                tool_name="Bash",
+                tool_input={"command": piped},
+            )
+        )
+        == cwd_repo.resolve()
+    )
+
+    piped_other = (
+        f"cd {first} | cd {actual} && brigade work verify run --target . --command 'true' --capture brigade-work"
+    )
+    assert (
+        runtime.wired_target_from_payload(
+            _payload(
+                cwd_repo,
+                "PostToolUse",
+                session_id=session_id,
+                tool_name="Bash",
+                tool_input={"command": piped_other},
+            )
+        )
+        == actual.resolve()
+    )
+
+
+def test_subshell_cd_does_not_carry_to_parent_scope(tmp_path: Path):
+    first = _configured_git_repo(tmp_path / "first")
+    actual = _configured_git_repo(tmp_path / "actual")
+    cwd_repo = _configured_git_repo(tmp_path / "cwdrepo")
+    session_id = "subshell-scope"
+
+    subshell = f"(cd {first}) && brigade work verify run --target . --command 'true' --capture brigade-work"
+    assert (
+        runtime.wired_target_from_payload(
+            _payload(
+                cwd_repo,
+                "PostToolUse",
+                session_id=session_id,
+                tool_name="Bash",
+                tool_input={"command": subshell},
+            )
+        )
+        == cwd_repo.resolve()
+    )
+
+    nested = (
+        f"cd {first} && (cd {actual} && brigade work verify run --target . --command 'true' --capture brigade-work)"
+    )
+    assert (
+        runtime.wired_target_from_payload(
+            _payload(
+                cwd_repo,
+                "PostToolUse",
+                session_id=session_id,
+                tool_name="Bash",
+                tool_input={"command": nested},
+            )
+        )
+        == actual.resolve()
+    )
+
+
+def test_unmatched_quote_and_quoted_literal_do_not_attribute_cd(tmp_path: Path):
+    first = _configured_git_repo(tmp_path / "first")
+    actual = _configured_git_repo(tmp_path / "actual")
+    cwd_repo = _configured_git_repo(tmp_path / "cwdrepo")
+    session_id = "quote-scope"
+
+    unmatched = f'cd "{first} && brigade work verify run --target . --command true --capture brigade-work'
+    assert runtime._verifier_target_from_command(unmatched, cwd_repo.resolve()) is None
+    assert runtime._command_candidate_paths(unmatched, cwd_repo.resolve()) == []
+
+    quoted_literal = f"echo 'cd {first}' && brigade work verify run --target . --command 'true' --capture brigade-work"
+    assert (
+        runtime.wired_target_from_payload(
+            _payload(
+                cwd_repo,
+                "PostToolUse",
+                session_id=session_id,
+                tool_name="Bash",
+                tool_input={"command": quoted_literal},
+            )
+        )
+        == cwd_repo.resolve()
+    )
+
+    literal_then_cd = f"printf 'cd {first}' && cd {actual} && brigade work verify run --target . --command 'true' --capture brigade-work"
+    assert (
+        runtime.wired_target_from_payload(
+            _payload(
+                cwd_repo,
+                "PostToolUse",
+                session_id=session_id,
+                tool_name="Bash",
+                tool_input={"command": literal_then_cd},
+            )
+        )
+        == actual.resolve()
+    )
+
+
+def test_heredoc_scanner_is_quote_aware_and_queues_delimiters(tmp_path: Path):
+    quoted_multiline = "printf '<<EOF\npytest\nEOF\n' && echo ok"
+    assert not runtime.is_raw_verification(quoted_multiline)
+    assert "pytest" in runtime._strip_heredoc_bodies(quoted_multiline)
+
+    assert "pytest" in runtime._strip_heredoc_bodies("printf '<<EOF' && pytest")
+    assert runtime.is_raw_verification("printf '<<EOF' && pytest")
+
+    dual = "cat <<ONE <<TWO\nalpha\nONE\nbeta\nTWO\necho done"
+    stripped = runtime._strip_heredoc_bodies(dual)
+    assert stripped == "cat <<ONE <<TWO\necho done"
+    assert "alpha" not in stripped
+    assert "beta" not in stripped
+    assert not runtime.is_raw_verification("cat <<ONE <<TWO\npytest\nTWO\necho done")
+
+    commented = "# <<END\npytest -q\nEND"
+    assert runtime.is_raw_verification(commented)
+    assert "pytest" in runtime._strip_heredoc_bodies(commented)
+
+    commented_apostrophe = "# ' <<END\npytest -q\nEND"
+    assert runtime.is_raw_verification(commented_apostrophe)
+    assert "pytest" in runtime._strip_heredoc_bodies(commented_apostrophe)
+
+    inline = "echo hi # <<END not a heredoc\npytest -q"
+    assert runtime.is_raw_verification(inline)
+    assert "pytest" in runtime._strip_heredoc_bodies(inline)
+
+    quoted_hash = "printf '# <<END' && cat <<EOF\nbody\nEOF\necho done"
+    stripped_hash = runtime._strip_heredoc_bodies(quoted_hash)
+    assert stripped_hash == "printf '# <<END' && cat <<EOF\necho done"
+    assert "body" not in stripped_hash
+
+    backslash = "cat <<\\END\npytest -q\nEND\necho done"
+    assert not runtime.is_raw_verification(backslash)
+    stripped_bs = runtime._strip_heredoc_bodies(backslash)
+    assert stripped_bs == "cat <<\\END\necho done"
+    assert "pytest" not in stripped_bs
