@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import ntpath
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
 _STREAM_ENCODING = "utf-8"
+_UNSUPPORTED_WINDOWS_SUFFIXES: dict[str, str] = {
+    ".ps1": "PowerShell script",
+    ".vbs": "VBScript",
+    ".js": "JavaScript file",
+    ".py": "Python script",
+    ".jar": "Java archive",
+    ".msi": "Windows installer",
+}
+_WINDOWS_BATCH_SUFFIXES = frozenset({".cmd", ".bat"})
 
 
 @dataclass
@@ -74,8 +86,127 @@ def _result_from_output(
     )
 
 
-def which(cmd: str) -> Optional[str]:
-    return shutil.which(cmd)
+@dataclass(frozen=True)
+class ExecutableIdentity:
+    """Resolved adapter executable identity safe for public diagnostics."""
+
+    command: str
+    path: str | None
+    kind: str
+    runnable: bool
+    detail: str
+
+
+def _native_executable_remediation(command: str) -> str:
+    return f"add the native {command} executable directory to PATH instead of the shim"
+
+
+def _looks_like_windows_pe_executable(path: Path) -> bool:
+    """Return True when path begins with a Windows PE executable signature."""
+
+    try:
+        with path.open("rb") as handle:
+            if handle.read(2) != b"MZ":
+                return False
+            handle.seek(0x3C)
+            pe_offset_bytes = handle.read(4)
+            if len(pe_offset_bytes) != 4:
+                return False
+            pe_offset = int.from_bytes(pe_offset_bytes, "little")
+            handle.seek(pe_offset)
+            return handle.read(4) == b"PE\0\0"
+    except OSError:
+        return False
+
+
+def _windows_executable_kind(path: Path, *, raw_path: str, command: str) -> tuple[str, bool, str]:
+    suffix = ntpath.splitext(raw_path)[1].lower()
+    basename = ntpath.splitext(ntpath.basename(raw_path))[0] or path.name
+    if suffix == ".exe":
+        return "exe", True, f"{basename} resolves to a supported Windows exe executable"
+    if suffix in _WINDOWS_BATCH_SUFFIXES:
+        shim_kind = suffix[1:]
+        return (
+            shim_kind,
+            False,
+            (
+                f"{basename} resolves to an unsupported Windows {shim_kind} shim; "
+                f"{_native_executable_remediation(command)}"
+            ),
+        )
+    if suffix in _UNSUPPORTED_WINDOWS_SUFFIXES:
+        shim = _UNSUPPORTED_WINDOWS_SUFFIXES[suffix]
+        return (
+            f"unsupported{suffix}",
+            False,
+            (f"{basename} resolves to an unsupported Windows {shim}; {_native_executable_remediation(command)}"),
+        )
+    if suffix:
+        return (
+            "unsupported",
+            False,
+            (
+                f"{basename} resolves to an unsupported Windows executable kind ({suffix}); "
+                f"add the native {command} executable directory to PATH"
+            ),
+        )
+    if _looks_like_windows_pe_executable(path):
+        return "native", True, f"{basename} resolves to a supported Windows native executable"
+    return (
+        "npm-shim",
+        False,
+        (f"{basename} resolves to an unsupported Windows npm shim; {_native_executable_remediation(command)}"),
+    )
+
+
+def _posix_executable_kind(command: str) -> tuple[str, bool, str]:
+    return "native", True, f"{command} is available on PATH"
+
+
+def which(cmd: str, path: str | None = None) -> Optional[str]:
+    return shutil.which(cmd, path=path)
+
+
+def resolve_executable(command: str, path: str | None = None) -> ExecutableIdentity:
+    """Resolve a command name once for detection and dispatch.
+
+    Public diagnostics intentionally omit user-specific absolute paths.
+    """
+
+    resolved_path = which(command) if path is None else which(command, path=path)
+    if resolved_path is None:
+        return ExecutableIdentity(
+            command=command,
+            path=None,
+            kind="missing",
+            runnable=False,
+            detail=f"{command} is not on PATH",
+        )
+
+    resolved = Path(resolved_path)
+    if sys.platform == "win32":
+        kind, runnable, detail = _windows_executable_kind(resolved, raw_path=resolved_path, command=command)
+    else:
+        kind, runnable, detail = _posix_executable_kind(command)
+
+    return ExecutableIdentity(
+        command=command,
+        path=resolved_path,
+        kind=kind,
+        runnable=runnable,
+        detail=detail,
+    )
+
+
+def _launch_failure(argv: List[str], exc: OSError) -> tuple[int, str]:
+    command = ntpath.basename(argv[0]) if argv else "command"
+    if isinstance(exc, FileNotFoundError):
+        return 127, f"command not found: {command}"
+    if isinstance(exc, PermissionError) or exc.errno in {errno.EACCES, errno.EPERM}:
+        return 126, f"command permission denied: {command}"
+    if exc.errno == errno.ENOEXEC:
+        return 126, f"command has invalid executable format: {command}"
+    return 126, f"command launch failed: {command}"
 
 
 def run(
@@ -111,8 +242,9 @@ def run(
                 input=stdin,
             )
         return _result_from_output(code=cp.returncode, stdout=cp.stdout, stderr=cp.stderr)
-    except FileNotFoundError:
-        return Result(code=127, stdout="", stderr=f"command not found: {args[0]}")
+    except OSError as exc:
+        code, message = _launch_failure(args, exc)
+        return Result(code=code, stdout="", stderr=message)
     except subprocess.TimeoutExpired as exc:
         result = _result_from_output(code=124, stdout=exc.stdout, stderr=exc.stderr)
         timeout_detail = f"timeout after {timeout}s"

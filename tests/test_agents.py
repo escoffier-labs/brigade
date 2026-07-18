@@ -163,7 +163,7 @@ def test_research_antigravity_cli_uses_current_cwd_when_cwd_omitted(tmp_path, mo
     assert llm._run_cli("antigravity", "hi", 10) == "answer"
     assert captured["cwd"] is None
     assert captured["argv"] == [
-        "agy",
+        "/x/agy",
         "--add-dir",
         str(tmp_path.resolve()),
         "--dangerously-skip-permissions",
@@ -350,7 +350,7 @@ def _fake_ollama_env(monkeypatch, list_result, run_result=None):
 
     def fake_run(argv, **kw):
         calls.append(argv)
-        if argv[:2] == ["ollama", "list"]:
+        if len(argv) >= 2 and Path(argv[0]).name == "ollama" and argv[1] == "list":
             return list_result
         return run_result if run_result is not None else agents.proc.Result(0, "answer", "")
 
@@ -368,7 +368,7 @@ def test_run_agent_ollama_refuses_model_not_pulled(monkeypatch):
     assert res.ok is False
     assert "not pulled locally" in res.detail
     assert "never auto-pulls" in res.detail
-    assert calls == [["ollama", "list"]]
+    assert calls == [["/x/ollama", "list"]]
 
 
 def test_run_agent_ollama_runs_when_model_pulled(monkeypatch):
@@ -377,7 +377,7 @@ def test_run_agent_ollama_runs_when_model_pulled(monkeypatch):
     res = agents.run_agent("ollama:llama3.3", "hi")
     assert res.ok is True
     assert res.text == "answer"
-    assert calls[-1] == ["ollama", "run", "llama3.3", "hi"]
+    assert calls[-1] == ["/x/ollama", "run", "llama3.3", "hi"]
 
 
 def test_run_agent_ollama_matches_exact_tag(monkeypatch):
@@ -385,7 +385,7 @@ def test_run_agent_ollama_matches_exact_tag(monkeypatch):
     calls = _fake_ollama_env(monkeypatch, listing)
     res = agents.run_agent("ollama:llama3.2:3b", "hi")
     assert res.ok is True
-    assert calls[-1] == ["ollama", "run", "llama3.2:3b", "hi"]
+    assert calls[-1] == ["/x/ollama", "run", "llama3.2:3b", "hi"]
 
 
 def test_run_agent_ollama_fails_seat_when_list_fails(monkeypatch):
@@ -394,7 +394,7 @@ def test_run_agent_ollama_fails_seat_when_list_fails(monkeypatch):
     res = agents.run_agent("ollama:llama3.2:3b", "hi")
     assert res.ok is False
     assert "could not list local ollama models" in res.detail
-    assert calls == [["ollama", "list"]]
+    assert calls == [["/x/ollama", "list"]]
 
 
 def test_run_agent_captures_output(monkeypatch):
@@ -662,7 +662,7 @@ def test_run_agent_forwards_model_to_argv(monkeypatch):
     monkeypatch.setattr(agents.proc, "run", fake_run)
     res = agents.run_agent("claude", "hi", model="claude-fable-5")
     assert res.ok is True
-    assert captured["argv"] == ["claude", "--model", "claude-fable-5", "-p", "hi"]
+    assert captured["argv"] == ["/x/claude", "--model", "claude-fable-5", "-p", "hi"]
 
 
 def test_run_agent_codex_feeds_prompt_on_stdin(monkeypatch):
@@ -684,7 +684,7 @@ def test_run_agent_codex_feeds_prompt_on_stdin(monkeypatch):
     res = agents.run_agent("codex", "plan this task", model="gpt-5.5", read_only=True)
     assert res.ok is True
     assert captured["argv"] == [
-        "codex",
+        "/x/codex",
         "exec",
         "--sandbox",
         "read-only",
@@ -744,7 +744,7 @@ def test_run_agent_threads_cwd_into_argv_builder(monkeypatch, tmp_path):
     assert res.ok is True
     assert captured["cwd"] == tmp_path
     assert captured["argv"] == [
-        "agy",
+        "/x/agy",
         "--add-dir",
         str(tmp_path),
         "--dangerously-skip-permissions",
@@ -769,7 +769,7 @@ def test_run_agent_antigravity_with_no_cwd_allows_current_cwd(monkeypatch, tmp_p
     assert res.ok is True
     assert captured["cwd"] is None
     assert captured["argv"] == [
-        "agy",
+        "/x/agy",
         "--add-dir",
         str(tmp_path.resolve()),
         "--dangerously-skip-permissions",
