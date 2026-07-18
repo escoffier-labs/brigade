@@ -165,6 +165,7 @@ class WorkerResult:
     safe_events: tuple[dict[str, object], ...] = ()
     failure_phase: str | None = None
     failure_kind: str | None = None
+    transport_warning: dict[str, object] | None = None
     env_overrides: tuple[str, ...] = ()
     endpoint_host: str | None = None
     attempts: tuple[WorkerAttempt, ...] = ()
@@ -414,6 +415,7 @@ def dispatch(
                 detail=result.detail,
                 failure_phase=result.failure_phase,
                 failure_kind=result.failure_kind,
+                transport_warning=result.transport_warning,
                 thread_id=result.thread_id,
                 status=result.status,
                 stdout=result.stdout,

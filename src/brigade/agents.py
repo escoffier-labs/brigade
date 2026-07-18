@@ -339,6 +339,7 @@ class AgentResult:
     safe_events: tuple[dict[str, object], ...] = ()
     failure_phase: str | None = None
     failure_kind: str | None = None
+    transport_warning: dict[str, object] | None = None
 
 
 def is_known(cli_ref: str) -> bool:

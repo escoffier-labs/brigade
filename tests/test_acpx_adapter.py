@@ -39,6 +39,78 @@ def _success_stream() -> str:
     )
 
 
+def _late_permission_stream(*, final_text: str = "Complete review findings.") -> str:
+    return _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": final_text}},
+            },
+        },
+        {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+        {
+            "jsonrpc": "2.0",
+            "id": "perm-1",
+            "error": {"code": -32072, "message": "PERMISSION_PROMPT_UNAVAILABLE"},
+        },
+    )
+
+
+def _malformed_late_permission_chronology_stream() -> str:
+    return _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+        {
+            "jsonrpc": "2.0",
+            "id": "perm-1",
+            "error": {"code": -32072, "message": "PERMISSION_PROMPT_UNAVAILABLE"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "Complete review findings."},
+                },
+            },
+        },
+    )
+
+
+def _prefinal_permission_stream() -> str:
+    return _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": "perm-1",
+            "error": {"code": -32072, "message": "PERMISSION_PROMPT_UNAVAILABLE"},
+        },
+    )
+
+
 def _authenticated_status() -> acpx_adapter.CursorAuthStatus:
     return acpx_adapter.CursorAuthStatus(
         "authenticated",
@@ -519,3 +591,360 @@ def test_run_distinguishes_timeout_permission_and_provider_startup(monkeypatch, 
     assert startup.exit_code == 7
     assert startup.failure_phase == "dispatch"
     assert startup.failure_kind == "provider-startup"
+
+
+def test_run_preserves_end_turn_final_after_late_permission_prompt(monkeypatch, tmp_path):
+    stream = _late_permission_stream()
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter(
+        [
+            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(5, stream, "PERMISSION_PROMPT_UNAVAILABLE"),
+        ]
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is True
+    assert result.text == "Complete review findings."
+    assert result.exit_code == 5
+    assert result.stop_reason == "end_turn"
+    assert result.session_id == "session-1"
+    assert result.request_id == "req-1"
+    assert result.stdout == stream
+    assert result.stderr == "PERMISSION_PROMPT_UNAVAILABLE"
+    assert result.transport_warning == {
+        "phase": "post-final",
+        "kind": "permission-prompt-unavailable",
+        "code": -32072,
+        "detail": "PERMISSION_PROMPT_UNAVAILABLE",
+    }
+    assert "late permission prompt unavailable" in result.detail
+
+
+def test_parse_stream_rejects_post_permission_text_without_prefinal_answer():
+    parsed, error = acpx_adapter.parse_stream(_malformed_late_permission_chronology_stream())
+
+    assert parsed is None
+    assert error == "ACP stream contained no final assistant text"
+
+
+def test_run_rejects_post_permission_text_without_prefinal_answer(monkeypatch, tmp_path):
+    stream = _malformed_late_permission_chronology_stream()
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter(
+        [
+            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(5, stream, "PERMISSION_PROMPT_UNAVAILABLE"),
+        ]
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.text == ""
+    assert result.exit_code == 5
+    assert result.transport_warning is None
+    assert result.failure_kind == "provider-startup"
+
+
+def test_run_keeps_prefinal_permission_failure_failed(monkeypatch, tmp_path):
+    stream = _prefinal_permission_stream()
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter(
+        [
+            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(5, stream, "PERMISSION_PROMPT_UNAVAILABLE"),
+        ]
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.text == ""
+    assert result.exit_code == 5
+    assert result.failure_kind == "provider-startup"
+    assert result.transport_warning is None
+
+
+def test_permission_prompt_diagnostic_requires_exact_code():
+    assert acpx_adapter._permission_prompt_diagnostic({"code": -32072, "message": "PERMISSION_PROMPT_UNAVAILABLE"}) == {
+        "phase": "post-final",
+        "kind": "permission-prompt-unavailable",
+        "code": -32072,
+        "detail": "PERMISSION_PROMPT_UNAVAILABLE",
+    }
+    assert (
+        acpx_adapter._permission_prompt_diagnostic({"code": -32000, "message": "PERMISSION_PROMPT_UNAVAILABLE"}) is None
+    )
+    assert (
+        acpx_adapter._permission_prompt_diagnostic({"code": "-32072", "message": "PERMISSION_PROMPT_UNAVAILABLE"})
+        is None
+    )
+
+
+def test_permission_prompt_diagnostic_canonicalizes_structured_message():
+    message = "PERMISSION_PROMPT_UNAVAILABLE token=fake-secret-token /tmp/fake-secret-path"
+    warning = acpx_adapter._permission_prompt_diagnostic({"code": -32072, "message": message})
+
+    assert warning == {
+        "phase": "post-final",
+        "kind": "permission-prompt-unavailable",
+        "code": -32072,
+        "detail": "PERMISSION_PROMPT_UNAVAILABLE",
+    }
+    assert "fake-secret-token" not in repr(warning)
+    assert "/tmp/fake-secret-path" not in repr(warning)
+
+
+def test_run_late_permission_structured_error_sanitizes_receipt_detail(monkeypatch, tmp_path):
+    secret_message = "PERMISSION_PROMPT_UNAVAILABLE token=fake-secret-token /tmp/fake-secret-path"
+    stream = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "Complete review findings."},
+                },
+            },
+        },
+        {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+        {
+            "jsonrpc": "2.0",
+            "id": "perm-1",
+            "error": {"code": -32072, "message": secret_message},
+        },
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter(
+        [
+            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(5, stream, "transport stderr preserved"),
+        ]
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is True
+    assert result.transport_warning == {
+        "phase": "post-final",
+        "kind": "permission-prompt-unavailable",
+        "code": -32072,
+        "detail": "PERMISSION_PROMPT_UNAVAILABLE",
+    }
+    assert "fake-secret-token" not in repr(result.transport_warning)
+    assert "/tmp/fake-secret-path" not in repr(result.transport_warning)
+    assert "fake-secret-token" not in result.detail
+    assert "/tmp/fake-secret-path" not in result.detail
+    assert result.stdout == stream
+    assert result.stderr == "transport stderr preserved"
+
+
+def test_late_permission_from_stderr_uses_canonical_detail():
+    stderr = "PERMISSION_PROMPT_UNAVAILABLE token=fake-secret-token /tmp/fake-secret-path"
+    warning = acpx_adapter._late_permission_from_stderr(stderr, prompt_completed=True)
+
+    assert warning == {
+        "phase": "post-final",
+        "kind": "permission-prompt-unavailable",
+        "code": -32072,
+        "detail": "PERMISSION_PROMPT_UNAVAILABLE",
+    }
+    assert "fake-secret-token" not in repr(warning)
+    assert "/tmp/fake-secret-path" not in repr(warning)
+
+
+def test_run_late_permission_stderr_fallback_sanitizes_structured_output(monkeypatch, tmp_path):
+    stream = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Done."}},
+            },
+        },
+        {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+    )
+    stderr = "PERMISSION_PROMPT_UNAVAILABLE token=fake-secret-token /tmp/fake-secret-path"
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter(
+        [
+            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(5, stream, stderr),
+        ]
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is True
+    assert result.transport_warning == {
+        "phase": "post-final",
+        "kind": "permission-prompt-unavailable",
+        "code": -32072,
+        "detail": "PERMISSION_PROMPT_UNAVAILABLE",
+    }
+    assert "fake-secret-token" not in repr(result.transport_warning)
+    assert "/tmp/fake-secret-path" not in repr(result.transport_warning)
+    assert "fake-secret-token" not in result.detail
+    assert "/tmp/fake-secret-path" not in result.detail
+
+
+def test_run_preserves_transport_warning_when_late_final_fails_output_validation(monkeypatch, tmp_path):
+    stream = _late_permission_stream(final_text="Reviewing repository files.")
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter(
+        [
+            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(5, stream, "PERMISSION_PROMPT_UNAVAILABLE"),
+        ]
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "non-final-output"
+    assert result.transport_warning == {
+        "phase": "post-final",
+        "kind": "permission-prompt-unavailable",
+        "code": -32072,
+        "detail": "PERMISSION_PROMPT_UNAVAILABLE",
+    }
+
+
+def test_run_rejects_mixed_channel_wrong_code_with_stderr_marker(monkeypatch, tmp_path):
+    stream = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "Complete review findings."},
+                },
+            },
+        },
+        {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+        {
+            "jsonrpc": "2.0",
+            "id": "perm-1",
+            "error": {"code": -32000, "message": "PERMISSION_PROMPT_UNAVAILABLE"},
+        },
+    )
+    stderr = "PERMISSION_PROMPT_UNAVAILABLE token=fake-secret-token /tmp/fake-secret-path"
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter(
+        [
+            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(5, stream, stderr),
+        ]
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.text == "Complete review findings."
+    assert result.exit_code == 5
+    assert result.transport_warning is None
+    assert result.failure_kind == "transport-error"
+
+
+def test_run_rejects_wrong_permission_code_even_with_marker_message(monkeypatch, tmp_path):
+    stream = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "Complete review findings."},
+                },
+            },
+        },
+        {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+        {
+            "jsonrpc": "2.0",
+            "id": "perm-1",
+            "error": {"code": -32000, "message": "PERMISSION_PROMPT_UNAVAILABLE"},
+        },
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter(
+        [
+            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(5, stream, "unrelated transport failure"),
+        ]
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.text == "Complete review findings."
+    assert result.transport_warning is None
+    assert result.failure_kind == "transport-error"
