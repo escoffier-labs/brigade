@@ -676,6 +676,30 @@ def run_agent(
             cwd=cwd,
             env=child_env,
         )
+
+    def scrub_detail(detail: str) -> str:
+        return _scrub_env_override_values(detail, resolved_overrides)
+
+    safe_stdout = _scrub_env_override_values(result.stdout, resolved_overrides)
+    safe_stderr = _scrub_env_override_values(result.stderr, resolved_overrides)
+
+    if result.decode_failed:
+        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides)
+        failure_detail = scrub_detail(safe_stderr.strip() or result.decode_failure_detail)[:200]
+        return AgentResult(
+            text=safe_text,
+            ok=False,
+            detail=failure_detail,
+            failure_phase="harness",
+            failure_kind="decode-failure",
+            stdout=safe_stdout,
+            stderr=safe_stderr,
+            exit_code=result.code,
+            timed_out=result.code == 124,
+            requested_model=model,
+            reasoning=reasoning,
+        )
+
     text = result.stdout.strip()
     structured_error = ""
     structured_diagnostic = ""
@@ -691,13 +715,7 @@ def run_agent(
         grok_request_id = grok_final.request_id
         grok_stop_reason = grok_final.stop_reason
     safe_text = _scrub_env_override_values(text, resolved_overrides)
-    safe_stdout = _scrub_env_override_values(result.stdout, resolved_overrides)
-    safe_stderr = _scrub_env_override_values(result.stderr, resolved_overrides)
     safe_structured_error = _scrub_env_override_values(structured_error, resolved_overrides)[:200]
-
-    def scrub_detail(detail: str) -> str:
-        return _scrub_env_override_values(detail, resolved_overrides)
-
     if result.code != 0:
         raw_detail = safe_stderr.strip() or f"exit {result.code}"
         detail = codex_stdin_hang_detail(raw_detail) if cli_ref == "codex" else None

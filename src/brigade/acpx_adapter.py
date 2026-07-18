@@ -216,9 +216,9 @@ def _late_permission_detail(warning: dict[str, object]) -> str:
     return f"late permission prompt unavailable ({code_text}); preserved completed final answer: {base}"[:200]
 
 
-def _objects(stdout: str) -> tuple[list[dict[str, Any]] | None, str]:
+def _objects(stdout: str | None) -> tuple[list[dict[str, Any]] | None, str]:
     messages: list[dict[str, Any]] = []
-    for line_number, line in enumerate(stdout.splitlines(), start=1):
+    for line_number, line in enumerate((stdout or "").splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -257,7 +257,7 @@ def _model_from(value: object) -> str | None:
     return None
 
 
-def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
+def parse_stream(stdout: str | None) -> tuple[dict[str, Any] | None, str]:
     messages, error = _objects(stdout)
     if messages is None:
         return None, error
@@ -437,6 +437,23 @@ def run_cursor(
             safe_events=(auth_event,),
         )
     result = proc.run(argv, timeout=timeout + 5.0, cwd=cwd)
+    if result.decode_failed:
+        detail = (result.stderr.strip() or result.decode_failure_detail)[:200]
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=detail,
+            failure_phase="harness",
+            failure_kind="decode-failure",
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.code,
+            timed_out=result.code == 124,
+            transport="acpx",
+            requested_model=model,
+            acpx_version=installed,
+            safe_events=(auth_event,),
+        )
     parsed, parse_error = parse_stream(result.stdout)
     if result.code != 0:
         late_warning: dict[str, object] | None = None
