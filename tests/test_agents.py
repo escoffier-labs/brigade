@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -339,6 +340,62 @@ def test_run_agent_reports_missing(monkeypatch):
     assert "not installed" in res.detail
 
 
+_OLLAMA_LIST_HEADER = "NAME                ID              SIZE      MODIFIED\n"
+
+
+def _fake_ollama_env(monkeypatch, list_result, run_result=None):
+    """Route proc.run so `ollama list` returns list_result and record any other argv."""
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if argv[:2] == ["ollama", "list"]:
+            return list_result
+        return run_result if run_result is not None else agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    return calls
+
+
+def test_run_agent_ollama_refuses_model_not_pulled(monkeypatch):
+    # `ollama run` on a missing model silently auto-pulls it (43GB for
+    # llama3.3, once enough to fill a root disk); dispatch must refuse instead.
+    listing = agents.proc.Result(0, _OLLAMA_LIST_HEADER + "other:latest  abc  2.0 GB  2 days ago\n", "")
+    calls = _fake_ollama_env(monkeypatch, listing)
+    res = agents.run_agent("ollama:llama3.3", "hi")
+    assert res.ok is False
+    assert "not pulled locally" in res.detail
+    assert "never auto-pulls" in res.detail
+    assert calls == [["ollama", "list"]]
+
+
+def test_run_agent_ollama_runs_when_model_pulled(monkeypatch):
+    listing = agents.proc.Result(0, _OLLAMA_LIST_HEADER + "llama3.3:latest  abc  43 GB  2 days ago\n", "")
+    calls = _fake_ollama_env(monkeypatch, listing)
+    res = agents.run_agent("ollama:llama3.3", "hi")
+    assert res.ok is True
+    assert res.text == "answer"
+    assert calls[-1] == ["ollama", "run", "llama3.3", "hi"]
+
+
+def test_run_agent_ollama_matches_exact_tag(monkeypatch):
+    listing = agents.proc.Result(0, _OLLAMA_LIST_HEADER + "llama3.2:3b  abc  2.0 GB  2 days ago\n", "")
+    calls = _fake_ollama_env(monkeypatch, listing)
+    res = agents.run_agent("ollama:llama3.2:3b", "hi")
+    assert res.ok is True
+    assert calls[-1] == ["ollama", "run", "llama3.2:3b", "hi"]
+
+
+def test_run_agent_ollama_fails_seat_when_list_fails(monkeypatch):
+    listing = agents.proc.Result(1, "", "could not connect to ollama server")
+    calls = _fake_ollama_env(monkeypatch, listing)
+    res = agents.run_agent("ollama:llama3.2:3b", "hi")
+    assert res.ok is False
+    assert "could not list local ollama models" in res.detail
+    assert calls == [["ollama", "list"]]
+
+
 def test_run_agent_captures_output(monkeypatch):
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, "  answer  ", ""))
@@ -349,6 +406,194 @@ def test_run_agent_captures_output(monkeypatch):
     assert res.stderr == ""
     assert res.exit_code == 0
     assert res.timed_out is False
+
+
+def test_run_agent_rejects_intent_only_antigravity_output(monkeypatch):
+    output = "\n".join(
+        [
+            "I will locate the relevant files in the repository.",
+            "I will list the repository contents to understand its structure.",
+            "I will run a search for the provider dispatch path.",
+            "I will inspect the matching source files next.",
+        ]
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
+
+    result = agents.run_agent("antigravity", "trace it", model="Gemini 3.5 Flash (High)")
+
+    assert result.ok is False
+    assert result.text == output
+    assert result.exit_code == 0
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "non-final-output"
+    assert result.detail == "provider returned progress or intent without a final result"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Reviewing repository files.",
+        "First, I will inspect the repo.",
+        "Now I will run the tests.",
+        "I'm going to inspect the files first.",
+        "I am inspecting the files first.",
+    ],
+)
+def test_run_agent_rejects_bare_progress_only_output(monkeypatch, output):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""),
+    )
+
+    result = agents.run_agent("antigravity", "review it")
+
+    assert result.ok is False
+    assert result.failure_kind == "non-final-output"
+
+
+def test_run_agent_rejects_progress_over_changed_files(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kwargs: agents.proc.Result(0, "Reviewing changed files.\n", ""),
+    )
+
+    result = agents.run_agent("antigravity", "review it")
+
+    assert result.ok is False
+    assert result.failure_kind == "non-final-output"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"tool_calls": [{"name": "read_file", "arguments": {"path": "README.md"}}]},
+        {"tool_calls": [{"name": "write_file", "arguments": {"text": "content"}}]},
+        {"type": "tool_call", "name": "read_file", "arguments": {"path": "README.md"}},
+        {"type": "tool_call", "name": "write_file", "arguments": {"text": "content"}},
+        {"name": "read_file", "arguments": {"path": "README.md"}},
+        {"name": "write_file", "arguments": {"text": "content"}},
+        {"type": "function_call_output", "call_id": "call-1", "output": "file contents"},
+        {"type": "tool_result", "content": "file contents"},
+        {"call_id": "call-1", "output": "file contents"},
+    ],
+)
+def test_run_agent_rejects_tool_call_only_output(monkeypatch, payload):
+    output = json.dumps(payload)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "inspect it")
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "tool-only-output"
+    assert result.detail == "provider returned tool-call data without a final result"
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        '<tool_use>{"name":"read_file","path":"README.md"}</tool_use>',
+        '<tool_use name="read_file">{"path":"README.md"}</tool_use>',
+        '<tool_call name="read_file"/><function_call>{"name":"inspect"}</function_call>',
+    ],
+)
+def test_run_agent_rejects_tool_use_markup_without_final_text(monkeypatch, output):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "inspect it")
+
+    assert result.ok is False
+    assert result.failure_kind == "tool-only-output"
+
+
+def test_run_agent_rejects_tool_call_and_tool_result_transcript(monkeypatch):
+    output = json.dumps(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "I will inspect the repository first.",
+                    "tool_calls": [{"name": "read_file", "arguments": {"path": "README.md"}}],
+                },
+                {"role": "tool", "type": "tool_result", "content": "file contents"},
+            ]
+        }
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "inspect it")
+
+    assert result.ok is False
+    assert result.failure_kind == "tool-only-output"
+
+
+@pytest.mark.parametrize("result_type", ["function_call_output", "tool_call_output"])
+def test_run_agent_rejects_call_output_without_final_text(monkeypatch, result_type):
+    output = json.dumps(
+        {
+            "items": [
+                {"type": "function_call", "name": "read_file", "arguments": "{}"},
+                {"type": result_type, "call_id": "call-1", "output": "file contents"},
+            ]
+        }
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "inspect it")
+
+    assert result.ok is False
+    assert result.failure_kind == "tool-only-output"
+
+
+@pytest.mark.parametrize(
+    ("output", "failure_kind"),
+    [
+        ("Error: authentication required. Run provider login.", "authentication-error"),
+        ("Error: failed to connect to the model provider.", "network-error"),
+        ("Error: model gemini-example is not available.", "provider-setting-error"),
+        ("Error: rate limit exceeded for this provider.", "rate-limit-error"),
+    ],
+)
+def test_run_agent_rejects_in_band_operational_diagnostics(monkeypatch, output, failure_kind):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "answer directly")
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == failure_kind
+    assert result.detail.startswith("provider returned an operational error instead of a final result:")
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "No findings.",
+        "OK",
+        "I will inspect the repository first. No findings.",
+        "Running the targeted tests passed.",
+        "Checking the implementation, I do not see any regressions.",
+        "```text\nError: NonRetriableError: Provider Error\n```\nThis is the requested fixture.",
+    ],
+)
+def test_run_agent_accepts_short_or_quoted_substantive_output(monkeypatch, output):
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output, ""))
+
+    result = agents.run_agent("antigravity", "answer directly")
+
+    assert result.ok is True
+    assert result.text == output
 
 
 def test_run_agent_forwards_model_to_argv(monkeypatch):
@@ -453,6 +698,231 @@ def test_run_agent_classifies_silent_adapter_exit(monkeypatch, cli_ref):
     assert result.exit_code == 0
 
 
+def _grok_json_output(answer: str, *, structured: bool = True, stop_reason: str = "EndTurn") -> str:
+    result = {"kind": "answer", "answer": answer}
+    return json.dumps(
+        {
+            "text": json.dumps(result),
+            "stopReason": stop_reason,
+            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "requestId": "00000000-0000-4000-8000-000000000001",
+            "structuredOutput": result if structured else None,
+            "structuredOutputError": None if structured else "model did not produce structured output",
+        }
+    )
+
+
+def test_run_agent_rejects_grok_progress_without_structured_final_output(monkeypatch):
+    output = (
+        "Reviewing the README.md and tools/brigade.md diffs against Brigade 0.22.0. "
+        "Gathering the git diffs and current file content first."
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert result.detail == "grok exited 0 without a structured final response"
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "malformed-final-output"
+    assert result.text == output
+    assert result.stdout == output + "\n"
+    assert result.exit_code == 0
+
+
+def test_run_agent_rejects_grok_json_without_structured_final_output(monkeypatch):
+    output = "Reviewing the diff and gathering the relevant files first."
+    stdout = _grok_json_output(output, structured=False, stop_reason="Cancelled")
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert result.detail == (
+        "grok exited 0 without a structured final response "
+        "(stopReason=Cancelled; model did not produce structured output)"
+    )
+    assert result.text == output
+    assert result.stdout == stdout + "\n"
+    assert result.session_id == "019f0000-0000-7000-8000-000000000001"
+    assert result.request_id == "00000000-0000-4000-8000-000000000001"
+    assert result.stop_reason == "Cancelled"
+
+
+@pytest.mark.parametrize("case", ["cancelled", "extra-property", "structured-error"])
+def test_run_agent_rejects_invalid_grok_structured_final_output(monkeypatch, case):
+    payload = json.loads(_grok_json_output("No actionable findings."))
+    if case == "cancelled":
+        payload["stopReason"] = "Cancelled"
+    elif case == "extra-property":
+        payload["structuredOutput"]["extra"] = True
+    else:
+        payload["structuredOutputError"] = "model reported an invalid structured result"
+    stdout = json.dumps(payload)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert "grok exited 0 without a structured final response" in result.detail
+    assert result.text == "No actionable findings."
+    assert result.stdout == stdout + "\n"
+
+
+@pytest.mark.parametrize("error_value", ["", False, 0, {}])
+def test_run_agent_rejects_falsey_present_grok_structured_error(monkeypatch, error_value):
+    payload = json.loads(_grok_json_output("No actionable findings."))
+    payload["structuredOutputError"] = error_value
+    stdout = json.dumps(payload)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert "structuredOutputError was present" in result.detail
+    assert result.text == "No actionable findings."
+    assert result.stdout == stdout + "\n"
+    assert result.exit_code == 0
+
+
+def test_run_agent_accepts_structured_grok_finding_with_progress_opening(monkeypatch):
+    output = "Reviewing the diff: missing bounds check in foo."
+    stdout = _grok_json_output(output)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is True
+    assert result.text == output
+    assert result.stdout == stdout + "\n"
+
+
+def test_run_agent_accepts_concise_grok_no_findings(monkeypatch):
+    output = _grok_json_output("No actionable findings.")
+    seen = {}
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return agents.proc.Result(0, output + "\n", "")
+
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is True
+    assert result.text == "No actionable findings."
+    assert result.exit_code == 0
+    assert result.session_id == "019f0000-0000-7000-8000-000000000001"
+    assert result.request_id == "00000000-0000-4000-8000-000000000001"
+    assert result.stop_reason == "EndTurn"
+    assert seen["argv"][-2:] == [
+        "--json-schema",
+        (
+            '{"type":"object","properties":{"kind":{"type":"string","enum":["answer"]},'
+            '"answer":{"type":"string","minLength":1}},"required":["kind","answer"],'
+            '"additionalProperties":false}'
+        ),
+    ]
+    assert "--permission-mode" not in seen["argv"]
+    assert seen["argv"][seen["argv"].index("--sandbox") :] == [
+        "--sandbox",
+        "read-only",
+        "--always-approve",
+        "--json-schema",
+        seen["argv"][-1],
+    ]
+
+
+def test_run_agent_resumes_exact_grok_session_with_original_settings(monkeypatch, tmp_path):
+    output = _grok_json_output("Recovered final answer.")
+    seen = {}
+    session_id = "019f0000-0000-7000-8000-000000000001"
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return agents.proc.Result(0, output + "\n", "")
+
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    result = agents.run_agent(
+        "grok",
+        "Return the final answer now.",
+        timeout=47,
+        cwd=tmp_path,
+        read_only=True,
+        sandbox="read-only",
+        model="grok-4.5",
+        reasoning="high",
+        resume_session_id=session_id,
+    )
+
+    assert result.ok is True
+    assert seen["argv"].count("--resume") == 1
+    assert seen["argv"][seen["argv"].index("--resume") + 1] == session_id
+    assert seen["argv"][seen["argv"].index("-p") + 1] == "Return the final answer now."
+    assert seen["argv"][seen["argv"].index("-m") + 1] == "grok-4.5"
+    assert seen["argv"][seen["argv"].index("--reasoning-effort") + 1] == "high"
+    assert seen["kwargs"]["timeout"] == 47
+    assert seen["kwargs"]["cwd"] == tmp_path
+
+
+def test_run_agent_keeps_permission_mode_prompt_separate_from_grok_flags(monkeypatch):
+    output = _grok_json_output("No actionable findings.")
+    seen = {}
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return agents.proc.Result(0, output + "\n", "")
+
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    result = agents.run_agent("grok", "--permission-mode", read_only=True, model="grok-4.5")
+
+    assert result.ok is True
+    assert result.text == "No actionable findings."
+    assert seen["argv"][seen["argv"].index("-p") + 1] == "--permission-mode"
+    assert seen["argv"].count("--permission-mode") == 1
+    assert seen["argv"][seen["argv"].index("--sandbox") : seen["argv"].index("--json-schema")] == [
+        "--sandbox",
+        "read-only",
+        "--always-approve",
+    ]
+
+
+def test_run_agent_keeps_writable_grok_plain_output(monkeypatch):
+    output = "Implemented the requested change."
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
+
+    result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
+
+    assert result.ok is True
+    assert result.text == output
+
+
+def test_run_agent_reports_invalid_internal_grok_read_only_argv(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents, "build_argv", lambda *args, **kwargs: ["grok", "-p", "review it"])
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: calls.append(argv))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert result.detail == "internal error: grok read-only argv missing --permission-mode plan"
+    assert result.requested_model == "grok-4.5"
+    assert calls == []
+
+
 def test_run_agent_rejects_direct_read_only_cursor_composer_before_spawn(monkeypatch):
     calls = []
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
@@ -548,6 +1018,24 @@ def test_run_codex_appserver_empty_text_not_ok():
     assert not res.ok and res.detail == "empty output"
 
 
+def test_run_codex_appserver_rejects_intent_only_final():
+    from brigade import codex_appserver
+
+    turn = codex_appserver.TurnResult(
+        text="I will inspect the repository first. I will report the result next.",
+        ok=True,
+        status="complete",
+        thread_id="t-1",
+    )
+    server = _StubServer(turn)
+
+    result = agents.run_codex_appserver(server, "p", timeout=5.0, cwd=None)
+
+    assert result.ok is False
+    assert result.failure_phase == "output-validation"
+    assert result.failure_kind == "non-final-output"
+
+
 def test_run_codex_appserver_server_error_is_failed():
     server = _StubServer(None, fail=True)
     res = agents.run_codex_appserver(server, "p", timeout=5.0, cwd=None)
@@ -557,3 +1045,311 @@ def test_run_codex_appserver_server_error_is_failed():
 def test_agent_result_defaults_keep_exec_contract():
     res = agents.AgentResult(text="t", ok=True)
     assert res.thread_id is None and res.status == ""
+
+
+def test_run_agent_env_overrides_child_environment(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    monkeypatch.setenv("PRE_EXISTING", "kept")
+
+    result = agents.run_agent(
+        "claude",
+        "hi",
+        env={"ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"},
+    )
+    assert result.ok
+    assert captured["env"] is not None
+    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://api.example.com/anthropic"
+    assert captured["env"]["PRE_EXISTING"] == "kept"
+
+
+def test_run_agent_env_ref_resolves_from_parent(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    monkeypatch.setenv("KIMI_API_KEY", "sk-resolved-value")
+
+    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "KIMI_API_KEY"})
+    assert result.ok
+    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-resolved-value"
+    assert "ANTHROPIC_AUTH_TOKEN_REF" not in captured["env"]
+
+
+def test_run_agent_scrubs_resolved_env_values_from_success_output(monkeypatch):
+    token = "lane-token-value-for-test"
+    endpoint = "https://lane.example.test/anthropic"
+
+    def fake_run(argv, **kw):
+        return agents.proc.Result(
+            0,
+            f"answer used {token} at {endpoint}\n",
+            f"debug auth={token}\n",
+        )
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    monkeypatch.setenv("LANE_KEY", token)
+
+    result = agents.run_agent(
+        "claude",
+        "hi",
+        env={"ANTHROPIC_BASE_URL": endpoint, "ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"},
+    )
+
+    assert result.ok
+    assert token not in result.text
+    assert token not in result.stdout
+    assert token not in result.stderr
+    assert endpoint not in result.text
+    assert result.text == "answer used [ANTHROPIC_AUTH_TOKEN] at [ANTHROPIC_BASE_URL]"
+    assert result.stderr == "debug auth=[ANTHROPIC_AUTH_TOKEN]\n"
+
+
+def test_run_agent_scrubs_resolved_env_value_from_failure_detail(monkeypatch):
+    token = "lane-token-value-for-test"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(1, f"request used {token}\n", f"401 bearer {token}\n"),
+    )
+    monkeypatch.setenv("LANE_KEY", token)
+
+    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"})
+
+    assert not result.ok
+    assert token not in result.text
+    assert token not in result.detail
+    assert token not in result.stdout
+    assert token not in result.stderr
+    assert result.detail == "401 bearer [ANTHROPIC_AUTH_TOKEN]"
+
+
+def test_run_agent_scrubs_longer_overlapping_env_value_first(monkeypatch):
+    endpoint = "https://api.example.test/v1"
+    host = "api.example.test"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"connected to {endpoint}\n", ""),
+    )
+
+    result = agents.run_agent("claude", "hi", env={"ENDPOINT": endpoint, "HOST_FRAGMENT": host})
+
+    assert result.ok
+    assert result.text == "connected to [ENDPOINT]"
+
+
+def test_run_agent_scrubs_equal_env_values_with_stable_target(monkeypatch):
+    shared = "shared-override-value"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"configured {shared}\n", ""),
+    )
+
+    result = agents.run_agent("claude", "hi", env={"Z_MODE": shared, "A_MODE": shared})
+
+    assert result.ok
+    assert result.text == "configured [A_MODE]"
+
+
+def test_run_agent_scrubs_structured_grok_after_parsing(monkeypatch):
+    token = "lane-token-value-for-test"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, _grok_json_output(f"answer used {token}"), ""),
+    )
+    monkeypatch.setenv("LANE_KEY", token)
+
+    result = agents.run_agent(
+        "grok",
+        "review it",
+        read_only=True,
+        env={"GROK_AUTH_TOKEN_REF": "LANE_KEY"},
+    )
+
+    assert result.ok
+    assert result.text == "answer used [GROK_AUTH_TOKEN]"
+    assert token not in result.stdout
+
+
+def test_run_agent_classifies_output_before_scrubbing_env_values(monkeypatch):
+    diagnostic = "rate limit exceeded"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"Error: {diagnostic} for this provider.\n", ""),
+    )
+    monkeypatch.setenv("LANE_DIAGNOSTIC", diagnostic)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_MODE_REF": "LANE_DIAGNOSTIC"})
+
+    assert not result.ok
+    assert result.failure_kind == "rate-limit-error"
+    assert diagnostic not in result.text
+    assert diagnostic not in result.detail
+    assert diagnostic not in result.stdout
+    assert result.text == "Error: [LANE_MODE] for this provider."
+    assert "Error: [LANE_MODE] for this provider." in result.detail
+
+
+def test_run_agent_classifies_invalid_grok_before_scrubbing_env_values(monkeypatch):
+    diagnostic = "rate limit exceeded"
+    stdout = _grok_json_output(f"Error: {diagnostic} for this provider.", structured=False)
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, stdout + "\n", ""),
+    )
+    monkeypatch.setenv("LANE_DIAGNOSTIC", diagnostic)
+
+    result = agents.run_agent(
+        "grok",
+        "review it",
+        read_only=True,
+        env={"GROK_MODE_REF": "LANE_DIAGNOSTIC"},
+    )
+
+    assert not result.ok
+    assert result.failure_kind == "rate-limit-error"
+    assert diagnostic not in result.text
+    assert diagnostic not in result.detail
+    assert diagnostic not in result.stdout
+    assert result.text == "Error: [GROK_MODE] for this provider."
+    assert "Error: [GROK_MODE] for this provider." in result.detail
+
+
+def test_run_agent_scrubs_long_env_value_before_detail_truncation(monkeypatch):
+    token = "secret-boundary-" + "x" * 240
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(
+            0,
+            f"Error: rate limit exceeded while using {token}.\n",
+            "",
+        ),
+    )
+    monkeypatch.setenv("LONG_LANE_TOKEN", token)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LONG_LANE_TOKEN"})
+
+    assert not result.ok
+    assert result.failure_kind == "rate-limit-error"
+    assert token[:80] not in result.detail
+    assert "[LANE_TOKEN]" in result.detail
+    assert len(result.detail) <= 200
+
+
+def test_run_agent_scrubs_long_grok_error_before_detail_truncation(monkeypatch):
+    token = "secret-boundary-" + "x" * 240
+    payload = json.loads(_grok_json_output("No findings."))
+    payload["structuredOutputError"] = f"schema rejected token {token}"
+    stdout = json.dumps(payload)
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, stdout + "\n", ""),
+    )
+    monkeypatch.setenv("LONG_GROK_TOKEN", token)
+
+    result = agents.run_agent(
+        "grok",
+        "review it",
+        read_only=True,
+        env={"GROK_TOKEN_REF": "LONG_GROK_TOKEN"},
+    )
+
+    assert not result.ok
+    assert result.failure_kind == "malformed-final-output"
+    assert token[:80] not in result.detail
+    assert "[GROK_TOKEN]" in result.detail
+    assert len(result.detail) <= 200
+
+
+def test_run_agent_does_not_scrub_unrelated_parent_environment(monkeypatch):
+    unrelated = "parent-value-not-overridden"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(
+        agents.proc,
+        "run",
+        lambda argv, **kw: agents.proc.Result(0, f"diagnostic {unrelated}\n", ""),
+    )
+    monkeypatch.setenv("UNRELATED_VALUE", unrelated)
+
+    result = agents.run_agent("claude", "hi", env={"LANE_MODE": "test"})
+
+    assert result.ok
+    assert unrelated in result.text
+
+
+def test_run_agent_env_ref_missing_fails_before_spawn(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: calls.append(argv))
+    monkeypatch.delenv("MISSING_LANE_KEY", raising=False)
+
+    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "MISSING_LANE_KEY"})
+    assert not result.ok
+    assert "MISSING_LANE_KEY" in result.detail
+    assert "is not set" in result.detail
+    assert calls == []
+
+
+def test_run_agent_env_default_leaves_child_environment_alone(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    assert agents.run_agent("claude", "hi").ok
+    assert captured["env"] is None
+
+
+def test_run_agent_env_ref_missing_is_typed_failure(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.delenv("MISSING_LANE_KEY", raising=False)
+    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "MISSING_LANE_KEY"})
+    assert not result.ok
+    assert result.failure_kind == "env-ref-missing"
+
+
+def test_run_agent_env_rejects_bare_ref_suffix(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setenv("HOME_VAR", "value")
+    result = agents.run_agent("claude", "hi", env={"_REF": "HOME_VAR"})
+    assert not result.ok
+    assert "empty" in result.detail
+
+
+def test_run_agent_env_ref_empty_value_is_typed_failure(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setenv("EMPTY_LANE_KEY", "")
+    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "EMPTY_LANE_KEY"})
+    assert not result.ok
+    assert result.failure_kind == "env-ref-missing"
+    assert "is not set or is empty" in result.detail

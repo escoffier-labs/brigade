@@ -26,6 +26,8 @@ from .health import (
     verify_harness_payload,
 )
 from .lifecycle import (
+    CHECKUP_PRESETS,
+    CHECKUP_SURFACE_NAMES,
     bootstrap_portable,
     checkup,
     checkup_payload,
@@ -56,6 +58,8 @@ from .surfaces import (
 
 __all__ = [
     "PROFILES",
+    "CHECKUP_PRESETS",
+    "CHECKUP_SURFACE_NAMES",
     "SURFACE_REVIEW_STATUSES",
     "_run_read_only_command",
     "adoption_capture",

@@ -108,6 +108,89 @@ def test_handoff_lint_accepts_card_handoff_without_document_sections(tmp_path, c
     assert "(create-card)" in out
 
 
+def test_handoff_lint_accepts_fenced_card_content(tmp_path, capsys):
+    path = tmp_path / "note.md"
+    path.write_text(
+        CARD_HANDOFF.replace(
+            "## Suggested card content\n---\n",
+            "## Suggested card content\n```markdown\n---\n",
+        )
+        + "\n```\n"
+    )
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[path]) == 0
+
+    out = capsys.readouterr().out
+    assert "[ok]" in out
+    assert "(create-card)" in out
+    assert "Suggested card content must start with YAML frontmatter" not in out
+
+
+def test_handoff_lint_accepts_comment_before_fenced_card_content(tmp_path, capsys):
+    path = tmp_path / "note.md"
+    path.write_text(
+        CARD_HANDOFF.replace(
+            "## Suggested card content\n---\n",
+            "## Suggested card content\n<!-- Card envelope. -->\n```markdown\n---\n",
+        )
+        + "\n```\n"
+    )
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[path]) == 0
+
+    out = capsys.readouterr().out
+    assert "[ok]" in out
+
+
+def test_handoff_lint_rejects_comment_inside_fence_before_frontmatter(tmp_path, capsys):
+    path = tmp_path / "note.md"
+    path.write_text(
+        CARD_HANDOFF.replace(
+            "## Suggested card content\n---\n",
+            "## Suggested card content\n```markdown\n<!-- Card content starts here. -->\n---\n",
+        )
+        + "\n```\n"
+    )
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[path]) == 1
+
+    out = capsys.readouterr().out
+    assert "Suggested card content must start with YAML frontmatter" in out
+
+
+def test_handoff_lint_rejects_fenced_card_content_without_closing_fence(tmp_path, capsys):
+    path = tmp_path / "note.md"
+    path.write_text(
+        CARD_HANDOFF.replace(
+            "## Suggested card content\n---\n",
+            "## Suggested card content\n```markdown\n---\n",
+        )
+    )
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[path]) == 1
+
+    out = capsys.readouterr().out
+    assert "Markdown fence is missing a closing fence" in out
+    assert "Suggested card content must start with YAML frontmatter" not in out
+
+
+def test_handoff_lint_rejects_unsupported_card_content_fence_language(tmp_path, capsys):
+    path = tmp_path / "note.md"
+    path.write_text(
+        CARD_HANDOFF.replace(
+            "## Suggested card content\n---\n",
+            "## Suggested card content\n```yaml\n---\n",
+        )
+        + "\n```\n"
+    )
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[path]) == 1
+
+    out = capsys.readouterr().out
+    assert "unsupported Markdown fence language" in out
+    assert "Suggested card content must start with YAML frontmatter" not in out
+
+
 def test_handoff_lint_allows_level_three_card_headings_without_warning(tmp_path, capsys):
     path = tmp_path / "note.md"
     path.write_text(CARD_HANDOFF + "\n### Details\n\nMore durable context.\n")
@@ -1442,7 +1525,62 @@ def test_handoff_sources_init_writes_all_writer_inboxes(tmp_path, capsys):
     assert ".antigravity/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".pi/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".cursor/memory-handoffs" in data["sources"][0]["inboxes"]
+    assert ".grok/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".hermes/memory-handoffs" in data["sources"][0]["inboxes"]
+
+
+def test_handoff_sources_init_makes_installed_grok_ready(tmp_path, capsys):
+    from brigade.install import install_selection
+    from brigade.operator_cmd.health import verify_harness_payload
+    from brigade.selection import Selection
+
+    selection = Selection(depth="repo", harnesses=["grok"], owner="this-repo", includes=[])
+    assert install_selection(tmp_path, selection) == 0
+    capsys.readouterr()
+
+    assert handoff_cmd.sources_init(target=tmp_path, json_output=True) == 0
+    sources_payload = json.loads(capsys.readouterr().out)
+    assert sources_payload["inboxes"] == [".grok/memory-handoffs"]
+
+    verify_payload = verify_harness_payload(tmp_path, harness="grok")
+    assert verify_payload["ready"] is True
+    assert verify_payload["issue_count"] == 0
+    assert verify_payload["handoff_inbox"]["watched"] is True
+
+
+def test_handoff_sources_init_adds_grok_without_replacing_custom_sources(tmp_path, capsys):
+    from brigade.config import Config, write_config
+    from brigade.selection import Selection
+
+    write_config(
+        tmp_path,
+        Config(version=1, selection=Selection(depth="repo", harnesses=["grok"], owner="this-repo")),
+    )
+    path = tmp_path / ".brigade" / "handoff-sources.json"
+    original = {
+        "canonical_owner": "openclaw",
+        "custom": {"keep": True},
+        "sources": [
+            {"root": ".", "inboxes": [".codex/memory-handoffs"]},
+            {"root": "../shared", "inboxes": ["team/handoffs"]},
+        ],
+    }
+    path.write_text(json.dumps(original, indent=2) + "\n")
+
+    assert handoff_cmd.sources_init(target=tmp_path, json_output=True) == 0
+    first_payload = json.loads(capsys.readouterr().out)
+    first = json.loads(path.read_text())
+    assert first_payload["written"] is True
+    assert first_payload["inboxes"] == [".codex/memory-handoffs", ".grok/memory-handoffs"]
+    assert first["custom"] == original["custom"]
+    assert first["sources"][1] == original["sources"][1]
+    assert first["sources"][0]["inboxes"] == [".codex/memory-handoffs", ".grok/memory-handoffs"]
+
+    assert handoff_cmd.sources_init(target=tmp_path, json_output=True) == 0
+    second_payload = json.loads(capsys.readouterr().out)
+    second = json.loads(path.read_text())
+    assert second_payload["written"] is False
+    assert second == first
 
 
 def test_handoff_sources_init_accepts_scoped_inboxes(tmp_path, capsys):
@@ -1704,12 +1842,15 @@ def test_doctor_checks_no_backlog_warn_for_fresh_pending(tmp_path):
 
 def test_handoff_writer_inboxes_include_supported_writer_harnesses():
     from brigade import handoff_cmd
+    from brigade.selection import KNOWN_HARNESSES, WRITER_INBOXES
 
     assert ".opencode/memory-handoffs" in handoff_cmd.WRITER_INBOXES
     assert ".antigravity/memory-handoffs" in handoff_cmd.WRITER_INBOXES
     assert ".pi/memory-handoffs" in handoff_cmd.WRITER_INBOXES
     assert ".cursor/memory-handoffs" in handoff_cmd.WRITER_INBOXES
+    assert ".grok/memory-handoffs" in handoff_cmd.WRITER_INBOXES
     assert ".hermes/memory-handoffs" in handoff_cmd.WRITER_INBOXES
+    assert set(KNOWN_HARNESSES) == {*WRITER_INBOXES, "openclaw"}
 
 
 def test_handoff_sources_example_lists_supported_writer_harnesses():
@@ -1721,6 +1862,7 @@ def test_handoff_sources_example_lists_supported_writer_harnesses():
     assert ".antigravity/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".pi/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".cursor/memory-handoffs" in data["sources"][0]["inboxes"]
+    assert ".grok/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".hermes/memory-handoffs" in data["sources"][0]["inboxes"]
 
 
@@ -1825,6 +1967,27 @@ def _homegrown_note(inbox, name="2026-06-01-1200-good-note.md"):
     return inbox / name
 
 
+def test_handoff_lint_suggests_migrate_for_extractable_homegrown_note(tmp_path, capsys):
+    note = _homegrown_note(tmp_path / ".claude" / "memory-handoffs")
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[note]) == 1
+    out = capsys.readouterr().out
+    expected = "this looks like a freeform note; try `brigade handoff migrate --target .`"
+    assert f"hint: {expected}" in out
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[note], json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["results"][0]["hints"] == [expected]
+
+
+def test_handoff_lint_does_not_suggest_migrate_for_unextractable_note(tmp_path, capsys):
+    note = tmp_path / "garbage.md"
+    note.write_text("random unstructured note, nothing usable\n")
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[note]) == 1
+    assert "handoff migrate" not in capsys.readouterr().out
+
+
 def test_handoff_migrate_dry_run_plans_homegrown_note(tmp_path, capsys):
     inbox = tmp_path / ".claude" / "memory-handoffs"
     note = _homegrown_note(inbox)
@@ -1892,8 +2055,10 @@ def test_handoff_lint_surfaces_injection_signals(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     flagged = [r for r in payload["results"] if r.get("injection_signals")]
     assert flagged, "lint should report injection signal counts"
+    assert flagged[0]["hints"] == []
 
     handoff_cmd.lint(target=tmp_path)
     out = capsys.readouterr().out
     assert "injection" in out.lower()
     assert "security scan" in out.lower()
+    assert "handoff migrate" not in out

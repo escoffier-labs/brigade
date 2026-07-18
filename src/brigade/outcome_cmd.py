@@ -323,6 +323,71 @@ def capability_fingerprint(manifest: dict[str, Any]) -> str:
     return localio.canonical_json_digest(vector)
 
 
+def _route_coverage(run_json_path: Path | None) -> str | None:
+    """ "clean" / "gap" / None, read best-effort from the run's plan-attempts.json
+    sibling. A gap is a final attempt with uncovered stages or hallucinated
+    covers; None when the file is absent or unreadable (never a hard failure)."""
+    if run_json_path is None:
+        return None
+    attempts_path = run_json_path.parent / "plan-attempts.json"
+    if not attempts_path.is_file():
+        return None
+    try:
+        payload = json.loads(attempts_path.read_text())
+        attempts = payload.get("attempts") if isinstance(payload, dict) else None
+        if not isinstance(attempts, list) or not attempts:
+            return None
+        final = attempts[-1]
+    except (OSError, json.JSONDecodeError, AttributeError, IndexError):
+        return None
+    if not isinstance(final, dict):
+        return None
+    if final.get("coverage_missing") or final.get("unknown_covers"):
+        return "gap"
+    return "clean"
+
+
+def route_manifest(run_payload: dict[str, Any] | None, run_json_path: Path | None = None) -> dict[str, Any]:
+    """Coarse manifest of the route the owning brigade run followed. A run with
+    no attached route, or a bare verify-capture with no owning run, is the honest
+    unrouted cohort: ``{"followed": False}``. Signals are sorted so the manifest
+    (and its fingerprint) do not depend on derivation order."""
+    from . import router
+
+    route = run_payload.get("route") if isinstance(run_payload, dict) else None
+    if not isinstance(route, dict) or not route.get("attached"):
+        return {"followed": False}
+    raw = route.get("signals")
+    signals = [str(s) for s in raw] if isinstance(raw, list) else []
+    # The path is the code/docs/system signal by identity, not by position, so a
+    # reordered signals list yields the same manifest and fingerprint.
+    path = next((s for s in signals if s in router.PATHS), "unknown")
+    manifest: dict[str, Any] = {
+        "followed": True,
+        "path": path,
+        "size": route.get("size", "unknown"),
+        "signals": sorted(signals),
+    }
+    coverage = _route_coverage(run_json_path)
+    if coverage is not None:
+        manifest["coverage"] = coverage
+    return manifest
+
+
+def route_fingerprint(manifest: dict[str, Any]) -> str | None:
+    """sha256 of the low-cardinality route vector (path + size + sorted signals),
+    or None for an unrouted record. Coverage is in the manifest but not the
+    fingerprint: it would fragment cohorts the way exact context does."""
+    if not manifest.get("followed"):
+        return None
+    vector = {
+        "path": manifest.get("path", "unknown"),
+        "size": manifest.get("size", "unknown"),
+        "signals": manifest.get("signals", []),
+    }
+    return localio.canonical_json_digest(vector)
+
+
 def _fingerprint_cohorts_by_artifact(
     target: Path, records: list[core.OutcomeRecord]
 ) -> dict[str, core.FingerprintCohorts]:
@@ -343,6 +408,8 @@ def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
     content_fingerprint = payload.get("content_fingerprint")
     context = payload.get("context")
     capability_fingerprint_value = payload.get("capability_fingerprint")
+    route = payload.get("route")
+    route_fingerprint_value = payload.get("route_fingerprint")
     try:
         return core.OutcomeRecord(
             artifact_id=str(payload["artifact_id"]),
@@ -360,6 +427,10 @@ def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
             context=context if isinstance(context, dict) else None,
             capability_fingerprint=capability_fingerprint_value
             if isinstance(capability_fingerprint_value, str) and capability_fingerprint_value
+            else None,
+            route=route if isinstance(route, dict) else None,
+            route_fingerprint=route_fingerprint_value
+            if isinstance(route_fingerprint_value, str) and route_fingerprint_value
             else None,
         )
     except (KeyError, TypeError, ValueError):
@@ -392,6 +463,10 @@ def _record_payload(record: core.OutcomeRecord) -> dict:
         row.pop("context", None)
     if row.get("capability_fingerprint") is None:
         row.pop("capability_fingerprint", None)
+    if row.get("route") is None:
+        row.pop("route", None)
+    if row.get("route_fingerprint") is None:
+        row.pop("route_fingerprint", None)
     return row
 
 
@@ -414,7 +489,14 @@ def _compact_code_graph_delta(receipt: dict) -> dict | None:
         return None
     compact = {
         key: delta[key]
-        for key in ("status", "summary", "changed_symbol_count", "edge_churn", "raw_counts")
+        for key in (
+            "status",
+            "summary",
+            "changed_symbol_count",
+            "edge_churn",
+            "raw_counts",
+            "stale_graph_used",
+        )
         if key in delta
     }
     return compact or None
@@ -687,6 +769,8 @@ def _graph_delta_counts(records: list[core.OutcomeRecord]) -> dict[str, int] | N
         return None
     counts = {"graph_changing": 0, "graph_no_op": 0}
     for delta in deltas:
+        if delta.get("stale_graph_used") is True:
+            continue
         if delta.get("status") != "ok":
             continue
         changed_symbols = _graph_count_value(delta.get("changed_symbol_count"))
@@ -791,6 +875,39 @@ def _fingerprint_decision_suffix(cohorts: core.FingerprintCohorts) -> str:
     )
 
 
+def _route_breakdown(records: list[core.OutcomeRecord]) -> list[dict] | None:
+    """Split an artifact's scored records into routed vs unrouted cohorts (Phase 1,
+    display-only). This is the receipt the route feature was missing: whether runs
+    that followed a composed route verify greener than bare verify captures.
+
+    Returns None when no record carries a route manifest, so a pre-route ledger's
+    output is unchanged. Routed records group by route_fingerprint (path/size);
+    unrouted records (a bare verify with no owning run) share one cohort. Not
+    scored: Phase 1 records and surfaces, the ratchet ignores it.
+    """
+    scored = core.scored_records(records)
+    if not any(isinstance(r.route, dict) for r in scored):
+        return None
+    groups: dict[str, dict] = {}
+    for record in scored:
+        route = record.route if isinstance(record.route, dict) else {}
+        if route.get("followed") and record.route_fingerprint:
+            key = record.route_fingerprint
+            label = f"routed {route.get('path', '?')}/{route.get('size', '?')}"
+        else:
+            key = "unrouted"
+            label = "unrouted"
+        entry = groups.setdefault(key, {"key": key, "label": label, "helped": 0, "hurt": 0, "neutral": 0})
+        if record.signal_value > 0:
+            entry["helped"] += 1
+        elif record.signal_value < 0:
+            entry["hurt"] += 1
+        else:
+            entry["neutral"] += 1
+    # unrouted last, then routed cohorts by fingerprint for a stable read
+    return sorted(groups.values(), key=lambda e: (e["key"] == "unrouted", e["key"]))
+
+
 def _capability_breakdown(records: list[core.OutcomeRecord]) -> list[dict] | None:
     """Group an artifact's scored records by capability cohort (Phase 1, display-only).
 
@@ -868,6 +985,7 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
         for record in sorted(records, key=lambda record: record.ts)
     ]
     capability_breakdown = _capability_breakdown(records)
+    route_breakdown = _route_breakdown(records)
     current_capability = capability_fingerprint(context_manifest())
     cap_cohorts = core.split_by_capability(
         artifact_id, core.current_content_records(records, cohorts.current_fingerprint), current_capability
@@ -891,6 +1009,8 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
         }
         if capability_breakdown is not None:
             payload["capability_breakdown"] = capability_breakdown
+        if route_breakdown is not None:
+            payload["route_breakdown"] = route_breakdown
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"outcome explain: {artifact_id}")
@@ -924,6 +1044,15 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
             print(
                 f"- {entry['capability_fingerprint'][:12]} {entry['label']} "
                 f"helped={entry['helped']} hurt={entry['hurt']} neutral={entry['neutral']}"
+            )
+    if route_breakdown is not None:
+        print("route cohorts (did following the route verify greener? retrieval only, not scored):")
+        for entry in route_breakdown:
+            total = entry["helped"] + entry["hurt"]
+            rate = f"{entry['helped'] / total:.3f}" if total else "n/a"
+            print(
+                f"- {entry['label']} helped={entry['helped']} hurt={entry['hurt']} "
+                f"neutral={entry['neutral']} (help-rate {rate})"
             )
     if not trail:
         print("trail: none")
@@ -970,6 +1099,8 @@ def capture(
     code_graph_delta: dict[str, Any] | None = None
     context_eval: dict[str, Any] | None = None
     run_agent: dict[str, Any] | None = None
+    route_run_payload: dict[str, Any] | None = None
+    route_run_json: Path | None = None
     if run_receipt is not None:
         receipt, run_json, error = _resolve_run_receipt(target, run_receipt)
         if receipt is None or run_json is None:
@@ -983,6 +1114,8 @@ def capture(
         context_eval = _compact_context_eval(receipt)
         agent = receipt.get("agent")
         run_agent = agent if isinstance(agent, dict) else None
+        route_run_payload = receipt
+        route_run_json = run_json
     else:
         from .work_cmd import verification as verify_mod
 
@@ -995,6 +1128,7 @@ def capture(
         ts = str(receipt.get("completed_at") or receipt.get("started_at") or localio.utc_now_iso())
         code_graph_delta = _compact_code_graph_delta(receipt)
     manifest = context_manifest(run_agent)
+    route = route_manifest(route_run_payload, route_run_json)
     record = core.OutcomeRecord(
         artifact_id=artifact_id,
         artifact_kind=artifact_kind,
@@ -1008,6 +1142,8 @@ def capture(
         content_fingerprint=artifact_fingerprint(target, artifact_id, artifact_kind),
         context=manifest,
         capability_fingerprint=capability_fingerprint(manifest),
+        route=route,
+        route_fingerprint=route_fingerprint(route),
     )
     append_records(target, [record])
     if json_output:
@@ -1020,6 +1156,10 @@ def capture(
         print(f"fingerprint: {record.content_fingerprint[:12]}")
     if record.capability_fingerprint:
         print(f"capability: {record.capability_fingerprint[:12]} ({manifest['harness']}/{manifest['model_family']})")
+    if record.route_fingerprint:
+        print(f"route: {record.route_fingerprint[:12]} ({route['path']}/{route['size']}, followed)")
+    else:
+        print("route: unrouted (no owning brigade run)")
     return 0
 
 

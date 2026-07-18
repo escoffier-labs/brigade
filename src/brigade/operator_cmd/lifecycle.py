@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -50,23 +51,33 @@ def init(
     results: list[dict[str, Any]] = []
     for step in _steps(target, profile=profile, handoff_inboxes=handoff_inboxes, default_tools=default_tools):
         path = step["path"]
-        if path.exists() and not force:
+        if path.exists() and not force and step["id"] != "handoff-sources":
             results.append({"id": step["id"], "path": str(path), "status": "skipped", "reason": "already exists"})
             continue
         kwargs = dict(step["kwargs"])
         kwargs.update({"target": target, "force": force})
+        if step["id"] == "handoff-sources":
+            kwargs["json_output"] = True
         output = StringIO()
         with redirect_stdout(output):
             rc = step["command"](**kwargs)
-        results.append(
-            {
-                "id": step["id"],
-                "path": str(path),
-                "status": "written" if rc == 0 else "error",
-                "return_code": rc,
-                "output": output.getvalue().strip().splitlines(),
-            }
-        )
+        output_text = output.getvalue().strip()
+        result = {
+            "id": step["id"],
+            "path": str(path),
+            "status": "written" if rc == 0 else "error",
+            "return_code": rc,
+            "output": output_text.splitlines(),
+        }
+        if step["id"] == "handoff-sources" and rc == 0:
+            try:
+                source_result = json.loads(output_text)
+            except json.JSONDecodeError:
+                source_result = None
+            if isinstance(source_result, dict) and source_result.get("written") is False:
+                result["status"] = "skipped"
+                result["reason"] = "source coverage already current"
+        results.append(result)
     post_actions = _post_init_actions(target, profile=profile, waive_public_release=waive_public_release)
     payload = {
         "target": str(target),
@@ -834,6 +845,203 @@ def _surface_issue_count(payload: dict[str, Any]) -> int | None:
     return None
 
 
+CHECKUP_DEFAULT_SURFACES = ("doctor", "operator", "handoff", "tools", "skills", "security")
+CHECKUP_EVIDENCE_SURFACES = ("work", "graph", "ledger")
+CHECKUP_SURFACE_NAMES = (*CHECKUP_DEFAULT_SURFACES, *CHECKUP_EVIDENCE_SURFACES)
+CHECKUP_PRESETS = {"evidence-loop": CHECKUP_EVIDENCE_SURFACES}
+
+
+def checkup_catalog_payload() -> dict[str, Any]:
+    return {
+        "surface_names": list(CHECKUP_SURFACE_NAMES),
+        "default_surfaces": list(CHECKUP_DEFAULT_SURFACES),
+        "presets": {name: list(values) for name, values in CHECKUP_PRESETS.items()},
+    }
+
+
+def _resolve_checkup_surfaces(surfaces: list[str] | None, preset: str | None) -> tuple[list[str], list[str], bool]:
+    if surfaces and preset:
+        raise ValueError("--surface and --preset cannot be combined")
+    if preset is not None:
+        if preset not in CHECKUP_PRESETS:
+            raise ValueError(f"unknown checkup preset: {preset}")
+        selected = list(CHECKUP_PRESETS[preset])
+        skipped = [name for name in CHECKUP_SURFACE_NAMES if name not in selected]
+        return selected, skipped, True
+    if surfaces:
+        selected = list(dict.fromkeys(surfaces))
+        unknown = [name for name in selected if name not in CHECKUP_SURFACE_NAMES]
+        if unknown:
+            raise ValueError(f"unknown checkup surface: {', '.join(unknown)}")
+        skipped = [name for name in CHECKUP_SURFACE_NAMES if name not in selected]
+        return selected, skipped, True
+    return list(CHECKUP_DEFAULT_SURFACES), list(CHECKUP_EVIDENCE_SURFACES), False
+
+
+def _print_checkup_surface(payload: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    print(str(payload.get("summary") or payload.get("status") or "checkup surface unavailable"))
+
+
+def _checkup_work(*, target: Path, json_output: bool = False) -> int:
+    """Check work receipt integrity and whether outcome capture is keeping up."""
+    from .. import outcome_cmd, receipts_cmd
+    from ..work_cmd import verification
+
+    receipt_health = receipts_cmd.verify_payload(target)
+    artifacts = [
+        row
+        for row in receipt_health.get("artifacts", [])
+        if isinstance(row, dict) and str(row.get("artifact_type") or "").startswith("work-verify-")
+    ]
+    integrity_failures = [
+        row
+        for row in artifacts
+        if row.get("status") in {receipts_cmd.MISMATCH, receipts_cmd.MISSING, receipts_cmd.SIGNATURE_MISMATCH}
+    ]
+    receipts = verification._verify_receipts(target)
+    latest = receipts[0] if receipts else None
+    outcomes = outcome_cmd.health(target)
+    outcome_issue_count = int(outcomes.get("issue_count") or 0)
+    missing_receipt_issue = int(latest is None and outcome_issue_count == 0)
+    issue_count = len(integrity_failures) + outcome_issue_count + missing_receipt_issue
+    ready = issue_count == 0
+    payload = {
+        "status": "ok" if ready else "warn",
+        "ready": ready,
+        "summary": (
+            "work receipts and outcome capture are healthy"
+            if ready
+            else f"work evidence loop has {issue_count} issue(s)"
+        ),
+        "issue_count": issue_count,
+        "receipt_count": len(receipts),
+        "latest_receipt": (
+            {
+                "run_id": latest.get("run_id"),
+                "status": latest.get("status"),
+                "started_at": latest.get("started_at"),
+            }
+            if latest
+            else None
+        ),
+        "receipt_integrity": {
+            "artifact_count": len(artifacts),
+            "failure_count": len(integrity_failures),
+        },
+        "outcome_capture": outcomes,
+        "next_command": (
+            "brigade receipts verify --target ."
+            if integrity_failures
+            else "brigade work verify run --target . --command '<check>' --capture brigade-work"
+            if latest is None
+            else "brigade outcome capture <skill-or-card-id> --run-id latest"
+            if outcome_issue_count
+            else None
+        ),
+    }
+    _print_checkup_surface(payload, json_output=json_output)
+    return 0 if ready else 1
+
+
+def _checkup_graph(*, target: Path, json_output: bool = False) -> int:
+    """Check live GraphTrail health and the latest work receipt's graph delta."""
+    from .. import search_cmd
+    from ..work_cmd import verification
+
+    station = search_cmd.status_payload(target)
+    tools = station.get("tools") if isinstance(station.get("tools"), dict) else {}
+    graphtrail = tools.get("graphtrail") if isinstance(tools.get("graphtrail"), dict) else {}
+    latest = verification._latest_verify_receipt(target)
+    delta = latest.get("code_graph_delta") if isinstance(latest, dict) else None
+    delta = delta if isinstance(delta, dict) else {}
+    graph_ready = (
+        graphtrail.get("installed") is True
+        and graphtrail.get("db_present") is True
+        and graphtrail.get("health") == "ok"
+    )
+    delta_ready = delta.get("status") == "ok" and delta.get("stale_graph_used") is not True
+    issue_count = int(not graph_ready) + int(not delta_ready)
+    ready = issue_count == 0
+    payload = {
+        "status": "ok" if ready else "warn",
+        "ready": ready,
+        "summary": (
+            "GraphTrail and the latest work receipt delta are healthy"
+            if ready
+            else f"GraphTrail evidence has {issue_count} issue(s)"
+        ),
+        "issue_count": issue_count,
+        "graphtrail": {
+            "installed": graphtrail.get("installed"),
+            "db_present": graphtrail.get("db_present"),
+            "health": graphtrail.get("health"),
+            "summary": graphtrail.get("summary"),
+        },
+        "latest_receipt": latest.get("run_id") if isinstance(latest, dict) else None,
+        "code_graph_delta": delta or None,
+        "next_command": (
+            "brigade search doctor --target ."
+            if not graph_ready
+            else "brigade work verify run --target . --command '<check>' --capture brigade-work"
+        )
+        if not ready
+        else None,
+    }
+    _print_checkup_surface(payload, json_output=json_output)
+    return 0 if ready else 1
+
+
+def _checkup_ledger(*, target: Path, json_output: bool = False) -> int:
+    """Check MiseLedger status and unimported Brigade work receipt evidence."""
+    from .. import evidence_cmd, receipts_cmd
+    from ..work_cmd import verification
+
+    station = evidence_cmd.status_payload(target, include_doctor=False)
+    receipts = verification._verify_receipts(target)
+    cursor_hashes = receipts_cmd._read_miseledger_cursor_hashes(target)
+    receipt_hashes: set[str] = set()
+    for receipt in receipts:
+        receipt_dir = receipt.get("path")
+        path = Path(receipt_dir) / "receipt.json" if isinstance(receipt_dir, str) else target / "missing-receipt.json"
+        digest, _source = receipts_cmd._receipt_hash(receipt, path)
+        receipt_hashes.add(digest)
+    pending_hashes = receipt_hashes - cursor_hashes
+    station_ready = station.get("installed") is True and station.get("health") == "ok"
+    import_ready = not receipts or (station.get("export_cursor_present") is True and not pending_hashes)
+    issue_count = int(not station_ready) + int(not import_ready)
+    ready = issue_count == 0
+    payload = {
+        "status": "ok" if ready else "warn",
+        "ready": ready,
+        "summary": (
+            "MiseLedger is healthy and all work receipts are imported"
+            if ready
+            else f"MiseLedger import health has {issue_count} issue(s)"
+        ),
+        "issue_count": issue_count,
+        "miseledger": {
+            "installed": station.get("installed"),
+            "health": station.get("health"),
+            "summary": station.get("summary"),
+            "export_cursor_present": station.get("export_cursor_present"),
+        },
+        "work_receipt_count": len(receipts),
+        "pending_work_receipt_count": len(pending_hashes),
+        "next_command": (
+            "brigade evidence doctor --target ."
+            if not station_ready
+            else "brigade receipts export miseledger --target . --new-only --import"
+        )
+        if not ready
+        else None,
+    }
+    _print_checkup_surface(payload, json_output=json_output)
+    return 0 if ready else 1
+
+
 def _loop_stations_payload(target: Path) -> dict[str, Any]:
     """Report GraphTrail / MiseLedger / context-eval loop health (informational).
 
@@ -924,7 +1132,13 @@ def _loop_stations_payload(target: Path) -> dict[str, Any]:
     }
 
 
-def checkup_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[str, Any]:
+def checkup_payload(
+    target: Path,
+    *,
+    profile: str = "internal-dogfood",
+    surfaces: list[str] | None = None,
+    preset: str | None = None,
+) -> dict[str, Any]:
     """Run every read-only first-run doctor once and roll the verdicts up.
 
     The first-10-minutes path has an operator run several separate doctors by
@@ -937,6 +1151,7 @@ def checkup_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[
     last evidence brief hit rate). Those stations never block readiness.
     """
     target = target.expanduser().resolve()
+    selected, skipped, scoped = _resolve_checkup_surfaces(surfaces, preset)
     spec = [
         ("doctor", "brigade doctor --target .", core_doctor.run, {"target": target}),
         ("operator", "brigade operator doctor --target .", operator_doctor, {"target": target, "profile": profile}),
@@ -944,38 +1159,80 @@ def checkup_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[
         ("tools", "brigade tools doctor --target .", tools_cmd.doctor, {"target": target}),
         ("skills", "brigade skills doctor --target .", skills_cmd.doctor, {"target": target}),
         ("security", "brigade security doctor --target .", security_cmd.doctor, {"target": target}),
+        ("work", "brigade operator checkup --target . --surface work", _checkup_work, {"target": target}),
+        ("graph", "brigade operator checkup --target . --surface graph", _checkup_graph, {"target": target}),
+        ("ledger", "brigade operator checkup --target . --surface ledger", _checkup_ledger, {"target": target}),
     ]
-    surfaces: list[dict[str, Any]] = []
+    spec_by_name = {row[0]: row for row in spec}
+    surface_results: list[dict[str, Any]] = []
     blocking = 0
-    for name, command, func, kwargs in spec:
+    for selected_name in selected:
+        if selected_name not in spec_by_name:
+            raise ValueError(f"checkup surface is not implemented: {selected_name}")
+        name, command, func, kwargs = spec_by_name[selected_name]
+        started = time.perf_counter()
         rc, payload = _capture_json_call(func, **kwargs)
+        elapsed = round(time.perf_counter() - started, 3)
         surface_ready = rc == 0
         if not surface_ready:
             blocking += 1
-        surfaces.append(
-            {
-                "name": name,
-                "command": command,
-                "ready": surface_ready,
-                "exit_code": rc,
-                "issue_count": _surface_issue_count(payload),
-            }
-        )
-    ready = blocking == 0
-    next_command = next((surface["command"] for surface in surfaces if not surface["ready"]), None)
+        result: dict[str, Any] = {
+            "name": name,
+            "command": command,
+            "ready": surface_ready,
+            "exit_code": rc,
+            "issue_count": _surface_issue_count(payload),
+            "elapsed_seconds": elapsed,
+        }
+        if name in CHECKUP_EVIDENCE_SURFACES:
+            result["details"] = payload
+        surface_results.append(result)
+    selected_ready = blocking == 0
+    next_command = next((surface["command"] for surface in surface_results if not surface["ready"]), None)
     return {
         "target": str(target),
         "profile": profile,
-        "ready": ready,
+        "ready": selected_ready,
+        "selected_ready": selected_ready,
+        "overall_ready": None if scoped else selected_ready,
+        "selected_surfaces": selected,
+        "skipped_surfaces": skipped,
         "blocking_surface_count": blocking,
-        "surfaces": surfaces,
+        "surfaces": surface_results,
         "next_command": next_command,
-        "loop": _loop_stations_payload(target),
+        "loop": {} if scoped else _loop_stations_payload(target),
     }
 
 
-def checkup(*, target: Path, profile: str = "internal-dogfood", json_output: bool = False) -> int:
-    payload = checkup_payload(target, profile=profile)
+def checkup(
+    *,
+    target: Path,
+    profile: str = "internal-dogfood",
+    surfaces: list[str] | None = None,
+    preset: str | None = None,
+    list_surfaces: bool = False,
+    json_output: bool = False,
+) -> int:
+    if list_surfaces and (surfaces or preset):
+        print("error: --list-surfaces cannot be combined with --surface or --preset", file=sys.stderr)
+        return 2
+    if list_surfaces:
+        payload = checkup_catalog_payload()
+        if json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print("operator checkup surfaces:")
+            for name in payload["surface_names"]:
+                print(f"- {name}")
+            print("presets:")
+            for name, values in payload["presets"].items():
+                print(f"- {name}: {', '.join(values)}")
+        return 0
+    try:
+        payload = checkup_payload(target, profile=profile, surfaces=surfaces, preset=preset)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["ready"] else 1
@@ -998,7 +1255,11 @@ def checkup(*, target: Path, profile: str = "internal-dogfood", json_output: boo
             detail = row.get("detail") or row.get("status") or ""
             label = "brief_hit_rate" if key == "context_eval" else key
             print(f"  [{mark}] {label}: {detail}")
-    print(f"ready: {'yes' if payload['ready'] else 'no'}")
+    if payload["overall_ready"] is None:
+        print(f"selected_ready: {'yes' if payload['selected_ready'] else 'no'}")
+        print("overall_ready: not evaluated")
+    else:
+        print(f"ready: {'yes' if payload['ready'] else 'no'}")
     print(f"blocking_surfaces: {payload['blocking_surface_count']}")
     if payload["next_command"]:
         print(f"next: {payload['next_command']}")

@@ -482,11 +482,25 @@ def actions_archive_completed(*, target: Path, json_output: bool = False) -> int
 
 
 def health(target: Path) -> dict[str, Any]:
-    payload = fleet.scan_payload(target)
+    target = target.expanduser().resolve()
+    entries, errors, config_loaded = fleet._load_config(target)
+    payload = fleet.scan_payload(
+        target,
+        entries=entries,
+        errors=errors,
+        config_loaded=config_loaded,
+    )
+    health_snapshot = sweeps._health_sweep_snapshot(target, entries)
     report = report_health(target)
     actions = actions_health(target)
-    sweep = sweeps.sweep_health(target)
-    health_registry = sweeps._health_command_registry_payload(target)
+    sweep = sweeps.sweep_health(target, health_snapshot=health_snapshot)
+    health_registry = sweeps._health_command_registry_payload(
+        target,
+        entries=entries,
+        errors=errors,
+        config_loaded=config_loaded,
+        health_snapshot=health_snapshot,
+    )
     release_train_data = release_train_health(target)
     issue_count = (
         payload["issue_count"]

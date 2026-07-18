@@ -7,19 +7,24 @@ reviewed packs into harness-specific folders.
 
 from __future__ import annotations
 
-import hashlib
+import contextlib
 import difflib
+import hashlib
+import io
 import json
 import os
+import shlex
 import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import __version__ as BRIGADE_VERSION
 from . import mcp_server
-from .untrusted import scan_untrusted
 from .localio import slugify, utc_now_iso as _now, write_json as _write_json
+from .templates import template_root
+from .untrusted import scan_untrusted
 
 OK = "ok"
 WARN = "warn"
@@ -54,6 +59,10 @@ HARNESS_ADAPTERS: dict[str, dict[str, Any]] = {
 HARNESS_TARGETS = tuple(key for key, value in HARNESS_ADAPTERS.items() if value["status"] == "built-in")
 INSTALL_TARGETS = (*HARNESS_TARGETS, "all")
 TRUST_LEVELS = ("unreviewed", "workspace", "team", "public")
+SOURCE_SCHEMA_VERSION = 1
+RECEIPT_SCHEMA_VERSION = 2
+RENDERER_SCHEMA_VERSION = 1
+BUNDLED_SOURCE_PREFIX = "brigade://bundled-skills/"
 
 
 def _slug(value: str) -> str:
@@ -278,6 +287,11 @@ def _text_fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _file_fingerprint(path: Path) -> str:
+    content = path.read_bytes() if path.is_file() else b"<missing>"
+    return hashlib.sha256(content).hexdigest()
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if not path.is_file():
@@ -327,12 +341,23 @@ def _changelog_payload(skill_dir: Path, metadata: dict[str, Any]) -> dict[str, A
 
 
 def _trust_score_payload(
-    skill_dir: Path, metadata: dict[str, Any], lint_payload: dict[str, Any] | None = None
+    skill_dir: Path,
+    metadata: dict[str, Any],
+    lint_payload: dict[str, Any] | None = None,
+    source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     score = 100
     signals: list[str] = []
-    trust_level = str(metadata.get("trust_level") or "unreviewed")
-    if trust_level == "unreviewed":
+    bundled_reviewed = bool(
+        source
+        and source.get("kind") == "brigade-bundle"
+        and source.get("reviewed") is True
+        and source.get("identity") == f"{BUNDLED_SOURCE_PREFIX}{_slug(str(metadata.get('id') or skill_dir.name))}"
+    )
+    trust_level = "bundled" if bundled_reviewed else str(metadata.get("trust_level") or "unreviewed")
+    if bundled_reviewed:
+        signals.append("canonical Brigade bundle is reviewed")
+    elif trust_level == "unreviewed":
         score -= 35
         signals.append("trust_level is unreviewed")
     elif trust_level == "workspace":
@@ -365,6 +390,7 @@ def _trust_score_payload(
         "signals": signals,
         "tests_declared": len(tests),
         "changelog": changelog,
+        "provenance": source,
     }
 
 
@@ -424,7 +450,7 @@ def _registry_import_payload(
     )
     metadata["fingerprint"] = _fingerprint(dest)
     _write_json(_metadata_path(dest), metadata)
-    lint_payload = _lint_payload(target, resolved_id, mode="lenient")
+    lint_payload = _lint_payload(target, str(dest), mode="lenient")
     return (
         {"target": str(target), "skill_id": resolved_id, "skill_dir": str(dest), "lint": lint_payload},
         None,
@@ -432,15 +458,65 @@ def _registry_import_payload(
     )
 
 
-def _load_skill(target: Path, skill_or_path: str) -> tuple[Path, dict[str, Any]]:
-    candidate = Path(skill_or_path).expanduser()
-    if candidate.exists():
+def _bundled_skill_path(skill_id: str) -> Path:
+    return template_root() / "skills" / _slug(skill_id)
+
+
+def _source_identity(*, skill_dir: Path, skill_id: str, kind: str, reviewed: bool) -> dict[str, Any]:
+    if kind == "brigade-bundle":
+        identity = f"{BUNDLED_SOURCE_PREFIX}{skill_id}"
+    elif kind == "registry":
+        identity = f"registry://skills/{skill_id}"
+    else:
+        identity = f"path:{skill_dir.resolve()}"
+    return {
+        "schema_version": SOURCE_SCHEMA_VERSION,
+        "kind": kind,
+        "identity": identity,
+        "reviewed": reviewed,
+        "brigade_version": BRIGADE_VERSION if kind == "brigade-bundle" else None,
+    }
+
+
+def _load_skill(target: Path, skill_or_path: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    requested = str(skill_or_path)
+    candidate = Path(requested).expanduser()
+    kind = "path"
+    reviewed = False
+    if requested.startswith("registry:"):
+        requested_id = _slug(requested.removeprefix("registry:"))
+        skill_dir = _skill_path(target, requested_id)
+        kind = "registry"
+    elif requested.startswith("bundled:"):
+        requested_id = _slug(requested.removeprefix("bundled:"))
+        skill_dir = _bundled_skill_path(requested_id)
+        kind = "brigade-bundle"
+        reviewed = True
+    elif candidate.exists():
         skill_dir = candidate if candidate.is_dir() else candidate.parent
     else:
-        skill_dir = _skill_path(target, skill_or_path)
+        requested_id = _slug(requested)
+        bundled = _bundled_skill_path(requested_id)
+        if (_skill_md_path(bundled)).is_file():
+            skill_dir = bundled
+            kind = "brigade-bundle"
+            reviewed = True
+        else:
+            skill_dir = _skill_path(target, requested_id)
+            kind = "registry"
     metadata = _read_json(_metadata_path(skill_dir))
     metadata.setdefault("id", skill_dir.name)
-    return skill_dir, metadata
+    skill_id = _slug(str(metadata.get("id") or skill_dir.name))
+    return (
+        skill_dir,
+        metadata,
+        _source_identity(
+            skill_dir=skill_dir,
+            skill_id=skill_id,
+            kind=kind,
+            reviewed=reviewed,
+        ),
+    )
 
 
 def _lint_payload(
@@ -448,7 +524,7 @@ def _lint_payload(
 ) -> dict[str, Any]:
     from . import agent_skill_format
 
-    skill_dir, metadata = _load_skill(target, skill_or_path)
+    skill_dir, metadata, source = _load_skill(target, skill_or_path)
     skill_md = _skill_md_path(skill_dir)
     errors: list[str] = []
     warnings: list[str] = []
@@ -491,6 +567,10 @@ def _lint_payload(
     injection = scan_untrusted(text)
     if injection.flagged:
         warnings.append("SKILL.md contains injection-like text; review as untrusted content before installing")
+    source = dict(source)
+    source["skill_version"] = str(metadata.get("version") or "0.1.0")
+    source["fingerprint"] = _fingerprint(skill_dir) if skill_dir.is_dir() else None
+    source["metadata_fingerprint"] = _file_fingerprint(_metadata_path(skill_dir))
     payload = {
         "target": str(target),
         "skill_dir": str(skill_dir),
@@ -506,13 +586,14 @@ def _lint_payload(
             "markers": injection.markers,
         },
         "metadata": metadata,
+        "source": source,
         "agent_skills": {
             "mode": mode,
             "fields": format_result.fields,
             "diagnostics": list(format_result.diagnostics),
             "allowed_tools_are_permissions": False,
         },
-        "fingerprint": _fingerprint(skill_dir) if skill_dir.is_dir() else None,
+        "fingerprint": source["fingerprint"],
     }
     payload["changelog"] = (
         _changelog_payload(skill_dir, metadata)
@@ -520,7 +601,7 @@ def _lint_payload(
         else {"present": False, "path": None, "fingerprint": None, "headings": []}
     )
     payload["trust_score"] = (
-        _trust_score_payload(skill_dir, metadata, payload)
+        _trust_score_payload(skill_dir, metadata, payload, source)
         if skill_dir.is_dir()
         else {
             "score": 0,
@@ -681,6 +762,156 @@ def _install_history(target: Path, skill_id: str | None = None, harness: str | N
     return rows
 
 
+def _renderer_identity(contract: dict[str, Any]) -> str:
+    identity = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"skills-renderer:{identity}"
+
+
+def _renderer_contract(target: Path, harness: str) -> dict[str, Any]:
+    adapter = _adapter_map(target).get(harness, {})
+    contract = {
+        "schema_version": RENDERER_SCHEMA_VERSION,
+        "harness": harness,
+        "format": adapter.get("format"),
+    }
+    return {**contract, "identity": _renderer_identity(contract)}
+
+
+def _valid_receipt_contract(receipt: dict[str, Any], *, skill_id: str, harness: str) -> bool:
+    source = receipt.get("source")
+    render = receipt.get("render")
+    installed = receipt.get("installed")
+    if receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION:
+        return False
+    if receipt.get("skill_id") != skill_id or receipt.get("target") != harness:
+        return False
+    if not isinstance(source, dict) or not isinstance(render, dict) or not isinstance(installed, dict):
+        return False
+    if source.get("schema_version") != SOURCE_SCHEMA_VERSION:
+        return False
+    if not all(
+        isinstance(source.get(key), str) and source.get(key)
+        for key in ("identity", "fingerprint", "metadata_fingerprint")
+    ):
+        return False
+    kind = source.get("kind")
+    identity = source["identity"]
+    reviewed = source.get("reviewed")
+    if not isinstance(reviewed, bool) or not isinstance(source.get("skill_version"), str):
+        return False
+    if kind == "brigade-bundle":
+        if (
+            identity != f"{BUNDLED_SOURCE_PREFIX}{skill_id}"
+            or reviewed is not True
+            or not isinstance(source.get("brigade_version"), str)
+            or not source["brigade_version"]
+        ):
+            return False
+    elif kind == "registry":
+        if identity != f"registry://skills/{skill_id}" or reviewed is not False:
+            return False
+    elif kind == "path":
+        source_path = identity.removeprefix("path:")
+        if identity == source_path or reviewed is not False or not Path(source_path).is_absolute():
+            return False
+    else:
+        return False
+    if not all(isinstance(render.get(key), str) and render.get(key) for key in ("identity", "fingerprint")):
+        return False
+    render_contract = {
+        "schema_version": render.get("schema_version"),
+        "harness": render.get("harness"),
+        "format": render.get("format"),
+    }
+    if (
+        type(render_contract["schema_version"]) is not int
+        or render_contract["schema_version"] < 1
+        or render_contract["harness"] != harness
+        or not isinstance(render_contract["format"], str)
+        or not render_contract["format"]
+        or render["identity"] != _renderer_identity(render_contract)
+    ):
+        return False
+    if not all(
+        isinstance(installed.get(key), str) and installed.get(key)
+        for key in ("bundle_fingerprint", "skill_fingerprint", "metadata_fingerprint")
+    ):
+        return False
+    return installed.get("skill_fingerprint") == render.get("fingerprint")
+
+
+def _drift_payload(
+    *,
+    target: Path,
+    skill_id: str,
+    harness: str,
+    lint_payload: dict[str, Any],
+    rendered: str,
+    installed_dir: Path,
+) -> dict[str, Any]:
+    receipt = _latest_install_receipt(target, skill_id, harness)
+    installed_skill = _skill_md_path(installed_dir)
+    installed_present = installed_skill.is_file()
+    installed_text = installed_skill.read_text(errors="replace") if installed_present else ""
+    current_source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
+    current_render = _renderer_contract(target, harness)
+    current_render_fingerprint = _text_fingerprint(rendered)
+    installed_skill_fingerprint = _text_fingerprint(installed_text) if installed_present else None
+    installed_bundle_fingerprint = _fingerprint(installed_dir) if installed_dir.is_dir() else None
+    installed_metadata_fingerprint = _file_fingerprint(_metadata_path(installed_dir))
+    known = _valid_receipt_contract(receipt, skill_id=skill_id, harness=harness)
+    if not installed_present and receipt and not known:
+        overall = "unknown"
+        source_state = "unknown"
+        render_state = "unknown"
+        local_state = "unknown"
+    elif not installed_present:
+        overall = "missing"
+        source_state = "unknown"
+        render_state = "unknown"
+        local_state = "unknown"
+    elif not known:
+        overall = "unknown"
+        source_state = "unknown"
+        render_state = "unknown"
+        local_state = "unknown"
+    else:
+        receipt_source = receipt["source"]
+        receipt_render = receipt["render"]
+        receipt_installed = receipt["installed"]
+        source_state = (
+            "current"
+            if receipt_source.get("identity") == current_source.get("identity")
+            and receipt_source.get("fingerprint") == current_source.get("fingerprint")
+            and receipt_source.get("metadata_fingerprint") == current_source.get("metadata_fingerprint")
+            else "changed"
+        )
+        render_state = "current" if receipt_render.get("identity") == current_render.get("identity") else "changed"
+        local_state = (
+            "current"
+            if receipt_installed.get("bundle_fingerprint") == installed_bundle_fingerprint
+            and receipt_installed.get("skill_fingerprint") == installed_skill_fingerprint
+            and receipt_installed.get("metadata_fingerprint") == installed_metadata_fingerprint
+            else "changed"
+        )
+        overall = "changed" if "changed" in {source_state, render_state, local_state} else "current"
+    return {
+        "overall": overall,
+        "source": source_state,
+        "render": render_state,
+        "local_edit": local_state,
+        "receipt_known": known,
+        "content_changed": installed_text != rendered,
+        "installed": installed_present,
+        "installed_skill_fingerprint": installed_skill_fingerprint,
+        "installed_bundle_fingerprint": installed_bundle_fingerprint,
+        "installed_metadata_fingerprint": installed_metadata_fingerprint,
+        "current_source": current_source,
+        "current_render": {**current_render, "fingerprint": current_render_fingerprint},
+        "receipt": receipt or None,
+    }
+
+
 def install(
     *,
     workspace: Path,
@@ -708,6 +939,7 @@ def install(
     source_dir = Path(lint_payload["skill_dir"])
     skill_id = _slug(str(lint_payload["skill_id"]))
     metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
+    source_identity = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
     version = str(metadata.get("version") or "0.1.0")
     source_path = str(metadata.get("source") or source_dir)
     targets = install_targets if harness == "all" else (harness,)
@@ -722,6 +954,7 @@ def install(
         source_text = _skill_md_path(source_dir).read_text(errors="replace")
         rendered_text = _render_skill_text_for_harness(source_text, metadata, skill_id, install_target)
         render_fingerprint = _text_fingerprint(rendered_text)
+        render_contract = _renderer_contract(workspace, install_target)
         render_errors = _rendered_skill_validation(rendered_text, install_target)
         if render_errors:
             if json_output:
@@ -758,8 +991,11 @@ def install(
         dest.parent.mkdir(parents=True, exist_ok=True)
         _copy_skill_for_harness(source_dir, dest, metadata, skill_id, install_target)
         installed_fingerprint = _fingerprint(dest)
+        installed_skill_fingerprint = _text_fingerprint(_skill_md_path(dest).read_text(errors="replace"))
+        installed_metadata_fingerprint = _file_fingerprint(_metadata_path(dest))
         installed_at = _now()
         receipt = {
+            "schema_version": RECEIPT_SCHEMA_VERSION,
             "workspace": str(workspace),
             "receipt_id": f"{installed_at[:19].replace(':', '').replace('-', '')}-{skill_id}-{install_target}",
             "skill_id": skill_id,
@@ -768,6 +1004,13 @@ def install(
             "installed_at": installed_at,
             "version": version,
             "source_path": source_path,
+            "source": source_identity,
+            "render": {**render_contract, "fingerprint": render_fingerprint},
+            "installed": {
+                "bundle_fingerprint": installed_fingerprint,
+                "skill_fingerprint": installed_skill_fingerprint,
+                "metadata_fingerprint": installed_metadata_fingerprint,
+            },
             "fingerprint": lint_payload.get("fingerprint"),
             "source_fingerprint": lint_payload.get("fingerprint"),
             "render_fingerprint": render_fingerprint,
@@ -791,6 +1034,7 @@ def install(
         "target": harness,
         "installed_at": _now(),
         "fingerprint": lint_payload.get("fingerprint"),
+        "source": lint_payload.get("source"),
         "targets": list(targets),
         "receipts": receipts,
         "skipped": skipped,
@@ -807,6 +1051,198 @@ def install(
     for item in skipped:
         print(f"- {item['target']}: skipped ({item['reason']})")
     return 0
+
+
+def _trust_at_least(actual: str, minimum: str) -> bool:
+    try:
+        return TRUST_LEVELS.index(actual) >= TRUST_LEVELS.index(minimum)
+    except ValueError:
+        return False
+
+
+def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[str, Any]], str | None]:
+    install_targets = _install_targets(workspace)
+    if harness not in (*install_targets, "all"):
+        return [], f"unknown skill install target: {harness}"
+    if trust not in TRUST_LEVELS:
+        return [], f"unknown skill trust level: {trust}"
+    targets = install_targets if harness == "all" else (harness,)
+    items: list[dict[str, Any]] = []
+    registry = _iter_registry(workspace)
+    for registry_row in registry:
+        registry_metadata = registry_row["metadata"]
+        skill_id = _slug(str(registry_metadata.get("id") or Path(str(registry_row["skill_dir"])).name))
+        lint_payload = _lint_payload(workspace, f"registry:{skill_id}")
+        metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else registry_metadata
+        trust_score = lint_payload.get("trust_score") if isinstance(lint_payload.get("trust_score"), dict) else {}
+        actual_trust = str(trust_score.get("trust_level") or "unreviewed")
+        supported = metadata.get("supported_harnesses")
+        supported_harnesses = set(supported) if isinstance(supported, list) else set()
+        source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
+        for install_target in targets:
+            item: dict[str, Any] = {
+                "skill_id": skill_id,
+                "harness": install_target,
+                "source": source,
+                "trust_level": actual_trust,
+                "minimum_trust": trust,
+                "state": "blocked",
+                "action": "none",
+                "result": "blocked",
+                "reason": None,
+                "receipt": None,
+                "error": None,
+            }
+            if not lint_payload.get("valid"):
+                errors = lint_payload.get("errors") if isinstance(lint_payload.get("errors"), list) else []
+                item["reason"] = "; ".join(str(error) for error in errors) or "skill lint failed"
+                items.append(item)
+                continue
+            if not _trust_at_least(actual_trust, trust):
+                item.update(
+                    state="excluded",
+                    result="excluded",
+                    reason=f"trust level {actual_trust} is below {trust}",
+                )
+                items.append(item)
+                continue
+            if supported_harnesses and install_target not in supported_harnesses:
+                item.update(
+                    state="excluded",
+                    result="excluded",
+                    reason=f"harness {install_target} is not supported by registry metadata",
+                )
+                items.append(item)
+                continue
+            if install_target == "hermes" and not _hermes_home().exists():
+                item.update(
+                    state="excluded",
+                    result="excluded",
+                    reason="Hermes home not found (is Hermes installed?)",
+                )
+                items.append(item)
+                continue
+            source_dir = Path(str(lint_payload["skill_dir"]))
+            source_text = _skill_md_path(source_dir).read_text(errors="replace")
+            rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, install_target)
+            render_errors = _rendered_skill_validation(rendered, install_target)
+            if render_errors:
+                item["reason"] = "; ".join(render_errors)
+                items.append(item)
+                continue
+            installed_dir = _install_dir(workspace, install_target, skill_id)
+            drift = _drift_payload(
+                target=workspace,
+                skill_id=skill_id,
+                harness=install_target,
+                lint_payload=lint_payload,
+                rendered=rendered,
+                installed_dir=installed_dir,
+            )
+            item["drift"] = {
+                key: drift[key]
+                for key in ("overall", "source", "render", "local_edit", "receipt_known", "content_changed")
+            }
+            if drift["overall"] == "current":
+                item.update(state="current", result="unchanged")
+            elif drift["overall"] == "missing":
+                item.update(state="missing", action="install", result="planned")
+            elif drift["overall"] == "changed":
+                item.update(state="changed", action="update", result="planned")
+            else:
+                item["reason"] = "installed copy has no valid provenance receipt"
+            items.append(item)
+    return items, None
+
+
+def sync(
+    *,
+    workspace: Path,
+    harness: str,
+    trust: str = "workspace",
+    write: bool = False,
+    json_output: bool = False,
+) -> int:
+    """Reconcile every eligible registry skill against one or all harness targets."""
+    workspace = workspace.expanduser().resolve()
+    items, error = _sync_plan(workspace=workspace, harness=harness, trust=trust)
+    if error is not None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    applied = {"installed": 0, "updated": 0, "failed": 0}
+    if write:
+        for item in items:
+            if item["action"] not in {"install", "update"}:
+                continue
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            exception_error: str | None = None
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                try:
+                    rc = install(
+                        workspace=workspace,
+                        skill=f"registry:{item['skill_id']}",
+                        harness=str(item["harness"]),
+                        force=True,
+                        json_output=True,
+                    )
+                except OSError as exc:
+                    rc = 1
+                    exception_error = str(exc)
+            if rc == 0:
+                result = "installed" if item["action"] == "install" else "updated"
+                item["result"] = result
+                applied[result] += 1
+                try:
+                    install_payload = json.loads(stdout.getvalue())
+                except json.JSONDecodeError:
+                    install_payload = {}
+                receipt = install_payload.get("receipt")
+                receipts = receipt.get("receipts", []) if isinstance(receipt, dict) else []
+                item["receipt"] = receipts[0] if isinstance(receipts, list) and receipts else None
+            else:
+                item["result"] = "failed"
+                item["error"] = (
+                    exception_error or stderr.getvalue().strip() or stdout.getvalue().strip() or f"install exited {rc}"
+                )
+                applied["failed"] += 1
+
+    counts = {
+        state: sum(item["state"] == state for item in items)
+        for state in ("current", "missing", "changed", "blocked", "excluded")
+    }
+    payload = {
+        "schema_version": 1,
+        "workspace": str(workspace),
+        "target": harness,
+        "minimum_trust": trust,
+        "write": write,
+        "registry_count": len({str(item["skill_id"]) for item in items}),
+        "item_count": len(items),
+        "counts": counts,
+        "applied": applied,
+        "items": items,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        mode = "write" if write else "dry-run"
+        print(f"skills sync: {workspace}")
+        print(f"mode: {mode}")
+        print(f"target: {harness}")
+        print(f"minimum_trust: {trust}")
+        print(
+            " ".join(f"{state}={counts[state]}" for state in ("current", "missing", "changed", "blocked", "excluded"))
+        )
+        for item in items:
+            detail_value = item.get("error") or item.get("reason")
+            detail = f" ({detail_value})" if detail_value else ""
+            print(
+                f"- {item['skill_id']} [{item['harness']}] {item['state']} "
+                f"action={item['action']} result={item['result']}{detail}"
+            )
+    return 1 if applied["failed"] else 0
 
 
 def uninstall(*, workspace: Path, skill: str, harness: str, json_output: bool = False) -> int:
@@ -863,12 +1299,33 @@ def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = F
         print(f"error: unknown skill install target: {harness}", file=sys.stderr)
         return 2
     root = _rollback_root(workspace, skill_id, harness)
-    snapshots = sorted([path for path in root.iterdir() if path.is_dir()], reverse=True) if root.is_dir() else []
-    if not snapshots:
-        print(f"error: no rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
-        return 1
-    snapshot = snapshots[0]
     dest = _install_dir(workspace, harness, skill_id)
+    canonical_receipt_path = _installs_root(workspace) / f"{skill_id}-{harness}.json"
+    current_receipt = _read_json(canonical_receipt_path) if canonical_receipt_path.is_file() else {}
+    if not _valid_receipt_contract(current_receipt, skill_id=skill_id, harness=harness):
+        print(f"error: invalid rollback receipt for {skill_id} on {harness}", file=sys.stderr)
+        return 1
+    snapshot_value = current_receipt.get("rollback_snapshot")
+    if not isinstance(snapshot_value, str) or not snapshot_value:
+        print(f"error: no receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
+        return 1
+    snapshot = Path(snapshot_value).expanduser().resolve()
+    root_resolved = root.resolve()
+    try:
+        relative_snapshot = snapshot.relative_to(root_resolved)
+    except ValueError:
+        relative_snapshot = Path()
+    if len(relative_snapshot.parts) != 1 or not snapshot.is_dir():
+        print(f"error: invalid receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
+        return 1
+    previous_receipt_value = current_receipt.get("previous_receipt")
+    if previous_receipt_value is not None and (
+        not isinstance(previous_receipt_value, dict)
+        or not _valid_receipt_contract(previous_receipt_value, skill_id=skill_id, harness=harness)
+    ):
+        print(f"error: invalid previous rollback receipt for {skill_id} on {harness}", file=sys.stderr)
+        return 1
+    previous_receipt = previous_receipt_value or {}
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -880,9 +1337,16 @@ def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = F
         "snapshot": str(snapshot),
         "installed_dir": str(dest),
         "rolled_back_at": _now(),
+        "restored_receipt": bool(previous_receipt),
+        "snapshot_consumed": True,
     }
+    if previous_receipt:
+        _write_json(canonical_receipt_path, previous_receipt)
+    elif canonical_receipt_path.is_file():
+        canonical_receipt_path.unlink()
     receipt_path = workspace / ".brigade" / "skills" / "installs" / f"{skill_id}-{harness}-rollback.json"
     _write_json(receipt_path, payload)
+    shutil.rmtree(snapshot)
     payload["receipt_path"] = str(receipt_path)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -946,16 +1410,24 @@ def diff(*, target: Path, skill: str, harness: str, json_output: bool = False) -
     installed_dir = _install_dir(target, harness, skill_id)
     installed_skill = _skill_md_path(installed_dir)
     installed_text = installed_skill.read_text(errors="replace") if installed_skill.is_file() else ""
+    source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
     diff_lines = list(
         difflib.unified_diff(
             installed_text.splitlines(),
             rendered.splitlines(),
             fromfile=str(installed_skill),
-            tofile=f"registry-rendered:{skill_id}:{harness}",
+            tofile=f"{source.get('identity') or f'resolved:{skill_id}'}#{harness}",
             lineterm="",
         )
     )
-    latest_receipt = _latest_install_receipt(target, skill_id, harness)
+    drift = _drift_payload(
+        target=target,
+        skill_id=skill_id,
+        harness=harness,
+        lint_payload=lint_payload,
+        rendered=rendered,
+        installed_dir=installed_dir,
+    )
     payload = {
         "target": str(target),
         "skill_id": skill_id,
@@ -964,10 +1436,17 @@ def diff(*, target: Path, skill: str, harness: str, json_output: bool = False) -
         "installed_path": str(installed_skill),
         "changed": bool(diff_lines),
         "diff": diff_lines,
+        "drift": {
+            key: drift[key] for key in ("overall", "source", "render", "local_edit", "receipt_known", "content_changed")
+        },
+        "source": source,
+        "render": drift["current_render"],
         "source_fingerprint": lint_payload.get("fingerprint"),
         "render_fingerprint": _text_fingerprint(rendered),
-        "installed_fingerprint": _text_fingerprint(installed_text) if installed_text else None,
-        "receipt": latest_receipt or None,
+        "installed_fingerprint": drift["installed_skill_fingerprint"],
+        "installed_skill_fingerprint": drift["installed_skill_fingerprint"],
+        "installed_bundle_fingerprint": drift["installed_bundle_fingerprint"],
+        "receipt": drift["receipt"],
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -985,7 +1464,7 @@ def _skill_pack_payload(target: Path) -> dict[str, Any]:
         skill_dir = Path(str(row["skill_dir"]))
         metadata = row["metadata"]
         skill_id = _slug(str(metadata.get("id") or skill_dir.name))
-        lint_payload = _lint_payload(target, skill_id)
+        lint_payload = _lint_payload(target, f"registry:{skill_id}")
         skills.append(
             {
                 "id": skill_id,
@@ -1206,7 +1685,7 @@ def _mcp_contract_payload(target: Path) -> dict[str, Any]:
     for row in _iter_registry(target):
         metadata = row["metadata"]
         skill_id = str(metadata.get("id") or Path(row["skill_dir"]).name)
-        lint_payload = _lint_payload(target, skill_id)
+        lint_payload = _lint_payload(target, f"registry:{skill_id}")
         compatibility_payload = {
             "skill": f"skill://registry/{skill_id}/compatibility.json",
             "summary": "Use brigade skills compatibility for the full local view.",
@@ -1294,7 +1773,10 @@ def _mcp_read_resource(target: Path, uri: str) -> tuple[str, str] | tuple[None, 
         path = Path(str(changelog.get("path") or ""))
         return (path.read_text(errors="replace"), "text/markdown") if path.is_file() else (None, None)
     if name == "compatibility.json":
-        return json.dumps(_compatibility_payload(target, skill_id), indent=2, sort_keys=True) + "\n", "application/json"
+        return (
+            json.dumps(_compatibility_payload(target, f"registry:{skill_id}"), indent=2, sort_keys=True) + "\n",
+            "application/json",
+        )
     if name == "history.json":
         payload = {"skill_id": skill_id, "history": _install_history(target, skill_id=skill_id)}
         return json.dumps(payload, indent=2, sort_keys=True) + "\n", "application/json"
@@ -1355,11 +1837,11 @@ def _mcp_tool_call(target: Path, name: str, arguments: dict[str, Any]) -> tuple[
         text, _ = _mcp_read_resource(target, f"skill://registry/{skill_id}/CHANGELOG.md")
         return text or "", text is None
     if name == "get_skill_compatibility":
-        return _compatibility_payload(target, skill_id), False
+        return _compatibility_payload(target, f"registry:{skill_id}"), False
     if name == "get_skill_history":
         return {"skill_id": skill_id, "history": _install_history(target, skill_id=skill_id)}, False
     if name == "lint_skill":
-        return _lint_payload(target, skill_id), False
+        return _lint_payload(target, f"registry:{skill_id}"), False
     return {"error": f"unknown read-only skill tool: {name}"}, True
 
 
@@ -1499,8 +1981,9 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
         installed = False
         installed_path = None
         if install_path:
-            installed_path = str(target / str(install_path).format(skill_id=skill_id))
-            installed = Path(installed_path).is_dir()
+            installed_dir = _install_dir(target, adapter_id, skill_id)
+            installed_path = str(installed_dir)
+            installed = _skill_md_path(installed_dir).is_file()
         supported_state = adapter_id in supported or not supported
         blockers: list[str] = []
         if adapter.get("status") == "planned":
@@ -1511,20 +1994,35 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
             blockers.append("skill metadata does not list this harness")
         rendered_errors: list[str] = []
         render_fingerprint: str | None = None
+        rendered: str | None = None
         if lint_payload.get("valid") and adapter.get("status") != "planned" and install_path:
             rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, adapter_id)
             render_fingerprint = _text_fingerprint(rendered)
             rendered_errors = _rendered_skill_validation(rendered, adapter_id)
             blockers.extend(rendered_errors)
-        latest_receipt = _latest_install_receipt(target, skill_id, adapter_id)
+        drift = (
+            _drift_payload(
+                target=target,
+                skill_id=skill_id,
+                harness=adapter_id,
+                lint_payload=lint_payload,
+                rendered=rendered,
+                installed_dir=Path(str(installed_path)),
+            )
+            if rendered is not None and installed_path is not None
+            else None
+        )
+        latest_receipt = drift.get("receipt") if drift else _latest_install_receipt(target, skill_id, adapter_id)
+        latest_receipt = latest_receipt if isinstance(latest_receipt, dict) else {}
+        if not _valid_receipt_contract(latest_receipt, skill_id=skill_id, harness=adapter_id):
+            latest_receipt = {}
         history_count = len(_install_history(target, skill_id=skill_id, harness=adapter_id))
         installed_source_fingerprint = latest_receipt.get("source_fingerprint") or latest_receipt.get("fingerprint")
         installed_render_fingerprint = latest_receipt.get("render_fingerprint")
         version_drift = bool(latest_receipt and latest_receipt.get("version") != current_version)
-        source_drift = bool(latest_receipt and installed_source_fingerprint != lint_payload.get("fingerprint"))
-        render_drift = bool(
-            latest_receipt and render_fingerprint and installed_render_fingerprint != render_fingerprint
-        )
+        source_drift = bool(drift and drift.get("source") == "changed")
+        render_drift = bool(drift and drift.get("render") == "changed")
+        local_drift = bool(drift and drift.get("local_edit") == "changed")
         adapters.append(
             {
                 "id": adapter_id,
@@ -1543,6 +2041,22 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
                 "version_drift": version_drift,
                 "source_drift": source_drift,
                 "render_drift": render_drift,
+                "local_drift": local_drift,
+                "drift": (
+                    {
+                        key: drift[key]
+                        for key in (
+                            "overall",
+                            "source",
+                            "render",
+                            "local_edit",
+                            "receipt_known",
+                            "content_changed",
+                        )
+                    }
+                    if drift
+                    else None
+                ),
                 "install_history_count": history_count,
                 "receipt_path": str(_installs_root(target) / f"{skill_id}-{adapter_id}.json")
                 if latest_receipt
@@ -1557,6 +2071,7 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
         "skill_id": skill_id,
         "valid": bool(lint_payload.get("valid")),
         "fingerprint": lint_payload.get("fingerprint"),
+        "source": lint_payload.get("source"),
         "version": current_version,
         "trust_score": lint_payload.get("trust_score"),
         "changelog": lint_payload.get("changelog"),
@@ -1579,6 +2094,247 @@ def compatibility(*, target: Path, skill: str, json_output: bool = False) -> int
     return 0 if payload["valid"] else 1
 
 
+def _fleet_skill_ids(target: Path) -> list[str]:
+    bundled_root = template_root() / "skills"
+    bundled = (
+        {path.name for path in bundled_root.iterdir() if path.is_dir() and _skill_md_path(path).is_file()}
+        if bundled_root.is_dir()
+        else set()
+    )
+    registry = {
+        _slug(str(row["metadata"].get("id") or Path(str(row["skill_dir"])).name)) for row in _iter_registry(target)
+    }
+    return sorted(bundled | registry)
+
+
+def _fleet_receipts(target: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    receipts: dict[tuple[str, str], dict[str, Any]] = {}
+    root = _installs_root(target)
+    if not root.is_dir():
+        return receipts
+    install_targets = set(_install_targets(target))
+    for path in sorted(root.glob("*.json")):
+        receipt = _read_json(path)
+        skill_id = receipt.get("skill_id")
+        harness = receipt.get("target")
+        if (
+            isinstance(skill_id, str)
+            and skill_id
+            and isinstance(harness, str)
+            and harness in install_targets
+            and path == root / f"{_slug(skill_id)}-{harness}.json"
+        ):
+            receipts[(_slug(skill_id), harness)] = receipt
+    return receipts
+
+
+def _fleet_copy_keys(target: Path) -> list[tuple[str, str]]:
+    keys = set(_fleet_receipts(target))
+    skill_ids = _fleet_skill_ids(target)
+    for harness in sorted(_install_targets(target)):
+        if harness == "hermes":
+            continue
+        probe = _install_dir(target, harness, "__brigade_probe__")
+        root = probe.parent
+        if root.is_dir():
+            for path in sorted(item for item in root.iterdir() if item.is_dir()):
+                if _skill_md_path(path).is_file():
+                    keys.add((_slug(path.name), harness))
+        for skill_id in skill_ids:
+            if _install_dir(target, harness, skill_id).exists():
+                keys.add((skill_id, harness))
+    return sorted(keys)
+
+
+def _fleet_source_selector(skill_id: str, receipt: dict[str, Any]) -> str | None:
+    if not receipt:
+        return skill_id
+    source = receipt.get("source") if isinstance(receipt.get("source"), dict) else {}
+    kind = source.get("kind")
+    identity = source.get("identity")
+    if kind == "brigade-bundle" and identity == f"{BUNDLED_SOURCE_PREFIX}{skill_id}":
+        return f"bundled:{skill_id}"
+    if kind == "registry" and identity == f"registry://skills/{skill_id}":
+        return f"registry:{skill_id}"
+    if kind == "path" and isinstance(identity, str) and identity.startswith("path:"):
+        source_path = identity.removeprefix("path:")
+        return source_path if Path(source_path).is_absolute() else None
+    return None
+
+
+def _fleet_update_command(*, target: Path, skill_id: str, harness: str, source: dict[str, Any]) -> str | None:
+    kind = source.get("kind")
+    identity = source.get("identity")
+    if kind == "brigade-bundle":
+        selector = f"bundled:{skill_id}"
+    elif kind == "registry":
+        selector = f"registry:{skill_id}"
+    elif kind == "path" and isinstance(identity, str) and identity.startswith("path:"):
+        selector = identity.removeprefix("path:")
+        if not Path(selector).is_dir():
+            return None
+    else:
+        return None
+    return shlex.join(
+        [
+            "brigade",
+            "skills",
+            "install",
+            selector,
+            "--workspace",
+            str(target),
+            "--target",
+            harness,
+            "--force",
+        ]
+    )
+
+
+def _fleet_remove_command(*, target: Path, skill_id: str, harness: str) -> str:
+    return shlex.join(
+        [
+            "brigade",
+            "skills",
+            "uninstall",
+            skill_id,
+            "--workspace",
+            str(target),
+            "--target",
+            harness,
+        ]
+    )
+
+
+def _fleet_status_payload(target: Path) -> dict[str, Any]:
+    copies: list[dict[str, Any]] = []
+    receipts = _fleet_receipts(target)
+    for skill_id, harness in _fleet_copy_keys(target):
+        receipt = receipts.get((skill_id, harness), {})
+        selector = _fleet_source_selector(skill_id, receipt)
+        lint_payload = _lint_payload(target, selector) if selector is not None else {"valid": False}
+        if not lint_payload.get("valid"):
+            copies.append(
+                {
+                    "skill_id": skill_id,
+                    "harness": harness,
+                    "installed_path": str(_install_dir(target, harness, skill_id)),
+                    "status": "unknown",
+                    "drift": {
+                        "overall": "unknown",
+                        "source": "unknown",
+                        "render": "unknown",
+                        "local_edit": "unknown",
+                        "receipt_known": False,
+                        "content_changed": False,
+                    },
+                    "source": receipt.get("source") if isinstance(receipt.get("source"), dict) else None,
+                    "supported": None,
+                    "update_command": None,
+                }
+            )
+            continue
+        source_dir = Path(str(lint_payload["skill_dir"]))
+        metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
+        source_text = _skill_md_path(source_dir).read_text(errors="replace")
+        supported = metadata.get("supported_harnesses") if isinstance(metadata.get("supported_harnesses"), list) else []
+        source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
+        supported_state = harness in supported or not supported
+        installed_dir = _install_dir(target, harness, skill_id)
+        rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, harness)
+        drift = _drift_payload(
+            target=target,
+            skill_id=skill_id,
+            harness=harness,
+            lint_payload=lint_payload,
+            rendered=rendered,
+            installed_dir=installed_dir,
+        )
+        if not drift["receipt_known"]:
+            status = "unknown"
+        elif _skill_md_path(installed_dir).is_file() and not supported_state:
+            status = "unsupported"
+        elif drift["overall"] == "missing":
+            status = "missing"
+        elif drift["overall"] == "changed":
+            status = "stale"
+        elif drift["overall"] == "current":
+            status = "current"
+        else:
+            status = "unknown"
+        update_command = (
+            _fleet_update_command(target=target, skill_id=skill_id, harness=harness, source=source)
+            if status in {"stale", "missing"} and supported_state
+            else None
+        )
+        remove_command = (
+            _fleet_remove_command(target=target, skill_id=skill_id, harness=harness)
+            if status == "unsupported"
+            else None
+        )
+        copies.append(
+            {
+                "skill_id": skill_id,
+                "harness": harness,
+                "installed_path": str(installed_dir),
+                "status": status,
+                "drift": {
+                    key: drift[key]
+                    for key in (
+                        "overall",
+                        "source",
+                        "render",
+                        "local_edit",
+                        "receipt_known",
+                        "content_changed",
+                    )
+                },
+                "source": source,
+                "supported": supported_state,
+                "update_command": update_command,
+                "remove_command": remove_command,
+            }
+        )
+    copies.sort(key=lambda row: (str(row["skill_id"]), str(row["harness"])))
+    counts = {
+        state: sum(row["status"] == state for row in copies)
+        for state in ("current", "stale", "missing", "unsupported", "unknown")
+    }
+    return {
+        "schema_version": 1,
+        "target": str(target),
+        "checked_count": len(copies),
+        "current_count": counts["current"],
+        "stale_count": counts["stale"],
+        "missing_count": counts["missing"],
+        "unsupported_count": counts["unsupported"],
+        "unknown_count": counts["unknown"],
+        "copies": copies,
+        "stale": [row for row in copies if row["status"] in {"stale", "missing"}],
+    }
+
+
+def fleet_status(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    payload = _fleet_status_payload(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"skills fleet status: {target}")
+    print(
+        f"checked={payload['checked_count']} current={payload['current_count']} "
+        f"stale={payload['stale_count']} missing={payload['missing_count']} "
+        f"unsupported={payload['unsupported_count']} unknown={payload['unknown_count']}"
+    )
+    for row in (item for item in payload["copies"] if item["status"] != "current"):
+        support = " supported=false" if row.get("supported") is False else ""
+        print(f"- {row['skill_id']} [{row['harness']}] {row['status']}{support}")
+        if row["update_command"]:
+            print(f"  update: {row['update_command']}")
+        elif row.get("remove_command"):
+            print(f"  remove: {row['remove_command']}")
+    return 0
+
+
 def _skill_health_issues(target: Path) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     registry = _iter_registry(target)
@@ -1587,7 +2343,7 @@ def _skill_health_issues(target: Path) -> list[dict[str, Any]]:
     for row in registry:
         metadata = row["metadata"]
         skill_id = _slug(str(metadata.get("id") or Path(row["skill_dir"]).name))
-        lint_payload = _lint_payload(target, skill_id)
+        lint_payload = _lint_payload(target, str(row["skill_dir"]))
         for error in lint_payload.get("errors", []):
             issues.append(
                 {
@@ -1645,7 +2401,7 @@ def _skill_health_issues(target: Path) -> list[dict[str, Any]]:
                     "fingerprint": lint_payload.get("fingerprint"),
                 }
             )
-        compat = _compatibility_payload(target, skill_id)
+        compat = _compatibility_payload(target, f"registry:{skill_id}")
         for adapter in compat.get("adapters", []):
             if not isinstance(adapter, dict):
                 continue
@@ -1662,7 +2418,7 @@ def _skill_health_issues(target: Path) -> list[dict[str, Any]]:
                         "fingerprint": adapter.get("installed_source_fingerprint") or lint_payload.get("fingerprint"),
                     }
                 )
-            if adapter.get("source_drift") or adapter.get("render_drift"):
+            if adapter.get("source_drift") or adapter.get("render_drift") or adapter.get("local_drift"):
                 issues.append(
                     {
                         "status": WARN,

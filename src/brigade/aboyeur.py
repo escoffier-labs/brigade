@@ -22,6 +22,7 @@ from . import graphtrail_delta
 from . import localio
 from . import proc, runguard
 from . import run_control
+from .result_integrity import validate_final_output
 from .run_receipts import (
     agent_result_from_worker as _agent_result_from_worker,
     agent_result_payload as _agent_result_payload,
@@ -641,6 +642,10 @@ def _record_plan_attempt(
         "detail": result.detail,
         "text": result.text,
     }
+    if result.failure_phase is not None:
+        payload["failure_phase"] = result.failure_phase
+    if result.failure_kind is not None:
+        payload["failure_kind"] = result.failure_kind
     if parse_error is not None:
         payload["parse_error"] = parse_error
     if coverage_missing:
@@ -684,6 +689,8 @@ def _run_orchestrator(
         kwargs["model"] = orchestrator.model
     if orchestrator.reasoning is not None:
         kwargs["reasoning"] = orchestrator.reasoning
+    if orchestrator.env is not None:
+        kwargs["env"] = dict(orchestrator.env)
     return agents.run_agent(orchestrator.cli, prompt, **kwargs)
 
 
@@ -966,6 +973,20 @@ def _run_codex_appserver_worker(
             text="",
             ok=False,
             detail="empty output",
+            thread_id=turn.thread_id,
+            status=turn.status,
+            transport="codex-app-server",
+            requested_model=agent.model,
+            reasoning=agent.reasoning,
+        )
+    output_failure = validate_final_output(text)
+    if output_failure is not None:
+        return agents.AgentResult(
+            text=text,
+            ok=False,
+            detail=output_failure.detail,
+            failure_phase="output-validation",
+            failure_kind=output_failure.kind,
             thread_id=turn.thread_id,
             status=turn.status,
             transport="codex-app-server",
@@ -1429,6 +1450,8 @@ def _context_eval_for_run(
             return None
         if not isinstance(code_graph_delta, dict) or code_graph_delta.get("ok") is not True:
             return None
+        if code_graph_delta.get("stale_graph_used") is True:
+            return None
         sidecar_path = code_graph_delta.get("sidecar_path")
         if not isinstance(sidecar_path, str) or not sidecar_path:
             return None
@@ -1446,16 +1469,121 @@ def set_artifact_patch_ref(output_dir: Path, patch_ref: str = "changes.patch") -
         path = output_dir / filename
         try:
             payload = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             continue
+        except OSError as exc:
+            raise runguard.RunGuardError(
+                f"failed to read {filename} while recording artifact patch reference: {exc}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise runguard.RunGuardError(
+                f"failed to parse {filename} while recording artifact patch reference: {exc}"
+            ) from exc
         if not isinstance(payload, dict) or "ground_truth" not in payload:
-            continue
+            raise runguard.RunGuardError(f"{filename} is missing ground_truth while recording artifact patch reference")
         payload["ground_truth"] = _with_patch_ref(payload.get("ground_truth"), patch_ref)
-        _write_json(path, payload)
+        try:
+            _write_json(path, payload)
+        except OSError as exc:
+            raise runguard.RunGuardError(f"failed to record artifact patch reference in {filename}: {exc}") from exc
+
+
+def record_artifact_collection(
+    output_dir: Path,
+    *,
+    status: str,
+    patch_ref: str | None = None,
+    changed: bool | None = None,
+    tracked_count: int | None = None,
+    untracked_count: int | None = None,
+    worktree: Path | None = None,
+    failure_phase: str | None = None,
+    failure_kind: str | None = None,
+    detail: str | None = None,
+) -> None:
+    run_path = output_dir / "run.json"
+    try:
+        payload = json.loads(run_path.read_text())
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to read run receipt during artifact collection: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise runguard.RetainRunLockError(f"run receipt is invalid during artifact collection: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise runguard.RetainRunLockError("run receipt must contain an object during artifact collection")
+
+    collection: dict[str, object] = {"status": status}
+    if patch_ref is not None:
+        collection["patch_ref"] = patch_ref
+    if changed is not None:
+        collection["changed"] = changed
+    if tracked_count is not None:
+        collection["tracked_count"] = tracked_count
+    if untracked_count is not None:
+        collection["untracked_count"] = untracked_count
+    if worktree is not None:
+        collection["worktree"] = str(worktree)
+
+    if status == "failed":
+        bounded_detail = _one_line(detail or "artifact collection failed")[:2000]
+        phase = failure_phase or "artifact-collection"
+        artifact_failure = {
+            "phase": phase,
+            "kind": failure_kind or "unknown",
+            "detail": bounded_detail,
+        }
+        collection["failure"] = artifact_failure
+        if payload.get("status") not in {"failed", "handoff-failed", "interrupted"}:
+            payload["status"] = "failed"
+            payload["error"] = bounded_detail
+            payload["failure_phase"] = phase
+            payload["failure"] = artifact_failure
+            finished_at = datetime.now(timezone.utc)
+            payload["finished_at"] = _utc_iso(finished_at)
+            started_at = payload.get("started_at")
+            if isinstance(started_at, str):
+                try:
+                    started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+                else:
+                    payload["duration_seconds"] = max(
+                        0.0,
+                        round((finished_at - started.astimezone(timezone.utc)).total_seconds(), 3),
+                    )
+    elif status == "ok" and payload.get("status") == "artifact-collection":
+        finished_at = datetime.now(timezone.utc)
+        payload["status"] = "ok"
+        payload["finished_at"] = _utc_iso(finished_at)
+        started_at = payload.get("started_at")
+        if isinstance(started_at, str):
+            try:
+                started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+            else:
+                payload["duration_seconds"] = max(
+                    0.0,
+                    round((finished_at - started.astimezone(timezone.utc)).total_seconds(), 3),
+                )
+    payload["artifact_collection"] = collection
+    try:
+        _write_json(run_path, payload)
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to update run receipt after artifact collection: {exc}") from exc
+
+
+def _roster_resolution_payload(roster: Roster) -> dict[str, object] | None:
+    if roster.resolution is None:
+        return None
+    return {
+        "path": str(roster.resolution.path),
+        "source": roster.resolution.source,
+        "shadowed": [str(path) for path in roster.resolution.shadowed],
+    }
 
 
 def _roster_payload(roster: Roster) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "schema": "brigade.roster_snapshot.v1",
         "orchestrator": roster.orchestrator,
         "max_workers": roster.max_workers,
@@ -1471,16 +1599,25 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
                 "transport_version": agent.transport_version,
                 "role": agent.role,
                 "timeout_seconds": agent.timeout_seconds,
+                "invalid_final_fallback": agent.invalid_final_fallback,
+                # env tables hold names and references only, never secret
+                # values (enforced at roster load), so persisting them for
+                # resume is safe.
+                "env": dict(agent.env) if agent.env is not None else None,
             }
             for name, agent in roster.agents.items()
         },
     }
+    if resolution := _roster_resolution_payload(roster):
+        payload["resolution"] = resolution
+    return payload
 
 
 def _run_payload(
     *,
     task: str,
     cwd: Path | None,
+    lock_workspace: Path | None,
     roster: Roster,
     dry_run: bool,
     read_only: bool,
@@ -1490,6 +1627,8 @@ def _run_payload(
     output_dir: Path | None = None,
     handoff_path: Path | None = None,
     error: str | None = None,
+    failure_phase: str | None = None,
+    failure_kind: str | None = None,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
@@ -1530,6 +1669,10 @@ def _run_payload(
             "attached": list(brief_set.attached) if brief_set is not None else [],
         },
     }
+    if resolution := _roster_resolution_payload(roster):
+        payload["roster"] = resolution
+    if lock_workspace is not None:
+        payload["lock_workspace"] = str(lock_workspace)
     if route is not None:
         payload["route"] = route.payload()
     if worker is not None:
@@ -1550,6 +1693,13 @@ def _run_payload(
         payload["handoff"] = str(handoff_path)
     if error is not None:
         payload["error"] = error
+        if failure_phase is not None or failure_kind is not None:
+            payload["failure_phase"] = failure_phase or "unknown"
+            payload["failure"] = {
+                "phase": failure_phase or "unknown",
+                "kind": failure_kind or "unknown",
+                "detail": error,
+            }
     if codex_transport is not None:
         payload["codex_transport"] = codex_transport
     if control_socket is not None:
@@ -1578,6 +1728,7 @@ def run(
     show_plan: bool = False,
     verbose: bool = False,
     cwd: Path | None = None,
+    lock_workspace: Path | None = None,
     output_dir: Path | None = None,
     handoff_inbox: Path | None = None,
     read_only: bool = False,
@@ -1595,13 +1746,19 @@ def run(
     route_overrides: tuple[str, ...] = (),
     worker: str | None = None,
     authorized_writable_worktree: bool = False,
+    defer_artifact_collection: bool = False,
 ) -> int:
     started_at = datetime.now(timezone.utc)
     transport_for_payload = codex_transport or roster.codex_transport
     cwd = cwd.expanduser().resolve() if cwd is not None else None
+    lock_workspace = lock_workspace.expanduser().resolve() if lock_workspace is not None else cwd
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     direct_worker = worker is not None
+
+    def _payload(**kwargs: Any) -> dict[str, object]:
+        return _run_payload(lock_workspace=lock_workspace, **kwargs)
+
     if worker is not None:
         worker_error = _direct_worker_error(worker, roster)
         if worker_error is not None:
@@ -1647,7 +1804,7 @@ def run(
         _write_json(output_dir / "roster.json", _roster_payload(roster))
         _write_json(
             output_dir / "run.json",
-            _run_payload(
+            _payload(
                 task=task,
                 cwd=cwd,
                 roster=roster,
@@ -1672,6 +1829,28 @@ def run(
     if worker is not None:
         assignments = [Assignment(worker=worker, task=task, stage=1)]
     else:
+        if output_dir is not None:
+            _write_json(
+                output_dir / "run.json",
+                _payload(
+                    task=task,
+                    cwd=cwd,
+                    roster=roster,
+                    dry_run=dry_run,
+                    read_only=read_only,
+                    status="planning",
+                    started_at=started_at,
+                    output_dir=output_dir,
+                    code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    evidence=evidence,
+                    brief_set=brief_set,
+                    codex_transport=transport_for_payload,
+                    route=route,
+                    code_graph_delta=code_graph_delta,
+                    worker=worker,
+                ),
+            )
         try:
             assignments = plan(
                 task,
@@ -1687,12 +1866,18 @@ def run(
                 route=route,
             )
         except RuntimeError as exc:
+            failed_attempt = next(
+                (attempt for attempt in reversed(plan_attempts or []) if attempt.get("ok") is False),
+                None,
+            )
+            failure_phase = failed_attempt.get("failure_phase") if isinstance(failed_attempt, dict) else None
+            failure_kind = failed_attempt.get("failure_kind") if isinstance(failed_attempt, dict) else None
             if output_dir is not None:
                 finished_at = datetime.now(timezone.utc)
                 _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
                 _write_json(
                     output_dir / "run.json",
-                    _run_payload(
+                    _payload(
                         task=task,
                         cwd=cwd,
                         roster=roster,
@@ -1703,6 +1888,8 @@ def run(
                         finished_at=finished_at,
                         output_dir=output_dir,
                         error=str(exc),
+                        failure_phase=(failure_phase if isinstance(failure_phase, str) else None),
+                        failure_kind=(failure_kind if isinstance(failure_kind, str) else None),
                         code_graph=code_graph,
                         drift_impact=drift_impact,
                         evidence=evidence,
@@ -1733,7 +1920,7 @@ def run(
             finished_at = datetime.now(timezone.utc)
             _write_json(
                 output_dir / "run.json",
-                _run_payload(
+                _payload(
                     task=task,
                     cwd=cwd,
                     roster=roster,
@@ -1763,10 +1950,38 @@ def run(
     has_codex_workers = any(
         (roster.agents.get(a.worker) is not None and roster.agents[a.worker].cli == "codex") for a in assignments
     )
+    if effective_transport == "app-server" and not has_codex_workers:
+        effective_transport = "exec"
+    elif effective_transport == "app-server" and output_dir is not None:
+        control_socket = output_dir / "control.sock"
+    transport_for_payload = effective_transport
+    if output_dir is not None:
+        _write_json(
+            output_dir / "run.json",
+            _payload(
+                task=task,
+                cwd=cwd,
+                roster=roster,
+                dry_run=dry_run,
+                read_only=read_only,
+                status="dispatching",
+                started_at=started_at,
+                output_dir=output_dir,
+                code_graph=code_graph,
+                drift_impact=drift_impact,
+                evidence=evidence,
+                brief_set=brief_set,
+                codex_transport=transport_for_payload,
+                route=route,
+                control_socket=control_socket,
+                code_graph_delta=code_graph_delta,
+                worker=worker,
+            ),
+        )
     appserver = None
     control_registry = None
     control_server = None
-    if effective_transport == "app-server" and has_codex_workers:
+    if effective_transport == "app-server":
         try:
             appserver = codex_appserver.AppServer(cwd=cwd)
             appserver.start()
@@ -1774,9 +1989,9 @@ def run(
             print(f"warning: codex app-server unavailable ({exc}); falling back to exec", file=sys.stderr)
             appserver = None
             effective_transport = "exec"
+            control_socket = None
         if appserver is not None and output_dir is not None:
             control_registry = run_control.LiveTurnRegistry()
-            control_socket = output_dir / "control.sock"
             control_server = run_control.ControlServer(control_socket, control_registry)
             try:
                 control_server.start()
@@ -1785,13 +2000,11 @@ def run(
                 control_registry = None
                 control_server = None
                 control_socket = None
-    elif effective_transport == "app-server":
-        effective_transport = "exec"
     transport_for_payload = effective_transport
-    if output_dir is not None and control_socket is not None:
+    if output_dir is not None:
         _write_json(
             output_dir / "run.json",
-            _run_payload(
+            _payload(
                 task=task,
                 cwd=cwd,
                 roster=roster,
@@ -1883,6 +2096,29 @@ def run(
         )
         final = _agent_result_from_worker(direct_result)
     else:
+        if output_dir is not None:
+            _write_json(
+                output_dir / "run.json",
+                _payload(
+                    task=task,
+                    cwd=cwd,
+                    roster=roster,
+                    dry_run=dry_run,
+                    read_only=read_only,
+                    status="synthesizing",
+                    started_at=started_at,
+                    output_dir=output_dir,
+                    code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    evidence=evidence,
+                    brief_set=brief_set,
+                    codex_transport=transport_for_payload,
+                    route=route,
+                    control_socket=control_socket,
+                    code_graph_delta=code_graph_delta,
+                    worker=worker,
+                ),
+            )
         synthesis_started = time.monotonic()
         final = _run_orchestrator(
             roster,
@@ -1929,7 +2165,7 @@ def run(
                 (output_dir / "final.txt").write_text(final.text + "\n")
             _write_json(
                 output_dir / "run.json",
-                _run_payload(
+                _payload(
                     task=task,
                     cwd=cwd,
                     roster=roster,
@@ -1940,6 +2176,8 @@ def run(
                     finished_at=finished_at,
                     output_dir=output_dir,
                     error=final.detail,
+                    failure_phase=final.failure_phase,
+                    failure_kind=final.failure_kind,
                     code_graph=code_graph,
                     drift_impact=drift_impact,
                     evidence=evidence,
@@ -1960,17 +2198,17 @@ def run(
             print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
         return 2
     if output_dir is not None:
-        finished_at = datetime.now(timezone.utc)
+        finished_at = None if defer_artifact_collection else datetime.now(timezone.utc)
         (output_dir / "final.txt").write_text(final.text + "\n")
         _write_json(
             output_dir / "run.json",
-            _run_payload(
+            _payload(
                 task=task,
                 cwd=cwd,
                 roster=roster,
                 dry_run=dry_run,
                 read_only=read_only,
-                status="ok",
+                status="artifact-collection" if defer_artifact_collection else "ok",
                 started_at=started_at,
                 finished_at=finished_at,
                 output_dir=output_dir,
@@ -2005,7 +2243,7 @@ def run(
                 finished_at = datetime.now(timezone.utc)
                 _write_json(
                     output_dir / "run.json",
-                    _run_payload(
+                    _payload(
                         task=task,
                         cwd=cwd,
                         roster=roster,
@@ -2034,16 +2272,16 @@ def run(
             return 2
         print(f"handoff: {handoff}", file=sys.stderr)
         if output_dir is not None:
-            finished_at = datetime.now(timezone.utc)
+            finished_at = None if defer_artifact_collection else datetime.now(timezone.utc)
             _write_json(
                 output_dir / "run.json",
-                _run_payload(
+                _payload(
                     task=task,
                     cwd=cwd,
                     roster=roster,
                     dry_run=dry_run,
                     read_only=read_only,
-                    status="ok",
+                    status="artifact-collection" if defer_artifact_collection else "ok",
                     started_at=started_at,
                     finished_at=finished_at,
                     output_dir=output_dir,

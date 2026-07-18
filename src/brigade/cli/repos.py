@@ -83,6 +83,43 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
     )
     p_repos_discover_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_adoption = repos_sub.add_parser(
+        "adoption", help="Compare harness wiring with observed Brigade work-loop use."
+    )
+    p_repos_adoption.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo fleet workspace to inspect."
+    )
+    p_repos_adoption.add_argument(
+        "--harness", dest="harnesses", action="append", default=[], help="Harness to inspect. May be repeated."
+    )
+    p_repos_adoption.add_argument("--days", type=int, default=7, help="Recent session window in days.")
+    p_repos_adoption.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    repos_adoption_sub = p_repos_adoption.add_subparsers(dest="adoption_action", metavar="<repos-adoption-command>")
+    p_repos_adoption_repair = repos_adoption_sub.add_parser(
+        "repair", help="Plan repairs for matching noncompliant rows."
+    )
+    p_repos_adoption_repair.add_argument(
+        "--target", "-t", type=Path, default=argparse.SUPPRESS, help="Repo fleet workspace to inspect."
+    )
+    p_repos_adoption_repair.add_argument(
+        "--harness",
+        dest="harnesses",
+        action="append",
+        default=argparse.SUPPRESS,
+        help="Harness to inspect. May be repeated.",
+    )
+    p_repos_adoption_repair.add_argument(
+        "--days", type=int, default=argparse.SUPPRESS, help="Recent session window in days."
+    )
+    p_repos_adoption_repair.add_argument(
+        "--state",
+        choices=("unwired", "partial", "advisory-only", "enforced-idle", "active", "bypassed", "stale"),
+        default=None,
+        help="Repair only rows in this state.",
+    )
+    p_repos_adoption_repair.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Print machine-readable JSON."
+    )
     p_repos_report = repos_sub.add_parser("report", help="Plan, build, and inspect local repo fleet reports.")
     repos_report_sub = p_repos_report.add_subparsers(dest="repos_report_command", metavar="<repos-report-command>")
     repos_report_sub.required = True
@@ -530,6 +567,33 @@ def register(sub: argparse._SubParsersAction) -> None:
         "templates", help="List fleet release waiver policy templates."
     )
     p_repos_release_waivers_templates.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_friction = repos_sub.add_parser(
+        "friction", help="Scan and review friction across the configured repo fleet."
+    )
+    repos_friction_sub = p_repos_friction.add_subparsers(
+        dest="repos_friction_command", metavar="<repos-friction-command>"
+    )
+    repos_friction_sub.required = True
+    p_repos_friction_scan = repos_friction_sub.add_parser("scan", help="Scan friction across enabled fleet repos.")
+    p_repos_friction_scan.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
+    )
+    p_repos_friction_scan.add_argument("--days", type=int, default=30, help="Lookback window in days.")
+    p_repos_friction_scan.add_argument(
+        "--include-agent-logs",
+        action="store_true",
+        help="Also scan global agent logs once from the operator workspace.",
+    )
+    p_repos_friction_scan.add_argument("--max-files", type=int, default=5000, help="Maximum source files per repo.")
+    p_repos_friction_scan.add_argument(
+        "--max-candidates", type=int, default=200, help="Maximum candidates to record per repo."
+    )
+    p_repos_friction_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_friction_show = repos_friction_sub.add_parser("show", help="Show the latest repo fleet friction report.")
+    p_repos_friction_show.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
+    )
+    p_repos_friction_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_repos_release_waivers_doctor = repos_release_waivers_sub.add_parser(
         "doctor", help="Check fleet release waiver health."
     )
@@ -598,6 +662,22 @@ def dispatch(args) -> int:
             return repos_cmd.fleet.discover_plan(target=args.target, json_output=args.json)
         args._brigade_parser.error(f"unknown repos discover command: {args.repos_discover_command}")
         return 2
+    if args.repos_command == "adoption":
+        harnesses = args.harnesses or None
+        if args.adoption_action == "repair":
+            return repos_cmd.adoption_repair(
+                target=args.target,
+                harnesses=harnesses,
+                days=args.days,
+                state=args.state,
+                json_output=args.json,
+            )
+        return repos_cmd.adoption_report(
+            target=args.target,
+            harnesses=harnesses,
+            days=args.days,
+            json_output=args.json,
+        )
     if args.repos_command == "report":
         if args.repos_report_command == "plan":
             return repos_cmd.report_plan(target=args.target, json_output=args.json)
@@ -870,6 +950,20 @@ def dispatch(args) -> int:
             args._brigade_parser.error(f"unknown repos release waivers command: {args.repos_release_waivers_command}")
             return 2
         args._brigade_parser.error(f"unknown repos release command: {args.repos_release_command}")
+        return 2
+    if args.repos_command == "friction":
+        if args.repos_friction_command == "scan":
+            return repos_cmd.friction_scan(
+                target=args.target,
+                days=args.days,
+                include_agent_logs=args.include_agent_logs,
+                max_files=args.max_files,
+                max_candidates=args.max_candidates,
+                json_output=args.json,
+            )
+        if args.repos_friction_command == "show":
+            return repos_cmd.friction_show(target=args.target, json_output=args.json)
+        args._brigade_parser.error(f"unknown repos friction command: {args.repos_friction_command}")
         return 2
     args._brigade_parser.error(f"unknown repos command: {args.repos_command}")
     return 2

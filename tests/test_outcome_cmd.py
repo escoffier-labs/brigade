@@ -49,6 +49,8 @@ def _write_run_receipt(
     code_graph_delta=None,
     context_eval=None,
     started_at="2026-06-20T00:00:00+00:00",
+    route=None,
+    plan_attempts=None,
 ):
     run_dir = target / ".brigade" / "runs" / run_id
     run_dir.mkdir(parents=True)
@@ -66,6 +68,10 @@ def _write_run_receipt(
         receipt["code_graph_delta"] = code_graph_delta
     if context_eval is not None:
         receipt["context_eval"] = context_eval
+    if route is not None:
+        receipt["route"] = route
+    if plan_attempts is not None:
+        localio.write_json(run_dir / "plan-attempts.json", {"attempts": plan_attempts})
     localio.write_json(run_dir / "run.json", receipt)
     return run_dir / "run.json"
 
@@ -240,6 +246,51 @@ def test_capture_copies_compact_code_graph_delta_from_verify_receipt(tmp_path, c
     assert row["code_graph_delta"] == compact
     assert "sidecar_path" not in row["code_graph_delta"]
     assert row["digest"] == localio.canonical_json_digest(row, exclude_keys={"digest"})
+
+
+def test_capture_persists_stale_graph_used_and_loaded_counts_exclude_it(tmp_path, capsys):
+    delta = {
+        "status": "ok",
+        "summary": "changed_symbols=2 edge_churn=0 stale_graph",
+        "changed_symbol_count": 2,
+        "edge_churn": 0,
+        "raw_counts": {"edges_added": 2, "edges_removed": 0},
+        "stale_graph_used": True,
+        "sidecar_path": "/tmp/not-copied.json",
+    }
+    _write_verify_receipt(tmp_path, run_id="stale-delta", code_graph_delta=delta)
+
+    assert (
+        outcome_cmd.capture(
+            target=tmp_path,
+            artifact_id="skill-x",
+            artifact_kind="skill",
+            task_id="t-stale",
+            run_id="stale-delta",
+            json_output=True,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    compact = {
+        "status": "ok",
+        "summary": "changed_symbols=2 edge_churn=0 stale_graph",
+        "changed_symbol_count": 2,
+        "edge_churn": 0,
+        "raw_counts": {"edges_added": 2, "edges_removed": 0},
+        "stale_graph_used": True,
+    }
+    assert payload["record"]["code_graph_delta"] == compact
+
+    row = json.loads((tmp_path / "memory" / "outcome" / "records.jsonl").read_text())
+    assert row["code_graph_delta"] == compact
+    assert "sidecar_path" not in row["code_graph_delta"]
+
+    records = outcome_cmd.load_records(tmp_path)
+    assert len(records) == 1
+    assert records[0].code_graph_delta is not None
+    assert records[0].code_graph_delta.get("stale_graph_used") is True
+    assert outcome_cmd._graph_delta_counts(records) == {"graph_changing": 0, "graph_no_op": 0}
 
 
 def test_capture_run_receipt_copies_delta_and_context_eval_into_digest_chain(tmp_path, capsys):
@@ -660,6 +711,45 @@ def test_rank_json_includes_graph_delta_counters_for_mixed_records(tmp_path, cap
     assert ranking["skill-x"]["graph_no_op"] == 1
     assert "graph_changing" not in ranking["skill-y"]
     assert "graph_no_op" not in ranking["skill-y"]
+
+
+def test_graph_delta_counts_excludes_stale_graph_used_deltas():
+    records = [
+        outcome.OutcomeRecord(
+            "skill-x",
+            "skill",
+            "t1",
+            "verify",
+            1,
+            "ref1",
+            "2026-06-20T00:00:00+00:00",
+            code_graph_delta={
+                "status": "ok",
+                "ok": True,
+                "changed_symbol_count": 2,
+                "edge_churn": 0,
+                "stale_graph_used": True,
+            },
+        ),
+        outcome.OutcomeRecord(
+            "skill-x",
+            "skill",
+            "t2",
+            "verify",
+            1,
+            "ref2",
+            "2026-06-20T01:00:00+00:00",
+            code_graph_delta={
+                "status": "ok",
+                "ok": True,
+                "changed_symbol_count": 0,
+                "edge_churn": 0,
+                "stale_graph_used": True,
+            },
+        ),
+    ]
+
+    assert outcome_cmd._graph_delta_counts(records) == {"graph_changing": 0, "graph_no_op": 0}
 
 
 def test_rank_and_reconcile_count_verify_and_run_receipt_graph_deltas_identically(tmp_path, capsys):
@@ -1926,3 +2016,105 @@ def test_cli_rank_recency_flag_dispatch(tmp_path, capsys):
     assert cli.main(["outcome", "rank", "--recency-half-life", "10", "--target", str(tmp_path), "--json"]) == 0
     entry = json.loads(capsys.readouterr().out)["ranking"][0]
     assert entry["recency_half_life_days"] == 10.0
+
+
+# --- Phase 1: route as a cohort axis (record + surface, no scoring change) ---
+
+
+ROUTE_M = {"attached": True, "signals": ["code", "auth-surface", "needs-tests"], "size": "M"}
+
+
+def test_route_manifest_and_fingerprint_are_order_stable():
+    a = outcome_cmd.route_manifest({"route": {"attached": True, "signals": ["code", "auth-surface"], "size": "S"}})
+    b = outcome_cmd.route_manifest({"route": {"attached": True, "signals": ["auth-surface", "code"], "size": "S"}})
+    assert a["path"] == "code"
+    assert a["signals"] == ["auth-surface", "code"]
+    assert outcome_cmd.route_fingerprint(a) == outcome_cmd.route_fingerprint(b)
+
+
+def test_route_manifest_unrouted_when_no_route():
+    for payload in ({"status": "completed"}, {"route": {"attached": False}}, None):
+        m = outcome_cmd.route_manifest(payload)
+        assert m == {"followed": False}
+        assert outcome_cmd.route_fingerprint(m) is None
+
+
+def test_route_coverage_reads_plan_attempts(tmp_path):
+    _init_git_repo(tmp_path)
+    clean = _write_run_receipt(
+        tmp_path, run_id="clean", route=ROUTE_M, plan_attempts=[{"stage": "initial", "parsed": True}]
+    )
+    gap = _write_run_receipt(
+        tmp_path,
+        run_id="gap",
+        route=ROUTE_M,
+        plan_attempts=[{"stage": "initial", "coverage_missing": ["verify"]}],
+    )
+    assert outcome_cmd._route_coverage(clean) == "clean"
+    assert outcome_cmd._route_coverage(gap) == "gap"
+    # no plan-attempts.json -> None, never a hard failure
+    bare = _write_run_receipt(tmp_path, run_id="bare", route=ROUTE_M)
+    assert outcome_cmd._route_coverage(bare) is None
+
+
+def test_capture_run_receipt_stamps_route_and_survives_roundtrip(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    _write_run_receipt(tmp_path, run_id="routed", route=ROUTE_M, plan_attempts=[{"stage": "initial", "parsed": True}])
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="brigade-work", run_receipt="routed") == 0
+    out = capsys.readouterr().out
+    assert "route:" in out and "code/M, followed" in out
+    records = outcome_cmd.load_records(tmp_path)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.route["followed"] is True
+    assert rec.route["path"] == "code"
+    assert rec.route["size"] == "M"
+    assert rec.route["coverage"] == "clean"
+    assert rec.route_fingerprint  # set for a routed record
+
+
+def test_capture_verify_run_is_unrouted(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    _write_verify_receipt(tmp_path, run_id="v1", status="completed")
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="brigade-work", run_id="v1") == 0
+    assert "route: unrouted" in capsys.readouterr().out
+    rec = outcome_cmd.load_records(tmp_path)[0]
+    assert rec.route == {"followed": False}
+    assert rec.route_fingerprint is None
+
+
+def test_explain_splits_routed_vs_unrouted(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    # one routed helped, one unrouted hurt
+    _write_run_receipt(tmp_path, run_id="r1", status="ok", route=ROUTE_M, plan_attempts=[{"parsed": True}])
+    outcome_cmd.capture(target=tmp_path, artifact_id="brigade-work", run_receipt="r1")
+    _write_verify_receipt(tmp_path, run_id="v1", status="failed")
+    outcome_cmd.capture(target=tmp_path, artifact_id="brigade-work", run_id="v1")
+    capsys.readouterr()
+    assert outcome_cmd.explain(target=tmp_path, artifact_id="brigade-work", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    cohorts = {c["label"]: c for c in payload["route_breakdown"]}
+    assert cohorts["routed code/M"]["helped"] == 1
+    assert cohorts["unrouted"]["hurt"] == 1
+
+
+def test_route_breakdown_absent_on_pre_route_ledger(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    # a record with no route field (legacy) yields no route_breakdown key
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                artifact_id="brigade-work",
+                artifact_kind="skill",
+                task_id="t",
+                source="verify",
+                signal_value=1,
+                evidence_ref="e",
+                ts="2026-06-20T00:00:00+00:00",
+            )
+        ],
+    )
+    assert outcome_cmd.explain(target=tmp_path, artifact_id="brigade-work", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "route_breakdown" not in payload

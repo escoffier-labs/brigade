@@ -4,13 +4,122 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from . import proc
 from .agents import AgentResult
+from .result_integrity import validate_final_output
 
 SUPPORTED_VERSION = "0.12.0"
+CURSOR_AUTH_TIMEOUT_SECONDS = 10.0
+CURSOR_AUTH_RECOVERY = "run `cursor-agent login` once, then verify with `cursor-agent status`"
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+_AUTH_IDENTITY = re.compile(r"(?i)(\blogged in as)\s+[^\r\n]+")
+_SENSITIVE_VALUE = re.compile(r"(?i)\b(token|secret|password|api[_ -]?key)\b(?:\s*[:=]\s*|\s+)[^\s,;]+")
+_BEARER = re.compile(r"(?i)\b(bearer)\s+[^\s,;]+")
+_UNAUTHENTICATED_LINE = re.compile(
+    r"^(?:[x✗✘]\s*)?(?:not logged in|not authenticated|unauthenticated|authentication required)[.!]?$",
+    re.IGNORECASE,
+)
+_AUTHENTICATED_LINE = re.compile(
+    r"^(?:[✓✔]\s*)?(?:logged in as\s+\S+|authenticated)[.!]?$",
+    re.IGNORECASE,
+)
+_PERMISSION_FAILURE = re.compile(
+    r"\b(?:permission denied|permission required|not permitted|auto-denied)\b",
+    re.IGNORECASE,
+)
+_SAFE_STATUS_KEYS = ("hasAccessToken", "hasRefreshToken", "isAuthenticated", "status")
+
+
+@dataclass(frozen=True)
+class CursorAuthStatus:
+    state: Literal["authenticated", "unauthenticated", "unavailable", "unrecognized"]
+    detail: str
+    stdout: str
+    stderr: str
+    exit_code: int
+
+
+def _safe_diagnostic(text: str, *, limit: int = 2000) -> str:
+    safe = _ANSI_ESCAPE.sub("", text).strip()
+    safe = _AUTH_IDENTITY.sub(r"\1 <redacted>", safe)
+    safe = _EMAIL.sub("<redacted>", safe)
+    safe = _SENSITIVE_VALUE.sub(lambda match: f"{match.group(1)}=<redacted>", safe)
+    safe = _BEARER.sub(lambda match: f"{match.group(1)} <redacted>", safe)
+    return safe[:limit]
+
+
+def _diagnostic_line(stdout: str, stderr: str) -> str:
+    text = stderr or stdout
+    return " ".join(text.split())[:500] or "no diagnostic output"
+
+
+def _status_payload(stdout: str) -> tuple[dict[str, Any] | None, str]:
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None, _safe_diagnostic(stdout)
+    if not isinstance(payload, dict):
+        return None, _safe_diagnostic(stdout)
+    safe_payload = {key: value for key in _SAFE_STATUS_KEYS if isinstance((value := payload.get(key)), (bool, str))}
+    safe_stdout = json.dumps(safe_payload, sort_keys=True, separators=(",", ":"))
+    return payload, _safe_diagnostic(safe_stdout)
+
+
+def cursor_auth_status() -> CursorAuthStatus:
+    """Return a bounded, prompt-free diagnosis for the headless Cursor CLI."""
+    if proc.which("cursor-agent") is None:
+        return CursorAuthStatus(
+            "unavailable",
+            "cursor-agent is not installed",
+            "",
+            "",
+            127,
+        )
+    result = proc.run(
+        ["cursor-agent", "status", "--format", "json"],
+        timeout=CURSOR_AUTH_TIMEOUT_SECONDS,
+    )
+    payload, stdout = _status_payload(result.stdout)
+    stderr = _safe_diagnostic(result.stderr)
+    diagnostic = _diagnostic_line(stdout, stderr)
+    authenticated = payload.get("isAuthenticated") if payload is not None else None
+    primary_line = next((line.strip() for line in stdout.splitlines() if line.strip()), "")
+    if authenticated is False or (payload is None and _UNAUTHENTICATED_LINE.fullmatch(primary_line)):
+        return CursorAuthStatus(
+            "unauthenticated",
+            f"cursor-agent CLI is not logged in; {CURSOR_AUTH_RECOVERY}",
+            stdout,
+            stderr,
+            result.code,
+        )
+    if result.code != 0:
+        return CursorAuthStatus(
+            "unavailable",
+            f"cursor-agent status failed (exit {result.code}): {diagnostic}",
+            stdout,
+            stderr,
+            result.code,
+        )
+    if authenticated is True or (payload is None and _AUTHENTICATED_LINE.fullmatch(primary_line)):
+        return CursorAuthStatus(
+            "authenticated",
+            "cursor-agent CLI is authenticated",
+            stdout,
+            stderr,
+            result.code,
+        )
+    return CursorAuthStatus(
+        "unrecognized",
+        f"cursor-agent status returned an unrecognized response: {diagnostic}",
+        stdout,
+        stderr,
+        result.code,
+    )
 
 
 def _timeout_arg(value: float) -> str:
@@ -109,6 +218,7 @@ def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
     session_id: str | None = None
     request_id: str | None = None
     stop_reason: str | None = None
+    stop_reasons: dict[str, str] = {}
     effective_model: str | None = None
     safe_events: list[dict[str, Any]] = []
     for message in messages:
@@ -118,10 +228,8 @@ def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
             if isinstance(version, int):
                 protocol_version = version
             stop = result.get("stopReason")
-            if isinstance(stop, str):
-                stop_reason = stop
-                if isinstance(message.get("id"), (str, int)):
-                    request_id = str(message["id"])
+            if isinstance(stop, str) and isinstance(message.get("id"), (str, int)):
+                stop_reasons[str(message["id"])] = stop
         params = message.get("params")
         if isinstance(params, dict):
             candidate_session = params.get("sessionId")
@@ -143,6 +251,10 @@ def parse_stream(stdout: str) -> tuple[dict[str, Any] | None, str]:
             content = update.get("content")
             if isinstance(content, dict) and content.get("type") == "text" and isinstance(content.get("text"), str):
                 text_parts.append(content["text"])
+    if request_id is not None:
+        stop_reason = stop_reasons.get(request_id)
+    elif len(stop_reasons) == 1:
+        request_id, stop_reason = next(iter(stop_reasons.items()))
     if protocol_version not in (None, 1):
         return None, f"unsupported ACP protocol version: {protocol_version}"
     text = "".join(text_parts).strip()
@@ -174,12 +286,28 @@ def run_cursor(
             text="",
             ok=False,
             detail=f"unsupported acpx adapter version {version}; reviewed version is {SUPPORTED_VERSION}",
+            failure_phase="preflight",
+            failure_kind="version-mismatch",
             transport="acpx",
         )
     if proc.which("acpx") is None:
-        return AgentResult(text="", ok=False, detail="acpx not installed", transport="acpx")
+        return AgentResult(
+            text="",
+            ok=False,
+            detail="acpx not installed",
+            failure_phase="preflight",
+            failure_kind="missing-executable",
+            transport="acpx",
+        )
     if proc.which("cursor-agent") is None:
-        return AgentResult(text="", ok=False, detail="cursor-agent not installed", transport="acpx")
+        return AgentResult(
+            text="",
+            ok=False,
+            detail="cursor-agent not installed",
+            failure_phase="preflight",
+            failure_kind="missing-executable",
+            transport="acpx",
+        )
     installed, version_error = installed_version()
     if installed != version:
         found = installed or version_error
@@ -187,8 +315,37 @@ def run_cursor(
             text="",
             ok=False,
             detail=f"seat requires acpx {version}; found {found}",
+            failure_phase="preflight",
+            failure_kind="version-mismatch",
             transport="acpx",
             acpx_version=installed,
+        )
+    auth = cursor_auth_status()
+    auth_event: dict[str, object] = {
+        "type": "provider_auth",
+        "status": auth.state,
+        "detail": auth.detail,
+    }
+    if auth.state != "authenticated":
+        failure_kind = {
+            "unauthenticated": "provider-auth",
+            "unavailable": "auth-status-unavailable",
+            "unrecognized": "auth-status-unrecognized",
+        }.get(auth.state, "auth-status-unrecognized")
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=auth.detail,
+            failure_phase="preflight",
+            failure_kind=failure_kind,
+            stdout=auth.stdout,
+            stderr=auth.stderr,
+            exit_code=auth.exit_code,
+            timed_out=auth.exit_code == 124,
+            transport="acpx",
+            requested_model=model,
+            acpx_version=installed,
+            safe_events=(auth_event,),
         )
     try:
         argv = build_argv(
@@ -200,35 +357,104 @@ def run_cursor(
             writable_worktree=writable_worktree,
         )
     except ValueError as exc:
-        return AgentResult(text="", ok=False, detail=str(exc), transport="acpx", acpx_version=installed)
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=str(exc),
+            failure_phase="preflight",
+            failure_kind="unsafe-worktree",
+            transport="acpx",
+            acpx_version=installed,
+            safe_events=(auth_event,),
+        )
     result = proc.run(argv, timeout=timeout + 5.0, cwd=cwd)
     parsed, parse_error = parse_stream(result.stdout)
     if result.code != 0:
         detail = result.stderr.strip() or parse_error or f"acpx exit {result.code}"
+        timed_out = result.code in {3, 124}
+        provider_startup = parsed is None
+        permission_denied = bool(_PERMISSION_FAILURE.search(detail))
         return AgentResult(
             text=parsed["text"] if parsed is not None else "",
             ok=False,
             detail=detail[:200],
+            failure_phase="inference" if timed_out or not provider_startup else "dispatch",
+            failure_kind=(
+                "timeout"
+                if timed_out
+                else "permission-denied"
+                if permission_denied
+                else "provider-startup"
+                if provider_startup
+                else "transport-error"
+            ),
             stdout=result.stdout,
             stderr=result.stderr,
             exit_code=result.code,
-            timed_out=result.code in {3, 124},
+            timed_out=timed_out,
             transport="acpx",
             requested_model=model,
             effective_model=parsed.get("effective_model") if parsed is not None else None,
             acpx_version=installed,
+            safe_events=(auth_event, *(parsed["events"] if parsed is not None else [])),
         )
     if parsed is None:
+        empty_final = parse_error == "ACP stream contained no final assistant text"
         return AgentResult(
             text="",
             ok=False,
             detail=parse_error[:200],
+            failure_phase="output-validation",
+            failure_kind="empty-output" if empty_final else "malformed-transport",
             stdout=result.stdout,
             stderr=result.stderr,
             exit_code=result.code,
             transport="acpx",
             requested_model=model,
             acpx_version=installed,
+            safe_events=(auth_event,),
+        )
+    if parsed["stop_reason"] != "end_turn":
+        stop_reason = parsed["stop_reason"] or "missing"
+        return AgentResult(
+            text=parsed["text"],
+            ok=False,
+            detail=f"ACP stream ended without a final completion (stopReason={stop_reason})",
+            failure_phase="output-validation",
+            failure_kind="non-final-stop",
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.code,
+            transport="acpx",
+            requested_model=model,
+            effective_model=parsed["effective_model"],
+            stop_reason=parsed["stop_reason"],
+            protocol_version=parsed["protocol_version"],
+            session_id=parsed["session_id"],
+            request_id=parsed["request_id"],
+            acpx_version=installed,
+            safe_events=(auth_event, *parsed["events"]),
+        )
+    output_failure = validate_final_output(parsed["text"])
+    if output_failure is not None:
+        return AgentResult(
+            text=parsed["text"],
+            ok=False,
+            detail=output_failure.detail,
+            failure_phase="output-validation",
+            failure_kind=output_failure.kind,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.code,
+            transport="acpx",
+            requested_model=model,
+            effective_model=parsed["effective_model"],
+            stop_reason=parsed["stop_reason"],
+            protocol_version=parsed["protocol_version"],
+            session_id=parsed["session_id"],
+            request_id=parsed["request_id"],
+            acpx_version=installed,
+            safe_events=(auth_event, *parsed["events"]),
         )
     return AgentResult(
         text=parsed["text"],
@@ -244,5 +470,5 @@ def run_cursor(
         session_id=parsed["session_id"],
         request_id=parsed["request_id"],
         acpx_version=installed,
-        safe_events=tuple(parsed["events"]),
+        safe_events=(auth_event, *parsed["events"]),
     )

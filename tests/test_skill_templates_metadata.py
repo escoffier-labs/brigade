@@ -45,3 +45,15 @@ def test_bundled_template_ships_tests_and_changelog_inside_dir(skill_id):
     assert isinstance(tests, list) and tests, "template must declare at least one honest test"
     # trust is a per-workspace review decision; templates stay unreviewed.
     assert "trust_level" not in metadata
+
+
+@pytest.mark.parametrize("skill_id", BUNDLED_TEMPLATES)
+def test_canonical_bundled_source_has_reviewed_runtime_provenance(skill_id, tmp_path, capsys):
+    assert skills_cmd.lint(target=tmp_path, skill=skill_id, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["source"]["kind"] == "brigade-bundle"
+    assert payload["source"]["identity"] == f"brigade://bundled-skills/{skill_id}"
+    assert payload["source"]["reviewed"] is True
+    assert payload["trust_score"]["trust_level"] == "bundled"
+    assert "trust_level is unreviewed" not in payload["trust_score"]["signals"]

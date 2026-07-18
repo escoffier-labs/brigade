@@ -6,7 +6,7 @@ import textwrap
 from pathlib import Path
 
 
-from brigade import ingest as ingest_mod
+from brigade import handoff_cmd, ingest as ingest_mod
 from brigade.install import install_selection
 from brigade.selection import Selection
 
@@ -64,6 +64,194 @@ def test_create_card_handoff_promotes_to_memory_cards(tmp_target: Path):
     assert card.read_text().startswith("---\ntopic: promote-test\n")
     processed = tmp_target / ".claude" / "memory-handoffs" / "processed" / "2026-05-13-1000-promote-me.md"
     assert processed.is_file()
+
+
+def test_fenced_create_card_handoff_promotes_without_fences(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    _write_handoff(
+        inbox,
+        "2026-05-13-1000-promote-fenced.md",
+        """\
+        # Memory Handoff
+
+        ## Type
+        decision
+
+        ## Title
+        Promote fenced card
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        promote-fenced.md
+
+        ## Suggested card content
+        ```markdown
+        ---
+        topic: promote-fenced
+        category: test
+        tags: [test]
+        ---
+
+        # Promote fenced card
+
+        Body line.
+        ```
+        """,
+    )
+
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+
+    card = tmp_target / "memory" / "cards" / "promote-fenced.md"
+    assert card.read_text().startswith("---\ntopic: promote-fenced\n")
+    assert "# Promote fenced card" in card.read_text()
+    assert "Body line." in card.read_text()
+    assert "```" not in card.read_text()
+
+
+def test_fenced_create_card_handoff_ignores_trailing_template_comment(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    handoff = _write_handoff(
+        inbox,
+        "2026-05-13-1001-promote-fenced-comment.md",
+        """\
+        # Memory Handoff
+
+        ## Type
+        decision
+
+        ## Title
+        Promote fenced card with envelope comment
+
+        ## Summary
+        Preserve comments inside the card while ignoring template comments outside it.
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        promote-fenced-comment.md
+
+        ## Suggested card content
+        ```markdown
+        ---
+        topic: promote-fenced-comment
+        category: test
+        tags: [test]
+        ---
+
+        # Promote fenced card
+
+        <!-- Keep this card comment. -->
+        Body line.
+        ```
+
+        <!-- Template branch marker outside the card. -->
+        """,
+    )
+
+    assert handoff_cmd.lint_file(handoff).valid
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+
+    card = tmp_target / "memory" / "cards" / "promote-fenced-comment.md"
+    content = card.read_text()
+    assert "<!-- Keep this card comment. -->" in content
+    assert "Template branch marker" not in content
+    assert "```" not in content
+
+
+def test_fenced_create_card_handoff_ignores_leading_envelope_comment(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    handoff = _write_handoff(
+        inbox,
+        "2026-05-13-1002-promote-fenced-leading-comment.md",
+        """\
+        # Memory Handoff
+
+        ## Type
+        decision
+
+        ## Title
+        Promote fenced card after an envelope comment
+
+        ## Summary
+        Ignore an envelope comment before the outer fence.
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        promote-fenced-leading-comment.md
+
+        ## Suggested card content
+        <!-- Card envelope. -->
+        ```markdown
+        ---
+        topic: promote-fenced-leading-comment
+        category: test
+        tags: [test]
+        ---
+
+        # Promote fenced card
+
+        Body line.
+        ```
+        """,
+    )
+
+    assert handoff_cmd.lint_file(handoff).valid
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+
+    card = tmp_target / "memory" / "cards" / "promote-fenced-leading-comment.md"
+    content = card.read_text()
+    assert content.startswith("---\ntopic: promote-fenced-leading-comment\n")
+    assert "Card envelope" not in content
+
+
+def test_fenced_create_card_handoff_rejects_comment_before_frontmatter(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    handoff = _write_handoff(
+        inbox,
+        "2026-05-13-1003-inbox-fenced-content-comment.md",
+        """\
+        # Memory Handoff
+
+        ## Type
+        decision
+
+        ## Title
+        Reject fenced content without leading frontmatter
+
+        ## Summary
+        Keep lint and ingestion aligned on the first card content line.
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        inbox-fenced-content-comment.md
+
+        ## Suggested card content
+        ```markdown
+        <!-- This comment belongs to the card. -->
+        ---
+        topic: inbox-fenced-content-comment
+        ---
+
+        # Inbox fenced card
+        ```
+        """,
+    )
+
+    lint_result = handoff_cmd.lint_file(handoff)
+    assert not lint_result.valid
+    assert "Suggested card content must start with YAML frontmatter" in lint_result.errors
+
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    assert not (tmp_target / "memory" / "cards" / "inbox-fenced-content-comment.md").exists()
+    inboxed = list((tmp_target / "memory" / "handoff-inbox").glob(f"*-{handoff.name}"))
+    assert len(inboxed) == 1
 
 
 def test_default_run_does_not_mutate_without_flags(tmp_target: Path):
@@ -502,6 +690,20 @@ def test_decide_promotes_clean_card(tmp_path):
     body = "---\nname: x\n---\nA perfectly ordinary durable fact about the system."
     outcome = ingest_mod.decide(_card_sections(body), target=tmp_path, promote_cards=True, route_documents=True)
     assert outcome.kind == "promoted"
+
+
+def test_decide_inboxes_card_with_incomplete_markdown_fence(tmp_path):
+    body = "```markdown\n---\nname: x\n---\nBody line."
+    outcome = ingest_mod.decide(_card_sections(body), target=tmp_path, promote_cards=True, route_documents=True)
+    assert outcome.kind == "inboxed"
+    assert outcome.reason == "Suggested card content Markdown fence is missing a closing fence"
+
+
+def test_decide_inboxes_card_with_unsupported_fence_language(tmp_path):
+    body = "```yaml\n---\nname: x\n---\nBody line.\n```"
+    outcome = ingest_mod.decide(_card_sections(body), target=tmp_path, promote_cards=True, route_documents=True)
+    assert outcome.kind == "inboxed"
+    assert outcome.reason == "Suggested card content uses an unsupported Markdown fence language: yaml"
 
 
 def _doc_sections(content_body):

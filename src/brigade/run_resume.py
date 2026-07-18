@@ -12,10 +12,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import aboyeur, agents, codex_appserver
-from .roster import Agent, Roster
+from . import aboyeur, agents, codex_appserver, runguard
+from .roster import Agent, Roster, _as_env
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
+_NONTERMINAL_RUN_STATUSES = frozenset(
+    {"started", "planning", "dispatching", "synthesizing", "artifact-collection", "running"}
+)
 
 
 def _load_json(run_dir: Path, name: str) -> dict | None:
@@ -41,6 +44,8 @@ def _roster_from_snapshot(snapshot: dict) -> Roster:
             reasoning=raw.get("reasoning"),
             transport=raw.get("transport", "direct"),
             transport_version=raw.get("transport_version"),
+            env=_as_env(raw.get("env"), name),
+            invalid_final_fallback=raw.get("invalid_final_fallback"),
         )
     return Roster(
         orchestrator=snapshot["orchestrator"],
@@ -63,6 +68,32 @@ def _continuation_prompt(task: str) -> str:
 def resume(run_dir: Path) -> int:
     run_dir = run_dir.expanduser().resolve()
     run_meta = _load_json(run_dir, "run.json")
+    if run_meta is None:
+        print(
+            f"error: missing run artifacts in {run_dir} (need run.json, roster.json, worker-results.json)",
+            file=sys.stderr,
+        )
+        return 2
+    status = run_meta.get("status")
+    if not isinstance(status, str) or status in _NONTERMINAL_RUN_STATUSES:
+        print("error: run is not terminal; recover or wait for the active run before resuming", file=sys.stderr)
+        return 2
+    workspace = runguard.resolve_run_lock_workspace(run_meta, run_dir)
+    if workspace is None:
+        print("error: run artifact has no workspace cwd; cannot verify lock ownership", file=sys.stderr)
+        return 2
+    try:
+        runguard.recover_stale_run(workspace, run_dir, required=False)
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            return _resume_locked(run_dir)
+    except runguard.RunLockError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+def _resume_locked(run_dir: Path) -> int:
+    run_dir = run_dir.expanduser().resolve()
+    run_meta = _load_json(run_dir, "run.json")
     roster_snapshot = _load_json(run_dir, "roster.json")
     worker_data = _load_json(run_dir, "worker-results.json")
     if run_meta is None or roster_snapshot is None or worker_data is None:
@@ -71,8 +102,20 @@ def resume(run_dir: Path) -> int:
             file=sys.stderr,
         )
         return 2
-
-    roster = _roster_from_snapshot(roster_snapshot)
+    status = run_meta.get("status")
+    if not isinstance(status, str) or status in _NONTERMINAL_RUN_STATUSES:
+        print("error: run is not terminal; recover or wait for the active run before resuming", file=sys.stderr)
+        return 2
+    raw_cwd = run_meta.get("cwd")
+    if not isinstance(raw_cwd, str) or not raw_cwd:
+        print("error: run artifact has no workspace cwd; cannot verify lock ownership", file=sys.stderr)
+        return 2
+    cwd = Path(raw_cwd).expanduser().resolve()
+    try:
+        roster = _roster_from_snapshot(roster_snapshot)
+    except (KeyError, TypeError, ValueError) as exc:
+        print(f"error: invalid roster snapshot: {exc}", file=sys.stderr)
+        return 2
     results = list(worker_data.get("results") or [])
     resumable = [
         r
@@ -89,7 +132,6 @@ def resume(run_dir: Path) -> int:
         print("error: no resumable workers in this run", file=sys.stderr)
         return 2
 
-    cwd = Path(run_meta["cwd"]) if run_meta.get("cwd") else None
     read_only = bool(run_meta.get("read_only"))
     sandbox = roster_snapshot.get("sandbox")
 
@@ -168,8 +210,9 @@ def resume(run_dir: Path) -> int:
         timeout=orchestrator.timeout_seconds or roster.timeout_seconds,
         cwd=cwd,
         read_only=read_only,
-        **({"model": orchestrator.model} if orchestrator.model is not None else {}),
-        **({"reasoning": orchestrator.reasoning} if orchestrator.reasoning is not None else {}),
+        model=orchestrator.model,
+        reasoning=orchestrator.reasoning,
+        env=dict(orchestrator.env) if orchestrator.env is not None else None,
     )
     aboyeur._write_json(
         run_dir / "synthesis.json",
@@ -191,6 +234,14 @@ def resume(run_dir: Path) -> int:
     (run_dir / "final.txt").write_text(final.text + "\n")
     run_meta["status"] = "ok"
     run_meta.pop("error", None)
+    recovered_failure = run_meta.pop("failure", None)
+    run_meta.pop("failure_phase", None)
+    if isinstance(recovered_failure, dict):
+        history = run_meta.get("recovery_history")
+        if not isinstance(history, list):
+            history = []
+            run_meta["recovery_history"] = history
+        history.append(recovered_failure)
     aboyeur._write_json(run_dir / "run.json", run_meta)
     print(final.text)
     return 0

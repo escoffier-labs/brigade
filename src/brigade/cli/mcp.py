@@ -58,7 +58,24 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_sync.add_argument("--prune", action="store_true", help="Remove pristine orphans dropped from the catalog.")
     p_sync.add_argument("--adopt", action="store_true", help="Take ownership of same-named foreign servers.")
     p_sync.add_argument("--user-scope", action="store_true", help="Include user-scoped targets (e.g. antigravity).")
+    p_sync.add_argument(
+        "--verify", action="store_true", help="After --write, verify runtime health for selected servers."
+    )
+    p_sync.add_argument(
+        "--verify-timeout",
+        type=float,
+        default=None,
+        help="Per-server runtime verification timeout in seconds (with --write --verify).",
+    )
     p_sync.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    p_verify = mcp_sub.add_parser("verify", help="Probe MCP runtime health for selected servers.")
+    _target(p_verify)
+    p_verify.add_argument("--name", default=None, help="Verify a single server.")
+    p_verify.add_argument("--harness", default=None, help="Verify servers for a single target harness.")
+    p_verify.add_argument("--user-scope", action="store_true", help="Include user-scoped targets (e.g. antigravity).")
+    p_verify.add_argument("--timeout", type=float, default=None, help="Per-server verification timeout in seconds.")
+    p_verify.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     p_doctor = mcp_sub.add_parser("doctor", help="Validate the canonical catalog and report gaps.")
     _target(p_doctor)
@@ -119,6 +136,17 @@ def dispatch(args) -> int:
             prune=args.prune,
             adopt=args.adopt,
             user_scope=args.user_scope,
+            verify_runtime=args.verify,
+            verify_timeout=args.verify_timeout,
+            json_output=args.json,
+        )
+    if args.mcp_command == "verify":
+        return mcp_cmd.verify(
+            target=args.target,
+            name=args.name,
+            harness=args.harness,
+            user_scope=args.user_scope,
+            timeout=args.timeout,
             json_output=args.json,
         )
     if args.mcp_command == "doctor":

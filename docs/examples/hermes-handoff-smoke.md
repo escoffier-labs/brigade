@@ -4,7 +4,7 @@ This is a local-only smoke path for a repo where Hermes writes Brigade Memory Ha
 
 ```bash
 brigade init --target . --depth workspace --harnesses hermes
-brigade handoff sources init --target . --force
+brigade handoff sources init --target .
 brigade handoff draft --target . --inbox hermes \
   --title "Hermes smoke handoff" \
   --summary "Hermes can write a local Brigade Memory Handoff." \

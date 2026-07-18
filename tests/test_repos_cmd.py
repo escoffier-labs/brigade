@@ -501,3 +501,34 @@ def test_repo_summary_counts_cursor_inbox(tmp_path):
     entry = repos_cmd.RepoEntry(repo_id="r1", label="R1", path=tmp_path)
     summary = repos_cmd._repo_summary(entry)
     assert ".cursor/memory-handoffs" in summary["handoff_inboxes"]
+
+
+def test_repo_summary_reports_selected_grok_inbox_missing(tmp_path):
+    _write_brigade_config(tmp_path, harnesses=("grok",), owner="grok")
+    entry = repos_cmd.RepoEntry(repo_id="r1", label="R1", path=tmp_path)
+
+    summary = repos_cmd._repo_summary(entry)
+    checks = repos_cmd.fleet._repo_checks(summary)
+
+    assert summary["handoff_inboxes_expected"] == [".grok/memory-handoffs"]
+    assert summary["handoff_inboxes_missing"] == [".grok/memory-handoffs"]
+    assert summary["handoff_inboxes_unwatched"] == []
+    assert [check["name"] for check in checks].count("repo_handoff_inbox_missing") == 1
+    assert not any(check["name"] == "repo_missing_handoff_inbox" for check in checks)
+
+
+def test_repo_summary_reports_selected_grok_inbox_unwatched(tmp_path):
+    _write_brigade_config(tmp_path, harnesses=("grok",), owner="grok")
+    (tmp_path / ".grok" / "memory-handoffs").mkdir(parents=True)
+    (tmp_path / ".brigade" / "handoff-sources.json").write_text(
+        json.dumps({"sources": [{"root": ".", "inboxes": [".codex/memory-handoffs"]}]}) + "\n"
+    )
+    entry = repos_cmd.RepoEntry(repo_id="r1", label="R1", path=tmp_path)
+
+    summary = repos_cmd._repo_summary(entry)
+    checks = repos_cmd.fleet._repo_checks(summary)
+
+    assert summary["handoff_inboxes_expected"] == [".grok/memory-handoffs"]
+    assert summary["handoff_inboxes_missing"] == []
+    assert summary["handoff_inboxes_unwatched"] == [".grok/memory-handoffs"]
+    assert [check["name"] for check in checks].count("repo_handoff_inbox_unwatched") == 1

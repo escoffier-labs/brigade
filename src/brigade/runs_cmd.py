@@ -8,7 +8,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-_NONTERMINAL_STATUSES = frozenset({"started", "planning", "dispatching", "synthesizing", "running"})
+_NONTERMINAL_STATUSES = frozenset(
+    {"started", "planning", "dispatching", "synthesizing", "artifact-collection", "running"}
+)
 _SUCCESS_STATUSES = frozenset({"ok", "dry-run"})
 
 
@@ -193,6 +195,23 @@ def _is_terminal(meta: dict[str, Any]) -> bool:
     return isinstance(status, str) and status not in _NONTERMINAL_STATUSES
 
 
+def _failure_fields(meta: dict[str, Any]) -> tuple[object, object, object]:
+    failure = meta.get("failure")
+    failure_payload = failure if isinstance(failure, dict) else {}
+    return (
+        meta.get("failure_phase") or failure_payload.get("phase"),
+        failure_payload.get("kind"),
+        failure_payload.get("detail"),
+    )
+
+
+def _print_failure(meta: dict[str, Any]) -> None:
+    phase, kind, detail = _failure_fields(meta)
+    _line("failure phase", phase)
+    _line("failure kind", kind)
+    _line("failure detail", detail)
+
+
 def _watch_return_code(status: object) -> int:
     if status in _SUCCESS_STATUSES:
         return 0
@@ -205,6 +224,7 @@ def _emit_json(payload: dict[str, object]) -> None:
 
 def _emit_run(meta: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
+        phase, kind, detail = _failure_fields(meta)
         payload = {
             "type": "run",
             "status": meta.get("status"),
@@ -212,11 +232,15 @@ def _emit_run(meta: dict[str, Any], *, json_output: bool) -> None:
             "started_at": meta.get("started_at"),
             "finished_at": meta.get("finished_at"),
             "duration_seconds": meta.get("duration_seconds"),
+            "failure_phase": phase,
+            "failure_kind": kind,
+            "failure_detail": detail,
         }
         _emit_json({key: value for key, value in payload.items() if value is not None})
         return
     _line("status", meta.get("status"))
     _line("task", meta.get("task"))
+    _print_failure(meta)
 
 
 def _emit_plan(plan_payload: dict[str, Any], *, json_output: bool) -> None:
@@ -294,9 +318,17 @@ def _emit_summary(run_dir: Path, meta: dict[str, Any], *, json_output: bool) -> 
         payload: dict[str, object] = {"type": "summary", "run": str(run_dir), "status": status}
         if isinstance(duration, (int, float)):
             payload["duration_seconds"] = duration
+        phase, _, _ = _failure_fields(meta)
+        if phase == "stale-lock-recovery":
+            recovery_status = _lock_recovery_status(run_dir, meta)
+            payload["failure_phase"] = phase
+            payload["inspect_command"] = f"brigade runs show {run_dir}"
+            payload["recover_status"] = recovery_status
+            payload["resume_available"] = _resume_available(run_dir)
         _emit_json(payload)
         return
     print(f"summary: {status} in {_duration_text(duration)}")
+    _print_terminal_guidance(run_dir, meta)
 
 
 def _tail_events(run_dir: Path, offsets: dict[Path, int], *, json_output: bool) -> None:
@@ -464,6 +496,138 @@ def show_latest(*, cwd: Path, runs_dir: Path | None = None) -> int:
     return show(runs[0][0])
 
 
+def _resume_available(run_dir: Path) -> bool:
+    try:
+        worker_results = _read_json(run_dir / "worker-results.json")
+    except ValueError:
+        return False
+    results = worker_results.get("results") if worker_results else None
+    if not isinstance(results, list):
+        return False
+    return any(
+        isinstance(result, dict)
+        and isinstance(result.get("thread_id"), str)
+        and bool(result["thread_id"])
+        and not result.get("ok")
+        and result.get("status") in {"interrupted", "failed"}
+        for result in results
+    )
+
+
+def _print_recovery_guidance(run_dir: Path) -> None:
+    if _resume_available(run_dir):
+        print(f"resume: brigade runs resume {run_dir}")
+    else:
+        print("resume: unavailable (no resumable app-server worker thread)")
+
+
+def _lock_workspace(run_dir: Path, run_meta: dict[str, Any], *, fallback: Path | None = None) -> Path | None:
+    from . import runguard
+
+    return runguard.resolve_run_lock_workspace(run_meta, run_dir, fallback=fallback)
+
+
+def _lock_recovery_status(run_dir: Path, run_meta: dict[str, Any]) -> str:
+    workspace = _lock_workspace(run_dir, run_meta)
+    if workspace is None:
+        return "unknown"
+    from . import runguard
+
+    return runguard.run_recovery_status(workspace, run_dir)
+
+
+def _print_terminal_guidance(run_dir: Path, run_meta: dict[str, Any]) -> None:
+    phase, _, _ = _failure_fields(run_meta)
+    if phase != "stale-lock-recovery":
+        return
+    print(f"inspect: brigade runs show {run_dir}")
+    recovery_status = _lock_recovery_status(run_dir, run_meta)
+    if recovery_status == "cleared":
+        print("recover: completed (stale lock cleared)")
+    elif recovery_status == "required":
+        print("recover: required (stale lock remains)")
+    else:
+        print("recover: unknown (workspace or lock metadata unavailable)")
+    _print_recovery_guidance(run_dir)
+
+
+def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
+    from . import runguard
+
+    run_dir, error = _resolve_run_dir(run, cwd=cwd, runs_dir=runs_dir)
+    if error is not None:
+        print(error, file=sys.stderr)
+        return 2
+    assert run_dir is not None
+    recovered_unreadable_artifact = False
+    read_error: str | None = None
+    try:
+        run_meta = _read_json(run_dir / "run.json")
+    except ValueError as exc:
+        run_meta = None
+        read_error = str(exc)
+    else:
+        read_error = f"run.json not found in {run_dir}" if run_meta is None else None
+    if run_meta is None:
+        workspace = _lock_workspace(run_dir, {}, fallback=cwd)
+        assert workspace is not None
+        try:
+            runguard.recover_stale_run(workspace, run_dir)
+        except runguard.RunLockError as exc:
+            detail = read_error if str(exc).startswith("run lock not found for run:") else str(exc)
+            print(f"error: {detail}", file=sys.stderr)
+            return 2
+        try:
+            run_meta = _read_json(run_dir / "run.json")
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if run_meta is None:
+            print(f"error: run.json not found in {run_dir} after recovery", file=sys.stderr)
+            return 2
+        recovered_unreadable_artifact = True
+    if recovered_unreadable_artifact:
+        print(f"recovered: {run_dir}")
+        _print_recovery_guidance(run_dir)
+        return 0
+    if _is_terminal(run_meta):
+        phase, _, _ = _failure_fields(run_meta)
+        if phase == "stale-lock-recovery":
+            workspace = _lock_workspace(run_dir, run_meta, fallback=cwd)
+            if workspace is None:
+                print(f"error: recovered run artifact has no workspace cwd: {run_dir}", file=sys.stderr)
+                return 2
+            try:
+                runguard.recover_stale_run(workspace, run_dir, required=False)
+            except runguard.RunLockError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+        print(f"already terminal: {run_dir} [{run_meta.get('status', 'unknown')}]")
+        _print_recovery_guidance(run_dir)
+        return 0
+    workspace = _lock_workspace(run_dir, run_meta, fallback=cwd)
+    if workspace is None:
+        print(f"error: run artifact has no workspace cwd: {run_dir}", file=sys.stderr)
+        return 2
+    try:
+        runguard.recover_stale_run(workspace, run_dir)
+    except runguard.RunLockError as exc:
+        if str(exc).startswith("run lock not found for run:"):
+            try:
+                concurrent_meta = _read_json(run_dir / "run.json")
+            except ValueError:
+                concurrent_meta = None
+            if concurrent_meta is not None and _is_terminal(concurrent_meta):
+                print(f"already terminal: {run_dir} [{concurrent_meta.get('status', 'unknown')}]")
+                _print_recovery_guidance(run_dir)
+                return 0
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"recovered: {run_dir}")
+    _print_recovery_guidance(run_dir)
+    return 0
+
+
 def watch(
     run: str | Path,
     *,
@@ -498,6 +662,27 @@ def watch(
         if rc is not None:
             return rc
         assert run_meta is not None
+        if run_meta.get("status") == "artifact-collection":
+            workspace = _lock_workspace(run_dir, run_meta, fallback=cwd)
+            if workspace is not None:
+                from . import runguard
+
+                try:
+                    if runguard.recover_stale_run(workspace, run_dir, required=False):
+                        continue
+                    refreshed = _read_json(run_dir / "run.json")
+                    if refreshed is not None and _is_terminal(refreshed):
+                        continue
+                    print(
+                        "error: artifact-collection run has no matching recoverable lock",
+                        file=sys.stderr,
+                    )
+                    return 2
+                except runguard.RunLockError as exc:
+                    detail = str(exc)
+                    if "owner process is still active" not in detail and "recovery is still active" not in detail:
+                        print(f"error: artifact-collection recovery failed: {detail}", file=sys.stderr)
+                        return 2
         if _is_terminal(run_meta):
             if not summary_emitted:
                 _emit_summary(run_dir, run_meta, json_output=json_output)
@@ -541,6 +726,7 @@ def show(run_dir: Path) -> int:
     _line("artifacts", run_meta.get("artifacts"))
     _line("handoff", run_meta.get("handoff"))
     _line("error", run_meta.get("error"))
+    _print_failure(run_meta)
     if run_meta.get("suspected_noop") is True:
         print("warning: suspected no-op run; ok workers produced no non-.brigade file changes.")
 
@@ -550,4 +736,7 @@ def show(run_dir: Path) -> int:
     _print_ground_truth(worker_results)
     _print_synthesis(synthesis)
     _print_final(_read_text(run_dir / "final.txt"))
+    _print_terminal_guidance(run_dir, run_meta)
+    if _is_terminal(run_meta):
+        return _watch_return_code(run_meta.get("status"))
     return 0

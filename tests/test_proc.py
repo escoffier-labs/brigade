@@ -9,6 +9,17 @@ def test_run_captures_exit_and_output():
     assert r.stdout.strip() == "hi"
 
 
+def test_run_passes_explicit_stdin_bytes_without_a_shell():
+    payload = b'{"body":"hello"}\n'
+    result = proc.run(
+        ["python3", "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"],
+        stdin=payload,
+    )
+
+    assert result.code == 0
+    assert result.stdout == payload.decode()
+
+
 def test_run_json_parses_stdout():
     r = proc.run(["python3", "-c", "print('{\"a\": 1}')"])
     assert r.json() == {"a": 1}

@@ -93,6 +93,23 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
     )
+    p_runs_recover = runs_sub.add_parser(
+        "recover",
+        help="Recover a nonterminal run whose recorded owner process has exited.",
+    )
+    p_runs_recover.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_runs_recover.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_runs_recover.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
     p_runs_resume = runs_sub.add_parser(
         "resume", help="Re-attach interrupted app-server workers from a run and re-synthesize."
     )
@@ -129,6 +146,8 @@ def dispatch(args) -> int:
         if args.worker is not None:
             payload["worker"] = args.worker
         return _control_request(args.run, cwd=args.cwd, runs_dir=args.runs_dir, payload=payload)
+    if args.runs_command == "recover":
+        return runs_cmd.recover(args.run, cwd=args.cwd, runs_dir=args.runs_dir)
     if args.runs_command == "resume":
         from .. import run_resume
 
@@ -149,7 +168,7 @@ def _control_request(run: str, *, cwd: Path, runs_dir: Path | None, payload: Map
     assert run_dir is not None
     try:
         socket_path = run_control.control_socket_from_run(run_dir)
-        response = run_control.send_request(socket_path, dict(payload))
+        response = run_control.send_request_with_retry(run_dir, socket_path, dict(payload))
     except run_control.ControlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

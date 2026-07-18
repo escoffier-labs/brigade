@@ -6,14 +6,50 @@ does not store provider keys or import provider SDKs.
 
 from __future__ import annotations
 
+import json
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List
 
 from . import proc
+from .result_integrity import validate_final_output
 
 _OLLAMA_PREFIX = "ollama:"
 _CODEX_CLOUD_PREFIX = "codex-cloud:"
+_NONRECOVERABLE_GROK_OUTPUT_FAILURES = frozenset(
+    {
+        "provider-error",
+        "authentication-error",
+        "rate-limit-error",
+        "provider-setting-error",
+        "network-error",
+        "permission-error",
+    }
+)
+_GROK_RESULT_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["answer"]},
+            "answer": {"type": "string", "minLength": 1},
+        },
+        "required": ["kind", "answer"],
+        "additionalProperties": False,
+    },
+    separators=(",", ":"),
+)
+
+
+@dataclass(frozen=True)
+class _GrokFinal:
+    text: str
+    error: str
+    diagnostic: str = ""
+    session_id: str | None = None
+    request_id: str | None = None
+    stop_reason: str | None = None
 
 
 def _claude_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
@@ -108,8 +144,8 @@ def _openhands_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path
 
 
 def _grok_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
-    # Headless `grok -p` stops silently (exit 0) at the first tool-approval
-    # gate, so a write task without an approval flag no-ops after its preamble.
+    # run_agent replaces plan mode with the native read-only filesystem sandbox
+    # before dispatch. Keep this base shape stable for argv construction callers.
     if read_only or sandbox == "read-only":
         return ["grok", "-p", prompt, "--permission-mode", "plan"]
     return ["grok", "-p", prompt, "--always-approve"]
@@ -206,6 +242,72 @@ def direct_cursor_read_only_limitation(model: str | None) -> str | None:
     return None
 
 
+def _parse_grok_final_output(stdout: str) -> _GrokFinal:
+    """Extract a schema-constrained final answer from Grok's JSON envelope."""
+    base_error = "grok exited 0 without a structured final response"
+    raw = stdout.strip()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return _GrokFinal(text=raw, error=base_error)
+    if not isinstance(payload, dict):
+        return _GrokFinal(text=raw, error=base_error)
+
+    diagnostic_parts: list[str] = []
+    stop_reason = payload.get("stopReason")
+    if isinstance(stop_reason, str) and stop_reason:
+        diagnostic_parts.append(f"stopReason={stop_reason}")
+    structured_output_error = payload.get("structuredOutputError")
+    structured_error_present = "structuredOutputError" in payload and structured_output_error is not None
+    if structured_error_present:
+        if isinstance(structured_output_error, str) and structured_output_error:
+            diagnostic_parts.append(structured_output_error)
+        else:
+            diagnostic_parts.append("structuredOutputError was present")
+
+    display_text = payload.get("text")
+    fallback = display_text.strip() if isinstance(display_text, str) else raw
+    if isinstance(display_text, str):
+        try:
+            nested = json.loads(display_text)
+        except json.JSONDecodeError:
+            nested = None
+        if isinstance(nested, dict) and isinstance(nested.get("answer"), str):
+            fallback = nested["answer"].strip()
+
+    structured = payload.get("structuredOutput")
+    answer = structured.get("answer") if isinstance(structured, dict) else None
+    exact_shape = (
+        isinstance(structured, dict)
+        and set(structured) == {"kind", "answer"}
+        and structured.get("kind") == "answer"
+        and isinstance(answer, str)
+        and bool(answer.strip())
+    )
+    if not exact_shape and not structured_error_present:
+        diagnostic_parts.append("structured output did not match expected schema")
+    successful_stop = stop_reason == "EndTurn"
+    no_structured_error = not structured_error_present
+    if not successful_stop or not no_structured_error or not exact_shape:
+        detail = f"{base_error} ({'; '.join(diagnostic_parts)})" if diagnostic_parts else base_error
+        return _GrokFinal(
+            text=fallback,
+            error=detail,
+            diagnostic=(structured_output_error if isinstance(structured_output_error, str) else ""),
+            session_id=payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None,
+            request_id=payload.get("requestId") if isinstance(payload.get("requestId"), str) else None,
+            stop_reason=stop_reason if isinstance(stop_reason, str) else None,
+        )
+    assert isinstance(answer, str)
+    return _GrokFinal(
+        text=answer.strip(),
+        error="",
+        session_id=payload.get("sessionId") if isinstance(payload.get("sessionId"), str) else None,
+        request_id=payload.get("requestId") if isinstance(payload.get("requestId"), str) else None,
+        stop_reason=stop_reason if isinstance(stop_reason, str) else None,
+    )
+
+
 @dataclass(frozen=True)
 class AgentResult:
     text: str
@@ -231,6 +333,8 @@ class AgentResult:
     request_id: str | None = None
     acpx_version: str | None = None
     safe_events: tuple[dict[str, object], ...] = ()
+    failure_phase: str | None = None
+    failure_kind: str | None = None
 
 
 def is_known(cli_ref: str) -> bool:
@@ -325,7 +429,16 @@ def build_argv(
     model: str | None = None,
     reasoning: str | None = None,
     cwd: Path | None = None,
+    resume_session_id: str | None = None,
 ) -> List[str]:
+    if resume_session_id is not None:
+        if cli_ref != "grok":
+            raise ValueError("exact-session continuation supports grok only")
+        if not (read_only or sandbox == "read-only"):
+            raise ValueError("grok exact-session continuation requires read-only dispatch")
+        if not resume_session_id.strip():
+            raise ValueError("grok exact-session continuation requires a session id")
+
     if cli_ref.startswith(_OLLAMA_PREFIX):
         ollama_model = cli_ref[len(_OLLAMA_PREFIX) :]
         if not ollama_model:
@@ -347,6 +460,8 @@ def build_argv(
             "codex-cloud:<env-id>)"
         )
     argv = builder(prompt, read_only, sandbox, cwd)
+    if resume_session_id is not None:
+        argv = [argv[0], "--resume", resume_session_id, *argv[1:]]
     if model is not None:
         argv = _with_model(cli_ref, argv, model)
     if reasoning is not None:
@@ -358,6 +473,67 @@ def detect(cli_ref: str) -> bool:
     return proc.which(command_for(cli_ref)) is not None
 
 
+def ollama_model_present(model: str) -> tuple[bool, str]:
+    """Check whether an ollama model is already pulled locally.
+
+    `ollama run` on a missing model silently auto-pulls it (tens of GB for
+    large models), so callers must refuse to dispatch instead of letting the
+    pull start. Returns (present, detail); detail explains a False result.
+    """
+    listing = proc.run(["ollama", "list"], timeout=15.0)
+    if listing.code != 0:
+        reason = listing.stderr.strip() or f"exit {listing.code}"
+        return False, f"could not list local ollama models ({reason[:120]}); is the ollama server running?"
+    names = {line.split()[0] for line in listing.stdout.splitlines()[1:] if line.strip()}
+    wanted = {model} if ":" in model else {model, f"{model}:latest"}
+    if names & wanted:
+        return True, ""
+    return False, (
+        f"ollama model {model!r} is not pulled locally; brigade never auto-pulls. "
+        f"Run `ollama pull {model}` yourself or point the seat at an installed model"
+    )
+
+
+def resolve_env_overrides(env: dict[str, str]) -> tuple[dict[str, str] | None, str]:
+    """Resolve a seat env table into concrete child overrides.
+
+    Keys ending in _REF name a parent environment variable holding the value;
+    the override is injected under the key minus the suffix so secrets never
+    live in the roster. Returns (overrides, error): error is non-empty when a
+    referenced variable is not set, and never contains a secret value.
+    """
+
+    resolved: dict[str, str] = {}
+    for key, value in env.items():
+        if key.endswith("_REF"):
+            target = key[: -len("_REF")]
+            if not target:
+                return None, f"env override {key}: resolved variable name is empty"
+            referenced = os.environ.get(value)
+            if not referenced:
+                return None, f"env override {key}: referenced variable {value} is not set or is empty"
+            resolved[target] = referenced
+        else:
+            resolved[key] = value
+    return resolved, ""
+
+
+def _scrub_env_override_values(text: str, overrides: dict[str, str] | None) -> str:
+    """Replace exact resolved override values with stable target-name labels."""
+
+    if not text or not overrides:
+        return text
+    replacements: dict[str, str] = {}
+    for target, value in sorted(overrides.items()):
+        if value:
+            replacements.setdefault(value, f"[{target}]")
+    if not replacements:
+        return text
+    values = sorted(replacements, key=lambda value: (-len(value), value))
+    pattern = re.compile("|".join(re.escape(value) for value in values))
+    return pattern.sub(lambda match: replacements[match.group(0)], text)
+
+
 def run_agent(
     cli_ref: str,
     prompt: str,
@@ -367,9 +543,22 @@ def run_agent(
     sandbox: str | None = None,
     model: str | None = None,
     reasoning: str | None = None,
+    env: dict[str, str] | None = None,
+    resume_session_id: str | None = None,
 ) -> AgentResult:
     if not detect(cli_ref):
         return AgentResult(text="", ok=False, detail=f"{command_for(cli_ref)} not installed")
+
+    if resume_session_id is not None and (cli_ref != "grok" or not (read_only or sandbox == "read-only")):
+        return AgentResult(
+            text="",
+            ok=False,
+            detail="exact-session continuation requires a read-only grok worker",
+            failure_phase="dispatch",
+            failure_kind="invalid-session-continuation",
+            requested_model=model,
+            reasoning=reasoning,
+        )
 
     if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
         env_id = cli_ref[len(_CODEX_CLOUD_PREFIX) :]
@@ -389,6 +578,30 @@ def run_agent(
 
         return codex_cloud.run_cloud_task(prompt, env_id=env_id, timeout=timeout, cwd=cwd)
 
+    if cli_ref.startswith(_OLLAMA_PREFIX):
+        ollama_model = cli_ref[len(_OLLAMA_PREFIX) :]
+        if ollama_model:
+            present, missing_detail = ollama_model_present(ollama_model)
+            if not present:
+                return AgentResult(text="", ok=False, detail=missing_detail)
+
+    child_env: dict[str, str] | None = None
+    resolved_overrides: dict[str, str] | None = None
+    if env is not None:
+        overrides, env_error = resolve_env_overrides(env)
+        if overrides is None:
+            return AgentResult(
+                text="",
+                ok=False,
+                detail=env_error,
+                failure_phase="dispatch",
+                failure_kind="env-ref-missing",
+                requested_model=model,
+            )
+        resolved_overrides = overrides
+        child_env = dict(os.environ)
+        child_env.update(overrides)
+
     cursor_limitation = None
     if cli_ref == "cursor" and (read_only or sandbox == "read-only"):
         cursor_limitation = direct_cursor_read_only_limitation(model)
@@ -400,32 +613,105 @@ def run_agent(
                 requested_model=model,
             )
 
+    argv = build_argv(
+        cli_ref,
+        prompt,
+        read_only=read_only,
+        sandbox=sandbox,
+        model=model,
+        reasoning=reasoning,
+        cwd=cwd,
+        resume_session_id=resume_session_id,
+    )
+    structured_grok = cli_ref == "grok" and (read_only or sandbox == "read-only")
+    if structured_grok:
+        if argv[-2:] != ["--permission-mode", "plan"]:
+            return AgentResult(
+                text="",
+                ok=False,
+                detail="internal error: grok read-only argv missing --permission-mode plan",
+                requested_model=model,
+                reasoning=reasoning,
+            )
+        argv[-2:] = ["--sandbox", "read-only", "--always-approve"]
+        argv.extend(["--json-schema", _GROK_RESULT_SCHEMA])
     result = proc.run(
-        build_argv(
-            cli_ref,
-            prompt,
-            read_only=read_only,
-            sandbox=sandbox,
-            model=model,
-            reasoning=reasoning,
-            cwd=cwd,
-        ),
+        argv,
         timeout=timeout,
         cwd=cwd,
+        env=child_env,
     )
     text = result.stdout.strip()
+    structured_error = ""
+    structured_diagnostic = ""
+    grok_session_id = None
+    grok_request_id = None
+    grok_stop_reason = None
+    if structured_grok:
+        grok_final = _parse_grok_final_output(result.stdout)
+        text = grok_final.text
+        structured_error = grok_final.error
+        structured_diagnostic = grok_final.diagnostic
+        grok_session_id = grok_final.session_id
+        grok_request_id = grok_final.request_id
+        grok_stop_reason = grok_final.stop_reason
+    safe_text = _scrub_env_override_values(text, resolved_overrides)
+    safe_stdout = _scrub_env_override_values(result.stdout, resolved_overrides)
+    safe_stderr = _scrub_env_override_values(result.stderr, resolved_overrides)
+    safe_structured_error = _scrub_env_override_values(structured_error, resolved_overrides)[:200]
+
+    def scrub_detail(detail: str) -> str:
+        return _scrub_env_override_values(detail, resolved_overrides)
+
     if result.code != 0:
-        detail = result.stderr.strip() or f"exit {result.code}"
+        detail = safe_stderr.strip() or f"exit {result.code}"
         return AgentResult(
-            text=text,
+            text=safe_text,
             ok=False,
             detail=detail[:200],
-            stdout=result.stdout,
-            stderr=result.stderr,
+            stdout=safe_stdout,
+            stderr=safe_stderr,
             exit_code=result.code,
             timed_out=result.code == 124,
             requested_model=model,
             reasoning=reasoning,
+            stop_reason=grok_stop_reason,
+            session_id=grok_session_id,
+            request_id=grok_request_id,
+        )
+    if structured_error:
+        for diagnostic in (text, structured_diagnostic, result.stderr):
+            output_failure = validate_final_output(diagnostic, detail_transform=scrub_detail)
+            if output_failure is not None and output_failure.kind in _NONRECOVERABLE_GROK_OUTPUT_FAILURES:
+                return AgentResult(
+                    text=safe_text,
+                    ok=False,
+                    detail=output_failure.detail,
+                    failure_phase="output-validation",
+                    failure_kind=output_failure.kind,
+                    stdout=safe_stdout,
+                    stderr=safe_stderr,
+                    exit_code=result.code,
+                    requested_model=model,
+                    reasoning=reasoning,
+                    stop_reason=grok_stop_reason,
+                    session_id=grok_session_id,
+                    request_id=grok_request_id,
+                )
+        return AgentResult(
+            text=safe_text,
+            ok=False,
+            detail=safe_structured_error,
+            failure_phase="output-validation",
+            failure_kind="malformed-final-output",
+            stdout=safe_stdout,
+            stderr=safe_stderr,
+            exit_code=result.code,
+            requested_model=model,
+            reasoning=reasoning,
+            stop_reason=grok_stop_reason,
+            session_id=grok_session_id,
+            request_id=grok_request_id,
         )
     if not text:
         detail = "empty output"
@@ -437,20 +723,43 @@ def run_agent(
             text="",
             ok=False,
             detail=detail,
-            stdout=result.stdout,
-            stderr=result.stderr,
+            stdout=safe_stdout,
+            stderr=safe_stderr,
             exit_code=result.code,
             requested_model=model,
             reasoning=reasoning,
+            stop_reason=grok_stop_reason,
+            session_id=grok_session_id,
+            request_id=grok_request_id,
+        )
+    output_failure = validate_final_output(text, detail_transform=scrub_detail)
+    if output_failure is not None:
+        return AgentResult(
+            text=safe_text,
+            ok=False,
+            detail=output_failure.detail,
+            failure_phase="output-validation",
+            failure_kind=output_failure.kind,
+            stdout=safe_stdout,
+            stderr=safe_stderr,
+            exit_code=result.code,
+            requested_model=model,
+            reasoning=reasoning,
+            stop_reason=grok_stop_reason,
+            session_id=grok_session_id,
+            request_id=grok_request_id,
         )
     return AgentResult(
-        text=text,
+        text=safe_text,
         ok=True,
-        stdout=result.stdout,
-        stderr=result.stderr,
+        stdout=safe_stdout,
+        stderr=safe_stderr,
         exit_code=result.code,
         requested_model=model,
         reasoning=reasoning,
+        stop_reason=grok_stop_reason,
+        session_id=grok_session_id,
+        request_id=grok_request_id,
     )
 
 
@@ -506,6 +815,20 @@ def run_codex_appserver(
             text="",
             ok=False,
             detail="empty output",
+            thread_id=turn.thread_id,
+            status=turn.status,
+            transport="codex-app-server",
+            requested_model=model,
+            reasoning=reasoning,
+        )
+    output_failure = validate_final_output(text)
+    if output_failure is not None:
+        return AgentResult(
+            text=text,
+            ok=False,
+            detail=output_failure.detail,
+            failure_phase="output-validation",
+            failure_kind=output_failure.kind,
             thread_id=turn.thread_id,
             status=turn.status,
             transport="codex-app-server",

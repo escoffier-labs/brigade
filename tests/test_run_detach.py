@@ -2,7 +2,8 @@ import argparse
 import json
 from pathlib import Path
 
-from brigade import cli
+from brigade import aboyeur, cli
+from brigade import roster as roster_mod
 from brigade.cli import run as run_cli
 
 
@@ -96,6 +97,50 @@ def test_run_detach_reports_early_child_exit(tmp_path, monkeypatch, capsys):
     assert (run_dir / "detached.log").read_text() == "boom\n"
 
 
+def test_run_detach_child_records_artifact_identity_in_lock(tmp_path, monkeypatch):
+    _write_roster(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    _write_roster(home)
+    workspace_roster = tmp_path / ".brigade" / "roster.toml"
+    user_roster = home / ".brigade" / "roster.toml"
+    seen = {}
+
+    def fake_run(*args, output_dir=None, **kwargs):
+        resolution = args[1].resolution
+        seen["roster_path"] = str(resolution.path)
+        seen["roster_source"] = resolution.source
+        seen["roster_shadowed"] = [str(path) for path in resolution.shadowed]
+        owner_path = tmp_path / ".brigade" / "run.lock" / "owner.json"
+        seen.update(json.loads(owner_path.read_text()))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "run.json").write_text(json.dumps({"status": "ok"}) + "\n")
+        return 0
+
+    class FakeProcess:
+        pid = 4321
+
+        def __init__(self, argv, **kwargs):
+            assert cli.main(argv[3:]) == 0
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(run_cli, "Popen", FakeProcess)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    assert cli.main(["run", "do work", "--cwd", str(tmp_path), "--detach"]) == 0
+
+    run_dir = next((tmp_path / ".brigade" / "runs").iterdir())
+    assert seen["run_dir"] == str(run_dir.resolve())
+    assert isinstance(seen["owner_token"], str) and seen["owner_token"]
+    assert seen["roster_path"] == str(workspace_roster.resolve())
+    assert seen["roster_source"] == "workspace"
+    assert seen["roster_shadowed"] == [str(user_roster.resolve())]
+    assert not (tmp_path / ".brigade" / "run.lock").exists()
+
+
 def test_run_detach_child_argv_preserves_worker(tmp_path):
     args = argparse.Namespace(
         task="do work",
@@ -113,16 +158,22 @@ def test_run_detach_child_argv_preserves_worker(tmp_path):
         worker="coder",
         wait=2.5,
     )
-    roster_path = tmp_path / "roster.toml"
+    roster_resolution = roster_mod.RosterResolution(
+        path=(tmp_path / "roster.toml").resolve(),
+        source="workspace",
+        shadowed=((tmp_path / "user-roster.toml").resolve(),),
+    )
     output_dir = tmp_path / "run"
 
     argv = run_cli._detached_child_argv(
         args,
         run_cwd=tmp_path,
-        roster_path=roster_path,
+        roster_resolution=roster_resolution,
         output_dir=output_dir,
     )
 
     assert "--worker" in argv
     assert argv[argv.index("--worker") + 1] == "coder"
     assert argv[argv.index("--wait") + 1] == "2.5"
+    assert argv[argv.index("--resolved-roster-source") + 1] == "workspace"
+    assert argv[argv.index("--resolved-roster-shadowed") + 1] == str(roster_resolution.shadowed[0])

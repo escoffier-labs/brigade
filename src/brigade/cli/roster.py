@@ -16,8 +16,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_roster_init.add_argument("--force", action="store_true", help="Overwrite an existing roster.")
     p_roster_init.add_argument(
         "--ollama-model",
-        default="llama3.3",
-        help="Default local researcher model for the starter roster.",
+        default=None,
+        help="Local researcher model for the starter roster (default: a small model; "
+        "brigade never auto-pulls, so pick one you have already pulled).",
     )
     p_roster_init.add_argument("--max-workers", type=int, default=4)
     p_roster_init.add_argument(
@@ -44,7 +45,7 @@ def dispatch(args) -> int:
         return roster_cmd.init(
             target=args.target,
             force=args.force,
-            ollama_model=args.ollama_model,
+            ollama_model=args.ollama_model if args.ollama_model is not None else roster_cmd.DEFAULT_OLLAMA_MODEL,
             max_workers=args.max_workers,
             review_model=args.review_model,
         )

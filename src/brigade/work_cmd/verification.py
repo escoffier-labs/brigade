@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from .. import graphtrail_delta, localio, receipt_signing
+from .. import config, graphtrail_delta, localio, receipt_signing
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -41,7 +41,7 @@ def _receipt_git_snapshot(target: Path) -> dict[str, Any] | None:
     return {"head": head, "branch": branch, "dirty_files": len(status.stdout.splitlines())}
 
 
-def _verify_parse_command(command: str) -> tuple[list[str] | None, dict[str, str], str | None]:
+def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None, dict[str, str], str | None]:
     try:
         parts = shlex.split(command)
     except ValueError as exc:
@@ -68,14 +68,17 @@ def _verify_parse_command(command: str) -> tuple[list[str] | None, dict[str, str
             ),
         )
     if "/" in argv[0]:
-        if not Path(argv[0]).expanduser().exists():
+        executable_path = Path(argv[0]).expanduser()
+        if not executable_path.is_absolute():
+            executable_path = target / executable_path
+        if not executable_path.exists():
             return None, env, f"verification command is not resolvable: {argv[0]}"
     elif shutil.which(argv[0]) is None:
         return None, env, f"verification command is not resolvable: {argv[0]}"
     return argv, env, None
 
 
-def _verify_parse_argv(argv: list[str]) -> tuple[list[str] | None, dict[str, str], str | None]:
+def _verify_parse_argv(argv: list[str], target: Path) -> tuple[list[str] | None, dict[str, str], str | None]:
     """Resolve a pre-parsed verification argv (e.g. from --argv-json).
 
     The argv arrived pre-split (no shlex/shell parsing happens on it), so the
@@ -88,11 +91,24 @@ def _verify_parse_argv(argv: list[str]) -> tuple[list[str] | None, dict[str, str
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
         return None, {}, f"high-risk verification command: {executable}"
     if "/" in argv[0]:
-        if not Path(argv[0]).expanduser().exists():
+        executable_path = Path(argv[0]).expanduser()
+        if not executable_path.is_absolute():
+            executable_path = target / executable_path
+        if not executable_path.exists():
             return None, {}, f"verification command is not resolvable: {argv[0]}"
     elif shutil.which(argv[0]) is None:
         return None, {}, f"verification command is not resolvable: {argv[0]}"
     return list(argv), {}, None
+
+
+def _verify_execution_argv(argv: list[str], target: Path) -> list[str]:
+    execution_argv = list(argv)
+    if "/" in execution_argv[0]:
+        executable_path = Path(execution_argv[0]).expanduser()
+        if not executable_path.is_absolute():
+            executable_path = target / executable_path
+        execution_argv[0] = str(executable_path)
+    return execution_argv
 
 
 VERIFY_RUNS_KEEP = 50
@@ -230,7 +246,7 @@ def _verify_plan_payload(target: Path, commands: list[str] | None = None) -> dic
     if not planned_commands:
         blockers.append("no verification commands found; pass --command")
     for command in planned_commands:
-        _, _, error = _verify_parse_command(command)
+        _, _, error = _verify_parse_command(command, target)
         if error:
             blockers.append(f"{command}: {error}")
     return {
@@ -276,12 +292,18 @@ def _write_verify_markdown(run_dir: Path, receipt: dict[str, Any]) -> None:
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
 
-def _run_verify_commands(target: Path, commands: list[str | list[str]], timeout: int) -> tuple[dict[str, Any], int]:
+def _run_verify_commands(
+    target: Path,
+    commands: list[str | list[str]],
+    timeout: int,
+    *,
+    graphtrail_timeout: float,
+) -> tuple[dict[str, Any], int]:
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
     run_dir = helpers._verify_runs_root(target) / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
-    graph_delta_before = graphtrail_delta.capture_before(target, run_dir)
+    graph_delta_before = graphtrail_delta.capture_before(target, run_dir, timeout=graphtrail_timeout)
     receipt: dict[str, Any] = {
         "run_id": run_id,
         "target": str(target),
@@ -292,13 +314,16 @@ def _run_verify_commands(target: Path, commands: list[str | list[str]], timeout:
         "evidence": _verification_evidence_payload(target),
         "commands": [],
     }
+    claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
+    if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
+        receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
     rc = 0
     for index, command in enumerate(commands, start=1):
         if isinstance(command, list):
-            argv, env_assignments, error = _verify_parse_argv(command)
+            argv, env_assignments, error = _verify_parse_argv(command, target)
             display_command = shlex.join(command)
         else:
-            argv, env_assignments, error = _verify_parse_command(command)
+            argv, env_assignments, error = _verify_parse_command(command, target)
             display_command = command
         command_result: dict[str, Any] = {
             "command": display_command,
@@ -331,10 +356,11 @@ def _run_verify_commands(target: Path, commands: list[str | list[str]], timeout:
             continue
         run_env = os.environ.copy()
         run_env.update(env_assignments)
+        execution_argv = _verify_execution_argv(argv, target)
         command_started = helpers._now()
         try:
             completed = subprocess.run(
-                argv,
+                execution_argv,
                 cwd=target,
                 env=run_env,
                 check=False,
@@ -384,8 +410,30 @@ def _run_verify_commands(target: Path, commands: list[str | list[str]], timeout:
                 }
             )
             rc = 124
+        except OSError as exc:
+            command_completed = helpers._now()
+            stderr = str(exc)
+            stdout_path.write_text("")
+            stderr_path.write_text(stderr + "\n")
+            command_result.update(
+                {
+                    "status": "failed",
+                    "exit_code": 127,
+                    "completed_at": command_completed.isoformat(),
+                    "duration_seconds": (command_completed - command_started).total_seconds(),
+                    "argv": argv,
+                    "stdout_summary": "",
+                    "stderr_summary": scanners_mod._scanner_run_summary(stderr),
+                    "stdout_log_path": str(stdout_path),
+                    "stderr_log_path": str(stderr_path),
+                }
+            )
+            if rc == 0:
+                rc = 127
         receipt["commands"].append(command_result)
-    receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(target, run_dir, graph_delta_before)
+    receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
+        target, run_dir, graph_delta_before, timeout=graphtrail_timeout
+    )
     completed_at = helpers._now()
     receipt["completed_at"] = completed_at.isoformat()
     receipt["duration_seconds"] = (completed_at - started).total_seconds()
@@ -620,6 +668,7 @@ def verify_run(
     target: Path,
     commands: list[str | list[str]] | None = None,
     timeout: int = 900,
+    graphtrail_timeout: float | None = None,
     json_output: bool = False,
     capture: str | None = None,
     capture_kind: str = "skill",
@@ -631,11 +680,16 @@ def verify_run(
     if timeout < 1:
         print("error: --timeout must be a positive integer", file=sys.stderr)
         return 2
+    try:
+        effective_graphtrail_timeout = config.resolve_graphtrail_delta_timeout(target, graphtrail_timeout)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     planned = commands if commands is not None else _default_verify_commands(target)
     if not planned:
         print("error: no verification commands found; pass --command", file=sys.stderr)
         return 2
-    receipt, rc = _run_verify_commands(target, planned, timeout)
+    receipt, rc = _run_verify_commands(target, planned, timeout, graphtrail_timeout=effective_graphtrail_timeout)
     if json_output:
         if capture:
             # Record the outcome in the same command (closes the loop without a

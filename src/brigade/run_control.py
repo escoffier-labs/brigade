@@ -6,15 +6,24 @@ import json
 import socket
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 _CLIENT_TIMEOUT_SECONDS = 5.0
+NO_ACTIVE_TURN = "no-active-turn"
+_NO_ACTIVE_TURN_RETRY_SECONDS = 5.0
+_NO_ACTIVE_TURN_RETRY_INTERVAL = 0.1
+_LIVE_RUN_STATUSES = frozenset({"started", "dispatching"})
 
 
 class ControlError(RuntimeError):
     """Control socket setup, request, or operation failure."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -59,7 +68,7 @@ class LiveTurnRegistry:
         turns = self._turns(worker)
         if not turns:
             target = f" for worker {worker!r}" if worker else ""
-            raise ControlError(f"no active turn{target}")
+            raise ControlError(f"no active turn{target}", code=NO_ACTIVE_TURN)
         interrupted: list[str] = []
         for active in turns:
             active.thread.interrupt(active.turn_id)
@@ -70,7 +79,7 @@ class LiveTurnRegistry:
         with self._lock:
             active = self._active.get(worker)
         if active is None:
-            raise ControlError(f"no active turn for worker {worker!r}")
+            raise ControlError(f"no active turn for worker {worker!r}", code=NO_ACTIVE_TURN)
         return active
 
     def _turns(self, worker: str | None) -> list[ActiveTurn]:
@@ -101,16 +110,29 @@ class ControlServer:
         except FileNotFoundError:
             pass
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        bound = False
         try:
             sock.bind(str(self.path))
+            bound = True
             sock.listen()
             sock.settimeout(0.1)
-        except OSError as exc:
-            sock.close()
+            thread = threading.Thread(target=self._serve, name="brigade-run-control", daemon=True)
+            self._sock = sock
+            self._thread = thread
+            thread.start()
+        except (OSError, RuntimeError) as exc:
+            self._sock = None
+            self._thread = None
+            try:
+                sock.close()
+            except OSError:
+                pass
+            if bound:
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
             raise ControlError(f"failed to start control socket: {exc}") from exc
-        self._sock = sock
-        self._thread = threading.Thread(target=self._serve, name="brigade-run-control", daemon=True)
-        self._thread.start()
 
     def close(self) -> None:
         self._stop.set()
@@ -160,6 +182,8 @@ class ControlServer:
                         response = {"ok": False, "error": f"invalid JSON: {exc.msg}"}
                     except ControlError as exc:
                         response = {"ok": False, "error": str(exc)}
+                        if exc.code is not None:
+                            response["code"] = exc.code
                     except Exception as exc:  # noqa: BLE001 - control server boundary
                         response = {"ok": False, "error": str(exc)}
                     fh.write(json.dumps(response, sort_keys=True).encode() + b"\n")
@@ -206,6 +230,40 @@ def send_request(path: Path, payload: dict[str, object], *, timeout: float = _CL
     if not isinstance(response, dict):
         raise ControlError("control socket returned a non-object response")
     return response
+
+
+def send_request_with_retry(
+    run_dir: Path,
+    path: Path,
+    payload: dict[str, object],
+    *,
+    retry_seconds: float = _NO_ACTIVE_TURN_RETRY_SECONDS,
+    retry_interval: float = _NO_ACTIVE_TURN_RETRY_INTERVAL,
+) -> dict[str, Any]:
+    """Send a control request, retrying while the live run has no active turn.
+
+    The control socket exists from the moment a run starts dispatching, before
+    any worker turn has registered, and workers are briefly unregistered
+    between turns. A steer or interrupt landing in that window would fail with
+    "no active turn" even though a turn is about to start, so retry until the
+    run leaves a live status or the window closes.
+    """
+    deadline = time.monotonic() + retry_seconds
+    while True:
+        response = send_request(path, payload)
+        if response.get("ok") is True or response.get("code") != NO_ACTIVE_TURN:
+            return response
+        if time.monotonic() >= deadline or not _run_is_live(run_dir):
+            return response
+        time.sleep(retry_interval)
+
+
+def _run_is_live(run_dir: Path) -> bool:
+    try:
+        meta = json.loads((run_dir / "run.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(meta, dict) and meta.get("status") in _LIVE_RUN_STATUSES
 
 
 def control_socket_from_run(run_dir: Path) -> Path:

@@ -46,6 +46,12 @@ def test_load_valid_roster(tmp_path):
     assert not roster_mod.is_cli_allowed("claude", r)
 
 
+def test_load_roster_without_resolution_does_not_invent_source(tmp_path):
+    loaded = roster_mod.load_roster(_write(tmp_path, VALID))
+
+    assert loaded.resolution is None
+
+
 def test_load_roster_fallback_parser(monkeypatch, tmp_path):
     # Force the pure-Python TOML fallback (the Python 3.10 path, where tomllib
     # is absent) and confirm a real roster still loads through it.
@@ -65,7 +71,62 @@ def test_resolve_roster_path_prefers_workspace(monkeypatch, tmp_path):
     local.write_text(VALID)
     user.write_text(VALID)
     monkeypatch.setattr(Path, "home", lambda: home)
-    assert roster_mod.resolve_roster_path(workspace) == local
+    assert roster_mod.resolve_roster_path(workspace) == local.resolve()
+
+
+def test_resolve_roster_reports_workspace_shadowing_user_roster(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    local = workspace / ".brigade" / "roster.toml"
+    user = home / ".brigade" / "roster.toml"
+    local.parent.mkdir(parents=True)
+    user.parent.mkdir(parents=True)
+    local.write_text(VALID)
+    user.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(workspace)
+
+    assert resolution.path == local.resolve()
+    assert resolution.source == "workspace"
+    assert resolution.shadowed == (user.resolve(),)
+
+
+def test_resolve_roster_does_not_shadow_same_file_through_workspace_symlink(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    user = home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text(VALID)
+    workspace.mkdir()
+    (workspace / ".brigade").symlink_to(user.parent, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(workspace)
+
+    assert resolution.path == user.resolve()
+    assert resolution.source == "workspace"
+    assert resolution.shadowed == ()
+
+
+def test_resolve_roster_explicit_choice_has_no_implicit_shadow(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    local = workspace / ".brigade" / "roster.toml"
+    user = home / ".brigade" / "roster.toml"
+    explicit = tmp_path / "chosen.toml"
+    local.parent.mkdir(parents=True)
+    user.parent.mkdir(parents=True)
+    local.write_text(VALID)
+    user.write_text(VALID)
+    explicit.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(workspace, explicit)
+
+    assert resolution.path == explicit.resolve()
+    assert resolution.source == "explicit"
+    assert resolution.shadowed == ()
 
 
 def test_resolve_roster_path_uses_user_fallback(monkeypatch, tmp_path):
@@ -74,7 +135,21 @@ def test_resolve_roster_path_uses_user_fallback(monkeypatch, tmp_path):
     user.parent.mkdir(parents=True)
     user.write_text(VALID)
     monkeypatch.setattr(Path, "home", lambda: home)
-    assert roster_mod.resolve_roster_path(tmp_path / "workspace") == user
+    assert roster_mod.resolve_roster_path(tmp_path / "workspace") == user.resolve()
+
+
+def test_resolve_roster_reports_user_fallback_source(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    user = home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(tmp_path / "workspace")
+
+    assert resolution.path == user.resolve()
+    assert resolution.source == "user"
+    assert resolution.shadowed == ()
 
 
 def test_resolve_roster_path_explicit_never_falls_back(monkeypatch, tmp_path):
@@ -286,3 +361,201 @@ def test_codex_transport_rejects_unknown(tmp_path):
     p.write_text('orchestrator = "chef"\ncodex_transport = "daemon"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
     with pytest.raises(ValueError, match="codex_transport"):
         roster_mod.load_roster(p)
+
+
+ENV_SEAT = """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan and synthesize"
+
+[agents.k3]
+cli = "claude"
+model = "kimi-k3"
+role = "open-weight worker"
+env = { ANTHROPIC_BASE_URL = "https://api.example.com/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY", CLAUDE_CONFIG_DIR = "/tmp/claudex-config" }
+
+[limits]
+allow_models = ["codex", "claude"]
+"""
+
+
+def test_env_table_parses_onto_agent(tmp_path):
+    r = roster_mod.load_roster(_write(tmp_path, ENV_SEAT))
+    assert r.agents["k3"].env == {
+        "ANTHROPIC_BASE_URL": "https://api.example.com/anthropic",
+        "ANTHROPIC_AUTH_TOKEN_REF": "KIMI_API_KEY",
+        "CLAUDE_CONFIG_DIR": "/tmp/claudex-config",
+    }
+    assert r.agents["chef"].env is None
+
+
+def test_env_rejects_non_table(tmp_path):
+    bad = ENV_SEAT.replace(
+        'env = { ANTHROPIC_BASE_URL = "https://api.example.com/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY", CLAUDE_CONFIG_DIR = "/tmp/claudex-config" }',
+        'env = "ANTHROPIC_BASE_URL=https://api.example.com"',
+    )
+    with pytest.raises(ValueError, match="agents.k3.env must be a TOML table"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejects_non_string_values(tmp_path):
+    bad = ENV_SEAT.replace(
+        '"/tmp/claudex-config" }',
+        '"/tmp/claudex-config", RETRIES = 3 }',
+    )
+    with pytest.raises(ValueError, match="agents.k3.env.RETRIES must be a string"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejects_invalid_variable_names(tmp_path):
+    bad = ENV_SEAT.replace("CLAUDE_CONFIG_DIR", "claude-config-dir")
+    with pytest.raises(ValueError, match="not a valid environment variable name"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejects_inline_secret_values(tmp_path):
+    bad = ENV_SEAT.replace('ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY"', 'ANTHROPIC_AUTH_TOKEN = "sk-live-secret"')
+    with pytest.raises(ValueError, match="looks like a secret; pass it by reference"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_ref_value_must_be_variable_name(tmp_path):
+    bad = ENV_SEAT.replace('ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY"', 'ANTHROPIC_AUTH_TOKEN_REF = "sk-live-inline"')
+    with pytest.raises(ValueError, match="must name an environment variable"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejected_on_acpx_transport(tmp_path):
+    bad = ENV_SEAT.replace(
+        'cli = "claude"\nmodel = "kimi-k3"',
+        'cli = "cursor"\nmodel = "kimi-k3"\ntransport = "acpx"\ntransport_version = "0.12.0"',
+    ).replace('allow_models = ["codex", "claude"]', 'allow_models = ["codex", "cursor"]')
+    with pytest.raises(ValueError, match="env overrides support direct CLI seats only"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejected_on_codex_cloud_seat(tmp_path):
+    bad = ENV_SEAT.replace('cli = "claude"\nmodel = "kimi-k3"\n', 'cli = "codex-cloud:brigade"\n').replace(
+        'allow_models = ["codex", "claude"]', 'allow_models = ["codex", "codex-cloud:*"]'
+    )
+    with pytest.raises(ValueError, match="env overrides support direct CLI seats only"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejects_ref_and_inline_collision(tmp_path):
+    bad = ENV_SEAT.replace(
+        'CLAUDE_CONFIG_DIR = "/tmp/claudex-config"',
+        'CLAUDE_CONFIG_DIR = "/tmp/claudex-config", ANTHROPIC_BASE_URL_REF = "OTHER_VAR"',
+    )
+    with pytest.raises(ValueError, match="collides with"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_secret_hints_cover_common_credential_names(tmp_path):
+    for name in ("GH_PAT", "DB_PASSWD", "SESSION_COOKIE", "ANTHROPIC_AUTH", "MY_CREDENTIAL", "API_BEARER"):
+        bad = ENV_SEAT.replace("CLAUDE_CONFIG_DIR", name)
+        with pytest.raises(ValueError, match="looks like a secret"):
+            roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejects_secret_shaped_inline_values(tmp_path):
+    bad = ENV_SEAT.replace('"/tmp/claudex-config"', '"sk-live-abc123"')
+    with pytest.raises(ValueError, match="looks like a secret value"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_allows_path_and_nonsecret_names(tmp_path):
+    ok = ENV_SEAT.replace("CLAUDE_CONFIG_DIR", "PATH")
+    r = roster_mod.load_roster(_write(tmp_path, ok))
+    assert r.agents["k3"].env["PATH"] == "/tmp/claudex-config"
+
+
+def test_env_rejected_on_codex_seat_under_appserver_transport(tmp_path):
+    bad = ENV_SEAT.replace('cli = "claude"\nmodel = "kimi-k3"', 'cli = "codex"').replace(
+        'orchestrator = "chef"', 'orchestrator = "chef"\ncodex_transport = "app-server"'
+    )
+    with pytest.raises(ValueError, match="codex_transport"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_rejected_on_endpoint_only_seat(tmp_path):
+    bad = ENV_SEAT.replace(
+        'cli = "claude"\nmodel = "kimi-k3"',
+        'endpoint = "https://api.example.com"\nmodel = "kimi-k3"',
+    )
+    with pytest.raises(ValueError, match="direct CLI seats only"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
+def test_env_empty_table_loads_as_none(tmp_path):
+    bad = ENV_SEAT.replace(
+        'env = { ANTHROPIC_BASE_URL = "https://api.example.com/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY", CLAUDE_CONFIG_DIR = "/tmp/claudex-config" }',
+        "env = { }",
+    )
+    r = roster_mod.load_roster(_write(tmp_path, bad))
+    assert r.agents["k3"].env is None
+
+
+GROK_FALLBACK_ROSTER = """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.grok-review]
+cli = "grok"
+model = "grok-4.5"
+reasoning = "high"
+role = "review"
+invalid_final_fallback = "cursor-grok"
+
+[agents.cursor-grok]
+cli = "cursor"
+model = "grok-4.5"
+transport = "acpx"
+transport_version = "0.12.0"
+role = "fallback review"
+"""
+
+
+def test_grok_invalid_final_fallback_names_reviewed_acpx_seat(tmp_path):
+    loaded = roster_mod.load_roster(_write(tmp_path, GROK_FALLBACK_ROSTER))
+
+    assert loaded.agents["grok-review"].invalid_final_fallback == "cursor-grok"
+
+
+@pytest.mark.parametrize(
+    ("roster_text", "match"),
+    [
+        (
+            GROK_FALLBACK_ROSTER.replace(
+                'invalid_final_fallback = "cursor-grok"', 'invalid_final_fallback = "missing"'
+            ),
+            "is not defined",
+        ),
+        (
+            GROK_FALLBACK_ROSTER.replace('cli = "grok"\nmodel = "grok-4.5"', 'cli = "codex"\nmodel = "gpt-5.6"'),
+            "direct grok seat",
+        ),
+        (
+            GROK_FALLBACK_ROSTER.replace('transport = "acpx"\ntransport_version = "0.12.0"\n', ""),
+            "reviewed cursor-grok acpx seat",
+        ),
+        (
+            GROK_FALLBACK_ROSTER.replace(
+                'model = "grok-4.5"\ntransport = "acpx"', 'model = "composer-2.5"\ntransport = "acpx"'
+            ),
+            "grok model",
+        ),
+        (
+            GROK_FALLBACK_ROSTER.replace('transport_version = "0.12.0"', 'transport_version = "0.11.0"'),
+            "reviewed version is 0.12.0",
+        ),
+    ],
+)
+def test_grok_invalid_final_fallback_rejects_unreviewed_routes(tmp_path, roster_text, match):
+    with pytest.raises(ValueError, match=match):
+        roster_mod.load_roster(_write(tmp_path, roster_text))

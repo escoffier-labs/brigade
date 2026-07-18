@@ -115,6 +115,10 @@ def validate(skill_dir: Path, *, mode: str) -> Validation:
         field_value = fields.get(key)
         if field_value is not None and (not isinstance(field_value, str) or not field_value):
             errors.append(f"frontmatter {key} must be a non-empty string")
+    compatibility = fields.get("compatibility")
+    if isinstance(compatibility, str) and len(compatibility) > 500:
+        message = "frontmatter compatibility exceeds 500 characters"
+        (errors if mode == "strict" else diagnostics).append(message)
     allowed = fields.get("allowed-tools")
     if isinstance(allowed, str):
         fields["allowed-tools"] = tuple(item for item in re.split(r"[\s,]+", allowed) if item)

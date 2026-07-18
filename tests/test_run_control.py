@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from brigade import aboyeur, agents, cli, codex_appserver, run_control
 from brigade.roster import Agent, Roster
 
@@ -80,6 +82,54 @@ def test_control_socket_round_trip_with_fake_registry(tmp_path):
         ("interrupt", "turn-1", ""),
     ]
     assert not (tmp_path / "control.sock").exists()
+
+
+def test_control_server_start_cleans_up_after_thread_start_failure(tmp_path, monkeypatch):
+    path = tmp_path / "control.sock"
+    server = run_control.ControlServer(path, run_control.LiveTurnRegistry())
+    startup_error = RuntimeError("forced thread start failure")
+
+    def fail_start(_thread):
+        raise startup_error
+
+    monkeypatch.setattr(run_control.threading.Thread, "start", fail_start)
+
+    with pytest.raises(run_control.ControlError, match="forced thread start failure") as exc_info:
+        server.start()
+
+    assert exc_info.value.__cause__ is startup_error
+    assert not path.exists()
+    assert server._sock is None
+    assert server._thread is None
+
+
+def test_control_server_start_does_not_unlink_socket_owned_by_bind_race(tmp_path, monkeypatch):
+    path = tmp_path / "control.sock"
+    server = run_control.ControlServer(path, run_control.LiveTurnRegistry())
+    real_socket = run_control.socket.socket
+    competing_socket = real_socket(run_control.socket.AF_UNIX, run_control.socket.SOCK_STREAM)
+    bind_error = OSError("address already in use")
+
+    class BindRaceSocket:
+        def bind(self, socket_path):
+            competing_socket.bind(socket_path)
+            competing_socket.listen()
+            raise bind_error
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(run_control.socket, "socket", lambda *_args: BindRaceSocket())
+
+    try:
+        with pytest.raises(run_control.ControlError, match="address already in use") as exc_info:
+            server.start()
+
+        assert exc_info.value.__cause__ is bind_error
+        assert path.exists()
+    finally:
+        competing_socket.close()
+        path.unlink(missing_ok=True)
 
 
 def test_run_turn_reports_turn_start_callback():
@@ -170,6 +220,87 @@ def test_run_records_control_socket_and_cli_steers_live_worker(tmp_path, monkeyp
     assert worker_results[0]["text"] == "steered: please finish"
 
 
+def test_cli_steer_retries_until_worker_turn_registers(tmp_path, monkeypatch, capsys):
+    # The control socket exists as soon as the run starts dispatching, before
+    # any worker turn has registered. Delay registration so the steer request
+    # is guaranteed to arrive first; the CLI must retry instead of failing
+    # with "no active turn" (the race CI runners hit on unmodified diffs).
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan and synthesize"),
+            "cook": Agent("cook", "codex", "write code"),
+        },
+        timeout_seconds=10.0,
+        codex_transport="app-server",
+    )
+    run_dir = tmp_path / "run"
+    real_app_server = codex_appserver.AppServer
+    monkeypatch.setattr(
+        aboyeur.codex_appserver,
+        "AppServer",
+        lambda cwd=None: real_app_server(argv=FAKE, cwd=cwd),
+    )
+    real_register = run_control.LiveTurnRegistry.register
+
+    def slow_register(self, worker, thread, turn_id):
+        time.sleep(0.5)
+        real_register(self, worker, thread, turn_id)
+
+    monkeypatch.setattr(run_control.LiveTurnRegistry, "register", slow_register)
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        if "Return exactly one JSON object" in prompt:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "cook", "task": "HANG until steered"}]}),
+                ok=True,
+            )
+        assert "steered: please finish" in prompt
+        return agents.AgentResult(text="final synthesis", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    result: dict[str, int] = {}
+
+    thread = threading.Thread(
+        target=lambda: result.update(rc=aboyeur.run("do it", roster, cwd=tmp_path, output_dir=run_dir)),
+        daemon=True,
+    )
+    thread.start()
+
+    control_socket = _wait_for(lambda: _control_socket_from_run_json(run_dir))
+    _wait_for(lambda: control_socket.exists())
+
+    assert cli.main(["runs", "steer", str(run_dir), "cook", "please finish"]) == 0
+    thread.join(timeout=5.0)
+
+    assert result == {"rc": 0}
+    assert "steer: cook" in capsys.readouterr().out
+    worker_results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    assert worker_results[0]["text"] == "steered: please finish"
+
+
+def test_cli_steer_does_not_retry_when_run_is_finished(tmp_path, capsys):
+    registry = run_control.LiveTurnRegistry()
+    socket_path = tmp_path / "run" / "control.sock"
+    _write_json(
+        tmp_path / "run" / "run.json",
+        {
+            "status": "ok",
+            "codex_transport": "app-server",
+            "control_socket": str(socket_path),
+        },
+    )
+    server = run_control.ControlServer(socket_path, registry)
+    server.start()
+    try:
+        rc = cli.main(["runs", "steer", str(tmp_path / "run"), "cook", "keep going"])
+    finally:
+        server.close()
+
+    assert rc == 1
+    assert "no active turn for worker 'cook'" in capsys.readouterr().err
+
+
 def test_cli_interrupt_leaves_live_worker_resumable(tmp_path, monkeypatch, capsys):
     roster = Roster(
         orchestrator="chef",
@@ -187,6 +318,15 @@ def test_cli_interrupt_leaves_live_worker_resumable(tmp_path, monkeypatch, capsy
         "AppServer",
         lambda cwd=None: real_app_server(argv=FAKE, cwd=cwd),
     )
+    turn_registered = threading.Event()
+    real_register = run_control.LiveTurnRegistry.register
+
+    def register_and_signal(registry, worker, turn, turn_id):
+        real_register(registry, worker, turn, turn_id)
+        if worker == "cook":
+            turn_registered.set()
+
+    monkeypatch.setattr(run_control.LiveTurnRegistry, "register", register_and_signal)
 
     def fake_run_agent(cli_ref, prompt, **kwargs):
         if "Return exactly one JSON object" in prompt:
@@ -207,6 +347,7 @@ def test_cli_interrupt_leaves_live_worker_resumable(tmp_path, monkeypatch, capsy
 
     control_socket = _wait_for(lambda: _control_socket_from_run_json(run_dir))
     _wait_for(lambda: control_socket.exists())
+    assert turn_registered.wait(timeout=5.0)
 
     assert cli.main(["runs", "interrupt", str(run_dir), "cook"]) == 0
     thread.join(timeout=5.0)

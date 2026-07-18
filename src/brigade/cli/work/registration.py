@@ -47,6 +47,22 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_brief.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_brief.add_argument("--limit", type=int, default=3, help="Maximum recent sessions to include.")
     p_work_brief.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_hooks = work_sub.add_parser("hooks", help="Manage project-scoped Claude work-loop hooks.")
+    hooks_sub = p_work_hooks.add_subparsers(dest="hooks_command", metavar="<hooks-command>")
+    hooks_sub.required = True
+    for action in ("install", "update", "status", "uninstall"):
+        parser = hooks_sub.add_parser(action, help=f"{action.capitalize()} the managed Claude work-loop hooks.")
+        parser.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo to update or inspect.")
+        if action == "status":
+            parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_hook_run = work_sub.add_parser("hook-run", help="Run one managed Claude hook event.")
+    p_work_hook_run.add_argument(
+        "--event",
+        required=True,
+        choices=["SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop"],
+        help="Claude hook event to handle.",
+    )
+    p_work_hook_run.add_argument("--package", required=True, help="Managed hook package id and version.")
     p_work_sweep = work_sub.add_parser("sweep", help="Run an explicit daily scanner sweep.")
     p_work_sweep.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_sweep.add_argument("--scanner", default=None, help="Run one scanner id instead of due scanners.")
@@ -144,6 +160,12 @@ def register(sub: argparse._SubParsersAction) -> None:
         ),
     )
     p_work_verify_run.add_argument("--timeout", type=int, default=900, help="Timeout per command in seconds.")
+    p_work_verify_run.add_argument(
+        "--graphtrail-timeout",
+        type=float,
+        default=None,
+        help="Timeout in seconds for each GraphTrail sync/diff during code graph delta capture.",
+    )
     p_work_verify_run.add_argument(
         "--capture",
         default=None,

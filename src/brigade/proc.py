@@ -40,19 +40,34 @@ def run(
     timeout: float = 30.0,
     env: Optional[dict] = None,
     cwd: Optional[Path] = None,
+    stdin: bytes | None = None,
 ) -> Result:
     try:
-        cp = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-            cwd=cwd,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
-        return Result(code=cp.returncode, stdout=cp.stdout, stderr=cp.stderr)
+        if stdin is None:
+            cp = subprocess.run(
+                args,
+                capture_output=True,
+                text=False,
+                timeout=timeout,
+                env=env,
+                cwd=cwd,
+                check=False,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+            )
+        else:
+            cp = subprocess.run(
+                args,
+                capture_output=True,
+                text=False,
+                timeout=timeout,
+                env=env,
+                cwd=cwd,
+                check=False,
+                shell=False,
+                input=stdin,
+            )
+        return Result(code=cp.returncode, stdout=_timeout_text(cp.stdout), stderr=_timeout_text(cp.stderr))
     except FileNotFoundError:
         return Result(code=127, stdout="", stderr=f"command not found: {args[0]}")
     except subprocess.TimeoutExpired as exc:

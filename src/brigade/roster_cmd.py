@@ -7,13 +7,18 @@ from pathlib import Path
 
 from . import agents
 from . import doctor as doctor_mod
+from . import model_inventory
 from . import roster as roster_mod
 
 DEFAULT_ROSTER_REL = ".brigade/roster.toml"
 
+# Small on purpose: a starter roster must never name a model whose absence
+# triggers a multi-GB `ollama pull` (a 43GB default once filled a root disk).
+DEFAULT_OLLAMA_MODEL = "llama3.2:3b"
+
 
 def default_roster_text(
-    *, ollama_model: str = "llama3.3", max_workers: int = 4, review_model: str | None = None
+    *, ollama_model: str = DEFAULT_OLLAMA_MODEL, max_workers: int = 4, review_model: str | None = None
 ) -> str:
     return f"""# Brigade aboyeur roster.
 # Edit agent roles and CLI refs to match the tools installed on this machine.
@@ -28,6 +33,8 @@ role = "Plan the work, choose useful workers, and synthesize the final answer."
 cli = "codex"
 role = "Make precise code changes and report what changed."
 
+# Brigade never auto-pulls ollama models: dispatch fails unless the model is
+# already local. Run `ollama pull {ollama_model}` once before using this seat.
 [agents.local_researcher]
 cli = "ollama:{ollama_model}"
 role = "Research locally and summarize useful findings."
@@ -85,7 +92,7 @@ def init(
     target: Path,
     *,
     force: bool = False,
-    ollama_model: str = "llama3.3",
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
     max_workers: int = 4,
     review_model: str | None = None,
 ) -> int:
@@ -142,6 +149,7 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
     else:
         checks.append((doctor_mod.WARN, "roster: allow_models", "not set; explicit model allow-list recommended"))
 
+    inventory_inspector = model_inventory.ModelInventoryInspector()
     for name, agent in loaded.agents.items():
         timeout = roster_mod.timeout_for(agent, loaded)
         if agent.cli is None:
@@ -155,8 +163,14 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
             )
             continue
         binary = agents.command_for(agent.cli)
-        if agents.detect(agent.cli):
+        detected = agents.detect(agent.cli)
+        if detected:
             checks.append((doctor_mod.OK, f"agent: {name}", f"{agent.cli} via {binary}; timeout={timeout:g}s"))
+            if agent.cli.startswith("ollama:"):
+                ollama_model = agent.cli[len("ollama:") :]
+                inventory = inventory_inspector.inspect(agent.cli, ollama_model)
+                assert inventory is not None
+                checks.append(_model_inventory_check(name, inventory))
         else:
             detail = f"{agent.cli} needs `{binary}` on PATH; timeout={timeout:g}s"
             if agent.cli == "claude":
@@ -169,6 +183,10 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
                 )
             elif agents.supports_model_pinning(agent.cli):
                 checks.append((doctor_mod.OK, f"agent: {name} model", f"{agent.model} via {agent.cli}"))
+                if detected and agent.transport == "direct":
+                    inventory = inventory_inspector.inspect(agent.cli, agent.model)
+                    if inventory is not None:
+                        checks.append(_model_inventory_check(name, inventory))
             else:
                 checks.append(
                     (
@@ -197,6 +215,9 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
                 installed, detail = acpx_adapter.installed_version()
                 if installed == agent.transport_version:
                     checks.append((doctor_mod.OK, f"agent: {name} acpx", f"version {installed}"))
+                    auth = acpx_adapter.cursor_auth_status()
+                    auth_status = doctor_mod.OK if auth.state == "authenticated" else doctor_mod.FAIL
+                    checks.append((auth_status, f"agent: {name} cursor auth", auth.detail))
                 else:
                     checks.append(
                         (
@@ -207,3 +228,8 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
                     )
 
     return doctor_mod._report(checks)
+
+
+def _model_inventory_check(agent_name: str, result: model_inventory.ModelInventoryResult) -> doctor_mod.CheckResult:
+    status = doctor_mod.OK if result.state == "exact" else doctor_mod.WARN
+    return (status, f"agent: {agent_name} model inventory", f"{result.state}: {result.detail}")

@@ -9,7 +9,7 @@ The inbox uses the same Markdown handoff schema as Claude Code, Codex, and OpenC
 
 ```bash
 brigade init --target . --depth workspace --harnesses hermes
-brigade handoff sources init --target . --force
+brigade handoff sources init --target .
 ```
 
 `init` writes the shared workspace files, the Hermes adapter fragments under `.brigade/hermes/`, the local `.hermes/memory-handoffs/` inbox, and the matching gitignore entries. `handoff sources init` records the local inboxes that the canonical ingestor is expected to scan, including `.hermes/memory-handoffs/`.
@@ -38,7 +38,7 @@ This creates a local ignored file under `.hermes/memory-handoffs/` and lints it 
 ## Smoke Test The Wiring
 
 ```bash
-brigade handoff sources init --target . --force
+brigade handoff sources init --target .
 brigade handoff draft --target . --inbox hermes \
   --title "Hermes smoke handoff" \
   --summary "Hermes can write a local Brigade Memory Handoff." \

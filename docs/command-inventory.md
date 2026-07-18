@@ -30,11 +30,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade guard`: 1 command path(s)
 - `brigade handoff`: 17 command path(s)
 - `brigade handoff-template`: 1 command path(s)
+- `brigade harness`: 3 command path(s)
 - `brigade hermes-fragments` (extras): 1 command path(s)
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
-- `brigade mcp`: 7 command path(s)
+- `brigade mcp`: 8 command path(s)
 - `brigade memory`: 14 command path(s)
 - `brigade model`: 6 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
@@ -47,24 +48,24 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade receipts`: 5 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
-- `brigade repos` (extras): 71 command path(s)
+- `brigade repos` (extras): 74 command path(s)
 - `brigade research` (extras): 11 command path(s)
 - `brigade roadmap` (extras): 4 command path(s)
 - `brigade roster`: 2 command path(s)
 - `brigade route`: 1 command path(s)
 - `brigade run`: 1 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
-- `brigade runs`: 7 command path(s)
+- `brigade runs`: 8 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 3 command path(s)
 - `brigade security`: 15 command path(s)
-- `brigade skills`: 27 command path(s)
+- `brigade skills`: 29 command path(s)
 - `brigade stations`: 3 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tokens`: 3 command path(s)
 - `brigade tools`: 48 command path(s)
 - `brigade untrusted` (extras): 2 command path(s)
-- `brigade work`: 139 command path(s)
+- `brigade work`: 144 command path(s)
 - `brigade workflow` (extras): 3 command path(s)
 
 ## Commands
@@ -174,6 +175,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade handoff sources init`
 - `brigade handoff sync-issues`
 - `brigade handoff-template`
+- `brigade harness doctor`
+- `brigade harness install`
+- `brigade harness uninstall`
 - `brigade hermes-fragments` (extras)
 - `brigade ingest`
 - `brigade init`
@@ -197,6 +201,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade mcp list`
 - `brigade mcp plan`
 - `brigade mcp sync`
+- `brigade mcp verify`
 - `brigade memory care backfill`
 - `brigade memory care closeout`
 - `brigade memory care doctor`
@@ -313,9 +318,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade repos actions reconcile` (extras)
 - `brigade repos actions show` (extras)
 - `brigade repos actions start` (extras)
+- `brigade repos adoption repair` (extras)
 - `brigade repos discover plan` (extras)
 - `brigade repos doctor` (extras)
 - `brigade repos first-run plan` (extras)
+- `brigade repos friction scan` (extras)
+- `brigade repos friction show` (extras)
 - `brigade repos health-commands` (extras)
 - `brigade repos import-issues` (extras)
 - `brigade repos ingest` (extras)
@@ -400,6 +408,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs interrupt`
 - `brigade runs latest`
 - `brigade runs list`
+- `brigade runs recover`
 - `brigade runs resume`
 - `brigade runs show`
 - `brigade runs steer`
@@ -429,6 +438,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade skills compatibility`
 - `brigade skills diff`
 - `brigade skills doctor`
+- `brigade skills fleet status`
 - `brigade skills history`
 - `brigade skills import`
 - `brigade skills import-issues`
@@ -449,6 +459,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade skills rollback`
 - `brigade skills search`
 - `brigade skills serve-mcp`
+- `brigade skills sync`
 - `brigade skills uninstall`
 - `brigade stations discover`
 - `brigade stations list`
@@ -519,6 +530,11 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work closeout`
 - `brigade work doctor`
 - `brigade work end`
+- `brigade work hook-run`
+- `brigade work hooks install`
+- `brigade work hooks status`
+- `brigade work hooks uninstall`
+- `brigade work hooks update`
 - `brigade work import add`
 - `brigade work import chat-sweep`
 - `brigade work import content-guard`

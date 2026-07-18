@@ -256,7 +256,7 @@ cli = "codex"
 role = "Plan the work, choose useful workers, and synthesize the final answer."
 
 [agents.local_researcher]
-cli = "ollama:llama3.3"
+cli = "ollama:llama3.2:3b"
 role = "Research locally and summarize useful findings."
 timeout_seconds = 300
 
@@ -272,6 +272,11 @@ sandbox = "workspace-write"
 ```
 
 Edit the roles, CLI refs, and timeouts to match the tools on your machine.
+Brigade never auto-pulls Ollama models: dispatch to an `ollama:<model>` seat
+fails with a clear message unless the model is already pulled locally, because
+a bare `ollama run` silently downloads the model first (tens of gigabytes for
+a large one). Pull the model yourself (`ollama pull llama3.2:3b`) or name one
+`ollama list` already shows; `brigade roster doctor` warns about missing ones.
 `limits.timeout_seconds` is the default per-agent timeout.
 `agents.<name>.timeout_seconds` overrides it for one agent.
 `limits.sandbox` is optional. When set to `read-only`, `workspace-write`, or
@@ -289,6 +294,21 @@ name their model, including cloud models such as `ollama:qwen3-coder-next:cloud`
 unsupported adapter with a `model =` pin fails `brigade roster doctor` before any run
 dispatches, so a bad pin never reaches a worker. The pinned model is recorded in each
 run's `roster.json` artifact.
+
+`brigade roster doctor` also checks live inventory for direct Cursor and Grok pins and
+for `ollama:<model>` refs. `exact` means the configured ID appears verbatim, or a
+parameterized Cursor ID has an advertised base ID that appears verbatim. Ollama also
+treats an omitted `:latest` tag as the listed `<model>:latest` ID.
+`fuzzy-resolved` means the exact ID is absent but the harness lists the same model family
+and version under a recognized namespace, effort, or fast suffix. `missing` means no such
+live ID exists. `unavailable` means the inventory command failed or its output could not
+be parsed. Every non-exact state is a warning because authentication, network access, and
+provider inventory can fail transiently.
+
+Ollama models must still be present in `ollama list`. For a listed `:cloud` model, doctor
+also runs the read-only `ollama show <model>` probe so a retired remote model is warned
+even when its cached manifest remains in the local list. Doctor never pulls or invokes a
+model while checking inventory.
 
 The classic split is a strong planner orchestrating a cheaper executor: the architect
 plans and synthesizes, the builder does the token-heavy work, and the run handoff is the
@@ -356,6 +376,14 @@ contains one assignment with the full task text, `worker-results.json` records
 the selected worker output, `final.txt` is that worker's text, and
 `synthesis.json` is marked with `mode: direct-worker`.
 
+Direct CLI seats may declare per-seat environment overrides in their roster entry. Values
+whose keys end in `_REF` are read from the named parent environment variable and injected
+under the key without `_REF`. After execution, Brigade replaces every exact nonempty
+resolved override value in returned text, detail, stdout, and stderr with `[TARGET_NAME]`
+before run logs or receipts are written. This bounded replacement covers only values
+resolved for that seat; it is not a heuristic scan of the parent environment or historical
+logs. Resume revalidates stored environment tables before any synthesis dispatch.
+
 Detached runs require artifacts, so `--detach` cannot be combined with `--no-artifacts`.
 It also refuses `--dry-run` and `--inspect`, because the parent process exits before it can print a plan or inspect final artifacts.
 Use `brigade runs watch <run>` to follow a detached run from its artifacts:
@@ -397,6 +425,7 @@ role = "Inspect the change and report concrete defects."
 This path requires user-installed `acpx 0.12.0` and `cursor-agent acp`. Read-only calls use `--approve-reads`, reject interactive permission requests, disable terminal capability, and parse strict ACP protocol 1 NDJSON. Brigade never falls back from ACP to direct Cursor. Writable ACP calls require `brigade run --worktree`, so approval applies only inside a Brigade-created detached worktree.
 
 ACP model ids follow the ids advertised by `cursor-agent acp`, which can differ from direct Cursor aliases. Authenticated checks with `acpx 0.12.0` passed `composer-2.5` and `grok-4.5`. The direct alias `grok-4.5-xhigh` is rejected by ACP; the ACP server advertises `grok-4.5` with `modelId` `grok-4.5[effort=high,fast=true]`. Acpx has no separate reasoning flag, so Brigade does not translate the direct alias or infer an effort setting. Pin the exact model id for the selected transport.
+Direct Cursor inventory is not applied to ACP seats because the two transports advertise different IDs. ACP version and authentication checks remain separate roster-doctor checks.
 Run `brigade roster doctor` to validate roster syntax and check which CLIs are on `PATH`.
 To decide which model belongs in which seat with receipt-backed evidence instead of reputation, see [model ratings](model-ratings.md).
 When `--roster` is omitted, `brigade run` first reads `--cwd/.brigade/roster.toml`;
@@ -591,6 +620,7 @@ Start-of-day commands:
 - `brigade work brief` shows branch state, active sessions, pending tasks, import counts, latest dogfood run, and the command to continue.
 - `brigade work status` is the quick dashboard for branch state, dogfood readiness, paths, latest run, and extracted next step.
 - `brigade work doctor` checks dogfood config, security config, evidence bundles, Codex CLI, artifact paths, handoff inbox, task acceptance, issue-backed tasks, stale active sessions, ignore coverage, and latest run context.
+- `brigade work hooks install|update|status|uninstall` manages the project-scoped Claude Code work-loop package while preserving foreign settings and hooks. The runtime entrypoint is `brigade work hook-run`; it is called by Claude Code rather than by operators.
 - `brigade work resume` shows the active or latest session, latest dogfood run, extracted next step, and suggested command.
 - `brigade work inbox` groups pending scanner imports by source, kind, priority, age, and acceptance coverage, then suggests plan, promote, dismiss, or run commands.
 - `brigade work backup status` reads local backup health summaries and reports snapshot, check, prune, and restore rehearsal risk without running backup commands.
@@ -702,8 +732,15 @@ Friction-log commands:
 - `brigade friction scan --include-agent-logs` also scans local Codex and Claude Code session/log directories.
 - `brigade friction scan --import-candidates` appends candidates to the work import inbox with `source=friction-scan`.
 - `brigade friction add "..."` manually captures a friction item as a reviewable work import.
+- The scanner rejects matches from documentation, generated suggestion files, processed handoffs, successful verification logs, and passing output with zero failures. Repeated evidence from one source is grouped under one candidate with child evidence.
+- JSON output reports accepted, rejected, grouped, and truncated counts for regex, verification, run, evaluation, and MiseLedger source families. The `--days` cutoff applies to each family.
+- `brigade repos friction scan` runs the same scanner across enabled entries in `.brigade/repos.toml`, keeps scanning when one repository fails, and groups matching signatures across repositories.
+- `brigade repos friction scan --include-agent-logs` scans the configured global agent-log roots once, then associates evidence with a repository only when its full path appears as a complete path token rather than a sibling-path prefix.
+- Fleet JSON reports include agent-log candidate and file counts, truncation state, rejected-noise count, and source-family dispositions so capped global scans remain visible.
+- `brigade repos friction show` reads the latest fleet report. Each scan also keeps a dated JSON and Markdown report under `.brigade/repos/friction/` for new, recurring, cleared, and unknown comparisons.
 
 Friction scan output is local and review-first. It writes `.brigade/friction/latest.json` and `.brigade/friction/latest.md`, and it does not create GitHub issues, edit memory, publish reports, or promote findings automatically.
+Fleet reports use configured repository ids and labels instead of local paths. A repository or agent-log scan failure produces a partial report and a non-zero exit code without discarding results from sources that completed.
 
 Handoff draft queue commands:
 
@@ -740,6 +777,8 @@ Roadmap and repo-fleet commands:
 - `brigade repos list`, `show <repo-id>`, and `scan` report safe repo metadata only: repo labels, branch, dirty counts, guidance-file presence, docs presence, test hints, handoff inboxes, publish-guard hook presence, Brigade config presence, and local receipt references.
 - `brigade repos doctor` reports setup gaps, and `brigade repos import-issues` creates `source: repo-fleet` task imports with stable source fingerprints.
 - `brigade repos discover plan` dry-runs repo discovery under explicit configured roots only, applies include/exclude rules, reports safe labels, redacts private paths, and never clones or writes config.
+- `brigade repos adoption --harness claude --harness cursor --days 7 --json` reports wiring and observed use separately for each configured repo and selected harness. States are `unwired`, `partial`, `advisory-only`, `enforced-idle`, `active`, `bypassed`, and `stale`. Claude rows correlate repo-scoped write sessions with the injected brief, exact session verification receipts, atomic outcome capture, GraphTrail delta, MiseLedger export, and a handoff. Failed and rejected verification counts only after outcome capture. Cursor's current user-scoped reminder hook is reported as `advisory-only`, because it does not prove repo-scoped write enforcement. JSON includes active-session, active-repository, wired-repository, compliant-session, and bypassed-session denominators plus stable alert row keys and a fleet fingerprint.
+- `brigade repos adoption repair --state bypassed` lists one safe repair or investigation command for each matching row. It never runs those commands or writes target repositories.
 - `brigade repos health-commands` inspects optional configured read-only health commands, reports labels, timeouts, latest sweep receipt status, stale receipts, and failed command receipts without exposing raw command paths or logs.
 - `brigade repos sweep plan/run/runs/show/closeout` explicitly refreshes safe local evidence across configured repos, writes one fleet sweep receipt under `.brigade/repos/sweeps/`, can include optional configured read-only health commands, and records only repo ids, safe labels, command labels, status counts, receipt labels, and local log labels.
 - `brigade repos report plan/build/list/show/archive/closeout` builds local fleet operator reports under `.brigade/repos/reports/`, using safe repo ids, labels, counts, statuses, and receipt labels only.
@@ -815,9 +854,9 @@ Tool call execution is explicit through `brigade tools call run`, limited to app
 
 Replay creates a pending call from redacted receipt arguments and never recovers secret values or bypasses approval, runtime, or policy gates. Checkpoint resume is explicit through `brigade tools checkpoint resume` and never runs automatically after approval. Runtime start and stop are explicit through `brigade tools runtime`; `doctor`, `brief`, and `work run` never auto-start runtimes.
 
-Execution policy is host-local and gitignored; environment values come only from the current process and are not stored in calls, checkpoints, receipts, logs, imports, or docs. Brigade does not connect to remote MCP servers, fetch OpenAPI or GraphQL schemas, store auth, install schedulers, send approval notifications, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
+Execution policy is host-local and gitignored; environment values come only from the current process and are not stored in calls, checkpoints, receipts, logs, imports, or docs. Outside explicit `brigade mcp verify` runs, Brigade does not connect to remote MCP servers. It does not fetch OpenAPI or GraphQL schemas, store auth, install schedulers, send approval notifications, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
 
-Runtime MCP *server* config sync is the one explicit exception, and it is bounded. `brigade mcp sync` (dry-run by default; `operator sync-mcp` wraps it) merges a canonical catalog (`.brigade/mcp.json`) into each tool's native config file by server key: it preserves servers the user added, treats a server edited outside Brigade as a conflict (skipped unless `--force`), removes orphans only with `--prune` and only when still pristine, and never inlines secrets (env values are written as `${VAR}` references, never literals). It still never runs automatically from `doctor`, `brief`, or `work run`. See [mcp-sync.md](mcp-sync.md).
+Runtime MCP server config sync and health verification are explicit, bounded exceptions. `brigade mcp sync` is dry-run by default and merges the canonical catalog (`.brigade/mcp.json`) by server key. It preserves servers the user added, treats an externally edited server as a conflict unless `--force` is present, removes pristine orphans only with `--prune`, and writes environment references instead of values. `brigade mcp verify` and `sync --write --verify` perform bounded `initialize` and `tools/list` handshakes, keep `config_current` separate from `runtime_healthy`, and write redacted receipts under `.brigade/mcp/verify-runs/`. These commands never run automatically from `doctor`, `brief`, or `work run`. See [mcp-sync.md](mcp-sync.md).
 
 Operator notification commands:
 
@@ -838,10 +877,12 @@ Shared skill registry commands:
 - `brigade skills import-issues` routes skill registry health findings into the reviewed work import inbox as `source: skill-registry`.
 - `brigade skills search "mcp security review"` searches approved local registry metadata.
 - `brigade skills install security-review --target codex`, `--target claude`, `--target opencode`, `--target antigravity`, `--target pi`, `--target cursor`, `--target aider`, `--target goose`, `--target continue`, `--target copilot`, `--target qwen`, `--target kimi`, `--target adal`, `--target openhands`, `--target grok`, `--target amp`, `--target crush`, `--target openclaw`, `--target hermes`, or `--target mcp` materializes one reviewed skill into a specific harness shape.
-- `brigade skills install security-review --target all` installs the same reviewed skill into Codex, Claude, OpenCode, Antigravity `.antigravity/skills`, Pi `.pi/skills`, Cursor `.cursor/skills`, Aider `.aider/skills`, Goose `.goose/skills`, Continue `.continue/skills`, GitHub Copilot CLI `.copilot/skills`, Qwen Code `.qwen/skills`, Kimi Code `.kimi/skills`, AdaL `.adal/skills`, OpenHands `.openhands/skills`, Grok `.grok/skills`, Amp `.amp/skills`, Crush `.crush/skills`, OpenClaw, Hermes, and MCP-resource folders, writing per-harness receipts. Built-in adapters normalize target-specific output, for example adding Codex `SKILL.md` frontmatter when the portable source does not already have it.
-- `brigade skills compatibility security-review` reports supported, installed, planned, and blocked harness targets for a skill, plus version drift, source/render fingerprints, install history counts, trust score, and changelog status.
+- `brigade skills install security-review --target all` installs the same reviewed skill into Codex, Claude, OpenCode, Antigravity `.antigravity/skills`, Pi `.pi/skills`, Cursor `.cursor/skills`, Aider `.aider/skills`, Goose `.goose/skills`, Continue `.continue/skills`, GitHub Copilot CLI `.copilot/skills`, Qwen Code `.qwen/skills`, Kimi Code `.kimi/skills`, AdaL `.adal/skills`, OpenHands `.openhands/skills`, Grok `.grok/skills`, Amp `.amp/skills`, Crush `.crush/skills`, OpenClaw, Hermes, and MCP-resource folders, writing per-harness receipts. Named bundled skills resolve from Brigade's current package. Use `registry:<skill-id>` or an explicit path when a same-named registry source is intentional. Built-in adapters normalize target-specific output, for example adding Codex `SKILL.md` frontmatter when the portable source does not already have it.
+- `brigade skills sync --workspace . --target all --trust workspace` scans the reviewed registry once and reports each selected skill and harness as current, missing, changed, blocked, or excluded. It is a dry run unless `--write` is present. Writes use explicit registry identities and the existing per-target receipt and rollback path, so completed targets survive a later target failure.
+- `brigade skills compatibility security-review` reports supported, installed, planned, and blocked harness targets for a skill, plus independent source, renderer, and local-copy drift, install history counts, trust score, and changelog status.
 - `brigade skills history security-review --harness codex` lists local install receipts for one skill and harness from `.brigade/skills/installs/history.jsonl`.
-- `brigade skills diff security-review --harness codex` compares the currently installed harness file against the current rendered registry version.
+- `brigade skills diff security-review --harness codex` compares the installed harness file against the current rendered resolved source. Bundled skills compare with the current Brigade package and report source, renderer, and local-edit drift separately. Receipts from older schemas report unknown provenance instead of guessing.
+- `brigade skills fleet status` reports installed skill copies across harnesses in stable order and prints one forced reinstall command for each supported stale or missing copy. Copies whose current metadata no longer supports their harness are listed separately as unsupported and get an uninstall command. Unknown legacy copies are listed without an automatic repair command.
 - `brigade skills rollback security-review --target claude` restores the latest rollback snapshot captured before a forced reinstall.
 - `brigade skills inbox add ./some-skill`, `list`, `show`, `diff`, `accept`, and `reject` keep agent-proposed skills in review before they enter the registry.
 - Skill proposals created by `brigade learn propose-skill` use the same inbox. They remain unreviewed until accepted and are never installed automatically.
@@ -967,7 +1008,7 @@ Work verification and closeout commands:
 - `brigade work verify runs` and `brigade work verify show <run-id>` inspect local verification receipts, command exit codes, summaries, and log paths.
 - `brigade receipts keygen` creates the optional local HMAC key used to sign new receipt digests. Pass `--force` to rotate the key.
 - `brigade receipts verify` recomputes SHA-256 receipt digests, stdout and stderr log digests, the `memory/outcome/records.jsonl` digest chain, and optional local HMAC signatures. It reports `OK`, `SIGNED-OK`, `MISMATCH`, `SIGNATURE-MISMATCH`, `MISSING`, `LEGACY`, or `UNVERIFIABLE-SIGNATURE` for checked artifacts and exits non-zero only for mismatch, signature mismatch, or missing evidence.
-- `brigade receipts export miseledger` exports local work verification receipts and Brigade run receipts as `miseledger.adapter.v1` JSONL for offline import into MiseLedger. Stdout is the default output; pass `--out <path>` to write a file, `--limit <n>` to export only the newest receipts, `--new-only` to skip hashes already recorded in the local export cursor, and `--import` to invoke `miseledger import adapter <file> --source brigade --json` after the JSONL file is written.
+- `brigade receipts export miseledger` exports local work verification receipts and Brigade run receipts as `miseledger.adapter.v1` JSONL for offline import into MiseLedger. Stdout is the default output; pass `--out <path>` to write a file, `--limit <n>` to export only the newest receipts, `--new-only` to skip hashes already recorded in the local export cursor, and `--import` to invoke `miseledger import adapter <file> --source brigade --json` after the JSONL file is written. A zero-receipt export without `--json` exits 0 with no output. Pass `--json` with a named `--out` file to print a `brigade.miseledger_export_result.v1` summary to stdout (status `empty`, `nothing-new`, `exported`, or `failed`, plus per-status counts) instead of JSONL; with `--import` and zero new rows, stdout carries only that JSON summary. Pass `--fleet --json` on a target with `.brigade/repos.toml` to export from enabled `[[repo]]` entries only: disabled repos and discovery roots are ignored, per-repo paths stay out of the JSON summary, rows are aggregated into one batch file, each repo keeps its own export cursor, the result schema is `brigade.miseledger_fleet_export_result.v1` with per-repo counts and privacy-safe `errors`, and a partial fleet run can still import valid rows once before returning `failed` when any sibling repo errors; aggregate import failure sets top-level `failed` without incrementing `failed_count`.
 - `brigade work closeout <session-id-or-latest>` writes a local closeout receipt under `.brigade/work/closeouts/` that collects task acceptance, latest verification, scanner sweep status, code review closeout state, handoff draft status, and session evidence.
 - `brigade work acceptance` reports pending task acceptance coverage, completion metadata gaps, completion-time acceptance evidence, code-review finding outcomes, and latest work closeout state. Release readiness and release candidate evidence include the same rollup.
 
@@ -1160,7 +1201,7 @@ For example, `brief hit rate 0.50 (2/4 files, 2 missed)` means two of four struc
 
 This is a coverage quality signal for skill and runbook ranking, not a claim that the context was useful, sufficient, or correct. Brief parsing is heuristic, and GraphTrail deltas only see structural code changes. Docs-only runs and runs without structural graph changes produce no context eval.
 
-`brigade operator checkup` reports optional loop station health alongside the first-run doctors: graph ok (graphtrail + db), ledger ok (miseledger on PATH), and last/mean brief hit rate from recent run receipts. Missing optional stations warn; they never block the checkup ready verdict.
+`brigade operator checkup` runs the six first-run doctors by default and reports optional loop station health alongside them. Missing optional stations warn and do not block the default ready verdict. Use repeatable `--surface` values to run only named checks, `--list-surfaces` to inspect the stable names, or `--preset evidence-loop` to gate only work receipt integrity and outcome capture, GraphTrail health and the latest work receipt delta, and MiseLedger work-receipt import state. Scoped JSON reports `selected_ready`, leaves `overall_ready` unevaluated, and includes selected, skipped, and per-surface elapsed data.
 
 Use `--handoff` to bridge a completed run back into the memory system.
 
