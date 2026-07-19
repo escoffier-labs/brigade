@@ -52,6 +52,20 @@ jobs:
         if: matrix.python == '3.12'
         run: python -m pytest -q --cov=brigade --cov-report=term --cov-fail-under=78
 
+  component-manifest-provenance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Verify component manifest provenance
+        run: python scripts/verify_component_manifest_provenance.py
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
   content-guard:
     runs-on: ubuntu-latest
     steps:

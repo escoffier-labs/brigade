@@ -38,6 +38,10 @@ VERSION_FILE = "pyproject.toml"  # read [project].version
 # Simple, single-token locations checked/rewritten by regex. Each pattern must
 # have exactly one capture group: the version token.
 INIT_FILE = ("src/brigade/__init__.py", r'__version__ = "([^"]+)"')
+COMPONENT_MANIFEST = (
+    "src/brigade/templates/components/manifest-v1.json",
+    r'"brigade_version"\s*:\s*"([^"]+)"',
+)
 TEMPLATES_GLOB = "src/brigade/templates/**/*.json"
 TEMPLATE_PATTERN = r'"_brigade_version"\s*:\s*"([^"]+)"'
 # Recorded demo assets with the version baked into the frames. The .cast is the
@@ -57,7 +61,7 @@ def _expected() -> str:
 
 def _locations() -> list[tuple[str, str]]:
     """Return every (path, pattern) location the version is stamped into."""
-    locs: list[tuple[str, str]] = [INIT_FILE]
+    locs: list[tuple[str, str]] = [INIT_FILE, COMPONENT_MANIFEST]
     for path in sorted(ROOT.glob(TEMPLATES_GLOB)):
         if '"_brigade_version"' in path.read_text():
             locs.append((path.relative_to(ROOT).as_posix(), TEMPLATE_PATTERN))
