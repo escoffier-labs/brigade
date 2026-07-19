@@ -22,9 +22,9 @@ you did not observe.
 
 CI-only jobs still cover work that is slower, platform-oriented, or depends on
 extra checkout/install context: `content-guard`, `repo-metadata`,
-`install-from-source`, and `quickstart-smoke`. The local `./scripts/verify`
-gate is the fast completion gate; do not treat it as a replacement for those
-CI-only release and public-repo checks.
+`install-from-source`, `quickstart-smoke`, and `windows-native-acceptance`.
+The local `./scripts/verify` gate is the fast completion gate; do not treat it
+as a replacement for those CI-only release and public-repo checks.
 
 Setup, if `.venv/` is missing:
 

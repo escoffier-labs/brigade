@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -26,6 +28,11 @@ _EXECUTABLE_MODE = 0o755
 _SMOKE_COMPONENT_IDS = component_manifest.KNOWN_COMPONENT_IDS
 _SMOKE_TIMEOUT_SECONDS = 30.0
 _DOWNLOAD_TIMEOUT_SECONDS = 30.0
+_WINDOWS_HTTPS_PRIME_TIMEOUT_SECONDS = 30.0
+_WINDOWS_HTTPS_PRIME_URL_ENV = "BRIGADE_HTTPS_PRIME_URL"
+_WINDOWS_HTTPS_PRIME_COMMAND = (
+    "Invoke-WebRequest -Uri $env:BRIGADE_HTTPS_PRIME_URL -Method Head -UseBasicParsing | Out-Null"
+)
 _JSONRPC_INIT_REQUEST = json.dumps(
     {
         "jsonrpc": "2.0",
@@ -298,6 +305,65 @@ def _managed_executable_is_ready(path: Path, *, byte_size: int, sha256: str) -> 
     return bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
 
 
+def _is_certificate_verify_failure(exc: BaseException) -> bool:
+    reason: BaseException | object = exc
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+    if isinstance(reason, ssl.CertificateError):
+        return True
+    message = str(exc)
+    if isinstance(reason, BaseException):
+        message = f"{message} {reason}"
+    return "CERTIFICATE_VERIFY_FAILED" in message.upper()
+
+
+def _windows_powershell_exe() -> str:
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    candidate = Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    if candidate.is_file():
+        return str(candidate)
+    found = shutil.which("powershell.exe") or shutil.which("powershell")
+    return found if found is not None else "powershell.exe"
+
+
+def _prime_windows_https_roots(url: str, *, timeout: float) -> bool:
+    """Run a bounded native Windows HTTPS HEAD request to refresh trusted roots."""
+    environment = os.environ.copy()
+    environment[_WINDOWS_HTTPS_PRIME_URL_ENV] = url
+    try:
+        completed = subprocess.run(
+            [
+                _windows_powershell_exe(),
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                _WINDOWS_HTTPS_PRIME_COMMAND,
+            ],
+            shell=False,
+            capture_output=True,
+            timeout=timeout,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def _default_urlopen(url: str) -> Any:
+    return urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT_SECONDS)
+
+
+def _urlopen_default_with_windows_cert_retry(url: str) -> Any:
+    try:
+        return _default_urlopen(url)
+    except urllib.error.URLError as exc:
+        if not _is_certificate_verify_failure(exc):
+            raise
+        if not _prime_windows_https_roots(url, timeout=_WINDOWS_HTTPS_PRIME_TIMEOUT_SECONDS):
+            raise
+        return _default_urlopen(url)
+
+
 def verify_cached_asset(path: Path, *, byte_size: int, sha256: str) -> None:
     """Verify cached asset byte size and SHA-256 digest."""
     _validate_expected(byte_size=byte_size, sha256=sha256)
@@ -331,7 +397,9 @@ def fetch_asset_to_cache(
     def open_url(url: str) -> Any:
         if opener is not None:
             return opener(url)
-        return urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT_SECONDS)
+        if sys.platform == "win32":
+            return _urlopen_default_with_windows_cert_retry(url)
+        return _default_urlopen(url)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=cache_path.parent, prefix=f".{cache_path.name}.", suffix=".tmp")

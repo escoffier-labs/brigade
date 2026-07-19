@@ -58,3 +58,21 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
+
+  windows-native-acceptance:
+    name: windows-native-acceptance
+    needs: build-and-publish
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Run Windows native acceptance (published CLI)
+        shell: powershell
+        env:
+          BRIGADE_VERSION: ${{ github.ref_name }}
+        run: |
+          $version = $env:BRIGADE_VERSION.Substring(1)
+          & "${{ github.workspace }}\scripts\windows-native-acceptance.ps1" -InstallMode pypi -BrigadeVersion $version

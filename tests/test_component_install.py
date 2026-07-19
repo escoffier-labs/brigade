@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import ssl
 import subprocess
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -14,8 +16,13 @@ import brigade
 from brigade import component_install, component_manifest, component_paths, component_state
 from brigade.component_install import (
     ComponentInstallError,
+    _WINDOWS_HTTPS_PRIME_COMMAND,
+    _WINDOWS_HTTPS_PRIME_URL_ENV,
+    _is_certificate_verify_failure,
+    _prime_windows_https_roots,
     _restore_managed_executables,
     _snapshot_managed_executables,
+    _urlopen_default_with_windows_cert_retry,
     build_setup_plan,
     fetch_asset_to_cache,
     materialize_executable,
@@ -326,6 +333,118 @@ def test_fetch_asset_accepts_https_to_https_redirect(tmp_path):
     assert result == cache_path
     assert opener.responses[0].geturl() == final_url
     verify_cached_asset(cache_path, byte_size=byte_size, sha256=sha256)
+
+
+def test_is_certificate_verify_failure_detects_ssl_and_message():
+    cert_error = ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED")
+    assert _is_certificate_verify_failure(urllib.error.URLError(cert_error))
+    assert _is_certificate_verify_failure(urllib.error.URLError("CERTIFICATE_VERIFY_FAILED"))
+    assert not _is_certificate_verify_failure(urllib.error.URLError("connection refused"))
+
+
+def test_urlopen_default_retries_after_windows_cert_prime(monkeypatch):
+    calls: list[str] = []
+    cert_error = urllib.error.URLError(ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED"))
+
+    def fake_urlopen(url: str):
+        calls.append(url)
+        if len(calls) == 1:
+            raise cert_error
+        return object()
+
+    monkeypatch.setattr(component_install, "_default_urlopen", fake_urlopen)
+    monkeypatch.setattr(component_install, "_prime_windows_https_roots", lambda url, timeout: True)
+    assert _urlopen_default_with_windows_cert_retry("https://example.invalid/asset") is not None
+    assert calls == ["https://example.invalid/asset", "https://example.invalid/asset"]
+
+
+def test_urlopen_default_preserves_cert_failure_when_prime_fails(monkeypatch):
+    cert_error = urllib.error.URLError(ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED"))
+
+    def fake_urlopen(url: str):
+        raise cert_error
+
+    monkeypatch.setattr(component_install, "_default_urlopen", fake_urlopen)
+    monkeypatch.setattr(component_install, "_prime_windows_https_roots", lambda url, timeout: False)
+    with pytest.raises(urllib.error.URLError):
+        _urlopen_default_with_windows_cert_retry("https://example.invalid/asset")
+
+
+def test_fetch_asset_default_opener_retries_cert_failure_on_windows(tmp_path, monkeypatch):
+    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    cache_path = tmp_path / "cache" / sha256 / asset.asset_name
+    calls: list[str] = []
+    cert_error = urllib.error.URLError(ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED"))
+
+    def fake_urlopen(url: str):
+        calls.append(url)
+        if len(calls) == 1:
+            raise cert_error
+        return FakeOpener({asset.download_url: payload})(url)
+
+    monkeypatch.setattr(component_install.sys, "platform", "win32")
+    monkeypatch.setattr(component_install, "_default_urlopen", fake_urlopen)
+    monkeypatch.setattr(component_install, "_prime_windows_https_roots", lambda url, timeout: True)
+    result = fetch_asset_to_cache(asset, cache_path=cache_path, offline=False)
+    assert result == cache_path
+    assert calls == [asset.download_url, asset.download_url]
+    verify_cached_asset(cache_path, byte_size=byte_size, sha256=sha256)
+
+
+def test_fetch_asset_custom_opener_does_not_retry_cert_failure_on_windows(tmp_path, monkeypatch):
+    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
+    cert_error = urllib.error.URLError(ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED"))
+
+    def boom(url: str):
+        raise cert_error
+
+    monkeypatch.setattr(component_install.sys, "platform", "win32")
+
+    def fail_prime(*_args, **_kwargs):
+        pytest.fail("custom opener must not trigger Windows HTTPS priming")
+
+    monkeypatch.setattr(component_install, "_prime_windows_https_roots", fail_prime)
+    with pytest.raises(urllib.error.URLError):
+        fetch_asset_to_cache(asset, cache_path=cache_path, offline=False, opener=boom)
+
+
+def test_fetch_asset_default_opener_does_not_retry_non_cert_failure_on_windows(tmp_path, monkeypatch):
+    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
+    other_error = urllib.error.URLError("connection refused")
+
+    def boom(url: str):
+        raise other_error
+
+    monkeypatch.setattr(component_install.sys, "platform", "win32")
+    monkeypatch.setattr(component_install, "_default_urlopen", boom)
+
+    def fail_prime(*_args, **_kwargs):
+        pytest.fail("non-certificate failures must not trigger Windows HTTPS priming")
+
+    monkeypatch.setattr(component_install, "_prime_windows_https_roots", fail_prime)
+    with pytest.raises(urllib.error.URLError):
+        fetch_asset_to_cache(asset, cache_path=cache_path, offline=False)
+
+
+def test_windows_https_prime_passes_url_via_environment(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = list(argv)
+        captured["env"] = dict(kwargs["env"])
+        captured["shell"] = kwargs["shell"]
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(component_install.subprocess, "run", fake_run)
+    url = 'https://example.invalid/asset"; Remove-Item -Recurse C:\\'
+    assert _prime_windows_https_roots(url, timeout=1.0)
+    assert captured["shell"] is False
+    assert captured["env"][_WINDOWS_HTTPS_PRIME_URL_ENV] == url
+    assert url not in " ".join(captured["argv"])
+    assert captured["argv"][-1] == _WINDOWS_HTTPS_PRIME_COMMAND
 
 
 def test_fetch_asset_fsyncs_verified_download_before_replace(tmp_path, monkeypatch):
