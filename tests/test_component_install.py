@@ -1096,8 +1096,23 @@ def test_run_post_install_smoke_rejects_miseledger_nonzero_exit(tmp_path):
         run_post_install_smoke(managed)
 
 
+SESSIONFIND_V060_HELP = (
+    "sessionfind list [--source KIND] ...\nsessionfind search <query> ...\nsessionfind <query> ...\n"
+)
+
+
 def test_run_post_install_smoke_accepts_sessionfind_help_exit_zero(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
+    run_post_install_smoke(managed)
+
+
+def test_run_post_install_smoke_accepts_sessionfind_v060_help_shape(tmp_path):
+    script = (
+        '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--help"]:\n'
+        f'    print({SESSIONFIND_V060_HELP!r}, end="")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
+    )
+    managed = _write_managed_smoke_stubs(tmp_path)
+    managed["sessionfind"] = _write_managed_stub(tmp_path, "sessionfind", script=script)
     run_post_install_smoke(managed)
 
 
@@ -1109,14 +1124,14 @@ def test_run_post_install_smoke_rejects_sessionfind_nonzero_exit(tmp_path):
         run_post_install_smoke(managed)
 
 
-def test_run_post_install_smoke_rejects_sessionfind_missing_usage(tmp_path):
+def test_run_post_install_smoke_rejects_sessionfind_missing_help(tmp_path):
     script = (
         '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--help"]:\n'
         '    print("options only")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
     )
     managed = _write_managed_smoke_stubs(tmp_path)
     managed["sessionfind"] = _write_managed_stub(tmp_path, "sessionfind", script=script)
-    with pytest.raises(ComponentInstallError, match="sessionfind smoke failed.*no usage text"):
+    with pytest.raises(ComponentInstallError, match="sessionfind smoke failed.*no help text"):
         run_post_install_smoke(managed)
 
 
