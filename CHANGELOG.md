@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-07-19
+
+### Fixed
+- Post-install smoke now accepts sessionfind v0.6.0's successful `--help` exit while retaining absolute managed-path and usage-text validation. (#355 / PR #370)
+
 ## [0.23.1] - 2026-07-19
 
 ### Added
@@ -813,7 +818,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.23.1...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.23.2...HEAD
+[0.23.2]: https://github.com/escoffier-labs/brigade/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/escoffier-labs/brigade/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/escoffier-labs/brigade/compare/v0.22.0...v0.23.0
 [0.8.1]: https://github.com/escoffier-labs/brigade/compare/v0.8.0...v0.8.1
