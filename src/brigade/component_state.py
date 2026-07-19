@@ -174,9 +174,9 @@ def state_digest_map(state: InstalledState) -> dict[str, str]:
 def should_rotate_previous(current: InstalledState | None, next_state: InstalledState) -> bool:
     """Return True when the previous state should rotate to the current one.
 
-    Rotation happens on first install, manifest revision change, or any
-    component digest change. Idempotent repeat installs with identical
-    manifest revisions and digest maps leave the previous state untouched.
+    Rotation happens on manifest revision change or any component digest
+    change. Idempotent repeat installs with identical manifest revisions
+    and digest maps leave the previous state untouched.
     """
     if current is None:
         return False
