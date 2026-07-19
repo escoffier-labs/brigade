@@ -93,7 +93,7 @@ Prior path: `component_paths.installed_previous_state_path(data_root)` → `<dat
   "brigade_version": "0.23.0",
   "manifest_revision": "2026-07-18",
   "platform": "linux-amd64",
-  "timestamp": "2026-07-19T06:00:00.000000+00:00",
+  "installed_at": "2026-07-19T06:00:00.000000+00:00",
   "components": {
     "graphtrail": {
       "component_revision": "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb",
@@ -167,7 +167,7 @@ class InstalledState:
     brigade_version: str
     manifest_revision: str
     platform: str
-    timestamp: str
+    installed_at: str
     components: dict[str, InstalledComponentRecord]
 
 def load_installed_state(path: Path) -> InstalledState | None
@@ -218,6 +218,7 @@ import os
 import sys
 from pathlib import Path
 
+import brigade
 from brigade import component_manifest
 
 GRAPHTRAIL_SHA = "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb"
@@ -234,16 +235,74 @@ def linux_env(root: Path) -> dict[str, str]:
     }
 
 
-def asset_bytes(*, byte_size: int, sha256: str) -> bytes:
-    body = (sha256 * ((byte_size // 64) + 1)).encode("ascii")[:byte_size]
-    assert hashlib.sha256(body).hexdigest() == sha256
-    return body
+def fixture_payload(component_id: str, *, platform: str = "linux-amd64") -> tuple[bytes, int, str]:
+    """Return (payload_bytes, byte_size, sha256) for deterministic offline fixtures."""
+    body = f"fixture:{component_id}:{platform}\n".encode("ascii")
+    digest = hashlib.sha256(body).hexdigest()
+    return body, len(body), digest
 
 
-def write_verified_cache(cache_path: Path, *, byte_size: int, sha256: str) -> None:
+def write_verified_cache(cache_path: Path, *, payload: bytes) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_bytes(asset_bytes(byte_size=byte_size, sha256=sha256))
+    cache_path.write_bytes(payload)
     cache_path.chmod(0o755)
+
+
+def test_manifest_asset(component_id: str, *, platform: str = "linux-amd64") -> component_manifest.ComponentAsset:
+    _, byte_size, sha256 = fixture_payload(component_id, platform=platform)
+    asset_name = f"{component_id}-{platform}"
+    if platform.startswith("windows"):
+        asset_name += ".exe"
+    return component_manifest.ComponentAsset(
+        asset_name=asset_name,
+        byte_size=byte_size,
+        sha256=sha256,
+        download_url=f"https://example.invalid/components/{component_id}/{platform}",
+    )
+
+
+def write_test_manifest(path: Path, *, platform: str = "linux-amd64", brigade_version: str) -> component_manifest.ComponentManifest:
+    """Write a manifest whose digests match fixture_payload bytes for offline engine tests."""
+    components: dict[str, object] = {}
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        _, byte_size, sha256 = fixture_payload(component_id, platform=platform)
+        asset = test_manifest_asset(component_id, platform=platform)
+        assert asset.byte_size == byte_size
+        assert asset.sha256 == sha256
+        components[component_id] = {
+            "component_revision": f"fixture-{component_id}",
+            "source": {"repository": f"https://example.invalid/{component_id}", "release_tag": "fixture"},
+            "executable": component_id,
+            "assets": {
+                platform: {
+                    "asset_name": asset.asset_name,
+                    "byte_size": byte_size,
+                    "sha256": sha256,
+                    "download_url": asset.download_url,
+                }
+            },
+        }
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "brigade_version": brigade_version,
+                "manifest_revision": "fixture",
+                "supported_platforms": list(component_manifest.SUPPORTED_PLATFORMS),
+                "components": components,
+            }
+        )
+    )
+    return component_manifest.load(path)
+
+
+def all_fixture_payloads(*, platform: str = "linux-amd64") -> dict[str, bytes]:
+    payloads: dict[str, bytes] = {}
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        payload, _, _ = fixture_payload(component_id, platform=platform)
+        asset = test_manifest_asset(component_id, platform=platform)
+        payloads[asset.download_url] = payload
+    return payloads
 
 
 def smoke_stub_script(name: str) -> str:
@@ -278,7 +337,7 @@ class FakeOpener:
         return BytesIO(self.payloads[url])
 ```
 
-Tests use small `byte_size` fixtures (for example 64 or 128 bytes) with precomputed `sha256` values checked into `tests/component_install_helpers.py`.
+Engine tests load `write_test_manifest(...)` from a temp path (or monkeypatch `component_manifest.load`) so every asset `byte_size` and `sha256` is derived from `fixture_payload` at test time. Never synthesize bytes to match an arbitrary digest.
 
 ## Implementation Recipe
 
@@ -342,7 +401,7 @@ def test_render_installed_state_round_trips_required_fields():
         brigade_version="0.23.0",
         manifest_revision="2026-07-19",
         platform="linux-amd64",
-        timestamp="2026-07-19T06:00:00+00:00",
+        installed_at="2026-07-19T06:00:00+00:00",
         components={
             "miseledger": InstalledComponentRecord(
                 component_revision="v0.6.0",
@@ -356,6 +415,7 @@ def test_render_installed_state_round_trips_required_fields():
     )
     payload = render_installed_state(state)
     assert payload["schema_version"] == 1
+    assert payload["installed_at"] == "2026-07-19T06:00:00+00:00"
     assert payload["components"]["miseledger"]["executable"].endswith("/brigade/bin/miseledger")
 
 
@@ -397,8 +457,10 @@ def test_verify_cached_asset_rejects_digest_mismatch(tmp_path):
 
 def test_setup_rejects_brigade_version_mismatch(tmp_path, monkeypatch):
     env = linux_env(tmp_path)
-    monkeypatch.setattr(component_install, "__version__", "9.9.9", raising=False)
-    monkeypatch.setattr(component_install, "brigade_version", lambda: "9.9.9")
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version="9.9.9")
+    monkeypatch.setattr("brigade.__version__", "0.23.0", raising=False)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
     rc = setup_native_components(env=env)
     assert rc == 1
 ```
@@ -416,17 +478,19 @@ def test_setup_rejects_brigade_version_mismatch(tmp_path, monkeypatch):
 
 ```python
 def test_fetch_asset_to_cache_writes_verified_bytes(tmp_path):
-    asset = _linux_miseledger_asset()
-    cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
-    payload = asset_bytes(byte_size=asset.byte_size, sha256=asset.sha256)
+    asset = test_manifest_asset("miseledger", platform="linux-amd64")
+    payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    assert asset.byte_size == byte_size
+    assert asset.sha256 == sha256
+    cache_path = tmp_path / "cache" / sha256 / asset.asset_name
     opener = FakeOpener({asset.download_url: payload})
     result = fetch_asset_to_cache(asset, cache_path=cache_path, offline=False, opener=opener)
     assert result == cache_path
-    verify_cached_asset(cache_path, byte_size=asset.byte_size, sha256=asset.sha256)
+    verify_cached_asset(cache_path, byte_size=byte_size, sha256=sha256)
 
 
 def test_fetch_asset_offline_fails_when_cache_corrupt(tmp_path):
-    asset = _linux_miseledger_asset()
+    asset = test_manifest_asset("miseledger", platform="linux-amd64")
     cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
     cache_path.parent.mkdir(parents=True)
     cache_path.write_bytes(b"bad")
@@ -435,14 +499,14 @@ def test_fetch_asset_offline_fails_when_cache_corrupt(tmp_path):
 
 
 def test_fetch_asset_online_replaces_bad_cache_only_after_verified_download(tmp_path):
-    asset = _linux_miseledger_asset()
-    cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
+    asset = test_manifest_asset("miseledger", platform="linux-amd64")
+    payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    cache_path = tmp_path / "cache" / sha256 / asset.asset_name
     cache_path.parent.mkdir(parents=True)
     cache_path.write_bytes(b"stale")
-    good = asset_bytes(byte_size=asset.byte_size, sha256=asset.sha256)
-    opener = FakeOpener({asset.download_url: good})
+    opener = FakeOpener({asset.download_url: payload})
     fetch_asset_to_cache(asset, cache_path=cache_path, offline=False, opener=opener)
-    verify_cached_asset(cache_path, byte_size=asset.byte_size, sha256=asset.sha256)
+    verify_cached_asset(cache_path, byte_size=byte_size, sha256=sha256)
 ```
 
 - [ ] Implement temp-sibling download, verify, `os.replace` into cache; offline raises when cache invalid; online never replaces until verified temp passes.
@@ -503,7 +567,7 @@ def test_run_post_install_smoke_invokes_absolute_paths_only(tmp_path):
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
     run_post_install_smoke(managed, runner=runner)
-    assert all(cmd[0] == managed[cmd[0].split("/")[-1].split(".")[0]] or cmd[0] in managed.values() for cmd in calls)
+    assert {cmd[0] for cmd in calls} == set(managed.values())
 ```
 
 - [ ] Implement smoke runner: `subprocess.run` with absolute argv[0], JSON-RPC stdin for graphtrail-mcp, accept exit 2 for sessionfind --help.
@@ -512,38 +576,36 @@ def test_run_post_install_smoke_invokes_absolute_paths_only(tmp_path):
 
 ### Task 6: Dry-run plan reporting
 
-**Files:** `src/brigade/component_install.py`, `src/brigade/cli/setup.py`, `tests/test_component_install.py`, `tests/test_cli_setup.py`.
+**Files:** `src/brigade/component_install.py`, `tests/test_component_install.py`.
 
 - [ ] Add failing tests:
 
 ```python
-def test_build_setup_plan_lists_all_four_components():
-    manifest = component_manifest.load()
-    roots = resolve_roots(env=linux_env(Path("/tmp/not-used")), system="linux")
+def test_build_setup_plan_lists_all_four_components(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "manifest-v1.json"
+    manifest = write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    roots = resolve_roots(env=linux_env(tmp_path), system="linux")
     plan = build_setup_plan(manifest, platform="linux-amd64", roots=roots)
     assert {action.component_id for action in plan} == set(component_manifest.KNOWN_COMPONENT_IDS)
 
 
-def test_setup_dry_run_writes_nothing(tmp_path, capsys):
+def test_setup_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
     env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
     rc = setup_native_components(dry_run=True, env=env)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "graphtrail-linux-amd64" in out
+    assert "miseledger-linux-amd64" in out
     assert "download" in out
     assert not (Path(env["XDG_DATA_HOME"]) / "brigade" / "installed.json").exists()
-
-
-def test_cli_setup_dry_run_flag(tmp_path, monkeypatch, capsys):
-    env = linux_env(tmp_path)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    assert cli.main(["setup", "--dry-run"]) == 0
 ```
 
-- [ ] Implement `build_setup_plan` and dry-run printer; wire CLI.
-- [ ] RED → GREEN.
-- [ ] Commit: `feat(cli): add brigade setup dry-run`.
+- [ ] Implement `build_setup_plan` and dry-run reporting in `component_install` only; no CLI files in this task.
+- [ ] RED → GREEN on `tests/test_component_install.py` focused tests.
+- [ ] Commit: `feat(components): add setup dry-run planning`.
 
 ### Task 7: Full install, idempotent repeat, and state commit after smoke
 
@@ -552,9 +614,12 @@ def test_cli_setup_dry_run_flag(tmp_path, monkeypatch, capsys):
 - [ ] Add failing tests:
 
 ```python
-def test_setup_install_writes_state_after_smoke(tmp_path):
+def test_setup_install_writes_state_after_smoke(tmp_path, monkeypatch):
     env = linux_env(tmp_path)
-    payloads = _all_manifest_payloads(env, platform="linux-amd64")
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    payloads = all_fixture_payloads(platform="linux-amd64")
     rc = setup_native_components(env=env, opener=FakeOpener(payloads))
     assert rc == 0
     state_path = Path(component_paths.installed_state_path(resolve_roots(env=env).data_root))
@@ -563,9 +628,12 @@ def test_setup_install_writes_state_after_smoke(tmp_path):
     assert set(state["components"]) == set(component_manifest.KNOWN_COMPONENT_IDS)
 
 
-def test_repeat_setup_is_idempotent_and_skips_previous_rotation(tmp_path):
+def test_repeat_setup_is_idempotent_and_skips_previous_rotation(tmp_path, monkeypatch):
     env = linux_env(tmp_path)
-    payloads = _all_manifest_payloads(env, platform="linux-amd64")
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    payloads = all_fixture_payloads(platform="linux-amd64")
     opener = FakeOpener(payloads)
     assert setup_native_components(env=env, opener=opener) == 0
     roots = resolve_roots(env=env)
@@ -582,7 +650,7 @@ def test_repeat_setup_is_idempotent_and_skips_previous_rotation(tmp_path):
 
 ### Task 8: Rollback via verified prior state
 
-**Files:** `src/brigade/component_install.py`, `tests/test_component_install.py`, `tests/test_cli_setup.py`.
+**Files:** `src/brigade/component_install.py`, `tests/test_component_install.py`.
 
 - [ ] Add failing tests:
 
@@ -610,7 +678,7 @@ def test_setup_rollback_fails_when_prior_cache_missing(tmp_path):
 
 **Files:** `src/brigade/cli/setup.py`, `src/brigade/cli/__init__.py`, `src/brigade/cli/_common.py`, `tests/test_cli_setup.py`, `tests/test_cli_help.py`.
 
-- [ ] Register parser:
+- [ ] Create `src/brigade/cli/setup.py` and register parser:
 
 ```python
 def register(sub: argparse._SubParsersAction) -> None:
@@ -622,6 +690,37 @@ def register(sub: argparse._SubParsersAction) -> None:
 ```
 
 - [ ] Add `setup` to `COMMAND_GROUPS` and `_setup_group.register(sub)` after `_add_group.register(sub)`.
+- [ ] Add failing CLI dispatch tests:
+
+```python
+def test_cli_setup_dry_run_flag(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert cli.main(["setup", "--dry-run"]) == 0
+
+
+def test_cli_setup_offline_flag(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert cli.main(["setup", "--offline"]) == 1
+
+
+def test_cli_setup_rollback_flag(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    _seed_installed_pair(env, revision_a="2026-07-18", revision_b="2026-07-19")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert cli.main(["setup", "--rollback"]) == 0
+```
+
 - [ ] RED: `tests/test_cli_help.py::test_command_groups_cover_every_command_exactly_once` fails until registration complete.
 - [ ] GREEN after wiring.
 - [ ] Commit: `feat(cli): register brigade setup command`.
@@ -661,12 +760,15 @@ brigade outcome capture brigade-work --run-id latest --kind skill
 - [x] Every behavior maps to a file, test name, RED/GREEN verify command, and commit message.
 - [x] `#356` reporting and `#357` porting explicitly excluded.
 - [x] No automatic PATH mutation; Cargo/Go fallbacks unchanged.
+- [x] Installed state uses `installed_at` consistently in schema, signatures, and tests.
+- [x] Offline engine tests derive digests from `fixture_payload`; no reverse SHA-256 synthesis.
+- [x] Task 6 is engine-only dry-run planning; Task 9 owns all CLI wiring and flag dispatch tests.
 - [x] Tests require temp roots and stubbed network; no live GitHub or real home directory.
 
 ## Placeholder Scan
 
-Run before committing this document (must return no matches outside this instruction line):
+Run before committing this document (scan body only; exclude this section):
 
 ```bash
-rg -n 'TODO|TBD|FIXME|XXX' docs/phase-355-pinned-component-setup.md && exit 1 || true
+python -c "from pathlib import Path; import re, sys; text=Path('docs/phase-355-pinned-component-setup.md').read_text(); body=text.split('## Placeholder Scan', 1)[0]; sys.exit(1 if re.search(r'TODO|TBD|FIXME|XXX', body) else 0)"
 ```
