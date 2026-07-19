@@ -280,7 +280,9 @@ def test_fetch_asset_cleans_up_temp_on_failure(tmp_path):
     assert leftovers == []
 
 
-def test_fetch_asset_oversized_stream_aborts_with_bounded_reads(tmp_path):
+def test_fetch_asset_oversized_stream_aborts_with_bounded_reads(tmp_path, monkeypatch):
+    small_chunk = 16
+    monkeypatch.setattr(component_install, "_READ_CHUNK", small_chunk)
     asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
     payload, byte_size, _sha256 = fixture_payload("miseledger", platform="linux-amd64")
     oversized = payload + b"extra-bytes"
@@ -291,9 +293,11 @@ def test_fetch_asset_oversized_stream_aborts_with_bounded_reads(tmp_path):
     opener = FakeOpener({asset.download_url: oversized})
     with pytest.raises(ComponentInstallError, match="byte_size"):
         fetch_asset_to_cache(asset, cache_path=cache_path, offline=False, opener=opener)
+    read_sizes = opener.responses[0].read_sizes
+    assert len(read_sizes) > 1
+    assert all(size <= small_chunk + 1 for size in read_sizes)
     assert cache_path.read_bytes() == stale
     assert list(cache_path.parent.glob(f".{cache_path.name}.*")) == []
-    assert all(size <= byte_size + 1 for size in opener.responses[0].read_sizes)
 
 
 def test_fetch_asset_rejects_https_to_http_redirect(tmp_path):
@@ -309,21 +313,44 @@ def test_fetch_asset_rejects_https_to_http_redirect(tmp_path):
     assert not cache_path.exists()
 
 
+def test_fetch_asset_accepts_https_to_https_redirect(tmp_path):
+    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    cache_path = tmp_path / "cache" / sha256 / asset.asset_name
+    final_url = asset.download_url.replace("/components/", "/components/redirect/", 1)
+    opener = FakeOpener(
+        {asset.download_url: payload},
+        final_urls={asset.download_url: final_url},
+    )
+    result = fetch_asset_to_cache(asset, cache_path=cache_path, offline=False, opener=opener)
+    assert result == cache_path
+    assert opener.responses[0].geturl() == final_url
+    verify_cached_asset(cache_path, byte_size=byte_size, sha256=sha256)
+
+
 def test_fetch_asset_fsyncs_verified_download_before_replace(tmp_path, monkeypatch):
     asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
     payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
     cache_path = tmp_path / "cache" / sha256 / asset.asset_name
     opener = FakeOpener({asset.download_url: payload})
-    fsync_calls: list[int] = []
+    events: list[str] = []
     original_fsync = os.fsync
+    original_replace = os.replace
 
     def recording_fsync(fd: int) -> None:
-        fsync_calls.append(fd)
+        events.append("fsync")
         original_fsync(fd)
 
+    def recording_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        events.append("replace")
+        original_replace(src, dst)
+
     monkeypatch.setattr(os, "fsync", recording_fsync)
+    monkeypatch.setattr(os, "replace", recording_replace)
     fetch_asset_to_cache(asset, cache_path=cache_path, offline=False, opener=opener)
-    assert fsync_calls
+    assert "fsync" in events
+    assert "replace" in events
+    assert events.index("fsync") < events.index("replace")
     verify_cached_asset(cache_path, byte_size=byte_size, sha256=sha256)
 
 
