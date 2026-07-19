@@ -89,6 +89,7 @@ def test_component_paths_never_use_repo_brigade(tmp_path):
     env = {"HOME": str(tmp_path / "home"), "XDG_DATA_HOME": str(tmp_path / "xdg-data")}
     data = component_paths.data_root(env=env, system="linux")
     installed = component_paths.installed_state_path(data)
+    previous = component_paths.installed_previous_state_path(data)
     executable = component_paths.managed_executable_path(data, "miseledger")
     cached = component_paths.cached_asset_path(
         component_paths.cache_root(env=env, system="linux"),
@@ -97,8 +98,16 @@ def test_component_paths_never_use_repo_brigade(tmp_path):
     )
     assert ".brigade" not in installed
     assert str(installed).endswith("brigade/installed.json")
+    assert str(previous).endswith("brigade/installed.previous.json")
     assert str(executable).endswith("brigade/bin/miseledger")
     assert str(cached).endswith(f"brigade/components/{_VALID_SHA}/miseledger-linux-amd64")
+
+
+def test_installed_previous_state_path_uses_brigade_subdir():
+    env = {"HOME": "/home/alice"}
+    data = component_paths.data_root(env=env, system="linux")
+    path = component_paths.installed_previous_state_path(data)
+    assert path.endswith("brigade/installed.previous.json")
 
 
 @pytest.mark.parametrize(
