@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-labelledby="workflow-title workflow-desc">
+  <title id="workflow-title">Follow the edges around a symbol</title>
+  <desc id="workflow-desc">Incoming and outgoing tree-sitter call edges define the neighborhood of serve.</desc>
+  <defs>
+    <linearGradient id="workflow-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1014"/>
+      <stop offset="1" stop-color="#0f1318"/>
+    </linearGradient>
+    <linearGradient id="workflow-card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#11161c"/>
+      <stop offset="1" stop-color="#0f1318"/>
+    </linearGradient>
+    <filter id="workflow-shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000000" flood-opacity="0.38"/>
+    </filter>
+    <marker id="workflow-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#e0a45c"/>
+    </marker>
+  </defs>
+  <rect width="960" height="540" fill="url(#workflow-bg)"/>
+  <circle cx="872" cy="52" r="220" fill="#e0a45c" opacity="0.07"/>
+  <circle cx="62" cy="506" r="180" fill="#e0a45c" opacity="0.04"/>
+  <rect x="36" y="28" width="888" height="484" rx="20" fill="url(#workflow-card)" stroke="#2a323d" filter="url(#workflow-shadow)"/>
+  <rect x="36" y="28" width="5" height="484" rx="2.5" fill="#e0a45c"/>
+  <text x="72" y="67" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="11" font-weight="600" letter-spacing="2.4">THE GRAPH</text>
+  <text x="72" y="96" fill="#dde3ea" font-family="Inter, ui-sans-serif, sans-serif" font-size="21" font-weight="700" letter-spacing="-0.6">Follow the edges around a symbol</text>
+  <text x="72" y="119" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="11">Incoming and outgoing tree-sitter call edges define the neighborhood of serve.</text>
+  <text x="888" y="67" text-anchor="end" fill="#7d8590" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">symbol: serve · depth 1</text>
+  <line x1="72" y1="139" x2="888" y2="139" stroke="#1e242c"/>
+  <text x="72.0" y="164" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.7">CALLERS · WHO REACHES ME</text>
+  <text x="354.0" y="164" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.7">FOCUS</text>
+  <text x="636.0" y="164" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.7">CALLEES · WHO I REACH</text>
+  <line class="workflow-edge" x1="324.0" y1="230.0" x2="354.0" y2="271.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="324.0" y1="312.0" x2="354.0" y2="271.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="606.0" y1="271.0" x2="636.0" y2="230.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="606.0" y1="271.0" x2="636.0" y2="312.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <rect x="72.0" y="196.0" width="252.0" height="68" rx="12" fill="#11161c" stroke="#2a323d"/>
+  <text class="workflow-node-label" x="88.0" y="225.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">main</text>
+  <text x="88.0" y="245.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">graphtrail-mcp.rs</text>
+  <rect x="72.0" y="278.0" width="252.0" height="68" rx="12" fill="#0f1318" stroke="#1e242c"/>
+  <text class="workflow-node-label" x="88.0" y="307.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">serve_returns_error</text>
+  <text x="88.0" y="327.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">tests/mcp.rs</text>
+  <rect x="354.0" y="237.0" width="252.0" height="68" rx="12" fill="#0f1318" stroke="#e0a45c"/>
+  <text class="workflow-node-label" x="370.0" y="274.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">serve</text>
+  <text x="370.0" y="293.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">src/mcp.rs</text>
+  <text class="workflow-badge" x="370.0" y="254.0" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="8" font-weight="600" letter-spacing="1.2">IMPACT</text>
+  <rect x="636.0" y="196.0" width="252.0" height="68" rx="12" fill="#11161c" stroke="#e0a45c"/>
+  <text class="workflow-node-label" x="652.0" y="225.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">handle_request</text>
+  <text x="652.0" y="245.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">hops=1 · mcp.rs</text>
+  <rect x="636.0" y="278.0" width="252.0" height="68" rx="12" fill="#11161c" stroke="#2a323d"/>
+  <text class="workflow-node-label" x="652.0" y="307.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">call_tool</text>
+  <text x="652.0" y="327.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">hops=2 from handle_request</text>
+  <line x1="72" y1="398" x2="888" y2="398" stroke="#1e242c"/>
+  <text x="72" y="427" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.6">CONTEXT PACK</text>
+  <text x="72" y="455" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="13" font-weight="600">entry points + callers + callees + related files</text>
+  <text x="72" y="478" fill="#7d8590" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">An agent loads this neighborhood before editing the focus symbol.</text>
+</svg>

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Website and docs
+    url: https://graphtrail.escoffierlabs.dev
+    about: How GraphTrail works, the MCP server, and the command surface. Browse there before filing an issue.
+  - name: Security report
+    url: https://github.com/escoffier-labs/graphtrail/security/policy
+    about: Do not file security issues publicly. See SECURITY.md.

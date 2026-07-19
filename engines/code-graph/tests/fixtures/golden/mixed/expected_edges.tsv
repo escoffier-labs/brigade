@@ -1,0 +1,10 @@
+# source_file	source	line	target_file	target
+go/caller.go	run	6	go/pkg/pkg.go	Func
+python/pkg/commands/sub/caller.py	run	6	python/pkg/commands/handoff_cmd.py	lint
+python/pkg/commands/sub/caller.py	run	7	python/pkg/commands/sub/sibling.py	func
+src/bin/graphtrail-mcp.rs	main	4	src/mcp.rs	serve
+src/lib.rs	run	14	src/factory.rs	build
+src/lib.rs	run	15	src/m.rs	f
+src/lib.rs	run	16	src/m.rs	g
+src/lib.rs	run	17	src/lib.rs	A.new
+ts/src/app/caller.ts	run	4	ts/src/util.ts	parse

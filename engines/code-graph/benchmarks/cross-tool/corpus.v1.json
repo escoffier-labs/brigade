@@ -1,0 +1,64 @@
+{
+  "corpus_schema_version": 1,
+  "result_schema_version": 1,
+  "fixture_version": "polyglot-v1",
+  "response_budget_chars": 4000,
+  "languages": ["python", "typescript", "rust", "go"],
+  "cases": [
+    {
+      "id": "typescript-symbol-navigation",
+      "task": "Find the request router and the service function it invokes.",
+      "fixture_variant": "base",
+      "behavior": "high_degree_hub",
+      "graphtrail_mode": "context",
+      "expected_files": ["typescript/router.ts", "typescript/service.ts"],
+      "expected_tokens": ["routeRequest"]
+    },
+    {
+      "id": "rust-high-degree-impact",
+      "task": "Trace the central Rust routing hub and identify its downstream handlers.",
+      "fixture_variant": "base",
+      "behavior": "high_degree_hub",
+      "graphtrail_mode": "context",
+      "expected_files": ["rust/src/lib.rs"],
+      "expected_tokens": ["dispatch"]
+    },
+    {
+      "id": "go-disconnected-named-file",
+      "task": "Inspect the explicitly named but disconnected file go/disconnected.go.",
+      "fixture_variant": "base",
+      "behavior": "disconnected_named_file",
+      "graphtrail_mode": "context",
+      "expected_files": [],
+      "expected_tokens": ["offlineSummary"]
+    },
+    {
+      "id": "python-unresolved-reference",
+      "task": "Find the Python call whose target has no definition in the fixture.",
+      "fixture_variant": "base",
+      "behavior": "unresolved_reference",
+      "graphtrail_mode": "context",
+      "expected_files": ["python/unresolved.py"],
+      "expected_tokens": ["missing_gateway"]
+    },
+    {
+      "id": "python-affected-tests",
+      "task": "Which tests are affected when python/service.py changes?",
+      "fixture_variant": "base",
+      "behavior": "test_attribution",
+      "graphtrail_mode": "affected",
+      "changed_files": ["python/service.py"],
+      "expected_files": ["python/test_service.py"],
+      "expected_tokens": []
+    },
+    {
+      "id": "typescript-branch-drift",
+      "task": "After moving from the indexed baseline branch to the alternate branch, determine whether the index describes the checked-out branch.",
+      "fixture_variant": "drift",
+      "behavior": "branch_drift",
+      "graphtrail_mode": "doctor",
+      "expected_files": [],
+      "expected_tokens": ["index mismatch"]
+    }
+  ]
+}
