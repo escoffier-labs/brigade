@@ -231,3 +231,16 @@ jobs:
           if (-not (Test-Path (Join-Path $target "tools/antislop.md"))) { throw "missing antislop tool" }
           if (-not (Test-Path (Join-Path $target "INSTALL_FOR_AGENTS.md"))) { throw "missing full-kit guide" }
           if (-not (Test-Path (Join-Path $target "rules/issue-tdd-loop.md"))) { throw "missing issue/TDD rule" }
+
+  windows-native-acceptance:
+    name: windows-native-acceptance
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Run Windows native acceptance (source install)
+        shell: powershell
+        run: |
+          & "${{ github.workspace }}\scripts\windows-native-acceptance.ps1" -InstallMode source -RepoRoot "${{ github.workspace }}"

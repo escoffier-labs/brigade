@@ -56,7 +56,8 @@ Thumbs.db
 /USER.md
 /hooks/
 /memory/
-/scripts/
+/scripts/*
+!/scripts/windows-native-acceptance.ps1
 /skills/
 
 # Local plan/spec scratch dirs only. Reviewed planning artifacts ARE
