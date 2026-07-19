@@ -214,8 +214,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import sys
 from pathlib import Path
 
 import brigade
@@ -223,6 +221,7 @@ from brigade import component_manifest
 
 GRAPHTRAIL_SHA = "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb"
 GRAPHTRAIL_BASE = "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/"
+FIXTURE_REPOSITORY = "example/components"
 
 
 def linux_env(root: Path) -> dict[str, str]:
@@ -235,11 +234,46 @@ def linux_env(root: Path) -> dict[str, str]:
     }
 
 
+def smoke_stub_script(name: str) -> str:
+    if name == "graphtrail":
+        return f'#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--version"]:\n    print("graphtrail test 0.4.0")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
+    if name == "graphtrail-mcp":
+        return (
+            '#!/usr/bin/env python3\nimport json, sys\n'
+            'req = json.load(sys.stdin)\n'
+            'assert req.get("method") == "initialize"\n'
+            'print(json.dumps({"jsonrpc": "2.0", "id": req.get("id"), "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "graphtrail-mcp", "version": "0.4.0"}}}))\n'
+        )
+    if name == "miseledger":
+        return '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["version"]:\n    print("miseledger test 0.6.0")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
+    if name == "sessionfind":
+        return '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--help"]:\n    print("usage: sessionfind [options]")\n    raise SystemExit(2)\nraise SystemExit(1)\n'
+    raise ValueError(name)
+
+
 def fixture_payload(component_id: str, *, platform: str = "linux-amd64") -> tuple[bytes, int, str]:
-    """Return (payload_bytes, byte_size, sha256) for deterministic offline fixtures."""
-    body = f"fixture:{component_id}:{platform}\n".encode("ascii")
+    """Return (payload_bytes, byte_size, sha256) for runnable smoke-stub fixture bytes."""
+    lines = smoke_stub_script(component_id).splitlines(keepends=True)
+    if lines and lines[0].startswith("#!"):
+        lines.insert(1, f"# platform: {platform}\n")
+    else:
+        lines.insert(0, f"# platform: {platform}\n")
+    body = "".join(lines).encode("utf-8")
     digest = hashlib.sha256(body).hexdigest()
     return body, len(body), digest
+
+
+def fixture_asset_name(component_id: str, *, platform: str) -> str:
+    base = f"{component_id}-{platform}"
+    if platform == "windows-amd64":
+        return f"{base}.exe"
+    return base
+
+
+def test_component_revision(component_id: str) -> str:
+    if component_id in ("graphtrail", "graphtrail-mcp"):
+        return GRAPHTRAIL_SHA
+    return "fixture-revision"
 
 
 def write_verified_cache(cache_path: Path, *, payload: bytes) -> None:
@@ -250,37 +284,36 @@ def write_verified_cache(cache_path: Path, *, payload: bytes) -> None:
 
 def test_manifest_asset(component_id: str, *, platform: str = "linux-amd64") -> component_manifest.ComponentAsset:
     _, byte_size, sha256 = fixture_payload(component_id, platform=platform)
-    asset_name = f"{component_id}-{platform}"
-    if platform.startswith("windows"):
-        asset_name += ".exe"
+    asset_name = fixture_asset_name(component_id, platform=platform)
     return component_manifest.ComponentAsset(
         asset_name=asset_name,
         byte_size=byte_size,
         sha256=sha256,
-        download_url=f"https://example.invalid/components/{component_id}/{platform}",
+        download_url=f"https://example.invalid/components/{asset_name}",
     )
 
 
-def write_test_manifest(path: Path, *, platform: str = "linux-amd64", brigade_version: str) -> component_manifest.ComponentManifest:
+def write_test_manifest(path: Path, *, brigade_version: str) -> component_manifest.ComponentManifest:
     """Write a manifest whose digests match fixture_payload bytes for offline engine tests."""
     components: dict[str, object] = {}
     for component_id in component_manifest.KNOWN_COMPONENT_IDS:
-        _, byte_size, sha256 = fixture_payload(component_id, platform=platform)
-        asset = test_manifest_asset(component_id, platform=platform)
-        assert asset.byte_size == byte_size
-        assert asset.sha256 == sha256
+        assets: dict[str, object] = {}
+        for platform in component_manifest.SUPPORTED_PLATFORMS:
+            _, byte_size, sha256 = fixture_payload(component_id, platform=platform)
+            asset = test_manifest_asset(component_id, platform=platform)
+            assert asset.byte_size == byte_size
+            assert asset.sha256 == sha256
+            assets[platform] = {
+                "asset_name": asset.asset_name,
+                "byte_size": byte_size,
+                "sha256": sha256,
+                "download_url": asset.download_url,
+            }
         components[component_id] = {
-            "component_revision": f"fixture-{component_id}",
-            "source": {"repository": f"https://example.invalid/{component_id}", "release_tag": "fixture"},
+            "component_revision": test_component_revision(component_id),
+            "source": {"repository": FIXTURE_REPOSITORY, "release_tag": "fixture"},
             "executable": component_id,
-            "assets": {
-                platform: {
-                    "asset_name": asset.asset_name,
-                    "byte_size": byte_size,
-                    "sha256": sha256,
-                    "download_url": asset.download_url,
-                }
-            },
+            "assets": assets,
         }
     path.write_text(
         json.dumps(
@@ -305,23 +338,6 @@ def all_fixture_payloads(*, platform: str = "linux-amd64") -> dict[str, bytes]:
     return payloads
 
 
-def smoke_stub_script(name: str) -> str:
-    if name == "graphtrail":
-        return f'#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--version"]:\n    print("graphtrail test 0.4.0")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
-    if name == "graphtrail-mcp":
-        return (
-            '#!/usr/bin/env python3\nimport json, sys\n'
-            'req = json.load(sys.stdin)\n'
-            'assert req.get("method") == "initialize"\n'
-            'print(json.dumps({"jsonrpc": "2.0", "id": req.get("id"), "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "graphtrail-mcp", "version": "0.4.0"}}}))\n'
-        )
-    if name == "miseledger":
-        return '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["version"]:\n    print("miseledger test 0.6.0")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
-    if name == "sessionfind":
-        return '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--help"]:\n    print("usage: sessionfind [options]")\n    raise SystemExit(2)\nraise SystemExit(1)\n'
-    raise ValueError(name)
-
-
 class FakeOpener:
     def __init__(self, payloads: dict[str, bytes]):
         self.payloads = payloads
@@ -337,7 +353,7 @@ class FakeOpener:
         return BytesIO(self.payloads[url])
 ```
 
-Engine tests load `write_test_manifest(...)` from a temp path (or monkeypatch `component_manifest.load`) so every asset `byte_size` and `sha256` is derived from `fixture_payload` at test time. Never synthesize bytes to match an arbitrary digest.
+Engine tests load `write_test_manifest(...)` from a temp path (or monkeypatch `component_manifest.load`) so every component publishes the full five-platform matrix, `source.repository` stays an `owner/name` pair, and every asset `byte_size` and `sha256` is derived from executable `fixture_payload` stub bytes at test time. Full-install tests materialize those same bytes so post-install smoke exercises real stub behavior. Never synthesize bytes to match an arbitrary digest.
 
 ## Implementation Recipe
 
@@ -553,24 +569,27 @@ def test_install_restores_prior_executable_when_smoke_fails(tmp_path, monkeypatc
 - [ ] Add failing test:
 
 ```python
+import subprocess
+
+
 def test_run_post_install_smoke_invokes_absolute_paths_only(tmp_path):
     managed = {}
     for name in ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"):
         path = tmp_path / name
-        path.write_text(smoke_stub_script(name))
+        path.write_bytes(fixture_payload(name, platform="linux-amd64")[0])
         path.chmod(0o755)
         managed[name] = str(path)
     calls: list[list[str]] = []
 
     def runner(argv, **kwargs):
         calls.append(list(argv))
-        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+        return subprocess.run(argv, **kwargs)
 
     run_post_install_smoke(managed, runner=runner)
     assert {cmd[0] for cmd in calls} == set(managed.values())
 ```
 
-- [ ] Implement smoke runner: `subprocess.run` with absolute argv[0], JSON-RPC stdin for graphtrail-mcp, accept exit 2 for sessionfind --help.
+- [ ] Implement smoke runner: `subprocess.run` with absolute argv[0], JSON-RPC stdin for graphtrail-mcp, accept exit 2 for sessionfind --help. Inject `runner` records argv then delegates to real `subprocess.run` so MCP JSON and sessionfind exit 2 are exercised.
 - [ ] RED → GREEN.
 - [ ] Commit: `feat(components): add post-install smoke suite`.
 
@@ -761,7 +780,8 @@ brigade outcome capture brigade-work --run-id latest --kind skill
 - [x] `#356` reporting and `#357` porting explicitly excluded.
 - [x] No automatic PATH mutation; Cargo/Go fallbacks unchanged.
 - [x] Installed state uses `installed_at` consistently in schema, signatures, and tests.
-- [x] Offline engine tests derive digests from `fixture_payload`; no reverse SHA-256 synthesis.
+- [x] Offline engine tests derive digests from executable `fixture_payload` stubs; no reverse SHA-256 synthesis.
+- [x] `write_test_manifest` publishes the full five-platform matrix with `owner/name` `source.repository` values.
 - [x] Task 6 is engine-only dry-run planning; Task 9 owns all CLI wiring and flag dispatch tests.
 - [x] Tests require temp roots and stubbed network; no live GitHub or real home directory.
 
