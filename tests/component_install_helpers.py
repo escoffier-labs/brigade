@@ -10,6 +10,7 @@ import brigade
 from brigade import component_manifest
 
 GRAPHTRAIL_SHA = "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb"
+GRAPHTRAIL_BASE = "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/"
 FIXTURE_REPOSITORY = "example/components"
 
 
@@ -76,6 +77,12 @@ def test_component_revision(component_id: str) -> str:
     return "fixture-revision"
 
 
+def write_verified_cache(cache_path: Path, *, payload: bytes) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(payload)
+    cache_path.chmod(0o755)
+
+
 def test_manifest_asset(
     component_id: str, *, platform: str = "linux-amd64"
 ) -> component_manifest.ComponentAsset:
@@ -123,3 +130,27 @@ def write_test_manifest(path: Path, *, brigade_version: str) -> component_manife
         )
     )
     return component_manifest.load(path)
+
+
+def all_fixture_payloads(*, platform: str = "linux-amd64") -> dict[str, bytes]:
+    payloads: dict[str, bytes] = {}
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        payload, _, _ = fixture_payload(component_id, platform=platform)
+        asset = test_manifest_asset(component_id, platform=platform)
+        payloads[asset.download_url] = payload
+    return payloads
+
+
+class FakeOpener:
+    def __init__(self, payloads: dict[str, bytes]):
+        self.payloads = payloads
+        self.calls: list[str] = []
+
+    def __call__(self, url: str, *args, **kwargs):
+        self.calls.append(url)
+        from io import BytesIO
+        from urllib.error import HTTPError
+
+        if url not in self.payloads:
+            raise HTTPError(url, 404, "not found", hdrs=None, fp=BytesIO(b""))
+        return BytesIO(self.payloads[url])
