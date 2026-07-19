@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-07-19
+
+### Added
+- Versioned component manifest v1 with pinned GraphTrail platform artifacts and provenance checks. (#353 / PR #367)
+- `brigade setup` installs those pinned native components transactionally, with dry-run, offline cache, rollback, smoke checks, and state recording. (#355 / PR #368)
+
+### Changed
+- Clarified cross-platform installation documentation. (#351)
+
 ## [0.23.0] - 2026-07-18
 
 ### Fixed
@@ -804,7 +813,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/escoffier-labs/brigade/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/escoffier-labs/brigade/compare/v0.22.0...v0.23.0
 [0.8.1]: https://github.com/escoffier-labs/brigade/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/escoffier-labs/brigade/compare/v0.7.0...v0.8.0
