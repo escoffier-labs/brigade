@@ -489,12 +489,13 @@ def call_greet():
             throw "graphtrail callers greet missing call_greet edge: $callersOutput"
         }
 
-        $acceptanceMarker = "brigade-win-acceptance-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-        $verifyScript = Join-Path $workRepo "verify_smoke.py"
-        ('print("{0}")' -f $acceptanceMarker) | Set-Content -Path $verifyScript -Encoding UTF8
+        $acceptanceMarker = "brigadewinacceptance$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        $verifyScriptName = "verify_$acceptanceMarker.py"
+        $verifyScript = Join-Path $workRepo $verifyScriptName
+        'print("ok")' | Set-Content -Path $verifyScript -Encoding UTF8
 
         Write-Step "brigade work verify run"
-        & brigade work verify run --target $workRepo --command "python verify_smoke.py" --capture brigade-work
+        & brigade work verify run --target $workRepo --command "python $verifyScriptName" --capture brigade-work
         if ($LASTEXITCODE -ne 0) { throw "work verify run failed" }
 
         $exportPath = Join-Path $acceptRoot "receipts.jsonl"

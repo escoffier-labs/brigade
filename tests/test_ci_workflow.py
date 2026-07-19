@@ -115,7 +115,7 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "--db $dbPath sync $workRepo" in text
     assert "callers greet" in text
     assert 'if ($callersOutput -notmatch "call_greet")' in text
-    assert "brigade-win-acceptance-" in text
+    assert "brigadewinacceptance" in text
     assert "brigade work verify run" in text
     assert "brigade receipts export miseledger" in text
     assert "import adapter" in text
@@ -232,6 +232,20 @@ def test_windows_native_acceptance_assigned_return_functions_do_not_leak_stdout(
             assert _powershell_line_consumes_success_stream(line), (
                 f"{name} leaks success-stream output from: {stripped}"
             )
+
+
+def test_windows_native_acceptance_miseledger_marker_is_in_verify_command_filename():
+    """MiseLedger indexes work-verify item.text (command text), not command stdout."""
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    section = text[text.index("$acceptanceMarker =") : text.index('Write-Step "Windows native acceptance passed"')]
+
+    assert "$acceptanceMarker = \"brigadewinacceptance$([guid]::NewGuid().ToString('N').Substring(0, 8))\"" in section
+    assert '$verifyScriptName = "verify_$acceptanceMarker.py"' in section
+    assert "$verifyScript = Join-Path $workRepo $verifyScriptName" in section
+    assert '--command "python $verifyScriptName"' in section
+    assert "& $miseledgerExe search $acceptanceMarker" in section
+    assert "verify_smoke.py" not in section
+    assert 'print("{0}")' not in section
 
 
 def test_windows_native_acceptance_brigade_version_regex_matches_cli_output():
