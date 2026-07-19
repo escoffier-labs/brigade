@@ -19,11 +19,13 @@ def test_current_release_has_one_fixed_section_with_recent_release_notes():
     assert text.count("### Fixed") == 1
     for expected in (
         "sessionfind v0.6.0",
+        "command-list",
         "`--help`",
-        "absolute managed-path",
-        "usage-text validation",
+        "usage-text",
+        "Windows",
+        "Go or Cargo",
         "#355",
-        "PR #370",
+        "PR #372",
     ):
         assert expected in text
 
