@@ -45,6 +45,7 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
             entry["status"] = result.status
         if result.exit_code is not None:
             entry["exit_code"] = result.exit_code
+        if result.exit_code is not None or result.timed_out:
             entry["timed_out"] = result.timed_out
         if result.stdout_log is not None:
             entry["stdout_log"] = result.stdout_log
@@ -115,6 +116,7 @@ def agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
         payload["transport_warning"] = dict(result.transport_warning)
     if result.exit_code is not None:
         payload["exit_code"] = result.exit_code
+    if result.exit_code is not None or result.timed_out:
         payload["timed_out"] = result.timed_out
     if result.stdout_log is not None:
         payload["stdout_log"] = result.stdout_log

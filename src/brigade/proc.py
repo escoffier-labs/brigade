@@ -5,12 +5,16 @@ from __future__ import annotations
 import errno
 import json
 import ntpath
+import os
+import signal
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 _STREAM_ENCODING = "utf-8"
 _UNSUPPORTED_WINDOWS_SUFFIXES: dict[str, str] = {
@@ -22,6 +26,113 @@ _UNSUPPORTED_WINDOWS_SUFFIXES: dict[str, str] = {
     ".msi": "Windows installer",
 }
 _WINDOWS_BATCH_SUFFIXES = frozenset({".cmd", ".bat"})
+_WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+_TIMED_OUT_DRAIN_SECONDS = 0.5
+
+
+class ProcessRegistry:
+    """Own cancellable subprocess groups for one worker dispatch."""
+
+    def __init__(self, *, terminate_grace: float = 0.5, kill_grace: float = 0.5) -> None:
+        self._terminate_grace = terminate_grace
+        self._kill_grace = kill_grace
+        self._lock = threading.Lock()
+        self._processes: set[subprocess.Popen[bytes]] = set()
+        self._canceled = False
+
+    def register(self, process: subprocess.Popen[bytes]) -> None:
+        with self._lock:
+            if not self._canceled:
+                self._processes.add(process)
+                return
+        _terminate_processes(
+            (process,),
+            terminate_grace=self._terminate_grace,
+            kill_grace=self._kill_grace,
+        )
+
+    def unregister(self, process: subprocess.Popen[bytes]) -> None:
+        with self._lock:
+            self._processes.discard(process)
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._canceled = True
+            processes = tuple(self._processes)
+        _terminate_processes(
+            processes,
+            terminate_grace=self._terminate_grace,
+            kill_grace=self._kill_grace,
+        )
+
+    def terminate(self, process: subprocess.Popen[bytes]) -> None:
+        _terminate_processes(
+            (process,),
+            terminate_grace=self._terminate_grace,
+            kill_grace=self._kill_grace,
+        )
+
+
+def _signal_process_group(process: subprocess.Popen[bytes], sig: int) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, sig)
+        elif sig == signal.SIGTERM:
+            process.terminate()
+        else:
+            process.kill()
+    except OSError:
+        pass
+
+
+def _terminate_windows_process_tree(process: subprocess.Popen[bytes], *, timeout: float) -> None:
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=max(timeout, 0.1),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _wait_for_processes(processes: tuple[subprocess.Popen[bytes], ...], timeout: float) -> None:
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while any(process.poll() is None for process in processes):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.01, remaining))
+
+
+def _terminate_processes(
+    processes: tuple[subprocess.Popen[bytes], ...],
+    *,
+    terminate_grace: float,
+    kill_grace: float,
+) -> None:
+    if not processes:
+        return
+    if os.name == "nt":
+        timeout = terminate_grace + kill_grace
+        for process in processes:
+            _terminate_windows_process_tree(process, timeout=timeout)
+        _wait_for_processes(processes, kill_grace)
+        return
+    for process in processes:
+        _signal_process_group(process, signal.SIGTERM)
+    _wait_for_processes(processes, terminate_grace)
+    for process in processes:
+        _signal_process_group(process, signal.SIGKILL)
+    _wait_for_processes(processes, kill_grace)
 
 
 @dataclass
@@ -215,8 +326,63 @@ def run(
     env: Optional[dict] = None,
     cwd: Optional[Path] = None,
     stdin: bytes | None = None,
+    process_registry: ProcessRegistry | None = None,
 ) -> Result:
     try:
+        if process_registry is not None:
+            process_group_kwargs: dict[str, Any] = {}
+            if os.name == "posix":
+                process_group_kwargs["start_new_session"] = True
+            elif os.name == "nt":
+                process_group_kwargs["creationflags"] = _WINDOWS_NEW_PROCESS_GROUP
+            process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+                env=env,
+                cwd=cwd,
+                shell=False,
+                **process_group_kwargs,
+            )
+            process_registry.register(process)
+            try:
+                process_stdout, process_stderr = process.communicate(input=stdin, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process_registry.terminate(process)
+                try:
+                    process_stdout, process_stderr = process.communicate(timeout=_TIMED_OUT_DRAIN_SECONDS)
+                except subprocess.TimeoutExpired as drain_exc:
+                    process_stdout, process_stderr = drain_exc.output, drain_exc.stderr
+                    for stream_name in ("stdout", "stderr"):
+                        stream = getattr(process, stream_name, None)
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except OSError:
+                                pass
+                result = _result_from_output(code=124, stdout=process_stdout, stderr=process_stderr)
+                timeout_detail = f"timeout after {timeout}s"
+                result_stderr = result.stderr
+                if result_stderr and not result_stderr.endswith("\n"):
+                    result_stderr += "\n"
+                return Result(
+                    code=124,
+                    stdout=result.stdout,
+                    stderr=result_stderr + timeout_detail,
+                    stdout_decode_error=result.stdout_decode_error,
+                    stderr_decode_error=result.stderr_decode_error,
+                )
+            except BaseException:
+                process_registry.terminate(process)
+                raise
+            finally:
+                process_registry.unregister(process)
+            return _result_from_output(
+                code=process.returncode,
+                stdout=process_stdout,
+                stderr=process_stderr,
+            )
         if stdin is None:
             cp = subprocess.run(
                 args,

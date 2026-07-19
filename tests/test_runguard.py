@@ -136,6 +136,28 @@ def test_run_lock_is_retained_when_terminal_receipt_cannot_be_written(tmp_path, 
     assert recovered["failure"]["prior_status"] == "artifact-collection"
 
 
+def test_recover_stale_dispatching_run_attributes_active_seat(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "status": "dispatching",
+                "active_seats": ["coder"],
+                "phase_owner": "chef",
+                "worker": "fallback-worker",
+                "orchestrator": "fallback-chef",
+            }
+        )
+    )
+
+    result = runguard._recover_run_artifact({"run_dir": str(run_dir), "pid": 4321})
+
+    assert result == "recovered"
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["failure"]["seat"] == "coder"
+
+
 def test_run_lock_release_does_not_delete_replacement_owner(tmp_path):
     repo = _repo(tmp_path)
     lock_path = runguard.lock_path(repo)
@@ -306,12 +328,13 @@ def test_run_lock_preserves_live_owner_when_pid_sidecar_is_missing_or_corrupt(tm
     assert json.loads((abandoned_run / "run.json").read_text())["status"] == "dispatching"
 
 
-def test_run_lock_recovers_dead_owner_run_to_typed_terminal_state(tmp_path):
+@pytest.mark.parametrize("prior_status", ["result-processing", "artifact-collection"])
+def test_run_lock_recovers_dead_owner_run_to_typed_terminal_state(tmp_path, prior_status):
     repo = _repo(tmp_path)
     abandoned_run = tmp_path / "abandoned-run"
     abandoned_run.mkdir()
     (abandoned_run / "run.json").write_text(
-        json.dumps({"schema": "brigade.run.v1", "status": "artifact-collection", "task": "inspect"})
+        json.dumps({"schema": "brigade.run.v1", "status": prior_status, "task": "inspect"})
     )
     lock_path = runguard.lock_path(repo)
     lock_path.mkdir(parents=True)
@@ -337,7 +360,7 @@ def test_run_lock_recovers_dead_owner_run_to_typed_terminal_state(tmp_path):
             "kind": "owner-process-exited",
             "detail": "run owner process 99999999 is no longer active",
             "owner_pid": 99999999,
-            "prior_status": "artifact-collection",
+            "prior_status": prior_status,
             "recovered_at": recovered["failure"]["recovered_at"],
         }
         assert recovered["finished_at"] == recovered["failure"]["recovered_at"]

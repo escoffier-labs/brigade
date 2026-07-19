@@ -17,7 +17,16 @@ from uuid import uuid4
 from . import localio, proc
 
 _NONTERMINAL_RUN_STATUSES = frozenset(
-    {"started", "planning", "dispatching", "synthesizing", "artifact-collection", "running"}
+    {
+        "started",
+        "planning",
+        "dispatching",
+        "result-processing",
+        "synthesizing",
+        "handoff",
+        "artifact-collection",
+        "running",
+    }
 )
 
 
@@ -310,6 +319,25 @@ def _recover_run_artifact(owner: dict[str, object] | None) -> str:
                 return "terminal"
     recovered_at = datetime.now(timezone.utc).isoformat()
     detail = f"run owner process {owner_pid} is no longer active"
+    failure_attribution: dict[str, object] = {}
+    stored_status = payload.get("status")
+    active_seats = payload.get("active_seats")
+    phase_owner = payload.get("phase_owner")
+    if stored_status == "dispatching" and isinstance(active_seats, list):
+        seats = [seat for seat in active_seats if isinstance(seat, str) and seat]
+        if len(seats) == 1:
+            failure_attribution["seat"] = seats[0]
+        elif seats:
+            failure_attribution["seats"] = seats
+    if not failure_attribution and isinstance(phase_owner, str) and phase_owner:
+        failure_attribution["seat"] = phase_owner
+    if not failure_attribution:
+        worker = payload.get("worker")
+        orchestrator = payload.get("orchestrator")
+        if isinstance(worker, str) and worker:
+            failure_attribution["seat"] = worker
+        elif isinstance(orchestrator, str) and orchestrator:
+            failure_attribution["seat"] = orchestrator
     workspace = owner.get("_lock_workspace")
     if isinstance(workspace, str) and workspace:
         payload.setdefault("cwd", workspace)
@@ -320,6 +348,7 @@ def _recover_run_artifact(owner: dict[str, object] | None) -> str:
     payload.update(
         {
             "status": "failed",
+            "status_started_at": recovered_at,
             "finished_at": recovered_at,
             "error": detail,
             "failure_phase": "stale-lock-recovery",
@@ -330,6 +359,7 @@ def _recover_run_artifact(owner: dict[str, object] | None) -> str:
                 "owner_pid": owner_pid,
                 "prior_status": prior_status,
                 "recovered_at": recovered_at,
+                **failure_attribution,
             },
         }
     )

@@ -75,9 +75,21 @@ def run_cloud_task(
     poll_interval: float = POLL_INTERVAL,
     sleep=time.sleep,
     clock=time.monotonic,
+    process_registry: proc.ProcessRegistry | None = None,
 ):
     """Submit, poll, and collect one Codex Cloud task. Mirrors run_agent's contract."""
     from .agents import AgentResult
+
+    def timeout_result(detail: str, *, task_id: str | None = None, text: str = ""):
+        return AgentResult(
+            text=text[:DIFF_CAP],
+            ok=False,
+            detail=detail[:200],
+            failure_kind="timeout",
+            thread_id=task_id,
+            status="timeout",
+            timed_out=True,
+        )
 
     argv = ["codex", "cloud", "exec", "--env", env_id]
     if attempts > 1:
@@ -86,8 +98,16 @@ def run_cloud_task(
         argv += ["--branch", branch]
     argv.append(prompt)
 
+    def run_command(command: list[str], *, command_timeout: float) -> proc.Result:
+        if process_registry is None:
+            return proc.run(command, timeout=command_timeout, cwd=cwd)
+        return proc.run(command, timeout=command_timeout, cwd=cwd, process_registry=process_registry)
+
     deadline = clock() + timeout
-    submit = proc.run(argv, timeout=min(timeout, SUBMIT_TIMEOUT), cwd=cwd)
+    submit = run_command(argv, command_timeout=min(timeout, SUBMIT_TIMEOUT))
+    if submit.code == 124:
+        detail = submit.stderr.strip() or submit.stdout.strip() or "exit 124"
+        return timeout_result(f"cloud submit timed out: {detail}")
     if submit.code != 0:
         detail = submit.stderr.strip() or submit.stdout.strip() or f"exit {submit.code}"
         return AgentResult(text="", ok=False, detail=f"cloud submit failed: {detail}"[:200])
@@ -103,12 +123,18 @@ def run_cloud_task(
     status_text = ""
     status_word = None
     while True:
-        st = proc.run(
+        st = run_command(
             ["codex", "cloud", "status", task_id],
-            timeout=min(POLL_TIMEOUT, remaining()),
-            cwd=cwd,
+            command_timeout=min(POLL_TIMEOUT, remaining()),
         )
         status_text = (st.stdout + "\n" + st.stderr).strip()
+        if st.code == 124:
+            detail = st.stderr.strip() or st.stdout.strip() or "exit 124"
+            return timeout_result(
+                f"cloud status timed out for task {task_id}: {detail}",
+                task_id=task_id,
+                text=status_text,
+            )
         if st.code == 0:
             status_word = _scan_status(status_text)
             if status_word in TERMINAL_FAIL:
@@ -122,23 +148,25 @@ def run_cloud_task(
             if status_word in TERMINAL_OK:
                 break
         if clock() >= deadline:
-            return AgentResult(
-                text=status_text[:DIFF_CAP],
-                ok=False,
-                detail=(
-                    f"cloud task {task_id} still pending after {int(timeout)}s; check `codex cloud status {task_id}`"
-                )[:200],
-                thread_id=task_id,
-                status="pending",
+            return timeout_result(
+                f"cloud task {task_id} timed out after {int(timeout)}s; check `codex cloud status {task_id}`",
+                task_id=task_id,
+                text=status_text,
             )
         sleep(poll_interval)
 
-    diff = proc.run(
+    diff = run_command(
         ["codex", "cloud", "diff", task_id],
-        timeout=min(DIFF_TIMEOUT, remaining(floor=30.0)),
-        cwd=cwd,
+        command_timeout=min(DIFF_TIMEOUT, remaining(floor=30.0)),
     )
     parts = [f"codex cloud task {task_id} [{status_word}]", status_text]
+    if diff.code == 124:
+        detail = diff.stderr.strip() or diff.stdout.strip() or "exit 124"
+        return timeout_result(
+            f"cloud diff timed out for task {task_id}: {detail}",
+            task_id=task_id,
+            text=status_text,
+        )
     if diff.code != 0:
         err = diff.stderr.strip() or f"exit {diff.code}"
         parts.append(f"WARNING: `codex cloud diff {task_id}` failed: {err[:300]}")

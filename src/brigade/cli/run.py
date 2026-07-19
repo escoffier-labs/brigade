@@ -6,13 +6,78 @@ import argparse
 import math
 import sys
 import time
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from subprocess import DEVNULL, STDOUT, Popen
+from typing import Callable, Iterator
 
 
 _DETACH_START_TIMEOUT_SECONDS = 30.0
 _DETACH_POLL_INTERVAL_SECONDS = 0.05
 _DEFAULT_RUN_LOCK_WAIT_SECONDS = 600.0
+
+
+@contextmanager
+def _terminalize_escaped_run(
+    output_dir: Path | None,
+    *,
+    seat: str | None,
+    should_terminalize: Callable[[], bool] | None = None,
+) -> Iterator[None]:
+    from .. import aboyeur as aboyeur_mod
+    from .. import runguard
+
+    try:
+        yield
+    except runguard.RetainRunLockError:
+        raise
+    except KeyboardInterrupt:
+        if (
+            (should_terminalize is None or should_terminalize())
+            and output_dir is not None
+            and (output_dir / "run.json").is_file()
+        ):
+            aboyeur_mod.record_run_termination(
+                output_dir,
+                status="canceled",
+                failure_phase=None,
+                failure_kind="keyboard-interrupt",
+                detail="run canceled by user",
+                seat=seat,
+            )
+        raise
+    except TimeoutError as exc:
+        detail = " ".join(str(exc).split()) or "run timed out"
+        if (
+            (should_terminalize is None or should_terminalize())
+            and output_dir is not None
+            and (output_dir / "run.json").is_file()
+        ):
+            aboyeur_mod.record_run_termination(
+                output_dir,
+                status="timeout",
+                failure_phase=None,
+                failure_kind="timeout",
+                detail=detail,
+                seat=seat,
+            )
+        raise
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {' '.join(str(exc).split()) or 'unexpected run failure'}"
+        if (
+            (should_terminalize is None or should_terminalize())
+            and output_dir is not None
+            and (output_dir / "run.json").is_file()
+        ):
+            aboyeur_mod.record_run_termination(
+                output_dir,
+                status="failed",
+                failure_phase=None,
+                failure_kind="unexpected-error",
+                detail=detail,
+                seat=seat,
+            )
+        raise
 
 
 def _non_negative_seconds(value: str) -> float:
@@ -245,13 +310,12 @@ def dispatch(args) -> int:
         if worker_error is not None:
             print(f"error: {worker_error}", file=sys.stderr)
             return 2
-    output_dir = None
-    if not args.no_artifacts:
-        output_dir = args.output_dir or aboyeur_mod.make_run_dir(run_cwd / ".brigade" / "runs")
     handoff_inbox = None
     if args.handoff:
         handoff_inbox = args.handoff_inbox or (run_cwd / ".claude" / "memory-handoffs")
     effective_sandbox = args.sandbox if args.sandbox is not None else loaded_roster.sandbox
+    advisory: list[str] = []
+    output_warnings: list[str] = []
     if args.read_only:
         advisory = _read_only_advisory(loaded_roster, effective_sandbox, worker=args.worker)
         output_warnings = _read_only_output_warnings(loaded_roster, worker=args.worker)
@@ -267,18 +331,6 @@ def dispatch(args) -> int:
             print("warning: direct Cursor read-only output is model-limited:", file=sys.stderr)
             for line in output_warnings:
                 print(f"  - {line}", file=sys.stderr)
-        if output_dir is not None and (advisory or output_warnings):
-            from .. import localio
-
-            localio.write_json(
-                output_dir / "read-only-enforcement.json",
-                {
-                    "read_only": True,
-                    "sandbox": effective_sandbox,
-                    "best_effort_agents": advisory,
-                    "output_warnings": output_warnings,
-                },
-            )
     # The dirty guard protects write runs from mixing agent edits with uncommitted
     # work. Dry, read-only, and worktree runs never edit the tree, so reviewing
     # uncommitted changes stays possible without --allow-dirty.
@@ -290,23 +342,57 @@ def dispatch(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    output_dir = None
+    if not args.no_artifacts:
+        output_dir = args.output_dir or aboyeur_mod.make_run_dir(run_cwd / ".brigade" / "runs")
+
     if args.detach:
         assert output_dir is not None
         return _dispatch_detached(
             args,
             run_cwd=run_cwd,
             roster_resolution=roster_resolution,
+            roster=loaded_roster,
             output_dir=output_dir,
         )
 
     worktree_cwd = None
     effective_cwd = run_cwd
     keep_worktree = False
+    lifecycle_seat = args.worker or loaded_roster.orchestrator
     try:
-        with runguard.run_lock(run_cwd, run_dir=output_dir, wait_seconds=args.wait):
+        with ExitStack() as lifecycle:
+            lifecycle.enter_context(_terminalize_escaped_run(output_dir, seat=lifecycle_seat))
+            lifecycle.enter_context(aboyeur_mod.terminal_sigterm_handler(output_dir, seat=lifecycle_seat))
+            if output_dir is not None:
+                aboyeur_mod.record_run_start(
+                    output_dir,
+                    task=args.task,
+                    cwd=run_cwd,
+                    roster=loaded_roster,
+                    read_only=args.read_only,
+                    worker=args.worker,
+                    dry_run=args.dry_run,
+                    lock_workspace=run_cwd,
+                    codex_transport=args.codex_transport or loaded_roster.codex_transport,
+                )
+            if output_dir is not None and (advisory or output_warnings):
+                from .. import localio
+
+                localio.write_json(
+                    output_dir / "read-only-enforcement.json",
+                    {
+                        "read_only": True,
+                        "sandbox": effective_sandbox,
+                        "best_effort_agents": advisory,
+                        "output_warnings": output_warnings,
+                    },
+                )
+            lifecycle.enter_context(runguard.run_lock(run_cwd, run_dir=output_dir, wait_seconds=args.wait))
             if args.worktree:
                 worktree_cwd = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
                 effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)
+                keep_worktree = True
                 print(f"worktree: {effective_cwd}", file=sys.stderr)
             run_kwargs = {
                 "dry_run": args.dry_run,
@@ -339,12 +425,49 @@ def dispatch(args) -> int:
                 run_kwargs["route_template"] = args.route_template
             if args.route_signals:
                 run_kwargs["route_overrides"] = tuple(args.route_signals)
-            rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
+            try:
+                rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
+            except runguard.RetainRunLockError:
+                raise
+            except KeyboardInterrupt:
+                if output_dir is not None:
+                    aboyeur_mod.record_run_termination(
+                        output_dir,
+                        status="canceled",
+                        failure_phase=None,
+                        failure_kind="keyboard-interrupt",
+                        detail="run canceled by user",
+                        seat=lifecycle_seat,
+                    )
+                raise
+            except TimeoutError as exc:
+                detail = " ".join(str(exc).split()) or "run timed out"
+                if output_dir is not None:
+                    aboyeur_mod.record_run_termination(
+                        output_dir,
+                        status="timeout",
+                        failure_phase=None,
+                        failure_kind="timeout",
+                        detail=detail,
+                        seat=lifecycle_seat,
+                    )
+                raise
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {' '.join(str(exc).split()) or 'unexpected run failure'}"
+                if output_dir is not None:
+                    aboyeur_mod.record_run_termination(
+                        output_dir,
+                        status="failed",
+                        failure_phase=None,
+                        failure_kind="unexpected-error",
+                        detail=detail,
+                        seat=lifecycle_seat,
+                    )
+                raise
             if args.worktree and output_dir is not None:
                 # Until the patch is proven good, the worktree is the only
                 # recoverable copy of the agents' edits; a collection failure
                 # must not let cleanup destroy it.
-                keep_worktree = True
                 patch_path = output_dir / "changes.patch"
                 try:
                     summary = runguard.collect_changes_patch(effective_cwd, patch_path)
@@ -420,8 +543,25 @@ def dispatch(args) -> int:
                         )
                     else:
                         print(f"changes: none ({summary.path})", file=sys.stderr)
+    except KeyboardInterrupt:
+        print("error: run canceled by user", file=sys.stderr)
+        if worktree_cwd is not None and keep_worktree:
+            print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
+        return 130
     except runguard.RunGuardError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        if worktree_cwd is not None and keep_worktree:
+            print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
+        return 2
+    except TimeoutError as exc:
+        detail = " ".join(str(exc).split()) or "worker dispatch timed out"
+        print(f"error: run timed out: {detail}", file=sys.stderr)
+        if worktree_cwd is not None and keep_worktree:
+            print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        detail = " ".join(str(exc).split()) or "unexpected run failure"
+        print(f"error: unexpected run failure: {type(exc).__name__}: {detail}", file=sys.stderr)
         if worktree_cwd is not None and keep_worktree:
             print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
         return 2
@@ -438,48 +578,145 @@ def dispatch(args) -> int:
     return rc
 
 
-def _dispatch_detached(args, *, run_cwd: Path, roster_resolution, output_dir: Path) -> int:
+def _dispatch_detached(args, *, run_cwd: Path, roster_resolution, roster, output_dir: Path) -> int:
+    from .. import aboyeur as aboyeur_mod
+    from .. import proc as proc_mod
+
     output_dir = output_dir.expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    log_path = output_dir / "detached.log"
-    argv = _detached_child_argv(
-        args,
-        run_cwd=run_cwd,
-        roster_resolution=roster_resolution,
-        output_dir=output_dir,
-    )
+    lifecycle_seat = args.worker or roster.orchestrator
+    startup_registry = proc_mod.ProcessRegistry()
+    child = None
+    child_handoff = False
+
+    def cancel_startup_child() -> None:
+        if child is not None and not child_handoff:
+            startup_registry.cancel()
+
     try:
-        with log_path.open("a", encoding="utf-8") as log:
-            proc = Popen(
-                argv,
-                cwd=run_cwd,
-                stdin=DEVNULL,
-                stdout=log,
-                stderr=STDOUT,
-                start_new_session=True,
+        with ExitStack() as lifecycle:
+            lifecycle.enter_context(
+                _terminalize_escaped_run(
+                    output_dir,
+                    seat=lifecycle_seat,
+                    should_terminalize=lambda: not child_handoff,
+                )
             )
-    except OSError as exc:
-        print(f"error: failed to start detached run: {exc}", file=sys.stderr)
-        print(f"log: {log_path}", file=sys.stderr)
-        return 2
+            lifecycle.enter_context(
+                aboyeur_mod.terminal_sigterm_handler(
+                    output_dir,
+                    seat=lifecycle_seat,
+                    before_record=cancel_startup_child,
+                    should_record=lambda: not child_handoff,
+                )
+            )
+            aboyeur_mod.record_run_start(
+                output_dir,
+                task=args.task,
+                cwd=run_cwd,
+                roster=roster,
+                read_only=args.read_only,
+                worker=args.worker,
+            )
+            initial_receipt = (output_dir / "run.json").read_bytes()
+            log_path = output_dir / "detached.log"
+            argv = _detached_child_argv(
+                args,
+                run_cwd=run_cwd,
+                roster_resolution=roster_resolution,
+                output_dir=output_dir,
+            )
+            try:
+                with log_path.open("a", encoding="utf-8") as log:
+                    child = Popen(
+                        argv,
+                        cwd=run_cwd,
+                        stdin=DEVNULL,
+                        stdout=log,
+                        stderr=STDOUT,
+                        start_new_session=True,
+                    )
+                    startup_registry.register(child)
+            except OSError as exc:
+                if child is not None:
+                    startup_registry.terminate(child)
+                detail = f"failed to start detached run: {exc}"
+                aboyeur_mod.record_run_termination(
+                    output_dir,
+                    status="failed",
+                    failure_phase="startup",
+                    failure_kind="spawn-error",
+                    detail=detail,
+                    seat=lifecycle_seat,
+                )
+                print(f"error: {detail}", file=sys.stderr)
+                print(f"log: {log_path}", file=sys.stderr)
+                return 2
+            except BaseException:
+                if child is not None:
+                    startup_registry.terminate(child)
+                raise
 
-    exit_code = _poll_detached_start(proc, output_dir)
-    if exit_code is not None:
-        print(f"error: detached child exited before run metadata was written: exit {exit_code}", file=sys.stderr)
-        print(f"artifacts: {output_dir}", file=sys.stderr)
-        print(f"log: {log_path}", file=sys.stderr)
-        return 2
+            try:
+                exit_code, metadata_taken_over = _poll_detached_start(
+                    child,
+                    output_dir,
+                    initial_receipt=initial_receipt,
+                )
+            except BaseException:
+                cancel_startup_child()
+                raise
+            if metadata_taken_over:
+                child_handoff = True
+                startup_registry.unregister(child)
+            elif exit_code is None:
+                cancel_startup_child()
+                detail = f"detached child did not write run metadata within {_DETACH_START_TIMEOUT_SECONDS:g} seconds"
+                aboyeur_mod.record_run_termination(
+                    output_dir,
+                    status="timeout",
+                    failure_phase="startup",
+                    failure_kind="timeout",
+                    detail=detail,
+                    seat=lifecycle_seat,
+                )
+                print(f"error: {detail}", file=sys.stderr)
+                print(f"artifacts: {output_dir}", file=sys.stderr)
+                print(f"log: {log_path}", file=sys.stderr)
+                return 2
+            else:
+                startup_registry.unregister(child)
+            if exit_code is not None:
+                detail = f"detached child exited before run metadata was written: exit {exit_code}"
+                aboyeur_mod.record_run_termination(
+                    output_dir,
+                    status="failed",
+                    failure_phase="startup",
+                    failure_kind="early-exit",
+                    detail=detail,
+                    seat=lifecycle_seat,
+                )
+                print(f"error: {detail}", file=sys.stderr)
+                print(f"artifacts: {output_dir}", file=sys.stderr)
+                print(f"log: {log_path}", file=sys.stderr)
+                return 2
 
-    if not (output_dir / "run.json").is_file():
-        print(
-            "warning: detached child has not written run metadata yet; check the log for startup progress.",
-            file=sys.stderr,
-        )
-    print(f"run: {output_dir.name}")
-    print(f"detached: pid {proc.pid}", file=sys.stderr)
-    print(f"artifacts: {output_dir}", file=sys.stderr)
-    print(f"log: {log_path}", file=sys.stderr)
-    return 0
+            if not (output_dir / "run.json").is_file():
+                print(
+                    "warning: detached child has not written run metadata yet; check the log for startup progress.",
+                    file=sys.stderr,
+                )
+            print(f"run: {output_dir.name}")
+            print(f"detached: pid {child.pid}", file=sys.stderr)
+            print(f"artifacts: {output_dir}", file=sys.stderr)
+            print(f"log: {log_path}", file=sys.stderr)
+            return 0
+    except KeyboardInterrupt:
+        print("error: run canceled by user", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        detail = " ".join(str(exc).split()) or "unexpected run failure"
+        print(f"error: unexpected run failure: {type(exc).__name__}: {detail}", file=sys.stderr)
+        return 2
 
 
 def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: Path) -> list[str]:
@@ -542,17 +779,20 @@ def _direct_worker_error(worker: str, loaded_roster, roster_mod) -> str | None:
     return None
 
 
-def _poll_detached_start(proc: Popen, output_dir: Path) -> int | None:
+def _poll_detached_start(proc: Popen, output_dir: Path, *, initial_receipt: bytes) -> tuple[int | None, bool]:
     run_json = output_dir / "run.json"
     deadline = time.monotonic() + _DETACH_START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        if run_json.is_file():
-            return None
+        try:
+            if run_json.read_bytes() != initial_receipt:
+                return None, True
+        except OSError:
+            pass
         exit_code = proc.poll()
         if exit_code is not None:
-            return exit_code
+            return exit_code, False
         time.sleep(_DETACH_POLL_INTERVAL_SECONDS)
-    return None
+    return None, False
 
 
 def _worktree_checkout_path(repo_root: Path, output_dir: Path) -> Path:

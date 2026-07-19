@@ -60,7 +60,7 @@ def extract_brief_files(brief_text: str) -> list[str]:
             if candidate is not None:
                 files.add(candidate)
         return sorted(files)
-    except BaseException:
+    except Exception:
         return []
 
 
@@ -87,7 +87,7 @@ def extract_delta_files(delta_sidecar_path_or_dict: str | Path | dict[str, Any])
                 if candidate is not None:
                     files.add(candidate)
         return sorted(files)
-    except BaseException:
+    except Exception:
         return []
 
 

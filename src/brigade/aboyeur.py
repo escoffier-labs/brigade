@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
+import signal
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import wraps
 from json import JSONDecoder
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 
 from . import agents
@@ -641,6 +646,8 @@ def _record_plan_attempt(
         "parsed": parsed,
         "detail": result.detail,
         "text": result.text,
+        "timed_out": result.timed_out,
+        "status": result.status,
     }
     if result.failure_phase is not None:
         payload["failure_phase"] = result.failure_phase
@@ -689,6 +696,7 @@ def _run_orchestrator(
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
     codex_transport: str | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
 ) -> agents.AgentResult:
     orchestrator = roster.agents[roster.orchestrator]
     transport = codex_transport or roster.codex_transport
@@ -719,7 +727,13 @@ def _run_orchestrator(
         kwargs["reasoning"] = orchestrator.reasoning
     if orchestrator.env is not None:
         kwargs["env"] = dict(orchestrator.env)
-    result = agents.run_agent(orchestrator.cli, prompt, **kwargs)
+    result = _call_with_process_registry(
+        agents.run_agent,
+        orchestrator.cli,
+        prompt,
+        process_registry=process_registry,
+        **kwargs,
+    )
     if not result.ok and orchestrator.cli == "codex":
         detail = _orchestrator_failure_detail(
             result,
@@ -741,6 +755,22 @@ def _run_orchestrator(
                 transport=result.transport,
             )
     return result
+
+
+def _call_with_process_registry(
+    function: Callable[..., Any],
+    *args: Any,
+    process_registry: proc.ProcessRegistry | None,
+    **kwargs: Any,
+) -> Any:
+    parameters = inspect.signature(function).parameters.values()
+    accepts_registry = any(
+        parameter.name == "process_registry" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_registry:
+        kwargs["process_registry"] = process_registry
+    return function(*args, **kwargs)
 
 
 def _coverage_missing(route: RouteBrief | None, assignments: list[Assignment]) -> list[str]:
@@ -768,9 +798,11 @@ def plan(
     evidence: EvidenceBrief | None = None,
     route: RouteBrief | None = None,
     codex_transport: str | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
 ) -> list[Assignment]:
     transport = codex_transport or roster.codex_transport
-    first = _run_orchestrator(
+    first = _call_with_process_registry(
+        _run_orchestrator,
         roster,
         build_plan_prompt(
             task,
@@ -786,6 +818,7 @@ def plan(
         sandbox_read_only=sandbox_read_only,
         sandbox=sandbox,
         codex_transport=transport,
+        process_registry=process_registry,
     )
     if not first.ok:
         _record_plan_attempt(attempts, stage="initial", result=first)
@@ -802,7 +835,8 @@ def plan(
         )
     except ValueError as exc:
         _record_plan_attempt(attempts, stage="initial", result=first, parse_error=str(exc))
-        second = _run_orchestrator(
+        second = _call_with_process_registry(
+            _run_orchestrator,
             roster,
             build_plan_prompt(
                 task,
@@ -819,6 +853,7 @@ def plan(
             sandbox_read_only=sandbox_read_only,
             sandbox=sandbox,
             codex_transport=transport,
+            process_registry=process_registry,
         )
         if not second.ok:
             _record_plan_attempt(attempts, stage="correction", result=second)
@@ -848,7 +883,8 @@ def plan(
     # The plan parses but skips required route stages: one corrective retry, then
     # keep whichever plan covers more. Advisory, never fatal - a deterministic
     # constraint must not brick a run the orchestrator can finish.
-    revised_result = _run_orchestrator(
+    revised_result = _call_with_process_registry(
+        _run_orchestrator,
         roster,
         build_plan_prompt(
             task,
@@ -869,6 +905,7 @@ def plan(
         sandbox_read_only=sandbox_read_only,
         sandbox=sandbox,
         codex_transport=transport,
+        process_registry=process_registry,
     )
     if not revised_result.ok:
         _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result)
@@ -1012,12 +1049,16 @@ def _run_codex_appserver_worker(
             registry.unregister(worker, active_turn_id)
     text = turn.text.strip()
     if not turn.ok:
+        timed_out = bool(getattr(turn, "timed_out", False))
+        failure_kind = "timeout" if timed_out else "interrupted" if turn.status == "interrupted" else None
         return agents.AgentResult(
             text=text,
             ok=False,
             detail=(turn.detail or f"turn {turn.status}")[:200],
+            failure_kind=failure_kind,
             thread_id=turn.thread_id,
             status=turn.status,
+            timed_out=timed_out,
             transport="codex-app-server",
             requested_model=agent.model,
             reasoning=agent.reasoning,
@@ -1074,6 +1115,9 @@ def dispatch(
     events_dir: Path | None = None,
     verbose: bool = False,
     authorized_writable_worktree: bool = False,
+    on_stage_start: Callable[[int, tuple[str, ...]], None] | None = None,
+    on_interrupt: Callable[[], None] | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
 ) -> list[WorkerResult]:
     from . import run_transport
 
@@ -1096,6 +1140,9 @@ def dispatch(
         events_dir=events_dir,
         verbose=verbose,
         authorized_writable_worktree=authorized_writable_worktree,
+        on_stage_start=on_stage_start,
+        on_interrupt=on_interrupt,
+        process_registry=process_registry,
     )
 
 
@@ -1483,7 +1530,7 @@ def _context_eval_fact(payload: dict[str, object]) -> str:
         ):
             return ""
         return f"brief hit rate {rate:.2f} ({hits}/{delta_files} files, {missed} missed)"
-    except BaseException:
+    except Exception:
         return ""
 
 
@@ -1514,7 +1561,7 @@ def _context_eval_for_run(
             return None
         brief_files = context_eval.extract_brief_files(code_graph.text)
         return context_eval.evaluate(brief_files, delta_files)
-    except BaseException:
+    except Exception:
         return None
 
 
@@ -1586,44 +1633,181 @@ def record_artifact_collection(
             "detail": bounded_detail,
         }
         collection["failure"] = artifact_failure
-        if payload.get("status") not in {"failed", "handoff-failed", "interrupted"}:
+        primary_status = payload.get("status")
+        primary_terminal = isinstance(primary_status, str) and primary_status not in {
+            "started",
+            "planning",
+            "dispatching",
+            "result-processing",
+            "synthesizing",
+            "handoff",
+            "artifact-collection",
+            "running",
+        }
+        if not primary_terminal:
             payload["status"] = "failed"
             payload["error"] = bounded_detail
             payload["failure_phase"] = phase
             payload["failure"] = artifact_failure
             finished_at = datetime.now(timezone.utc)
+            payload["status_started_at"] = _utc_iso(finished_at)
             payload["finished_at"] = _utc_iso(finished_at)
             started_at = payload.get("started_at")
             if isinstance(started_at, str):
-                try:
-                    started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-                except ValueError:
-                    pass
-                else:
+                started = _parse_iso_datetime(started_at)
+                if started is not None:
                     payload["duration_seconds"] = max(
                         0.0,
-                        round((finished_at - started.astimezone(timezone.utc)).total_seconds(), 3),
+                        round((finished_at - started).total_seconds(), 3),
                     )
     elif status == "ok" and payload.get("status") == "artifact-collection":
         finished_at = datetime.now(timezone.utc)
         payload["status"] = "ok"
+        payload["status_started_at"] = _utc_iso(finished_at)
         payload["finished_at"] = _utc_iso(finished_at)
         started_at = payload.get("started_at")
         if isinstance(started_at, str):
-            try:
-                started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-            except ValueError:
-                pass
-            else:
+            started = _parse_iso_datetime(started_at)
+            if started is not None:
                 payload["duration_seconds"] = max(
                     0.0,
-                    round((finished_at - started.astimezone(timezone.utc)).total_seconds(), 3),
+                    round((finished_at - started).total_seconds(), 3),
                 )
     payload["artifact_collection"] = collection
     try:
         _write_json(run_path, payload)
     except OSError as exc:
         raise runguard.RetainRunLockError(f"failed to update run receipt after artifact collection: {exc}") from exc
+
+
+def record_run_termination(
+    output_dir: Path,
+    *,
+    status: str,
+    failure_phase: str | None,
+    failure_kind: str,
+    detail: str,
+    seat: str | None = None,
+    active_seats: tuple[str, ...] = (),
+) -> None:
+    """Terminalize a run that escaped its normal result path."""
+
+    run_path = output_dir / "run.json"
+    try:
+        payload = json.loads(run_path.read_text())
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to read run receipt during termination: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise runguard.RetainRunLockError(f"run receipt is invalid during termination: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise runguard.RetainRunLockError("run receipt must contain an object during termination")
+    if payload.get("finished_at"):
+        return
+
+    stored_status = payload.get("status")
+    phase_owner = payload.get("phase_owner")
+    if stored_status == "result-processing" and isinstance(phase_owner, str) and phase_owner:
+        seat = phase_owner
+        active_seats = ()
+    phase = failure_phase or {
+        "started": "startup",
+        "planning": "planning",
+        "dispatching": "dispatch",
+        "result-processing": "result-processing",
+        "synthesizing": "synthesis",
+        "handoff": "handoff",
+        "artifact-collection": "artifact-collection",
+    }.get(stored_status, "run")
+    bounded_detail = _one_line(detail or failure_kind)[:2000]
+    failure: dict[str, object] = {
+        "phase": phase,
+        "kind": failure_kind,
+        "detail": bounded_detail,
+    }
+    if seat:
+        failure["seat"] = seat
+    elif active_seats:
+        failure["seats"] = list(active_seats)
+    finished_at = datetime.now(timezone.utc)
+    payload.update(
+        {
+            "status": status,
+            "status_started_at": _utc_iso(finished_at),
+            "error": bounded_detail,
+            "failure_phase": phase,
+            "failure": failure,
+            "finished_at": _utc_iso(finished_at),
+        }
+    )
+    started_at = payload.get("started_at")
+    if isinstance(started_at, str):
+        started = _parse_iso_datetime(started_at)
+        if started is not None:
+            payload["duration_seconds"] = max(
+                0.0,
+                round((finished_at - started).total_seconds(), 3),
+            )
+    try:
+        _write_json(run_path, payload)
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to write terminal run receipt: {exc}") from exc
+
+
+def record_dispatch_stage(output_dir: Path, *, stage: int, seats: tuple[str, ...]) -> None:
+    """Record the currently executing dispatch stage without terminalizing it."""
+
+    run_path = output_dir / "run.json"
+    try:
+        payload = json.loads(run_path.read_text())
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to read run receipt during stage transition: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise runguard.RetainRunLockError(f"run receipt is invalid during stage transition: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise runguard.RetainRunLockError("run receipt must contain an object during stage transition")
+    if payload.get("finished_at"):
+        return
+    payload.update(
+        {
+            "status": "dispatching",
+            "status_started_at": _utc_iso(datetime.now(timezone.utc)),
+            "active_stage": stage,
+            "active_seats": list(seats),
+        }
+    )
+    try:
+        _write_json(run_path, payload)
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to write dispatch stage receipt: {exc}") from exc
+
+
+def record_result_processing(output_dir: Path, *, seat: str) -> None:
+    """Record post-dispatch result processing and clear completed worker ownership."""
+
+    run_path = output_dir / "run.json"
+    try:
+        payload = json.loads(run_path.read_text())
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to read run receipt during result processing: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise runguard.RetainRunLockError(f"run receipt is invalid during result processing: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise runguard.RetainRunLockError("run receipt must contain an object during result processing")
+    if payload.get("finished_at"):
+        return
+    payload.update(
+        {
+            "status": "result-processing",
+            "status_started_at": _utc_iso(datetime.now(timezone.utc)),
+            "phase_owner": seat,
+        }
+    )
+    payload.pop("active_stage", None)
+    payload.pop("active_seats", None)
+    try:
+        _write_json(run_path, payload)
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to record result-processing phase: {exc}") from exc
 
 
 def _roster_resolution_payload(roster: Roster) -> dict[str, object] | None:
@@ -1683,6 +1867,7 @@ def _run_payload(
     error: str | None = None,
     failure_phase: str | None = None,
     failure_kind: str | None = None,
+    failure_seat: str | None = None,
     transport_warning: dict[str, object] | None = None,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
@@ -1696,6 +1881,7 @@ def _run_payload(
     suspected_noop: bool = False,
     route: RouteBrief | None = None,
     worker: str | None = None,
+    include_git: bool = True,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": "brigade.run.v1",
@@ -1706,6 +1892,7 @@ def _run_payload(
         "read_only": read_only,
         "status": status,
         "started_at": _utc_iso(started_at),
+        "status_started_at": _utc_iso(started_at if status == "started" else datetime.now(timezone.utc)),
         "suspected_noop": suspected_noop,
         "code_graph_brief": {
             "attached": bool(code_graph.attached) if code_graph is not None else False,
@@ -1733,9 +1920,10 @@ def _run_payload(
         payload["route"] = route.payload()
     if worker is not None:
         payload["worker"] = worker
-    git = _receipt_git_snapshot(cwd)
-    if git is not None:
-        payload["git"] = git
+    if include_git:
+        git = _receipt_git_snapshot(cwd)
+        if git is not None:
+            payload["git"] = git
     if code_graph_delta is not None:
         payload["code_graph_delta"] = code_graph_delta
     if context_eval_payload is not None:
@@ -1751,11 +1939,14 @@ def _run_payload(
         payload["error"] = error
         if failure_phase is not None or failure_kind is not None:
             payload["failure_phase"] = failure_phase or "unknown"
-            payload["failure"] = {
+            failure_payload: dict[str, object] = {
                 "phase": failure_phase or "unknown",
                 "kind": failure_kind or "unknown",
                 "detail": error,
             }
+            if failure_seat is not None:
+                failure_payload["seat"] = failure_seat
+            payload["failure"] = failure_payload
     if transport_warning is not None:
         payload["transport_warning"] = dict(transport_warning)
     if codex_transport is not None:
@@ -1782,6 +1973,173 @@ def _direct_worker_error(worker: str, roster: Roster) -> str | None:
     return None
 
 
+def record_run_start(
+    output_dir: Path,
+    *,
+    task: str,
+    cwd: Path | None,
+    roster: Roster,
+    read_only: bool,
+    worker: str | None = None,
+    dry_run: bool = False,
+    lock_workspace: Path | None = None,
+    codex_transport: str | None = None,
+    started_at: datetime | None = None,
+) -> None:
+    """Write the minimal typed receipt needed before optional or blocking work."""
+
+    output_dir = output_dir.expanduser().resolve()
+    started_at = started_at or datetime.now(timezone.utc)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        output_dir / "run.json",
+        _run_payload(
+            task=task,
+            cwd=cwd,
+            lock_workspace=lock_workspace if lock_workspace is not None else cwd,
+            roster=roster,
+            dry_run=dry_run,
+            read_only=read_only,
+            status="started",
+            started_at=started_at,
+            output_dir=output_dir,
+            code_graph=CodeGraphBrief(attached=False),
+            drift_impact=DriftImpactBrief(attached=False),
+            evidence=EvidenceBrief(attached=False),
+            codex_transport=codex_transport or roster.codex_transport,
+            worker=worker,
+            include_git=False,
+        ),
+    )
+    _write_json(output_dir / "roster.json", _roster_payload(roster))
+
+
+@contextmanager
+def terminal_sigterm_handler(
+    output_dir: Path | None,
+    *,
+    seat: str | None,
+    before_record: Callable[[], None] | None = None,
+    should_record: Callable[[], bool] | None = None,
+) -> Iterator[None]:
+    """Terminalize SIGTERM while preserving the conventional 128+signal exit."""
+
+    if output_dir is None or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    output_dir = output_dir.expanduser()
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def handle_sigterm(signum: int, frame: object) -> None:  # noqa: ARG001
+        if should_record is not None and not should_record():
+            raise SystemExit(128 + signum)
+        if before_record is not None:
+            before_record()
+        run_path = output_dir / "run.json"
+        if run_path.is_file():
+            active_seats: tuple[str, ...] = ()
+            active_seat = seat
+            try:
+                payload = json.loads(run_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                stored_active = payload.get("active_seats")
+                if isinstance(stored_active, list):
+                    active_seats = tuple(value for value in stored_active if isinstance(value, str) and value)
+                    if len(active_seats) == 1:
+                        active_seat = active_seats[0]
+                    elif active_seats:
+                        active_seat = None
+                if not active_seats:
+                    phase_owner = payload.get("phase_owner")
+                    if isinstance(phase_owner, str) and phase_owner:
+                        active_seat = phase_owner
+                    else:
+                        stored_worker = payload.get("worker")
+                        if isinstance(stored_worker, str) and stored_worker:
+                            active_seat = stored_worker
+            record_run_termination(
+                output_dir,
+                status="canceled",
+                failure_phase=None,
+                failure_kind="signal",
+                detail="run terminated by SIGTERM",
+                seat=active_seat,
+                active_seats=active_seats,
+            )
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _terminalize_run_lifecycle(function: Callable[..., int]) -> Callable[..., int]:
+    """Ensure every artifact-producing run leaves a terminal receipt on escape."""
+
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> int:
+        raw_output_dir = kwargs.get("output_dir")
+        output_dir = raw_output_dir.expanduser() if isinstance(raw_output_dir, Path) else None
+        raw_roster = args[1] if len(args) > 1 else kwargs.get("roster")
+        raw_worker = kwargs.get("worker")
+        seat = (
+            raw_worker
+            if isinstance(raw_worker, str) and raw_worker
+            else raw_roster.orchestrator
+            if isinstance(raw_roster, Roster)
+            else None
+        )
+
+        def terminate_existing(
+            *, status: str, failure_kind: str, detail: str, failure_phase: str | None = None
+        ) -> None:
+            if output_dir is None or not (output_dir / "run.json").is_file():
+                return
+            record_run_termination(
+                output_dir,
+                status=status,
+                failure_phase=failure_phase,
+                failure_kind=failure_kind,
+                detail=detail,
+                seat=seat,
+            )
+
+        try:
+            with terminal_sigterm_handler(output_dir, seat=seat):
+                return function(*args, **kwargs)
+        except runguard.RetainRunLockError:
+            raise
+        except KeyboardInterrupt:
+            terminate_existing(
+                status="canceled",
+                failure_kind="keyboard-interrupt",
+                detail="run canceled by user",
+            )
+            raise
+        except TimeoutError as exc:
+            terminate_existing(
+                status="timeout",
+                failure_kind="timeout",
+                detail=_one_line(str(exc)) or "run timed out",
+            )
+            raise
+        except Exception as exc:
+            terminate_existing(
+                status="failed",
+                failure_kind="unexpected-error",
+                detail=f"{type(exc).__name__}: {_one_line(str(exc)) or 'unexpected run failure'}",
+            )
+            raise
+
+    return wrapped
+
+
+@_terminalize_run_lifecycle
 def run(
     task: str,
     roster: Roster,
@@ -1811,6 +2169,7 @@ def run(
     defer_artifact_collection: bool = False,
 ) -> int:
     started_at = datetime.now(timezone.utc)
+    process_registry = proc.ProcessRegistry()
     transport_for_payload = codex_transport or roster.codex_transport
     cwd = cwd.expanduser().resolve() if cwd is not None else None
     lock_workspace = lock_workspace.expanduser().resolve() if lock_workspace is not None else cwd
@@ -1826,6 +2185,19 @@ def run(
         if worker_error is not None:
             print(f"error: {worker_error}", file=sys.stderr)
             return 2
+    if output_dir is not None:
+        record_run_start(
+            output_dir,
+            task=task,
+            cwd=cwd,
+            roster=roster,
+            read_only=read_only,
+            worker=worker,
+            dry_run=dry_run,
+            lock_workspace=lock_workspace,
+            codex_transport=transport_for_payload,
+            started_at=started_at,
+        )
     if code_graph is None:
         code_graph = code_graph_brief(cwd, task) if code_graph_enabled else CodeGraphBrief(attached=False)
     if drift_impact is None:
@@ -1915,7 +2287,8 @@ def run(
                 ),
             )
         try:
-            assignments = plan(
+            assignments = _call_with_process_registry(
+                plan,
                 task,
                 roster,
                 cwd=cwd,
@@ -1928,14 +2301,19 @@ def run(
                 evidence=evidence,
                 route=route,
                 codex_transport=transport_for_payload,
+                process_registry=process_registry,
             )
         except RuntimeError as exc:
-            failed_attempt = next(
-                (attempt for attempt in reversed(plan_attempts or []) if attempt.get("ok") is False),
-                None,
-            )
-            failure_phase = failed_attempt.get("failure_phase") if isinstance(failed_attempt, dict) else None
-            failure_kind = failed_attempt.get("failure_kind") if isinstance(failed_attempt, dict) else None
+            final_attempt = plan_attempts[-1] if plan_attempts else None
+            timed_out = isinstance(final_attempt, dict) and final_attempt.get("timed_out") is True
+            if isinstance(final_attempt, dict) and isinstance(final_attempt.get("failure_kind"), str):
+                failure_kind = final_attempt["failure_kind"]
+            elif isinstance(final_attempt, dict) and isinstance(final_attempt.get("parse_error"), str):
+                failure_kind = "invalid-plan"
+            else:
+                failure_kind = "orchestrator-error"
+            if timed_out:
+                failure_kind = "timeout"
             if output_dir is not None:
                 finished_at = datetime.now(timezone.utc)
                 _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
@@ -1947,13 +2325,14 @@ def run(
                         roster=roster,
                         dry_run=dry_run,
                         read_only=read_only,
-                        status="failed",
+                        status="timeout" if timed_out else "failed",
                         started_at=started_at,
                         finished_at=finished_at,
                         output_dir=output_dir,
                         error=str(exc),
-                        failure_phase=(failure_phase if isinstance(failure_phase, str) else None),
-                        failure_kind=(failure_kind if isinstance(failure_kind, str) else None),
+                        failure_phase="planning",
+                        failure_kind=failure_kind,
+                        failure_seat=roster.orchestrator,
                         code_graph=code_graph,
                         drift_impact=drift_impact,
                         evidence=evidence,
@@ -2047,75 +2426,178 @@ def run(
     appserver = None
     control_registry = None
     control_server = None
-    if effective_transport == "app-server":
+
+    def close_appserver() -> None:
+        nonlocal appserver
+        server = appserver
+        appserver = None
+        close = getattr(server, "close", None)
+        if callable(close):
+            close()
+
+    def close_control_server() -> None:
+        nonlocal control_server
+        server = control_server
+        control_server = None
+        close = getattr(server, "close", None)
+        if callable(close):
+            close()
+
+    def close_server_resources() -> None:
         try:
-            appserver = codex_appserver.AppServer(cwd=cwd)
-            appserver.start()
-        except codex_appserver.AppServerError as exc:
-            print(f"warning: codex app-server unavailable ({exc}); falling back to exec", file=sys.stderr)
-            appserver = None
-            effective_transport = "exec"
-            control_socket = None
-        if appserver is not None and output_dir is not None:
-            control_registry = run_control.LiveTurnRegistry()
-            control_server = run_control.ControlServer(control_socket, control_registry)
+            close_control_server()
+        finally:
+            close_appserver()
+
+    try:
+        if effective_transport == "app-server":
             try:
-                control_transport = control_server.start()
-            except run_control.ControlError as exc:
-                print(f"warning: run control unavailable ({exc})", file=sys.stderr)
-                control_registry = None
-                control_server = None
-                control_transport = None
+                appserver = _call_with_process_registry(
+                    codex_appserver.AppServer,
+                    cwd=cwd,
+                    process_registry=process_registry,
+                )
+                appserver.start()
+            except codex_appserver.AppServerError as exc:
+                close_appserver()
+                print(f"warning: codex app-server unavailable ({exc}); falling back to exec", file=sys.stderr)
+                effective_transport = "exec"
                 control_socket = None
-    transport_for_payload = effective_transport
-    if output_dir is not None:
-        _write_json(
-            output_dir / "run.json",
-            _payload(
-                task=task,
+            if appserver is not None and output_dir is not None:
+                control_registry = run_control.LiveTurnRegistry()
+                control_server = run_control.ControlServer(control_socket, control_registry)
+                try:
+                    control_transport = control_server.start()
+                except run_control.ControlError as exc:
+                    close_control_server()
+                    print(f"warning: run control unavailable ({exc})", file=sys.stderr)
+                    control_registry = None
+                    control_transport = None
+                    control_socket = None
+        transport_for_payload = effective_transport
+        if output_dir is not None:
+            _write_json(
+                output_dir / "run.json",
+                _payload(
+                    task=task,
+                    cwd=cwd,
+                    roster=roster,
+                    dry_run=dry_run,
+                    read_only=read_only,
+                    status="dispatching",
+                    started_at=started_at,
+                    output_dir=output_dir,
+                    code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    evidence=evidence,
+                    brief_set=brief_set,
+                    codex_transport=transport_for_payload,
+                    route=route,
+                    control_socket=control_socket,
+                    control_transport=control_transport,
+                    code_graph_delta=code_graph_delta,
+                    worker=worker,
+                ),
+            )
+
+        active_stage = min(assignment.stage for assignment in assignments) if assignments else 1
+        active_seats = tuple(assignment.worker for assignment in assignments if assignment.stage == active_stage)
+    except BaseException:
+        close_server_resources()
+        raise
+
+    def stage_started(stage: int, seats: tuple[str, ...]) -> None:
+        nonlocal active_stage, active_seats
+        active_stage = stage
+        active_seats = seats
+        if output_dir is not None:
+            record_dispatch_stage(output_dir, stage=stage, seats=seats)
+
+    def dispatch_interrupted() -> None:
+        if output_dir is None:
+            return
+        active_seat = active_seats[0] if len(active_seats) == 1 else None
+        record_run_termination(
+            output_dir,
+            status="canceled",
+            failure_phase="dispatch",
+            failure_kind="keyboard-interrupt",
+            detail="run canceled by user",
+            seat=active_seat,
+            active_seats=active_seats,
+        )
+
+    active_seat = active_seats[0] if len(active_seats) == 1 else None
+    try:
+        try:
+            worker_results = _call_with_process_registry(
+                dispatch,
+                assignments,
+                roster,
                 cwd=cwd,
-                roster=roster,
-                dry_run=dry_run,
                 read_only=read_only,
-                status="dispatching",
-                started_at=started_at,
-                output_dir=output_dir,
+                sandbox_read_only=sandbox_read_only,
+                sandbox=sandbox,
+                direct=direct_worker,
                 code_graph=code_graph,
                 drift_impact=drift_impact,
                 evidence=evidence,
-                brief_set=brief_set,
-                codex_transport=transport_for_payload,
-                route=route,
-                control_socket=control_socket,
-                control_transport=control_transport,
-                code_graph_delta=code_graph_delta,
-                worker=worker,
-            ),
-        )
-
-    try:
-        worker_results = dispatch(
-            assignments,
-            roster,
-            cwd=cwd,
-            read_only=read_only,
-            sandbox_read_only=sandbox_read_only,
-            sandbox=sandbox,
-            direct=direct_worker,
-            code_graph=code_graph,
-            drift_impact=drift_impact,
-            evidence=evidence,
-            appserver=appserver,
-            control_registry=control_registry,
-            events_dir=(output_dir / "events") if (output_dir is not None and appserver is not None) else None,
-            verbose=verbose,
-            authorized_writable_worktree=authorized_writable_worktree,
-        )
+                appserver=appserver,
+                control_registry=control_registry,
+                events_dir=(output_dir / "events") if (output_dir is not None and appserver is not None) else None,
+                verbose=verbose,
+                authorized_writable_worktree=authorized_writable_worktree,
+                on_stage_start=stage_started,
+                on_interrupt=dispatch_interrupted,
+                process_registry=process_registry,
+            )
+        except runguard.RetainRunLockError:
+            raise
+        except KeyboardInterrupt:
+            active_seat = active_seats[0] if len(active_seats) == 1 else None
+            if output_dir is not None:
+                record_run_termination(
+                    output_dir,
+                    status="canceled",
+                    failure_phase="dispatch",
+                    failure_kind="keyboard-interrupt",
+                    detail="run canceled by user",
+                    seat=active_seat,
+                    active_seats=active_seats,
+                )
+            raise
+        except TimeoutError as exc:
+            active_seat = active_seats[0] if len(active_seats) == 1 else None
+            detail = _one_line(str(exc)) or "worker dispatch timed out"
+            if output_dir is not None:
+                record_run_termination(
+                    output_dir,
+                    status="timeout",
+                    failure_phase="dispatch",
+                    failure_kind="timeout",
+                    detail=detail,
+                    seat=active_seat,
+                    active_seats=active_seats,
+                )
+            raise
+        except Exception as exc:
+            active_seat = active_seats[0] if len(active_seats) == 1 else None
+            detail = f"{type(exc).__name__}: {_one_line(str(exc)) or 'unexpected dispatch failure'}"
+            if output_dir is not None:
+                record_run_termination(
+                    output_dir,
+                    status="failed",
+                    failure_phase="dispatch",
+                    failure_kind="unexpected-error",
+                    detail=detail,
+                    seat=active_seat,
+                    active_seats=active_seats,
+                )
+            raise
     finally:
-        if control_server is not None:
-            control_server.close()
-        if appserver is not None:
-            appserver.close()
+        close_server_resources()
+    if output_dir is not None:
+        record_result_processing(output_dir, seat=roster.orchestrator)
     if output_dir is not None and code_graph_delta_before is not None and cwd is not None:
         code_graph_delta = graphtrail_delta.capture_after_and_diff(cwd, output_dir, code_graph_delta_before)
     context_eval_payload = _context_eval_for_run(code_graph, code_graph_delta)
@@ -2189,7 +2671,8 @@ def run(
                 ),
             )
         synthesis_started = time.monotonic()
-        final = _run_orchestrator(
+        final = _call_with_process_registry(
+            _run_orchestrator,
             roster,
             build_synth_prompt(
                 task,
@@ -2205,6 +2688,7 @@ def run(
             sandbox_read_only=sandbox_read_only,
             sandbox=sandbox,
             codex_transport=transport_for_payload,
+            process_registry=process_registry,
         )
         final = replace(final, duration_seconds=max(0.0, round(time.monotonic() - synthesis_started, 3)))
     if output_dir is not None:
@@ -2231,6 +2715,7 @@ def run(
     if not final.ok:
         if output_dir is not None:
             finished_at = datetime.now(timezone.utc)
+            interrupted = final.status == "interrupted"
             if direct_worker:
                 (output_dir / "final.txt").write_text(final.text + "\n")
             _write_json(
@@ -2241,13 +2726,21 @@ def run(
                     roster=roster,
                     dry_run=dry_run,
                     read_only=read_only,
-                    status="failed",
+                    status="timeout" if final.timed_out else "canceled" if interrupted else "failed",
                     started_at=started_at,
                     finished_at=finished_at,
                     output_dir=output_dir,
                     error=final.detail,
-                    failure_phase=final.failure_phase,
-                    failure_kind=final.failure_kind,
+                    failure_phase=(
+                        final.failure_phase
+                        or ("inference" if final.timed_out else "dispatch" if direct_worker else "synthesis")
+                    ),
+                    failure_kind=(
+                        "timeout"
+                        if final.timed_out
+                        else final.failure_kind or ("interrupted" if interrupted else "agent-error")
+                    ),
+                    failure_seat=worker if direct_worker else roster.orchestrator,
                     code_graph=code_graph,
                     drift_impact=drift_impact,
                     evidence=evidence,
@@ -2269,7 +2762,9 @@ def run(
             print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
         return 2
     if output_dir is not None:
-        finished_at = None if defer_artifact_collection else datetime.now(timezone.utc)
+        final_status = "artifact-collection" if defer_artifact_collection else "ok"
+        pending_handoff = handoff_inbox is not None
+        finished_at = None if defer_artifact_collection or pending_handoff else datetime.now(timezone.utc)
         (output_dir / "final.txt").write_text(final.text + "\n")
         _write_json(
             output_dir / "run.json",
@@ -2279,7 +2774,7 @@ def run(
                 roster=roster,
                 dry_run=dry_run,
                 read_only=read_only,
-                status="artifact-collection" if defer_artifact_collection else "ok",
+                status="handoff" if pending_handoff else final_status,
                 started_at=started_at,
                 finished_at=finished_at,
                 output_dir=output_dir,
@@ -2322,11 +2817,14 @@ def run(
                         roster=roster,
                         dry_run=dry_run,
                         read_only=read_only,
-                        status="handoff-failed",
+                        status="failed",
                         started_at=started_at,
                         finished_at=finished_at,
                         output_dir=output_dir,
                         error=detail,
+                        failure_phase="handoff",
+                        failure_kind="handoff-write-error",
+                        failure_seat=roster.orchestrator,
                         code_graph=code_graph,
                         drift_impact=drift_impact,
                         evidence=evidence,

@@ -356,19 +356,19 @@ def test_cli_interrupt_leaves_live_worker_resumable(tmp_path, monkeypatch, capsy
 
     monkeypatch.setattr(run_control.LiveTurnRegistry, "register", register_and_signal)
 
-    def fake_run_agent(cli_ref, prompt, **kwargs):
-        if "Return exactly one JSON object" in prompt:
-            return agents.AgentResult(
-                text=json.dumps({"assignments": [{"worker": "cook", "task": "HANG until interrupted"}]}),
-                ok=True,
-            )
-        return agents.AgentResult(text="final synthesis", ok=True)
-
-    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     result: dict[str, int] = {}
 
     thread = threading.Thread(
-        target=lambda: result.update(rc=aboyeur.run("do it", roster, cwd=tmp_path, output_dir=run_dir)),
+        target=lambda: result.update(
+            rc=aboyeur.run(
+                "HANG until interrupted",
+                roster,
+                worker="cook",
+                cwd=tmp_path,
+                output_dir=run_dir,
+                route_enabled=False,
+            )
+        ),
         daemon=True,
     )
     thread.start()
@@ -380,14 +380,23 @@ def test_cli_interrupt_leaves_live_worker_resumable(tmp_path, monkeypatch, capsy
     assert cli.main(["runs", "interrupt", str(run_dir), "cook"]) == 0
     thread.join(timeout=5.0)
 
-    assert "rc" in result
+    assert result == {"rc": 2}
     assert "interrupt: 1 (cook)" in capsys.readouterr().out
     assert not _control_transport_active(control_transport)
     worker_results = json.loads((run_dir / "worker-results.json").read_text())["results"]
     entry = worker_results[0]
     assert entry["status"] == "interrupted"
     assert entry["ok"] is False
+    assert entry["failure_kind"] == "interrupted"
     assert isinstance(entry["thread_id"], str) and entry["thread_id"]
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    assert run_meta["failure"] == {
+        "phase": "dispatch",
+        "kind": "interrupted",
+        "detail": "turn interrupted",
+        "seat": "cook",
+    }
 
 
 def test_plan_control_transport_selects_loopback_when_af_unix_missing(tmp_path, monkeypatch):

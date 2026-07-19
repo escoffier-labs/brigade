@@ -5,11 +5,21 @@ from __future__ import annotations
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 _NONTERMINAL_STATUSES = frozenset(
-    {"started", "planning", "dispatching", "synthesizing", "artifact-collection", "running"}
+    {
+        "started",
+        "planning",
+        "dispatching",
+        "result-processing",
+        "synthesizing",
+        "handoff",
+        "artifact-collection",
+        "running",
+    }
 )
 _SUCCESS_STATUSES = frozenset({"ok", "dry-run"})
 
@@ -443,6 +453,79 @@ def _collect_runs(root: Path) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
     return runs, skipped
 
 
+def _positive_timeout(value: object) -> float | None:
+    if isinstance(value, (int, float)) and value > 0:
+        return float(value)
+    return None
+
+
+def _run_timeout_seconds(run_dir: Path, meta: dict[str, Any]) -> float | None:
+    try:
+        roster = _read_json(run_dir / "roster.json")
+    except (OSError, ValueError):
+        return None
+    if roster is None:
+        return None
+    default_timeout = _positive_timeout(roster.get("timeout_seconds"))
+    agents = roster.get("agents")
+    if not isinstance(agents, dict):
+        return default_timeout
+
+    status = meta.get("status")
+    seats: list[str] = []
+    if status in {"planning", "result-processing", "synthesizing", "handoff"}:
+        orchestrator = roster.get("orchestrator")
+        if isinstance(orchestrator, str):
+            seats.append(orchestrator)
+    elif isinstance(meta.get("worker"), str):
+        seats.append(meta["worker"])
+    elif status == "dispatching" and isinstance(meta.get("active_seats"), list):
+        seats.extend(seat for seat in meta["active_seats"] if isinstance(seat, str))
+    elif status == "started":
+        orchestrator = roster.get("orchestrator")
+        if isinstance(orchestrator, str):
+            seats.append(orchestrator)
+    else:
+        try:
+            plan = _read_json(run_dir / "plan.json")
+        except (OSError, ValueError):
+            plan = None
+        if plan is not None:
+            assignments = plan.get("assignments")
+            if isinstance(assignments, list):
+                seats.extend(
+                    item["worker"]
+                    for item in assignments
+                    if isinstance(item, dict) and isinstance(item.get("worker"), str)
+                )
+
+    timeouts: list[float] = []
+    for seat in seats:
+        agent = agents.get(seat)
+        seat_timeout = _positive_timeout(agent.get("timeout_seconds")) if isinstance(agent, dict) else None
+        if seat_timeout is not None:
+            timeouts.append(seat_timeout)
+        elif default_timeout is not None:
+            timeouts.append(default_timeout)
+    return max(timeouts) if timeouts else default_timeout
+
+
+def _stale_timeout(run_dir: Path, meta: dict[str, Any]) -> float | None:
+    if _is_terminal(meta):
+        return None
+    timeout = _run_timeout_seconds(run_dir, meta)
+    started_at = meta.get("status_started_at", meta.get("started_at"))
+    if timeout is None or not isinstance(started_at, str):
+        return None
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return timeout if time.time() - started.timestamp() > timeout else None
+
+
 def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
@@ -460,13 +543,15 @@ def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> in
     runs, skipped = _collect_runs(root)
     for path, meta in runs[:limit]:
         status = meta.get("status", "unknown")
+        stale_timeout = _stale_timeout(path, meta)
+        status_text = f"{status}; stale > {stale_timeout:g}s timeout" if stale_timeout is not None else str(status)
         started = meta.get("started_at", path.name)
         duration = meta.get("duration_seconds")
         duration_text = f" {duration:g}s" if isinstance(duration, (int, float)) else ""
         mode = " read-only" if meta.get("read_only") else ""
         if meta.get("dry_run"):
             mode += " dry-run"
-        print(f"{started} [{status}]{duration_text}{mode} {path}")
+        print(f"{started} [{status_text}]{duration_text}{mode} {path}")
         task = _short(meta.get("task"))
         if task:
             print(f"  {task}")

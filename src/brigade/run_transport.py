@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
-from . import agents, run_control
+from . import agents, proc, run_control
 from .roster import Agent, Roster, is_cli_allowed, timeout_for
 
 _GROK_CONTINUATION_PROMPT = (
@@ -229,8 +230,41 @@ def dispatch(
     events_dir: Path | None = None,
     verbose: bool = False,
     authorized_writable_worktree: bool = False,
+    on_stage_start: Callable[[int, tuple[str, ...]], None] | None = None,
+    on_interrupt: Callable[[], None] | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module."""
+
+    process_registry = process_registry or proc.ProcessRegistry()
+
+    def run_direct_agent(*args: Any, **kwargs: Any) -> agents.AgentResult:
+        runner = agents.run_agent
+        parameters = inspect.signature(runner).parameters.values()
+        accepts_registry = any(
+            parameter.name == "process_registry" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+        if not accepts_registry:
+            kwargs.pop("process_registry", None)
+        return runner(*args, **kwargs)
+
+    def cancel_active_work(futures: dict[Any, int]) -> None:
+        for future in futures:
+            future.cancel()
+        process_registry.cancel()
+        if control_registry is not None:
+            try:
+                control_registry.interrupt()
+            except Exception:
+                pass
+        if appserver is not None:
+            close = getattr(appserver, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
     def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
         agent = roster.agents[assignment.worker]
@@ -278,9 +312,10 @@ def dispatch(
                     version=selected_agent.transport_version or "",
                     read_only=effective_read_only,
                     writable_worktree=authorized_writable_worktree,
+                    process_registry=process_registry,
                 )
             if resume_session_id is not None:
-                return agents.run_agent(
+                return run_direct_agent(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout_for(selected_agent, roster),
@@ -291,6 +326,7 @@ def dispatch(
                     reasoning=selected_agent.reasoning,
                     env=dict(selected_agent.env) if selected_agent.env is not None else None,
                     resume_session_id=resume_session_id,
+                    process_registry=process_registry,
                 )
             if selected_agent.env is not None:
                 # Env seats always dispatch through the direct CLI path. The
@@ -302,13 +338,14 @@ def dispatch(
                     env_kwargs["model"] = selected_agent.model
                 if selected_agent.reasoning is not None:
                     env_kwargs["reasoning"] = selected_agent.reasoning
-                return agents.run_agent(
+                return run_direct_agent(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout_for(selected_agent, roster),
                     cwd=cwd,
                     read_only=effective_read_only,
                     env=dict(selected_agent.env),
+                    process_registry=process_registry,
                     **env_kwargs,
                 )
             if selected_agent.cli == "codex" and appserver is not None:
@@ -328,38 +365,46 @@ def dispatch(
 
             timeout = timeout_for(selected_agent, roster)
             if sandbox is None and selected_agent.model is None and selected_agent.reasoning is None:
-                return agents.run_agent(
-                    cli_ref, selected_prompt, timeout=timeout, cwd=cwd, read_only=effective_read_only
+                return run_direct_agent(
+                    cli_ref,
+                    selected_prompt,
+                    timeout=timeout,
+                    cwd=cwd,
+                    read_only=effective_read_only,
+                    process_registry=process_registry,
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is None:
-                return agents.run_agent(
+                return run_direct_agent(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
                     cwd=cwd,
                     read_only=effective_read_only,
                     sandbox=sandbox,
+                    process_registry=process_registry,
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is None:
-                return agents.run_agent(
+                return run_direct_agent(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
                     cwd=cwd,
                     read_only=effective_read_only,
                     model=selected_agent.model,
+                    process_registry=process_registry,
                 )
             if sandbox is None and selected_agent.model is None and selected_agent.reasoning is not None:
-                return agents.run_agent(
+                return run_direct_agent(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
                     cwd=cwd,
                     read_only=effective_read_only,
                     reasoning=selected_agent.reasoning,
+                    process_registry=process_registry,
                 )
             if sandbox is not None and selected_agent.model is not None and selected_agent.reasoning is None:
-                return agents.run_agent(
+                return run_direct_agent(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
@@ -367,9 +412,10 @@ def dispatch(
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     model=selected_agent.model,
+                    process_registry=process_registry,
                 )
             if sandbox is not None and selected_agent.model is None and selected_agent.reasoning is not None:
-                return agents.run_agent(
+                return run_direct_agent(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
@@ -377,9 +423,10 @@ def dispatch(
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     reasoning=selected_agent.reasoning,
+                    process_registry=process_registry,
                 )
             if sandbox is None and selected_agent.model is not None and selected_agent.reasoning is not None:
-                return agents.run_agent(
+                return run_direct_agent(
                     cli_ref,
                     selected_prompt,
                     timeout=timeout,
@@ -387,11 +434,12 @@ def dispatch(
                     read_only=effective_read_only,
                     model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
+                    process_registry=process_registry,
                 )
             assert sandbox is not None
             assert selected_agent.model is not None
             assert selected_agent.reasoning is not None
-            return agents.run_agent(
+            return run_direct_agent(
                 cli_ref,
                 selected_prompt,
                 timeout=timeout,
@@ -400,6 +448,7 @@ def dispatch(
                 sandbox=sandbox,
                 model=selected_agent.model,
                 reasoning=selected_agent.reasoning,
+                process_registry=process_registry,
             )
 
         def finish(
@@ -532,13 +581,15 @@ def dispatch(
     all_results: list[WorkerResult] = []
     for stage in sorted({assignment.stage for assignment in assignments}):
         stage_assignments = [assignment for assignment in assignments if assignment.stage == stage]
+        if on_stage_start is not None:
+            on_stage_start(stage, tuple(assignment.worker for assignment in stage_assignments))
         stage_results_by_index: dict[int, WorkerResult] = {}
         prior_results = list(all_results)
-        with ThreadPoolExecutor(max_workers=min(roster.max_workers, len(stage_assignments))) as executor:
-            future_to_index = {
-                executor.submit(run_one, assignment, prior_results): index
-                for index, assignment in enumerate(stage_assignments)
-            }
+        executor = ThreadPoolExecutor(max_workers=min(roster.max_workers, len(stage_assignments)))
+        future_to_index = {}
+        try:
+            for index, assignment in enumerate(stage_assignments):
+                future_to_index[executor.submit(run_one, assignment, prior_results)] = index
             for future in as_completed(future_to_index):
                 index = future_to_index[future]
                 try:
@@ -552,5 +603,19 @@ def dispatch(
                         ok=False,
                         detail=str(exc)[:200],
                     )
+        except KeyboardInterrupt:
+            try:
+                if on_interrupt is not None:
+                    on_interrupt()
+            finally:
+                cancel_active_work(future_to_index)
+                executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        except BaseException:
+            cancel_active_work(future_to_index)
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
         all_results.extend(stage_results_by_index[index] for index in range(len(stage_assignments)))
     return all_results

@@ -1,5 +1,6 @@
 import json
 import os
+import time as system_time
 from pathlib import Path
 
 from brigade import cli
@@ -13,6 +14,11 @@ def _write_json(path, payload):
 
 def test_artifact_collection_status_is_nonterminal():
     assert runs_cmd._is_terminal({"status": "artifact-collection"}) is False
+    assert runs_cmd._is_terminal({"status": "result-processing"}) is False
+
+
+def test_legacy_handoff_failed_status_remains_terminal():
+    assert runs_cmd._is_terminal({"status": "handoff-failed"}) is True
 
 
 def test_watch_reports_unrecoverable_artifact_collection_lock_error(tmp_path, monkeypatch, capsys):
@@ -617,6 +623,278 @@ def test_runs_list_prints_recent_runs(tmp_path, capsys):
     assert first < second
     assert "[ok] 2.5s read-only" in out
     assert str(runs_root / "newer") in out
+
+
+def test_runs_list_flags_over_timeout_nonterminal_run_without_mutating_it(tmp_path, monkeypatch, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    run_dir = runs_root / "stale"
+    _write_minimal_run(
+        run_dir,
+        task="stalled task",
+        status="dispatching",
+        started_at="2026-05-26T14:00:00Z",
+    )
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "chef",
+            "timeout_seconds": 180.0,
+            "agents": {
+                "chef": {"timeout_seconds": None},
+                "coder": {"timeout_seconds": 30.0},
+                "reviewer": {"timeout_seconds": 90.0},
+            },
+        },
+    )
+    _write_json(
+        run_dir / "plan.json",
+        {
+            "assignments": [
+                {"stage": 1, "worker": "coder", "task": "inspect"},
+                {"stage": 2, "worker": "reviewer", "task": "review"},
+            ]
+        },
+    )
+    before = (run_dir / "run.json").read_bytes()
+    monkeypatch.setattr(runs_cmd.time, "time", lambda: 1779804091.0)
+
+    assert runs_cmd.list_runs(cwd=tmp_path, limit=10) == 0
+
+    out = capsys.readouterr().out
+    assert "[dispatching; stale > 90s timeout]" in out
+    assert (run_dir / "run.json").read_bytes() == before
+
+
+def test_runs_list_uses_current_synthesis_phase_age(tmp_path, monkeypatch, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    run_dir = runs_root / "synthesizing"
+    _write_minimal_run(
+        run_dir,
+        task="synthesize result",
+        status="synthesizing",
+        started_at="2026-05-26T14:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["status_started_at"] = "2026-05-26T14:01:10Z"
+    _write_json(run_dir / "run.json", run_meta)
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "chef",
+            "timeout_seconds": 180.0,
+            "agents": {"chef": {"timeout_seconds": 30.0}},
+        },
+    )
+    monkeypatch.setattr(runs_cmd.time, "time", lambda: 1779804091.0)
+
+    assert runs_cmd.list_runs(cwd=tmp_path, limit=10) == 0
+
+    out = capsys.readouterr().out
+    assert "[synthesizing]" in out
+    assert "stale" not in out
+
+
+def test_handoff_timeout_uses_orchestrator_default_not_planned_workers(tmp_path):
+    run_dir = tmp_path / ".brigade" / "runs" / "handoff"
+    _write_minimal_run(
+        run_dir,
+        task="write handoff",
+        status="handoff",
+        started_at="2026-05-26T14:00:00Z",
+    )
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "chef",
+            "timeout_seconds": 180.0,
+            "agents": {
+                "chef": {"timeout_seconds": None},
+                "coder": {"timeout_seconds": 30.0},
+                "reviewer": {"timeout_seconds": 90.0},
+            },
+        },
+    )
+    _write_json(
+        run_dir / "plan.json",
+        {
+            "assignments": [
+                {"stage": 1, "worker": "coder", "task": "implement"},
+                {"stage": 2, "worker": "reviewer", "task": "review"},
+            ]
+        },
+    )
+
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    assert runs_cmd._run_timeout_seconds(run_dir, run_meta) == 180.0
+
+
+def test_result_processing_timeout_uses_orchestrator_not_direct_worker(tmp_path):
+    run_dir = tmp_path / ".brigade" / "runs" / "result-processing"
+    _write_minimal_run(
+        run_dir,
+        task="process worker result",
+        status="result-processing",
+        started_at="2026-05-26T14:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["worker"] = "coder"
+    _write_json(run_dir / "run.json", run_meta)
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "chef",
+            "timeout_seconds": 180.0,
+            "agents": {
+                "chef": {"timeout_seconds": 90.0},
+                "coder": {"timeout_seconds": 30.0},
+            },
+        },
+    )
+
+    assert runs_cmd._run_timeout_seconds(run_dir, run_meta) == 90.0
+
+
+def test_runs_list_uses_current_later_stage_age(tmp_path, monkeypatch, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    run_dir = runs_root / "stage-two"
+    _write_minimal_run(
+        run_dir,
+        task="review implementation",
+        status="dispatching",
+        started_at="2026-05-26T14:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update(
+        {
+            "status_started_at": "2026-05-26T14:01:10Z",
+            "active_stage": 2,
+            "active_seats": ["reviewer"],
+        }
+    )
+    _write_json(run_dir / "run.json", run_meta)
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "chef",
+            "timeout_seconds": 180.0,
+            "agents": {
+                "chef": {"timeout_seconds": 180.0},
+                "coder": {"timeout_seconds": 30.0},
+                "reviewer": {"timeout_seconds": 90.0},
+            },
+        },
+    )
+    _write_json(
+        run_dir / "plan.json",
+        {
+            "assignments": [
+                {"stage": 1, "worker": "coder", "task": "implement"},
+                {"stage": 2, "worker": "reviewer", "task": "review"},
+            ]
+        },
+    )
+    monkeypatch.setattr(runs_cmd.time, "time", lambda: 1779804091.0)
+
+    assert runs_cmd.list_runs(cwd=tmp_path, limit=10) == 0
+
+    out = capsys.readouterr().out
+    assert "[dispatching]" in out
+    assert "stale" not in out
+
+
+def test_runs_list_detects_stale_active_phase_with_corrupt_optional_plan(tmp_path, monkeypatch, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    run_dir = runs_root / "active-corrupt-plan"
+    _write_minimal_run(
+        run_dir,
+        task="review implementation",
+        status="dispatching",
+        started_at="2026-05-26T14:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["active_seats"] = ["reviewer"]
+    _write_json(run_dir / "run.json", run_meta)
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "chef",
+            "timeout_seconds": 180.0,
+            "agents": {
+                "chef": {"timeout_seconds": 180.0},
+                "reviewer": {"timeout_seconds": 90.0},
+            },
+        },
+    )
+    (run_dir / "plan.json").write_text("not json")
+    monkeypatch.setattr(runs_cmd.time, "time", lambda: 1779804091.0)
+
+    assert runs_cmd.list_runs(cwd=tmp_path, limit=10) == 0
+
+    assert "[dispatching; stale > 90s timeout]" in capsys.readouterr().out
+
+
+def test_runs_list_uses_direct_worker_timeout_while_status_is_started(tmp_path, monkeypatch, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    run_dir = runs_root / "direct-worker"
+    _write_minimal_run(
+        run_dir,
+        task="direct task",
+        status="started",
+        started_at="2026-05-26T14:01:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["worker"] = "coder"
+    _write_json(run_dir / "run.json", run_meta)
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "chef",
+            "timeout_seconds": 180.0,
+            "agents": {
+                "chef": {"timeout_seconds": 180.0},
+                "coder": {"timeout_seconds": 30.0},
+            },
+        },
+    )
+    monkeypatch.setattr(runs_cmd.time, "time", lambda: 1779804091.0)
+
+    assert runs_cmd.list_runs(cwd=tmp_path, limit=10) == 0
+
+    assert "[started; stale > 30s timeout]" in capsys.readouterr().out
+
+
+def test_runs_list_treats_naive_legacy_timestamp_as_utc(tmp_path, monkeypatch, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    run_dir = runs_root / "legacy-naive"
+    _write_minimal_run(
+        run_dir,
+        task="legacy task",
+        status="started",
+        started_at="2026-05-26T14:00:00",
+    )
+    _write_json(
+        run_dir / "roster.json",
+        {
+            "orchestrator": "chef",
+            "timeout_seconds": 30.0,
+            "agents": {"chef": {"timeout_seconds": None}},
+        },
+    )
+    previous_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "America/New_York"
+        system_time.tzset()
+        monkeypatch.setattr(runs_cmd.time, "time", lambda: 1779804031.0)
+
+        assert runs_cmd.list_runs(cwd=tmp_path, limit=10) == 0
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        system_time.tzset()
+
+    assert "[started; stale > 30s timeout]" in capsys.readouterr().out
 
 
 def test_runs_list_respects_limit(tmp_path, capsys):
