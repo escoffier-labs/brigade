@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -10,8 +11,7 @@ from pathlib import Path
 import pytest
 
 import brigade
-from brigade import component_manifest
-from brigade import component_paths
+from brigade import component_install, component_manifest, component_paths, component_state
 from brigade.component_install import (
     ComponentInstallError,
     _restore_managed_executables,
@@ -27,6 +27,7 @@ from brigade.component_install import (
 
 from tests.component_install_helpers import (
     FakeOpener,
+    all_fixture_payloads,
     fixture_payload,
     linux_env,
     smoke_stub_script,
@@ -59,6 +60,35 @@ def _recording_runner(calls: list[tuple[list[str], dict[str, object]]]):
         return subprocess.run(argv, **kwargs)
 
     return runner
+
+
+def _install_fixture_manifest(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    return env, manifest_path
+
+
+def _managed_paths(env: dict[str, str]) -> dict[str, Path]:
+    roots = resolve_roots(env=env, system="linux")
+    return {
+        component_id: Path(component_paths.managed_executable_path(roots.data_root, component_id))
+        for component_id in component_manifest.KNOWN_COMPONENT_IDS
+    }
+
+
+def _write_prior_managed(paths: dict[str, Path]) -> dict[str, bytes]:
+    prior: dict[str, bytes] = {}
+    for index, path in enumerate(paths.values()):
+        if index % 2 == 0:
+            payload = f"prior-{path.name}".encode()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+            path.chmod(0o700)
+            prior[path.name] = payload
+    return prior
 
 
 def test_verify_cached_asset_rejects_invalid_byte_size(tmp_path):
@@ -201,9 +231,7 @@ def test_build_setup_plan_emits_deterministic_actions(tmp_path):
     roots = resolve_roots(env=linux_env(tmp_path), system="linux")
     plan = build_setup_plan(manifest, platform="linux-amd64", roots=roots)
     per_component = ("verify-cache", "download", "materialize", "smoke")
-    assert [action.action for action in plan] == list(per_component) * len(
-        component_manifest.KNOWN_COMPONENT_IDS
-    )
+    assert [action.action for action in plan] == list(per_component) * len(component_manifest.KNOWN_COMPONENT_IDS)
     expected_ids: list[str] = []
     for component_id in component_manifest.KNOWN_COMPONENT_IDS:
         expected_ids.extend([component_id] * len(per_component))
@@ -218,9 +246,7 @@ def test_build_setup_plan_uses_exact_cache_and_managed_paths(tmp_path):
     plan = build_setup_plan(manifest, platform=platform, roots=roots)
     for component_id in component_manifest.KNOWN_COMPONENT_IDS:
         asset = manifest.components[component_id].assets[platform]
-        cache_path = component_paths.cached_asset_path(
-            roots.cache_root, asset.sha256, asset.asset_name
-        )
+        cache_path = component_paths.cached_asset_path(roots.cache_root, asset.sha256, asset.asset_name)
         managed_path = component_paths.managed_executable_path(roots.data_root, component_id)
         component_actions = [action for action in plan if action.component_id == component_id]
         assert len(component_actions) == 4
@@ -230,9 +256,7 @@ def test_build_setup_plan_uses_exact_cache_and_managed_paths(tmp_path):
         assert component_actions[0].byte_size == asset.byte_size
         assert component_actions[0].sha256 == asset.sha256
         assert component_actions[0].download_url == asset.download_url
-        assert component_actions[0].component_revision == manifest.components[
-            component_id
-        ].component_revision
+        assert component_actions[0].component_revision == manifest.components[component_id].component_revision
 
 
 def test_setup_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
@@ -322,6 +346,178 @@ def test_setup_rejects_brigade_version_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
     rc = setup_native_components(env=env)
     assert rc == 1
+
+
+def test_setup_install_writes_all_four_managed_files_and_state_after_smoke(tmp_path, monkeypatch):
+    env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    opener = FakeOpener(all_fixture_payloads())
+
+    assert setup_native_components(env=env, opener=opener) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    state = component_state.load_installed_state(state_path)
+    assert state is not None
+    assert set(state.components) == set(component_manifest.KNOWN_COMPONENT_IDS)
+    assert len(opener.calls) == len(component_manifest.KNOWN_COMPONENT_IDS)
+    for component_id, managed_path in _managed_paths(env).items():
+        payload, byte_size, sha256 = fixture_payload(component_id)
+        assert managed_path.read_bytes() == payload
+        assert state.components[component_id].byte_size == byte_size
+        assert state.components[component_id].sha256 == sha256
+        assert state.components[component_id].executable == str(managed_path)
+
+
+def test_setup_state_is_absent_while_smoke_runs(tmp_path, monkeypatch):
+    env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    original_smoke = component_install.run_post_install_smoke
+
+    def assert_state_absent(managed_paths, **kwargs):
+        assert not state_path.exists()
+        original_smoke(managed_paths, **kwargs)
+
+    monkeypatch.setattr(component_install, "run_post_install_smoke", assert_state_absent)
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+    assert state_path.is_file()
+
+
+def test_setup_fetches_every_asset_before_managed_bin_mutation(tmp_path, monkeypatch):
+    env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    opener = FakeOpener(all_fixture_payloads())
+    original_materialize = component_install.materialize_executable
+
+    def assert_all_downloaded(*, cache_path, managed_path):
+        assert len(opener.calls) == len(component_manifest.KNOWN_COMPONENT_IDS)
+        original_materialize(cache_path=cache_path, managed_path=managed_path)
+
+    monkeypatch.setattr(component_install, "materialize_executable", assert_all_downloaded)
+
+    assert setup_native_components(env=env, opener=opener) == 0
+
+
+def test_setup_last_download_failure_preserves_managed_bin(tmp_path, monkeypatch):
+    env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    paths = _managed_paths(env)
+    prior = _write_prior_managed(paths)
+    payloads = all_fixture_payloads()
+    payloads.pop(next(reversed(payloads)))
+
+    assert setup_native_components(env=env, opener=FakeOpener(payloads)) == 1
+
+    for component_id, path in paths.items():
+        if component_id in prior:
+            assert path.read_bytes() == prior[component_id]
+            assert path.stat().st_mode & 0o777 == 0o700
+        else:
+            assert not path.exists()
+
+
+def test_setup_smoke_failure_restores_old_files_and_removes_new_files(tmp_path, monkeypatch):
+    env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    paths = _managed_paths(env)
+    prior = _write_prior_managed(paths)
+
+    def boom_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads()), runner=boom_runner) == 1
+
+    for component_id, path in paths.items():
+        if component_id in prior:
+            assert path.read_bytes() == prior[component_id]
+            assert path.stat().st_mode & 0o777 == 0o700
+        else:
+            assert not path.exists()
+
+
+def test_setup_materialize_failure_restores_managed_bin(tmp_path, monkeypatch):
+    env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    paths = _managed_paths(env)
+    prior = _write_prior_managed(paths)
+    original_materialize = component_install.materialize_executable
+    materialized = 0
+
+    def fail_mid_batch(*, cache_path, managed_path):
+        nonlocal materialized
+        materialized += 1
+        if materialized == 3:
+            raise OSError("materialize failed")
+        original_materialize(cache_path=cache_path, managed_path=managed_path)
+
+    monkeypatch.setattr(component_install, "materialize_executable", fail_mid_batch)
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 1
+
+    for component_id, path in paths.items():
+        if component_id in prior:
+            assert path.read_bytes() == prior[component_id]
+            assert path.stat().st_mode & 0o777 == 0o700
+        else:
+            assert not path.exists()
+
+
+def test_setup_state_write_failure_restores_managed_bin(tmp_path, monkeypatch):
+    env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    paths = _managed_paths(env)
+
+    def fail_state_write(*_args, **_kwargs):
+        raise OSError("state write failed")
+
+    monkeypatch.setattr(component_install.component_state, "write_installed_state", fail_state_write)
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 1
+    assert all(not path.exists() for path in paths.values())
+
+
+def test_setup_refuses_an_invalid_existing_current_state(tmp_path, monkeypatch, capsys):
+    env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text("{not valid json")
+    opener = FakeOpener(all_fixture_payloads())
+
+    assert setup_native_components(env=env, opener=opener) == 1
+    assert "invalid installed state" in capsys.readouterr().err
+    assert opener.calls == []
+
+
+def test_repeat_setup_is_idempotent_without_network_or_managed_rewrites(tmp_path, monkeypatch):
+    env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    first_opener = FakeOpener(all_fixture_payloads())
+    assert setup_native_components(env=env, opener=first_opener) == 0
+    paths = _managed_paths(env)
+    mtimes_before = {component_id: path.stat().st_mtime_ns for component_id, path in paths.items()}
+    roots = resolve_roots(env=env, system="linux")
+    previous_path = Path(component_paths.installed_previous_state_path(roots.data_root))
+    previous_before = previous_path.read_bytes() if previous_path.exists() else None
+
+    second_opener = FakeOpener({})
+    assert setup_native_components(env=env, opener=second_opener) == 0
+
+    assert second_opener.calls == []
+    assert {component_id: path.stat().st_mtime_ns for component_id, path in paths.items()} == mtimes_before
+    assert (previous_path.read_bytes() if previous_path.exists() else None) == previous_before
+
+
+def test_setup_rotates_previous_state_when_manifest_revision_changes(tmp_path, monkeypatch):
+    env, manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+    roots = resolve_roots(env=env, system="linux")
+    current_path = Path(component_paths.installed_state_path(roots.data_root))
+    current_before = current_path.read_bytes()
+    payload = json.loads(manifest_path.read_text())
+    payload["manifest_revision"] = "fixture-next"
+    manifest_path.write_text(json.dumps(payload))
+
+    assert setup_native_components(env=env, opener=FakeOpener({})) == 0
+
+    previous_path = Path(component_paths.installed_previous_state_path(roots.data_root))
+    assert previous_path.read_bytes() == current_before
+    assert component_state.load_installed_state(current_path).manifest_revision == "fixture-next"
 
 
 def test_materialize_executable_sets_mode_and_replaces(tmp_path):
@@ -489,6 +685,19 @@ def test_run_post_install_smoke_rejects_graphtrail_mcp_malformed_json(tmp_path):
         run_post_install_smoke(managed)
 
 
+def test_run_post_install_smoke_rejects_graphtrail_mcp_nonzero_exit(tmp_path):
+    managed = _write_managed_smoke_stubs(tmp_path)
+
+    def nonzero_runner(argv, **kwargs):
+        completed = subprocess.run(argv, **kwargs)
+        if argv[0] == managed["graphtrail-mcp"]:
+            return subprocess.CompletedProcess(argv, 1, completed.stdout, completed.stderr)
+        return completed
+
+    with pytest.raises(ComponentInstallError, match="graphtrail-mcp smoke failed.*exited 1"):
+        run_post_install_smoke(managed, runner=nonzero_runner)
+
+
 def test_run_post_install_smoke_rejects_miseledger_nonzero_exit(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
     script = smoke_stub_script("miseledger").replace("raise SystemExit(0)", "raise SystemExit(1)")
@@ -518,7 +727,7 @@ def test_run_post_install_smoke_rejects_sessionfind_missing_usage(tmp_path):
 
 def test_run_post_install_smoke_rejects_timeout(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
-    sleep_script = '#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n'
+    sleep_script = "#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n"
 
     def slow_runner(argv, **kwargs):
         kwargs["timeout"] = 0.2

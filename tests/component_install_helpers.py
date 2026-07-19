@@ -6,7 +6,6 @@ import hashlib
 import json
 from pathlib import Path
 
-import brigade
 from brigade import component_manifest
 
 GRAPHTRAIL_SHA = "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb"
@@ -32,8 +31,8 @@ def smoke_stub_script(name: str) -> str:
         )
     if name == "graphtrail-mcp":
         return (
-            '#!/usr/bin/env python3\nimport json, sys\n'
-            'req = json.load(sys.stdin)\n'
+            "#!/usr/bin/env python3\nimport json, sys\n"
+            "req = json.load(sys.stdin)\n"
             'assert req.get("method") == "initialize"\n'
             'print(json.dumps({"jsonrpc": "2.0", "id": req.get("id"), "result": '
             '{"protocolVersion": "2024-11-05", "capabilities": {}, '
@@ -83,9 +82,7 @@ def write_verified_cache(cache_path: Path, *, payload: bytes) -> None:
     cache_path.chmod(0o755)
 
 
-def test_manifest_asset(
-    component_id: str, *, platform: str = "linux-amd64"
-) -> component_manifest.ComponentAsset:
+def test_manifest_asset(component_id: str, *, platform: str = "linux-amd64") -> component_manifest.ComponentAsset:
     _, byte_size, sha256 = fixture_payload(component_id, platform=platform)
     asset_name = fixture_asset_name(component_id, platform=platform)
     return component_manifest.ComponentAsset(

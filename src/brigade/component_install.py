@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -15,13 +17,14 @@ from pathlib import Path
 from typing import Any
 
 import brigade
-from brigade import component_manifest, component_paths, localio
+from brigade import component_manifest, component_paths, component_state, localio
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
 _EXECUTABLE_MODE = 0o755
 _SMOKE_COMPONENT_IDS = component_manifest.KNOWN_COMPONENT_IDS
 _SMOKE_TIMEOUT_SECONDS = 30.0
+_DOWNLOAD_TIMEOUT_SECONDS = 30.0
 _JSONRPC_INIT_REQUEST = json.dumps(
     {
         "jsonrpc": "2.0",
@@ -189,14 +192,35 @@ def _restore_managed_executables(snapshots: Sequence[_ManagedExecutableSnapshot]
     for snapshot in snapshots:
         if snapshot.existed:
             if snapshot.content is None or snapshot.mode is None:
-                raise ComponentInstallError(
-                    f"invalid managed executable snapshot for {snapshot.path}"
-                )
-            snapshot.path.parent.mkdir(parents=True, exist_ok=True)
-            snapshot.path.write_bytes(snapshot.content)
-            snapshot.path.chmod(snapshot.mode)
+                raise ComponentInstallError(f"invalid managed executable snapshot for {snapshot.path}")
+            _restore_file_atomically(
+                snapshot.path,
+                content=snapshot.content,
+                mode=snapshot.mode,
+            )
         elif snapshot.path.exists():
             snapshot.path.unlink()
+
+
+def _restore_file_atomically(path: Path, *, content: bytes, mode: int) -> None:
+    """Restore one snapshotted file through a temp sibling and os.replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.chmod(stat.S_IMODE(mode))
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def materialize_executable(*, cache_path: Path, managed_path: Path) -> None:
@@ -242,14 +266,10 @@ def verify_cached_asset(path: Path, *, byte_size: int, sha256: str) -> None:
         raise ComponentInstallError(f"cached asset missing: {path}")
     actual_size = path.stat().st_size
     if actual_size != byte_size:
-        raise ComponentInstallError(
-            f"byte_size mismatch for {path}: expected {byte_size}, got {actual_size}"
-        )
+        raise ComponentInstallError(f"byte_size mismatch for {path}: expected {byte_size}, got {actual_size}")
     actual_sha256 = localio.file_sha256(path)
     if actual_sha256 != sha256:
-        raise ComponentInstallError(
-            f"sha256 mismatch for {path}: expected {sha256}, got {actual_sha256}"
-        )
+        raise ComponentInstallError(f"sha256 mismatch for {path}: expected {sha256}, got {actual_sha256}")
 
 
 def fetch_asset_to_cache(
@@ -265,21 +285,21 @@ def fetch_asset_to_cache(
         verify_cached_asset(cache_path, byte_size=asset.byte_size, sha256=asset.sha256)
     except ComponentInstallError:
         if offline:
-            raise ComponentInstallError(
-                f"offline: verified cache required at {cache_path}"
-            ) from None
+            raise ComponentInstallError(f"offline: verified cache required at {cache_path}") from None
     else:
         return cache_path
 
-    url_opener = opener if opener is not None else urllib.request.urlopen
+    def open_url(url: str) -> Any:
+        if opener is not None:
+            return opener(url)
+        return urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT_SECONDS)
+
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=cache_path.parent, prefix=f".{cache_path.name}.", suffix=".tmp"
-    )
+    fd, tmp_name = tempfile.mkstemp(dir=cache_path.parent, prefix=f".{cache_path.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as handle:
-            with url_opener(asset.download_url) as response:
+            with open_url(asset.download_url) as response:
                 while True:
                     chunk = response.read(_READ_CHUNK)
                     if not chunk:
@@ -293,9 +313,7 @@ def fetch_asset_to_cache(
     return cache_path
 
 
-def _default_smoke_runner(
-    argv: Sequence[str], **kwargs: object
-) -> subprocess.CompletedProcess[str]:
+def _default_smoke_runner(argv: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
     run_kwargs: dict[str, object] = {
         "capture_output": True,
         "text": True,
@@ -333,8 +351,7 @@ def _validate_smoke_managed_paths(managed_paths: Mapping[str, str]) -> dict[str,
         if extra:
             parts.append(f"unexpected: {', '.join(extra)}")
         raise ComponentInstallError(
-            "post-install smoke requires exactly "
-            f"{len(expected)} managed paths; {'; '.join(parts)}"
+            f"post-install smoke requires exactly {len(expected)} managed paths; {'; '.join(parts)}"
         )
 
     resolved: dict[str, Path] = {}
@@ -343,13 +360,10 @@ def _validate_smoke_managed_paths(managed_paths: Mapping[str, str]) -> dict[str,
         path = Path(raw)
         if not path.is_absolute():
             raise ComponentInstallError(
-                f"post-install smoke for {component_id} requires absolute managed path, "
-                f"got {raw!r}"
+                f"post-install smoke for {component_id} requires absolute managed path, got {raw!r}"
             )
         if not path.is_file():
-            raise ComponentInstallError(
-                f"post-install smoke for {component_id}: managed executable missing: {raw}"
-            )
+            raise ComponentInstallError(f"post-install smoke for {component_id}: managed executable missing: {raw}")
         resolved[component_id] = path
     return resolved
 
@@ -362,20 +376,14 @@ def _smoke_graphtrail(
     try:
         completed = _invoke_smoke_runner(run, argv)
     except subprocess.TimeoutExpired as exc:
-        raise ComponentInstallError(
-            f"graphtrail smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s"
-        ) from exc
+        raise ComponentInstallError(f"graphtrail smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
     except OSError as exc:
         raise ComponentInstallError(f"graphtrail smoke failed to run {path}: {exc}") from exc
 
     if completed.returncode != 0:
-        raise ComponentInstallError(
-            f"graphtrail smoke failed: {path} --version exited {completed.returncode}"
-        )
+        raise ComponentInstallError(f"graphtrail smoke failed: {path} --version exited {completed.returncode}")
     if not (completed.stdout or "").strip():
-        raise ComponentInstallError(
-            f"graphtrail smoke failed: {path} --version produced empty stdout"
-        )
+        raise ComponentInstallError(f"graphtrail smoke failed: {path} --version produced empty stdout")
 
 
 def _smoke_graphtrail_mcp(
@@ -386,19 +394,15 @@ def _smoke_graphtrail_mcp(
     try:
         completed = _invoke_smoke_runner(run, argv, input=_JSONRPC_INIT_REQUEST)
     except subprocess.TimeoutExpired as exc:
-        raise ComponentInstallError(
-            f"graphtrail-mcp smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s"
-        ) from exc
+        raise ComponentInstallError(f"graphtrail-mcp smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
     except OSError as exc:
-        raise ComponentInstallError(
-            f"graphtrail-mcp smoke failed to run {path}: {exc}"
-        ) from exc
+        raise ComponentInstallError(f"graphtrail-mcp smoke failed to run {path}: {exc}") from exc
 
+    if completed.returncode != 0:
+        raise ComponentInstallError(f"graphtrail-mcp smoke failed: {path} exited {completed.returncode}")
     stdout = (completed.stdout or "").strip()
     if not stdout:
-        raise ComponentInstallError(
-            f"graphtrail-mcp smoke failed: {path} produced empty stdout"
-        )
+        raise ComponentInstallError(f"graphtrail-mcp smoke failed: {path} produced empty stdout")
     try:
         response = json.loads(stdout)
     except json.JSONDecodeError as exc:
@@ -406,17 +410,11 @@ def _smoke_graphtrail_mcp(
             f"graphtrail-mcp smoke failed: {path} returned malformed JSON-RPC response"
         ) from exc
     if response.get("jsonrpc") != "2.0":
-        raise ComponentInstallError(
-            f"graphtrail-mcp smoke failed: {path} returned invalid JSON-RPC version"
-        )
+        raise ComponentInstallError(f"graphtrail-mcp smoke failed: {path} returned invalid JSON-RPC version")
     if response.get("id") != 1:
-        raise ComponentInstallError(
-            f"graphtrail-mcp smoke failed: {path} JSON-RPC response id mismatch"
-        )
+        raise ComponentInstallError(f"graphtrail-mcp smoke failed: {path} JSON-RPC response id mismatch")
     if "result" not in response:
-        raise ComponentInstallError(
-            f"graphtrail-mcp smoke failed: {path} JSON-RPC response missing result"
-        )
+        raise ComponentInstallError(f"graphtrail-mcp smoke failed: {path} JSON-RPC response missing result")
 
 
 def _smoke_miseledger(
@@ -427,16 +425,12 @@ def _smoke_miseledger(
     try:
         completed = _invoke_smoke_runner(run, argv)
     except subprocess.TimeoutExpired as exc:
-        raise ComponentInstallError(
-            f"miseledger smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s"
-        ) from exc
+        raise ComponentInstallError(f"miseledger smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
     except OSError as exc:
         raise ComponentInstallError(f"miseledger smoke failed to run {path}: {exc}") from exc
 
     if completed.returncode != 0:
-        raise ComponentInstallError(
-            f"miseledger smoke failed: {path} version exited {completed.returncode}"
-        )
+        raise ComponentInstallError(f"miseledger smoke failed: {path} version exited {completed.returncode}")
 
 
 def _smoke_sessionfind(
@@ -447,9 +441,7 @@ def _smoke_sessionfind(
     try:
         completed = _invoke_smoke_runner(run, argv)
     except subprocess.TimeoutExpired as exc:
-        raise ComponentInstallError(
-            f"sessionfind smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s"
-        ) from exc
+        raise ComponentInstallError(f"sessionfind smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
     except OSError as exc:
         raise ComponentInstallError(f"sessionfind smoke failed to run {path}: {exc}") from exc
 
@@ -459,9 +451,7 @@ def _smoke_sessionfind(
         )
     combined = f"{completed.stdout or ''}{completed.stderr or ''}"
     if "usage" not in combined.lower():
-        raise ComponentInstallError(
-            f"sessionfind smoke failed: {path} --help produced no usage text"
-        )
+        raise ComponentInstallError(f"sessionfind smoke failed: {path} --help produced no usage text")
 
 
 def run_post_install_smoke(
@@ -485,25 +475,105 @@ def setup_native_components(
     offline: bool = False,
     rollback: bool = False,
     env: Mapping[str, str] | None = None,
-    opener: object | None = None,
-    runner: object | None = None,
+    opener: Callable[..., Any] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
 ) -> int:
     """Install pinned native components; return process exit code."""
-    del opener, runner
     try:
         manifest = component_manifest.load()
-    except ValueError as exc:
+        if manifest.brigade_version != brigade.__version__:
+            raise ComponentInstallError(
+                "brigade_version mismatch: "
+                f"manifest requires {manifest.brigade_version!r}, "
+                f"running Brigade {brigade.__version__!r}"
+            )
+        if dry_run:
+            return _setup_dry_run(manifest, env=env)
+        if rollback:
+            raise ComponentInstallError("rollback is not implemented")
+
+        roots = resolve_roots(env=env)
+        platform = component_manifest.platform_key()
+        plan = build_setup_plan(manifest, platform=platform, roots=roots)
+        assets = [entry for entry in plan if entry.action == "verify-cache"]
+        current_state_path = Path(component_paths.installed_state_path(roots.data_root))
+        previous_state_path = Path(component_paths.installed_previous_state_path(roots.data_root))
+        current_state = component_state.load_installed_state(current_state_path)
+        if current_state_path.exists() and current_state is None:
+            raise ComponentInstallError(f"invalid installed state: {current_state_path}")
+
+        for entry in assets:
+            asset = manifest.components[entry.component_id].assets[platform]
+            fetch_asset_to_cache(
+                asset,
+                cache_path=Path(entry.cache_path),
+                offline=offline,
+                opener=opener,
+            )
+
+        managed_paths = {entry.component_id: Path(entry.managed_path) for entry in assets}
+        snapshots = _snapshot_managed_executables(list(managed_paths.values()))
+        state_snapshots = _snapshot_managed_executables([current_state_path, previous_state_path])
+        try:
+            for entry in assets:
+                managed_path = managed_paths[entry.component_id]
+                try:
+                    verify_cached_asset(
+                        managed_path,
+                        byte_size=entry.byte_size,
+                        sha256=entry.sha256,
+                    )
+                except ComponentInstallError:
+                    verify_cached_asset(
+                        Path(entry.cache_path),
+                        byte_size=entry.byte_size,
+                        sha256=entry.sha256,
+                    )
+                    materialize_executable(
+                        cache_path=Path(entry.cache_path),
+                        managed_path=managed_path,
+                    )
+
+            for entry in assets:
+                verify_cached_asset(
+                    managed_paths[entry.component_id],
+                    byte_size=entry.byte_size,
+                    sha256=entry.sha256,
+                )
+
+            run_post_install_smoke(
+                {component_id: str(path) for component_id, path in managed_paths.items()},
+                runner=runner,
+            )
+            next_state = component_state.InstalledState(
+                schema_version=component_state.SCHEMA_VERSION,
+                brigade_version=brigade.__version__,
+                manifest_revision=manifest.manifest_revision,
+                platform=platform,
+                installed_at=localio.utc_now_iso(),
+                components={
+                    entry.component_id: component_state.InstalledComponentRecord(
+                        component_revision=entry.component_revision,
+                        asset_name=entry.asset_name,
+                        byte_size=entry.byte_size,
+                        sha256=entry.sha256,
+                        download_url=entry.download_url,
+                        executable=str(managed_paths[entry.component_id]),
+                    )
+                    for entry in assets
+                },
+            )
+            if current_state is not None and component_state.should_rotate_previous(current_state, next_state):
+                component_state.write_installed_state(previous_state_path, current_state)
+            component_state.write_installed_state(current_state_path, next_state)
+        except (ComponentInstallError, OSError, ValueError, urllib.error.URLError) as exc:
+            try:
+                _restore_managed_executables(snapshots)
+                _restore_managed_executables(state_snapshots)
+            except (ComponentInstallError, OSError) as restore_exc:
+                raise ComponentInstallError(f"{exc}; failed to restore prior managed files: {restore_exc}") from exc
+            raise
+    except (ComponentInstallError, OSError, ValueError, urllib.error.URLError) as exc:
         print(f"component setup: {exc}", file=sys.stderr)
         return 1
-    if manifest.brigade_version != brigade.__version__:
-        print(
-            "component setup: brigade_version mismatch: "
-            f"manifest requires {manifest.brigade_version!r}, "
-            f"running Brigade {brigade.__version__!r}",
-            file=sys.stderr,
-        )
-        return 1
-    if dry_run:
-        return _setup_dry_run(manifest, env=env)
-    del offline, rollback, env
     return 0
