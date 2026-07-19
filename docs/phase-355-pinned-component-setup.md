@@ -126,7 +126,7 @@ Prior path: `component_paths.installed_previous_state_path(data_root)` → `<dat
 | graphtrail | `<managed>/graphtrail --version` | exit 0, non-empty stdout |
 | graphtrail-mcp | `<managed>/graphtrail-mcp` JSON-RPC `initialize` on stdin | valid JSON-RPC response on stdout |
 | miseledger | `<managed>/miseledger version` | exit 0 |
-| sessionfind | `<managed>/sessionfind --help` | exit 0 with usage text in stdout or stderr |
+| sessionfind | `<managed>/sessionfind --help` | exit 0; command-syntax lines beginning with `sessionfind ` read from stdout, or legacy text containing `usage` read from stdout or stderr |
 
 ## File Map
 
@@ -247,7 +247,7 @@ def smoke_stub_script(name: str) -> str:
     if name == "miseledger":
         return '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["version"]:\n    print("miseledger test 0.6.0")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
     if name == "sessionfind":
-        return '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--help"]:\n    print("usage: sessionfind [options]")\n    raise SystemExit(2)\nraise SystemExit(1)\n'
+        return '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--help"]:\n    print("sessionfind list [--source KIND] ...")\n    print("sessionfind search <query> ...")\n    print("sessionfind <query> ...")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
     raise ValueError(name)
 
 

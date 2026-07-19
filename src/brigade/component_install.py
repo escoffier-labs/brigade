@@ -471,6 +471,13 @@ def _smoke_miseledger(
         raise ComponentInstallError(f"miseledger smoke failed: {path} version exited {completed.returncode}")
 
 
+def _sessionfind_help_is_valid(stdout: str, stderr: str) -> bool:
+    combined = f"{stdout}{stderr}"
+    if "usage" in combined.lower():
+        return True
+    return any(line.strip().startswith("sessionfind ") for line in stdout.splitlines())
+
+
 def _smoke_sessionfind(
     path: Path,
     run: Callable[..., subprocess.CompletedProcess[str]],
@@ -487,9 +494,10 @@ def _smoke_sessionfind(
         raise ComponentInstallError(
             f"sessionfind smoke failed: {path} --help exited {completed.returncode}, expected 0"
         )
-    combined = f"{completed.stdout or ''}{completed.stderr or ''}"
-    if "usage" not in combined.lower():
-        raise ComponentInstallError(f"sessionfind smoke failed: {path} --help produced no usage text")
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    if not _sessionfind_help_is_valid(stdout, stderr):
+        raise ComponentInstallError(f"sessionfind smoke failed: {path} --help produced no help text")
 
 
 def run_post_install_smoke(
