@@ -15,6 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import brigade
 from brigade import component_manifest, component_paths, component_state, localio
@@ -259,6 +260,44 @@ def _validate_expected(*, byte_size: int, sha256: str) -> None:
         raise ComponentInstallError(f"sha256 must be 64 lowercase hex characters, got {sha256!r}")
 
 
+def _require_https_final_url(response: Any) -> None:
+    geturl = getattr(response, "geturl", None)
+    if geturl is None:
+        return
+    final_url = geturl()
+    if urlparse(final_url).scheme.lower() != "https":
+        raise ComponentInstallError(f"download redirect downgraded to non-https URL: {final_url}")
+
+
+def _write_bounded_download(handle: Any, response: Any, *, byte_size: int) -> None:
+    nbytes = 0
+    while True:
+        remaining = byte_size - nbytes
+        if remaining <= 0:
+            if response.read(1):
+                raise ComponentInstallError(f"download exceeded byte_size {byte_size}")
+            break
+        chunk = response.read(min(_READ_CHUNK, remaining + 1))
+        if not chunk:
+            break
+        if len(chunk) > remaining:
+            handle.write(chunk[:remaining])
+            raise ComponentInstallError(f"download exceeded byte_size {byte_size}")
+        handle.write(chunk)
+        nbytes += len(chunk)
+
+
+def _managed_executable_is_ready(path: Path, *, byte_size: int, sha256: str) -> bool:
+    try:
+        verify_cached_asset(path, byte_size=byte_size, sha256=sha256)
+    except ComponentInstallError:
+        return False
+    if sys.platform == "win32":
+        return True
+    mode = path.stat().st_mode
+    return bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+
+
 def verify_cached_asset(path: Path, *, byte_size: int, sha256: str) -> None:
     """Verify cached asset byte size and SHA-256 digest."""
     _validate_expected(byte_size=byte_size, sha256=sha256)
@@ -300,11 +339,10 @@ def fetch_asset_to_cache(
     try:
         with os.fdopen(fd, "wb") as handle:
             with open_url(asset.download_url) as response:
-                while True:
-                    chunk = response.read(_READ_CHUNK)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
+                _require_https_final_url(response)
+                _write_bounded_download(handle, response, byte_size=asset.byte_size)
+            handle.flush()
+            os.fsync(handle.fileno())
         verify_cached_asset(tmp_path, byte_size=asset.byte_size, sha256=asset.sha256)
         os.replace(tmp_path, cache_path)
     except BaseException:
@@ -626,13 +664,11 @@ def setup_native_components(
         try:
             for entry in assets:
                 managed_path = managed_paths[entry.component_id]
-                try:
-                    verify_cached_asset(
-                        managed_path,
-                        byte_size=entry.byte_size,
-                        sha256=entry.sha256,
-                    )
-                except ComponentInstallError:
+                if not _managed_executable_is_ready(
+                    managed_path,
+                    byte_size=entry.byte_size,
+                    sha256=entry.sha256,
+                ):
                     verify_cached_asset(
                         Path(entry.cache_path),
                         byte_size=entry.byte_size,

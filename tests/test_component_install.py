@@ -280,6 +280,72 @@ def test_fetch_asset_cleans_up_temp_on_failure(tmp_path):
     assert leftovers == []
 
 
+def test_fetch_asset_oversized_stream_aborts_with_bounded_reads(tmp_path):
+    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    payload, byte_size, _sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    oversized = payload + b"extra-bytes"
+    cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
+    stale = b"stale-cache"
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_bytes(stale)
+    opener = FakeOpener({asset.download_url: oversized})
+    with pytest.raises(ComponentInstallError, match="byte_size"):
+        fetch_asset_to_cache(asset, cache_path=cache_path, offline=False, opener=opener)
+    assert cache_path.read_bytes() == stale
+    assert list(cache_path.parent.glob(f".{cache_path.name}.*")) == []
+    assert all(size <= byte_size + 1 for size in opener.responses[0].read_sizes)
+
+
+def test_fetch_asset_rejects_https_to_http_redirect(tmp_path):
+    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    payload, _byte_size, _sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
+    opener = FakeOpener(
+        {asset.download_url: payload},
+        final_urls={asset.download_url: asset.download_url.replace("https://", "http://", 1)},
+    )
+    with pytest.raises(ComponentInstallError, match="https"):
+        fetch_asset_to_cache(asset, cache_path=cache_path, offline=False, opener=opener)
+    assert not cache_path.exists()
+
+
+def test_fetch_asset_fsyncs_verified_download_before_replace(tmp_path, monkeypatch):
+    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    cache_path = tmp_path / "cache" / sha256 / asset.asset_name
+    opener = FakeOpener({asset.download_url: payload})
+    fsync_calls: list[int] = []
+    original_fsync = os.fsync
+
+    def recording_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+        original_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    fetch_asset_to_cache(asset, cache_path=cache_path, offline=False, opener=opener)
+    assert fsync_calls
+    verify_cached_asset(cache_path, byte_size=byte_size, sha256=sha256)
+
+
+def test_repeat_setup_repairs_cleared_execute_bits_without_network(tmp_path, monkeypatch):
+    env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+    paths = _managed_paths(env)
+    mtimes_before = {component_id: path.stat().st_mtime_ns for component_id, path in paths.items()}
+    repair_target = component_manifest.KNOWN_COMPONENT_IDS[0]
+    paths[repair_target].chmod(0o644)
+
+    assert setup_native_components(env=env, opener=FakeOpener({})) == 0
+
+    payload, _byte_size, _sha256 = fixture_payload(repair_target)
+    assert paths[repair_target].read_bytes() == payload
+    assert paths[repair_target].stat().st_mode & 0o111
+    for component_id, path in paths.items():
+        if component_id == repair_target:
+            continue
+        assert path.stat().st_mtime_ns == mtimes_before[component_id]
+
+
 def test_resolve_roots_uses_xdg_paths(tmp_path):
     env = linux_env(tmp_path)
     roots = resolve_roots(env=env, system="linux")

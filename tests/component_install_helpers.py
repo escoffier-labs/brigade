@@ -138,10 +138,61 @@ def all_fixture_payloads(*, platform: str = "linux-amd64") -> dict[str, bytes]:
     return payloads
 
 
+class _RedirectFakeResponse:
+    def __init__(self, payload: bytes, *, final_url: str):
+        from io import BytesIO
+
+        self._stream = BytesIO(payload)
+        self._final_url = final_url
+        self.read_sizes: list[int] = []
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            return self._stream.read()
+        self.read_sizes.append(size)
+        return self._stream.read(size)
+
+    def geturl(self) -> str:
+        return self._final_url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+
+class _TrackingFakeResponse:
+    def __init__(self, payload: bytes):
+        from io import BytesIO
+
+        self._stream = BytesIO(payload)
+        self.read_sizes: list[int] = []
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            return self._stream.read()
+        self.read_sizes.append(size)
+        return self._stream.read(size)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+
 class FakeOpener:
-    def __init__(self, payloads: dict[str, bytes]):
+    def __init__(
+        self,
+        payloads: dict[str, bytes],
+        *,
+        final_urls: dict[str, str] | None = None,
+    ):
         self.payloads = payloads
+        self.final_urls = final_urls or {}
         self.calls: list[str] = []
+        self.responses: list[_TrackingFakeResponse | _RedirectFakeResponse] = []
 
     def __call__(self, url: str, *args, **kwargs):
         self.calls.append(url)
@@ -150,4 +201,13 @@ class FakeOpener:
 
         if url not in self.payloads:
             raise HTTPError(url, 404, "not found", hdrs=None, fp=BytesIO(b""))
-        return BytesIO(self.payloads[url])
+        payload = self.payloads[url]
+        final_url = self.final_urls.get(url)
+        if final_url is not None:
+            response: _TrackingFakeResponse | _RedirectFakeResponse = _RedirectFakeResponse(
+                payload, final_url=final_url
+            )
+        else:
+            response = _TrackingFakeResponse(payload)
+        self.responses.append(response)
+        return response
