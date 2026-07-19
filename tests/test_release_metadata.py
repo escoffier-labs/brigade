@@ -13,14 +13,17 @@ def _release_changelog(version: str) -> str:
     return text[start:end]
 
 
-def test_current_release_has_one_added_section_with_recent_release_notes():
+def test_current_release_has_one_fixed_section_with_recent_release_notes():
     text = _release_changelog(__version__)
 
-    assert text.count("### Added") == 1
+    assert text.count("### Fixed") == 1
     for expected in (
-        "Versioned component manifest v1",
-        "brigade setup",
-        "cross-platform installation documentation",
+        "sessionfind v0.6.0",
+        "`--help`",
+        "absolute managed-path",
+        "usage-text validation",
+        "#355",
+        "PR #370",
     ):
         assert expected in text
 
