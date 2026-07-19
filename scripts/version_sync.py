@@ -28,9 +28,11 @@ import os
 import pathlib
 import re
 import sys
-import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+
+from brigade import toml_compat  # noqa: E402
 
 # --- Per-repo configuration -------------------------------------------------
 # Source of truth for the version.
@@ -55,7 +57,7 @@ RECORDINGS = [
 
 
 def _expected() -> str:
-    data = tomllib.loads((ROOT / VERSION_FILE).read_text())
+    data = toml_compat.loads((ROOT / VERSION_FILE).read_text())
     return data["project"]["version"]
 
 
