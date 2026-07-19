@@ -96,7 +96,7 @@ function Initialize-PipxBootstrap {
         [string]$BootstrapRoot
     )
     $bootstrapVenv = Join-Path $BootstrapRoot "bootstrap-venv"
-    & $SystemPython -m venv $bootstrapVenv
+    $null = & $SystemPython -m venv $bootstrapVenv
     if ($LASTEXITCODE -ne 0) {
         throw "bootstrap venv creation failed"
     }
@@ -104,7 +104,7 @@ function Initialize-PipxBootstrap {
     if (-not (Test-Path $bootstrapPython)) {
         throw "bootstrap python missing at $bootstrapPython"
     }
-    & $bootstrapPython -m pip install --upgrade pip pipx
+    & $bootstrapPython -m pip install --upgrade pip pipx 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "bootstrap pip/pipx install failed"
     }

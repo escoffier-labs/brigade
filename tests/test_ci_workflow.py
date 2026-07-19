@@ -174,6 +174,66 @@ def test_windows_native_acceptance_json_commands_keep_stderr_separate():
     assert "Invoke-ExternalCommand" in search_section
 
 
+def _extract_powershell_function(text: str, name: str) -> str:
+    start = text.index(f"function {name}")
+    lines = text[start:].splitlines()
+    result = [lines[0]]
+    depth = lines[0].count("{") - lines[0].count("}")
+    for line in lines[1:]:
+        result.append(line)
+        depth += line.count("{") - line.count("}")
+        if depth == 0:
+            break
+    return "\n".join(result)
+
+
+def _powershell_line_consumes_success_stream(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped.startswith("&"):
+        return True
+    if "| Out-Host" in line or "| Out-Null" in line:
+        return True
+    assignment, _, _ = stripped.partition("=")
+    return assignment.endswith("$null") or (assignment.startswith("$") and "&" not in assignment)
+
+
+def test_windows_native_acceptance_bootstrap_return_is_single_python_path():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    bootstrap = _extract_powershell_function(text, "Initialize-PipxBootstrap")
+
+    assert bootstrap.count("return ") == 1
+    assert "return $bootstrapPython" in bootstrap
+
+    venv_line = next(line for line in bootstrap.splitlines() if "-m venv" in line)
+    pip_line = next(line for line in bootstrap.splitlines() if "-m pip install" in line)
+    assert _powershell_line_consumes_success_stream(venv_line)
+    assert _powershell_line_consumes_success_stream(pip_line)
+
+
+def test_windows_native_acceptance_assigned_return_functions_do_not_leak_stdout():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    assigned_returns = (
+        "Get-PythonExeDir",
+        "Get-PythonScriptsDir",
+        "Get-PipxBinDir",
+        "Initialize-PipxBootstrap",
+        "Get-ManagedExecutablePath",
+    )
+
+    for name in assigned_returns:
+        body = _extract_powershell_function(text, name)
+        assert "return " in body
+        for line in body.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("&"):
+                continue
+            if "{ &" in line:
+                continue
+            assert _powershell_line_consumes_success_stream(line), (
+                f"{name} leaks success-stream output from: {stripped}"
+            )
+
+
 def test_windows_native_acceptance_brigade_version_regex_matches_cli_output():
     script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
     assert r"if ($line -match '^brigade\s+(.+)$')" in script
