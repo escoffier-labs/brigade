@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
 
 import pytest
 
@@ -15,6 +16,7 @@ from brigade.component_install import (
     _snapshot_managed_executables,
     fetch_asset_to_cache,
     materialize_executable,
+    run_post_install_smoke,
     setup_native_components,
     verify_cached_asset,
 )
@@ -23,10 +25,36 @@ from tests.component_install_helpers import (
     FakeOpener,
     fixture_payload,
     linux_env,
+    smoke_stub_script,
     test_manifest_asset as manifest_asset_fixture,
     write_test_manifest,
     write_verified_cache,
 )
+
+_SMOKE_COMPONENTS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+
+
+def _write_managed_stub(tmp_path, component_id: str, *, script: str | None = None) -> str:
+    payload = script.encode("utf-8") if script is not None else fixture_payload(component_id)[0]
+    path = tmp_path / component_id
+    path.write_bytes(payload)
+    path.chmod(0o755)
+    return str(path)
+
+
+def _write_managed_smoke_stubs(tmp_path) -> dict[str, str]:
+    managed: dict[str, str] = {}
+    for component_id in _SMOKE_COMPONENTS:
+        managed[component_id] = _write_managed_stub(tmp_path, component_id)
+    return managed
+
+
+def _recording_runner(calls: list[tuple[list[str], dict[str, object]]]):
+    def runner(argv, **kwargs):
+        calls.append((list(argv), dict(kwargs)))
+        return subprocess.run(argv, **kwargs)
+
+    return runner
 
 
 def test_verify_cached_asset_rejects_invalid_byte_size(tmp_path):
@@ -259,3 +287,108 @@ def test_restore_managed_executables_removes_newly_created_paths(tmp_path):
 
     assert existing.read_bytes() == b"keep-me"
     assert not new_path.exists()
+
+
+def test_run_post_install_smoke_invokes_absolute_paths_only(tmp_path):
+    managed = _write_managed_smoke_stubs(tmp_path)
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    run_post_install_smoke(managed, runner=_recording_runner(calls))
+
+    assert {cmd[0] for cmd, _kwargs in calls} == set(managed.values())
+    assert calls[0][0] == [managed["graphtrail"], "--version"]
+    assert calls[1][0] == [managed["graphtrail-mcp"]]
+    assert "input" in calls[1][1]
+    assert calls[2][0] == [managed["miseledger"], "version"]
+    assert calls[3][0] == [managed["sessionfind"], "--help"]
+
+
+def test_run_post_install_smoke_rejects_relative_paths(tmp_path):
+    managed = _write_managed_smoke_stubs(tmp_path)
+    managed["graphtrail"] = "graphtrail"
+    with pytest.raises(ComponentInstallError, match="graphtrail.*absolute managed path"):
+        run_post_install_smoke(managed)
+
+
+def test_run_post_install_smoke_rejects_wrong_component_set(tmp_path):
+    managed = {"graphtrail": _write_managed_stub(tmp_path, "graphtrail")}
+    with pytest.raises(ComponentInstallError, match="exactly 4 managed paths"):
+        run_post_install_smoke(managed)
+
+
+def test_run_post_install_smoke_rejects_missing_executable(tmp_path):
+    managed = _write_managed_smoke_stubs(tmp_path)
+    missing = tmp_path / "graphtrail"
+    missing.unlink()
+    with pytest.raises(ComponentInstallError, match="graphtrail.*managed executable missing"):
+        run_post_install_smoke(managed)
+
+
+def test_run_post_install_smoke_rejects_graphtrail_nonzero_exit(tmp_path):
+    managed = _write_managed_smoke_stubs(tmp_path)
+    script = smoke_stub_script("graphtrail").replace("raise SystemExit(0)", "raise SystemExit(1)")
+    managed["graphtrail"] = _write_managed_stub(tmp_path, "graphtrail", script=script)
+    with pytest.raises(ComponentInstallError, match="graphtrail smoke failed.*exited 1"):
+        run_post_install_smoke(managed)
+
+
+def test_run_post_install_smoke_rejects_graphtrail_empty_stdout(tmp_path):
+    script = (
+        '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--version"]:\n'
+        "    raise SystemExit(0)\nraise SystemExit(1)\n"
+    )
+    managed = _write_managed_smoke_stubs(tmp_path)
+    managed["graphtrail"] = _write_managed_stub(tmp_path, "graphtrail", script=script)
+    with pytest.raises(ComponentInstallError, match="graphtrail smoke failed.*empty stdout"):
+        run_post_install_smoke(managed)
+
+
+def test_run_post_install_smoke_rejects_graphtrail_mcp_malformed_json(tmp_path):
+    script = '#!/usr/bin/env python3\nprint("not-json")\n'
+    managed = _write_managed_smoke_stubs(tmp_path)
+    managed["graphtrail-mcp"] = _write_managed_stub(tmp_path, "graphtrail-mcp", script=script)
+    with pytest.raises(ComponentInstallError, match="graphtrail-mcp smoke failed.*malformed JSON-RPC"):
+        run_post_install_smoke(managed)
+
+
+def test_run_post_install_smoke_rejects_miseledger_nonzero_exit(tmp_path):
+    managed = _write_managed_smoke_stubs(tmp_path)
+    script = smoke_stub_script("miseledger").replace("raise SystemExit(0)", "raise SystemExit(1)")
+    managed["miseledger"] = _write_managed_stub(tmp_path, "miseledger", script=script)
+    with pytest.raises(ComponentInstallError, match="miseledger smoke failed.*exited 1"):
+        run_post_install_smoke(managed)
+
+
+def test_run_post_install_smoke_rejects_sessionfind_wrong_exit(tmp_path):
+    managed = _write_managed_smoke_stubs(tmp_path)
+    script = smoke_stub_script("sessionfind").replace("raise SystemExit(2)", "raise SystemExit(0)")
+    managed["sessionfind"] = _write_managed_stub(tmp_path, "sessionfind", script=script)
+    with pytest.raises(ComponentInstallError, match="sessionfind smoke failed.*expected 2"):
+        run_post_install_smoke(managed)
+
+
+def test_run_post_install_smoke_rejects_sessionfind_missing_usage(tmp_path):
+    script = (
+        '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--help"]:\n'
+        '    print("options only")\n    raise SystemExit(2)\nraise SystemExit(1)\n'
+    )
+    managed = _write_managed_smoke_stubs(tmp_path)
+    managed["sessionfind"] = _write_managed_stub(tmp_path, "sessionfind", script=script)
+    with pytest.raises(ComponentInstallError, match="sessionfind smoke failed.*no usage text"):
+        run_post_install_smoke(managed)
+
+
+def test_run_post_install_smoke_rejects_timeout(tmp_path):
+    managed = _write_managed_smoke_stubs(tmp_path)
+    sleep_script = '#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n'
+
+    def slow_runner(argv, **kwargs):
+        kwargs["timeout"] = 0.2
+        if argv[0] == managed["graphtrail"]:
+            kwargs.pop("timeout", None)
+            return subprocess.run(argv, **kwargs)
+        return subprocess.run(argv, **kwargs)
+
+    managed["graphtrail-mcp"] = _write_managed_stub(tmp_path, "graphtrail-mcp", script=sleep_script)
+    with pytest.raises(ComponentInstallError, match="graphtrail-mcp smoke timed out"):
+        run_post_install_smoke(managed, runner=slow_runner)

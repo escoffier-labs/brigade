@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import urllib.request
@@ -18,6 +20,20 @@ from brigade import component_manifest, localio
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
 _EXECUTABLE_MODE = 0o755
+_SMOKE_COMPONENT_IDS = component_manifest.KNOWN_COMPONENT_IDS
+_SMOKE_TIMEOUT_SECONDS = 30.0
+_JSONRPC_INIT_REQUEST = json.dumps(
+    {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "brigade-setup", "version": "1"},
+        },
+    }
+)
 
 
 class ComponentInstallError(RuntimeError):
@@ -156,6 +172,192 @@ def fetch_asset_to_cache(
         tmp_path.unlink(missing_ok=True)
         raise
     return cache_path
+
+
+def _default_smoke_runner(
+    argv: Sequence[str], **kwargs: object
+) -> subprocess.CompletedProcess[str]:
+    run_kwargs: dict[str, object] = {
+        "capture_output": True,
+        "text": True,
+        "shell": False,
+        "timeout": _SMOKE_TIMEOUT_SECONDS,
+    }
+    run_kwargs.update(kwargs)
+    return subprocess.run(list(argv), **run_kwargs)  # type: ignore[arg-type, call-overload]
+
+
+def _invoke_smoke_runner(
+    run: Callable[..., subprocess.CompletedProcess[str]],
+    argv: Sequence[str],
+    **kwargs: object,
+) -> subprocess.CompletedProcess[str]:
+    return run(
+        list(argv),
+        capture_output=True,
+        text=True,
+        shell=False,
+        timeout=_SMOKE_TIMEOUT_SECONDS,
+        **kwargs,
+    )
+
+
+def _validate_smoke_managed_paths(managed_paths: Mapping[str, str]) -> dict[str, Path]:
+    keys = set(managed_paths)
+    expected = set(_SMOKE_COMPONENT_IDS)
+    if keys != expected:
+        missing = sorted(expected - keys)
+        extra = sorted(keys - expected)
+        parts: list[str] = []
+        if missing:
+            parts.append(f"missing: {', '.join(missing)}")
+        if extra:
+            parts.append(f"unexpected: {', '.join(extra)}")
+        raise ComponentInstallError(
+            "post-install smoke requires exactly "
+            f"{len(expected)} managed paths; {'; '.join(parts)}"
+        )
+
+    resolved: dict[str, Path] = {}
+    for component_id in _SMOKE_COMPONENT_IDS:
+        raw = managed_paths[component_id]
+        path = Path(raw)
+        if not path.is_absolute():
+            raise ComponentInstallError(
+                f"post-install smoke for {component_id} requires absolute managed path, "
+                f"got {raw!r}"
+            )
+        if not path.is_file():
+            raise ComponentInstallError(
+                f"post-install smoke for {component_id}: managed executable missing: {raw}"
+            )
+        resolved[component_id] = path
+    return resolved
+
+
+def _smoke_graphtrail(
+    path: Path,
+    run: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    argv = [str(path), "--version"]
+    try:
+        completed = _invoke_smoke_runner(run, argv)
+    except subprocess.TimeoutExpired as exc:
+        raise ComponentInstallError(
+            f"graphtrail smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s"
+        ) from exc
+    except OSError as exc:
+        raise ComponentInstallError(f"graphtrail smoke failed to run {path}: {exc}") from exc
+
+    if completed.returncode != 0:
+        raise ComponentInstallError(
+            f"graphtrail smoke failed: {path} --version exited {completed.returncode}"
+        )
+    if not (completed.stdout or "").strip():
+        raise ComponentInstallError(
+            f"graphtrail smoke failed: {path} --version produced empty stdout"
+        )
+
+
+def _smoke_graphtrail_mcp(
+    path: Path,
+    run: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    argv = [str(path)]
+    try:
+        completed = _invoke_smoke_runner(run, argv, input=_JSONRPC_INIT_REQUEST)
+    except subprocess.TimeoutExpired as exc:
+        raise ComponentInstallError(
+            f"graphtrail-mcp smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s"
+        ) from exc
+    except OSError as exc:
+        raise ComponentInstallError(
+            f"graphtrail-mcp smoke failed to run {path}: {exc}"
+        ) from exc
+
+    stdout = (completed.stdout or "").strip()
+    if not stdout:
+        raise ComponentInstallError(
+            f"graphtrail-mcp smoke failed: {path} produced empty stdout"
+        )
+    try:
+        response = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise ComponentInstallError(
+            f"graphtrail-mcp smoke failed: {path} returned malformed JSON-RPC response"
+        ) from exc
+    if response.get("jsonrpc") != "2.0":
+        raise ComponentInstallError(
+            f"graphtrail-mcp smoke failed: {path} returned invalid JSON-RPC version"
+        )
+    if response.get("id") != 1:
+        raise ComponentInstallError(
+            f"graphtrail-mcp smoke failed: {path} JSON-RPC response id mismatch"
+        )
+    if "result" not in response:
+        raise ComponentInstallError(
+            f"graphtrail-mcp smoke failed: {path} JSON-RPC response missing result"
+        )
+
+
+def _smoke_miseledger(
+    path: Path,
+    run: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    argv = [str(path), "version"]
+    try:
+        completed = _invoke_smoke_runner(run, argv)
+    except subprocess.TimeoutExpired as exc:
+        raise ComponentInstallError(
+            f"miseledger smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s"
+        ) from exc
+    except OSError as exc:
+        raise ComponentInstallError(f"miseledger smoke failed to run {path}: {exc}") from exc
+
+    if completed.returncode != 0:
+        raise ComponentInstallError(
+            f"miseledger smoke failed: {path} version exited {completed.returncode}"
+        )
+
+
+def _smoke_sessionfind(
+    path: Path,
+    run: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    argv = [str(path), "--help"]
+    try:
+        completed = _invoke_smoke_runner(run, argv)
+    except subprocess.TimeoutExpired as exc:
+        raise ComponentInstallError(
+            f"sessionfind smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s"
+        ) from exc
+    except OSError as exc:
+        raise ComponentInstallError(f"sessionfind smoke failed to run {path}: {exc}") from exc
+
+    if completed.returncode != 2:
+        raise ComponentInstallError(
+            f"sessionfind smoke failed: {path} --help exited {completed.returncode}, expected 2"
+        )
+    combined = f"{completed.stdout or ''}{completed.stderr or ''}"
+    if "usage" not in combined.lower():
+        raise ComponentInstallError(
+            f"sessionfind smoke failed: {path} --help produced no usage text"
+        )
+
+
+def run_post_install_smoke(
+    managed_paths: Mapping[str, str],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> None:
+    """Run post-install smoke checks using only absolute managed executable paths."""
+    paths = _validate_smoke_managed_paths(managed_paths)
+    run = runner if runner is not None else _default_smoke_runner
+
+    _smoke_graphtrail(paths["graphtrail"], run)
+    _smoke_graphtrail_mcp(paths["graphtrail-mcp"], run)
+    _smoke_miseledger(paths["miseledger"], run)
+    _smoke_sessionfind(paths["sessionfind"], run)
 
 
 def setup_native_components(
