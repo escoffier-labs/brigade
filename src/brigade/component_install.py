@@ -7,7 +7,8 @@ import re
 import sys
 import tempfile
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +17,80 @@ from brigade import component_manifest, localio
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
+_EXECUTABLE_MODE = 0o755
 
 
 class ComponentInstallError(RuntimeError):
     """Raised when a component install step fails verification."""
+
+
+@dataclass(frozen=True)
+class _ManagedExecutableSnapshot:
+    path: Path
+    existed: bool
+    content: bytes | None = None
+    mode: int | None = None
+
+
+def _snapshot_managed_executables(paths: Sequence[Path]) -> tuple[_ManagedExecutableSnapshot, ...]:
+    snapshots: list[_ManagedExecutableSnapshot] = []
+    for path in paths:
+        if path.is_file():
+            stat_result = path.stat()
+            snapshots.append(
+                _ManagedExecutableSnapshot(
+                    path=path,
+                    existed=True,
+                    content=path.read_bytes(),
+                    mode=stat_result.st_mode,
+                )
+            )
+        else:
+            snapshots.append(_ManagedExecutableSnapshot(path=path, existed=False))
+    return tuple(snapshots)
+
+
+def _restore_managed_executables(snapshots: Sequence[_ManagedExecutableSnapshot]) -> None:
+    for snapshot in snapshots:
+        if snapshot.existed:
+            if snapshot.content is None or snapshot.mode is None:
+                raise ComponentInstallError(
+                    f"invalid managed executable snapshot for {snapshot.path}"
+                )
+            snapshot.path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot.path.write_bytes(snapshot.content)
+            snapshot.path.chmod(snapshot.mode)
+        elif snapshot.path.exists():
+            snapshot.path.unlink()
+
+
+def materialize_executable(*, cache_path: Path, managed_path: Path) -> None:
+    """Copy a verified cache file into a managed executable path atomically."""
+    if not cache_path.is_file():
+        raise ComponentInstallError(f"cache asset missing: {cache_path}")
+    managed_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=managed_path.parent,
+        prefix=f".{managed_path.name}.",
+        suffix=".tmp",
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            with cache_path.open("rb") as source:
+                while True:
+                    chunk = source.read(_READ_CHUNK)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if sys.platform != "win32":
+            tmp_path.chmod(_EXECUTABLE_MODE)
+        os.replace(tmp_path, managed_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _validate_expected(*, byte_size: int, sha256: str) -> None:

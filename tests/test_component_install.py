@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 
 import pytest
 
@@ -10,7 +11,10 @@ import brigade
 from brigade import component_manifest
 from brigade.component_install import (
     ComponentInstallError,
+    _restore_managed_executables,
+    _snapshot_managed_executables,
     fetch_asset_to_cache,
+    materialize_executable,
     setup_native_components,
     verify_cached_asset,
 )
@@ -152,3 +156,106 @@ def test_setup_rejects_brigade_version_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
     rc = setup_native_components(env=env)
     assert rc == 1
+
+
+def test_materialize_executable_sets_mode_and_replaces(tmp_path):
+    cache_path = tmp_path / "cache.bin"
+    managed_path = tmp_path / "bin" / "tool"
+    cache_path.write_bytes(b"#!/bin/sh\n")
+    materialize_executable(cache_path=cache_path, managed_path=managed_path)
+    assert managed_path.read_bytes() == cache_path.read_bytes()
+    assert oct(managed_path.stat().st_mode & 0o777) == oct(0o755)
+
+
+def test_materialize_executable_creates_parent_dirs(tmp_path):
+    cache_path = tmp_path / "cache.bin"
+    managed_path = tmp_path / "deep" / "nested" / "bin" / "tool"
+    payload = b"#!/bin/sh\necho ok\n"
+    cache_path.write_bytes(payload)
+    materialize_executable(cache_path=cache_path, managed_path=managed_path)
+    assert managed_path.read_bytes() == payload
+    assert managed_path.parent.is_dir()
+
+
+def test_materialize_executable_rejects_missing_cache(tmp_path):
+    cache_path = tmp_path / "cache.bin"
+    managed_path = tmp_path / "bin" / "tool"
+    with pytest.raises(ComponentInstallError, match="cache asset missing"):
+        materialize_executable(cache_path=cache_path, managed_path=managed_path)
+
+
+def test_materialize_executable_failure_preserves_prior_bytes(tmp_path, monkeypatch):
+    cache_path = tmp_path / "cache.bin"
+    managed_path = tmp_path / "bin" / "tool"
+    prior = b"OLD"
+    managed_path.parent.mkdir(parents=True)
+    managed_path.write_bytes(prior)
+    managed_path.chmod(0o755)
+    cache_path.write_bytes(b"NEW")
+
+    def fail_replace(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        materialize_executable(cache_path=cache_path, managed_path=managed_path)
+    assert managed_path.read_bytes() == prior
+
+
+def test_materialize_executable_cleans_up_temp_on_failure(tmp_path, monkeypatch):
+    cache_path = tmp_path / "cache.bin"
+    managed_path = tmp_path / "bin" / "tool"
+    cache_path.write_bytes(b"NEW")
+
+    def fail_replace(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        materialize_executable(cache_path=cache_path, managed_path=managed_path)
+    leftovers = list(managed_path.parent.glob(f".{managed_path.name}.*"))
+    assert leftovers == []
+
+
+def test_restore_managed_executables_restores_bytes_and_mode(tmp_path):
+    path_a = tmp_path / "bin" / "a"
+    path_b = tmp_path / "bin" / "b"
+    path_a.parent.mkdir(parents=True)
+    path_a.write_bytes(b"original-a")
+    path_a.chmod(0o754)
+    path_b.write_bytes(b"original-b")
+    path_b.chmod(0o700)
+
+    snapshot = _snapshot_managed_executables([path_a, path_b])
+
+    path_a.write_bytes(b"mutated-a")
+    path_a.chmod(0o644)
+    path_b.write_bytes(b"mutated-b")
+    path_b.chmod(0o644)
+
+    _restore_managed_executables(snapshot)
+
+    assert path_a.read_bytes() == b"original-a"
+    assert path_b.read_bytes() == b"original-b"
+    assert oct(path_a.stat().st_mode & 0o777) == oct(0o754)
+    assert oct(path_b.stat().st_mode & 0o777) == oct(0o700)
+
+
+def test_restore_managed_executables_removes_newly_created_paths(tmp_path):
+    existing = tmp_path / "bin" / "existing"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"keep-me")
+    existing.chmod(0o755)
+
+    new_path = tmp_path / "bin" / "new"
+    snapshot = _snapshot_managed_executables([existing, new_path])
+
+    existing.write_bytes(b"changed")
+    new_path.parent.mkdir(parents=True, exist_ok=True)
+    new_path.write_bytes(b"brand-new")
+    new_path.chmod(0o755)
+
+    _restore_managed_executables(snapshot)
+
+    assert existing.read_bytes() == b"keep-me"
+    assert not new_path.exists()
