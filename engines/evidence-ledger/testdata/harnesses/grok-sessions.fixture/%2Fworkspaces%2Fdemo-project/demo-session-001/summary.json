@@ -1,0 +1,16 @@
+{
+  "agent_name": "Grok",
+  "chat_format_version": 1,
+  "created_at": "2026-07-15T12:00:00Z",
+  "current_model_id": "grok-code-fast-1",
+  "generated_title": "Synthetic Grok crawler audit",
+  "git_root_dir": "/workspaces/demo-project",
+  "head_branch": "codex/fixture-crawl",
+  "head_commit": "0123456789abcdef",
+  "last_active_at": "2026-07-15T12:05:00Z",
+  "num_chat_messages": 5,
+  "num_messages": 6,
+  "reasoning_effort": "medium",
+  "session_summary": "Verify the fixture crawl contract without private session data.",
+  "updated_at": "2026-07-15T12:05:00Z"
+}

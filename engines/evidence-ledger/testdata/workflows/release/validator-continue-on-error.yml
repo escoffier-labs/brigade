@@ -1,0 +1,54 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify built release binaries
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          for bin in miseledger sessionfind; do
+            got="$(./dist/${bin}-linux-amd64 version)"
+            want="miseledger ${expected}"
+            if [ "$got" != "$want" ]; then
+              echo "${bin} version mismatch: got ${got}, want ${want} (from ${GITHUB_REF_NAME})"
+              exit 1
+            fi
+          done
+      - name: Validate release workflow contract
+        continue-on-error: true
+        run: scripts/check_release_workflow.sh
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
+          fi
+      - name: Verify published install assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p verify
+          gh release download "$GITHUB_REF_NAME" --pattern miseledger-linux-amd64 --pattern sessionfind-linux-amd64 --pattern checksums.txt --dir verify
+          (cd verify && sha256sum -c checksums.txt --ignore-missing)
+          chmod +x verify/miseledger-linux-amd64
+          chmod +x verify/sessionfind-linux-amd64
+          expected="${GITHUB_REF_NAME#v}"
+          for bin in miseledger sessionfind; do
+            got="$(./verify/${bin}-linux-amd64 version)"
+            want="miseledger ${expected}"
+            if [ "$got" != "$want" ]; then
+              echo "${bin} version mismatch: got ${got}, want ${want} (from ${GITHUB_REF_NAME})"
+              exit 1
+            fi
+          done
+          MISELEDGER="$PWD/verify/miseledger-linux-amd64" scripts/smoke_archive.sh

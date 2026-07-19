@@ -1,0 +1,5 @@
+{"type":"system","content":"Synthetic Grok fixture system context."}
+{"type":"user","content":[{"type":"text","text":"Check the fixture crawl contract for demo-project."}]}
+{"type":"assistant","content":[{"type":"text","text":"The synthetic crawler fixture is ready for validation."}]}
+{"type":"reasoning","content":[{"type":"text","text":"Compare the generated adapter fields with the fixture expectations."}]}
+{"type":"tool_result","content":"Fixture tool result: no private data was read."}

@@ -1,0 +1,11 @@
+.git/
+bin/
+dist/
+exports/
+/memory/
+*.db
+*.db-shm
+*.db-wal
+.claude/
+.brigade/
+.codex/

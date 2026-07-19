@@ -1,0 +1,12 @@
+name: Docs drift
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  docs-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check_docs_drift.sh

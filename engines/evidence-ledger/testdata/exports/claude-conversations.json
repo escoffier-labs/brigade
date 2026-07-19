@@ -1,0 +1,21 @@
+[
+  {
+    "uuid": "claude-conv-1",
+    "name": "MiseLedger Claude import",
+    "created_at": "2026-06-17T10:00:00Z",
+    "chat_messages": [
+      {
+        "uuid": "claude-msg-user",
+        "sender": "human",
+        "created_at": "2026-06-17T10:00:01Z",
+        "text": "Can MiseLedger import Claude exports?"
+      },
+      {
+        "uuid": "claude-msg-assistant",
+        "sender": "assistant",
+        "created_at": "2026-06-17T10:00:02Z",
+        "text": "Yes. Claude export conversations become local evidence records."
+      }
+    ]
+  }
+]

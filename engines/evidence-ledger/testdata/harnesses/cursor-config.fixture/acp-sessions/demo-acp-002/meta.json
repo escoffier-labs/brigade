@@ -1,0 +1,7 @@
+{
+  "sessionId": "demo-acp-002",
+  "name": "demo-project agent follow-up",
+  "created_at": 1781535600,
+  "cwd": "/home/user/demo-project",
+  "preview": "Review the synthetic Cursor ACP session fixture without reading binary message bodies."
+}

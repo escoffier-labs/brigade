@@ -1,0 +1,5 @@
+{"type":"session","timestamp":"2026-06-03T16:00:00Z","session_id":"openclaw-demo","workspace_dir":"/workspace/miseledger","model":"gpt-5"}
+{"type":"thinking_level_change","timestamp":"2026-06-03T16:00:30Z","session_id":"openclaw-demo","thinkingLevel":"high"}
+{"type":"message","timestamp":"2026-06-03T16:01:00Z","session_id":"openclaw-demo","role":"human","message":"Import OpenClaw agent sessions into the same normalized schema."}
+{"type":"model_change","timestamp":"2026-06-03T16:02:00Z","session_id":"openclaw-demo","model":"gpt-5","message":"Model changed before evidence bundle validation."}
+{"type":"custom","timestamp":"2026-06-03T16:03:00Z","session_id":"openclaw-demo","role":"assistant","content":"OpenClaw native import should remain local and preserve raw refs."}

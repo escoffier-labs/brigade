@@ -1,0 +1,3 @@
+{"type":"unknown_shape","timestamp":"2026-06-03T18:00:00Z","payload":{"session_id":"bad-demo"}}
+not json
+{"type":"message","timestamp":"2026-06-03T18:01:00Z","payload":{"session_id":"bad-demo","role":"user","message":"Known event after malformed input still imports."}}
