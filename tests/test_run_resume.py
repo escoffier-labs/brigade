@@ -97,6 +97,25 @@ def test_roster_snapshot_preserves_invalid_final_fallback():
     assert roster.agents["grok-review"].invalid_final_fallback == "cursor-grok"
 
 
+def test_roster_snapshot_preserves_read_only_capability_with_legacy_default():
+    snapshot = {
+        "orchestrator": "chef",
+        "agents": {
+            "chef": {"cli": "codex", "role": "plan"},
+            "composer": {
+                "cli": "cursor",
+                "role": "implement",
+                "read_only_capable": False,
+            },
+        },
+    }
+
+    roster = run_resume._roster_from_snapshot(snapshot)
+
+    assert roster.agents["chef"].read_only_capable is True
+    assert roster.agents["composer"].read_only_capable is False
+
+
 def test_roster_snapshot_rejects_inline_secret_env():
     snapshot = {
         "orchestrator": "chef",

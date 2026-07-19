@@ -527,6 +527,44 @@ def test_run_cli_explicit_direct_worker_reports_choice_without_shadow_warning(tm
     assert "shadows user roster" not in err
 
 
+def test_run_cli_rejects_incapable_direct_read_only_worker_before_artifacts(tmp_path, monkeypatch, capsys):
+    roster_path = tmp_path / "roster.toml"
+    output_dir = tmp_path / "run"
+    roster_path.write_text(
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.composer]\ncli = "cursor"\nmodel = "composer-2.5"\n'
+        'role = "implement"\nread_only_capable = false\n'
+    )
+    monkeypatch.setattr(
+        aboyeur,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dispatch happened too early")),
+    )
+
+    rc = cli.main(
+        [
+            "run",
+            "inspect",
+            "--cwd",
+            str(tmp_path),
+            "--roster",
+            str(roster_path),
+            "--worker",
+            "composer",
+            "--read-only",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert rc == 2
+    assert not output_dir.exists()
+    err = capsys.readouterr().err
+    assert "composer" in err
+    assert "agents.composer.read_only_capable is false" in err
+
+
 def test_run_cli_identifies_fallback_roster_in_validation_error(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     roster_path = home / ".brigade" / "roster.toml"

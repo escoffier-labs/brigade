@@ -279,6 +279,11 @@ a large one). Pull the model yourself (`ollama pull llama3.2:3b`) or name one
 `ollama list` already shows; `brigade roster doctor` warns about missing ones.
 `limits.timeout_seconds` is the default per-agent timeout.
 `agents.<name>.timeout_seconds` overrides it for one agent.
+`agents.<name>.read_only_capable` is an optional boolean that defaults to `true`.
+Set it to `false` when a seat cannot return usable output under `--read-only`.
+The chef sees the value in its planning prompt, plan validation rejects an incapable
+assignment during read-only runs, and `--worker` rejects the seat before run artifacts
+are created. The field does not restrict writable runs.
 `limits.sandbox` is optional. When set to `read-only`, `workspace-write`, or
 `danger-full-access`, `brigade run` uses it as the native Codex sandbox mode
 unless the run also passes `--sandbox`.

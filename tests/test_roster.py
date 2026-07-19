@@ -46,6 +46,29 @@ def test_load_valid_roster(tmp_path):
     assert not roster_mod.is_cli_allowed("claude", r)
 
 
+def test_read_only_capability_defaults_true_and_accepts_boolean(tmp_path):
+    loaded = roster_mod.load_roster(_write(tmp_path, VALID))
+    assert loaded.agents["coder"].read_only_capable is True
+
+    incapable = VALID.replace(
+        'role = "write code"',
+        'role = "write code"\nread_only_capable = false',
+    )
+    loaded = roster_mod.load_roster(_write(tmp_path, incapable))
+    assert loaded.agents["coder"].read_only_capable is False
+
+
+@pytest.mark.parametrize("value", ['"false"', "0", "[]"])
+def test_read_only_capability_rejects_non_booleans(tmp_path, value):
+    invalid = VALID.replace(
+        'role = "write code"',
+        f'role = "write code"\nread_only_capable = {value}',
+    )
+
+    with pytest.raises(ValueError, match=r"agents\.coder\.read_only_capable must be a boolean"):
+        roster_mod.load_roster(_write(tmp_path, invalid))
+
+
 def test_load_roster_without_resolution_does_not_invent_source(tmp_path):
     loaded = roster_mod.load_roster(_write(tmp_path, VALID))
 

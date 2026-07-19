@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import aboyeur, agents, codex_appserver, runguard
-from .roster import Agent, Roster, _as_env
+from .roster import Agent, Roster, _as_bool, _as_env
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
 _NONTERMINAL_RUN_STATUSES = frozenset(
@@ -55,6 +55,10 @@ def _roster_from_snapshot(snapshot: dict) -> Roster:
             transport_version=raw.get("transport_version"),
             env=_as_env(raw.get("env"), name),
             invalid_final_fallback=raw.get("invalid_final_fallback"),
+            read_only_capable=_as_bool(
+                raw.get("read_only_capable", True),
+                f"agents.{name}.read_only_capable",
+            ),
         )
     return Roster(
         orchestrator=snapshot["orchestrator"],

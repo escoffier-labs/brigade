@@ -306,7 +306,12 @@ def dispatch(args) -> int:
             file=sys.stderr,
         )
     if args.worker is not None:
-        worker_error = _direct_worker_error(args.worker, loaded_roster, roster_mod)
+        worker_error = _direct_worker_error(
+            args.worker,
+            loaded_roster,
+            roster_mod,
+            read_only=args.read_only,
+        )
         if worker_error is not None:
             print(f"error: {worker_error}", file=sys.stderr)
             return 2
@@ -766,12 +771,16 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
     return argv
 
 
-def _direct_worker_error(worker: str, loaded_roster, roster_mod) -> str | None:
+def _direct_worker_error(worker: str, loaded_roster, roster_mod, *, read_only: bool = False) -> str | None:
     agent = loaded_roster.agents.get(worker)
     if agent is None:
         return f"unknown worker: {worker}"
     if worker == loaded_roster.orchestrator:
         return f"--worker cannot target orchestrator seat: {worker}"
+    if read_only:
+        capability_error = roster_mod.read_only_capability_error(agent)
+        if capability_error is not None:
+            return capability_error
     if agent.cli is None:
         return f"worker has no CLI adapter: {worker}"
     if not roster_mod.is_cli_allowed(agent.cli, loaded_roster):

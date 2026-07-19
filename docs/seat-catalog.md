@@ -45,6 +45,29 @@ role = "Open-weight implementation worker on the flat sub; overflow relief for t
 
 Known gap: Composer models return empty text in read-only plan mode (issue #206). Pin a non-composer model for read-only seats.
 
+Mark direct Cursor Composer and Grok seats as incapable so the chef cannot route
+`--read-only` work to them:
+
+```toml
+[agents.composer]
+cli = "cursor"
+model = "composer-2.5"
+read_only_capable = false
+role = "Fast implementation worker for writable runs."
+
+[agents.grok]
+cli = "cursor"
+model = "grok-4.5-xhigh"
+read_only_capable = false
+role = "Alternate implementation worker for writable runs."
+```
+
+Keep those direct seats set to `false`. To use either model for read-only findings,
+create a separate ACP seat and set `transport = "acpx"`,
+`transport_version = "0.12.0"`, and `read_only_capable = true` on that seat. ACP
+model IDs differ from direct Cursor aliases, so copy the reviewed model ID from
+the [technical guide](technical-guide.md#run-a-brigade).
+
 ### Claude subscription
 
 Two seats, two costs. The heavier model reviews. A lighter sibling takes routine passes at a fraction of the quota burn:
@@ -111,9 +134,13 @@ Several open-weight providers expose Anthropic-compatible endpoints, which means
 [agents.k3]
 cli = "claude"
 model = "kimi-k3"
+read_only_capable = false
 role = "Open-weight worker on a coding-plan quota; relief for orchestrator-tier work."
 env = { ANTHROPIC_BASE_URL = "https://api.moonshot.ai/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY", CLAUDE_CONFIG_DIR = "/home/operator/.claude-lanes" }
 ```
+
+This proxy example opts out of read-only dispatch. Set the value to `true` only after
+the validation smoke below returns a usable worker result in read-only mode.
 
 Overrides apply to the spawned CLI process only, `run.json` records the override names and endpoint host (never values), and a missing referenced variable fails the worker before dispatch. If the CLI echoes any resolved override value, Brigade replaces the exact value with its target name in brackets before worker text, detail, stdout, or stderr can be stored. Direct CLI seats only: acpx and codex-cloud seats manage their own environment.
 
