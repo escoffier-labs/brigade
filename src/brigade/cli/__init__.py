@@ -31,6 +31,7 @@ from . import (
     receipts as _receipts_group,
     daily as _daily_group,
     add as _add_group,
+    setup as _setup_group,
     stations as _stations_group,
     pantry as _pantry_group,
     evidence as _evidence_group,
@@ -129,6 +130,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _receipts_group.register(sub)
     _daily_group.register(sub)
     _add_group.register(sub)
+    _setup_group.register(sub)
     _stations_group.register(sub)
     _evidence_group.register(sub)
     _search_group.register(sub)
