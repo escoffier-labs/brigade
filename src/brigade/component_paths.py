@@ -69,6 +69,10 @@ def installed_state_path(data_root_path: str) -> str:
     return _join(data_root_path, "brigade", "installed.json", windows=_is_windows_path(data_root_path))
 
 
+def installed_previous_state_path(data_root_path: str) -> str:
+    return _join(data_root_path, "brigade", "installed.previous.json", windows=_is_windows_path(data_root_path))
+
+
 def cached_asset_path(cache_root_path: str, sha256: str, asset_name: str) -> str:
     if not _SHA256.fullmatch(sha256):
         raise ValueError("sha256 must be 64 lowercase hex characters")

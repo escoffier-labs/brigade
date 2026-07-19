@@ -10,7 +10,81 @@ import pytest
 from brigade import component_manifest
 
 MISELEDGER_BASE = "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/"
+GRAPHTRAIL_BASE = "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/"
 GRAPHTRAIL_SHA = "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb"
+
+GRAPHTRAIL_V040_ASSETS = [
+    (
+        "graphtrail",
+        "darwin-amd64",
+        "graphtrail-darwin-amd64",
+        11695172,
+        "eb6768be11d26a9d82c1bcecd503a9fdc7c883bda3bd627dea9ccb04fd31379c",
+    ),
+    (
+        "graphtrail",
+        "darwin-arm64",
+        "graphtrail-darwin-arm64",
+        11426112,
+        "20534dbbb84f134a5a892520fd5a695d2520c2e040733b5535e991c611c99686",
+    ),
+    (
+        "graphtrail",
+        "linux-amd64",
+        "graphtrail-linux-amd64",
+        12802256,
+        "e78c73a80a2eadbe297066739044e2c5fcdd187c8219198f453bd004bf9c9a55",
+    ),
+    (
+        "graphtrail",
+        "linux-arm64",
+        "graphtrail-linux-arm64",
+        12424560,
+        "7f961a4f018e4b12b9dcf5227a7cdc20fa7cdd9a723d96ec0336e254adf33c07",
+    ),
+    (
+        "graphtrail",
+        "windows-amd64",
+        "graphtrail-windows-amd64.exe",
+        10753536,
+        "1a9adc002c81661d2b0838e642f1c9db2671a2808c93e6b4499cfc2b33d6ea22",
+    ),
+    (
+        "graphtrail-mcp",
+        "darwin-amd64",
+        "graphtrail-mcp-darwin-amd64",
+        11004028,
+        "d8d605a522d3894c36a2f30e94cdcc99b87c34d05e53b01f4c47018eaebaf93f",
+    ),
+    (
+        "graphtrail-mcp",
+        "darwin-arm64",
+        "graphtrail-mcp-darwin-arm64",
+        10766928,
+        "649abe87a3e40415d1933db493c94f1049d84577a996df7ba9c27c4b3c4cf597",
+    ),
+    (
+        "graphtrail-mcp",
+        "linux-amd64",
+        "graphtrail-mcp-linux-amd64",
+        11981944,
+        "66606e4e394973766e1e91d3b0b78b26bd9077076cc85e62b9d0faf9780e7154",
+    ),
+    (
+        "graphtrail-mcp",
+        "linux-arm64",
+        "graphtrail-mcp-linux-arm64",
+        11609512,
+        "0bf17d38d44c5fc4f3132e17078a2db74e92da9bcb27a40c3d8345056523a651",
+    ),
+    (
+        "graphtrail-mcp",
+        "windows-amd64",
+        "graphtrail-mcp-windows-amd64.exe",
+        10020864,
+        "ec642c7e736fff1673c3d7e06d10eb02c9782008d8f783ab2b40699e69a35b08",
+    ),
+]
 
 MISELEDGER_V060_ASSETS = [
     (
@@ -128,6 +202,24 @@ def _full_miseledger_assets(component_id: str) -> dict:
     return assets
 
 
+def _graphtrail_asset(asset_name: str, byte_size: int, sha256: str) -> dict:
+    return {
+        "asset_name": asset_name,
+        "byte_size": byte_size,
+        "sha256": sha256,
+        "download_url": GRAPHTRAIL_BASE + asset_name,
+    }
+
+
+def _full_graphtrail_assets(component_id: str) -> dict:
+    assets: dict = {}
+    for comp, platform, asset_name, byte_size, sha256 in GRAPHTRAIL_V040_ASSETS:
+        if comp != component_id:
+            continue
+        assets[platform] = _graphtrail_asset(asset_name, byte_size, sha256)
+    return assets
+
+
 def _write_manifest(tmp_path: Path, **overrides) -> Path:
     payload = {
         "schema_version": 1,
@@ -138,14 +230,16 @@ def _write_manifest(tmp_path: Path, **overrides) -> Path:
             "graphtrail": _minimal_known_component(
                 component_revision=GRAPHTRAIL_SHA,
                 repository="escoffier-labs/graphtrail",
-                release_tag=None,
+                release_tag="v0.4.0",
                 executable="graphtrail",
+                assets=_full_graphtrail_assets("graphtrail"),
             ),
             "graphtrail-mcp": _minimal_known_component(
                 component_revision=GRAPHTRAIL_SHA,
                 repository="escoffier-labs/graphtrail",
-                release_tag=None,
+                release_tag="v0.4.0",
                 executable="graphtrail-mcp",
+                assets=_full_graphtrail_assets("graphtrail-mcp"),
             ),
             "miseledger": _minimal_known_component(assets=_full_miseledger_assets("miseledger")),
             "sessionfind": _minimal_known_component(
@@ -160,12 +254,12 @@ def _write_manifest(tmp_path: Path, **overrides) -> Path:
     return path
 
 
-def test_bundled_manifest_pins_miseledger_and_leaves_graphtrail_assets_unpublished():
+def test_bundled_manifest_pins_miseledger_and_graphtrail_assets():
     manifest = component_manifest.load()
 
     assert manifest.schema_version == 1
     assert manifest.brigade_version == "0.23.0"
-    assert manifest.manifest_revision
+    assert manifest.manifest_revision == "2026-07-19"
     assert manifest.supported_platforms == component_manifest.SUPPORTED_PLATFORMS
     assert set(manifest.components) == set(component_manifest.KNOWN_COMPONENT_IDS)
     assert manifest.components["miseledger"].component_revision == "v0.6.0"
@@ -175,10 +269,10 @@ def test_bundled_manifest_pins_miseledger_and_leaves_graphtrail_assets_unpublish
     assert asset.byte_size == 16441315
     assert asset.sha256 == "246893c8c39318f774fc7a06338b5a8e87bf84661b1951251b2c0c971e9a7a6c"
     assert asset.download_url.endswith("/miseledger-linux-amd64")
-    assert manifest.components["graphtrail"].assets == {}
-    assert manifest.components["graphtrail"].source.release_tag is None
-    assert manifest.components["graphtrail-mcp"].assets == {}
-    assert manifest.components["graphtrail-mcp"].source.release_tag is None
+    assert set(manifest.components["graphtrail"].assets) == set(component_manifest.SUPPORTED_PLATFORMS)
+    assert manifest.components["graphtrail"].source.release_tag == "v0.4.0"
+    assert set(manifest.components["graphtrail-mcp"].assets) == set(component_manifest.SUPPORTED_PLATFORMS)
+    assert manifest.components["graphtrail-mcp"].source.release_tag == "v0.4.0"
     assert manifest.unknown_component_diagnostics == ()
 
 
@@ -198,6 +292,21 @@ def test_bundled_manifest_pins_miseledger_v060_assets(component_id, platform, as
         assert asset_name.endswith(".exe")
     else:
         assert not asset_name.endswith(".exe")
+
+
+def test_bundled_manifest_pins_graphtrail_v040_assets():
+    manifest = component_manifest.load()
+    asset = manifest.components["graphtrail"].assets["linux-amd64"]
+    assert asset.byte_size == 12802256
+    assert asset.sha256 == "e78c73a80a2eadbe297066739044e2c5fcdd187c8219198f453bd004bf9c9a55"
+    assert manifest.components["graphtrail"].source.release_tag == "v0.4.0"
+
+
+def test_bundled_manifest_pins_graphtrail_mcp_v040_assets():
+    manifest = component_manifest.load()
+    asset = manifest.components["graphtrail-mcp"].assets["linux-amd64"]
+    assert asset.byte_size == 11981944
+    assert asset.sha256 == "66606e4e394973766e1e91d3b0b78b26bd9077076cc85e62b9d0faf9780e7154"
 
 
 def test_bundled_manifest_pins_graphtrail_to_git_sha():
@@ -481,10 +590,10 @@ def test_resolve_unknown_component_lists_known_components(tmp_path):
         component_manifest.resolve_asset(manifest, "missing", "linux-amd64")
 
 
-def test_resolve_unpublished_graphtrail_raises_unsupported_component_platform(tmp_path):
+def test_resolve_graphtrail_returns_pinned_asset(tmp_path):
     manifest = component_manifest.load(_write_manifest(tmp_path))
-    with pytest.raises(ValueError, match="unsupported-component-platform"):
-        component_manifest.resolve_asset(manifest, "graphtrail", "linux-amd64")
+    asset = component_manifest.resolve_asset(manifest, "graphtrail", "linux-amd64")
+    assert asset.asset_name == "graphtrail-linux-amd64"
 
 
 def test_resolve_miseledger_returns_pinned_asset(tmp_path):
@@ -538,8 +647,11 @@ def test_manifest_rejects_empty_sessionfind_assets(tmp_path):
         component_manifest.load(path)
 
 
-def test_manifest_rejects_graphtrail_revision_that_is_not_git_sha(tmp_path):
+def test_manifest_rejects_graphtrail_revision_that_is_not_git_sha(tmp_path, monkeypatch):
+    monkeypatch.setattr(component_manifest, "UNPUBLISHED_COMPONENT_IDS", frozenset({"graphtrail"}))
     base = json.loads(_write_manifest(tmp_path).read_text())
+    base["components"]["graphtrail"]["assets"] = {}
+    del base["components"]["graphtrail"]["source"]["release_tag"]
     base["components"]["graphtrail"]["component_revision"] = "unreleased"
     path = tmp_path / "bad.json"
     path.write_text(json.dumps(base))
@@ -556,9 +668,13 @@ def test_manifest_rejects_published_component_without_release_tag(tmp_path):
         component_manifest.load(path)
 
 
-def test_manifest_rejects_unpublished_component_with_release_tag(tmp_path):
+def test_manifest_rejects_unpublished_component_with_release_tag(tmp_path, monkeypatch):
+    monkeypatch.setattr(component_manifest, "UNPUBLISHED_COMPONENT_IDS", frozenset({"graphtrail"}))
     base = json.loads(_write_manifest(tmp_path).read_text())
     base["components"]["graphtrail"]["source"]["release_tag"] = "v0.1.0"
+    base["components"]["graphtrail"]["assets"] = {}
+    base["components"]["graphtrail-mcp"]["assets"] = {}
+    del base["components"]["graphtrail-mcp"]["source"]["release_tag"]
     path = tmp_path / "bad.json"
     path.write_text(json.dumps(base))
     with pytest.raises(ValueError, match="source.release_tag' must be omitted when assets are unpublished"):

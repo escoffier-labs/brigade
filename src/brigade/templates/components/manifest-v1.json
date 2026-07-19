@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "brigade_version": "0.23.0",
-  "manifest_revision": "2026-07-18",
+  "manifest_revision": "2026-07-19",
   "supported_platforms": [
     "linux-amd64",
     "linux-arm64",
@@ -12,15 +12,77 @@
   "components": {
     "graphtrail": {
       "component_revision": "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb",
-      "source": {"repository": "escoffier-labs/graphtrail"},
+      "source": {"repository": "escoffier-labs/graphtrail", "release_tag": "v0.4.0"},
       "executable": "graphtrail",
-      "assets": {}
+      "assets": {
+        "darwin-amd64": {
+          "asset_name": "graphtrail-darwin-amd64",
+          "byte_size": 11695172,
+          "sha256": "eb6768be11d26a9d82c1bcecd503a9fdc7c883bda3bd627dea9ccb04fd31379c",
+          "download_url": "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/graphtrail-darwin-amd64"
+        },
+        "darwin-arm64": {
+          "asset_name": "graphtrail-darwin-arm64",
+          "byte_size": 11426112,
+          "sha256": "20534dbbb84f134a5a892520fd5a695d2520c2e040733b5535e991c611c99686",
+          "download_url": "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/graphtrail-darwin-arm64"
+        },
+        "linux-amd64": {
+          "asset_name": "graphtrail-linux-amd64",
+          "byte_size": 12802256,
+          "sha256": "e78c73a80a2eadbe297066739044e2c5fcdd187c8219198f453bd004bf9c9a55",
+          "download_url": "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/graphtrail-linux-amd64"
+        },
+        "linux-arm64": {
+          "asset_name": "graphtrail-linux-arm64",
+          "byte_size": 12424560,
+          "sha256": "7f961a4f018e4b12b9dcf5227a7cdc20fa7cdd9a723d96ec0336e254adf33c07",
+          "download_url": "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/graphtrail-linux-arm64"
+        },
+        "windows-amd64": {
+          "asset_name": "graphtrail-windows-amd64.exe",
+          "byte_size": 10753536,
+          "sha256": "1a9adc002c81661d2b0838e642f1c9db2671a2808c93e6b4499cfc2b33d6ea22",
+          "download_url": "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/graphtrail-windows-amd64.exe"
+        }
+      }
     },
     "graphtrail-mcp": {
       "component_revision": "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb",
-      "source": {"repository": "escoffier-labs/graphtrail"},
+      "source": {"repository": "escoffier-labs/graphtrail", "release_tag": "v0.4.0"},
       "executable": "graphtrail-mcp",
-      "assets": {}
+      "assets": {
+        "darwin-amd64": {
+          "asset_name": "graphtrail-mcp-darwin-amd64",
+          "byte_size": 11004028,
+          "sha256": "d8d605a522d3894c36a2f30e94cdcc99b87c34d05e53b01f4c47018eaebaf93f",
+          "download_url": "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/graphtrail-mcp-darwin-amd64"
+        },
+        "darwin-arm64": {
+          "asset_name": "graphtrail-mcp-darwin-arm64",
+          "byte_size": 10766928,
+          "sha256": "649abe87a3e40415d1933db493c94f1049d84577a996df7ba9c27c4b3c4cf597",
+          "download_url": "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/graphtrail-mcp-darwin-arm64"
+        },
+        "linux-amd64": {
+          "asset_name": "graphtrail-mcp-linux-amd64",
+          "byte_size": 11981944,
+          "sha256": "66606e4e394973766e1e91d3b0b78b26bd9077076cc85e62b9d0faf9780e7154",
+          "download_url": "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/graphtrail-mcp-linux-amd64"
+        },
+        "linux-arm64": {
+          "asset_name": "graphtrail-mcp-linux-arm64",
+          "byte_size": 11609512,
+          "sha256": "0bf17d38d44c5fc4f3132e17078a2db74e92da9bcb27a40c3d8345056523a651",
+          "download_url": "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/graphtrail-mcp-linux-arm64"
+        },
+        "windows-amd64": {
+          "asset_name": "graphtrail-mcp-windows-amd64.exe",
+          "byte_size": 10020864,
+          "sha256": "ec642c7e736fff1673c3d7e06d10eb02c9782008d8f783ab2b40699e69a35b08",
+          "download_url": "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/graphtrail-mcp-windows-amd64.exe"
+        }
+      }
     },
     "miseledger": {
       "component_revision": "v0.6.0",

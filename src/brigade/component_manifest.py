@@ -26,7 +26,7 @@ KNOWN_COMPONENT_IDS: tuple[str, ...] = (
     "miseledger",
     "sessionfind",
 )
-UNPUBLISHED_COMPONENT_IDS: frozenset[str] = frozenset({"graphtrail", "graphtrail-mcp"})
+UNPUBLISHED_COMPONENT_IDS: frozenset[str] = frozenset()
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _PLATFORM = re.compile(r"^(linux|darwin|windows)-(amd64|arm64)$")
