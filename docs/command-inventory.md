@@ -66,6 +66,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade tokens`: 3 command path(s)
 - `brigade tools`: 48 command path(s)
 - `brigade untrusted` (extras): 2 command path(s)
+- `brigade version`: 1 command path(s)
 - `brigade work`: 144 command path(s)
 - `brigade workflow` (extras): 3 command path(s)
 
@@ -520,6 +521,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade tools sync plan`
 - `brigade untrusted scan` (extras)
 - `brigade untrusted wrap` (extras)
+- `brigade version`
 - `brigade work acceptance`
 - `brigade work backup closeout`
 - `brigade work backup contract`
