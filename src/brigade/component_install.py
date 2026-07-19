@@ -483,9 +483,9 @@ def _smoke_sessionfind(
     except OSError as exc:
         raise ComponentInstallError(f"sessionfind smoke failed to run {path}: {exc}") from exc
 
-    if completed.returncode != 2:
+    if completed.returncode != 0:
         raise ComponentInstallError(
-            f"sessionfind smoke failed: {path} --help exited {completed.returncode}, expected 2"
+            f"sessionfind smoke failed: {path} --help exited {completed.returncode}, expected 0"
         )
     combined = f"{completed.stdout or ''}{completed.stderr or ''}"
     if "usage" not in combined.lower():

@@ -126,7 +126,7 @@ Prior path: `component_paths.installed_previous_state_path(data_root)` → `<dat
 | graphtrail | `<managed>/graphtrail --version` | exit 0, non-empty stdout |
 | graphtrail-mcp | `<managed>/graphtrail-mcp` JSON-RPC `initialize` on stdin | valid JSON-RPC response on stdout |
 | miseledger | `<managed>/miseledger version` | exit 0 |
-| sessionfind | `<managed>/sessionfind --help` | exit 2 with usage text in stdout or stderr |
+| sessionfind | `<managed>/sessionfind --help` | exit 0 with usage text in stdout or stderr |
 
 ## File Map
 
@@ -589,7 +589,7 @@ def test_run_post_install_smoke_invokes_absolute_paths_only(tmp_path):
     assert {cmd[0] for cmd in calls} == set(managed.values())
 ```
 
-- [ ] Implement smoke runner: `subprocess.run` with absolute argv[0], JSON-RPC stdin for graphtrail-mcp, accept exit 2 for sessionfind --help. Inject `runner` records argv then delegates to real `subprocess.run` so MCP JSON and sessionfind exit 2 are exercised.
+- [ ] Implement smoke runner: `subprocess.run` with absolute argv[0], JSON-RPC stdin for graphtrail-mcp, accept exit 0 for sessionfind --help. Inject `runner` records argv then delegates to real `subprocess.run` so MCP JSON and sessionfind exit 0 are exercised.
 - [ ] RED → GREEN.
 - [ ] Commit: `feat(components): add post-install smoke suite`.
 
