@@ -91,6 +91,76 @@ def _write_prior_managed(paths: dict[str, Path]) -> dict[str, bytes]:
     return prior
 
 
+def _rollback_payload(component_id: str, *, version: str) -> bytes:
+    payload = fixture_payload(component_id)[0]
+    return payload.replace(
+        b"# platform: linux-amd64\n",
+        f"# platform: linux-amd64 {version}\n".encode(),
+        1,
+    )
+
+
+def _rollback_state(
+    env: dict[str, str],
+    *,
+    revision: str,
+    version: str,
+    executable: str | None = None,
+) -> component_state.InstalledState:
+    roots = resolve_roots(env=env, system="linux")
+    components: dict[str, component_state.InstalledComponentRecord] = {}
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        payload = _rollback_payload(component_id, version=version)
+        sha256 = hashlib.sha256(payload).hexdigest()
+        asset_name = f"{component_id}-rollback-{version}"
+        cache_path = Path(component_paths.cached_asset_path(roots.cache_root, sha256, asset_name))
+        write_verified_cache(cache_path, payload=payload)
+        components[component_id] = component_state.InstalledComponentRecord(
+            component_revision=f"fixture-{version}",
+            asset_name=asset_name,
+            byte_size=len(payload),
+            sha256=sha256,
+            download_url=f"https://example.invalid/components/{asset_name}",
+            executable=executable or f"/untrusted/{component_id}",
+        )
+    return component_state.InstalledState(
+        schema_version=component_state.SCHEMA_VERSION,
+        brigade_version=brigade.__version__,
+        manifest_revision=revision,
+        platform="linux-amd64",
+        installed_at="2026-07-19T06:00:00+00:00",
+        components=components,
+    )
+
+
+def _seed_rollback_pair(
+    env: dict[str, str],
+    *,
+    revision_a: str = "fixture-a",
+    revision_b: str = "fixture-b",
+) -> tuple[component_state.InstalledState, component_state.InstalledState]:
+    roots = resolve_roots(env=env, system="linux")
+    previous = _rollback_state(env, revision=revision_a, version="previous")
+    current = _rollback_state(env, revision=revision_b, version="current")
+    component_state.write_installed_state(Path(component_paths.installed_state_path(roots.data_root)), current)
+    component_state.write_installed_state(
+        Path(component_paths.installed_previous_state_path(roots.data_root)), previous
+    )
+    for component_id, path in _managed_paths(env).items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_rollback_payload(component_id, version="current"))
+        path.chmod(0o700)
+    return previous, current
+
+
+def _rollback_state_paths(env: dict[str, str]) -> tuple[Path, Path]:
+    roots = resolve_roots(env=env, system="linux")
+    return (
+        Path(component_paths.installed_state_path(roots.data_root)),
+        Path(component_paths.installed_previous_state_path(roots.data_root)),
+    )
+
+
 def test_verify_cached_asset_rejects_invalid_byte_size(tmp_path):
     path = tmp_path / "asset"
     path.write_bytes(b"data")
@@ -346,6 +416,233 @@ def test_setup_rejects_brigade_version_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
     rc = setup_native_components(env=env)
     assert rc == 1
+
+
+def test_setup_rejects_dry_run_with_rollback(tmp_path):
+    assert setup_native_components(dry_run=True, rollback=True, env=linux_env(tmp_path)) == 1
+
+
+def test_setup_rollback_restores_previous_binaries_and_swaps_state(tmp_path):
+    env = linux_env(tmp_path)
+    previous, current = _seed_rollback_pair(env)
+    current_path, previous_path = _rollback_state_paths(env)
+    current_before = current_path.read_bytes()
+    previous_before = previous_path.read_bytes()
+    opener = FakeOpener({})
+
+    assert setup_native_components(rollback=True, env=env, opener=opener) == 0
+
+    restored = component_state.load_installed_state(current_path)
+    swapped = component_state.load_installed_state(previous_path)
+    assert restored == previous
+    assert swapped == current
+    assert current_path.read_bytes() != current_before
+    assert previous_path.read_bytes() != previous_before
+    assert opener.calls == []
+    for component_id, path in _managed_paths(env).items():
+        assert path.read_bytes() == _rollback_payload(component_id, version="previous")
+        assert path.stat().st_mode & 0o777 == 0o755
+
+
+def test_setup_rollback_verifies_all_prior_caches_before_mutating_managed_files(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    previous, _current = _seed_rollback_pair(env)
+    current_path, previous_path = _rollback_state_paths(env)
+    state_before = (current_path.read_bytes(), previous_path.read_bytes())
+    paths = _managed_paths(env)
+    managed_before = {component_id: path.read_bytes() for component_id, path in paths.items()}
+    last_component = component_manifest.KNOWN_COMPONENT_IDS[-1]
+    record = previous.components[last_component]
+    roots = resolve_roots(env=env, system="linux")
+    Path(component_paths.cached_asset_path(roots.cache_root, record.sha256, record.asset_name)).unlink()
+
+    def mutation_before_cache_verification(*_args, **_kwargs):
+        pytest.fail("managed files must not mutate before every prior cache verifies")
+
+    monkeypatch.setattr(component_install, "materialize_executable", mutation_before_cache_verification)
+
+    assert setup_native_components(rollback=True, env=env) == 1
+    assert (current_path.read_bytes(), previous_path.read_bytes()) == state_before
+    assert {component_id: path.read_bytes() for component_id, path in paths.items()} == managed_before
+
+
+@pytest.mark.parametrize("failure", ("missing", "corrupt"))
+def test_setup_rollback_bad_prior_cache_preserves_binaries_and_state(tmp_path, failure):
+    env = linux_env(tmp_path)
+    previous, _current = _seed_rollback_pair(env)
+    current_path, previous_path = _rollback_state_paths(env)
+    state_before = (current_path.read_bytes(), previous_path.read_bytes())
+    paths = _managed_paths(env)
+    managed_before = {component_id: path.read_bytes() for component_id, path in paths.items()}
+    component_id = component_manifest.KNOWN_COMPONENT_IDS[0]
+    record = previous.components[component_id]
+    roots = resolve_roots(env=env, system="linux")
+    cache_path = Path(component_paths.cached_asset_path(roots.cache_root, record.sha256, record.asset_name))
+    if failure == "missing":
+        cache_path.unlink()
+    else:
+        cache_path.write_bytes(b"corrupt")
+
+    assert setup_native_components(rollback=True, env=env) == 1
+    assert (current_path.read_bytes(), previous_path.read_bytes()) == state_before
+    assert {component_id: path.read_bytes() for component_id, path in paths.items()} == managed_before
+
+
+@pytest.mark.parametrize("state_name", ("current", "previous"))
+@pytest.mark.parametrize("invalid", (False, True))
+def test_setup_rollback_rejects_missing_or_invalid_state_without_mutation(tmp_path, state_name, invalid):
+    env = linux_env(tmp_path)
+    _seed_rollback_pair(env)
+    current_path, previous_path = _rollback_state_paths(env)
+    target = current_path if state_name == "current" else previous_path
+    if invalid:
+        target.write_text("{invalid json")
+    else:
+        target.unlink()
+    paths = _managed_paths(env)
+    managed_before = {component_id: path.read_bytes() for component_id, path in paths.items()}
+    other_path = previous_path if target == current_path else current_path
+    other_before = other_path.read_bytes()
+
+    assert setup_native_components(rollback=True, env=env) == 1
+    assert not target.exists() if not invalid else target.read_text() == "{invalid json"
+    assert other_path.read_bytes() == other_before
+    assert {component_id: path.read_bytes() for component_id, path in paths.items()} == managed_before
+
+
+def test_setup_rollback_rejects_partial_component_state_without_mutation(tmp_path):
+    env = linux_env(tmp_path)
+    previous, _current = _seed_rollback_pair(env)
+    current_path, previous_path = _rollback_state_paths(env)
+    state_before = current_path.read_bytes()
+    partial = component_state.InstalledState(
+        schema_version=previous.schema_version,
+        brigade_version=previous.brigade_version,
+        manifest_revision=previous.manifest_revision,
+        platform=previous.platform,
+        installed_at=previous.installed_at,
+        components={"graphtrail": previous.components["graphtrail"]},
+    )
+    component_state.write_installed_state(previous_path, partial)
+    previous_before = previous_path.read_bytes()
+    paths = _managed_paths(env)
+    managed_before = {component_id: path.read_bytes() for component_id, path in paths.items()}
+
+    assert setup_native_components(rollback=True, env=env) == 1
+    assert current_path.read_bytes() == state_before
+    assert previous_path.read_bytes() == previous_before
+    assert {component_id: path.read_bytes() for component_id, path in paths.items()} == managed_before
+
+
+def test_setup_rollback_rejects_host_platform_mismatch_without_mutation(tmp_path):
+    env = linux_env(tmp_path)
+    previous, _current = _seed_rollback_pair(env)
+    current_path, previous_path = _rollback_state_paths(env)
+    state_before = current_path.read_bytes()
+    mismatch = component_state.InstalledState(
+        schema_version=previous.schema_version,
+        brigade_version=previous.brigade_version,
+        manifest_revision=previous.manifest_revision,
+        platform="linux-arm64",
+        installed_at=previous.installed_at,
+        components=previous.components,
+    )
+    component_state.write_installed_state(previous_path, mismatch)
+    previous_before = previous_path.read_bytes()
+    paths = _managed_paths(env)
+    managed_before = {component_id: path.read_bytes() for component_id, path in paths.items()}
+
+    assert setup_native_components(rollback=True, env=env) == 1
+    assert current_path.read_bytes() == state_before
+    assert previous_path.read_bytes() == previous_before
+    assert {component_id: path.read_bytes() for component_id, path in paths.items()} == managed_before
+
+
+def test_setup_rollback_ignores_persisted_executable_destinations(tmp_path):
+    env = linux_env(tmp_path)
+    _seed_rollback_pair(env)
+    untrusted = tmp_path / "persisted-executable"
+    current_path, _previous_path = _rollback_state_paths(env)
+    current = component_state.load_installed_state(current_path)
+    assert current is not None
+    altered = component_state.InstalledState(
+        schema_version=current.schema_version,
+        brigade_version=current.brigade_version,
+        manifest_revision=current.manifest_revision,
+        platform=current.platform,
+        installed_at=current.installed_at,
+        components={
+            component_id: component_state.InstalledComponentRecord(
+                component_revision=record.component_revision,
+                asset_name=record.asset_name,
+                byte_size=record.byte_size,
+                sha256=record.sha256,
+                download_url=record.download_url,
+                executable=str(untrusted / component_id),
+            )
+            for component_id, record in current.components.items()
+        },
+    )
+    component_state.write_installed_state(current_path, altered)
+
+    assert setup_native_components(rollback=True, env=env) == 0
+    assert not untrusted.exists()
+    for component_id, path in _managed_paths(env).items():
+        assert path.read_bytes() == _rollback_payload(component_id, version="previous")
+
+
+def test_setup_rollback_smoke_failure_restores_binaries_and_state(tmp_path):
+    env = linux_env(tmp_path)
+    _seed_rollback_pair(env)
+    current_path, previous_path = _rollback_state_paths(env)
+    state_before = (current_path.read_bytes(), previous_path.read_bytes())
+    paths = _managed_paths(env)
+    managed_before = {component_id: path.read_bytes() for component_id, path in paths.items()}
+
+    def failed_smoke(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+
+    assert setup_native_components(rollback=True, env=env, runner=failed_smoke) == 1
+    assert (current_path.read_bytes(), previous_path.read_bytes()) == state_before
+    assert {component_id: path.read_bytes() for component_id, path in paths.items()} == managed_before
+
+
+def test_setup_rollback_state_write_failure_restores_binaries_and_state(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    _seed_rollback_pair(env)
+    current_path, previous_path = _rollback_state_paths(env)
+    state_before = (current_path.read_bytes(), previous_path.read_bytes())
+    paths = _managed_paths(env)
+    managed_before = {component_id: path.read_bytes() for component_id, path in paths.items()}
+    original_write = component_install.component_state.write_installed_state
+    writes = 0
+
+    def fail_second_state_write(path, state):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("state write failed")
+        original_write(path, state)
+
+    monkeypatch.setattr(component_install.component_state, "write_installed_state", fail_second_state_write)
+
+    assert setup_native_components(rollback=True, env=env) == 1
+    assert (current_path.read_bytes(), previous_path.read_bytes()) == state_before
+    assert {component_id: path.read_bytes() for component_id, path in paths.items()} == managed_before
+
+
+def test_setup_rollback_twice_toggles_back_to_original_current_state(tmp_path):
+    env = linux_env(tmp_path)
+    _previous, _current = _seed_rollback_pair(env)
+    current_path, previous_path = _rollback_state_paths(env)
+    original = (current_path.read_bytes(), previous_path.read_bytes())
+
+    assert setup_native_components(rollback=True, env=env) == 0
+    assert setup_native_components(rollback=True, env=env) == 0
+
+    assert (current_path.read_bytes(), previous_path.read_bytes()) == original
+    for component_id, path in _managed_paths(env).items():
+        assert path.read_bytes() == _rollback_payload(component_id, version="current")
 
 
 def test_setup_install_writes_all_four_managed_files_and_state_after_smoke(tmp_path, monkeypatch):

@@ -469,6 +469,113 @@ def run_post_install_smoke(
     _smoke_sessionfind(paths["sessionfind"], run)
 
 
+def _load_rollback_state(
+    path: Path,
+    *,
+    label: str,
+    platform: str,
+) -> component_state.InstalledState:
+    if not path.is_file():
+        raise ComponentInstallError(f"{label} installed state missing: {path}")
+    state = component_state.load_installed_state(path)
+    if state is None:
+        raise ComponentInstallError(f"invalid {label} installed state: {path}")
+    expected_components = set(component_manifest.KNOWN_COMPONENT_IDS)
+    if set(state.components) != expected_components:
+        raise ComponentInstallError(
+            f"{label} installed state requires exactly {len(expected_components)} components: {path}"
+        )
+    if state.platform != platform:
+        raise ComponentInstallError(
+            f"{label} installed state platform {state.platform!r} does not match host {platform!r}"
+        )
+    return state
+
+
+def _rollback_cache_paths(
+    state: component_state.InstalledState,
+    *,
+    cache_root: str,
+) -> dict[str, Path]:
+    cache_paths: dict[str, Path] = {}
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        record = state.components[component_id]
+        try:
+            cache_path = component_paths.cached_asset_path(
+                cache_root,
+                record.sha256,
+                record.asset_name,
+            )
+        except ValueError as exc:
+            raise ComponentInstallError(f"invalid previous installed cache path for {component_id}: {exc}") from exc
+        cache_paths[component_id] = Path(cache_path)
+    return cache_paths
+
+
+def _setup_rollback(
+    *,
+    env: Mapping[str, str] | None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] | None,
+) -> int:
+    roots = resolve_roots(env=env)
+    platform = component_manifest.platform_key()
+    current_state_path = Path(component_paths.installed_state_path(roots.data_root))
+    previous_state_path = Path(component_paths.installed_previous_state_path(roots.data_root))
+    current_state = _load_rollback_state(
+        current_state_path,
+        label="current",
+        platform=platform,
+    )
+    previous_state = _load_rollback_state(
+        previous_state_path,
+        label="previous",
+        platform=platform,
+    )
+    cache_paths = _rollback_cache_paths(previous_state, cache_root=roots.cache_root)
+
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        record = previous_state.components[component_id]
+        verify_cached_asset(
+            cache_paths[component_id],
+            byte_size=record.byte_size,
+            sha256=record.sha256,
+        )
+
+    managed_paths = {
+        component_id: Path(component_paths.managed_executable_path(roots.data_root, component_id))
+        for component_id in component_manifest.KNOWN_COMPONENT_IDS
+    }
+    managed_snapshots = _snapshot_managed_executables(list(managed_paths.values()))
+    state_snapshots = _snapshot_managed_executables([current_state_path, previous_state_path])
+    try:
+        for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+            materialize_executable(
+                cache_path=cache_paths[component_id],
+                managed_path=managed_paths[component_id],
+            )
+        for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+            record = previous_state.components[component_id]
+            verify_cached_asset(
+                managed_paths[component_id],
+                byte_size=record.byte_size,
+                sha256=record.sha256,
+            )
+        run_post_install_smoke(
+            {component_id: str(path) for component_id, path in managed_paths.items()},
+            runner=runner,
+        )
+        component_state.write_installed_state(current_state_path, previous_state)
+        component_state.write_installed_state(previous_state_path, current_state)
+    except (ComponentInstallError, OSError, ValueError) as exc:
+        try:
+            _restore_managed_executables(managed_snapshots)
+            _restore_managed_executables(state_snapshots)
+        except (ComponentInstallError, OSError) as restore_exc:
+            raise ComponentInstallError(f"{exc}; failed to restore rollback transaction: {restore_exc}") from exc
+        raise
+    return 0
+
+
 def setup_native_components(
     *,
     dry_run: bool = False,
@@ -480,6 +587,10 @@ def setup_native_components(
 ) -> int:
     """Install pinned native components; return process exit code."""
     try:
+        if dry_run and rollback:
+            raise ComponentInstallError("--dry-run and --rollback cannot be used together")
+        if rollback:
+            return _setup_rollback(env=env, runner=runner)
         manifest = component_manifest.load()
         if manifest.brigade_version != brigade.__version__:
             raise ComponentInstallError(
@@ -489,8 +600,6 @@ def setup_native_components(
             )
         if dry_run:
             return _setup_dry_run(manifest, env=env)
-        if rollback:
-            raise ComponentInstallError("rollback is not implemented")
 
         roots = resolve_roots(env=env)
         platform = component_manifest.platform_key()
