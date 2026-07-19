@@ -5,17 +5,21 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
 import brigade
 from brigade import component_manifest
+from brigade import component_paths
 from brigade.component_install import (
     ComponentInstallError,
     _restore_managed_executables,
     _snapshot_managed_executables,
+    build_setup_plan,
     fetch_asset_to_cache,
     materialize_executable,
+    resolve_roots,
     run_post_install_smoke,
     setup_native_components,
     verify_cached_asset,
@@ -174,6 +178,140 @@ def test_fetch_asset_cleans_up_temp_on_failure(tmp_path):
         fetch_asset_to_cache(asset, cache_path=cache_path, offline=False, opener=opener)
     leftovers = list(cache_path.parent.glob(f".{cache_path.name}.*"))
     assert leftovers == []
+
+
+def test_resolve_roots_uses_xdg_paths(tmp_path):
+    env = linux_env(tmp_path)
+    roots = resolve_roots(env=env, system="linux")
+    assert roots.data_root == env["XDG_DATA_HOME"]
+    assert roots.cache_root == env["XDG_CACHE_HOME"]
+
+
+def test_build_setup_plan_lists_all_four_components(tmp_path):
+    manifest_path = tmp_path / "manifest-v1.json"
+    manifest = write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    roots = resolve_roots(env=linux_env(tmp_path), system="linux")
+    plan = build_setup_plan(manifest, platform="linux-amd64", roots=roots)
+    assert {action.component_id for action in plan} == set(component_manifest.KNOWN_COMPONENT_IDS)
+
+
+def test_build_setup_plan_emits_deterministic_actions(tmp_path):
+    manifest_path = tmp_path / "manifest-v1.json"
+    manifest = write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    roots = resolve_roots(env=linux_env(tmp_path), system="linux")
+    plan = build_setup_plan(manifest, platform="linux-amd64", roots=roots)
+    per_component = ("verify-cache", "download", "materialize", "smoke")
+    assert [action.action for action in plan] == list(per_component) * len(
+        component_manifest.KNOWN_COMPONENT_IDS
+    )
+    expected_ids: list[str] = []
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        expected_ids.extend([component_id] * len(per_component))
+    assert [action.component_id for action in plan] == expected_ids
+
+
+def test_build_setup_plan_uses_exact_cache_and_managed_paths(tmp_path):
+    manifest_path = tmp_path / "manifest-v1.json"
+    manifest = write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    roots = resolve_roots(env=linux_env(tmp_path), system="linux")
+    platform = "linux-amd64"
+    plan = build_setup_plan(manifest, platform=platform, roots=roots)
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        asset = manifest.components[component_id].assets[platform]
+        cache_path = component_paths.cached_asset_path(
+            roots.cache_root, asset.sha256, asset.asset_name
+        )
+        managed_path = component_paths.managed_executable_path(roots.data_root, component_id)
+        component_actions = [action for action in plan if action.component_id == component_id]
+        assert len(component_actions) == 4
+        assert all(action.cache_path == cache_path for action in component_actions)
+        assert all(action.managed_path == managed_path for action in component_actions)
+        assert component_actions[0].asset_name == asset.asset_name
+        assert component_actions[0].byte_size == asset.byte_size
+        assert component_actions[0].sha256 == asset.sha256
+        assert component_actions[0].download_url == asset.download_url
+        assert component_actions[0].component_revision == manifest.components[
+            component_id
+        ].component_revision
+
+
+def test_setup_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    rc = setup_native_components(dry_run=True, env=env)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "miseledger-linux-amd64" in out
+    assert "download" in out
+    assert not (Path(env["XDG_DATA_HOME"]) / "brigade" / "installed.json").exists()
+
+
+def test_setup_dry_run_prints_required_metadata(tmp_path, monkeypatch, capsys):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    rc = setup_native_components(dry_run=True, env=env)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert brigade.__version__ in out
+    assert "fixture" in out
+    assert "linux-amd64" in out
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        assert component_id in out
+    assert "verify-cache" in out
+    assert "materialize" in out
+    assert "smoke" in out
+
+
+def test_setup_dry_run_creates_no_directories(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    assert not Path(env["XDG_DATA_HOME"]).exists()
+    assert not Path(env["XDG_CACHE_HOME"]).exists()
+    rc = setup_native_components(dry_run=True, env=env)
+    assert rc == 0
+    assert not Path(env["XDG_DATA_HOME"]).exists()
+    assert not Path(env["XDG_CACHE_HOME"]).exists()
+
+
+def test_setup_dry_run_invokes_no_opener_or_runner(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    opener = FakeOpener({})
+
+    def boom_runner(*_args, **_kwargs):
+        pytest.fail("runner should not be called during dry-run")
+
+    rc = setup_native_components(dry_run=True, env=env, opener=opener, runner=boom_runner)
+    assert rc == 0
+    assert opener.calls == []
+
+
+def test_setup_dry_run_rejects_unsupported_platform(tmp_path, monkeypatch, capsys):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+
+    def bad_platform(**_kwargs):
+        raise ValueError("unsupported platform foo-bar")
+
+    monkeypatch.setattr(component_manifest, "platform_key", bad_platform)
+    rc = setup_native_components(dry_run=True, env=env)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "unsupported platform" in err
 
 
 def test_setup_rejects_brigade_version_mismatch(tmp_path, monkeypatch):

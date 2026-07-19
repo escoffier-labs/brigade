@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import brigade
-from brigade import component_manifest, localio
+from brigade import component_manifest, component_paths, localio
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
@@ -38,6 +38,125 @@ _JSONRPC_INIT_REQUEST = json.dumps(
 
 class ComponentInstallError(RuntimeError):
     """Raised when a component install step fails verification."""
+
+
+_SETUP_ACTIONS: tuple[str, ...] = ("verify-cache", "download", "materialize", "smoke")
+
+
+@dataclass(frozen=True)
+class SetupPlanAction:
+    component_id: str
+    action: str
+    cache_path: str
+    managed_path: str
+    asset_name: str
+    byte_size: int
+    sha256: str
+    download_url: str
+    component_revision: str
+
+
+@dataclass(frozen=True)
+class SetupRoots:
+    data_root: str
+    cache_root: str
+    env: Mapping[str, str]
+
+
+def resolve_roots(
+    *,
+    env: Mapping[str, str] | None = None,
+    system: str | None = None,
+) -> SetupRoots:
+    """Resolve user-local data and cache roots for component setup."""
+    environment = dict(env if env is not None else os.environ)
+    data_root_path = component_paths.data_root(env=environment, system=system)
+    cache_root_path = component_paths.cache_root(env=environment, system=system)
+    return SetupRoots(
+        data_root=data_root_path,
+        cache_root=cache_root_path,
+        env=environment,
+    )
+
+
+def build_setup_plan(
+    manifest: component_manifest.ComponentManifest,
+    *,
+    platform: str,
+    roots: SetupRoots,
+) -> list[SetupPlanAction]:
+    """Build a deterministic dry-run/install plan for every known component."""
+    plan: list[SetupPlanAction] = []
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        asset = component_manifest.resolve_asset(manifest, component_id, platform)
+        component = manifest.components[component_id]
+        cache_path = component_paths.cached_asset_path(
+            roots.cache_root,
+            asset.sha256,
+            asset.asset_name,
+        )
+        managed_path = component_paths.managed_executable_path(
+            roots.data_root,
+            component.executable,
+        )
+        for action in _SETUP_ACTIONS:
+            plan.append(
+                SetupPlanAction(
+                    component_id=component_id,
+                    action=action,
+                    cache_path=cache_path,
+                    managed_path=managed_path,
+                    asset_name=asset.asset_name,
+                    byte_size=asset.byte_size,
+                    sha256=asset.sha256,
+                    download_url=asset.download_url,
+                    component_revision=component.component_revision,
+                )
+            )
+    return plan
+
+
+def _print_setup_dry_run(
+    manifest: component_manifest.ComponentManifest,
+    *,
+    platform: str,
+    plan: Sequence[SetupPlanAction],
+) -> None:
+    print("component setup dry-run")
+    print(f"brigade_version: {brigade.__version__}")
+    print(f"manifest_revision: {manifest.manifest_revision}")
+    print(f"platform: {platform}")
+    current_component: str | None = None
+    for entry in plan:
+        if entry.component_id != current_component:
+            current_component = entry.component_id
+            print()
+            print(f"component: {entry.component_id}")
+            print(f"component_revision: {entry.component_revision}")
+            print(f"asset_name: {entry.asset_name}")
+            print(f"byte_size: {entry.byte_size}")
+            print(f"sha256: {entry.sha256}")
+            print(f"download_url: {entry.download_url}")
+            print(f"cache_path: {entry.cache_path}")
+            print(f"managed_path: {entry.managed_path}")
+            print("actions:")
+        print(f"  - {entry.action}")
+
+
+def _setup_dry_run(
+    manifest: component_manifest.ComponentManifest,
+    *,
+    env: Mapping[str, str] | None,
+) -> int:
+    try:
+        roots = resolve_roots(env=env)
+        platform = component_manifest.platform_key()
+        plan = build_setup_plan(manifest, platform=platform, roots=roots)
+    except ValueError as exc:
+        print(f"component setup: {exc}", file=sys.stderr)
+        return 1
+    _print_setup_dry_run(manifest, platform=platform, plan=plan)
+    return 0
 
 
 @dataclass(frozen=True)
@@ -370,8 +489,12 @@ def setup_native_components(
     runner: object | None = None,
 ) -> int:
     """Install pinned native components; return process exit code."""
-    del dry_run, offline, rollback, env, opener, runner
-    manifest = component_manifest.load()
+    del opener, runner
+    try:
+        manifest = component_manifest.load()
+    except ValueError as exc:
+        print(f"component setup: {exc}", file=sys.stderr)
+        return 1
     if manifest.brigade_version != brigade.__version__:
         print(
             "component setup: brigade_version mismatch: "
@@ -380,4 +503,7 @@ def setup_native_components(
             file=sys.stderr,
         )
         return 1
+    if dry_run:
+        return _setup_dry_run(manifest, env=env)
+    del offline, rollback, env
     return 0
