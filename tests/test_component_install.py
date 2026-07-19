@@ -1096,18 +1096,23 @@ def test_run_post_install_smoke_rejects_miseledger_nonzero_exit(tmp_path):
         run_post_install_smoke(managed)
 
 
-def test_run_post_install_smoke_rejects_sessionfind_wrong_exit(tmp_path):
+def test_run_post_install_smoke_accepts_sessionfind_help_exit_zero(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
-    script = smoke_stub_script("sessionfind").replace("raise SystemExit(2)", "raise SystemExit(0)")
+    run_post_install_smoke(managed)
+
+
+def test_run_post_install_smoke_rejects_sessionfind_nonzero_exit(tmp_path):
+    managed = _write_managed_smoke_stubs(tmp_path)
+    script = smoke_stub_script("sessionfind").replace("raise SystemExit(0)", "raise SystemExit(2)", 1)
     managed["sessionfind"] = _write_managed_stub(tmp_path, "sessionfind", script=script)
-    with pytest.raises(ComponentInstallError, match="sessionfind smoke failed.*expected 2"):
+    with pytest.raises(ComponentInstallError, match="sessionfind smoke failed.*expected 0"):
         run_post_install_smoke(managed)
 
 
 def test_run_post_install_smoke_rejects_sessionfind_missing_usage(tmp_path):
     script = (
         '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--help"]:\n'
-        '    print("options only")\n    raise SystemExit(2)\nraise SystemExit(1)\n'
+        '    print("options only")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
     )
     managed = _write_managed_smoke_stubs(tmp_path)
     managed["sessionfind"] = _write_managed_stub(tmp_path, "sessionfind", script=script)

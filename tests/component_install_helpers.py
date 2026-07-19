@@ -46,7 +46,7 @@ def smoke_stub_script(name: str) -> str:
     if name == "sessionfind":
         return (
             '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--help"]:\n'
-            '    print("usage: sessionfind [options]")\n    raise SystemExit(2)\nraise SystemExit(1)\n'
+            '    print("usage: sessionfind [options]")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
         )
     raise ValueError(name)
 
