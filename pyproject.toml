@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brigade-cli"
-version = "0.23.0"
+version = "0.23.1"
 description = "Your agents run loops. Brigade keeps the receipts. Local control plane for multi-agent coding: share MCP/tools/memory, remember via handoffs, prove with file receipts, improve by promoting skills only on real exit codes. Claude Code, Codex, Grok, Hermes, OpenClaw, and more. Stations for evidence, code graph, pantry, skills. pipx install brigade-cli."
 readme = "README.md"
 requires-python = ">=3.10"

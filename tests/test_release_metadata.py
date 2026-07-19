@@ -18,10 +18,9 @@ def test_current_release_has_one_added_section_with_recent_release_notes():
 
     assert text.count("### Added") == 1
     for expected in (
-        "brigade repos adoption",
-        "brigade operator checkup",
-        "brigade work hooks",
-        "brigade receipts export miseledger",
+        "Versioned component manifest v1",
+        "brigade setup",
+        "cross-platform installation documentation",
     ):
         assert expected in text
 
