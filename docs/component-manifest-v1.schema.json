@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brigade.tools/schemas/component-manifest-v1.schema.json",
+  "title": "Brigade component manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "brigade_version",
+    "manifest_revision",
+    "supported_platforms",
+    "components"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "brigade_version": {"type": "string", "minLength": 1},
+    "manifest_revision": {"type": "string", "minLength": 1},
+    "supported_platforms": {
+      "const": [
+        "linux-amd64",
+        "linux-arm64",
+        "darwin-amd64",
+        "darwin-arm64",
+        "windows-amd64"
+      ]
+    },
+    "components": {
+      "type": "object",
+      "required": ["graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"],
+      "properties": {
+        "graphtrail": {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["component_revision", "source", "executable", "assets"],
+              "properties": {
+                "component_revision": {"$ref": "#/$defs/graphtrail_component_revision"},
+                "executable": {"const": "graphtrail"},
+                "source": {},
+                "assets": {}
+              }
+            },
+            {
+              "oneOf": [
+                {
+                  "properties": {
+                    "source": {"$ref": "#/$defs/unpublished_source"},
+                    "assets": {"$ref": "#/$defs/empty_assets"}
+                  },
+                  "required": ["source", "assets"]
+                },
+                {
+                  "properties": {
+                    "source": {"$ref": "#/$defs/published_source"},
+                    "assets": {"$ref": "#/$defs/published_assets"}
+                  },
+                  "required": ["source", "assets"]
+                }
+              ]
+            }
+          ]
+        },
+        "graphtrail-mcp": {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["component_revision", "source", "executable", "assets"],
+              "properties": {
+                "component_revision": {"$ref": "#/$defs/graphtrail_component_revision"},
+                "executable": {"const": "graphtrail-mcp"},
+                "source": {},
+                "assets": {}
+              }
+            },
+            {
+              "oneOf": [
+                {
+                  "properties": {
+                    "source": {"$ref": "#/$defs/unpublished_source"},
+                    "assets": {"$ref": "#/$defs/empty_assets"}
+                  },
+                  "required": ["source", "assets"]
+                },
+                {
+                  "properties": {
+                    "source": {"$ref": "#/$defs/published_source"},
+                    "assets": {"$ref": "#/$defs/published_assets"}
+                  },
+                  "required": ["source", "assets"]
+                }
+              ]
+            }
+          ]
+        },
+        "miseledger": {
+          "allOf": [
+            {"$ref": "#/$defs/known_component"},
+            {
+              "properties": {
+                "executable": {"const": "miseledger"},
+                "assets": {"$ref": "#/$defs/published_assets"},
+                "source": {"$ref": "#/$defs/published_source"}
+              }
+            }
+          ]
+        },
+        "sessionfind": {
+          "allOf": [
+            {"$ref": "#/$defs/known_component"},
+            {
+              "properties": {
+                "executable": {"const": "sessionfind"},
+                "assets": {"$ref": "#/$defs/published_assets"},
+                "source": {"$ref": "#/$defs/published_source"}
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "known_component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component_revision", "source", "executable", "assets"],
+      "properties": {
+        "component_revision": {"type": "string", "minLength": 1},
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository"],
+          "properties": {
+            "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+            "release_tag": {"type": "string", "minLength": 1}
+          }
+        },
+        "executable": {"type": "string", "minLength": 1},
+        "assets": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^(linux|darwin|windows)-(amd64|arm64)$"
+          },
+          "additionalProperties": {"$ref": "#/$defs/asset"}
+        }
+      }
+    },
+    "graphtrail_component_revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "published_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "release_tag"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"},
+        "release_tag": {"type": "string", "minLength": 1}
+      }
+    },
+    "unpublished_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^[^/]+/[^/]+$"}
+      }
+    },
+    "empty_assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "published_assets": {
+      "type": "object",
+      "required": [
+        "linux-amd64",
+        "linux-arm64",
+        "darwin-amd64",
+        "darwin-arm64",
+        "windows-amd64"
+      ],
+      "properties": {
+        "linux-amd64": {"$ref": "#/$defs/unix_asset"},
+        "linux-arm64": {"$ref": "#/$defs/unix_asset"},
+        "darwin-amd64": {"$ref": "#/$defs/unix_asset"},
+        "darwin-arm64": {"$ref": "#/$defs/unix_asset"},
+        "windows-amd64": {"$ref": "#/$defs/windows_asset"}
+      },
+      "additionalProperties": false
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_name", "byte_size", "sha256", "download_url"],
+      "properties": {
+        "asset_name": {"type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$"},
+        "byte_size": {"type": "integer", "minimum": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "download_url": {
+          "type": "string",
+          "pattern": "^https://[^?#]+/[^/?#]+$"
+        }
+      }
+    },
+    "unix_asset": {
+      "allOf": [
+        {"$ref": "#/$defs/asset"},
+        {
+          "properties": {
+            "asset_name": {
+              "pattern": "^[a-z0-9-]+-(linux|darwin)-(amd64|arm64)$"
+            }
+          }
+        }
+      ]
+    },
+    "windows_asset": {
+      "allOf": [
+        {"$ref": "#/$defs/asset"},
+        {
+          "properties": {
+            "asset_name": {
+              "pattern": "^[a-z0-9-]+-windows-amd64\\.exe$"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

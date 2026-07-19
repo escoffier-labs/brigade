@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "brigade_version": "0.23.0",
+  "manifest_revision": "2026-07-18",
+  "supported_platforms": [
+    "linux-amd64",
+    "linux-arm64",
+    "darwin-amd64",
+    "darwin-arm64",
+    "windows-amd64"
+  ],
+  "components": {
+    "graphtrail": {
+      "component_revision": "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb",
+      "source": {"repository": "escoffier-labs/graphtrail"},
+      "executable": "graphtrail",
+      "assets": {}
+    },
+    "graphtrail-mcp": {
+      "component_revision": "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb",
+      "source": {"repository": "escoffier-labs/graphtrail"},
+      "executable": "graphtrail-mcp",
+      "assets": {}
+    },
+    "miseledger": {
+      "component_revision": "v0.6.0",
+      "source": {"repository": "escoffier-labs/miseledger", "release_tag": "v0.6.0"},
+      "executable": "miseledger",
+      "assets": {
+        "darwin-amd64": {
+          "asset_name": "miseledger-darwin-amd64",
+          "byte_size": 16659744,
+          "sha256": "fb952aefd763a624e2c0346e7cc22dde8af812649ece97bd6cb62f16bc9881df",
+          "download_url": "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/miseledger-darwin-amd64"
+        },
+        "darwin-arm64": {
+          "asset_name": "miseledger-darwin-arm64",
+          "byte_size": 15784018,
+          "sha256": "ae13b508d84d651e388218275511ca13176a4747c6b93dfc78c7ab6bc9cdca1f",
+          "download_url": "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/miseledger-darwin-arm64"
+        },
+        "linux-amd64": {
+          "asset_name": "miseledger-linux-amd64",
+          "byte_size": 16441315,
+          "sha256": "246893c8c39318f774fc7a06338b5a8e87bf84661b1951251b2c0c971e9a7a6c",
+          "download_url": "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/miseledger-linux-amd64"
+        },
+        "linux-arm64": {
+          "asset_name": "miseledger-linux-arm64",
+          "byte_size": 15314138,
+          "sha256": "425ea81daaf9fc793862e2d66f49ef948dc1ea186d3db56df49544dca5e26b32",
+          "download_url": "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/miseledger-linux-arm64"
+        },
+        "windows-amd64": {
+          "asset_name": "miseledger-windows-amd64.exe",
+          "byte_size": 16616960,
+          "sha256": "033f9a492435068cd7e2bd1882422c1419189f60898071411656595a93640e39",
+          "download_url": "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/miseledger-windows-amd64.exe"
+        }
+      }
+    },
+    "sessionfind": {
+      "component_revision": "v0.6.0",
+      "source": {"repository": "escoffier-labs/miseledger", "release_tag": "v0.6.0"},
+      "executable": "sessionfind",
+      "assets": {
+        "darwin-amd64": {
+          "asset_name": "sessionfind-darwin-amd64",
+          "byte_size": 16659776,
+          "sha256": "33359c447f58954463a1a7a02253f7090db52f6e8189c406c7707bc20844689d",
+          "download_url": "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/sessionfind-darwin-amd64"
+        },
+        "darwin-arm64": {
+          "asset_name": "sessionfind-darwin-arm64",
+          "byte_size": 15784066,
+          "sha256": "0219288e4bd1df8cf49989ab83753f6b7f564eee072f63af1db8a7460a902771",
+          "download_url": "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/sessionfind-darwin-arm64"
+        },
+        "linux-amd64": {
+          "asset_name": "sessionfind-linux-amd64",
+          "byte_size": 16445238,
+          "sha256": "5b42f573d44f4301b0e1cfc2008842849c7704c0f96e390c2f5461f1f8059ac0",
+          "download_url": "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/sessionfind-linux-amd64"
+        },
+        "linux-arm64": {
+          "asset_name": "sessionfind-linux-arm64",
+          "byte_size": 15315773,
+          "sha256": "80695c1d92a0a01cffe8248c655bba3fe2579bb931c35ca311e7067eef69ab37",
+          "download_url": "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/sessionfind-linux-arm64"
+        },
+        "windows-amd64": {
+          "asset_name": "sessionfind-windows-amd64.exe",
+          "byte_size": 16620032,
+          "sha256": "b8bb05fe9b310012893cd49d11f4acf27171194b9a7ab492fa5d2dc1614b0842",
+          "download_url": "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/sessionfind-windows-amd64.exe"
+        }
+      }
+    }
+  }
+}
