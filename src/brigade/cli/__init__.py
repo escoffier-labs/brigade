@@ -26,6 +26,7 @@ from .. import extras as _extras_mod
 from . import (
     init as _init_group,
     doctor as _doctor_group,
+    version as _version_group,
     status as _status_group,
     profiles as _profiles_group,
     receipts as _receipts_group,
@@ -125,6 +126,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _init_group.register(sub)
     _doctor_group.register(sub)
+    _version_group.register(sub)
     _status_group.register(sub)
     _profiles_group.register(sub)
     _receipts_group.register(sub)

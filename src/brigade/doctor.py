@@ -226,10 +226,12 @@ def run(target: Path, harness: str = "generic", *, json_output: bool = False, fu
 
 
 def _gather_checks(ctx: DoctorContext) -> List[CheckResult]:
+    from . import component_report
     from .registry import all_stations
     from . import managed
 
     checks: List[CheckResult] = []
+    checks.extend(component_report.doctor_checks())
     missing_tools: List[Tuple[str, str]] = []
     for station in all_stations():
         if station.doctor is not None:
@@ -841,7 +843,7 @@ _MARKERS = {
 # Checks about host-global state rather than this specific repo. Grouping them
 # under their own header keeps a single-repo run from reading as if the repo
 # itself is responsible for an unrelated OpenClaw config or content-guard clone.
-_MACHINE_LEVEL_PREFIXES = ("openclaw:",)
+_MACHINE_LEVEL_PREFIXES = ("openclaw:", "components:")
 _MACHINE_LEVEL_NAMES = {"guard: embedded content guard", "managed tools"}
 
 
