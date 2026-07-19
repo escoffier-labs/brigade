@@ -1,0 +1,33 @@
+{
+ "schema_version": 1,
+ "description": "Co-change ranking bench: for each historical commit that modified 2+ source files, seed the largest-diff file at the parent commit and score how much of the rest of the commit each ranked-context surface recovers. Baseline: an editor-integrated repo-map ranking at a matched token budget (map 1024 tokens vs personalized context --max-chars 4000). 12 cases per repo across Go, TypeScript, and Rust.",
+ "summary": {
+  "go-repo": {
+   "baseline_recall": 0.269,
+   "ours_before_fix": 0.239,
+   "ours_after_fix": 0.692,
+   "ours_chars_before": 646,
+   "ours_chars_after": 3777
+  },
+  "ts-repo": {
+   "baseline_recall": 0.043,
+   "ours_before_fix": 0.0,
+   "ours_after_fix": 0.0,
+   "ours_chars_before": 230,
+   "ours_chars_after": 3568
+  },
+  "rust-repo": {
+   "baseline_recall": 0.236,
+   "ours_before_fix": 0.2,
+   "ours_after_fix": 0.504,
+   "ours_chars_before": 3272,
+   "ours_chars_after": 3879
+  }
+ },
+ "findings": [
+  "Root cause of the before-fix loss: fts_query quoted an entire path-bearing task string as one FTS token, so personalized context packs seeded from 'change <path>' matched nothing and fell back to tiny unpersonalized packs (646/230/3272 chars).",
+  "After splitting terms on path separators, recall beats the baseline on Go (0.692 vs 0.269) and Rust (0.504 vs 0.236).",
+  "TypeScript is near-zero for BOTH surfaces (0.0 vs 0.043): the corpus repo's co-changes are route-page siblings related by imports and shared data files, not call edges. Neither call-graph personalization nor the baseline's map recovers them. Recorded as the next-experiment seed: blend import edges into personalization seeds.",
+  "Hub-heavy check: the six-case synthetic corpus (context-ranking/) still gates regressions; this bench adds real-repo evidence on top."
+ ]
+}

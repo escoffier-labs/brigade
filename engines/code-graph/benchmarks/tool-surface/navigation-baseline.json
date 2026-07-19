@@ -1,0 +1,180 @@
+{
+ "schema_version": 1,
+ "description": "Same 12-task navigation set as results.json, run against an npm-distributed graph-navigation baseline (CLI surface; its MCP mirrors these outputs). Setup cost measured with /usr/bin/time -v on a cold index of the same corpus.",
+ "setup_cost": {
+  "ours": {
+   "index_wall_s": 0.12,
+   "peak_rss_mb": 14,
+   "disk_mb": 2.1
+  },
+  "baseline": {
+   "index_wall_s": 0.74,
+   "peak_rss_mb": 389,
+   "disk_mb": 4.4
+  }
+ },
+ "summary": {
+  "ours": {
+   "hits": 11,
+   "tasks": 12,
+   "resp_tokens_total": 22553
+  },
+  "baseline": {
+   "hits": 9,
+   "tasks": 12,
+   "resp_tokens_total": 12442
+  }
+ },
+ "per_task": [
+  {
+   "task": "locate-incremental-sync",
+   "kind": "locate",
+   "ours": {
+    "hit": true,
+    "resp_tokens": 1919
+   },
+   "baseline": {
+    "hit": true,
+    "resp_tokens": 1534
+   }
+  },
+  {
+   "task": "locate-pending-call-persistence",
+   "kind": "locate",
+   "ours": {
+    "hit": false,
+    "resp_tokens": 470
+   },
+   "baseline": {
+    "hit": false,
+    "resp_tokens": 1725
+   }
+  },
+  {
+   "task": "locate-symbol-search",
+   "kind": "locate",
+   "ours": {
+    "hit": true,
+    "resp_tokens": 2013
+   },
+   "baseline": {
+    "hit": true,
+    "resp_tokens": 1558
+   }
+  },
+  {
+   "task": "locate-freshness-verdict",
+   "kind": "locate",
+   "ours": {
+    "hit": true,
+    "resp_tokens": 1922
+   },
+   "baseline": {
+    "hit": true,
+    "resp_tokens": 1472
+   }
+  },
+  {
+   "task": "locate-tool-schemas",
+   "kind": "locate",
+   "ours": {
+    "hit": true,
+    "resp_tokens": 1991
+   },
+   "baseline": {
+    "hit": true,
+    "resp_tokens": 1579
+   }
+  },
+  {
+   "task": "locate-schema-upgrade",
+   "kind": "locate",
+   "ours": {
+    "hit": true,
+    "resp_tokens": 557
+   },
+   "baseline": {
+    "hit": true,
+    "resp_tokens": 850
+   }
+  },
+  {
+   "task": "locate-context-personalization",
+   "kind": "locate",
+   "ours": {
+    "hit": true,
+    "resp_tokens": 2046
+   },
+   "baseline": {
+    "hit": true,
+    "resp_tokens": 1621
+   }
+  },
+  {
+   "task": "callers-sync-repo",
+   "kind": "structural",
+   "ours": {
+    "hit": true,
+    "resp_tokens": 8370
+   },
+   "baseline": {
+    "hit": true,
+    "resp_tokens": 787
+   }
+  },
+  {
+   "task": "callers-resolve-explained",
+   "kind": "structural",
+   "ours": {
+    "hit": true,
+    "resp_tokens": 206
+   },
+   "baseline": {
+    "hit": true,
+    "resp_tokens": 114
+   }
+  },
+  {
+   "task": "callees-sync-repo",
+   "kind": "structural",
+   "ours": {
+    "hit": true,
+    "resp_tokens": 1911
+   },
+   "baseline": {
+    "hit": false,
+    "resp_tokens": 77
+   }
+  },
+  {
+   "task": "affected-tests-sync",
+   "kind": "structural",
+   "ours": {
+    "hit": true,
+    "resp_tokens": 1002
+   },
+   "baseline": {
+    "hit": false,
+    "resp_tokens": 28
+   }
+  },
+  {
+   "task": "explain-edge-resolution",
+   "kind": "structural",
+   "ours": {
+    "hit": true,
+    "resp_tokens": 146
+   },
+   "baseline": {
+    "hit": true,
+    "resp_tokens": 1097
+   }
+  }
+ ],
+ "findings": [
+  "Structural correctness: baseline callees on a hot symbol returned 2 of 12 real callees; baseline affected-test attribution returned none on this Rust corpus. Ours answered 5/5 structural tasks.",
+  "Response bounding: baseline caps output by default (limit 10, compact); our equivalent lever is the optional limit shipped from the tool-surface round (see results.json).",
+  "Shared miss: one locate task (pending-call persistence) failed on every surface tested across both rounds because the target file's symbol names never contain the query word; ground-truth artifact, not a tool gap.",
+  "No further change justified by this data: the one deficiency it exposes was already implemented (edge-query limit). Null result recorded."
+ ]
+}

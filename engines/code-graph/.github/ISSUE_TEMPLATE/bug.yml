@@ -1,0 +1,79 @@
+name: Bug report
+description: Something is broken in GraphTrail itself, such as the CLI, the extractors, the graph queries, or the MCP server.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run, and what did you expect versus what you got?
+      placeholder: |
+        I ran `graphtrail --db .graphtrail/graphtrail.db callers serve` and got X.
+        I expected Y.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: GraphTrail version
+      description: Output of `graphtrail --version`.
+      placeholder: graphtrail X.Y.Z
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Where did the problem appear?
+      options:
+        - Indexing or sync
+        - CLI query
+        - MCP tool
+        - Doctor or freshness
+        - Graph diff or analysis
+        - Optional integration
+    validations:
+      required: true
+  - type: dropdown
+    id: language
+    attributes:
+      label: Source language involved
+      description: Which language was being indexed or queried (if relevant)?
+      options:
+        - Python
+        - TypeScript / JavaScript
+        - Rust
+        - Go
+        - Not language-specific
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: Ubuntu 24.04, macOS 14.5, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Include a small source snippet and the exact command or MCP request that reproduces the wrong symbol, import, edge, or result.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste relevant stderr and `graphtrail --db .graphtrail/graphtrail.db doctor . --json` output when available. Remove private paths and credentials first.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: scrub
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I have removed any personal hostnames, tokens, or unredacted absolute paths from this report.
+          required: true
