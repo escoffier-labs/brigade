@@ -10,6 +10,7 @@ import pytest
 from brigade import cli
 from brigade import graphtrail_delta
 from brigade import localio
+from brigade import receipts_cmd
 from brigade import work_cmd
 
 from tests.work_cmd_test_helpers import (
@@ -654,6 +655,7 @@ if command == "diff":
             "qualified_name": name,
             "file_path": "pkg/mod.py",
             "start_line": line,
+            "end_line": line + 1,
             "signature": "def " + name + "()",
         }
 
@@ -757,6 +759,181 @@ def test_work_verify_graphtrail_delta_sidecar_digest_cleanup_and_summary(tmp_pat
     assert receipt["digests"]["logs"]["graph-delta.json"] == localio.file_sha256(sidecar_path)
     assert json.loads((run_dir / "receipt.json").read_text())["digests"] == receipt["digests"]
     assert "- Code graph delta: " + receipt["code_graph_delta"]["summary"] in (run_dir / "summary.md").read_text()
+
+
+def test_work_verify_compact_delta_emits_exportable_code_references(tmp_path, capsys, monkeypatch):
+    """Exercise capture_after_and_diff, compaction, receipt storage, and export together."""
+    _init_git_repo_with_head(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/escoffier-labs/brigade.git"],
+        cwd=tmp_path,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(_write_fake_graphtrail(tmp_path)))
+
+    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    delta = receipt["code_graph_delta"]
+    assert len(delta["code_reference_nodes"]) == 20
+    assert delta["code_reference_nodes"][0] == {
+        "change_kind": "added",
+        "file_path": "pkg/mod.py",
+        "kind": "function",
+        "qualified_name": "pkg.new_a",
+        "start_line": 1,
+        "end_line": 2,
+    }
+
+    assert receipts_cmd.export_miseledger(target=tmp_path) == 0
+    row = json.loads(capsys.readouterr().out)
+    references = row["item"]["metadata"]["code_references"]
+    assert references[0]["repository"] == "escoffier-labs/brigade"
+    assert references[0]["source_span"] == {"start_line": 1, "line_count": 2}
+    assert row["item"]["metadata"]["code_references_total"] == 28
+    assert row["item"]["metadata"]["code_references_truncated"] is True
+
+
+def test_code_reference_compaction_sorts_valid_nodes_and_counts_malformed_candidates_out():
+    compact = graphtrail_delta._compact(
+        {
+            "status": "ok",
+            "ok": True,
+            "added_nodes": [
+                {"kind": "function", "qualified_name": "zeta", "file_path": "pkg/z.py", "start_line": 4, "end_line": 4},
+                {
+                    "kind": "function",
+                    "qualified_name": "alpha",
+                    "file_path": "pkg/a.py",
+                    "start_line": 2,
+                    "end_line": 3,
+                },
+                {"kind": "function", "qualified_name": "empty_path", "file_path": "", "start_line": 4, "end_line": 4},
+                {
+                    "kind": "function",
+                    "qualified_name": "absolute",
+                    "file_path": "/pkg/a.py",
+                    "start_line": 4,
+                    "end_line": 4,
+                },
+                {
+                    "kind": "function",
+                    "qualified_name": "traversal",
+                    "file_path": "pkg/../a.py",
+                    "start_line": 4,
+                    "end_line": 4,
+                },
+                {
+                    "kind": "unsupported",
+                    "qualified_name": "unknown_kind",
+                    "file_path": "pkg/a.py",
+                    "start_line": 4,
+                    "end_line": 4,
+                },
+                {"kind": "function", "qualified_name": "", "file_path": "pkg/a.py", "start_line": 4, "end_line": 4},
+                {"kind": "", "qualified_name": "empty_kind", "file_path": "pkg/a.py", "start_line": 4, "end_line": 4},
+                {
+                    "kind": "function",
+                    "qualified_name": "reversed",
+                    "file_path": "pkg/a.py",
+                    "start_line": 7,
+                    "end_line": 6,
+                },
+                {"kind": "function", "qualified_name": "missing", "file_path": "pkg/a.py", "start_line": 8},
+                "not-a-node",
+            ],
+        }
+    )
+
+    assert compact["code_reference_nodes"] == [
+        {
+            "change_kind": "added",
+            "file_path": "pkg/a.py",
+            "kind": "function",
+            "qualified_name": "alpha",
+            "start_line": 2,
+            "end_line": 3,
+        },
+        {
+            "change_kind": "added",
+            "file_path": "pkg/z.py",
+            "kind": "function",
+            "qualified_name": "zeta",
+            "start_line": 4,
+            "end_line": 4,
+        },
+    ]
+    assert compact["code_reference_nodes_total"] == 2
+    assert compact["code_reference_nodes_truncated"] is False
+
+
+def test_code_reference_compaction_counts_only_valid_candidates_before_the_cap():
+    valid_nodes = [
+        {
+            "kind": "function",
+            "qualified_name": f"pkg.symbol_{number:02d}",
+            "file_path": "pkg/mod.py",
+            "start_line": number,
+            "end_line": number,
+        }
+        for number in range(1, 22)
+    ]
+
+    compact = graphtrail_delta._compact({"status": "ok", "ok": True, "added_nodes": list(reversed(valid_nodes))})
+
+    assert len(compact["code_reference_nodes"]) == 20
+    assert compact["code_reference_nodes_total"] == 21
+    assert compact["code_reference_nodes_truncated"] is True
+    assert (
+        compact["code_reference_nodes"]
+        == sorted(
+            [{"change_kind": "added", **node} for node in valid_nodes],
+            key=lambda node: json.dumps(node, sort_keys=True, separators=(",", ":")),
+        )[:20]
+    )
+
+
+@pytest.mark.parametrize(
+    ("retained_count", "declared_total", "declared_truncated", "malformed", "expected_total", "expected_truncated"),
+    [
+        (19, 19, False, False, 19, False),
+        (19, 20, False, False, 19, False),
+        (19, 20, True, False, 19, False),
+        (20, 20, True, False, 20, False),
+        (20, 21, False, False, 20, False),
+        (20, 28, True, False, 28, True),
+        (20, 28, True, True, 20, False),
+    ],
+)
+def test_code_reference_compaction_trusts_only_exact_declared_candidate_metadata(
+    retained_count, declared_total, declared_truncated, malformed, expected_total, expected_truncated
+):
+    nodes = [
+        {
+            "change_kind": "added",
+            "kind": "function",
+            "qualified_name": f"pkg.symbol_{number:02d}",
+            "file_path": "pkg/mod.py",
+            "start_line": number,
+            "end_line": number,
+        }
+        for number in range(1, retained_count + 1)
+    ]
+    if malformed:
+        nodes.append({"change_kind": "added", "kind": "function", "qualified_name": "", "file_path": "pkg/mod.py"})
+
+    compact = graphtrail_delta._compact(
+        {
+            "status": "ok",
+            "ok": True,
+            "code_reference_nodes": nodes,
+            "code_reference_nodes_total": declared_total,
+            "code_reference_nodes_truncated": declared_truncated,
+        }
+    )
+
+    assert compact["code_reference_nodes_total"] == expected_total
+    assert compact["code_reference_nodes_truncated"] is expected_truncated
 
 
 def test_work_verify_graphtrail_delta_sync_failure_fails_open(tmp_path, capsys, monkeypatch):

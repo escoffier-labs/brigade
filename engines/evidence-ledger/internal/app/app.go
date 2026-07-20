@@ -11,11 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1535,7 +1537,7 @@ func parseRedactions(raw string) (map[string]bool, error) {
 }
 
 func cmdSearch(args []string, out, errw io.Writer) int {
-	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "collection": true, "kind": true, "actor-type": true, "project": true, "tags": true, "from": true, "to": true, "limit": true}, map[string]bool{"json": true})
+	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "collection": true, "kind": true, "actor-type": true, "project": true, "tags": true, "from": true, "to": true, "limit": true, "code-reference": true}, map[string]bool{"json": true})
 	if err != nil {
 		return fatalf(errw, "search: %s", err)
 	}
@@ -1549,12 +1551,16 @@ func cmdSearch(args []string, out, errw io.Writer) int {
 		}
 	}
 	query := strings.Join(rest, " ")
+	codeReference, err := parseCodeReference(values["code-reference"])
+	if err != nil {
+		return fatalf(errw, "search: %s", err)
+	}
 	db, _, err := openMigrated()
 	if err != nil {
 		return fatalf(errw, "search: %s", err)
 	}
 	defer db.Close()
-	results, err := search(db, SearchOpts{Query: query, Source: values["source"], Collection: values["collection"], Kind: values["kind"], ActorType: values["actor-type"], From: values["from"], To: values["to"], Project: values["project"], Tags: values["tags"], Limit: limit})
+	results, err := search(db, SearchOpts{Query: query, Source: values["source"], Collection: values["collection"], Kind: values["kind"], ActorType: values["actor-type"], From: values["from"], To: values["to"], Project: values["project"], Tags: values["tags"], Limit: limit, CodeReference: codeReference})
 	if err != nil {
 		return fatalf(errw, "search: %s", err)
 	}
@@ -1573,6 +1579,197 @@ type SearchOpts struct {
 	Limit                                                               int
 	IncludeRelated                                                      bool
 	IncludeArtifactText                                                 bool
+	CodeReference                                                       *CodeReference
+}
+
+// CodeReference is Brigade's strict v1 metadata contract. SourceSpan records
+// one declaration line, so invalid reversed ranges are unrepresentable.
+// Exact retrieval intentionally matches the stable identity only.
+type CodeReference struct {
+	Schema        string       `json:"schema"`
+	Repository    string       `json:"repository"`
+	Revision      CodeRevision `json:"revision"`
+	FilePath      string       `json:"file_path"`
+	QualifiedName string       `json:"qualified_name"`
+	SymbolKind    string       `json:"symbol_kind"`
+	SourceSpan    SourceSpan   `json:"source_span"`
+	ChangeKind    string       `json:"change_kind"`
+}
+
+type CodeRevision struct {
+	Commit string `json:"commit"`
+}
+
+type SourceSpan struct {
+	StartLine int64 `json:"start_line"`
+	LineCount int64 `json:"line_count"`
+}
+
+var codeReferenceCommit = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var codeReferenceRepository = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
+var codeReferenceMaxLine = big.NewInt(1<<53 - 1)
+var codeReferenceSymbolKinds = map[string]bool{
+	"class": true, "enum": true, "function": true, "method": true,
+	"module": true, "struct": true, "trait": true, "type": true,
+}
+
+func (span *SourceSpan) UnmarshalJSON(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var fields map[string]any
+	if err := decoder.Decode(&fields); err != nil {
+		return err
+	}
+	if len(fields) != 2 {
+		return errors.New("source_span must contain only start_line and line_count")
+	}
+	startLine, ok := fields["start_line"]
+	if !ok {
+		return errors.New("source_span must contain start_line")
+	}
+	lineCount, ok := fields["line_count"]
+	if !ok {
+		return errors.New("source_span must contain line_count")
+	}
+	var err error
+	span.StartLine, err = parsePositiveJSONInteger(startLine)
+	if err != nil {
+		return fmt.Errorf("source_span.start_line: %w", err)
+	}
+	span.LineCount, err = parsePositiveJSONInteger(lineCount)
+	if err != nil {
+		return fmt.Errorf("source_span.line_count: %w", err)
+	}
+	return nil
+}
+
+func parsePositiveJSONInteger(value any) (int64, error) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, errors.New("must be a positive integer")
+	}
+	text := number.String()
+	if strings.HasPrefix(text, "-") {
+		return 0, errors.New("must be a positive integer")
+	}
+	mantissa, exponentText, hasExponent := strings.Cut(strings.ToLower(text), "e")
+	exponent := int64(0)
+	if hasExponent {
+		parsed, err := strconv.ParseInt(exponentText, 10, 64)
+		if err != nil {
+			return 0, errors.New("must be a positive integer")
+		}
+		exponent = parsed
+	}
+	integerPart, fractionPart, hasFraction := strings.Cut(mantissa, ".")
+	if !hasFraction {
+		fractionPart = ""
+	}
+	digits := strings.TrimLeft(integerPart+fractionPart, "0")
+	if digits == "" {
+		return 0, errors.New("must be a positive integer")
+	}
+	scale := new(big.Int).Sub(big.NewInt(exponent), big.NewInt(int64(len(fractionPart))))
+	if scale.Sign() < 0 {
+		shift := new(big.Int).Neg(scale)
+		if !shift.IsInt64() || shift.Int64() > int64(len(digits)) {
+			return 0, errors.New("must be a positive integer")
+		}
+		shiftCount := int(shift.Int64())
+		if strings.Trim(digits[len(digits)-shiftCount:], "0") != "" {
+			return 0, errors.New("must be a positive integer")
+		}
+		digits = digits[:len(digits)-shiftCount]
+	} else {
+		if !scale.IsInt64() || scale.Int64() > 19-int64(len(digits)) {
+			return 0, errors.New("must be a positive integer")
+		}
+		digits += strings.Repeat("0", int(scale.Int64()))
+	}
+	integer, ok := new(big.Int).SetString(digits, 10)
+	if !ok || integer.Sign() <= 0 || integer.Cmp(codeReferenceMaxLine) > 0 {
+		return 0, errors.New("must be a positive integer")
+	}
+	return integer.Int64(), nil
+}
+
+func parseCodeReference(raw string) (*CodeReference, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	return parseCodeReferenceJSON([]byte(raw))
+}
+
+func parseCodeReferenceJSON(raw []byte) (*CodeReference, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var reference CodeReference
+	if err := decoder.Decode(&reference); err != nil {
+		return nil, fmt.Errorf("invalid code reference: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("invalid code reference: multiple JSON values")
+		}
+		return nil, fmt.Errorf("invalid code reference: %w", err)
+	}
+	if err := validateCodeReference(reference); err != nil {
+		return nil, err
+	}
+	return &reference, nil
+}
+
+func validateCodeReference(reference CodeReference) error {
+	if reference.Schema != "brigade.code-reference.v1" {
+		return errors.New("invalid code reference: schema must be brigade.code-reference.v1")
+	}
+	if !codeReferenceRepository.MatchString(reference.Repository) {
+		return errors.New("invalid code reference: repository must be owner/name")
+	}
+	if !codeReferenceCommit.MatchString(reference.Revision.Commit) {
+		return errors.New("invalid code reference: revision.commit must be a 40-character lowercase SHA")
+	}
+	if reference.FilePath == "" || strings.HasPrefix(reference.FilePath, "/") || strings.Contains(reference.FilePath, "\\") || strings.Contains("/"+reference.FilePath+"/", "/../") {
+		return errors.New("invalid code reference: file_path must be repository-relative")
+	}
+	if reference.QualifiedName == "" {
+		return errors.New("invalid code reference: qualified_name is required")
+	}
+	if !codeReferenceSymbolKinds[reference.SymbolKind] {
+		return errors.New("invalid code reference: symbol_kind must be a supported GraphTrail symbol kind")
+	}
+	if reference.SourceSpan.StartLine < 1 || reference.SourceSpan.LineCount < 1 {
+		return errors.New("invalid code reference: source_span must contain positive start_line and line_count")
+	}
+	if reference.ChangeKind != "added" && reference.ChangeKind != "changed" && reference.ChangeKind != "removed" {
+		return errors.New("invalid code reference: change_kind must be added, changed, or removed")
+	}
+	return nil
+}
+
+func canonicalCodeReference(reference *CodeReference) string {
+	if reference == nil {
+		return ""
+	}
+	value := map[string]any{
+		"change_kind":    reference.ChangeKind,
+		"file_path":      reference.FilePath,
+		"qualified_name": reference.QualifiedName,
+		"repository":     reference.Repository,
+		"revision":       map[string]any{"commit": reference.Revision.Commit},
+		"schema":         reference.Schema,
+		"source_span": map[string]any{
+			"line_count": reference.SourceSpan.LineCount,
+			"start_line": reference.SourceSpan.StartLine,
+		},
+		"symbol_kind": reference.SymbolKind,
+	}
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(value)
+	return strings.TrimSuffix(encoded.String(), "\n")
 }
 
 type SearchResult struct {
@@ -1633,7 +1830,29 @@ func buildSearchQuery(opts SearchOpts) (string, []any) {
 	}
 	params = append(params, searchCandidateLimit(limit))
 
-	where := []string{"1=1"}
+	where, params := appendSearchResultFilters(opts, []string{"1=1"}, params)
+	params = append(params, limit)
+
+	sqlText := `with fts_candidates as materialized (
+  select item_id, snippet(item_fts, 5, '[', ']', '...', 20) as snippet, bm25(item_fts) as fts_score
+  from item_fts
+  where ` + strings.Join(candidateWhere, " and ") + `
+  order by fts_score, item_id
+  limit ?
+)
+select i.id, s.kind, c.name, c.kind, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), fc.snippet, printf('%.6f', fc.fts_score), i.content_hash
+from fts_candidates fc
+join items i on i.id = fc.item_id
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+left join actors a on a.id = i.actor_id
+where ` + strings.Join(where, " and ") + `
+order by (fc.fts_score - case when exists(select 1 from relations rr where rr.source_item_id = i.id or rr.target_item_id = i.id) then 0.25 else 0 end), i.created_at desc, i.id
+limit ?`
+	return sqlText, params
+}
+
+func appendSearchResultFilters(opts SearchOpts, where []string, params []any) ([]string, []any) {
 	if opts.Source != "" {
 		where = append(where, "s.kind = ?")
 		params = append(params, opts.Source)
@@ -1672,29 +1891,23 @@ func buildSearchQuery(opts SearchOpts) (string, []any) {
 			params = append(params, tag)
 		}
 	}
-	params = append(params, limit)
-
-	sqlText := `with fts_candidates as materialized (
-  select item_id, snippet(item_fts, 5, '[', ']', '...', 20) as snippet, bm25(item_fts) as fts_score
-  from item_fts
-  where ` + strings.Join(candidateWhere, " and ") + `
-  order by fts_score, item_id
-  limit ?
-)
-select i.id, s.kind, c.name, c.kind, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), fc.snippet, printf('%.6f', fc.fts_score), i.content_hash
-from fts_candidates fc
-join items i on i.id = fc.item_id
-join sources s on s.id = i.source_id
-join collections c on c.id = i.collection_id
-left join actors a on a.id = i.actor_id
-where ` + strings.Join(where, " and ") + `
-order by (fc.fts_score - case when exists(select 1 from relations rr where rr.source_item_id = i.id or rr.target_item_id = i.id) then 0.25 else 0 end), i.created_at desc, i.id
-limit ?`
-	return sqlText, params
+	return where, params
 }
 
 func search(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
 	opts.Limit = normalizedSearchLimit(opts.Limit)
+	if opts.CodeReference != nil {
+		if err := validateCodeReference(*opts.CodeReference); err != nil {
+			return nil, err
+		}
+		exact, err := searchExactCodeReference(db, opts)
+		if err != nil {
+			return nil, err
+		}
+		if len(exact) != 0 {
+			return exact, nil
+		}
+	}
 	sqlText, params := buildSearchQuery(opts)
 	rows, err := db.Query(sqlText, params...)
 	if err != nil {
@@ -1708,6 +1921,52 @@ func search(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
 			return nil, err
 		}
 		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+func searchExactCodeReference(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
+	reference := opts.CodeReference
+	where := []string{
+		"json_extract(code_reference.value, '$.schema') = ?",
+		"json_extract(code_reference.value, '$.repository') = ?",
+		"json_extract(code_reference.value, '$.revision.commit') = ?",
+		"json_extract(code_reference.value, '$.file_path') = ?",
+		"json_extract(code_reference.value, '$.qualified_name') = ?",
+		"json_extract(code_reference.value, '$.symbol_kind') = ?",
+		"json_extract(code_reference.value, '$.change_kind') = ?",
+	}
+	params := []any{reference.Schema, reference.Repository, reference.Revision.Commit, reference.FilePath, reference.QualifiedName, reference.SymbolKind, reference.ChangeKind}
+	where, params = appendSearchResultFilters(opts, where, params)
+	params = append(params, opts.Limit)
+	sqlText := `select i.id, s.kind, c.name, c.kind, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), code_reference.value, i.content_hash
+from items i
+join json_each(i.metadata_json, '$.code_references') code_reference
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+left join actors a on a.id = i.actor_id
+where ` + strings.Join(where, " and ") + `
+order by i.created_at desc, i.id
+limit ?`
+	rows, err := db.Query(sqlText, params...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := []SearchResult{}
+	for rows.Next() {
+		var result SearchResult
+		var rawReference string
+		if err := rows.Scan(&result.ID, &result.SourceKind, &result.CollectionName, &result.CollectionKind, &result.Kind, &result.ActorType, &result.ActorName, &result.CreatedAt, &rawReference, &result.ContentHash); err != nil {
+			return nil, err
+		}
+		stored, err := parseCodeReferenceJSON([]byte(rawReference))
+		if err != nil || stored.Schema != reference.Schema || stored.Repository != reference.Repository || stored.Revision.Commit != reference.Revision.Commit || stored.FilePath != reference.FilePath || stored.QualifiedName != reference.QualifiedName || stored.SymbolKind != reference.SymbolKind || stored.ChangeKind != reference.ChangeKind {
+			continue
+		}
+		result.Snippet = "Exact code reference: " + stored.Repository + ":" + stored.FilePath + "#" + stored.QualifiedName
+		result.Score = "0.000000"
+		results = append(results, result)
 	}
 	return results, rows.Err()
 }
@@ -1744,7 +2003,7 @@ func ftsQuery(s string) string {
 }
 
 func cmdExplain(args []string, out, errw io.Writer) int {
-	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "collection": true, "kind": true, "actor-type": true, "project": true, "tags": true, "from": true, "to": true, "limit": true}, map[string]bool{"json": true})
+	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "collection": true, "kind": true, "actor-type": true, "project": true, "tags": true, "from": true, "to": true, "limit": true, "code-reference": true}, map[string]bool{"json": true})
 	if err != nil {
 		return fatalf(errw, "explain: %s", err)
 	}
@@ -1756,7 +2015,11 @@ func cmdExplain(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "explain: %s", err)
 	}
 	query := strings.Join(rest, " ")
-	opts := SearchOpts{Query: query, Source: values["source"], Collection: values["collection"], Kind: values["kind"], ActorType: values["actor-type"], From: values["from"], To: values["to"], Project: values["project"], Tags: values["tags"], Limit: limit}
+	codeReference, err := parseCodeReference(values["code-reference"])
+	if err != nil {
+		return fatalf(errw, "explain: %s", err)
+	}
+	opts := SearchOpts{Query: query, Source: values["source"], Collection: values["collection"], Kind: values["kind"], ActorType: values["actor-type"], From: values["from"], To: values["to"], Project: values["project"], Tags: values["tags"], Limit: limit, CodeReference: codeReference}
 	db, _, err := openMigrated()
 	if err != nil {
 		return fatalf(errw, "explain: %s", err)
@@ -1797,10 +2060,12 @@ func explainSearch(db *sql.DB, opts SearchOpts) (map[string]any, error) {
 			"snippet":         r.Snippet,
 		})
 	}
+	filters := map[string]any{"source": opts.Source, "collection": opts.Collection, "kind": opts.Kind, "actor_type": opts.ActorType, "project": opts.Project, "tags": opts.Tags, "from": opts.From, "to": opts.To, "limit": opts.Limit}
+	addCodeReferenceFilter(filters, opts.CodeReference)
 	return map[string]any{
 		"query":             opts.Query,
 		"fts_query":         ftsQuery(opts.Query),
-		"filters":           map[string]any{"source": opts.Source, "collection": opts.Collection, "kind": opts.Kind, "actor_type": opts.ActorType, "project": opts.Project, "tags": opts.Tags, "from": opts.From, "to": opts.To, "limit": opts.Limit},
+		"filters":           filters,
 		"result_count":      len(results),
 		"source_counts":     sourceCounts,
 		"kind_counts":       kindCounts,
@@ -1848,7 +2113,7 @@ func cmdEvidence(args []string, out, errw io.Writer) int {
 			return cmdEvidenceList(args[1:], out, errw)
 		}
 	}
-	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "from": true, "to": true, "limit": true, "project": true}, map[string]bool{"json": true, "markdown": true, "include-related": true, "include-artifact-text": true})
+	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "from": true, "to": true, "limit": true, "project": true, "code-reference": true}, map[string]bool{"json": true, "markdown": true, "include-related": true, "include-artifact-text": true})
 	if err != nil {
 		return fatalf(errw, "evidence: %s", err)
 	}
@@ -1860,12 +2125,16 @@ func cmdEvidence(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "evidence: %s", err)
 	}
 	query := strings.Join(rest, " ")
+	codeReference, err := parseCodeReference(values["code-reference"])
+	if err != nil {
+		return fatalf(errw, "evidence: %s", err)
+	}
 	db, _, err := openMigrated()
 	if err != nil {
 		return fatalf(errw, "evidence: %s", err)
 	}
 	defer db.Close()
-	bundle, err := evidenceBundle(db, SearchOpts{Query: query, Source: values["source"], Project: values["project"], From: values["from"], To: values["to"], Limit: limit, IncludeRelated: bools["include-related"], IncludeArtifactText: bools["include-artifact-text"]})
+	bundle, err := evidenceBundle(db, SearchOpts{Query: query, Source: values["source"], Project: values["project"], From: values["from"], To: values["to"], Limit: limit, IncludeRelated: bools["include-related"], IncludeArtifactText: bools["include-artifact-text"], CodeReference: codeReference})
 	if err != nil {
 		return fatalf(errw, "evidence: %s", err)
 	}
@@ -1976,11 +2245,13 @@ where i.id = ?`, r.ID)
 		groups[r.SourceKind]++
 	}
 	id := evidenceBundleID(opts, items)
+	filters := map[string]any{"source": opts.Source, "project": opts.Project, "from": opts.From, "to": opts.To, "limit": opts.Limit, "include_related": opts.IncludeRelated, "include_artifact_text": opts.IncludeArtifactText}
+	addCodeReferenceFilter(filters, opts.CodeReference)
 	return map[string]any{
 		"id":                id,
 		"resource_uri":      "miseledger://evidence/" + id,
 		"query":             opts.Query,
-		"filters":           map[string]any{"source": opts.Source, "project": opts.Project, "from": opts.From, "to": opts.To, "limit": opts.Limit, "include_related": opts.IncludeRelated, "include_artifact_text": opts.IncludeArtifactText},
+		"filters":           filters,
 		"generated_at":      time.Now().UTC().Format(time.RFC3339Nano),
 		"untrusted_context": true,
 		"results":           items,
@@ -1992,6 +2263,9 @@ where i.id = ?`, r.ID)
 func evidenceBundleID(opts SearchOpts, items []map[string]any) string {
 	h := sha256.New()
 	parts := []string{opts.Query, opts.Source, opts.Collection, opts.Kind, opts.ActorType, opts.Project, opts.Tags, opts.From, opts.To, fmt.Sprint(opts.Limit), fmt.Sprint(opts.IncludeRelated), fmt.Sprint(opts.IncludeArtifactText)}
+	if opts.CodeReference != nil {
+		parts = append(parts, canonicalCodeReference(opts.CodeReference))
+	}
 	for _, part := range parts {
 		_, _ = io.WriteString(h, part)
 		_, _ = io.WriteString(h, "\x00")
@@ -2001,6 +2275,12 @@ func evidenceBundleID(opts SearchOpts, items []map[string]any) string {
 		_, _ = io.WriteString(h, "\x00")
 	}
 	return hex.EncodeToString(h.Sum(nil))[:24]
+}
+
+func addCodeReferenceFilter(filters map[string]any, reference *CodeReference) {
+	if reference != nil {
+		filters["code_reference"] = reference
+	}
 }
 
 func evidenceCacheDir() string {

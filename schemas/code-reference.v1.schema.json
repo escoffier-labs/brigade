@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brigade.tools/schemas/code-reference.v1.schema.json",
+  "title": "Brigade structured code reference v1",
+  "description": "An exact, versioned reference to a changed code symbol.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "repository",
+    "revision",
+    "file_path",
+    "qualified_name",
+    "symbol_kind",
+    "source_span",
+    "change_kind"
+  ],
+  "properties": {
+    "schema": {"const": "brigade.code-reference.v1"},
+    "repository": {"type": "string", "minLength": 3, "pattern": "^[^/\\s]+/[^/\\s]+$"},
+    "revision": {"$ref": "#/$defs/revision"},
+    "file_path": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"},
+    "qualified_name": {"type": "string", "minLength": 1},
+    "symbol_kind": {"enum": ["class", "enum", "function", "method", "module", "struct", "trait", "type"]},
+    "source_span": {"$ref": "#/$defs/source_span"},
+    "change_kind": {"enum": ["added", "changed", "removed"]}
+  },
+  "$defs": {
+    "revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit"],
+      "properties": {
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "source_span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_line", "line_count"],
+      "properties": {
+        "start_line": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "line_count": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      }
+    }
+  }
+}

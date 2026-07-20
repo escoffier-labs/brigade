@@ -1,0 +1,25 @@
+{
+  "accept": [
+    {"name": "integer literals", "source_span_json": "{\"start_line\":1,\"line_count\":2}", "canonical": {"start_line": 1, "line_count": 2}},
+    {"name": "zero fractional decimals", "source_span_json": "{\"start_line\":1.0,\"line_count\":2.0}", "canonical": {"start_line": 1, "line_count": 2}},
+    {"name": "zero fractional exponents", "source_span_json": "{\"start_line\":1e0,\"line_count\":2e0}", "canonical": {"start_line": 1, "line_count": 2}},
+    {"name": "zero fractional decimal exponent", "source_span_json": "{\"start_line\":1.0e0,\"line_count\":2.00e0}", "canonical": {"start_line": 1, "line_count": 2}},
+    {"name": "safe integer maximum", "source_span_json": "{\"start_line\":9007199254740991,\"line_count\":1}", "canonical": {"start_line": 9007199254740991, "line_count": 1}},
+    {"name": "safe integer maximum decimal", "source_span_json": "{\"start_line\":9007199254740991.0,\"line_count\":1e0}", "canonical": {"start_line": 9007199254740991, "line_count": 1}},
+    {"name": "safe integer maximum exponent", "source_span_json": "{\"start_line\":9007199254740991e0,\"line_count\":1e0}", "canonical": {"start_line": 9007199254740991, "line_count": 1}}
+  ],
+  "reject": [
+    {"name": "boolean", "source_span_json": "{\"start_line\":true,\"line_count\":1}"},
+    {"name": "non-integral decimal", "source_span_json": "{\"start_line\":1.5,\"line_count\":1}"},
+    {"name": "zero", "source_span_json": "{\"start_line\":0,\"line_count\":1}"},
+    {"name": "negative", "source_span_json": "{\"start_line\":-1,\"line_count\":1}"},
+    {"name": "string", "source_span_json": "{\"start_line\":\"1\",\"line_count\":1}"},
+    {"name": "unsafe integer literal", "source_span_json": "{\"start_line\":9007199254740993,\"line_count\":1}"},
+    {"name": "unsafe integer decimal", "source_span_json": "{\"start_line\":9007199254740993.0,\"line_count\":1}"},
+    {"name": "unsafe integer exponent", "source_span_json": "{\"start_line\":9007199254740993e0,\"line_count\":1}"},
+    {"name": "unsafe integer next exponent", "source_span_json": "{\"start_line\":9007199254740992e0,\"line_count\":1}"},
+    {"name": "safe integer plus a fractional decimal", "source_span_json": "{\"start_line\":9007199254740991.1,\"line_count\":1}"},
+    {"name": "safe integer plus a fractional exponent", "source_span_json": "{\"start_line\":90071992547409911e-1,\"line_count\":1}"},
+    {"name": "non-finite", "source_span_json": "{\"start_line\":1e9999,\"line_count\":1}"}
+  ]
+}

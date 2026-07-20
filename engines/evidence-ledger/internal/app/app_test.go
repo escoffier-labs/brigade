@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1567,6 +1568,9 @@ func TestHTTPAPIAndMCPTools(t *testing.T) {
 	if len(results) == 0 {
 		t.Fatalf("http search returned no results: %v", searchBody)
 	}
+	if _, ok := searchBody["code_reference"]; ok {
+		t.Fatalf("unfiltered HTTP search response added code_reference: %v", searchBody)
+	}
 	id := results[0].(map[string]any)["id"].(string)
 
 	req = httptest.NewRequest(http.MethodGet, "/items/"+id, nil)
@@ -1629,6 +1633,9 @@ func TestHTTPAPIAndMCPTools(t *testing.T) {
 	if evidence["id"] == "" || evidence["resource_uri"] == "" {
 		t.Fatalf("http evidence missing stable reference: %v", evidence)
 	}
+	if _, ok := evidence["filters"].(map[string]any)["code_reference"]; ok {
+		t.Fatalf("unfiltered HTTP evidence response added code_reference: %v", evidence["filters"])
+	}
 	firstEvidence := evidence["results"].([]any)[0].(map[string]any)
 	if firstEvidence["score"] == "" {
 		t.Fatalf("evidence missing score: %v", firstEvidence)
@@ -1646,6 +1653,9 @@ func TestHTTPAPIAndMCPTools(t *testing.T) {
 	}
 	if !strings.Contains(content[0]["text"].(string), `"resource_uri":"miseledger://evidence/`) {
 		t.Fatalf("mcp content missing evidence resource uri: %v", content)
+	}
+	if strings.Contains(content[0]["text"].(string), `"code_reference"`) {
+		t.Fatalf("unfiltered MCP evidence response added code_reference: %v", content)
 	}
 }
 
@@ -2006,6 +2016,9 @@ func TestSearchPlanBoundsFTSCandidatesBeforeJoins(t *testing.T) {
 	if explained["result_count"] != opts.Limit {
 		t.Fatalf("explainSearch result_count = %v, want %d", explained["result_count"], opts.Limit)
 	}
+	if _, ok := explained["filters"].(map[string]any)["code_reference"]; ok {
+		t.Fatalf("unfiltered explain response added code_reference: %#v", explained["filters"])
+	}
 
 	bundle, err := evidenceBundle(db, SearchOpts{Query: "needle", Limit: 5, IncludeRelated: true})
 	if err != nil {
@@ -2017,6 +2030,255 @@ func TestSearchPlanBoundsFTSCandidatesBeforeJoins(t *testing.T) {
 	}
 	if related, ok := items[0]["related"].([]map[string]any); !ok || len(related) == 0 {
 		t.Fatalf("first evidence item missing related rows: %#v", items[0])
+	}
+}
+
+func TestSearchUsesExactCodeReferenceBeforeLexicalFallbackAndLegacyItemsStillSearch(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	insertSyntheticSearchArchive(t, db, 40)
+
+	ref := CodeReference{
+		Schema:        "brigade.code-reference.v1",
+		Repository:    "escoffier-labs/brigade",
+		Revision:      CodeRevision{Commit: strings.Repeat("a", 40)},
+		FilePath:      "src/brigade/receipts_cmd.py",
+		QualifiedName: "brigade.receipts_cmd._metadata_with_delta",
+		SymbolKind:    "function",
+		SourceSpan:    SourceSpan{StartLine: 787, LineCount: 3},
+		ChangeKind:    "changed",
+	}
+	metadata, err := json.Marshal(map[string]any{"code_references": []CodeReference{ref}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update items set metadata_json = ? where id = 'item-001'`, string(metadata)); err != nil {
+		t.Fatal(err)
+	}
+
+	requested := ref
+	requested.SourceSpan = SourceSpan{StartLine: 1, LineCount: 1}
+	exact, err := search(db, SearchOpts{Query: "needle", Limit: 5, CodeReference: &requested})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exact) != 1 || exact[0].ID != "item-001" {
+		t.Fatalf("exact structured lookup = %#v, want only item-001 before lexical fallback", exact)
+	}
+
+	missing := requested
+	missing.ChangeKind = "removed"
+	fallback, err := search(db, SearchOpts{Query: "needle", Limit: 5, CodeReference: &missing})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fallback) != 5 || fallback[0].ID != "item-030" {
+		t.Fatalf("legacy lexical fallback = %#v, want existing bounded FTS results", fallback)
+	}
+}
+
+func TestCodeReferenceIntegerVectorsAreAcceptedAndCanonicalized(t *testing.T) {
+	data, err := os.ReadFile(repoPath(t, "../../schemas/code-reference.v1.integer-vectors.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors struct {
+		Accept []struct {
+			Name          string           `json:"name"`
+			SourceSpanRaw string           `json:"source_span_json"`
+			Canonical     map[string]int64 `json:"canonical"`
+		} `json:"accept"`
+		Reject []struct {
+			Name          string `json:"name"`
+			SourceSpanRaw string `json:"source_span_json"`
+		} `json:"reject"`
+	}
+	if err := json.Unmarshal(data, &vectors); err != nil {
+		t.Fatal(err)
+	}
+	for _, vector := range vectors.Accept {
+		raw := fmt.Sprintf(`{"schema":"brigade.code-reference.v1","repository":"escoffier-labs/brigade","revision":{"commit":"%s"},"file_path":"src/brigade/receipts_cmd.py","qualified_name":"brigade.receipts_cmd.reference","symbol_kind":"function","source_span":%s,"change_kind":"changed"}`, strings.Repeat("a", 40), vector.SourceSpanRaw)
+		reference, err := parseCodeReferenceJSON([]byte(raw))
+		if err != nil {
+			t.Fatalf("%s rejected: %v", vector.Name, err)
+		}
+		if reference.SourceSpan.StartLine != vector.Canonical["start_line"] || reference.SourceSpan.LineCount != vector.Canonical["line_count"] {
+			t.Fatalf("%s canonical source span = %#v, want %#v", vector.Name, reference.SourceSpan, vector.Canonical)
+		}
+	}
+	for _, vector := range vectors.Reject {
+		raw := fmt.Sprintf(`{"schema":"brigade.code-reference.v1","repository":"escoffier-labs/brigade","revision":{"commit":"%s"},"file_path":"src/brigade/receipts_cmd.py","qualified_name":"brigade.receipts_cmd.reference","symbol_kind":"function","source_span":%s,"change_kind":"changed"}`, strings.Repeat("a", 40), vector.SourceSpanRaw)
+		if _, err := parseCodeReferenceJSON([]byte(raw)); err == nil {
+			t.Fatalf("%s accepted", vector.Name)
+		}
+	}
+}
+
+func TestCanonicalCodeReferenceMatchesTheSharedCrossRuntimeVector(t *testing.T) {
+	data, err := os.ReadFile(repoPath(t, "../../schemas/code-reference.v1.canonical-vector.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vector struct {
+		Reference     json.RawMessage `json:"reference"`
+		CanonicalJSON string          `json:"canonical_json"`
+	}
+	if err := json.Unmarshal(data, &vector); err != nil {
+		t.Fatal(err)
+	}
+	reference, err := parseCodeReferenceJSON(vector.Reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := canonicalCodeReference(reference); got != vector.CanonicalJSON {
+		t.Fatalf("canonical code reference = %s, want %s", got, vector.CanonicalJSON)
+	}
+	if got := []byte(canonicalCodeReference(reference)); !bytes.Equal(got, []byte(vector.CanonicalJSON)) {
+		t.Fatalf("canonical code reference bytes = %q, want %q", got, []byte(vector.CanonicalJSON))
+	}
+}
+
+func TestCodeReferenceFiltersReachCLIHTTPAndMCPAndIgnoreMalformedStoredReferences(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	insertSyntheticSearchArchive(t, db, 40)
+
+	reference := CodeReference{
+		Schema:        "brigade.code-reference.v1",
+		Repository:    "escoffier-labs/brigade",
+		Revision:      CodeRevision{Commit: strings.Repeat("a", 40)},
+		FilePath:      "src/brigade/receipts_cmd.py",
+		QualifiedName: "brigade.receipts_cmd.café",
+		SymbolKind:    "function",
+		SourceSpan:    SourceSpan{StartLine: 787, LineCount: 3},
+		ChangeKind:    "changed",
+	}
+	metadata, err := json.Marshal(map[string]any{"code_references": []CodeReference{reference}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update items set metadata_json = ? where id = 'item-001'`, string(metadata)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update items set metadata_json = ? where id = 'item-002'`, `{"code_references":[{"not":"a code reference"}]}`); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var argument map[string]any
+	if err := json.Unmarshal(encoded, &argument); err != nil {
+		t.Fatal(err)
+	}
+
+	cli := runJSON(t, "search", "needle", "--code-reference", string(encoded), "--json")
+	if results := cli["results"].([]any); len(results) != 1 || results[0].(map[string]any)["id"] != "item-001" {
+		t.Fatalf("CLI code-reference search = %#v", cli)
+	}
+	evidenceCLI := runJSON(t, "evidence", "needle", "--code-reference", string(encoded), "--json")
+	if results := evidenceCLI["results"].([]any); len(results) != 1 || results[0].(map[string]any)["id"] != "item-001" {
+		t.Fatalf("CLI code-reference evidence = %#v", evidenceCLI)
+	}
+
+	handler := newHTTPHandler()
+	req := httptest.NewRequest(http.MethodGet, "/search?q=needle&code_reference="+url.QueryEscape(string(encoded)), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP code-reference search status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var httpSearch map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &httpSearch); err != nil {
+		t.Fatal(err)
+	}
+	if results := httpSearch["results"].([]any); len(results) != 1 || results[0].(map[string]any)["id"] != "item-001" {
+		t.Fatalf("HTTP code-reference search = %#v", httpSearch)
+	}
+	body, err := json.Marshal(map[string]any{"query": "needle", "code_reference": reference})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/evidence", bytes.NewReader(body))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP code-reference evidence status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var httpEvidence map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &httpEvidence); err != nil {
+		t.Fatal(err)
+	}
+	if results := httpEvidence["results"].([]any); len(results) != 1 || results[0].(map[string]any)["id"] != "item-001" {
+		t.Fatalf("HTTP code-reference evidence = %#v", httpEvidence)
+	}
+
+	mcpSearchResult, err := mcpSearch(map[string]any{"query": "needle", "code_reference": argument})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mcpSearchBody map[string]any
+	if err := json.Unmarshal([]byte(mcpSearchResult["content"].([]map[string]any)[0]["text"].(string)), &mcpSearchBody); err != nil {
+		t.Fatal(err)
+	}
+	if results := mcpSearchBody["results"].([]any); len(results) != 1 || results[0].(map[string]any)["id"] != "item-001" {
+		t.Fatalf("MCP code-reference search = %#v", mcpSearchBody)
+	}
+	mcpEvidenceResult, err := mcpEvidence(map[string]any{"query": "needle", "code_reference": argument})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mcpEvidenceBody map[string]any
+	if err := json.Unmarshal([]byte(mcpEvidenceResult["content"].([]map[string]any)[0]["text"].(string)), &mcpEvidenceBody); err != nil {
+		t.Fatal(err)
+	}
+	if results := mcpEvidenceBody["results"].([]any); len(results) != 1 || results[0].(map[string]any)["id"] != "item-001" {
+		t.Fatalf("MCP code-reference evidence = %#v", mcpEvidenceBody)
+	}
+
+	missing := reference
+	missing.ChangeKind = "removed"
+	fallback, err := search(db, SearchOpts{Query: "needle", Limit: 5, CodeReference: &missing})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fallback) != 5 || fallback[0].ID != "item-030" {
+		t.Fatalf("malformed stored code references did not safely fall back: %#v", fallback)
+	}
+}
+
+func TestEvidenceBundleIDPreservesLegacyBytesAndAddsStructuredReference(t *testing.T) {
+	items := []map[string]any{{"id": "item-001"}}
+	legacy := evidenceBundleID(SearchOpts{Query: "needle", Limit: 5}, items)
+	if legacy != "fed5d55935b1db1da27fd3c8" {
+		t.Fatalf("legacy evidence bundle id = %s, want pinned legacy id", legacy)
+	}
+	reference := &CodeReference{
+		Schema:        "brigade.code-reference.v1",
+		Repository:    "escoffier-labs/brigade",
+		Revision:      CodeRevision{Commit: strings.Repeat("a", 40)},
+		FilePath:      "src/brigade/receipts_cmd.py",
+		QualifiedName: "brigade.receipts_cmd.café",
+		SymbolKind:    "function",
+		SourceSpan:    SourceSpan{StartLine: 787, LineCount: 3},
+		ChangeKind:    "changed",
+	}
+	structured := evidenceBundleID(SearchOpts{Query: "needle", Limit: 5, CodeReference: reference}, items)
+	if structured != "626ca464af6265d8f761a365" {
+		t.Fatalf("structured evidence bundle id = %s, want deterministic structured id", structured)
+	}
+	if structured == legacy {
+		t.Fatal("structured code reference did not alter evidence bundle id")
 	}
 }
 

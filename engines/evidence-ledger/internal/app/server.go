@@ -210,7 +210,16 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer db.Close()
-	results, err := search(db, searchOptsFromQuery(q, query))
+	opts := searchOptsFromQuery(q, query)
+	if raw := firstQuery(q, "code_reference"); raw != "" {
+		reference, err := parseCodeReference(raw)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		opts.CodeReference = reference
+	}
+	results, err := search(db, opts)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -248,14 +257,15 @@ func handleEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Query               string `json:"query"`
-		Source              string `json:"source"`
-		Project             string `json:"project"`
-		From                string `json:"from"`
-		To                  string `json:"to"`
-		Limit               int    `json:"limit"`
-		IncludeRelated      bool   `json:"include_related"`
-		IncludeArtifactText bool   `json:"include_artifact_text"`
+		Query               string          `json:"query"`
+		Source              string          `json:"source"`
+		Project             string          `json:"project"`
+		From                string          `json:"from"`
+		To                  string          `json:"to"`
+		Limit               int             `json:"limit"`
+		IncludeRelated      bool            `json:"include_related"`
+		IncludeArtifactText bool            `json:"include_artifact_text"`
+		CodeReference       json.RawMessage `json:"code_reference"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -266,13 +276,22 @@ func handleEvidence(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "missing query")
 		return
 	}
+	var codeReference *CodeReference
+	if len(req.CodeReference) != 0 && string(req.CodeReference) != "null" {
+		var err error
+		codeReference, err = parseCodeReferenceJSON(req.CodeReference)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	db, _, err := openMigrated()
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	defer db.Close()
-	bundle, err := evidenceBundle(db, SearchOpts{Query: req.Query, Source: req.Source, Project: req.Project, From: req.From, To: req.To, Limit: req.Limit, IncludeRelated: req.IncludeRelated, IncludeArtifactText: req.IncludeArtifactText})
+	bundle, err := evidenceBundle(db, SearchOpts{Query: req.Query, Source: req.Source, Project: req.Project, From: req.From, To: req.To, Limit: req.Limit, IncludeRelated: req.IncludeRelated, IncludeArtifactText: req.IncludeArtifactText, CodeReference: codeReference})
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return

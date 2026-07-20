@@ -13,10 +13,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import code_references
+
 SNAPSHOT_NAME = "graphtrail-before.db"
 SNAPSHOT_AFTER_NAME = "graphtrail-after.db"
 SIDECAR_NAME = "graph-delta.json"
 CHANGED_SYMBOL_LIMIT = 20
+CODE_REFERENCE_NODE_LIMIT = 20
 LINE_KEYS = {
     "line",
     "line_number",
@@ -231,6 +234,7 @@ def capture_after_and_diff(
             "changed_symbols": changed_symbols,
             "changed_symbol_count": len(changed_symbols),
             "changed_symbols_truncated": _symbol_count(diff_payload) > CHANGED_SYMBOL_LIMIT,
+            **_code_reference_node_metadata(diff_payload),
             "edge_churn": edge_churn,
             "line_insensitive_edge_churn": edge_churn,
             "before_snapshot_path": str(snapshot_path),
@@ -438,6 +442,7 @@ def _compact(payload: dict[str, Any]) -> dict[str, Any]:
         "edge_churn": int(payload.get("edge_churn") or 0),
         "changed_symbols": payload.get("changed_symbols") if isinstance(payload.get("changed_symbols"), list) else [],
         "changed_symbol_count": int(payload.get("changed_symbol_count") or 0),
+        **_code_reference_node_metadata(payload),
     }
     timeout = payload.get("graphtrail_timeout_seconds")
     if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
@@ -448,6 +453,59 @@ def _compact(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(commands, dict):
         compact["commands"] = commands
     return compact
+
+
+def _code_reference_node_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep canonical nodes plus their valid pre-cap candidate accounting."""
+    existing = payload.get("code_reference_nodes")
+    if isinstance(existing, list):
+        normalized_nodes = [code_references.normalize_delta_node(value) for value in existing]
+        malformed_candidate = any(node is None for node in normalized_nodes)
+        compact_nodes = normalized_nodes
+        compact_nodes = [node for node in compact_nodes if node is not None]
+        compact_nodes.sort(key=lambda node: json.dumps(node, sort_keys=True, separators=(",", ":")))
+        declared_total = payload.get("code_reference_nodes_total")
+        declared_truncated = payload.get("code_reference_nodes_truncated")
+        if (
+            not malformed_candidate
+            and isinstance(declared_total, int)
+            and not isinstance(declared_total, bool)
+            and (
+                (declared_truncated is False and declared_total == len(compact_nodes))
+                or (
+                    declared_truncated is True
+                    and len(compact_nodes) == CODE_REFERENCE_NODE_LIMIT
+                    and declared_total > CODE_REFERENCE_NODE_LIMIT
+                )
+            )
+        ):
+            total = declared_total
+        else:
+            total = len(compact_nodes)
+        return {
+            "code_reference_nodes": compact_nodes[:CODE_REFERENCE_NODE_LIMIT],
+            "code_reference_nodes_total": total,
+            "code_reference_nodes_truncated": total > CODE_REFERENCE_NODE_LIMIT,
+        }
+    nodes: list[dict[str, Any]] = []
+    for source_key, change_kind in (
+        ("added_nodes", "added"),
+        ("changed_nodes", "changed"),
+        ("removed_nodes", "removed"),
+    ):
+        values = payload.get(source_key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            normalized = code_references.normalize_delta_node(value, change_kind)
+            if normalized is not None:
+                nodes.append(normalized)
+    nodes.sort(key=lambda node: json.dumps(node, sort_keys=True, separators=(",", ":")))
+    return {
+        "code_reference_nodes": nodes[:CODE_REFERENCE_NODE_LIMIT],
+        "code_reference_nodes_total": len(nodes),
+        "code_reference_nodes_truncated": len(nodes) > CODE_REFERENCE_NODE_LIMIT,
+    }
 
 
 def _status(status: str, summary: str, **extra: Any) -> dict[str, Any]:

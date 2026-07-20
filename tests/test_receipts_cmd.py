@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from brigade import cli, localio, outcome, outcome_cmd, receipt_signing, receipts_cmd, runbook_cmd, work_cmd
 
 from tests.work_cmd_test_helpers import _init_git_repo
@@ -234,6 +236,154 @@ def test_receipts_export_miseledger_emits_required_verify_fields_and_artifacts(t
     assert row["artifacts"][0]["hash"].startswith("sha256:")
     assert row["links"] == []
     assert row["relations"] == []
+
+
+def test_receipts_export_miseledger_composes_graph_delta_code_references(tmp_path, capsys):
+    head = "a" * 40
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120000-work-verify-code-reference",
+        started_at="2026-07-08T12:00:00Z",
+        code_graph_delta={
+            "status": "ok",
+            "changed_nodes": [
+                {
+                    "kind": "function",
+                    "qualified_name": "brigade.receipts_cmd._metadata_with_delta",
+                    "file_path": "src/brigade/receipts_cmd.py",
+                    "start_line": 787,
+                    "end_line": 789,
+                }
+            ],
+        },
+        git={"head": head, "branch": "code-reference", "dirty_files": 0},
+    )
+    _init_git_repo(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/escoffier-labs/brigade.git"],
+        cwd=tmp_path,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path)]) == 0
+    row = _jsonl(capsys.readouterr().out)[0]
+
+    assert row["item"]["metadata"]["code_references"] == [
+        {
+            "change_kind": "changed",
+            "file_path": "src/brigade/receipts_cmd.py",
+            "qualified_name": "brigade.receipts_cmd._metadata_with_delta",
+            "repository": "escoffier-labs/brigade",
+            "revision": {"commit": head},
+            "schema": "brigade.code-reference.v1",
+            "source_span": {"start_line": 787, "line_count": 3},
+            "symbol_kind": "function",
+        }
+    ]
+    assert row["item"]["metadata"]["code_references_total"] == 1
+    assert row["item"]["metadata"]["code_references_truncated"] is False
+    assert row["item"]["metadata"]["code_graph_delta"]["changed_nodes"][0]["start_line"] == 787
+
+
+def test_receipts_export_miseledger_keeps_compaction_candidate_accounting_and_skips_malformed_nodes(tmp_path, capsys):
+    head = "a" * 40
+    valid_nodes = [
+        {
+            "change_kind": "added",
+            "kind": "function",
+            "qualified_name": f"pkg.symbol_{number:02d}",
+            "file_path": "pkg/mod.py",
+            "start_line": number,
+            "end_line": number,
+        }
+        for number in range(1, 21)
+    ]
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120001-work-verify-code-reference-accounting",
+        started_at="2026-07-08T12:00:01Z",
+        code_graph_delta={
+            "status": "ok",
+            "code_reference_nodes": list(reversed(valid_nodes))
+            + [{"kind": "function", "qualified_name": "empty_path", "file_path": "", "start_line": 1, "end_line": 1}],
+            "code_reference_nodes_total": 28,
+            "code_reference_nodes_truncated": True,
+        },
+        git={"head": head, "branch": "code-reference", "dirty_files": 0},
+    )
+    _init_git_repo(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/escoffier-labs/brigade.git"],
+        cwd=tmp_path,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path)]) == 0
+    row = _jsonl(capsys.readouterr().out)[0]
+    metadata = row["item"]["metadata"]
+    assert len(metadata["code_references"]) == 20
+    assert metadata["code_references_total"] == 20
+    assert metadata["code_references_truncated"] is False
+    assert [reference["qualified_name"] for reference in metadata["code_references"]] == sorted(
+        reference["qualified_name"] for reference in metadata["code_references"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("retained_count", "declared_total", "declared_truncated", "malformed", "expected_total", "expected_truncated"),
+    [
+        (19, 19, False, False, 19, False),
+        (19, 20, False, False, 19, False),
+        (19, 20, True, False, 19, False),
+        (20, 20, True, False, 20, False),
+        (20, 21, False, False, 20, False),
+        (20, 28, True, False, 28, True),
+        (20, 28, True, True, 20, False),
+    ],
+)
+def test_receipts_export_recomputes_inconsistent_compact_code_reference_metadata(
+    tmp_path,
+    monkeypatch,
+    retained_count,
+    declared_total,
+    declared_truncated,
+    malformed,
+    expected_total,
+    expected_truncated,
+):
+    nodes = [
+        {
+            "change_kind": "added",
+            "kind": "function",
+            "qualified_name": f"pkg.symbol_{number:02d}",
+            "file_path": "pkg/mod.py",
+            "start_line": number,
+            "end_line": number,
+        }
+        for number in range(1, retained_count + 1)
+    ]
+    if malformed:
+        nodes.append({"change_kind": "added", "kind": "function", "qualified_name": "", "file_path": "pkg/mod.py"})
+
+    monkeypatch.setattr(receipts_cmd, "_code_reference_repository", lambda target: "escoffier-labs/brigade")
+
+    references, total, truncated = receipts_cmd._code_references_from_delta(
+        {
+            "git": {"head": "a" * 40},
+            "code_graph_delta": {
+                "code_reference_nodes": nodes,
+                "code_reference_nodes_total": declared_total,
+                "code_reference_nodes_truncated": declared_truncated,
+            },
+        },
+        tmp_path,
+    )
+
+    assert len(references) == retained_count
+    assert total == expected_total
+    assert truncated is expected_truncated
 
 
 def test_receipts_export_miseledger_exports_run_and_digestless_verify_receipts(tmp_path, capsys):

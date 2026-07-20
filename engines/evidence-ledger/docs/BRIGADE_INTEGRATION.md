@@ -105,10 +105,13 @@ What each imported item carries:
 - `item.kind` is `brigade_work_verify_receipt` or `brigade_run_receipt`
 - `item.text` holds the searchable line: run id, status, the command strings, the run task, and the code-graph delta summary when the receipt has one (`added_nodes=1 changed_symbols=...`)
 - `item.metadata.code_graph_delta` holds the compact delta dict verbatim
+- `item.metadata.code_references` holds strict `brigade.code-reference.v1` references when a receipt has a GitHub repository, immutable commit, and symbol-level graph delta; `code_references_total` and `code_references_truncated` make the bounded export explicit
 - `artifacts` point at `receipt.json`, `graph-delta.json`, and the digest-covered logs
 - `raw.hash` reuses the receipt's own sha256 digest, so the identity boundary (`source_kind + collection + item + content_hash`) dedupes re-imports: importing the same export twice inserts 0 and reports `already_known`
 
 Receipts are trusted local artifacts at export time, but once inside the archive they flow through the same evidence surfaces as everything else and come back marked untrusted context like any other search result.
+
+MiseLedger can receive an optional structured code reference filter. It checks matching receipt metadata before lexical FTS and uses FTS unchanged if no exact reference exists. Repository, revision, file path, qualified name, symbol kind, and change kind form the match. Source spans record location only.
 
 Potential future commands:
 
