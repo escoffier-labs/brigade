@@ -19,6 +19,7 @@ Then it should work inside the target repo or operator workspace and run:
 
 ```bash
 pipx install brigade-cli
+brigade setup
 brigade --version
 brigade operator quickstart --target . --harnesses codex --dry-run
 brigade operator quickstart --target . --harnesses codex

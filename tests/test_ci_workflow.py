@@ -334,6 +334,31 @@ def test_windows_native_acceptance_assigned_return_functions_do_not_leak_stdout(
             )
 
 
+def test_windows_native_acceptance_restricts_reported_executables_to_the_clean_managed_bin():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    managed_path = _extract_powershell_function(text, "Get-ManagedExecutablePath")
+
+    assert "[System.IO.Path]::IsPathRooted($path)" in managed_path
+    assert "Resolve-Path -LiteralPath $ManagedBin" in managed_path
+    assert "Resolve-Path -LiteralPath $path" in managed_path
+    assert "StartsWith($managedPrefix" in managed_path
+    assert "-ManagedBin $managedBin" in text
+
+
+def test_windows_native_acceptance_passes_managed_bin_to_every_executable_lookup():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    digest_assertion = _extract_powershell_function(text, "Assert-ManagedComponentDigests")
+
+    assert "[string]$ManagedBin" in digest_assertion
+    assert (
+        "Get-ManagedExecutablePath -Report $Report -ComponentId $componentId -ManagedBin $ManagedBin"
+        in digest_assertion
+    )
+    assert "Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin" in text
+    for call in re.findall(r"(?m)^(?!function\s).*Get-ManagedExecutablePath[^\r\n]*", text):
+        assert "-ManagedBin" in call
+
+
 def test_windows_native_acceptance_miseledger_marker_is_in_verify_command_filename():
     """MiseLedger indexes work-verify item.text (command text), not command stdout."""
     text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
@@ -346,6 +371,27 @@ def test_windows_native_acceptance_miseledger_marker_is_in_verify_command_filena
     assert "& $miseledgerExe search $acceptanceMarker" in section
     assert "verify_smoke.py" not in section
     assert 'print("{0}")' not in section
+
+
+def test_hyperv_acceptance_is_a_tracked_maintainer_contract_not_a_self_hosted_job():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    orchestrator = (ROOT / "scripts/hyper-v-native-acceptance.ps1").read_text()
+    runbook = (ROOT / "docs/runbooks/hyper-v-native-acceptance.md").read_text()
+
+    assert "self-hosted" not in workflow
+    assert "Restore-VMSnapshot" in orchestrator
+    assert '"clean"' in orchestrator
+    assert "-BrigadeVersion" in orchestrator
+    assert 'Assert-CommandMissing "go"' in orchestrator
+    assert 'Assert-CommandMissing "cargo"' in orchestrator
+    assert "Get-VMIntegrationService" in orchestrator
+    assert "Heartbeat" in orchestrator
+    assert "PowerShell Direct" in orchestrator
+    assert "Start-Sleep -Seconds 2" in orchestrator
+    assert "timed out waiting" in orchestrator
+    assert orchestrator.index("Start-VM -Name $VmName") < orchestrator.index("Get-VMIntegrationService")
+    assert orchestrator.index("Get-VMIntegrationService") < orchestrator.index("Invoke-Command -VMName")
+    assert "exact immutable release tag" in runbook
 
 
 def test_windows_native_acceptance_brigade_version_regex_matches_cli_output():

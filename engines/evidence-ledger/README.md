@@ -29,6 +29,14 @@
 
 ## Install
 
+For a Brigade-managed installation, use the verified engine manifest:
+
+```bash
+brigade setup
+```
+
+The standalone script below remains a one-release compatibility fallback:
+
 ```bash
 # install pinned release 0.6.0 (Linux/macOS)
 MISELEDGER_VERSION=v0.6.0
@@ -93,7 +101,7 @@ miseledger search "auth timeout" --json
 miseledger evidence "auth timeout" --markdown
 ```
 
-Convenience alternative, mutable `HEAD` installer:
+Independent-development fallback: mutable `HEAD` installer. This is not the default Brigade installation path:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh

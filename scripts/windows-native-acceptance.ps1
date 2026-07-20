@@ -309,6 +309,68 @@ function Get-ComponentReport {
     return ($raw | Out-String).Trim() | ConvertFrom-Json
 }
 
+function Assert-ReleaseManifestAndAssets {
+    param(
+        [string]$Version,
+        [string]$Destination
+    )
+    $tag = "v$Version"
+    $base = "https://github.com/escoffier-labs/brigade/releases/download/$tag"
+    $manifestPath = Join-Path $Destination "component-manifest-v1.json"
+    $checksumsPath = Join-Path $Destination "checksums.txt"
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/component-manifest-v1.json" -OutFile $manifestPath
+    Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile $checksumsPath
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $checksums = @{}
+    foreach ($line in Get-Content -LiteralPath $checksumsPath) {
+        if ($line -notmatch '^([0-9a-f]{64})\s+(.+)$') { throw "malformed checksums.txt line: $line" }
+        if ($checksums.ContainsKey($Matches[2])) { throw "duplicate checksums.txt asset: $($Matches[2])" }
+        $checksums[$Matches[2]] = $Matches[1]
+    }
+    $expected = @()
+    foreach ($componentId in @("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+        $component = $manifest.components.$componentId
+        if (-not $component -or $component.source.repository -ne "escoffier-labs/brigade" -or $component.source.release_tag -ne $tag) {
+            throw "release manifest component $componentId does not point to escoffier-labs/brigade@$tag"
+        }
+        foreach ($platform in @("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")) {
+            $asset = $component.assets.$platform
+            if (-not $asset) { throw "release manifest missing $componentId $platform" }
+            $expected += $asset.asset_name
+            if ($asset.download_url -ne "$base/$($asset.asset_name)") { throw "release manifest has moving or wrong URL for $($asset.asset_name)" }
+            if ($checksums[$asset.asset_name] -ne $asset.sha256) { throw "checksums mismatch for $($asset.asset_name)" }
+            $assetPath = Join-Path $Destination $asset.asset_name
+            Invoke-WebRequest -UseBasicParsing -Uri $asset.download_url -OutFile $assetPath
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $assetPath).Hash.ToLowerInvariant() -ne $asset.sha256) {
+                throw "release asset digest mismatch for $($asset.asset_name)"
+            }
+        }
+    }
+    if ($expected.Count -ne 20 -or $checksums.Count -ne 21 -or -not $checksums.ContainsKey("component-manifest-v1.json")) {
+        throw "release checksums must contain exactly 20 native assets and component-manifest-v1.json"
+    }
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant() -ne $checksums["component-manifest-v1.json"]) {
+        throw "release manifest digest mismatch"
+    }
+    return $manifest
+}
+
+function Assert-ManagedComponentDigests {
+    param(
+        $Manifest,
+        $Report,
+        [string]$ManagedBin
+    )
+    foreach ($componentId in @("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+        $path = Get-ManagedExecutablePath -Report $Report -ComponentId $componentId -ManagedBin $ManagedBin
+        $expected = $Manifest.components.$componentId.assets."windows-amd64".sha256
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant() -ne $expected) {
+            throw "managed $componentId digest does not match release manifest"
+        }
+    }
+}
+
 function Assert-OperatorDoctorReady {
     param(
         [string]$Target,
@@ -345,7 +407,8 @@ function Assert-AllComponentsHealthy {
 function Get-ManagedExecutablePath {
     param(
         $Report,
-        [string]$ComponentId
+        [string]$ComponentId,
+        [string]$ManagedBin
     )
     $item = $Report.components | Where-Object { $_.component_id -eq $ComponentId } | Select-Object -First 1
     if (-not $item) {
@@ -358,10 +421,19 @@ function Get-ManagedExecutablePath {
     if (-not $path) {
         throw "no managed path for $ComponentId"
     }
+    if (-not [System.IO.Path]::IsPathRooted($path)) {
+        throw "managed executable for $ComponentId must be absolute: $path"
+    }
     if (-not (Test-Path $path)) {
         throw "managed executable missing for ${ComponentId}: $path"
     }
-    return $path
+    $managedRoot = (Resolve-Path -LiteralPath $ManagedBin -ErrorAction Stop).Path.TrimEnd("\\")
+    $managedPrefix = "$managedRoot\\"
+    $resolved = (Resolve-Path -LiteralPath $path -ErrorAction Stop).Path
+    if (-not $resolved.StartsWith($managedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "managed executable for $ComponentId is outside the clean managed bin: $resolved"
+    }
+    return $resolved
 }
 
 $acceptRoot = $null
@@ -431,6 +503,7 @@ try {
     Assert-BrigadeResolvesFromPipxBin -PipxBinDir $pipxBinDir
     if ($InstallMode -eq "pypi") {
         Assert-BrigadeVersionMatches -Expected $BrigadeVersion
+        $releaseManifest = Assert-ReleaseManifestAndAssets -Version $BrigadeVersion -Destination (Join-Path $acceptRoot "release-assets")
     }
 
     & brigade --version
@@ -446,9 +519,19 @@ try {
 
     $report = Get-ComponentReport -StderrRoot $acceptRoot
     Assert-AllComponentsHealthy $report
+    $managedBin = Join-Path $env:LOCALAPPDATA "brigade\bin"
+    if ($InstallMode -eq "pypi") {
+        Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin
+    }
+    $graphtrailExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail" -ManagedBin $managedBin
+    $graphtrailMcpExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail-mcp" -ManagedBin $managedBin
+    $miseledgerExe = Get-ManagedExecutablePath -Report $report -ComponentId "miseledger" -ManagedBin $managedBin
+    $sessionfindExe = Get-ManagedExecutablePath -Report $report -ComponentId "sessionfind" -ManagedBin $managedBin
 
-    $graphtrailExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail"
-    $miseledgerExe = Get-ManagedExecutablePath -Report $report -ComponentId "miseledger"
+    $mcpResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & $graphtrailMcpExe
+    if ($LASTEXITCODE -ne 0 -or $mcpResponse -notmatch '"jsonrpc"') { throw "graphtrail-mcp absolute-path smoke failed" }
+    & $sessionfindExe --help | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "sessionfind absolute-path smoke failed" }
 
     $workRepo = Join-Path $acceptRoot "repo"
     New-Item -ItemType Directory -Force -Path $workRepo | Out-Null

@@ -50,7 +50,7 @@ def run(verb: str, arguments: Sequence[str]) -> int:
 
     binary = context_cmd._graphtrail_bin()
     if binary is None:
-        print("error: graphtrail is not installed; run `brigade add graphtrail`", file=sys.stderr)
+        print("error: graphtrail is not installed; run `brigade setup`", file=sys.stderr)
         return 127
 
     result = proc.run([binary, verb, *arguments], timeout=timeout)

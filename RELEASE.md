@@ -66,6 +66,17 @@ Fetch `origin/main`, confirm its declared version, create an annotated tag on th
 )
 ```
 
+The publish workflow builds `graphtrail`, `graphtrail-mcp`, `miseledger`, and `sessionfind` for
+`linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`, and `windows-amd64`. It creates one
+Brigade release with exactly 20 native assets, `component-manifest-v1.json`, and `checksums.txt`.
+The release body names `brigade-cli==<version>`. Rust builds run on the exact native runner for
+each platform; Go builds are pure-Go cross builds with `CGO_ENABLED=0`.
+
+The generated manifest and all component URLs must point to
+`escoffier-labs/brigade` at the exact tag. The workflow fails before PyPI publication if inventory,
+checksum, release-page manifest, or `gh attestation verify` checks fail. PyPI wheel and sdist builds
+copy the final generated manifest into package data after that gate.
+
 ## 6. Verify the published package
 
 ```bash
@@ -85,3 +96,11 @@ PY
 ```
 
 Create a Memory Handoff in `.claude/memory-handoffs/` for durable release workflow changes, root causes, or setup gotchas.
+
+## 7. Maintainer Hyper-V clean acceptance
+
+Hosted Windows amd64 acceptance runs in GitHub Actions. For a clean Windows checkpoint run, follow
+[`docs/runbooks/hyper-v-native-acceptance.md`](docs/runbooks/hyper-v-native-acceptance.md). It is a
+maintainer-operated PowerShell Direct contract, never a self-hosted GitHub runner. Restore the
+`clean` checkpoint before every run, record the exact release tag, allow Git, and require Go and
+Cargo to be absent.

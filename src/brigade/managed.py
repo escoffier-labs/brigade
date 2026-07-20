@@ -264,7 +264,13 @@ def _graphtrail_doctor(ctx: DoctorContext) -> List[CheckResult]:
     """Health-check GraphTrail for the target workspace (optional station)."""
     name = "graphtrail (code graph)"
     if not proc.which("graphtrail"):
-        return [(MANUAL, name, "not installed; cargo install graphtrail")]
+        return [
+            (
+                MANUAL,
+                name,
+                "not installed; run `brigade setup` (direct Cargo install is one-release compatibility only)",
+            )
+        ]
     db = ctx.target / ".graphtrail" / "graphtrail.db"
     if not db.is_file():
         return [(WARN, name, "installed; run `graphtrail sync` to build .graphtrail/graphtrail.db")]

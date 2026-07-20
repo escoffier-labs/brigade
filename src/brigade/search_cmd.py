@@ -67,11 +67,11 @@ def status_payload(target: Path) -> dict[str, Any]:
     payload = health.base_payload(
         target=target,
         station="search",
-        summary="search tools not installed; run `brigade add search` or `brigade add graphtrail`",
+        summary="search tools not installed; run `brigade setup`",
         health="missing",
         installed=installed_any,
         next_commands=[
-            "brigade add graphtrail",
+            "brigade setup",
             "brigade search sync plan",
             "brigade search doctor",
         ],
@@ -172,7 +172,7 @@ def status_payload(target: Path) -> dict[str, Any]:
             "brigade search doctor",
         ]
     elif not graphtrail_bin:
-        payload["next_commands"] = ["brigade add graphtrail", "brigade search sync plan"]
+        payload["next_commands"] = ["brigade setup", "brigade search sync plan"]
     return payload
 
 

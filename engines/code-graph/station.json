@@ -10,7 +10,7 @@
       "kind": "executable",
       "command": "graphtrail",
       "summary": "local code-graph CLI: callers, callees, impact, context briefs, and structural diffs",
-      "install": ["cargo", "install", "graphtrail"],
+      "install": ["brigade", "setup"],
       "surfaces": [
         {
           "kind": "brief-markdown",

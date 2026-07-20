@@ -12,6 +12,7 @@ Brigade supports Linux, macOS, and Windows with Python 3.10 or newer. Follow the
 
 ```bash
 pipx install brigade-cli
+brigade setup
 brigade --version
 ```
 

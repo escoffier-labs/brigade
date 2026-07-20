@@ -36,6 +36,7 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
         [
             "add",
             "setup",
+            "update",
             "stations",
             "skills",
             "harness",

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Verify bundled component manifest release assets against GitHub provenance."""
+"""Verify a generated component manifest against its one immutable Brigade release."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -13,334 +14,286 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = ROOT / "src/brigade/templates/components/manifest-v1.json"
+REPOSITORY = "escoffier-labs/brigade"
+COMPONENT_IDS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 USER_AGENT = "brigade-component-manifest-provenance/1.0"
-GITHUB_RELEASE_URL = re.compile(
-    r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/releases/download/(?P<tag>[^/]+)/(?P<filename>[^/?#]+)$"
-)
-GITHUB_RELEASE_TAG_API = "https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
-_SHA256_DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
-
-
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
+MAX_TAG_DEREFERENCE_DEPTH = 5
 FetchFn = Callable[[str], tuple[int, str]]
 
 
-def parse_github_release_url(url: str) -> tuple[str, str, str, str]:
-    match = GITHUB_RELEASE_URL.fullmatch(url)
-    if match is None:
-        raise ValueError(f"download_url is not a direct GitHub release asset URL: {url}")
-    return (
-        match.group("owner"),
-        match.group("repo"),
-        match.group("tag"),
-        match.group("filename"),
-    )
-
-
 def parse_checksums(text: str) -> dict[str, str]:
-    digests: dict[str, str] = {}
-    for line_number, raw_line in enumerate(text.splitlines(), start=1):
-        line = raw_line.strip()
+    result: dict[str, str] = {}
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
         if not line or line.startswith("#"):
             continue
         parts = line.split()
-        if len(parts) != 2:
-            raise ValueError(f"checksums.txt line {line_number} is malformed: {raw_line!r}")
-        digest, name = parts
-        if not re.fullmatch(r"[0-9a-f]{64}", digest):
-            raise ValueError(f"checksums.txt line {line_number} has invalid sha256: {digest!r}")
-        if name in digests:
-            raise ValueError(f"checksums.txt lists duplicate asset name {name!r}")
-        digests[name] = digest
-    return digests
+        if len(parts) != 2 or _SHA256.fullmatch(parts[0]) is None:
+            raise ValueError(f"checksums.txt line {number} is malformed")
+        if parts[1] in result:
+            raise ValueError(f"checksums.txt lists duplicate asset name {parts[1]!r}")
+        result[parts[1]] = parts[0]
+    return result
 
 
 def default_fetch(url: str) -> tuple[int, str]:
-    request = urllib.request.Request(url, headers=_request_headers())
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT}
+    if token := os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
-            body = response.read().decode("utf-8")
-            return response.status, body
+            return response.status, response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", errors="replace")
 
 
-def _request_headers() -> dict[str, str]:
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT}
-    token = os.environ.get("GITHUB_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
+def _expected_asset_name(component: str, platform: str) -> str:
+    return f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
+
+
+def _release_url(tag: str, filename: str) -> str:
+    return f"https://github.com/{REPOSITORY}/releases/download/{tag}/{filename}"
+
+
+def _tag_ref_url(tag: str) -> str:
+    return f"https://api.github.com/repos/{REPOSITORY}/git/ref/tags/{tag}"
+
+
+def _tag_object_url(sha: str) -> str:
+    return f"https://api.github.com/repos/{REPOSITORY}/git/tags/{sha}"
+
+
+def _fetch_json(fetch: FetchFn, url: str, *, label: str) -> dict[str, Any]:
+    status, body = fetch(url)
+    if status != 200:
+        raise ValueError(f"GitHub {label} lookup failed: HTTP {status}")
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"GitHub {label} lookup returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"GitHub {label} lookup must return an object")
+    return payload
+
+
+def _tag_target(payload: dict[str, Any], *, label: str) -> tuple[str, str]:
+    target = payload.get("object")
+    if not isinstance(target, dict):
+        raise ValueError(f"GitHub {label} is missing its object")
+    object_type = target.get("type")
+    sha = target.get("sha")
+    if object_type not in {"commit", "tag"} or not isinstance(sha, str) or _COMMIT.fullmatch(sha) is None:
+        raise ValueError(f"GitHub {label} has an invalid object type or SHA")
+    return object_type, sha
+
+
+def resolve_tag_commit(tag: str, *, fetch: FetchFn) -> str:
+    ref = _fetch_json(fetch, _tag_ref_url(tag), label="tag ref")
+    if ref.get("ref") != f"refs/tags/{tag}":
+        raise ValueError(f"GitHub tag ref did not report exact tag refs/tags/{tag}")
+    object_type, sha = _tag_target(ref, label="tag ref")
+    seen: set[str] = set()
+    depth = 0
+    while object_type == "tag":
+        if sha in seen:
+            raise ValueError("GitHub tag dereference detected a cycle")
+        if depth >= MAX_TAG_DEREFERENCE_DEPTH:
+            raise ValueError("GitHub tag dereference exceeded the maximum depth")
+        seen.add(sha)
+        annotated = _fetch_json(fetch, _tag_object_url(sha), label="tag object")
+        if annotated.get("tag") != tag:
+            raise ValueError(f"GitHub tag object did not report exact tag {tag}")
+        object_type, sha = _tag_target(annotated, label="tag object")
+        depth += 1
+    return sha
+
+
+def _github_asset_digest(asset: dict[str, Any]) -> re.Match[str] | None:
+    digest = asset.get("digest")
+    return _DIGEST.fullmatch(digest) if isinstance(digest, str) else None
 
 
 def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> list[str]:
     try:
-        raw = json.loads(manifest_path.read_text())
+        raw_text = manifest_path.read_text()
+        manifest = json.loads(raw_text)
     except (OSError, json.JSONDecodeError) as exc:
         return [f"component manifest could not be loaded: {manifest_path} ({exc})"]
-    if not isinstance(raw, dict):
-        return [f"component manifest must be a JSON object: {manifest_path}"]
+    if not isinstance(manifest, dict):
+        return ["component manifest must be a JSON object"]
 
     errors: list[str] = []
-    components = raw.get("components")
+    components = manifest.get("components")
     if not isinstance(components, dict):
-        return [f"component manifest field 'components' must be an object: {manifest_path}"]
+        return ["component manifest field 'components' must be an object"]
+    if set(components) != set(COMPONENT_IDS):
+        errors.append("component manifest must contain exactly graphtrail, graphtrail-mcp, miseledger, sessionfind")
 
-    for component_id, component_raw in sorted(components.items()):
-        if not isinstance(component_raw, dict):
-            errors.append(f"component {component_id!r} must be an object")
+    tag: str | None = None
+    expected_native: dict[str, dict[str, Any]] = {}
+    for component in COMPONENT_IDS:
+        value = components.get(component)
+        if not isinstance(value, dict):
+            errors.append(f"component {component!r} must be an object")
             continue
-        assets_raw = component_raw.get("assets")
-        if not isinstance(assets_raw, dict) or not assets_raw:
+        source = value.get("source")
+        if not isinstance(source, dict) or source.get("repository") != REPOSITORY:
+            errors.append(f"component {component!r} source.repository must be {REPOSITORY}")
+        release_tag = source.get("release_tag") if isinstance(source, dict) else None
+        if not isinstance(release_tag, str) or not release_tag:
+            errors.append(f"component {component!r} source.release_tag must be set")
             continue
-        errors.extend(
-            _verify_component(
-                component_id,
-                component_raw,
-                assets_raw,
-                fetch=fetch,
-            )
-        )
-    return errors
+        if tag is None:
+            tag = release_tag
+        elif tag != release_tag:
+            errors.append(f"component {component!r} source.release_tag {release_tag!r} does not match {tag!r}")
+        assets = value.get("assets")
+        if not isinstance(assets, dict) or set(assets) != set(SUPPORTED_PLATFORMS):
+            errors.append(f"component {component!r} must publish the full platform matrix")
+            continue
+        for platform in SUPPORTED_PLATFORMS:
+            asset = assets.get(platform)
+            if not isinstance(asset, dict):
+                errors.append(f"component {component!r} platform {platform!r} asset must be an object")
+                continue
+            name = asset.get("asset_name")
+            expected_name = _expected_asset_name(component, platform)
+            digest = asset.get("sha256")
+            size = asset.get("byte_size")
+            url = asset.get("download_url")
+            if name != expected_name:
+                errors.append(f"component {component!r} platform {platform!r} asset_name must be {expected_name!r}")
+                continue
+            if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+                errors.append(f"component {component!r} asset {name!r} byte_size must be positive")
+            if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
+                errors.append(f"component {component!r} asset {name!r} sha256 must be lowercase SHA-256")
+            if not isinstance(url, str) or url != _release_url(release_tag, name):
+                errors.append(f"component {component!r} asset {name!r} must use its immutable Brigade release URL")
+            if name in expected_native:
+                errors.append(f"component manifest lists duplicate native asset {name!r}")
+            else:
+                expected_native[name] = {"size": size, "sha256": digest, "url": url}
 
-
-def _verify_component(
-    component_id: str,
-    component_raw: dict[str, Any],
-    assets_raw: dict[str, Any],
-    *,
-    fetch: FetchFn,
-) -> list[str]:
-    errors: list[str] = []
-    source = component_raw.get("source")
-    repository = ""
-    if isinstance(source, dict) and isinstance(source.get("repository"), str):
-        repository = source["repository"].strip()
-    release_tag = ""
-    if isinstance(source, dict) and isinstance(source.get("release_tag"), str):
-        release_tag = source["release_tag"].strip()
-
-    parsed_assets: list[dict[str, Any]] = []
-    seen_names: dict[str, str] = {}
-    release_coords: tuple[str, str, str] | None = None
-
-    for platform, asset_raw in sorted(assets_raw.items()):
-        if not isinstance(asset_raw, dict):
-            errors.append(f"component {component_id!r} platform {platform!r} asset must be an object")
-            continue
-        asset_name = asset_raw.get("asset_name")
-        byte_size = asset_raw.get("byte_size")
-        digest = asset_raw.get("sha256")
-        download_url = asset_raw.get("download_url")
-        if not isinstance(asset_name, str) or not asset_name:
-            errors.append(
-                f"component {component_id!r} platform {platform!r} field 'asset_name' must be a non-empty string"
-            )
-            continue
-        if asset_name in seen_names:
-            errors.append(
-                f"component {component_id!r} lists duplicate asset_name {asset_name!r} "
-                f"on platforms {seen_names[asset_name]!r} and {platform!r}"
-            )
-        else:
-            seen_names[asset_name] = platform
-        if not isinstance(byte_size, int) or isinstance(byte_size, bool) or byte_size <= 0:
-            errors.append(
-                f"component {component_id!r} platform {platform!r} field 'byte_size' must be a positive integer"
-            )
-            continue
-        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-            errors.append(
-                f"component {component_id!r} platform {platform!r} field 'sha256' must be 64 lowercase hex characters"
-            )
-            continue
-        if not isinstance(download_url, str) or not download_url:
-            errors.append(
-                f"component {component_id!r} platform {platform!r} field 'download_url' must be a non-empty string"
-            )
-            continue
-        path_name = Path(urlparse(download_url).path).name
-        if path_name != asset_name:
-            errors.append(
-                f"component {component_id!r} platform {platform!r} download_url final segment "
-                f"must equal asset_name {asset_name!r} (found {path_name!r})"
-            )
-        try:
-            owner, repo, tag, filename = parse_github_release_url(download_url)
-        except ValueError as exc:
-            errors.append(f"component {component_id!r} platform {platform!r} {exc}")
-            continue
-        if filename != asset_name:
-            errors.append(
-                f"component {component_id!r} platform {platform!r} download_url filename "
-                f"must equal asset_name {asset_name!r} (found {filename!r})"
-            )
-        coords = (owner, repo, tag)
-        if release_coords is None:
-            release_coords = coords
-        elif release_coords != coords:
-            expected_owner, expected_repo, expected_tag = release_coords
-            errors.append(
-                f"component {component_id!r} platform {platform!r} download_url must use the "
-                f"same repository and tag as other assets "
-                f"({expected_owner}/{expected_repo}@{expected_tag}, found {owner}/{repo}@{tag})"
-            )
-        if repository and repository != f"{owner}/{repo}":
-            errors.append(
-                f"component {component_id!r} source.repository {repository!r} does not match "
-                f"download_url repository {owner}/{repo}"
-            )
-        if not release_tag:
-            errors.append(
-                f"component {component_id!r} source.release_tag must be set when assets are published"
-            )
-        elif release_tag != tag:
-            errors.append(
-                f"component {component_id!r} source.release_tag {release_tag!r} does not match "
-                f"download_url tag {tag!r}"
-            )
-        parsed_assets.append(
-            {
-                "platform": platform,
-                "asset_name": asset_name,
-                "byte_size": byte_size,
-                "sha256": digest,
-                "download_url": download_url,
-            }
-        )
-
-    if errors or release_coords is None or not parsed_assets:
+    if tag is None:
         return errors
-
-    owner, repo, tag = release_coords
-    release_url = GITHUB_RELEASE_TAG_API.format(owner=owner, repo=repo, tag=tag)
-    status, body = fetch(release_url)
+    api_url = f"https://api.github.com/repos/{REPOSITORY}/releases/tags/{tag}"
+    status, body = fetch(api_url)
     if status != 200:
-        errors.append(
-            f"component {component_id!r} GitHub release lookup failed for {owner}/{repo}@{tag}: HTTP {status}"
-        )
-        return errors
+        return [*errors, f"GitHub release lookup failed for {REPOSITORY}@{tag}: HTTP {status}"]
     try:
         release = json.loads(body)
     except json.JSONDecodeError:
-        errors.append(
-            f"component {component_id!r} GitHub release lookup returned invalid JSON for {owner}/{repo}@{tag}"
-        )
-        return errors
-
-    release_assets = release.get("assets")
-    if not isinstance(release_assets, list):
-        errors.append(f"component {component_id!r} GitHub release for {owner}/{repo}@{tag} is missing an assets array")
-        return errors
-
-    by_name: dict[str, dict[str, Any]] = {}
-    checksums_url: str | None = None
-    for asset in release_assets:
-        if not isinstance(asset, dict):
-            continue
-        name = asset.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        if name == "checksums.txt":
-            browser_download_url = asset.get("browser_download_url")
-            if isinstance(browser_download_url, str) and browser_download_url:
-                checksums_url = browser_download_url
-            continue
-        by_name[name] = asset
-
-    expected_names = {asset["asset_name"] for asset in parsed_assets}
-    release_names = set(by_name)
-    missing = sorted(expected_names - release_names)
-    if missing:
-        errors.append(
-            f"component {component_id!r} release {owner}/{repo}@{tag} is missing assets: " + ", ".join(missing)
-        )
-
-    for asset in parsed_assets:
-        release_asset = by_name.get(asset["asset_name"])
-        if release_asset is None:
-            continue
-        platform = asset["platform"]
-        name = asset["asset_name"]
-        release_size = release_asset.get("size")
-        if release_size != asset["byte_size"]:
-            errors.append(
-                f"component {component_id!r} platform {platform!r} asset {name!r} byte_size "
-                f"{asset['byte_size']} does not match GitHub release size {release_size!r}"
-            )
-        release_url_value = release_asset.get("browser_download_url")
-        if release_url_value != asset["download_url"]:
-            errors.append(
-                f"component {component_id!r} platform {platform!r} asset {name!r} "
-                "browser_download_url does not match the GitHub release asset URL"
-            )
-        digest_value = release_asset.get("digest")
-        if not isinstance(digest_value, str):
-            errors.append(
-                f"component {component_id!r} platform {platform!r} asset {name!r} is missing a GitHub release digest"
-            )
-        else:
-            digest_match = _SHA256_DIGEST.fullmatch(digest_value)
-            if digest_match is None:
-                errors.append(
-                    f"component {component_id!r} platform {platform!r} asset {name!r} "
-                    f"has malformed GitHub release digest {digest_value!r}"
-                )
-            elif digest_match.group(1) != asset["sha256"]:
-                errors.append(
-                    f"component {component_id!r} platform {platform!r} asset {name!r} sha256 "
-                    f"{asset['sha256']} does not match GitHub release digest {digest_value}"
-                )
-
-    if checksums_url is None:
-        errors.append(f"component {component_id!r} release {owner}/{repo}@{tag} is missing checksums.txt")
-        return errors
-
-    checksum_status, checksum_body = fetch(checksums_url)
-    if checksum_status != 200:
-        errors.append(
-            f"component {component_id!r} checksums.txt fetch failed for {owner}/{repo}@{tag}: HTTP {checksum_status}"
-        )
+        return [*errors, f"GitHub release lookup returned invalid JSON for {REPOSITORY}@{tag}"]
+    if not isinstance(release, dict) or release.get("tag_name") != tag:
+        errors.append(f"GitHub release must report tag_name {tag!r}")
         return errors
     try:
-        checksum_map = parse_checksums(checksum_body)
+        target_commit = resolve_tag_commit(tag, fetch=fetch)
     except ValueError as exc:
-        errors.append(f"component {component_id!r} checksums.txt is malformed: {exc}")
-        return errors
+        errors.append(str(exc))
+        target_commit = None
+    for component in COMPONENT_IDS:
+        value = components.get(component)
+        revision = value.get("component_revision") if isinstance(value, dict) else None
+        if not isinstance(revision, str) or _COMMIT.fullmatch(revision) is None:
+            errors.append(f"component {component!r} component_revision must be a 40-character lowercase git SHA")
+        elif target_commit is not None and revision != target_commit:
+            errors.append(f"component {component!r} component_revision does not match the resolved tag commit")
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        return [*errors, "GitHub release is missing an assets array"]
+    release_assets: dict[str, dict[str, Any]] = {}
+    for asset in assets:
+        if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):
+            errors.append("GitHub release contains an invalid asset entry")
+            continue
+        name = asset["name"]
+        if name in release_assets:
+            errors.append(f"GitHub release lists duplicate asset {name!r}")
+        release_assets[name] = asset
+    expected_release_names = set(expected_native) | {"component-manifest-v1.json", "checksums.txt"}
+    if set(release_assets) != expected_release_names:
+        missing = sorted(expected_release_names - set(release_assets))
+        extra = sorted(set(release_assets) - expected_release_names)
+        if missing:
+            errors.append("GitHub release is missing assets: " + ", ".join(missing))
+        if extra:
+            errors.append("GitHub release has unexpected assets: " + ", ".join(extra))
 
-    for asset in parsed_assets:
-        name = asset["asset_name"]
-        expected = asset["sha256"]
-        found = checksum_map.get(name)
-        if found is None:
-            errors.append(f"component {component_id!r} asset {name!r} is missing from checksums.txt")
-        elif found != expected:
-            errors.append(
-                f"component {component_id!r} asset {name!r} sha256 {expected} "
-                f"does not match checksums.txt entry {found}"
-            )
+    for name, expected in expected_native.items():
+        asset = release_assets.get(name)
+        if asset is None:
+            continue
+        if asset.get("size") != expected["size"]:
+            errors.append(f"release asset {name!r} size does not match manifest")
+        if asset.get("browser_download_url") != expected["url"]:
+            errors.append(f"release asset {name!r} URL does not match manifest")
+        match = _github_asset_digest(asset)
+        if match is None or match.group(1) != expected["sha256"]:
+            errors.append(f"release asset {name!r} digest does not match manifest")
+
+    manifest_asset = release_assets.get("component-manifest-v1.json")
+    checksums_asset = release_assets.get("checksums.txt")
+    if manifest_asset is None or checksums_asset is None:
+        return errors
+    for name, asset in (("component-manifest-v1.json", manifest_asset), ("checksums.txt", checksums_asset)):
+        if asset.get("browser_download_url") != _release_url(tag, name):
+            errors.append(f"release asset {name!r} must use the immutable Brigade release URL")
+        if _github_asset_digest(asset) is None:
+            errors.append(f"release asset {name!r} is missing a valid GitHub SHA-256 digest")
+
+    manifest_status, release_manifest = fetch(_release_url(tag, "component-manifest-v1.json"))
+    if manifest_status != 200:
+        errors.append(f"release-page component-manifest-v1.json fetch failed: HTTP {manifest_status}")
+    elif release_manifest != raw_text:
+        errors.append("release-page component-manifest-v1.json does not match the local manifest")
+    elif (manifest_digest := _github_asset_digest(manifest_asset)) is not None and (
+        hashlib.sha256(release_manifest.encode()).hexdigest() != manifest_digest.group(1)
+    ):
+        errors.append("release-page component-manifest-v1.json digest does not match its release asset")
+
+    checksums_status, checksums_text = fetch(_release_url(tag, "checksums.txt"))
+    if checksums_status != 200:
+        errors.append(f"checksums.txt fetch failed: HTTP {checksums_status}")
+        return errors
+    checksums_digest = _github_asset_digest(checksums_asset)
+    if checksums_digest is not None and hashlib.sha256(checksums_text.encode()).hexdigest() != checksums_digest.group(
+        1
+    ):
+        errors.append("release-page checksums.txt digest does not match its release asset")
+    try:
+        checksum_map = parse_checksums(checksums_text)
+    except ValueError as exc:
+        return [*errors, str(exc)]
+    if set(checksum_map) != set(expected_native) | {"component-manifest-v1.json"}:
+        errors.append("checksums.txt must contain exactly every native asset and component-manifest-v1.json")
+    for name, expected in expected_native.items():
+        if checksum_map.get(name) != expected["sha256"]:
+            errors.append(f"checksums.txt digest for {name!r} does not match manifest")
+    manifest_digest = _github_asset_digest(manifest_asset)
+    if manifest_digest and checksum_map.get("component-manifest-v1.json") != manifest_digest.group(1):
+        errors.append("checksums.txt digest for component-manifest-v1.json does not match release")
     return errors
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--manifest",
-        type=Path,
-        default=DEFAULT_MANIFEST,
-        help="path to manifest-v1.json (default: bundled template manifest)",
-    )
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     args = parser.parse_args(argv)
     errors = verify_manifest(args.manifest.resolve())
-    if errors:
-        for error in errors:
-            print(f"component manifest provenance: {error}", file=sys.stderr)
-        return 1
-    print(f"component manifest provenance: ok ({args.manifest})")
-    return 0
+    for error in errors:
+        print(f"component manifest provenance: {error}", file=sys.stderr)
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

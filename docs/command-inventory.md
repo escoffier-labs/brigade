@@ -61,6 +61,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade search`: 6 command path(s)
 - `brigade security`: 15 command path(s)
 - `brigade setup`: 1 command path(s)
+- `brigade update`: 1 command path(s)
 - `brigade skills`: 29 command path(s)
 - `brigade stations`: 3 command path(s)
 - `brigade status`: 1 command path(s)
@@ -444,6 +445,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade security template-audit`
 - `brigade security unsuppress`
 - `brigade setup`
+- `brigade update`
 - `brigade skills adapters init`
 - `brigade skills adapters list`
 - `brigade skills adapters show`

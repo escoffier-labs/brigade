@@ -46,7 +46,7 @@ def test_add_accepts_managed_tool_name(monkeypatch, tmp_target, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "graphtrail" in out
-    assert any("cargo" in a for a in calls)
+    assert ["brigade", "setup"] in calls
 
 
 def test_add_skips_install_when_already_present(monkeypatch, tmp_target):

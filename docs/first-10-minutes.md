@@ -6,6 +6,7 @@ This is the shortest path from install to a healthy local setup. It is meant for
 
 ```bash
 pipx install brigade-cli
+brigade setup
 brigade --version
 ```
 

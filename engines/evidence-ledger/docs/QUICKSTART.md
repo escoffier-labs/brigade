@@ -4,7 +4,18 @@ This path gets MiseLedger from a fresh install to a local evidence archive that 
 
 ## Install
 
-Install MiseLedger:
+For the default Brigade-managed installation, install the exact-release engine set and run the MiseLedger smoke:
+
+```bash
+brigade setup
+brigade evidence doctor
+```
+
+`brigade setup` installs GraphTrail, `graphtrail-mcp`, MiseLedger, and SessionFind from the running CLI's exact release manifest and runs its version smoke before recording the install.
+
+## One-release standalone compatibility
+
+Use this only for an independent MiseLedger installation. It is not the default path.
 
 ```bash
 MISELEDGER_VERSION=v0.6.0
@@ -16,7 +27,7 @@ miseledger version
 
 Review `install.sh` before running it. The installer downloads release binaries and verifies their sha256 checksums against the release `checksums.txt`.
 
-Convenience alternative, mutable `HEAD` installer:
+Mutable `HEAD` installer for independent development only, not the default path:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh

@@ -10,7 +10,7 @@
       "kind": "executable",
       "command": "miseledger",
       "summary": "local-first SQLite archive for agent sessions and imported evidence",
-      "install": ["go", "install", "github.com/escoffier-labs/miseledger/cmd/miseledger@latest"],
+      "install": ["brigade", "setup"],
       "surfaces": [
         {
           "kind": "doctor-json",

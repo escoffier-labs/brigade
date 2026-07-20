@@ -48,12 +48,13 @@ Open a new terminal after `pipx ensurepath`, then continue on any OS:
 
 ```bash
 pipx install brigade-cli
+brigade setup
 ```
 
-To track the latest `main` branch instead of the latest package release:
+For an intentional Brigade development machine tracking CI-green `main`:
 
 ```bash
-pipx install git+https://github.com/escoffier-labs/brigade
+brigade update --channel beta
 ```
 
 ## First install
@@ -193,11 +194,10 @@ Capture against an id you actually have: a skill you followed, a memory card (`-
 
 ```bash
 # optional stations (fail-open everywhere if absent)
-brigade add graphtrail          # or: cargo install graphtrail
+brigade setup                    # run once: verified GraphTrail, graphtrail-mcp, MiseLedger, and SessionFind
 brigade code sync .             # explicitly runs local GraphTrail and builds .graphtrail/graphtrail.db
 brigade code context "auth receipt flow"
 brigade code impact brigade.work.verify.run
-brigade add evidence            # miseledger (process-boundary Go binary)
 
 # evidence station CLI: explicit local operations
 brigade evidence crawl sessions
@@ -214,6 +214,8 @@ brigade receipts export miseledger --target . --new-only --import
 brigade outcome rank --target .    # surfaces brief_hit as a skill quality signal
 # next brigade run attaches a capped MiseLedger evidence brief automatically
 ```
+
+One-release compatibility note: `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain available for independent installations. A Brigade-managed install needs only `brigade setup` before these facade commands.
 
 That is the differentiated loop: receipts that feed the next run's context, with a measured hit rate (`context_eval.brief_hit_rate`) on whether the pre-run brief named the files the run actually touched.
 
@@ -238,8 +240,7 @@ brigade pantry expiry-alert --send
 ## Optional: search and tokens stations
 
 ```bash
-# GraphTrail code-graph + optional local semantic search
-brigade add search              # or: brigade add graphtrail
+# GraphTrail is installed by `brigade setup`; use its facade commands.
 brigade code sync .             # preferred GraphTrail facade
 brigade code context "auth receipt flow"
 brigade code impact brigade.work.verify.run

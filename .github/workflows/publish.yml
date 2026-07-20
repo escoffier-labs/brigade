@@ -4,30 +4,21 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build-and-publish:
+  validate-release:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      contents: read
-      id-token: write  # required for PyPI Trusted Publishing (OIDC)
     steps:
       - uses: actions/checkout@v5
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
       - name: Verify tag matches every declared version
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          set -e
-          python - "${GITHUB_REF_NAME#v}" <<'EOF'
+          python - "${TAG#v}" <<'EOF'
           import json, pathlib, re, sys, tomllib
 
           expected = sys.argv[1]
@@ -41,49 +32,336 @@ jobs:
               fields = json.loads(path.read_text())
               if "_brigade_version" in fields:
                   versions[str(path)] = fields["_brigade_version"]
-          mismatched = {p: v for p, v in versions.items() if v != expected}
+          mismatched = {path: value for path, value in versions.items() if value != expected}
           print(f"tag={expected} checked={len(versions)} locations")
-          for p, v in mismatched.items():
-              print(f"::error::{p} declares {v}, tag says {expected}")
+          for path, value in mismatched.items():
+              print(f"::error::{path} declares {value}, tag says {expected}")
           sys.exit(1 if mismatched else 0)
           EOF
 
-      - name: Install build tooling
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install build
-
-      - name: Build sdist + wheel
-        run: python -m build
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
-
-  published-artifact-acceptance:
-    name: published-artifact-acceptance (${{ matrix.os }})
-    needs: build-and-publish
+  build-rust-native:
+    name: Rust native (${{ matrix.platform }})
+    needs: validate-release
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - platform: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+          - platform: darwin-amd64
+            runner: macos-15-intel
+          - platform: darwin-arm64
+            runner: macos-15
+          - platform: windows-amd64
+            runner: windows-latest
+    defaults:
+      run:
+        working-directory: engines/code-graph
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build exact native GraphTrail binaries
+        if: runner.os != 'Windows'
+        run: cargo build --release --locked --bin graphtrail --bin graphtrail-mcp
+      - name: Stage native GraphTrail binaries
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/release-assets"
+          cp target/release/graphtrail "$GITHUB_WORKSPACE/release-assets/graphtrail-${{ matrix.platform }}"
+          cp target/release/graphtrail-mcp "$GITHUB_WORKSPACE/release-assets/graphtrail-mcp-${{ matrix.platform }}"
+      - name: Build exact native GraphTrail binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo build --release --locked --bin graphtrail --bin graphtrail-mcp
+      - name: Stage native GraphTrail binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE/release-assets" | Out-Null
+          Copy-Item target/release/graphtrail.exe "$env:GITHUB_WORKSPACE/release-assets/graphtrail-${{ matrix.platform }}.exe"
+          Copy-Item target/release/graphtrail-mcp.exe "$env:GITHUB_WORKSPACE/release-assets/graphtrail-mcp-${{ matrix.platform }}.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-${{ matrix.platform }}
+          path: release-assets/
+          if-no-files-found: error
+
+  build-go-native:
+    name: Go native (${{ matrix.platform }})
+    needs: validate-release
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            goos: linux
+            goarch: amd64
+          - platform: linux-arm64
+            goos: linux
+            goarch: arm64
+          - platform: darwin-amd64
+            goos: darwin
+            goarch: amd64
+          - platform: darwin-arm64
+            goos: darwin
+            goarch: arm64
+          - platform: windows-amd64
+            goos: windows
+            goarch: amd64
+    defaults:
+      run:
+        working-directory: engines/evidence-ledger
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Build pure-Go component binaries
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/release-assets"
+          suffix=""
+          if [ "$GOOS" = windows ]; then suffix=.exe; fi
+          go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/miseledger-${{ matrix.platform }}$suffix" ./cmd/miseledger
+          go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/sessionfind-${{ matrix.platform }}$suffix" ./cmd/sessionfind
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-${{ matrix.platform }}
+          path: release-assets/
+          if-no-files-found: error
+
+  assemble-release:
+    needs: [build-rust-native, build-go-native]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rust-*
+          path: downloaded/rust
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: go-*
+          path: downloaded/go
+      - name: Generate and validate complete release inventory
+        env:
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          mkdir release-assets
+          test "$(find downloaded -type f | wc -l)" -eq 20
+          test -z "$(find downloaded -type f -printf '%f\n' | sort | uniq -d)"
+          find downloaded -type f -exec cp {} release-assets/ \;
+          python scripts/generate_component_manifest.py --tag "$TAG" --commit "$COMMIT" \
+            --assets-dir release-assets --output release-assets/component-manifest-v1.json \
+            --checksums-output release-assets/checksums.txt
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 22
+      - uses: actions/attest@v4
+        with:
+          subject-path: |
+            release-assets/graphtrail-linux-amd64
+            release-assets/graphtrail-linux-arm64
+            release-assets/graphtrail-darwin-amd64
+            release-assets/graphtrail-darwin-arm64
+            release-assets/graphtrail-windows-amd64.exe
+            release-assets/graphtrail-mcp-linux-amd64
+            release-assets/graphtrail-mcp-linux-arm64
+            release-assets/graphtrail-mcp-darwin-amd64
+            release-assets/graphtrail-mcp-darwin-arm64
+            release-assets/graphtrail-mcp-windows-amd64.exe
+            release-assets/miseledger-linux-amd64
+            release-assets/miseledger-linux-arm64
+            release-assets/miseledger-darwin-amd64
+            release-assets/miseledger-darwin-arm64
+            release-assets/miseledger-windows-amd64.exe
+            release-assets/sessionfind-linux-amd64
+            release-assets/sessionfind-linux-arm64
+            release-assets/sessionfind-darwin-amd64
+            release-assets/sessionfind-darwin-arm64
+            release-assets/sessionfind-windows-amd64.exe
+            release-assets/component-manifest-v1.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unified-release-assets
+          path: release-assets/
+          if-no-files-found: error
+
+  create-release:
+    needs: assemble-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: unified-release-assets
+          path: release-assets
+      - name: Create or strictly resume the one immutable Brigade release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets > existing-release.json 2> release-view.err; then
+            python - release-assets existing-release.json missing-release-assets.txt <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          assets_dir = Path(sys.argv[1])
+          release = json.loads(Path(sys.argv[2]).read_text())
+          expected = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in assets_dir.iterdir()
+              if path.is_file()
+          }
+          assets = release.get("assets")
+          if not isinstance(assets, list):
+              raise SystemExit("existing release is missing an assets array")
+
+          errors = []
+          existing = {}
+          for asset in assets:
+              if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):
+                  errors.append("existing release contains an invalid asset entry")
+                  continue
+              name = asset["name"]
+              if name in existing:
+                  errors.append(f"existing release lists duplicate asset {name!r}")
+                  continue
+              existing[name] = asset
+              if name not in expected:
+                  errors.append(f"existing release has unexpected asset {name!r}")
+                  continue
+              if asset.get("digest") != f"sha256:{expected[name]}":
+                  errors.append(f"existing release asset differs from local release asset: {name!r}")
+          if errors:
+              raise SystemExit("\n".join(errors))
+          Path(sys.argv[3]).write_text("\n".join(sorted(set(expected) - set(existing))) + "\n")
+          PY
+            while IFS= read -r asset; do
+              [ -n "$asset" ] || continue
+              gh release upload "$TAG" "release-assets/$asset" --repo "$GITHUB_REPOSITORY"
+            done < missing-release-assets.txt
+          elif grep -qi "release not found" release-view.err; then
+            VERSION="${TAG#v}"
+            gh release create "$TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$TAG" --notes "Python package: brigade-cli==${VERSION}"
+          else
+            cat release-view.err >&2
+            exit 1
+          fi
+
+  release-asset-gate:
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: read
+      artifact-metadata: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Redownload, checksum, provenance, and attestation gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir release-assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 22
+          (cd release-assets && sha256sum --check checksums.txt)
+          python scripts/verify_component_manifest_provenance.py --manifest release-assets/component-manifest-v1.json
+          while read -r _digest asset; do
+            gh attestation verify "release-assets/$asset" --repo "$GITHUB_REPOSITORY" --signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml
+          done < release-assets/checksums.txt
+
+  build-and-publish:
+    needs: release-asset-gate
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: unified-release-assets
+          path: release-assets
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Replace the packaged manifest with the release manifest
+        run: |
+          cp release-assets/component-manifest-v1.json src/brigade/templates/components/manifest-v1.json
+          python scripts/version_sync.py --check
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build
+      - name: Build sdist + wheel
+        run: python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
+
+  published-artifact-acceptance:
+    name: published-artifact-acceptance (${{ matrix.platform }})
+    needs: build-and-publish
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-latest
             kind: unix
-          - os: macos-13
+            extra: ''
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
             kind: unix
-          - os: windows-latest
+            extra: ''
+          - platform: darwin-arm64
+            runner: macos-15
+            kind: unix
+            extra: --rosetta-darwin-amd64
+          - platform: windows-amd64
+            runner: windows-latest
             kind: windows
+            extra: ''
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: '3.12'
+      - name: Ensure Rosetta for darwin-amd64 smoke
+        if: matrix.extra == '--rosetta-darwin-amd64'
+        run: |
+          if /usr/bin/arch -x86_64 /usr/bin/true; then
+            exit 0
+          fi
+          sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+          /usr/bin/arch -x86_64 /usr/bin/true
       - name: Run published artifact acceptance (Unix)
         if: matrix.kind == 'unix'
         env:
           BRIGADE_VERSION: ${{ github.ref_name }}
-        run: python scripts/published-artifact-acceptance.py --brigade-version "${BRIGADE_VERSION#v}"
+        run: python scripts/published-artifact-acceptance.py --brigade-version "${BRIGADE_VERSION#v}" ${{ matrix.extra }}
       - name: Run Windows native acceptance (published CLI)
         if: matrix.kind == 'windows'
         shell: powershell

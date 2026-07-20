@@ -30,6 +30,25 @@ def test_setup_parser_flag_defaults():
     assert ns.dry_run is False
     assert ns.offline is False
     assert ns.rollback is False
+    assert ns.manifest is None
+    assert ns.allow_compatible_stable_manifest is None
+
+
+def test_setup_parser_accepts_verified_manifest(tmp_path):
+    manifest = tmp_path / "component-manifest-v1.json"
+    parser = cli._build_parser()
+    assert parser.parse_args(["setup", "--manifest", str(manifest)]).manifest == manifest
+
+
+def test_setup_compatibility_handoff_is_hidden_and_requires_a_manifest(tmp_path, capsys):
+    manifest = tmp_path / "component-manifest-v1.json"
+    parser = cli._build_parser()
+    ns = parser.parse_args(["setup", "--manifest", str(manifest), "--allow-compatible-stable-manifest", "1.2.3"])
+    assert ns.allow_compatible_stable_manifest == "1.2.3"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["setup", "--allow-compatible-stable-manifest", "1.2.3"])
+    assert exc.value.code == 2
+    assert "requires --manifest" in capsys.readouterr().err
 
 
 def test_setup_command_help_lists_flags(capsys):
@@ -44,6 +63,7 @@ def test_setup_command_help_lists_flags(capsys):
     assert "Use verified cache only; fail if missing." in out
     assert "--rollback" in out
     assert "Restore the previous installed manifest." in out
+    assert "--allow-compatible-stable-manifest" not in out
 
 
 def test_top_level_help_includes_setup():

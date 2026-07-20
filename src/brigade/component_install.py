@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -20,7 +21,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import brigade
-from brigade import component_manifest, component_paths, component_state, localio
+from brigade import component_manifest, component_paths, component_state, localio, templates
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
@@ -690,6 +691,92 @@ def _setup_rollback(
     return 0
 
 
+def _load_setup_manifest(
+    *,
+    manifest_path: Path | None,
+    manifest_source: str,
+    offline: bool,
+    opener: Callable[..., Any] | None,
+    env: Mapping[str, str] | None,
+) -> tuple[component_manifest.ComponentManifest, Any | None]:
+    """Load an exact release manifest, with one standalone compatibility fallback."""
+    if manifest_path is not None:
+        return component_manifest.load(manifest_path), None
+    if manifest_source == "standalone":
+        return component_manifest.load(allow_standalone_legacy_revisions=True), None
+    if manifest_source != "auto":
+        raise ComponentInstallError("manifest source must be auto or standalone")
+
+    bundled_path = templates.template_root() / "components" / "manifest-v1.json"
+    if component_manifest.manifest_path() != bundled_path:
+        return component_manifest.load(), None
+
+    from brigade import update_cmd
+
+    roots = resolve_roots(env=env)
+    try:
+        if offline:
+            state_path = Path(component_paths.update_state_path(roots.data_root))
+            state = update_cmd.load_update_state(state_path)
+            if state is not None and state.component_tag == f"v{brigade.__version__}":
+                cached = Path(component_paths.verified_manifest_path(roots.cache_root, state.component_manifest_sha256))
+                if cached.is_file():
+                    cached_bytes = cached.read_bytes()
+                    if hashlib.sha256(cached_bytes).hexdigest() != state.component_manifest_sha256:
+                        raise ComponentInstallError("cached exact-release manifest digest does not match update state")
+                    release = update_cmd.ResolvedRelease(
+                        state.component_release_id,
+                        state.component_tag,
+                        brigade.__version__,
+                        state.component_target_commit,
+                        state.component_manifest_url,
+                        len(cached_bytes),
+                        state.component_manifest_sha256,
+                        cached_bytes,
+                    )
+                    return update_cmd.validate_release_manifest_bytes(release), None
+            raise ComponentInstallError("offline setup requires a verified exact-release manifest cache")
+
+        release = update_cmd.resolve_release(update_cmd._DefaultHttp(), latest=False, tag=f"v{brigade.__version__}")
+        update_cmd._cache_manifest(
+            update_cmd.UpdatePaths(Path(roots.data_root), Path(roots.cache_root), Path("unused")), release
+        )
+        return update_cmd.validate_release_manifest_bytes(release), release
+    except update_cmd.UpdateError as exc:
+        raise ComponentInstallError(f"exact release manifest setup failed: {exc}") from exc
+
+
+def _publish_auto_setup_release_state(*, roots: SetupRoots, release: Any) -> None:
+    """Publish only auto-resolved component coordinates after setup commits."""
+    from brigade import update_cmd
+
+    state_path = Path(component_paths.update_state_path(roots.data_root))
+    current = update_cmd.load_update_state(state_path)
+    if current is None:
+        channel = "stable"
+        owner = "brigade setup"
+        cli_coordinate = release.version
+    else:
+        channel = current.channel
+        owner = current.owner
+        cli_coordinate = current.cli_coordinate
+    update_cmd.write_update_state(
+        state_path,
+        update_cmd.UpdateState(
+            update_cmd.STATE_SCHEMA_VERSION,
+            channel,
+            owner,
+            cli_coordinate,
+            release.release_id,
+            release.tag,
+            release.target_commit,
+            release.manifest_url,
+            release.manifest_sha256,
+            localio.utc_now_iso(),
+        ),
+    )
+
+
 def setup_native_components(
     *,
     dry_run: bool = False,
@@ -698,15 +785,30 @@ def setup_native_components(
     env: Mapping[str, str] | None = None,
     opener: Callable[..., Any] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    manifest_path: Path | None = None,
+    manifest_source: str = "auto",
+    allow_compatible_stable_manifest: str | None = None,
 ) -> int:
     """Install pinned native components; return process exit code."""
     try:
         if dry_run and rollback:
             raise ComponentInstallError("--dry-run and --rollback cannot be used together")
+        if allow_compatible_stable_manifest is not None and manifest_path is None:
+            raise ComponentInstallError("--allow-compatible-stable-manifest requires --manifest")
         if rollback:
             return _setup_rollback(env=env, runner=runner)
-        manifest = component_manifest.load()
-        if manifest.brigade_version != brigade.__version__:
+        manifest, auto_release = _load_setup_manifest(
+            manifest_path=manifest_path,
+            manifest_source=manifest_source,
+            offline=offline,
+            opener=opener,
+            env=env,
+        )
+        compatible_stable_manifest = (
+            allow_compatible_stable_manifest is not None
+            and allow_compatible_stable_manifest == manifest.brigade_version
+        )
+        if manifest.brigade_version != brigade.__version__ and not compatible_stable_manifest:
             raise ComponentInstallError(
                 "brigade_version mismatch: "
                 f"manifest requires {manifest.brigade_version!r}, "
@@ -736,7 +838,10 @@ def setup_native_components(
 
         managed_paths = {entry.component_id: Path(entry.managed_path) for entry in assets}
         snapshots = _snapshot_managed_executables(list(managed_paths.values()))
-        state_snapshots = _snapshot_managed_executables([current_state_path, previous_state_path])
+        state_paths = [current_state_path, previous_state_path]
+        if auto_release is not None:
+            state_paths.append(Path(component_paths.update_state_path(roots.data_root)))
+        state_snapshots = _snapshot_managed_executables(state_paths)
         try:
             for entry in assets:
                 managed_path = managed_paths[entry.component_id]
@@ -787,6 +892,8 @@ def setup_native_components(
             if current_state is not None and component_state.should_rotate_previous(current_state, next_state):
                 component_state.write_installed_state(previous_state_path, current_state)
             component_state.write_installed_state(current_state_path, next_state)
+            if auto_release is not None:
+                _publish_auto_setup_release_state(roots=roots, release=auto_release)
         except (ComponentInstallError, OSError, ValueError, urllib.error.URLError) as exc:
             try:
                 _restore_managed_executables(snapshots)

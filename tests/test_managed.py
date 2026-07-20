@@ -200,10 +200,9 @@ def test_evidence_tools_attach_to_evidence_station():
     assert names == {"miseledger"}
 
 
-def test_evidence_install_args_use_escoffier_labs():
+def test_evidence_install_uses_verified_brigade_setup():
     t = managed.resolve("miseledger")
-    joined = " ".join(t.install_args)
-    assert "github.com/escoffier-labs/miseledger/cmd/miseledger@latest" in joined
+    assert t.install_args == ["brigade", "setup"]
 
 
 def test_search_tools_attach_to_search_station():
@@ -486,9 +485,9 @@ def test_token_glace_declares_utc_summary_contract():
     assert summary.probe_contains == ("--format", "--timezone")
 
 
-def test_graphtrail_declares_portable_install_and_bounded_context_contract():
+def test_graphtrail_declares_verified_brigade_install_and_bounded_context_contract():
     t = managed.resolve("graphtrail")
-    assert t.install_args == ["cargo", "install", "graphtrail"]
+    assert t.install_args == ["brigade", "setup"]
     surfaces = {surface.kind: surface for surface in t.surfaces}
     context = surfaces["brief-markdown"]
     assert context.command == ("graphtrail", "context", "<task>", "--markdown")

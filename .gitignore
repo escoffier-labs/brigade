@@ -59,6 +59,8 @@ Thumbs.db
 /scripts/*
 !/scripts/windows-native-acceptance.ps1
 !/scripts/published-artifact-acceptance.py
+!/scripts/generate_component_manifest.py
+!/scripts/hyper-v-native-acceptance.ps1
 /skills/
 
 # Local plan/spec scratch dirs only. Reviewed planning artifacts ARE
