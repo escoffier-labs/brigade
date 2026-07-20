@@ -9,6 +9,9 @@ use std::time::SystemTime;
 use graphtrail::store::{init_schema, open_db, sync_repo};
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "miseledger")]
+const MISELEDGER_DEPRECATION_WARNING: &str = "warning: GraphTrail's direct MiseLedger adapter is deprecated. Use `brigade code sync`, `brigade code context`, `brigade code impact`, `brigade evidence crawl`, `brigade evidence search`, and `brigade evidence doctor` instead. The adapter remains functional for at least two minor GraphTrail releases or 90 days after the first GraphTrail release containing this deprecation, whichever is longer. It will not be removed before that compatibility policy is satisfied.";
+
 fn graphtrail() -> &'static str {
     env!("CARGO_BIN_EXE_graphtrail")
 }
@@ -47,6 +50,60 @@ def run():
     conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
         .unwrap();
     drop(conn);
+    db
+}
+
+#[cfg(feature = "miseledger")]
+fn build_miseledger_db(root: &Path) -> PathBuf {
+    let db = root.join("miseledger.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE item_fts USING fts5(item_id, source_kind, body);\
+         INSERT INTO item_fts (item_id, source_kind, body) VALUES\
+             ('evidence-helper', 'session', 'helper helper');",
+    )
+    .unwrap();
+    conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+        .unwrap();
+    db
+}
+
+#[cfg(feature = "miseledger")]
+fn build_evidence_context_miseledger_db(root: &Path) -> PathBuf {
+    let db = root.join("miseledger.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE item_fts USING fts5(item_id, source_kind, body);\
+         INSERT INTO item_fts (item_id, source_kind, body) VALUES\
+             ('evidence-task', 'session', 'evidence'),\
+             ('evidence-alpha', 'session', 'evidence_alpha'),\
+             ('evidence-beta', 'session', 'evidence_beta');",
+    )
+    .unwrap();
+    conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+        .unwrap();
+    db
+}
+
+#[cfg(feature = "miseledger")]
+fn build_evidence_context_db(root: &Path) -> PathBuf {
+    fs::write(
+        root.join("evidence.py"),
+        r#"
+def evidence_alpha():
+    return 1
+
+def evidence_beta():
+    return evidence_alpha()
+"#,
+    )
+    .unwrap();
+    let db = root.join(".graphtrail").join("graphtrail.db");
+    let conn = open_db(&db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+    conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+        .unwrap();
     db
 }
 
@@ -365,6 +422,147 @@ fn doctor_does_not_mutate_db_or_tree() {
         "doctor mutated the repo tree"
     );
     assert_eq!(before_tree, snapshot_tree(graph_dir.parent().unwrap()));
+}
+
+#[cfg(feature = "miseledger")]
+#[test]
+fn deprecated_miseledger_commands_warn_once_without_changing_json_or_databases() {
+    let graph_dir = tempfile::tempdir().unwrap();
+    let evidence_dir = tempfile::tempdir().unwrap();
+    let links_evidence_dir = tempfile::tempdir().unwrap();
+    let graph_db = build_evidence_context_db(graph_dir.path());
+    let evidence_db = build_evidence_context_miseledger_db(evidence_dir.path());
+    let links_evidence_db = build_miseledger_db(links_evidence_dir.path());
+    let before_graph = snapshot_tree(graph_dir.path());
+    let before_evidence = snapshot_tree(evidence_dir.path());
+    let before_links_evidence = snapshot_tree(links_evidence_dir.path());
+
+    let context_without_evidence = Command::new(graphtrail())
+        .current_dir(graph_dir.path())
+        .args([
+            "--db",
+            &graph_db.display().to_string(),
+            "context",
+            "evidence",
+            "--json",
+        ])
+        .env("MISELEDGER_DB", &evidence_db)
+        .output()
+        .unwrap();
+    assert!(
+        context_without_evidence.status.success(),
+        "context without --evidence failed: {context_without_evidence:?}"
+    );
+    assert!(
+        context_without_evidence.stderr.is_empty(),
+        "context without --evidence warned: {:?}",
+        String::from_utf8_lossy(&context_without_evidence.stderr)
+    );
+
+    let context_with_evidence = Command::new(graphtrail())
+        .current_dir(graph_dir.path())
+        .args([
+            "--db",
+            &graph_db.display().to_string(),
+            "context",
+            "evidence",
+            "--json",
+            "--evidence",
+        ])
+        .env("MISELEDGER_DB", &evidence_db)
+        .output()
+        .unwrap();
+    assert!(
+        context_with_evidence.status.success(),
+        "context with --evidence failed: {context_with_evidence:?}"
+    );
+    assert_eq!(
+        String::from_utf8(context_with_evidence.stderr).unwrap(),
+        format!("{MISELEDGER_DEPRECATION_WARNING}\n")
+    );
+    assert_eq!(
+        context_with_evidence.stdout, context_without_evidence.stdout,
+        "--evidence must not change context JSON output"
+    );
+    let context_json: serde_json::Value =
+        serde_json::from_slice(&context_with_evidence.stdout).unwrap();
+    assert_eq!(context_json["task"], "evidence");
+
+    let context_markdown_with_evidence = Command::new(graphtrail())
+        .current_dir(graph_dir.path())
+        .args([
+            "--db",
+            &graph_db.display().to_string(),
+            "context",
+            "evidence",
+            "--markdown",
+            "--evidence",
+        ])
+        .env("MISELEDGER_DB", &evidence_db)
+        .output()
+        .unwrap();
+    assert!(
+        context_markdown_with_evidence.status.success(),
+        "markdown context with --evidence failed: {context_markdown_with_evidence:?}"
+    );
+    assert_eq!(
+        String::from_utf8(context_markdown_with_evidence.stderr).unwrap(),
+        format!("{MISELEDGER_DEPRECATION_WARNING}\n")
+    );
+    let markdown = String::from_utf8(context_markdown_with_evidence.stdout).unwrap();
+    assert_eq!(markdown.matches("### `").count(), 3, "{markdown}");
+    for expected_link in [
+        "### `evidence`",
+        "- [session] `evidence-task` - [evidence]",
+        "### `evidence_alpha`",
+        "- [session] `evidence-alpha` - [evidence-alpha]",
+        "### `evidence_beta`",
+        "- [session] `evidence-beta` - [evidence-beta]",
+    ] {
+        assert!(markdown.contains(expected_link), "{markdown}");
+    }
+
+    let links = Command::new(graphtrail())
+        .args(["links", "helper", "--json"])
+        .env("MISELEDGER_DB", &links_evidence_db)
+        .output()
+        .unwrap();
+    assert!(links.status.success(), "links failed: {links:?}");
+    assert_eq!(
+        String::from_utf8(links.stderr).unwrap(),
+        format!("{MISELEDGER_DEPRECATION_WARNING}\n")
+    );
+    let links_json: serde_json::Value = serde_json::from_slice(&links.stdout).unwrap();
+    assert_eq!(links_json[0]["item_id"], "evidence-helper");
+
+    assert_eq!(before_graph, snapshot_tree(graph_dir.path()));
+    assert_eq!(before_evidence, snapshot_tree(evidence_dir.path()));
+    assert_eq!(
+        before_links_evidence,
+        snapshot_tree(links_evidence_dir.path())
+    );
+}
+
+#[cfg(not(feature = "miseledger"))]
+#[test]
+fn miseledger_commands_are_unavailable_without_the_feature_and_do_not_warn() {
+    let context_help = Command::new(graphtrail())
+        .args(["context", "--help"])
+        .output()
+        .unwrap();
+    assert!(context_help.status.success(), "{context_help:?}");
+    assert!(
+        !String::from_utf8_lossy(&context_help.stdout).contains("--evidence"),
+        "{context_help:?}"
+    );
+    assert!(context_help.stderr.is_empty(), "{context_help:?}");
+
+    let links = Command::new(graphtrail()).arg("links").output().unwrap();
+    assert!(!links.status.success(), "links unexpectedly succeeded");
+    assert!(
+        !String::from_utf8_lossy(&links.stderr).contains("direct MiseLedger adapter is deprecated"),
+        "miseledger-free build warned: {links:?}"
+    );
 }
 
 #[cfg(all(feature = "codesearch", feature = "miseledger"))]

@@ -322,6 +322,10 @@ pub fn run(cli: Cli) -> Result<()> {
             #[cfg(feature = "miseledger")]
             evidence,
         } => {
+            #[cfg(feature = "miseledger")]
+            if evidence {
+                crate::adapters::miseledger::emit_deprecation_warning();
+            }
             let db_path = default_query_db_path(cli.db.clone());
             let conn = open_read_only(&db_path)?;
             #[cfg(feature = "codesearch")]
@@ -603,6 +607,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         #[cfg(feature = "miseledger")]
         Command::Links { term, limit, json } => {
+            crate::adapters::miseledger::emit_deprecation_warning();
             let db = crate::adapters::miseledger::default_db_path();
             let hits = crate::adapters::miseledger::search_evidence(&db, &term, limit)?;
             if json {
