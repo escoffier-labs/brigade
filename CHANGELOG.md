@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-07-20
+
+### Added
+- `brigade version --components` reports managed native component installation state, and Windows native acceptance now installs and exercises the supported component paths. (#374 / #375)
+- GraphTrail v0.4.0 and MiseLedger v0.6.0 source is available under `engines/`; their standalone repositories and release pipelines remain unchanged until Phase 4. (#379 / #381)
+- The `brigade.code-reference.v1` schema and canonical vectors define the exact code-reference contract for evidence lookups before lexical fallback. (#361 / PR #389)
+- Executable `brigade code sync|context|impact` and `brigade evidence crawl|search|doctor` are available; `brigade search` keeps tested aliases for two minor releases or 90 days, whichever is longer. (#362 / PR #390)
+
+### Fixed
+- `brigade run` terminalizes interrupted and stale runs, refuses read-only execution for seats without that capability, and rejects empty tasks. (#382 / #383 / #384)
+
 ## [0.23.3] - 2026-07-19
 
 ### Fixed
@@ -823,7 +834,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.23.3...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/escoffier-labs/brigade/compare/v0.23.3...v0.24.0
 [0.23.3]: https://github.com/escoffier-labs/brigade/compare/v0.23.2...v0.23.3
 [0.23.2]: https://github.com/escoffier-labs/brigade/compare/v0.23.1...v0.23.2
 [0.23.1]: https://github.com/escoffier-labs/brigade/compare/v0.23.0...v0.23.1

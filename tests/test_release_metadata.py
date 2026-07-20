@@ -13,19 +13,32 @@ def _release_changelog(version: str) -> str:
     return text[start:end]
 
 
-def test_current_release_has_one_fixed_section_with_recent_release_notes():
+def test_current_release_has_expected_v024_release_notes():
+    assert __version__ == "0.24.0"
+
     text = _release_changelog(__version__)
 
+    assert text.count("### Added") == 1
     assert text.count("### Fixed") == 1
     for expected in (
-        "sessionfind v0.6.0",
-        "command-list",
-        "`--help`",
-        "usage-text",
-        "Windows",
-        "Go or Cargo",
-        "#355",
-        "PR #372",
+        "reports managed native component installation state",
+        "Windows native acceptance now installs and exercises the supported component paths",
+        "GraphTrail v0.4.0",
+        "MiseLedger v0.6.0",
+        "standalone repositories and release pipelines remain unchanged until Phase 4",
+        "`brigade.code-reference.v1`",
+        "evidence lookups before lexical fallback",
+        "`brigade code sync|context|impact`",
+        "`brigade evidence crawl|search|doctor`",
+        "two minor releases or 90 days, whichever is longer",
+        "terminalizes interrupted and stale runs",
+        "refuses read-only execution for seats without that capability",
+        "rejects empty tasks",
+        "#374 / #375",
+        "#379 / #381",
+        "#361 / PR #389",
+        "#362 / PR #390",
+        "#382 / #383 / #384",
     ):
         assert expected in text
 
