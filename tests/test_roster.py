@@ -450,6 +450,29 @@ def test_env_ref_value_must_be_variable_name(tmp_path):
         roster_mod.load_roster(_write(tmp_path, bad))
 
 
+def test_env_ref_accepts_absolute_environment_file_reference(tmp_path):
+    environment_file = tmp_path / "runtime.env"
+    roster = ENV_SEAT.replace(
+        'ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY"',
+        f'ANTHROPIC_AUTH_TOKEN_REF = "env-file:{environment_file}#CLIPROXY_API_KEY"',
+    )
+    assert roster_mod.load_roster(_write(tmp_path, roster)).agents["k3"].env is not None
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "env-file:relative.env#CLIPROXY_API_KEY",
+        "env-file:/runtime.env#",
+        "env-file:/runtime.env#not_a_variable",
+    ),
+)
+def test_env_ref_rejects_malformed_environment_file_reference(tmp_path, reference):
+    bad = ENV_SEAT.replace('ANTHROPIC_AUTH_TOKEN_REF = "KIMI_API_KEY"', f'ANTHROPIC_AUTH_TOKEN_REF = "{reference}"')
+    with pytest.raises(ValueError, match="env-file:/absolute/path#VARIABLE"):
+        roster_mod.load_roster(_write(tmp_path, bad))
+
+
 def test_env_rejected_on_acpx_transport(tmp_path):
     bad = ENV_SEAT.replace(
         'cli = "claude"\nmodel = "kimi-k3"',

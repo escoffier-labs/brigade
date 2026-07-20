@@ -1222,6 +1222,49 @@ def test_run_agent_env_ref_resolves_from_parent(monkeypatch):
     assert "ANTHROPIC_AUTH_TOKEN_REF" not in captured["env"]
 
 
+def test_run_agent_env_file_ref_uses_runtime_environment_file(tmp_path, monkeypatch):
+    captured = {}
+    token = "runtime-token-value-for-test"
+    environment_file = tmp_path / "runtime.env"
+    environment_file.write_text(f"\n# generated at runtime\nCLIPROXY_API_KEY={token}\n\n")
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return agents.proc.Result(0, f"answer used {token}\n", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    monkeypatch.setenv("CLIPROXY_API_KEY", "stale-parent-token")
+
+    result = agents.run_agent(
+        "claude",
+        "hi",
+        env={"ANTHROPIC_AUTH_TOKEN_REF": f"env-file:{environment_file}#CLIPROXY_API_KEY"},
+    )
+
+    assert result.ok
+    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == token
+    assert token not in result.text
+    assert result.text == "answer used [ANTHROPIC_AUTH_TOKEN]"
+
+
+def test_run_agent_env_file_ref_unavailable_fails_before_spawn(tmp_path, monkeypatch):
+    calls = []
+    environment_file = tmp_path / "missing.env"
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: calls.append(argv))
+
+    result = agents.run_agent(
+        "claude",
+        "hi",
+        env={"ANTHROPIC_AUTH_TOKEN_REF": f"env-file:{environment_file}#CLIPROXY_API_KEY"},
+    )
+
+    assert not result.ok
+    assert result.failure_kind == "env-ref-missing"
+    assert calls == []
+
+
 def test_run_agent_scrubs_resolved_env_values_from_success_output(monkeypatch):
     token = "lane-token-value-for-test"
     endpoint = "https://lane.example.test/anthropic"

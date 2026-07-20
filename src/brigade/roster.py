@@ -85,6 +85,7 @@ def _as_sandbox(value: object) -> str | None:
 
 
 _ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_ENV_FILE_REF_RE = re.compile(r"^env-file:(/[^#]+)#([A-Z][A-Z0-9_]*)$")
 # Prefix hints match the start of any underscore-separated segment; exact
 # hints must equal a whole segment (so PAT flags GH_PAT but not PATH).
 _SECRET_PREFIX_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "AUTH", "CRED", "COOKIE", "SESSION", "BEARER")
@@ -115,7 +116,10 @@ def _as_env(value: object, agent_name: str) -> dict[str, str] | None:
             raise ValueError(f"agents.{agent_name}.env.{key} is not a valid environment variable name")
         if key.endswith("_REF"):
             target = key[: -len("_REF")]
-            if not _ENV_NAME_RE.match(raw):
+            if raw.startswith("env-file"):
+                if not _ENV_FILE_REF_RE.match(raw):
+                    raise ValueError(f"agents.{agent_name}.env.{key} must use env-file:/absolute/path#VARIABLE")
+            elif not _ENV_NAME_RE.match(raw):
                 raise ValueError(
                     f"agents.{agent_name}.env.{key} must name an environment variable to read the value from"
                 )
