@@ -11,6 +11,9 @@ permissions:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       code_graph: ${{ steps.filter.outputs.code_graph }}
       evidence_ledger: ${{ steps.filter.outputs.evidence_ledger }}

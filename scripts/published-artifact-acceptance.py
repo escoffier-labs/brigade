@@ -11,16 +11,68 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 
 COMPONENT_IDS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+PYPI_PROJECT_URL = "https://pypi.org/pypi/brigade-cli/json"
+PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
+PYPI_POLL_INTERVAL_SECONDS = 5
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+JsonFetcher = Callable[[str], Any]
 
 
 class AcceptanceError(RuntimeError):
     """A published-artifact acceptance requirement was not met."""
+
+
+def managed_bin_path(data_home: Path, profile: Path, *, platform: str | None = None) -> Path:
+    if (platform or sys.platform) == "darwin":
+        return profile / "Library" / "Application Support" / "brigade" / "bin"
+    return data_home / "brigade" / "bin"
+
+
+def fetch_pypi_json(url: str) -> Any:
+    with urllib.request.urlopen(url, timeout=15) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def wait_for_pypi_version(
+    version: str,
+    *,
+    fetch_json: JsonFetcher = fetch_pypi_json,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    timeout_seconds: float = PYPI_AVAILABILITY_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = PYPI_POLL_INTERVAL_SECONDS,
+) -> None:
+    deadline = monotonic() + timeout_seconds
+    detail = "PyPI response did not list the version"
+    while True:
+        try:
+            payload = fetch_json(PYPI_PROJECT_URL)
+        except (OSError, ValueError) as exc:
+            detail = f"PyPI was unavailable: {exc}"
+        else:
+            releases = payload.get("releases") if isinstance(payload, dict) else None
+            if isinstance(releases, dict) and version in releases:
+                return
+            if releases is None:
+                detail = "PyPI response did not contain a releases object"
+            elif not isinstance(releases, dict):
+                detail = "PyPI response contained an invalid releases object"
+            else:
+                detail = "PyPI response did not list the version"
+
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise AcceptanceError(
+                f"PyPI version {version} was not available within {timeout_seconds:g} seconds: {detail}"
+            )
+        sleep(min(poll_interval_seconds, remaining))
 
 
 def run_checked(
@@ -155,6 +207,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run) -> None:
         managed_brigade = pipx_bin / "brigade"
         try:
             run_checked([sys.executable, "-m", "pip", "install", "--upgrade", "pip", "pipx"], runner=runner, env=env)
+            wait_for_pypi_version(version)
             run_checked([sys.executable, "-m", "pipx", "install", f"brigade-cli=={version}"], runner=runner, env=env)
             if not managed_brigade.is_file():
                 raise AcceptanceError(f"pipx did not install brigade at {managed_brigade}")
@@ -169,7 +222,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run) -> None:
                 report = json.loads(report_output.stdout)
             except json.JSONDecodeError as exc:
                 raise AcceptanceError("brigade version --components --json returned malformed JSON") from exc
-            managed_paths = validate_component_report(report, data_home / "brigade" / "bin")
+            managed_paths = validate_component_report(report, managed_bin_path(data_home, profile))
             smoke_managed_components(managed_paths, runner=runner, env=env)
         finally:
             assert_no_poison_invocation(marker)

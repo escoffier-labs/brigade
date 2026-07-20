@@ -54,6 +54,18 @@ def test_component_report_rejects_relative_executable_before_resolving(acceptanc
         acceptance_module.validate_component_report(report, tmp_path / "xdg-data" / "brigade" / "bin")
 
 
+def test_managed_bin_path_uses_xdg_data_home_on_linux(acceptance_module, tmp_path):
+    assert acceptance_module.managed_bin_path(tmp_path / "xdg-data", tmp_path / "profile", platform="linux") == (
+        tmp_path / "xdg-data" / "brigade" / "bin"
+    )
+
+
+def test_managed_bin_path_uses_application_support_on_macos(acceptance_module, tmp_path):
+    assert acceptance_module.managed_bin_path(tmp_path / "xdg-data", tmp_path / "profile", platform="darwin") == (
+        tmp_path / "profile" / "Library" / "Application Support" / "brigade" / "bin"
+    )
+
+
 def test_component_report_rejects_outside_managed_root(acceptance_module, tmp_path):
     managed_bin = tmp_path / "xdg-data" / "brigade" / "bin"
     _write_managed_binaries(managed_bin)
@@ -61,6 +73,20 @@ def test_component_report_rejects_outside_managed_root(acceptance_module, tmp_pa
     outside.write_text("not managed")
     report = _healthy_report(managed_bin)
     report["components"][0]["recorded_executable"] = str(outside)
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="outside"):
+        acceptance_module.validate_component_report(report, managed_bin)
+
+
+def test_component_report_rejects_symlink_outside_managed_root(acceptance_module, tmp_path):
+    managed_bin = tmp_path / "xdg-data" / "brigade" / "bin"
+    _write_managed_binaries(managed_bin)
+    outside = tmp_path / "outside"
+    outside.write_text("not managed")
+    linked = managed_bin / "graphtrail"
+    linked.unlink()
+    linked.symlink_to(outside)
+    report = _healthy_report(managed_bin)
 
     with pytest.raises(acceptance_module.AcceptanceError, match="outside"):
         acceptance_module.validate_component_report(report, managed_bin)
@@ -96,6 +122,64 @@ def test_command_failure_preserves_installer_or_asset_error(acceptance_module):
 
     with pytest.raises(acceptance_module.AcceptanceError, match="missing asset: digest mismatch"):
         acceptance_module.run_checked(["pipx", "install", "brigade-cli==1.2.3"], runner=failing_runner)
+
+
+def test_wait_for_pypi_version_returns_when_exact_version_is_immediately_available(acceptance_module):
+    calls = []
+
+    def fetch_json(url):
+        calls.append(url)
+        return {"releases": {"1.2.3": [{}]}}
+
+    acceptance_module.wait_for_pypi_version(
+        "1.2.3",
+        fetch_json=fetch_json,
+        sleep=lambda _: pytest.fail("available version should not sleep"),
+    )
+
+    assert calls == [acceptance_module.PYPI_PROJECT_URL]
+
+
+def test_wait_for_pypi_version_retries_until_exact_version_is_available(acceptance_module):
+    clock = [0.0]
+    sleeps = []
+    responses = iter(({"releases": {}}, {"releases": {}}, {"releases": {"1.2.3": [{}]}}))
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    acceptance_module.wait_for_pypi_version(
+        "1.2.3",
+        fetch_json=lambda _: next(responses),
+        sleep=sleep,
+        monotonic=lambda: clock[0],
+        timeout_seconds=10,
+        poll_interval_seconds=2,
+    )
+
+    assert sleeps == [2, 2]
+
+
+def test_wait_for_pypi_version_times_out_after_unavailable_or_malformed_responses(acceptance_module):
+    clock = [0.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="not available"):
+        acceptance_module.wait_for_pypi_version(
+            "1.2.3",
+            fetch_json=lambda _: {"releases": []},
+            sleep=sleep,
+            monotonic=lambda: clock[0],
+            timeout_seconds=6,
+            poll_interval_seconds=2,
+        )
+
+    assert sleeps == [2, 2, 2]
 
 
 def test_smoke_uses_only_absolute_managed_executables(acceptance_module, tmp_path):

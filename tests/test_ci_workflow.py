@@ -34,6 +34,15 @@ def test_ci_workflow_path_filter_has_valid_structure_and_engine_paths():
         assert path in changes
 
 
+def test_ci_workflow_path_filter_can_read_pull_request_files():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    changes = _workflow_job_section(text, "changes")
+
+    assert "permissions:" in changes
+    assert "contents: read" in changes
+    assert "pull-requests: read" in changes
+
+
 def test_ci_workflow_gates_native_engine_jobs_with_valid_expressions():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     expected_jobs = {
