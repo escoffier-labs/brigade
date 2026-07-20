@@ -1360,8 +1360,9 @@ First-class station CLIs (always registered; not extras-gated):
 
 | Command group | Plans / health |
 |---|---|
-| `brigade evidence` | `status`, `doctor`, `crawl plan`, `export plan` |
-| `brigade search` | `status`, `doctor`, `sync plan` |
+| `brigade evidence` | `status`, `doctor`, `crawl`, `search`, `crawl plan`, `export plan` |
+| `brigade code` | `sync`, `context`, `impact` |
+| `brigade search` | `status`, `doctor`, `sync`, `context`, `impact`, `sync plan` |
 | `brigade tokens` | `status`, `doctor`, `wire plan` |
 | `brigade stations` | `list`, `discover` |
 
@@ -1377,11 +1378,9 @@ These plan commands do not generate or copy PSKs, start services, or mutate brow
 
 `evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade never imports it.
 `brigade add evidence` installs miseledger and prints the crawl/export path.
-Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands, `brigade evidence crawl plan` to preview miseledger init/crawl/doctor commands, and `brigade evidence export plan` to preview `brigade receipts export miseledger --new-only --import`.
-These plan commands do not execute crawl or import. Product page: https://brigade.tools/miseledger.
+Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands. `brigade evidence crawl <args...>` and `brigade evidence search <args...>` relay a safe argv list to MiseLedger, preserving its text or JSON output and exit status. `--code-reference <brigade.code-reference.v1 JSON>` is passed to MiseLedger unchanged, so its exact code-reference lookup runs before lexical fallback. Crawl defaults to 900 seconds and can be changed with the positive finite numeric `BRIGADE_EVIDENCE_CRAWL_TIMEOUT_SECONDS`; search remains at 30 seconds. An invalid crawl timeout reports a diagnostic and exits 2 before starting MiseLedger. `brigade evidence crawl plan` still previews miseledger init/crawl/doctor commands, and `brigade evidence export plan` still previews `brigade receipts export miseledger --new-only --import`. Product page: https://brigade.tools/miseledger.
 
-`search` (alias `code-search`) wires GraphTrail and optional code-search-api. The `code-search-mcp` compatibility key points to the bridge maintained under `code-search-api/mcp`.
-Use `brigade search status` / `doctor` and review-only `brigade search sync plan`. Brigade does not run `graphtrail sync` or start the search API for you.
+`code` runs GraphTrail through a process boundary: `brigade code sync|context|impact <args...>` uses safe argument forwarding and preserves engine text, JSON, and exit status. Sync defaults to 900 seconds and can be changed with the positive finite numeric `BRIGADE_CODE_SYNC_TIMEOUT_SECONDS`; context and impact remain at 30 seconds. An invalid sync timeout reports a diagnostic and exits 2 before starting GraphTrail. `search` retains its `status`, `doctor`, and `sync plan` surfaces; its executable `sync`, `context`, and `impact` forms are compatibility aliases for `code` for at least two minor releases or 90 days, whichever is longer. `search` still wires optional code-search-api, and the `code-search-mcp` compatibility key points to the bridge maintained under `code-search-api/mcp`.
 
 `tokens` wires Token Glace (current name; TokenJuice is the old name) and optional usage-tracker spend export.
 Use `brigade tokens status` / `doctor` and review-only `brigade tokens wire plan`.
@@ -1390,8 +1389,7 @@ Use `brigade tokens status` / `doctor` and review-only `brigade tokens wire plan
 
 `evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade never imports it.
 `brigade add evidence` installs miseledger and prints the crawl/export path.
-Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands, `brigade evidence crawl plan` to preview miseledger init/crawl/doctor commands, and `brigade evidence export plan` to preview `brigade receipts export miseledger --new-only --import`.
-These plan commands do not execute crawl or import. Product page: https://brigade.tools/miseledger.
+Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands. `brigade evidence crawl <args...>` and `brigade evidence search <args...>` relay a safe argv list to MiseLedger, preserving its text or JSON output and exit status. `brigade evidence crawl plan` still previews miseledger init/crawl/doctor commands, and `brigade evidence export plan` still previews `brigade receipts export miseledger --new-only --import`. Product page: https://brigade.tools/miseledger.
 
 Security commands:
 

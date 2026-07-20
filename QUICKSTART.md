@@ -194,10 +194,14 @@ Capture against an id you actually have: a skill you followed, a memory card (`-
 ```bash
 # optional stations (fail-open everywhere if absent)
 brigade add graphtrail          # or: cargo install graphtrail
-graphtrail sync                 # builds .graphtrail/graphtrail.db in the repo
+brigade code sync .             # explicitly runs local GraphTrail and builds .graphtrail/graphtrail.db
+brigade code context "auth receipt flow"
+brigade code impact brigade.work.verify.run
 brigade add evidence            # miseledger (process-boundary Go binary)
 
-# evidence station CLI (install / plan / health; does not crawl for you)
+# evidence station CLI: explicit local operations
+brigade evidence crawl sessions
+brigade evidence search "auth receipt flow"
 brigade evidence crawl plan     # review-only miseledger init + crawl commands
 brigade evidence doctor
 brigade evidence export plan    # review-only receipts export path
@@ -236,7 +240,11 @@ brigade pantry expiry-alert --send
 ```bash
 # GraphTrail code-graph + optional local semantic search
 brigade add search              # or: brigade add graphtrail
-brigade search sync plan        # review-only; does not run sync
+brigade code sync .             # preferred GraphTrail facade
+brigade code context "auth receipt flow"
+brigade code impact brigade.work.verify.run
+# `brigade search sync|context|impact` remain compatibility aliases.
+brigade search sync plan        # review-only; does not run GraphTrail
 brigade search doctor
 
 # Token Glace (output compaction; TokenJuice was the old name) + optional usage export

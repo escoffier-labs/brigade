@@ -34,6 +34,7 @@ from . import (
     add as _add_group,
     setup as _setup_group,
     stations as _stations_group,
+    code as _code_group,
     pantry as _pantry_group,
     evidence as _evidence_group,
     search as _search_group,
@@ -105,6 +106,20 @@ _EXTRAS_MODULES = {
 }
 
 
+_PASSTHROUGH_LEAVES = {
+    ("code", "sync"),
+    ("code", "context"),
+    ("code", "impact"),
+    ("evidence", "crawl"),
+    ("evidence", "search"),
+    ("search", "sync"),
+    ("search", "context"),
+    ("search", "impact"),
+}
+
+_PLAN_LEAVES = {("evidence", "crawl"), ("search", "sync")}
+
+
 def _register_extras(sub: argparse._SubParsersAction, name: str, extras_enabled: bool) -> None:
     if extras_enabled:
         _EXTRAS_MODULES[name].register(sub)
@@ -134,6 +149,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_group.register(sub)
     _setup_group.register(sub)
     _stations_group.register(sub)
+    _code_group.register(sub)
     _evidence_group.register(sub)
     _search_group.register(sub)
     _tokens_group.register(sub)
@@ -188,9 +204,24 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _peel_passthrough_engine_args(argv: list[str]) -> tuple[list[str], list[str] | None]:
+    """Keep opaque engine flags out of argparse for known passthrough leaves."""
+
+    leaf = tuple(argv[:2])
+    if leaf not in _PASSTHROUGH_LEAVES:
+        return argv, None
+    if leaf in _PLAN_LEAVES and len(argv) > 2 and argv[2] == "plan":
+        return argv, None
+    return argv[:2], argv[2:]
+
+
 def main(argv=None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parse_argv, engine_args = _peel_passthrough_engine_args(raw_argv)
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(parse_argv)
+    if engine_args is not None:
+        args.engine_args = engine_args
 
     # Command groups dispatch via set_defaults(func=...). The parser is attached
     # so dispatch functions can call parser.error for unreachable

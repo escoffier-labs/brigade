@@ -25,15 +25,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
-    p_crawl = evidence_sub.add_parser("crawl", help="Plan miseledger crawl without executing it.")
-    crawl_sub = p_crawl.add_subparsers(dest="evidence_crawl_command", metavar="<crawl-command>")
-    crawl_sub.required = True
-    p_crawl_plan = crawl_sub.add_parser("plan", help="Plan miseledger init/crawl/doctor commands.")
-    p_crawl_plan.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace for plan paths and --write."
-    )
-    p_crawl_plan.add_argument("--write", action="store_true", help="Write plan under .brigade/evidence/plans/.")
-    p_crawl_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_crawl = evidence_sub.add_parser("crawl", help="Run `miseledger crawl`, or use `crawl plan` to preview it.")
+    # Executable crawl arguments are intentionally opaque. `crawl plan` is
+    # parsed in dispatch to preserve the established plan command contract.
+    p_crawl.add_argument("engine_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    p_crawl.set_defaults(_brigade_command_contract_leaf=True, _brigade_legacy_plan=True)
+
+    p_search = evidence_sub.add_parser("search", help="Run `miseledger search`.")
+    p_search.add_argument("engine_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
 
     p_export = evidence_sub.add_parser("export", help="Plan receipt export into MiseLedger without executing it.")
     export_sub = p_export.add_subparsers(dest="evidence_export_command", metavar="<export-command>")
@@ -56,10 +55,12 @@ def dispatch(args) -> int:
     if args.evidence_command == "doctor":
         return evidence_cmd.doctor(target=args.target, json_output=args.json)
     if args.evidence_command == "crawl":
-        if args.evidence_crawl_command == "plan":
-            return evidence_cmd.crawl_plan(target=args.target, write=args.write, json_output=args.json)
-        args._brigade_parser.error(f"unknown evidence crawl command: {args.evidence_crawl_command}")
-        return 2
+        if args.engine_args and args.engine_args[0] == "plan":
+            plan_args = _crawl_plan_parser().parse_args(args.engine_args[1:])
+            return evidence_cmd.crawl_plan(target=plan_args.target, write=plan_args.write, json_output=plan_args.json)
+        return evidence_cmd.run_engine("crawl", args.engine_args)
+    if args.evidence_command == "search":
+        return evidence_cmd.run_engine("search", args.engine_args)
     if args.evidence_command == "export":
         if args.evidence_export_command == "plan":
             return evidence_cmd.export_plan(target=args.target, write=args.write, json_output=args.json)
@@ -67,3 +68,13 @@ def dispatch(args) -> int:
         return 2
     args._brigade_parser.error(f"unknown evidence command: {args.evidence_command}")
     return 2
+
+
+def _crawl_plan_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="brigade evidence crawl plan")
+    parser.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace for plan paths and --write."
+    )
+    parser.add_argument("--write", action="store_true", help="Write plan under .brigade/evidence/plans/.")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    return parser

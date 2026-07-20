@@ -42,6 +42,7 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
             "tools",
             "mcp",
             "evidence",
+            "code",
             "search",
             "tokens",
             "pantry",

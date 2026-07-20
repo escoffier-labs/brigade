@@ -1541,20 +1541,20 @@ func cmdSearch(args []string, out, errw io.Writer) int {
 	if err != nil {
 		return fatalf(errw, "search: %s", err)
 	}
-	if len(rest) < 1 {
-		return fatalf(errw, "usage: miseledger search <query>")
-	}
 	limit := 20
 	if values["limit"] != "" {
 		if _, err := fmt.Sscan(values["limit"], &limit); err != nil {
 			return fatalf(errw, "search: invalid --limit")
 		}
 	}
-	query := strings.Join(rest, " ")
 	codeReference, err := parseCodeReference(values["code-reference"])
 	if err != nil {
 		return fatalf(errw, "search: %s", err)
 	}
+	if len(rest) < 1 && codeReference == nil {
+		return fatalf(errw, "usage: miseledger search <query>")
+	}
+	query := strings.Join(rest, " ")
 	db, _, err := openMigrated()
 	if err != nil {
 		return fatalf(errw, "search: %s", err)
@@ -1905,6 +1905,9 @@ func search(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
 			return nil, err
 		}
 		if len(exact) != 0 {
+			return exact, nil
+		}
+		if opts.Query == "" {
 			return exact, nil
 		}
 	}

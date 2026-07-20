@@ -27,6 +27,11 @@ def _command_tree() -> dict[str, list[str]]:
             tree[" ".join(prefix)] = sorted(dict.fromkeys(children))
 
     walk(_build_parser(), ["brigade"])
+    # These legacy plan forms share an executable command's opaque engine
+    # arguments, so argparse cannot model both alternatives as subparsers.
+    # Keep them in the static completion contract explicitly.
+    for path in ("brigade search sync", "brigade evidence crawl"):
+        tree[path] = sorted(set(tree.get(path, []) + ["plan"]))
     return tree
 
 
