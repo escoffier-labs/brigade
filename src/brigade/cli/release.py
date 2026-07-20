@@ -132,6 +132,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_release_candidate_plan.add_argument(
         "--base-ref", default="origin/main", help="Base ref for changed files and release notes."
     )
+    p_release_candidate_plan.add_argument(
+        "--guard-policy",
+        help="Bundled guard policy name or path used to sanitize commit messages (default: public-repo).",
+    )
     p_release_candidate_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_release_candidate_build = release_candidate_sub.add_parser(
         "build", help="Build a local release candidate bundle."
@@ -141,6 +145,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_release_candidate_build.add_argument(
         "--base-ref", default="origin/main", help="Base ref for changed files and release notes."
+    )
+    p_release_candidate_build.add_argument(
+        "--guard-policy",
+        help="Bundled guard policy name or path used to sanitize commit messages (default: public-repo).",
     )
     p_release_candidate_build.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_release_candidate_list = release_candidate_sub.add_parser("list", help="List local release candidate bundles.")
@@ -263,9 +271,19 @@ def dispatch(args) -> int:
         return 2
     if args.release_command == "candidate":
         if args.release_candidate_command == "plan":
-            return release_cmd.candidate_plan(target=args.target, base_ref=args.base_ref, json_output=args.json)
+            return release_cmd.candidate_plan(
+                target=args.target,
+                base_ref=args.base_ref,
+                guard_policy=args.guard_policy,
+                json_output=args.json,
+            )
         if args.release_candidate_command == "build":
-            return release_cmd.candidate_build(target=args.target, base_ref=args.base_ref, json_output=args.json)
+            return release_cmd.candidate_build(
+                target=args.target,
+                base_ref=args.base_ref,
+                guard_policy=args.guard_policy,
+                json_output=args.json,
+            )
         if args.release_candidate_command == "list":
             return release_cmd.candidate_list(target=args.target, limit=args.limit, json_output=args.json)
         if args.release_candidate_command == "show":

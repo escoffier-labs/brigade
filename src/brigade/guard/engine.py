@@ -34,6 +34,10 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
             start, end = match.span()
             if start == end:
                 continue
+            if rule.id == "email" and active_policy.allows_agent_coauthor_email(
+                match.group(0), _line_at(text, start, end)
+            ):
+                continue
             if _inside_ranges(start, end, skipped_ranges):
                 continue
             if _overlaps(start, end, occupied):
@@ -190,6 +194,12 @@ def _line_starts(text: str) -> list[int]:
     for match in re.finditer("\n", text):
         starts.append(match.end())
     return starts
+
+
+def _line_at(text: str, start: int, end: int) -> str:
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    return text[line_start:] if line_end == -1 else text[line_start:line_end]
 
 
 def _line_for_offset(starts: list[int], offset: int) -> int:

@@ -449,8 +449,40 @@ def test_release_cli(tmp_path, monkeypatch):
     assert cli.main(["release", "runs", "--target", str(tmp_path), "--limit", "3", "--json"]) == 0
     assert cli.main(["release", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["release", "schema", "--target", str(tmp_path), "--json"]) == 0
-    assert cli.main(["release", "candidate", "plan", "--target", str(tmp_path), "--base-ref", "main", "--json"]) == 0
-    assert cli.main(["release", "candidate", "build", "--target", str(tmp_path), "--base-ref", "main", "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "release",
+                "candidate",
+                "plan",
+                "--target",
+                str(tmp_path),
+                "--base-ref",
+                "main",
+                "--guard-policy",
+                "in-house-repo",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "release",
+                "candidate",
+                "build",
+                "--target",
+                str(tmp_path),
+                "--base-ref",
+                "main",
+                "--guard-policy",
+                "in-house-repo",
+                "--json",
+            ]
+        )
+        == 0
+    )
     assert cli.main(["release", "candidate", "list", "--target", str(tmp_path), "--limit", "4", "--json"]) == 0
     assert cli.main(["release", "candidate", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["release", "candidate", "archive", "latest", "--target", str(tmp_path), "--json"]) == 0
@@ -466,8 +498,14 @@ def test_release_cli(tmp_path, monkeypatch):
         ("runs", {"target": tmp_path, "limit": 3, "json_output": True}),
         ("show", {"target": tmp_path, "run_id": "latest", "json_output": True}),
         ("schema", {"target": tmp_path, "json_output": True}),
-        ("candidate_plan", {"target": tmp_path, "base_ref": "main", "json_output": True}),
-        ("candidate_build", {"target": tmp_path, "base_ref": "main", "json_output": True}),
+        (
+            "candidate_plan",
+            {"target": tmp_path, "base_ref": "main", "guard_policy": "in-house-repo", "json_output": True},
+        ),
+        (
+            "candidate_build",
+            {"target": tmp_path, "base_ref": "main", "guard_policy": "in-house-repo", "json_output": True},
+        ),
         ("candidate_list", {"target": tmp_path, "limit": 4, "json_output": True}),
         ("candidate_show", {"target": tmp_path, "candidate_id": "latest", "json_output": True}),
         ("candidate_archive", {"target": tmp_path, "candidate_id": "latest", "json_output": True}),
@@ -763,11 +801,38 @@ def test_release_candidate_notes_and_publish_plan(tmp_path, monkeypatch, capsys)
     (docs / "release-candidates.md").write_text("docs\n")
     subprocess.run(["git", "add", "CHANGELOG.md", "docs/release-candidates.md"], cwd=tmp_path, check=True)
     subprocess.run(
-        ["git", "commit", "-m", "add release candidate docs"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL
+        [
+            "git",
+            "commit",
+            "-m",
+            "add release candidate docs",
+            "-m",
+            "Co-authored-by: Codex <codex@openai.com>",
+        ],
+        cwd=tmp_path,
+        check=True,
+        stdout=subprocess.DEVNULL,
     )
 
     assert release_cmd.run(target=tmp_path, base_ref="HEAD~1", json_output=True) == 0
     capsys.readouterr()
+    inhouse_policy_path = (
+        Path(__file__).resolve().parents[1] / "src" / "brigade" / "guard" / "policies" / "in-house-repo.json"
+    )
+    assert (
+        release_cmd.candidate_plan(
+            target=tmp_path,
+            base_ref="HEAD~1",
+            guard_policy=inhouse_policy_path,
+            json_output=True,
+        )
+        == 0
+    )
+    plan_payload = json.loads(capsys.readouterr().out)
+    assert plan_payload["release_notes_inputs"]["commit_subjects"] == [
+        "add release candidate docs\n\nCo-authored-by: Codex <codex@openai.com>"
+    ]
+
     assert release_cmd.candidate_build(target=tmp_path, base_ref="HEAD~1", json_output=True) == 0
     candidate = json.loads(capsys.readouterr().out)
     candidate_dir = Path(candidate["path"])
@@ -776,11 +841,25 @@ def test_release_candidate_notes_and_publish_plan(tmp_path, monkeypatch, capsys)
 
     assert "Add release candidate bundles." in notes
     assert "add release candidate docs" in notes
+    assert "Co-authored-by:" not in notes
     assert "`docs/release-candidates.md`" in notes
     assert "Manual-only remote step" in plan
     assert "git tag <version>" in plan
     assert "git push origin" in plan
     assert "gh release create <version>" in plan
+
+    assert (
+        release_cmd.candidate_build(
+            target=tmp_path,
+            base_ref="HEAD~1",
+            guard_policy="in-house-repo",
+            json_output=True,
+        )
+        == 0
+    )
+    inhouse_candidate = json.loads(capsys.readouterr().out)
+    inhouse_notes = Path(inhouse_candidate["path"], "RELEASE_NOTES_DRAFT.md").read_text()
+    assert "Co-authored-by: Codex <codex@openai.com>" in inhouse_notes
 
 
 def test_release_candidate_health_warnings(tmp_path, monkeypatch, capsys):

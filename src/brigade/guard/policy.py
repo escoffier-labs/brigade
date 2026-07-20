@@ -19,6 +19,15 @@ from .types import Action, Rule
 
 VALID_ACTIONS: set[str] = {"allow", "warn", "redact", "block"}
 
+_AGENT_COAUTHOR_EMAIL = (
+    r"(?:noreply@anthropic\.com|codex@openai\.com|cursoragent@cursor\.com|"
+    r"[0-9]+@users\.noreply\.github\.com)"
+)
+_ALLOWED_AGENT_COAUTHOR_TRAILER = re.compile(
+    rf"^Co-authored-by:\s*[^<\r\n]+<(?P<email>{_AGENT_COAUTHOR_EMAIL})>\s*$", re.IGNORECASE
+)
+_UNAPPROVED_COAUTHOR_TRAILER = rf"^Co-authored-by:\s*(?![^\r\n]*<{_AGENT_COAUTHOR_EMAIL}>\s*\r?$).+(?:\r?\n)?"
+
 
 # Per-rule action defaults that override category-level defaults. Each entry
 # represents "this rule should default to X unless the user's policy.rules map
@@ -69,6 +78,10 @@ class Policy:
     # inline marker can exist. Keep personal or environment-specific values in
     # a private policy file, never in a shipped public default policy.
     allow_values: list[str] = field(default_factory=list)
+    # In-house commit and repository scans may retain only the explicitly
+    # approved agent attribution addresses. Outbound prose policies leave this
+    # disabled, so every co-author trailer is still removed.
+    allow_agent_coauthors: bool = False
     opf_backend: OpfBackendConfig = field(default_factory=OpfBackendConfig)
 
     def action_for(self, rule: Rule) -> Action:
@@ -97,7 +110,30 @@ class Policy:
                     description="Known internal host or IP (policy-defined).",
                 )
             )
-        return [*known_rule, *DEFAULT_RULES, *self.custom_rules]
+        default_rules = list(DEFAULT_RULES)
+        if self.allow_agent_coauthors:
+            default_rules = [
+                Rule(
+                    id=rule.id,
+                    category=rule.category,
+                    pattern=_UNAPPROVED_COAUTHOR_TRAILER,
+                    replacement=rule.replacement,
+                    description=rule.description,
+                    flags=rule.flags,
+                )
+                if rule.id == "coauthored-by-trailer"
+                else rule
+                for rule in default_rules
+            ]
+        coauthor_rules = [rule for rule in default_rules if rule.id == "coauthored-by-trailer"]
+        default_rules = [rule for rule in default_rules if rule.id != "coauthored-by-trailer"]
+        default_rules = [*coauthor_rules, *default_rules]
+        return [*known_rule, *default_rules, *self.custom_rules]
+
+    def allows_agent_coauthor_email(self, email: str, line: str) -> bool:
+        """Allow only the approved bracketed address in an approved trailer."""
+        trailer = _ALLOWED_AGENT_COAUTHOR_TRAILER.fullmatch(line.rstrip("\r\n"))
+        return bool(self.allow_agent_coauthors and trailer and trailer.group("email").casefold() == email.casefold())
 
 
 def _as_action(value: Any, where: str) -> Action:
@@ -145,6 +181,7 @@ def load_policy(path: str | PathLike[str] | Traversable | None) -> Policy:
     custom_rules = [_parse_custom_rule(item, i) for i, item in enumerate(raw.get("custom_rules", []))]
     known_hosts = _parse_known_hosts(raw.get("known_hosts"))
     allow_values = _parse_allow_values(raw.get("allow_values"))
+    allow_agent_coauthors = _parse_allow_agent_coauthors(raw.get("allow_agent_coauthors"))
     opf_backend = _parse_opf_backend(
         raw.get("backends", {}).get("opf") if isinstance(raw.get("backends"), dict) else None
     )
@@ -158,6 +195,7 @@ def load_policy(path: str | PathLike[str] | Traversable | None) -> Policy:
         custom_rules=custom_rules,
         known_hosts=known_hosts,
         allow_values=allow_values,
+        allow_agent_coauthors=allow_agent_coauthors,
         opf_backend=OpfBackendConfig(
             enabled=opf_backend.enabled,
             device=opf_backend.device,
@@ -190,6 +228,14 @@ def _parse_allow_values(raw: Any) -> list[str]:
             raise ValueError(f"allow_values[{i}] must be a non-empty string")
         values.append(entry)
     return values
+
+
+def _parse_allow_agent_coauthors(raw: Any) -> bool:
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise ValueError("allow_agent_coauthors must be a boolean")
+    return raw
 
 
 def _parse_custom_rule(item: Any, index: int) -> Rule:
