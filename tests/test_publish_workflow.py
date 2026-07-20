@@ -84,6 +84,17 @@ def test_publish_workflow_builds_the_complete_native_matrix_then_attests_and_rel
     assert assemble < release < release_gate < pypi < acceptance
 
 
+def test_go_native_build_disables_setup_go_cache_for_the_cross_platform_matrix():
+    text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
+    section = text[text.index("  build-go-native:") : text.index("  assemble-release:")]
+
+    setup_go = section[
+        section.index("      - uses: actions/setup-go@v5") : section.index("      - name: Build pure-Go")
+    ]
+    assert "go-version: stable" in setup_go
+    assert "cache: false" in setup_go
+
+
 def test_publish_acceptance_covers_native_arm64_and_rosetta_without_self_hosted_runner():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     section = text[text.index("  published-artifact-acceptance:") :]

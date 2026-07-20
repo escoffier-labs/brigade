@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from unittest.mock import patch
 import pytest
 
@@ -172,6 +173,51 @@ def test_default_http_rejects_api_redirect_outside_exact_api_path():
     ):
         with pytest.raises(update_cmd.UpdateError, match="GitHub API request redirected"):
             update_cmd._DefaultHttp().json(url)
+
+
+def test_cache_manifest_preserves_verified_crlf_bytes_without_text_round_trip(tmp_path, monkeypatch):
+    manifest_bytes = b'{"schema_version":1}\r\n'
+    release = update_cmd.ResolvedRelease(
+        42,
+        TAG,
+        VERSION,
+        "a" * 40,
+        BASE + "component-manifest-v1.json",
+        len(manifest_bytes),
+        hashlib.sha256(manifest_bytes).hexdigest(),
+        manifest_bytes,
+    )
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
+    monkeypatch.setattr(
+        update_cmd.localio,
+        "write_text_atomic",
+        lambda *_args: pytest.fail("verified manifest cache must not use a text write"),
+    )
+
+    cached = update_cmd._cache_manifest(paths, release)
+
+    assert cached.read_bytes() == manifest_bytes
+
+
+def test_cache_manifest_rejects_existing_bytes_for_the_same_digest_path(tmp_path):
+    manifest_bytes = b'{"schema_version":1}\r\n'
+    release = update_cmd.ResolvedRelease(
+        42,
+        TAG,
+        VERSION,
+        "a" * 40,
+        BASE + "component-manifest-v1.json",
+        len(manifest_bytes),
+        hashlib.sha256(manifest_bytes).hexdigest(),
+        manifest_bytes,
+    )
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
+    cached = Path(update_cmd.component_paths.verified_manifest_path(str(paths.cache_root), release.manifest_sha256))
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"different manifest")
+
+    with pytest.raises(update_cmd.UpdateError, match="verified manifest cache digest collision"):
+        update_cmd._cache_manifest(paths, release)
 
 
 def test_beta_check_runs_paginate_and_require_every_run_to_pass():

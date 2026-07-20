@@ -403,7 +403,7 @@ def _cache_manifest(paths: UpdatePaths, release: ResolvedRelease) -> Path:
         if target.read_bytes() == release.manifest_bytes:
             return target
         raise UpdateError(f"verified manifest cache digest collision: {target}")
-    localio.write_text_atomic(target, release.manifest_bytes.decode("utf-8"))
+    localio.write_bytes_atomic(target, release.manifest_bytes)
     return target
 
 

@@ -1082,7 +1082,7 @@ def _loop_stations_payload(target: Path) -> dict[str, Any]:
         ledger = {
             "ok": False,
             "status": "missing-bin",
-            "detail": "miseledger not on PATH (run `brigade setup`)",
+            "detail": "miseledger not on PATH (run `brigade setup`; go install is one-release compatibility only)",
         }
 
     rates: list[float] = []

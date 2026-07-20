@@ -122,6 +122,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
+          cache: false
       - name: Build pure-Go component binaries
         env:
           CGO_ENABLED: '0'

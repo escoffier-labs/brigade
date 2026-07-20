@@ -101,6 +101,17 @@ def test_operator_checkup_loop_reports_graph_ledger_and_brief_hit_rate(monkeypat
     assert payload["loop"]["context_eval"]["sample_count"] == 1
 
 
+def test_loop_stations_missing_miseledger_explains_go_install_is_one_release_compatibility(monkeypatch, tmp_path):
+    monkeypatch.setattr("brigade.context_cmd._graphtrail_bin", lambda: None)
+    monkeypatch.setattr("brigade.evidence_brief._miseledger_bin", lambda: None)
+
+    payload = lifecycle._loop_stations_payload(tmp_path)
+
+    assert payload["ledger"]["detail"] == (
+        "miseledger not on PATH (run `brigade setup`; go install is one-release compatibility only)"
+    )
+
+
 def test_operator_checkup_cli_dispatch(monkeypatch, tmp_path):
     seen = {}
 

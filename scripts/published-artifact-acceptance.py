@@ -171,6 +171,8 @@ def verify_release_assets(
             for platform in SUPPORTED_PLATFORMS
             if name == f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
         )
+        if platform != "windows-amd64":
+            path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         native_paths[component][platform] = path
     return {"manifest": manifest, "native_paths": native_paths}
 
