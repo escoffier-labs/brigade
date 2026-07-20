@@ -1,6 +1,10 @@
 import json
 import os
+import signal
 import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -10,6 +14,7 @@ from brigade import agents
 from brigade import context_eval
 from brigade import evidence_brief
 from brigade import proc
+from brigade import runguard
 from brigade.roster import Agent, Roster
 from tests.work_cmd_test_helpers import _init_git_repo
 
@@ -405,6 +410,24 @@ def test_context_eval_reports_sorted_hits_misses_and_rate():
     }
 
 
+@pytest.mark.parametrize("signal_type", [KeyboardInterrupt, SystemExit])
+def test_context_eval_extractors_propagate_process_signals(monkeypatch, signal_type):
+    class SignalPattern:
+        def finditer(self, text):  # noqa: ARG002
+            raise signal_type()
+
+    class SignalMapping(dict):
+        def get(self, key, default=None):  # noqa: ARG002
+            raise signal_type()
+
+    monkeypatch.setattr(context_eval, "_BACKTICK_RE", SignalPattern())
+    with pytest.raises(signal_type):
+        context_eval.extract_brief_files("src/brigade/context_eval.py")
+
+    with pytest.raises(signal_type):
+        context_eval.extract_delta_files(SignalMapping())
+
+
 def test_context_eval_for_run_returns_none_when_stale_graph_used(tmp_path):
     brief = aboyeur.CodeGraphBrief(
         attached=True,
@@ -423,6 +446,30 @@ def test_context_eval_for_run_returns_none_when_stale_graph_used(tmp_path):
     }
 
     assert aboyeur._context_eval_for_run(brief, delta) is None
+
+
+@pytest.mark.parametrize("signal_type", [KeyboardInterrupt, SystemExit])
+def test_context_eval_for_run_propagates_process_signals(monkeypatch, tmp_path, signal_type):
+    brief = aboyeur.CodeGraphBrief(attached=True, text="- `src/brigade/aboyeur.py:10`", bytes=36)
+    delta = {"ok": True, "sidecar_path": str(tmp_path / "graph-delta.json")}
+
+    def raise_signal(path):
+        raise signal_type()
+
+    monkeypatch.setattr(aboyeur.context_eval, "extract_delta_files", raise_signal)
+
+    with pytest.raises(signal_type):
+        aboyeur._context_eval_for_run(brief, delta)
+
+
+@pytest.mark.parametrize("signal_type", [KeyboardInterrupt, SystemExit])
+def test_context_eval_fact_propagates_process_signals(signal_type):
+    class SignalMapping(dict):
+        def get(self, key, default=None):
+            raise signal_type()
+
+    with pytest.raises(signal_type):
+        aboyeur._context_eval_fact(SignalMapping())
 
 
 def test_ground_truth_facts_surface_context_eval_metric_once():
@@ -1069,6 +1116,7 @@ def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_
         "phase": "output-validation",
         "kind": "non-final-output",
         "detail": "provider returned progress or intent without a final result",
+        "seat": "coder",
     }
     synthesis = json.loads((output_dir / "synthesis.json").read_text())
     assert synthesis["mode"] == "direct-worker"
@@ -1424,6 +1472,188 @@ def test_run_defers_success_until_worktree_artifact_collection(monkeypatch, tmp_
     assert "duration_seconds" in run_payload
 
 
+def test_record_run_termination_is_idempotent_for_finished_receipt(tmp_path):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    run_path = output_dir / "run.json"
+    run_path.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "started_at": "2026-07-19T12:00:00Z",
+                "finished_at": "2026-07-19T12:00:01Z",
+                "failure_phase": "planning",
+                "failure": {
+                    "phase": "planning",
+                    "kind": "invalid-plan",
+                    "detail": "specific planning failure",
+                    "seat": "chef",
+                },
+            }
+        )
+        + "\n"
+    )
+    before = run_path.read_bytes()
+
+    aboyeur.record_run_termination(
+        output_dir,
+        status="failed",
+        failure_phase="run",
+        failure_kind="unexpected-error",
+        detail="fallback failure",
+        seat="chef",
+    )
+
+    assert run_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("primary_status", ["ok", "failed", "timeout", "canceled", "handoff-failed", "interrupted"])
+def test_artifact_collection_failure_preserves_terminal_primary_receipt(tmp_path, primary_status):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    run_path = output_dir / "run.json"
+    primary = {
+        "status": primary_status,
+        "started_at": "2026-07-19T12:00:00Z",
+        "finished_at": "2026-07-19T12:00:01Z",
+        "error": "primary failure",
+        "failure_phase": "inference",
+        "failure": {
+            "phase": "inference",
+            "kind": "provider-error",
+            "detail": "primary failure",
+            "seat": "coder",
+            "reason": "provider stopped",
+        },
+    }
+    run_path.write_text(json.dumps(primary) + "\n")
+
+    aboyeur.record_artifact_collection(
+        output_dir,
+        status="failed",
+        failure_phase="artifact-validation",
+        failure_kind="invalid-patch",
+        detail="changes.patch failed validation",
+    )
+
+    receipt = json.loads(run_path.read_text())
+    assert {key: receipt[key] for key in primary} == primary
+    assert receipt["artifact_collection"]["failure"] == {
+        "phase": "artifact-validation",
+        "kind": "invalid-patch",
+        "detail": "changes.patch failed validation",
+    }
+
+
+@pytest.mark.parametrize("escape", ["keyboard", "sigterm"])
+def test_post_dispatch_escape_uses_result_processing_phase_owner(monkeypatch, tmp_path, escape):
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(
+        aboyeur,
+        "plan",
+        lambda *args, **kwargs: [aboyeur.Assignment(worker="coder", task="implement")],
+    )
+    monkeypatch.setattr(
+        aboyeur,
+        "dispatch",
+        lambda *args, **kwargs: [aboyeur.WorkerResult(worker="coder", task="implement", text="done", ok=True)],
+    )
+    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda *args, **kwargs: {})
+
+    def interrupt_after_dispatch(*args, **kwargs):  # noqa: ARG001
+        receipt = json.loads((output_dir / "run.json").read_text())
+        assert receipt["status"] == "result-processing"
+        assert receipt["phase_owner"] == "chef"
+        assert "active_stage" not in receipt
+        assert "active_seats" not in receipt
+        if escape == "sigterm":
+            signal.raise_signal(signal.SIGTERM)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", interrupt_after_dispatch)
+
+    expected_kind = "signal" if escape == "sigterm" else "keyboard-interrupt"
+    expected_exception = SystemExit if escape == "sigterm" else KeyboardInterrupt
+    with pytest.raises(expected_exception):
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            worker="coder",
+            cwd=tmp_path,
+            output_dir=output_dir,
+            route_enabled=False,
+        )
+
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["status"] == "canceled"
+    assert receipt["failure"]["phase"] == "result-processing"
+    assert receipt["failure"]["kind"] == expected_kind
+    assert receipt["failure"]["seat"] == "chef"
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="requires POSIX timezone control")
+@pytest.mark.parametrize("terminalizer", ["artifact", "termination"])
+def test_legacy_naive_started_at_is_treated_as_utc(tmp_path, terminalizer):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    started_at = (datetime.now(timezone.utc) - timedelta(seconds=10)).replace(tzinfo=None).isoformat()
+    status = "artifact-collection" if terminalizer == "artifact" else "dispatching"
+    (output_dir / "run.json").write_text(json.dumps({"status": status, "started_at": started_at}) + "\n")
+
+    prior_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/New_York"
+    time.tzset()
+    try:
+        if terminalizer == "artifact":
+            aboyeur.record_artifact_collection(output_dir, status="ok")
+        else:
+            aboyeur.record_run_termination(
+                output_dir,
+                status="canceled",
+                failure_phase="dispatch",
+                failure_kind="signal",
+                detail="canceled",
+                seat="coder",
+            )
+    finally:
+        if prior_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = prior_tz
+        time.tzset()
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert 5 <= run_meta["duration_seconds"] <= 30
+
+
+def test_record_run_termination_write_error_retains_run_lock(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output_dir = workspace / ".brigade" / "runs" / "active"
+    output_dir.mkdir(parents=True)
+    (output_dir / "run.json").write_text(
+        json.dumps({"status": "dispatching", "started_at": "2026-07-19T12:00:00Z"}) + "\n"
+    )
+    monkeypatch.setattr(
+        aboyeur,
+        "_write_json",
+        lambda path, payload: (_ for _ in ()).throw(OSError("receipt disk full")),
+    )
+
+    with pytest.raises(runguard.RetainRunLockError, match="failed to write terminal run receipt: receipt disk full"):
+        with runguard.run_lock(workspace, run_dir=output_dir):
+            aboyeur.record_run_termination(
+                output_dir,
+                status="failed",
+                failure_phase="dispatch",
+                failure_kind="unexpected-error",
+                detail="provider failed",
+                seat="coder",
+            )
+
+    assert runguard.lock_path(workspace).is_dir()
+
+
 def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
     def fake_run_agent(cli_ref, prompt, **kwargs):
         return agents.AgentResult(
@@ -1457,6 +1687,40 @@ def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
     synthesis = json.loads((output_dir / "synthesis.json").read_text())["result"]
     assert synthesis["stdout_log"] == worker_payload["stdout_log"]
     assert synthesis["stderr_log"] == worker_payload["stderr_log"]
+
+
+def test_run_direct_worker_preserves_timeout_as_terminal_status(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        return agents.AgentResult(
+            text="",
+            ok=False,
+            detail="worker timed out",
+            timed_out=True,
+        )
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert (
+        aboyeur.run(
+            "do exactly this",
+            _roster(),
+            worker="coder",
+            output_dir=output_dir,
+            route_enabled=False,
+        )
+        == 2
+    )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "timeout"
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["failure"] == {
+        "phase": "inference",
+        "kind": "timeout",
+        "detail": "worker timed out",
+        "seat": "coder",
+    }
 
 
 def test_run_direct_worker_dry_run_skips_agents_and_writes_synthetic_plan(monkeypatch, tmp_path, capsys):
@@ -1528,6 +1792,182 @@ def test_run_dispatches_stages_in_order_with_earlier_context(monkeypatch):
     assert calls[-1][0] == "codex"
     assert "implementation output" in calls[-1][1]
     assert "review output" in calls[-1][1]
+
+
+def test_run_stage_two_interruption_records_current_stage_seat(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        calls.append(cli_ref)
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps(
+                    {
+                        "assignments": [
+                            {"stage": 1, "worker": "coder", "task": "implement"},
+                            {"stage": 2, "worker": "reviewer", "task": "review"},
+                        ]
+                    }
+                ),
+                ok=True,
+            )
+        if len(calls) == 2:
+            return agents.AgentResult(text="implemented", ok=True)
+        raise KeyboardInterrupt
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    with pytest.raises(KeyboardInterrupt):
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    assert run_meta["active_stage"] == 2
+    assert run_meta["active_seats"] == ["reviewer"]
+    assert run_meta["status_started_at"].endswith("Z")
+    assert run_meta["failure"] == {
+        "phase": "dispatch",
+        "kind": "keyboard-interrupt",
+        "detail": "run canceled by user",
+        "seat": "reviewer",
+    }
+
+
+def test_run_terminalizes_keyboard_interrupt_during_planning_without_cli(monkeypatch, tmp_path):
+    output_dir = tmp_path / "run"
+
+    def interrupted_plan(*args, **kwargs):  # noqa: ARG001
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(aboyeur, "plan", interrupted_plan)
+
+    with pytest.raises(KeyboardInterrupt):
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["failure"] == {
+        "phase": "planning",
+        "kind": "keyboard-interrupt",
+        "detail": "run canceled by user",
+        "seat": "chef",
+    }
+
+
+def test_run_terminalizes_unexpected_synthesis_error_without_cli(monkeypatch, tmp_path):
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(
+        aboyeur,
+        "plan",
+        lambda *args, **kwargs: [aboyeur.Assignment(worker="coder", task="implement")],
+    )
+    monkeypatch.setattr(
+        aboyeur,
+        "dispatch",
+        lambda *args, **kwargs: [aboyeur.WorkerResult(worker="coder", task="implement", text="done", ok=True)],
+    )
+
+    def failed_synthesis(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("synthesis exploded")
+
+    monkeypatch.setattr(aboyeur, "_run_orchestrator", failed_synthesis)
+
+    with pytest.raises(RuntimeError, match="synthesis exploded"):
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["failure"] == {
+        "phase": "synthesis",
+        "kind": "unexpected-error",
+        "detail": "RuntimeError: synthesis exploded",
+        "seat": "chef",
+    }
+
+
+def test_direct_run_terminalizes_sigterm_in_subprocess(tmp_path):
+    output_dir = tmp_path / "run"
+    script = f"""
+import time
+from pathlib import Path
+from brigade import aboyeur
+from brigade.roster import Agent, Roster
+
+roster = Roster(
+    orchestrator="chef",
+    agents={{
+        "chef": Agent("chef", "codex", "plan"),
+        "coder": Agent("coder", "codex", "code"),
+    }},
+)
+
+def blocked_plan(*args, **kwargs):
+    while True:
+        time.sleep(0.05)
+
+aboyeur.plan = blocked_plan
+aboyeur.run(
+    "build feature",
+    roster,
+    output_dir=Path({str(output_dir)!r}),
+    code_graph_enabled=False,
+    route_enabled=False,
+)
+"""
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    proc = subprocess.Popen([sys.executable, "-c", script], env=child_env)
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                run_meta = json.loads((output_dir / "run.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                time.sleep(0.02)
+                continue
+            if run_meta.get("status") == "planning":
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("direct run did not reach planning before SIGTERM")
+
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=5) == 128 + signal.SIGTERM
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["failure"] == {
+        "phase": "planning",
+        "kind": "signal",
+        "detail": "run terminated by SIGTERM",
+        "seat": "chef",
+    }
 
 
 def test_run_uses_roster_timeouts(monkeypatch):
@@ -1676,6 +2116,7 @@ def test_direct_acpx_auth_failure_reaches_worker_run_receipt_and_human_summary(m
         "phase": "preflight",
         "kind": "provider-auth",
         "detail": diagnosis,
+        "seat": "composer",
     }
 
 
@@ -2557,12 +2998,57 @@ def test_invalid_plan_writes_attempt_artifact(monkeypatch, tmp_path, capsys):
     assert run_meta["started_at"].endswith("Z")
     assert run_meta["finished_at"].endswith("Z")
     assert run_meta["duration_seconds"] >= 0
+    assert run_meta["failure"] == {
+        "phase": "planning",
+        "kind": "invalid-plan",
+        "detail": "orchestrator returned an invalid plan: plan is not valid JSON: Expecting value: line 1 column 1 (char 0)",
+        "seat": "chef",
+    }
     attempts = json.loads((output_dir / "plan-attempts.json").read_text())["attempts"]
     assert [attempt["stage"] for attempt in attempts] == ["initial", "correction"]
     assert [attempt["parsed"] for attempt in attempts] == [False, False]
     assert all(attempt["text"] == "not json" for attempt in attempts)
+    assert all(attempt["timed_out"] is False for attempt in attempts)
+    assert all(attempt["status"] == "" for attempt in attempts)
     assert all("plan is not valid JSON" in attempt["parse_error"] for attempt in attempts)
     assert not (output_dir / "plan.json").exists()
+
+
+def test_plan_timeout_writes_terminal_timeout_receipt(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        return agents.AgentResult(
+            text="",
+            ok=False,
+            detail="planner timed out",
+            timed_out=True,
+            status="timeout",
+        )
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert (
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 2
+    )
+
+    attempt = json.loads((output_dir / "plan-attempts.json").read_text())["attempts"][0]
+    assert attempt["timed_out"] is True
+    assert attempt["status"] == "timeout"
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "timeout"
+    assert run_meta["failure"] == {
+        "phase": "planning",
+        "kind": "timeout",
+        "detail": "orchestrator failed during plan: planner timed out",
+        "seat": "chef",
+    }
 
 
 def test_plan_output_validation_failure_preserves_typed_receipts(monkeypatch, tmp_path):
@@ -2585,8 +3071,12 @@ def test_plan_output_validation_failure_preserves_typed_receipts(monkeypatch, tm
     assert attempt["failure_kind"] == "non-final-output"
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["status"] == "failed"
-    assert run_meta["failure_phase"] == "output-validation"
-    assert run_meta["failure"]["kind"] == "non-final-output"
+    assert run_meta["failure"] == {
+        "phase": "planning",
+        "kind": "non-final-output",
+        "detail": "orchestrator failed during plan: provider returned progress or intent without a final result",
+        "seat": "chef",
+    }
 
 
 def test_synthesis_failure_writes_artifact(monkeypatch, tmp_path, capsys):
@@ -2639,7 +3129,17 @@ def test_run_writes_handoff(monkeypatch, tmp_path, capsys):
 
     inbox = tmp_path / ".claude" / "memory-handoffs"
     output_dir = tmp_path / "run"
+    original_write_handoff = aboyeur.write_run_handoff
+
+    def observed_write_handoff(*args, **kwargs):
+        run_meta = json.loads((output_dir / "run.json").read_text())
+        assert run_meta["status"] == "handoff"
+        assert "finished_at" not in run_meta
+        assert (output_dir / "final.txt").read_text() == "final answer\n## model heading\n"
+        return original_write_handoff(*args, **kwargs)
+
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(aboyeur, "write_run_handoff", observed_write_handoff)
 
     assert (
         aboyeur.run(
@@ -2683,6 +3183,9 @@ def test_handoff_failure_preserves_final_artifacts(monkeypatch, tmp_path, capsys
         return agents.AgentResult(text="final answer", ok=True)
 
     def fail_handoff(*args, **kwargs):
+        run_meta = json.loads((output_dir / "run.json").read_text())
+        assert run_meta["status"] == "handoff"
+        assert "finished_at" not in run_meta
         raise OSError("cannot write handoff")
 
     output_dir = tmp_path / "run"
@@ -2695,12 +3198,181 @@ def test_handoff_failure_preserves_final_artifacts(monkeypatch, tmp_path, capsys
     assert "handoff failed: cannot write handoff" in captured.err
     assert (output_dir / "final.txt").read_text() == "final answer\n"
     run_meta = json.loads((output_dir / "run.json").read_text())
-    assert run_meta["status"] == "handoff-failed"
+    assert run_meta["status"] == "failed"
     assert run_meta["error"] == "handoff failed: cannot write handoff"
+    assert run_meta["failure_phase"] == "handoff"
+    assert run_meta["failure"] == {
+        "phase": "handoff",
+        "kind": "handoff-write-error",
+        "detail": "handoff failed: cannot write handoff",
+        "seat": "chef",
+    }
     assert run_meta["artifacts"] == str(output_dir)
     assert run_meta["started_at"].endswith("Z")
     assert run_meta["finished_at"].endswith("Z")
     assert run_meta["duration_seconds"] >= 0
+
+
+@pytest.mark.parametrize(
+    ("exception", "status", "kind", "detail"),
+    [
+        (KeyboardInterrupt(), "canceled", "keyboard-interrupt", "run canceled by user"),
+        (RuntimeError("handoff exploded"), "failed", "unexpected-error", "RuntimeError: handoff exploded"),
+    ],
+)
+def test_handoff_escape_terminalizes_nonterminal_receipt(monkeypatch, tmp_path, exception, status, kind, detail):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        calls.append(cli_ref)
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    def fail_handoff(*args, **kwargs):
+        run_meta = json.loads((output_dir / "run.json").read_text())
+        assert run_meta["status"] == "handoff"
+        assert "finished_at" not in run_meta
+        raise exception
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(aboyeur, "write_run_handoff", fail_handoff)
+
+    with pytest.raises(type(exception)):
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            output_dir=output_dir,
+            handoff_inbox=tmp_path / "handoffs",
+            route_enabled=False,
+        )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == status
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["failure"] == {
+        "phase": "handoff",
+        "kind": kind,
+        "detail": detail,
+        "seat": "chef",
+    }
+
+
+def test_handoff_sigterm_terminalizes_nonterminal_receipt(tmp_path):
+    output_dir = tmp_path / "run"
+    script = f"""
+import json
+import time
+from pathlib import Path
+from brigade import aboyeur, agents
+from brigade.roster import Agent, Roster
+
+roster = Roster(
+    orchestrator="chef",
+    agents={{
+        "chef": Agent("chef", "codex", "plan"),
+        "coder": Agent("coder", "codex", "code"),
+    }},
+)
+calls = []
+def fake_run_agent(cli_ref, prompt, **kwargs):
+    calls.append(cli_ref)
+    if len(calls) == 1:
+        return agents.AgentResult(
+            text=json.dumps({{"assignments": [{{"worker": "coder", "task": "implement"}}]}}),
+            ok=True,
+        )
+    if cli_ref == "codex" and len(calls) == 2:
+        return agents.AgentResult(text="worker output", ok=True)
+    return agents.AgentResult(text="final answer", ok=True)
+def blocked_handoff(*args, **kwargs):
+    while True:
+        time.sleep(0.05)
+aboyeur.agents.run_agent = fake_run_agent
+aboyeur.write_run_handoff = blocked_handoff
+aboyeur.run(
+    "build feature",
+    roster,
+    output_dir=Path({str(output_dir)!r}),
+    handoff_inbox=Path({str(tmp_path / "handoffs")!r}),
+    code_graph_enabled=False,
+    route_enabled=False,
+)
+"""
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    child = subprocess.Popen([sys.executable, "-c", script], env=child_env)
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                run_meta = json.loads((output_dir / "run.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                time.sleep(0.02)
+                continue
+            if run_meta.get("status") == "handoff":
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("run did not reach handoff before SIGTERM")
+
+        child.send_signal(signal.SIGTERM)
+        assert child.wait(timeout=3) == 128 + signal.SIGTERM
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    assert run_meta["failure"] == {
+        "phase": "handoff",
+        "kind": "signal",
+        "detail": "run terminated by SIGTERM",
+        "seat": "chef",
+    }
+
+
+def test_run_reuses_one_process_registry_across_all_cli_phases(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_plan(*args, process_registry=None, **kwargs):
+        seen.append(("plan", process_registry))
+        return [aboyeur.Assignment(worker="coder", task="implement")]
+
+    def fake_dispatch(*args, process_registry=None, **kwargs):
+        seen.append(("dispatch", process_registry))
+        return [aboyeur.WorkerResult(worker="coder", task="implement", text="done", ok=True)]
+
+    def fake_orchestrator(*args, process_registry=None, **kwargs):
+        seen.append(("synthesis", process_registry))
+        return agents.AgentResult(text="final answer", ok=True)
+
+    monkeypatch.setattr(aboyeur, "plan", fake_plan)
+    monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
+    monkeypatch.setattr(aboyeur, "_run_orchestrator", fake_orchestrator)
+
+    assert (
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            output_dir=tmp_path / "run",
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    registries = [registry for _, registry in seen]
+    assert [phase for phase, _ in seen] == ["plan", "dispatch", "synthesis"]
+    assert registries[0] is not None
+    assert registries[0] is registries[1] is registries[2]
 
 
 def test_disallowed_worker_is_recorded_not_run(monkeypatch):
@@ -2832,6 +3504,130 @@ def test_dispatch_routes_codex_through_appserver(monkeypatch, tmp_path):
     assert '"item/completed"' in events_file.read_text()
 
 
+@pytest.mark.parametrize(
+    ("detail", "timed_out", "expected_kind"),
+    [
+        ("timeout after 5.0s; interrupted", True, "timeout"),
+        ("turn interrupted", False, "interrupted"),
+        ("app-server exited", True, "timeout"),
+    ],
+)
+def test_appserver_worker_classifies_interrupted_turns(detail, timed_out, expected_kind):
+    class InterruptedThread:
+        def run_turn(self, prompt, **kwargs):  # noqa: ARG002
+            from brigade import codex_appserver
+
+            return codex_appserver.TurnResult(
+                text="partial output",
+                ok=False,
+                status="interrupted",
+                thread_id="thread-1",
+                detail=detail,
+                timed_out=timed_out,
+            )
+
+    class InterruptedServer:
+        def start_thread(self, **kwargs):  # noqa: ARG002
+            return InterruptedThread()
+
+    result = aboyeur._run_codex_appserver_worker(
+        InterruptedServer(),
+        Agent("cook", "codex", "write code"),
+        "cook",
+        "do work",
+        timeout=5.0,
+        cwd=None,
+        read_only=False,
+        sandbox=None,
+        registry=None,
+    )
+
+    assert result.ok is False
+    assert result.status == "interrupted"
+    assert result.detail == detail
+    assert result.timed_out is timed_out
+    assert result.failure_kind == expected_kind
+
+
+@pytest.mark.parametrize(
+    ("turn_status", "detail", "expected_status", "expected_phase", "expected_kind", "expected_timed_out"),
+    [
+        ("interrupted", "timeout after 5.0s; interrupted", "timeout", "inference", "timeout", True),
+        ("interrupted", "turn interrupted", "canceled", "dispatch", "interrupted", False),
+        ("failed", "provider failed", "failed", "dispatch", "agent-error", False),
+    ],
+)
+def test_direct_appserver_failure_receipt_preserves_terminal_semantics(
+    monkeypatch,
+    tmp_path,
+    turn_status,
+    detail,
+    expected_status,
+    expected_phase,
+    expected_kind,
+    expected_timed_out,
+):
+    class ResultThread:
+        def run_turn(self, prompt, **kwargs):  # noqa: ARG002
+            from brigade import codex_appserver
+
+            return codex_appserver.TurnResult(
+                text="partial output",
+                ok=False,
+                status=turn_status,
+                thread_id="thread-1",
+                detail=detail,
+                timed_out=expected_timed_out,
+            )
+
+    class ResultServer:
+        def __init__(self, **kwargs):  # noqa: ARG002
+            pass
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+        def start_thread(self, **kwargs):  # noqa: ARG002
+            return ResultThread()
+
+    monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", ResultServer)
+    output_dir = tmp_path / "run"
+
+    assert (
+        aboyeur.run(
+            "task",
+            _appserver_roster(),
+            worker="cook",
+            cwd=tmp_path,
+            output_dir=output_dir,
+            route_enabled=False,
+        )
+        == 2
+    )
+
+    run_payload = json.loads((output_dir / "run.json").read_text())
+    assert run_payload["status"] == expected_status
+    assert run_payload["failure"] == {
+        "phase": expected_phase,
+        "kind": expected_kind,
+        "detail": detail,
+        "seat": "cook",
+    }
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    if expected_kind == "agent-error":
+        assert worker.get("failure_kind") is None
+    else:
+        assert worker["failure_kind"] == expected_kind
+    if expected_timed_out:
+        assert worker["timed_out"] is True
+    synthesis = json.loads((output_dir / "synthesis.json").read_text())["result"]
+    if expected_timed_out:
+        assert synthesis["timed_out"] is True
+
+
 def test_run_appserver_worker_rejects_non_final_output_in_receipts(monkeypatch, tmp_path):
     monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", _IntentOnlyAppServer)
     output_dir = tmp_path / "run"
@@ -2856,6 +3652,42 @@ def test_run_appserver_worker_rejects_non_final_output_in_receipts(monkeypatch, 
     assert worker["transport"] == "codex-app-server"
     assert worker["failure_phase"] == "output-validation"
     assert worker["failure_kind"] == "non-final-output"
+
+
+def test_run_reuses_dispatch_process_registry_for_appserver(monkeypatch, tmp_path):
+    seen = {}
+
+    class RegistryAwareAppServer:
+        def __init__(self, *, cwd, process_registry):
+            seen["cwd"] = cwd
+            seen["appserver_registry"] = process_registry
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_dispatch(*args, process_registry=None, **kwargs):
+        seen["dispatch_registry"] = process_registry
+        return [aboyeur.WorkerResult(worker="cook", task="task", text="done", ok=True)]
+
+    monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", RegistryAwareAppServer)
+    monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
+
+    assert (
+        aboyeur.run(
+            "task",
+            _appserver_roster(),
+            worker="cook",
+            cwd=tmp_path,
+            output_dir=tmp_path / "run",
+            route_enabled=False,
+        )
+        == 0
+    )
+    assert seen["cwd"] == tmp_path
+    assert seen["appserver_registry"] is seen["dispatch_registry"]
 
 
 def test_worker_payload_includes_thread_fields_only_for_appserver():
@@ -2897,6 +3729,142 @@ def test_run_falls_back_to_exec_when_appserver_unavailable(monkeypatch, tmp_path
     assert "falling back to exec" in capsys.readouterr().err
     run_json = json.loads((out / "run.json").read_text())
     assert run_json["codex_transport"] == "exec"
+
+
+def test_appserver_error_fallback_closes_partially_started_candidate(monkeypatch, tmp_path):
+    instances = []
+
+    class FailingAppServer:
+        def __init__(self, *, cwd):
+            self.closed = 0
+            instances.append(self)
+
+        def start(self):
+            raise aboyeur.codex_appserver.AppServerError("initialize failed")
+
+        def close(self):
+            self.closed += 1
+
+    def fake_dispatch(*args, **kwargs):
+        assert kwargs["appserver"] is None
+        return [aboyeur.WorkerResult(worker="cook", task="task", text="done", ok=True)]
+
+    monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", FailingAppServer)
+    monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
+
+    assert (
+        aboyeur.run(
+            "task",
+            _appserver_roster(),
+            worker="cook",
+            cwd=tmp_path,
+            output_dir=tmp_path / "run",
+            route_enabled=False,
+        )
+        == 0
+    )
+    assert instances[0].closed == 1
+
+
+def test_control_error_closes_partial_server_and_preserves_warning_fallback(monkeypatch, tmp_path, capsys):
+    instances = {}
+
+    class StubAppServer:
+        def __init__(self, *, cwd):
+            self.closed = 0
+            instances["app"] = self
+
+        def start(self):
+            pass
+
+        def close(self):
+            self.closed += 1
+
+    class FailingControlServer:
+        def __init__(self, path, registry):
+            self.closed = 0
+            instances["control"] = self
+
+        def start(self):
+            raise aboyeur.run_control.ControlError("bind failed")
+
+        def close(self):
+            self.closed += 1
+
+    def fake_dispatch(*args, **kwargs):
+        assert kwargs["appserver"] is instances["app"]
+        assert kwargs["control_registry"] is None
+        return [aboyeur.WorkerResult(worker="cook", task="task", text="done", ok=True)]
+
+    monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", StubAppServer)
+    monkeypatch.setattr(aboyeur.run_control, "ControlServer", FailingControlServer)
+    monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
+
+    assert (
+        aboyeur.run(
+            "task",
+            _appserver_roster(),
+            worker="cook",
+            cwd=tmp_path,
+            output_dir=tmp_path / "run",
+            route_enabled=False,
+        )
+        == 0
+    )
+    assert "run control unavailable (bind failed)" in capsys.readouterr().err
+    assert instances["control"].closed == 1
+    assert instances["app"].closed == 1
+
+
+@pytest.mark.parametrize("interrupt_phase", ["appserver", "control"])
+def test_server_setup_keyboard_interrupt_closes_every_acquired_resource(monkeypatch, tmp_path, interrupt_phase):
+    instances = {}
+
+    class InterruptibleAppServer:
+        def __init__(self, *, cwd):
+            self.closed = 0
+            instances["app"] = self
+
+        def start(self):
+            if interrupt_phase == "appserver":
+                raise KeyboardInterrupt
+
+        def close(self):
+            self.closed += 1
+
+    class InterruptibleControlServer:
+        def __init__(self, path, registry):
+            self.closed = 0
+            instances["control"] = self
+
+        def start(self):
+            raise KeyboardInterrupt
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", InterruptibleAppServer)
+    monkeypatch.setattr(aboyeur.run_control, "ControlServer", InterruptibleControlServer)
+    output_dir = tmp_path / "run"
+
+    with pytest.raises(KeyboardInterrupt):
+        aboyeur.run(
+            "task",
+            _appserver_roster(),
+            worker="cook",
+            cwd=tmp_path,
+            output_dir=output_dir,
+            route_enabled=False,
+        )
+
+    assert instances["app"].closed == 1
+    if interrupt_phase == "control":
+        assert instances["control"].closed == 1
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    assert run_meta["failure"]["phase"] == "dispatch"
+    assert run_meta["failure"]["kind"] == "keyboard-interrupt"
+    assert run_meta["failure"]["seat"] == "cook"
 
 
 # --- deterministic route brief (router integration) ---

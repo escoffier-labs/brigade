@@ -10,6 +10,7 @@ always auto-declined: brigade runs are headless and rely on approvalPolicy
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
 import threading
@@ -17,7 +18,9 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, cast
+
+from . import proc as proc_mod
 
 _CLIENT_NAME = "brigade"
 _CLIENT_VERSION = "0.0.0"
@@ -52,14 +55,21 @@ class TurnResult:
     status: str  # complete | interrupted | failed
     thread_id: str
     detail: str = ""
+    timed_out: bool = False
 
 
 class AppServer:
     """One `codex app-server` child; thread-safe for concurrent CodexThread turns."""
 
-    def __init__(self, argv: list[str] | None = None, cwd: Path | None = None) -> None:
+    def __init__(
+        self,
+        argv: list[str] | None = None,
+        cwd: Path | None = None,
+        process_registry: proc_mod.ProcessRegistry | None = None,
+    ) -> None:
         self._argv = argv or ["codex", "app-server"]
         self._cwd = cwd
+        self._process_registry = process_registry or proc_mod.ProcessRegistry()
         self._proc: subprocess.Popen | None = None
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
@@ -77,6 +87,15 @@ class AppServer:
         self.close()
 
     def start(self) -> None:
+        process_group_kwargs: dict[str, Any] = {}
+        if os.name == "posix":
+            process_group_kwargs["start_new_session"] = True
+        elif os.name == "nt":
+            process_group_kwargs["creationflags"] = getattr(
+                subprocess,
+                "CREATE_NEW_PROCESS_GROUP",
+                0x00000200,
+            )
         try:
             self._proc = subprocess.Popen(
                 self._argv,
@@ -85,26 +104,31 @@ class AppServer:
                 stderr=subprocess.DEVNULL,
                 text=True,
                 cwd=self._cwd,
+                **process_group_kwargs,
             )
+            self._process_registry.register(cast("subprocess.Popen[bytes]", self._proc))
         except OSError as exc:
             raise AppServerError(f"failed to spawn {self._argv[0]}: {exc}") from exc
-        threading.Thread(target=self._read_loop, daemon=True).start()
-        self.request(
-            "initialize",
-            {"clientInfo": {"name": _CLIENT_NAME, "version": _CLIENT_VERSION}},
-        )
-        self._send({"jsonrpc": "2.0", "method": "initialized"})
+        try:
+            threading.Thread(target=self._read_loop, daemon=True).start()
+            self.request(
+                "initialize",
+                {"clientInfo": {"name": _CLIENT_NAME, "version": _CLIENT_VERSION}},
+            )
+            self._send({"jsonrpc": "2.0", "method": "initialized"})
+        except BaseException:
+            self.close()
+            raise
 
     def close(self) -> None:
         proc = self._proc
+        self._proc = None
         if proc is None:
             return
-        proc.terminate()
         try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5.0)
+            self._process_registry.terminate(cast("subprocess.Popen[bytes]", proc))
+        finally:
+            self._process_registry.unregister(cast("subprocess.Popen[bytes]", proc))
 
     def request(self, method: str, params: dict, timeout: float = _REQUEST_TIMEOUT) -> dict:
         with self._state_lock:
@@ -315,7 +339,14 @@ class CodexThread:
             turn = completed["params"]["turn"]
             if turn.get("status") == "failed":
                 detail = ((turn.get("error") or {}).get("message") or detail)[:200]
-        return TurnResult(text=salvaged, ok=False, status="interrupted", thread_id=self.thread_id, detail=detail)
+        return TurnResult(
+            text=salvaged,
+            ok=False,
+            status="interrupted",
+            thread_id=self.thread_id,
+            detail=detail,
+            timed_out=True,
+        )
 
     def _consume(
         self,

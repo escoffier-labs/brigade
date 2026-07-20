@@ -1,6 +1,8 @@
 """Per-seat env overrides flowing through worker dispatch (issue #301)."""
 
-from brigade import agents
+import threading
+
+from brigade import acpx_adapter, agents
 from brigade import run_transport
 from brigade.roster import Agent, Roster
 from brigade.run_receipts import write_worker_logs
@@ -16,6 +18,7 @@ def _roster_with_env(env):
 def _dispatch(roster, monkeypatch, captured, *, stdout="worker answer", stderr=""):
     def fake_run(argv, **kw):
         captured["env"] = kw.get("env")
+        captured["process_registry"] = kw.get("process_registry")
         return agents.proc.Result(0, stdout, stderr)
 
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
@@ -101,6 +104,135 @@ def test_worker_env_missing_ref_fails_the_worker(monkeypatch):
     assert captured.get("env") is None
 
 
+def test_keyboard_interrupt_notifies_before_blocked_worker_finishes(monkeypatch):
+    worker_started = threading.Event()
+    allow_interrupt = threading.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+    interruption_recorded = threading.Event()
+    dispatch_finished = threading.Event()
+    errors = []
+
+    def blocked_run_agent(*args, **kwargs):  # noqa: ARG001
+        worker_started.set()
+        release_worker.wait()
+        worker_finished.set()
+        return agents.AgentResult(text="done", ok=True)
+
+    def interrupted_wait(futures):  # noqa: ARG001
+        allow_interrupt.wait()
+        raise KeyboardInterrupt
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(agents, "run_agent", blocked_run_agent)
+    monkeypatch.setattr(run_transport, "as_completed", interrupted_wait)
+
+    def invoke_dispatch():
+        try:
+            run_transport.dispatch(
+                [Assignment(worker="k3", task="do the thing")],
+                _roster_with_env(None),
+                build_prompt=lambda agent, assignment, **kw: assignment.task,
+                run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+                event_writer=lambda events_dir, worker, verbose=False: None,
+                read_only=True,
+                on_interrupt=interruption_recorded.set,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            dispatch_finished.set()
+
+    controller = threading.Thread(target=invoke_dispatch)
+    controller.start()
+    try:
+        assert worker_started.wait(2)
+        allow_interrupt.set()
+        assert interruption_recorded.wait(2)
+        assert not dispatch_finished.wait(0.1)
+        assert not worker_finished.is_set()
+    finally:
+        release_worker.set()
+        controller.join(2)
+
+    assert not controller.is_alive()
+    assert worker_finished.wait(2)
+    assert len(errors) == 1
+    assert isinstance(errors[0], KeyboardInterrupt)
+
+
+def test_keyboard_interrupt_stops_scoped_appserver_turn_before_return(monkeypatch):
+    worker_started = threading.Event()
+    allow_interrupt = threading.Event()
+    release_worker = threading.Event()
+    registry_interrupted = threading.Event()
+    appserver_closed = threading.Event()
+    dispatch_finished = threading.Event()
+    errors = []
+
+    class StubRegistry:
+        def interrupt(self):
+            registry_interrupted.set()
+
+    class StubAppserver:
+        def close(self):
+            appserver_closed.set()
+            release_worker.set()
+
+    def blocked_appserver(*args, **kwargs):  # noqa: ARG001
+        worker_started.set()
+        release_worker.wait()
+        return agents.AgentResult(text="done", ok=True)
+
+    def interrupted_wait(futures):  # noqa: ARG001
+        allow_interrupt.wait()
+        raise KeyboardInterrupt
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(run_transport, "as_completed", interrupted_wait)
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "worker": Agent(name="worker", cli="codex", role="worker"),
+        },
+    )
+
+    def invoke_dispatch():
+        try:
+            run_transport.dispatch(
+                [Assignment(worker="worker", task="do the thing")],
+                roster,
+                build_prompt=lambda agent, assignment, **kw: assignment.task,
+                run_appserver_worker=blocked_appserver,
+                event_writer=lambda events_dir, worker, verbose=False: None,
+                appserver=StubAppserver(),
+                control_registry=StubRegistry(),
+                read_only=True,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            dispatch_finished.set()
+
+    controller = threading.Thread(target=invoke_dispatch)
+    controller.start()
+    try:
+        assert worker_started.wait(2)
+        allow_interrupt.set()
+        assert registry_interrupted.wait(2)
+        assert appserver_closed.wait(2)
+        assert dispatch_finished.wait(2)
+    finally:
+        release_worker.set()
+        controller.join(2)
+
+    assert not controller.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], KeyboardInterrupt)
+
+
 def test_worker_without_env_keeps_legacy_call_shape(monkeypatch):
     captured = {}
     roster = _roster_with_env(None)
@@ -109,6 +241,49 @@ def test_worker_without_env_keeps_legacy_call_shape(monkeypatch):
     assert captured["env"] is None
     assert result.env_overrides == ()
     assert result.endpoint_host is None
+
+
+def test_direct_worker_uses_dispatch_scoped_process_registry(monkeypatch):
+    captured = {}
+
+    assert _dispatch(_roster_with_env(None), monkeypatch, captured)[0].ok
+    assert captured["process_registry"] is not None
+
+
+def test_acpx_worker_uses_dispatch_scoped_process_registry(monkeypatch, tmp_path):
+    captured = {}
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "composer": Agent(
+                name="composer",
+                cli="cursor",
+                role="worker",
+                transport="acpx",
+                transport_version="0.12.0",
+                model="composer-2.5",
+            ),
+        },
+    )
+
+    def fake_run_cursor(prompt, **kwargs):
+        captured["process_registry"] = kwargs.get("process_registry")
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(acpx_adapter, "run_cursor", fake_run_cursor)
+    result = run_transport.dispatch(
+        [Assignment(worker="composer", task="do the thing")],
+        roster,
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        read_only=True,
+    )[0]
+
+    assert result.ok
+    assert captured["process_registry"] is not None
 
 
 def test_worker_payload_serializes_env_provenance(monkeypatch):

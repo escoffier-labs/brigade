@@ -215,7 +215,7 @@ def test_resume_refuses_nonterminal_run(tmp_path, monkeypatch, capsys):
         lambda **kwargs: (_ for _ in ()).throw(AssertionError("provider must not start")),
     )
 
-    for status in ("dispatching", "artifact-collection"):
+    for status in ("dispatching", "result-processing", "artifact-collection"):
         run_meta = json.loads((run_dir / "run.json").read_text())
         run_meta["status"] = status
         (run_dir / "run.json").write_text(json.dumps(run_meta))

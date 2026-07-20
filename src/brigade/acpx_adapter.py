@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from dataclasses import dataclass
@@ -76,7 +77,7 @@ def _status_payload(stdout: str) -> tuple[dict[str, Any] | None, str]:
     return payload, _safe_diagnostic(safe_stdout)
 
 
-def cursor_auth_status() -> CursorAuthStatus:
+def cursor_auth_status(*, process_registry: proc.ProcessRegistry | None = None) -> CursorAuthStatus:
     """Return a bounded, prompt-free diagnosis for the headless Cursor CLI."""
     if proc.which("cursor-agent") is None:
         return CursorAuthStatus(
@@ -86,10 +87,11 @@ def cursor_auth_status() -> CursorAuthStatus:
             "",
             127,
         )
-    result = proc.run(
-        ["cursor-agent", "status", "--format", "json"],
-        timeout=CURSOR_AUTH_TIMEOUT_SECONDS,
-    )
+    argv = ["cursor-agent", "status", "--format", "json"]
+    if process_registry is None:
+        result = proc.run(argv, timeout=CURSOR_AUTH_TIMEOUT_SECONDS)
+    else:
+        result = proc.run(argv, timeout=CURSOR_AUTH_TIMEOUT_SECONDS, process_registry=process_registry)
     payload, stdout = _status_payload(result.stdout)
     stderr = _safe_diagnostic(result.stderr)
     diagnostic = _diagnostic_line(stdout, stderr)
@@ -164,14 +166,28 @@ def build_argv(
     return argv
 
 
-def installed_version() -> tuple[str | None, str]:
-    result = proc.run(["acpx", "--version"], timeout=10.0)
+def installed_version(*, process_registry: proc.ProcessRegistry | None = None) -> tuple[str | None, str]:
+    if process_registry is None:
+        result = proc.run(["acpx", "--version"], timeout=10.0)
+    else:
+        result = proc.run(["acpx", "--version"], timeout=10.0, process_registry=process_registry)
     if result.code != 0:
         return None, result.stderr.strip() or result.stdout.strip() or f"exit {result.code}"
     match = re.search(r"\b(\d+\.\d+\.\d+)\b", result.stdout)
     if match is None:
         return None, "acpx --version did not report a semantic version"
     return match.group(1), ""
+
+
+def _call_with_process_registry(function, *, process_registry: proc.ProcessRegistry | None):
+    parameters = inspect.signature(function).parameters.values()
+    accepts_registry = any(
+        parameter.name == "process_registry" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_registry:
+        return function(process_registry=process_registry)
+    return function()
 
 
 def _permission_prompt_diagnostic(error: object) -> dict[str, object] | None:
@@ -349,6 +365,7 @@ def run_cursor(
     version: str,
     read_only: bool,
     writable_worktree: bool = False,
+    process_registry: proc.ProcessRegistry | None = None,
 ) -> AgentResult:
     if version != SUPPORTED_VERSION:
         return AgentResult(
@@ -377,7 +394,10 @@ def run_cursor(
             failure_kind="missing-executable",
             transport="acpx",
         )
-    installed, version_error = installed_version()
+    installed, version_error = _call_with_process_registry(
+        installed_version,
+        process_registry=process_registry,
+    )
     if installed != version:
         found = installed or version_error
         return AgentResult(
@@ -389,7 +409,10 @@ def run_cursor(
             transport="acpx",
             acpx_version=installed,
         )
-    auth = cursor_auth_status()
+    auth = _call_with_process_registry(
+        cursor_auth_status,
+        process_registry=process_registry,
+    )
     auth_event: dict[str, object] = {
         "type": "provider_auth",
         "status": auth.state,
@@ -436,7 +459,12 @@ def run_cursor(
             acpx_version=installed,
             safe_events=(auth_event,),
         )
-    result = proc.run(argv, timeout=timeout + 5.0, cwd=cwd)
+    result = proc.run(
+        argv,
+        timeout=timeout + 5.0,
+        cwd=cwd,
+        process_registry=process_registry,
+    )
     if result.decode_failed:
         detail = (result.stderr.strip() or result.decode_failure_detail)[:200]
         return AgentResult(

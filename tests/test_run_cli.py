@@ -1,4 +1,9 @@
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -7,6 +12,7 @@ import pytest
 from brigade import aboyeur
 from brigade import agents
 from brigade import cli
+from brigade import localio
 from brigade import proc
 from brigade import runguard
 from brigade import runs_cmd
@@ -720,7 +726,7 @@ role = "code"
     output_dir = tmp_path / "run"
 
     def fake_run(task, loaded_roster, **kwargs):
-        output_dir.mkdir(parents=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "run.json").write_text(
             json.dumps(
                 {
@@ -845,6 +851,22 @@ def test_run_cli_dirty_guard_blocks_by_default(tmp_path, monkeypatch, capsys):
     assert "--allow-dirty" in err
 
 
+def test_run_cli_dirty_guard_does_not_allocate_artifact_directory(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    (repo / "tracked.txt").write_text("dirty\n")
+    allocations = []
+
+    def record_allocation(base):
+        allocations.append(base)
+        return base / "should-not-exist"
+
+    monkeypatch.setattr(aboyeur, "make_run_dir", record_allocation)
+
+    assert cli.main(["run", "x", "--cwd", str(repo)]) == 2
+    assert allocations == []
+    assert not (repo / ".brigade" / "runs").exists()
+
+
 def test_run_cli_allow_dirty_passes_dirty_guard(tmp_path, monkeypatch):
     repo = _git_repo_with_roster(tmp_path)
     (repo / "tracked.txt").write_text("dirty\n")
@@ -929,6 +951,171 @@ def test_run_cli_records_output_dir_in_run_lock(tmp_path, monkeypatch):
 
     assert rc == 0
     assert seen == {"cwd": repo, "run_dir": output_dir, "wait_seconds": 0.0}
+
+
+def test_run_cli_terminalizes_roster_snapshot_write_failure(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = repo / ".brigade" / "runs" / "roster-write"
+    real_write_json = aboyeur._write_json
+
+    def fail_roster_write(path, payload):
+        if path.name == "roster.json":
+            raise OSError("roster snapshot denied")
+        return real_write_json(path, payload)
+
+    monkeypatch.setattr(aboyeur, "_write_json", fail_roster_write)
+
+    assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worker", "coder"]) == 2
+
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["schema"] == "brigade.run.v1"
+    assert receipt["status"] == "failed"
+    assert receipt["failure"] == {
+        "phase": "startup",
+        "kind": "unexpected-error",
+        "detail": "OSError: roster snapshot denied",
+        "seat": "coder",
+    }
+
+
+def test_run_cli_terminalizes_sigterm_during_roster_snapshot(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = repo / ".brigade" / "runs" / "roster-signal"
+    real_write_json = aboyeur._write_json
+
+    def terminate_during_roster_write(path, payload):
+        if path.name == "roster.json":
+            signal.raise_signal(signal.SIGTERM)
+        return real_write_json(path, payload)
+
+    monkeypatch.setattr(aboyeur, "_write_json", terminate_during_roster_write)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worker", "coder"])
+
+    assert exc_info.value.code == 128 + signal.SIGTERM
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["schema"] == "brigade.run.v1"
+    assert receipt["status"] == "canceled"
+    assert receipt["failure"] == {
+        "phase": "startup",
+        "kind": "signal",
+        "detail": "run terminated by SIGTERM",
+        "seat": "coder",
+    }
+
+
+def test_run_cli_terminalizes_keyboard_interrupt_during_lock_entry(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = repo / ".brigade" / "runs" / "lock-entry"
+
+    class InterruptingLock:
+        def __enter__(self):
+            raise KeyboardInterrupt
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(runguard, "run_lock", lambda *args, **kwargs: InterruptingLock())
+
+    assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worker", "coder"]) == 130
+
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["schema"] == "brigade.run.v1"
+    assert receipt["status"] == "canceled"
+    assert receipt["failure"]["phase"] == "startup"
+    assert receipt["failure"]["seat"] == "coder"
+    assert not (repo / ".brigade" / "run.lock").exists()
+
+
+def test_run_cli_terminalizes_keyboard_interrupt_during_worktree_creation(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = repo / ".brigade" / "runs" / "worktree-entry"
+    checkout = tmp_path / "checkout"
+
+    monkeypatch.setattr(
+        "brigade.cli.run._worktree_checkout_path",
+        lambda repo_root, run_dir: checkout,
+    )
+    monkeypatch.setattr(
+        runguard,
+        "create_detached_worktree",
+        lambda repo_root, worktree_path: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    monkeypatch.setattr(runguard, "remove_worktree", lambda repo_root, worktree_path: None)
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "x",
+                "--cwd",
+                str(repo),
+                "--output-dir",
+                str(output_dir),
+                "--worktree",
+                "--worker",
+                "coder",
+            ]
+        )
+        == 130
+    )
+
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["schema"] == "brigade.run.v1"
+    assert receipt["status"] == "canceled"
+    assert receipt["failure"]["phase"] == "startup"
+    assert receipt["failure"]["seat"] == "coder"
+    assert not (repo / ".brigade" / "run.lock").exists()
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected_rc", "expected_status", "expected_kind"),
+    [
+        (KeyboardInterrupt, 130, "canceled", "keyboard-interrupt"),
+        (OSError, 2, "failed", "unexpected-error"),
+    ],
+)
+def test_run_cli_terminalizes_read_only_warning_write_failures(
+    tmp_path,
+    monkeypatch,
+    error_type,
+    expected_rc,
+    expected_status,
+    expected_kind,
+):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = repo / ".brigade" / "runs" / "warning-write"
+    roster_path = repo / ".brigade" / "roster.toml"
+    roster_path.write_text(
+        roster_path.read_text().replace('cli = "codex"\nrole = "code"', 'cli = "claude"\nrole = "code"')
+    )
+
+    def fail_warning_write(path, payload):
+        raise error_type("warning write failed")
+
+    monkeypatch.setattr(localio, "write_json", fail_warning_write)
+
+    rc = cli.main(
+        [
+            "run",
+            "x",
+            "--cwd",
+            str(repo),
+            "--output-dir",
+            str(output_dir),
+            "--read-only",
+        ]
+    )
+
+    assert rc == expected_rc
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["schema"] == "brigade.run.v1"
+    assert receipt["status"] == expected_status
+    assert receipt["failure"]["phase"] == "startup"
+    assert receipt["failure"]["kind"] == expected_kind
+    assert not (output_dir / "read-only-enforcement.json").exists()
+    assert not (repo / ".brigade" / "run.lock").exists()
 
 
 @pytest.mark.parametrize("lane", ["direct", "acpx"])
@@ -1083,6 +1270,628 @@ def test_app_server_and_control_start_after_dispatching_is_recorded(tmp_path, mo
     assert seen == {"app_server": "dispatching", "control_server": "dispatching"}
 
 
+def test_sigterm_during_control_setup_closes_appserver_child_before_lock_release(tmp_path):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+    appserver_pid_path = tmp_path / "appserver.pid"
+    stubborn_appserver = (
+        "import json,sys,time; "
+        "request=json.loads(sys.stdin.readline()); "
+        "print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{}}),flush=True); "
+        "sys.stdin.readline(); time.sleep(60)"
+    )
+    script = f"""
+import sys
+import time
+from pathlib import Path
+from brigade import aboyeur, cli
+from brigade.codex_appserver import AppServer
+
+class RecordingAppServer(AppServer):
+    def __init__(self, *, cwd):
+        super().__init__(argv=[sys.executable, "-c", {stubborn_appserver!r}], cwd=cwd)
+    def start(self):
+        super().start()
+        Path({str(appserver_pid_path)!r}).write_text(str(self._proc.pid))
+
+class BlockingControlServer:
+    def __init__(self, path, registry):
+        self.closed = False
+    def start(self):
+        while True:
+            time.sleep(0.05)
+    def close(self):
+        self.closed = True
+
+aboyeur.codex_appserver.AppServer = RecordingAppServer
+aboyeur.run_control.ControlServer = BlockingControlServer
+raise SystemExit(cli.main([
+    "run", "blocked setup", "--cwd", {str(repo)!r},
+    "--output-dir", {str(output_dir)!r}, "--worker", "coder",
+    "--codex-transport", "app-server", "--no-code-graph", "--no-evidence", "--no-route",
+]))
+"""
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    child = subprocess.Popen([sys.executable, "-c", script], env=child_env, start_new_session=True)
+    appserver_pid = None
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                run_meta = json.loads((output_dir / "run.json").read_text())
+                appserver_pid = int(appserver_pid_path.read_text())
+            except (OSError, ValueError, json.JSONDecodeError):
+                time.sleep(0.02)
+                continue
+            if run_meta.get("status") == "dispatching" and (repo / ".brigade" / "run.lock").is_dir():
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("run did not block during control setup")
+
+        child.send_signal(signal.SIGTERM)
+        assert child.wait(timeout=3) == 128 + signal.SIGTERM
+        assert not (repo / ".brigade" / "run.lock").exists()
+
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                os.kill(appserver_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("app-server child survived setup cancellation")
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+        if appserver_pid is not None:
+            try:
+                os.kill(appserver_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["failure"] == {
+        "phase": "dispatch",
+        "kind": "signal",
+        "detail": "run terminated by SIGTERM",
+        "seat": "coder",
+    }
+
+
+def test_run_cli_terminalizes_keyboard_interrupt_during_dispatch(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+
+    def interrupted_dispatch(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(aboyeur, "dispatch", interrupted_dispatch)
+
+    try:
+        rc = cli.main(
+            [
+                "run",
+                "inspect",
+                "--cwd",
+                str(repo),
+                "--output-dir",
+                str(output_dir),
+                "--worker",
+                "coder",
+                "--no-code-graph",
+                "--no-evidence",
+                "--no-route",
+            ]
+        )
+    except KeyboardInterrupt:
+        pytest.fail("run dispatch leaked KeyboardInterrupt without terminalizing the receipt")
+
+    assert rc == 130
+    assert "run canceled by user" in capsys.readouterr().err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["failure"] == {
+        "phase": "dispatch",
+        "kind": "keyboard-interrupt",
+        "detail": "run canceled by user",
+        "seat": "coder",
+    }
+    assert not (repo / ".brigade" / "run.lock").exists()
+
+
+@pytest.mark.parametrize(
+    ("sig", "expected_code", "failure_kind"),
+    [
+        (signal.SIGINT, 128 + signal.SIGINT, "keyboard-interrupt"),
+        (signal.SIGTERM, 128 + signal.SIGTERM, "signal"),
+    ],
+)
+def test_run_cli_cancels_blocked_worker_process_before_releasing_lock(tmp_path, sig, expected_code, failure_kind):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+    worker_pid_path = tmp_path / "worker.pid"
+    worker_code = (
+        "import os,time; from pathlib import Path; "
+        f"Path({str(worker_pid_path)!r}).write_text(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    script = f"""
+import sys
+from pathlib import Path
+from brigade import agents, cli
+from brigade.proc import ExecutableIdentity
+
+agents.resolve_agent_executable = lambda *args, **kwargs: ExecutableIdentity(
+    command="codex", path=sys.executable, kind="native", runnable=True, detail="test"
+)
+agents.build_argv = lambda *args, **kwargs: [sys.executable, "-c", {worker_code!r}]
+raise SystemExit(cli.main([
+    "run", "blocked", "--cwd", {str(repo)!r},
+    "--output-dir", {str(output_dir)!r}, "--worker", "coder",
+    "--no-code-graph", "--no-evidence", "--no-route",
+]))
+"""
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    child = subprocess.Popen([sys.executable, "-c", script], env=child_env, start_new_session=True)
+    worker_pid = None
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                run_meta = json.loads((output_dir / "run.json").read_text())
+                worker_pid = int(worker_pid_path.read_text())
+            except (OSError, ValueError, json.JSONDecodeError):
+                time.sleep(0.02)
+                continue
+            if run_meta.get("status") == "dispatching":
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("run did not reach a blocked dispatch")
+
+        child.send_signal(sig)
+        assert child.wait(timeout=3) == expected_code
+        assert not (repo / ".brigade" / "run.lock").exists()
+
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                os.kill(worker_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("blocked worker process survived run cancellation")
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+        if worker_pid is not None:
+            try:
+                os.kill(worker_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    assert run_meta["active_seats"] == ["coder"]
+    assert run_meta["failure"]["phase"] == "dispatch"
+    assert run_meta["failure"]["kind"] == failure_kind
+    assert run_meta["failure"]["seat"] == "coder"
+
+
+def test_run_cli_terminalizes_sigint_during_graphtrail_baseline_capture(tmp_path, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = repo / ".brigade" / "runs" / "blocked-graphtrail-baseline"
+    ready_path = tmp_path / "capture-ready"
+    script = f"""
+import time
+from pathlib import Path
+from brigade import aboyeur, cli
+
+aboyeur.code_graph_brief = lambda *args, **kwargs: aboyeur.CodeGraphBrief(attached=False)
+aboyeur.drift_impact_brief = lambda *args, **kwargs: aboyeur.DriftImpactBrief(attached=False)
+aboyeur.evidence_brief_mod.evidence_brief = lambda *args, **kwargs: aboyeur.EvidenceBrief(attached=False)
+def blocked_capture(target, run_dir):
+    Path({str(ready_path)!r}).write_text("ready")
+    time.sleep(60)
+aboyeur.graphtrail_delta.capture_before = blocked_capture
+raise SystemExit(cli.main([
+    "run", "blocked baseline", "--cwd", {str(repo)!r},
+    "--output-dir", {str(output_dir)!r}, "--worker", "coder",
+    "--no-evidence", "--no-route",
+]))
+"""
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    child = subprocess.Popen([sys.executable, "-c", script], env=child_env, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if ready_path.is_file() and (repo / ".brigade" / "run.lock").is_dir():
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("run did not block during GraphTrail baseline capture")
+
+        child.send_signal(signal.SIGINT)
+        assert child.wait(timeout=3) == 128 + signal.SIGINT
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["schema"] == "brigade.run.v1"
+    assert receipt["status"] == "canceled"
+    assert receipt["failure"] == {
+        "phase": "startup",
+        "kind": "keyboard-interrupt",
+        "detail": "run canceled by user",
+        "seat": "coder",
+    }
+    assert not (repo / ".brigade" / "run.lock").exists()
+    assert runs_cmd.list_runs(cwd=repo, limit=10) == 0
+    assert "blocked baseline" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("phase", "sig", "expected_code", "expected_status", "expected_seat"),
+    [
+        ("planning", signal.SIGINT, 128 + signal.SIGINT, "planning", "chef"),
+        ("synthesis", signal.SIGTERM, 128 + signal.SIGTERM, "synthesizing", "chef"),
+        ("acpx-preflight", signal.SIGINT, 128 + signal.SIGINT, "dispatching", "composer"),
+        ("ollama-preflight", signal.SIGINT, 128 + signal.SIGINT, "dispatching", "coder"),
+        ("codex-cloud-submit", signal.SIGTERM, 128 + signal.SIGTERM, "dispatching", "coder"),
+    ],
+)
+def test_run_cli_cancels_blocked_phase_process_before_releasing_lock(
+    tmp_path, phase, sig, expected_code, expected_status, expected_seat
+):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+    worker_pid_path = tmp_path / "phase-worker.pid"
+    worker_code = (
+        "import os,time; from pathlib import Path; "
+        f"Path({str(worker_pid_path)!r}).write_text(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    if phase == "acpx-preflight":
+        (repo / ".brigade" / "roster.toml").write_text(
+            """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.composer]
+cli = "cursor"
+model = "composer-2.5"
+transport = "acpx"
+transport_version = "0.12.0"
+role = "code"
+"""
+        )
+        _git(repo, "add", ".brigade/roster.toml")
+        _git(repo, "commit", "-m", "test acpx roster")
+    elif phase in {"ollama-preflight", "codex-cloud-submit"}:
+        cli_ref = "ollama:llama3.3" if phase == "ollama-preflight" else "codex-cloud:env-123"
+        (repo / ".brigade" / "roster.toml").write_text(
+            f"""
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "{cli_ref}"
+role = "code"
+"""
+        )
+        _git(repo, "add", ".brigade/roster.toml")
+        _git(repo, "commit", "-m", f"test {phase} roster")
+
+    setup = ""
+    worker_args = ""
+    if phase in {"planning", "synthesis"}:
+        setup = f"""
+agents.resolve_agent_executable = lambda *args, **kwargs: ExecutableIdentity(
+    command="codex", path=sys.executable, kind="native", runnable=True, detail="test"
+)
+agents.build_argv = lambda *args, **kwargs: [sys.executable, "-c", {worker_code!r}]
+"""
+    if phase == "synthesis":
+        setup += """
+aboyeur.plan = lambda *args, **kwargs: [aboyeur.Assignment(worker="coder", task="implement")]
+aboyeur.dispatch = lambda *args, **kwargs: [
+    aboyeur.WorkerResult(worker="coder", task="implement", text="done", ok=True)
+]
+"""
+    elif phase == "acpx-preflight":
+        setup = f"""
+acpx_adapter.proc.which = lambda *args, **kwargs: sys.executable
+def blocked_version(*, process_registry=None):
+    proc.run(
+        [sys.executable, "-c", {worker_code!r}],
+        timeout=60,
+        process_registry=process_registry,
+    )
+    return "0.12.0", ""
+acpx_adapter.installed_version = blocked_version
+"""
+        worker_args = ', "--worker", "composer"'
+    elif phase == "ollama-preflight":
+        setup = f"""
+agents.resolve_agent_executable = lambda *args, **kwargs: ExecutableIdentity(
+    command="ollama", path=sys.executable, kind="native", runnable=True, detail="test"
+)
+def blocked_ollama(model, executable=None, process_registry=None):
+    proc.run(
+        [sys.executable, "-c", {worker_code!r}],
+        timeout=60,
+        process_registry=process_registry,
+    )
+    return True, ""
+agents.ollama_model_present = blocked_ollama
+"""
+        worker_args = ', "--worker", "coder"'
+    elif phase == "codex-cloud-submit":
+        setup = f"""
+agents.resolve_agent_executable = lambda *args, **kwargs: ExecutableIdentity(
+    command="codex", path=sys.executable, kind="native", runnable=True, detail="test"
+)
+def blocked_cloud(prompt, *, env_id, timeout, cwd=None, process_registry=None):
+    proc.run(
+        [sys.executable, "-c", {worker_code!r}],
+        timeout=60,
+        process_registry=process_registry,
+    )
+    return agents.AgentResult(text="done", ok=True)
+codex_cloud.run_cloud_task = blocked_cloud
+"""
+        worker_args = ', "--worker", "coder"'
+
+    script = f"""
+import sys
+from brigade import aboyeur, acpx_adapter, agents, cli, codex_cloud, proc
+from brigade.proc import ExecutableIdentity
+{setup}
+raise SystemExit(cli.main([
+    "run", "blocked", "--cwd", {str(repo)!r},
+    "--output-dir", {str(output_dir)!r}{worker_args},
+    "--no-code-graph", "--no-evidence", "--no-route",
+]))
+"""
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
+    child = subprocess.Popen([sys.executable, "-c", script], env=child_env, start_new_session=True)
+    worker_pid = None
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                run_meta = json.loads((output_dir / "run.json").read_text())
+                worker_pid = int(worker_pid_path.read_text())
+            except (OSError, ValueError, json.JSONDecodeError):
+                time.sleep(0.02)
+                continue
+            if run_meta.get("status") == expected_status and (repo / ".brigade" / "run.lock").is_dir():
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(f"run did not reach blocked {phase}")
+
+        child.send_signal(sig)
+        deadline = time.monotonic() + 3
+        while child.poll() is None and time.monotonic() < deadline:
+            try:
+                os.kill(worker_pid, 0)
+                worker_alive = True
+            except ProcessLookupError:
+                worker_alive = False
+            if not (repo / ".brigade" / "run.lock").exists() and worker_alive:
+                pytest.fail(f"run lock released before blocked {phase} process exited")
+            time.sleep(0.01)
+        assert child.wait(timeout=3) == expected_code
+        assert not (repo / ".brigade" / "run.lock").exists()
+
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                os.kill(worker_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(f"blocked {phase} process survived run cancellation")
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+        if worker_pid is not None:
+            try:
+                os.kill(worker_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    expected_failure_phase = "dispatch" if phase.endswith("preflight") or phase.endswith("submit") else phase
+    assert run_meta["failure"]["phase"] == expected_failure_phase
+    assert run_meta["failure"]["seat"] == expected_seat
+
+
+def test_run_cli_terminalizes_unexpected_dispatch_exception(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+
+    def broken_dispatch(*args, **kwargs):
+        raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(aboyeur, "dispatch", broken_dispatch)
+
+    rc = cli.main(
+        [
+            "run",
+            "inspect",
+            "--cwd",
+            str(repo),
+            "--output-dir",
+            str(output_dir),
+            "--worker",
+            "coder",
+            "--no-code-graph",
+            "--no-evidence",
+            "--no-route",
+        ]
+    )
+
+    assert rc == 2
+    assert "unexpected run failure: RuntimeError: provider exploded" in capsys.readouterr().err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["failure"] == {
+        "phase": "dispatch",
+        "kind": "unexpected-error",
+        "detail": "RuntimeError: provider exploded",
+        "seat": "coder",
+    }
+    assert not (repo / ".brigade" / "run.lock").exists()
+
+
+def test_run_cli_terminalizes_keyboard_interrupt_during_planning(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+
+    def interrupted_plan(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(aboyeur, "plan", interrupted_plan)
+
+    try:
+        rc = cli.main(
+            [
+                "run",
+                "inspect",
+                "--cwd",
+                str(repo),
+                "--output-dir",
+                str(output_dir),
+                "--no-code-graph",
+                "--no-evidence",
+                "--no-route",
+            ]
+        )
+    except KeyboardInterrupt:
+        pytest.fail("run planning leaked KeyboardInterrupt without terminalizing the receipt")
+
+    assert rc == 130
+    assert "run canceled by user" in capsys.readouterr().err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["failure"] == {
+        "phase": "planning",
+        "kind": "keyboard-interrupt",
+        "detail": "run canceled by user",
+        "seat": "chef",
+    }
+
+
+def test_run_cli_terminalizes_unexpected_planning_exception(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+
+    def broken_plan(*args, **kwargs):
+        raise ValueError("planner exploded")
+
+    monkeypatch.setattr(aboyeur, "plan", broken_plan)
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "inspect",
+                "--cwd",
+                str(repo),
+                "--output-dir",
+                str(output_dir),
+                "--no-code-graph",
+                "--no-evidence",
+                "--no-route",
+            ]
+        )
+        == 2
+    )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["failure"] == {
+        "phase": "planning",
+        "kind": "unexpected-error",
+        "detail": "ValueError: planner exploded",
+        "seat": "chef",
+    }
+
+
+def test_run_cli_does_not_reclassify_receipt_write_failure(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run-artifacts"
+    termination_calls = []
+
+    def failed_run(*args, **kwargs):  # noqa: ARG001
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "run.json").write_text(
+            json.dumps(
+                {
+                    "status": "planning",
+                    "started_at": "2026-07-19T12:00:00Z",
+                    "status_started_at": "2026-07-19T12:00:00Z",
+                }
+            )
+        )
+        raise runguard.RetainRunLockError("receipt disk full")
+
+    monkeypatch.setattr(aboyeur, "run", failed_run)
+    monkeypatch.setattr(
+        aboyeur,
+        "record_run_termination",
+        lambda *args, **kwargs: termination_calls.append((args, kwargs)),
+    )
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "inspect",
+                "--cwd",
+                str(repo),
+                "--output-dir",
+                str(output_dir),
+                "--no-code-graph",
+                "--no-evidence",
+                "--no-route",
+            ]
+        )
+        == 2
+    )
+
+    assert termination_calls == []
+    assert (repo / ".brigade" / "run.lock").is_dir()
+
+
 def test_app_server_fallback_clears_uncreated_control_socket(tmp_path, monkeypatch):
     repo = _git_repo_with_roster(tmp_path)
     output_dir = tmp_path / "run-artifacts"
@@ -1133,10 +1942,8 @@ def _write_successful_worktree_run(output_dir: Path, cwd: Path, *, final: str = 
                 "schema": "brigade.run.v1",
                 "task": "x",
                 "cwd": str(cwd),
-                "status": "ok",
+                "status": "artifact-collection",
                 "started_at": "2026-07-09T12:00:00Z",
-                "finished_at": "2026-07-09T12:00:01Z",
-                "duration_seconds": 1,
                 "artifacts": str(output_dir),
             }
         )
@@ -1220,7 +2027,7 @@ def test_run_cli_worktree_warns_on_empty_changes_patch_noop(tmp_path, monkeypatc
     def fake_run(task, loaded_roster, **kwargs):
         cwd = kwargs["cwd"]
         output = kwargs["output_dir"]
-        output.mkdir(parents=True)
+        output.mkdir(parents=True, exist_ok=True)
         (output / "run.json").write_text(
             json.dumps(
                 {
@@ -1292,8 +2099,8 @@ def test_run_cli_worktree_keeps_checkout_when_patch_invalid(tmp_path, monkeypatc
         run_path = output / "run.json"
         run_meta = json.loads(run_path.read_text())
         run_meta["status"] = "artifact-collection"
-        run_meta.pop("finished_at")
-        run_meta.pop("duration_seconds")
+        run_meta.pop("finished_at", None)
+        run_meta.pop("duration_seconds", None)
         run_path.write_text(json.dumps(run_meta) + "\n")
         (output / "worker-results.json").write_text(
             json.dumps({"results": [], "ground_truth": {"patch_ref": None}}) + "\n"
@@ -1397,6 +2204,50 @@ def test_run_cli_worktree_artifact_failure_preserves_model_failure(tmp_path, mon
     }
 
 
+def test_run_cli_terminalizes_keyboard_interrupt_during_artifact_collection(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        cwd = kwargs["cwd"]
+        (cwd / "tracked.txt").write_text("changed in worktree\n")
+        output = kwargs["output_dir"]
+        _write_successful_worktree_run(output, cwd, final="implementation complete")
+        run_path = output / "run.json"
+        run_meta = json.loads(run_path.read_text())
+        run_meta["status"] = "artifact-collection"
+        run_meta["status_started_at"] = "2026-07-19T12:00:01Z"
+        run_meta.pop("finished_at", None)
+        run_meta.pop("duration_seconds", None)
+        run_path.write_text(json.dumps(run_meta) + "\n")
+        return 0
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(
+        runguard,
+        "collect_changes_patch",
+        lambda cwd, patch_path: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    assert rc == 130
+    assert checkout.exists()
+    assert (checkout / "tracked.txt").read_text() == "changed in worktree\n"
+    assert str(checkout) in capsys.readouterr().err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "canceled"
+    assert run_meta["failure"] == {
+        "phase": "artifact-collection",
+        "kind": "keyboard-interrupt",
+        "detail": "run canceled by user",
+        "seat": "chef",
+    }
+    assert not runguard.lock_path(repo).exists()
+
+
 def test_run_cli_worktree_kept_when_patch_collection_raises(tmp_path, monkeypatch, capsys):
     # If patch collection itself dies after agents edited the worktree, the
     # worktree is the only copy of the work and must survive cleanup.
@@ -1489,8 +2340,10 @@ def test_run_cli_worktree_records_patch_write_error(tmp_path, monkeypatch, capsy
 def test_run_cli_worktree_keeps_checkout_when_receipt_finalization_fails(tmp_path, monkeypatch, capsys):
     repo = _git_repo_with_roster(tmp_path)
     output_dir = tmp_path / "run"
+    fail_writes = False
 
     def fake_run(task, loaded_roster, **kwargs):
+        nonlocal fail_writes
         cwd = kwargs["cwd"]
         (cwd / "tracked.txt").write_text("changed in worktree\n")
         output = kwargs["output_dir"]
@@ -1498,18 +2351,22 @@ def test_run_cli_worktree_keeps_checkout_when_receipt_finalization_fails(tmp_pat
         run_path = output / "run.json"
         run_meta = json.loads(run_path.read_text())
         run_meta["status"] = "artifact-collection"
-        run_meta.pop("finished_at")
-        run_meta.pop("duration_seconds")
+        run_meta.pop("finished_at", None)
+        run_meta.pop("duration_seconds", None)
         run_path.write_text(json.dumps(run_meta) + "\n")
+        fail_writes = True
         return 0
+
+    real_write_json = aboyeur._write_json
+
+    def fail_finalization_write(path, payload):
+        if fail_writes:
+            raise OSError("receipt disk full")
+        real_write_json(path, payload)
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     monkeypatch.setattr(aboyeur, "run", fake_run)
-    monkeypatch.setattr(
-        aboyeur,
-        "_write_json",
-        lambda path, payload: (_ for _ in ()).throw(OSError("receipt disk full")),
-    )
+    monkeypatch.setattr(aboyeur, "_write_json", fail_finalization_write)
 
     rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
 

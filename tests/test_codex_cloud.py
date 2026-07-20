@@ -52,6 +52,39 @@ def test_run_agent_rejects_model_pin(monkeypatch):
     assert "model" in result.detail
 
 
+def test_run_agent_threads_process_registry_to_codex_cloud(monkeypatch):
+    registry = proc.ProcessRegistry()
+    seen = {}
+
+    def fake_cloud_task(prompt, *, env_id, timeout, cwd=None, process_registry=None):
+        seen.update(
+            prompt=prompt,
+            env_id=env_id,
+            timeout=timeout,
+            cwd=cwd,
+            process_registry=process_registry,
+        )
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(codex_cloud, "run_cloud_task", fake_cloud_task)
+
+    result = agents.run_agent("codex-cloud:env-123", "fix it", process_registry=registry)
+
+    assert result.ok
+    assert seen["process_registry"] is registry
+
+
+def test_run_agent_preserves_legacy_codex_cloud_call_shape(monkeypatch):
+    def fake_cloud_task(prompt, *, env_id, timeout, cwd=None):
+        return agents.AgentResult(text=f"{env_id}: {prompt}", ok=True)
+
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(codex_cloud, "run_cloud_task", fake_cloud_task)
+
+    assert agents.run_agent("codex-cloud:env-123", "fix it").ok
+
+
 def test_parse_task_id_variants():
     assert (
         codex_cloud.parse_task_id("Created https://chatgpt.com/codex/tasks/task_e_abc123 for review") == "task_e_abc123"
@@ -108,6 +141,34 @@ def test_run_cloud_task_happy_path(monkeypatch):
     assert "diff --git" in result.text
     assert "NOT applied locally" in result.text
     assert fake.calls[0][:5] == ["codex", "cloud", "exec", "--env", "env-123"]
+
+
+def test_run_cloud_task_threads_registry_through_submit_status_and_diff(monkeypatch):
+    registry = proc.ProcessRegistry()
+    calls = []
+
+    def fake_run(argv, timeout=30.0, env=None, cwd=None, process_registry=None):
+        calls.append((argv[2], process_registry))
+        if argv[2] == "exec":
+            return _result(stdout="task_registered1")
+        if argv[2] == "status":
+            return _result(stdout="status: completed")
+        return _result(stdout="")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+
+    result = codex_cloud.run_cloud_task(
+        "fix it",
+        env_id="env-123",
+        timeout=600,
+        poll_interval=0,
+        sleep=lambda seconds: None,
+        clock=lambda: 0,
+        process_registry=registry,
+    )
+
+    assert result.ok
+    assert calls == [("exec", registry), ("status", registry), ("diff", registry)]
 
 
 def test_run_cloud_task_failure_status(monkeypatch):
@@ -167,8 +228,45 @@ def test_run_cloud_task_timeout_reports_task_id(monkeypatch):
         clock=lambda: next(ticks),
     )
     assert not result.ok
-    assert result.status == "pending"
+    assert result.status == "timeout"
+    assert result.timed_out is True
+    assert result.failure_kind == "timeout"
     assert "task_slow1" in result.detail
+
+
+@pytest.mark.parametrize("timed_out_stage", ["submit", "status", "diff"])
+def test_run_cloud_task_command_timeout_is_terminal_timeout(monkeypatch, timed_out_stage):
+    timed_out_subcommand = "exec" if timed_out_stage == "submit" else timed_out_stage
+    fake = FakeRuns(
+        {
+            "exec": [_result(code=124, stderr="timeout after 5s")]
+            if timed_out_subcommand == "exec"
+            else [_result(stdout="task_timeout1")],
+            "status": [_result(code=124, stderr="timeout after 5s")]
+            if timed_out_subcommand == "status"
+            else [_result(stdout="status: completed")],
+            "diff": [_result(code=124, stderr="timeout after 5s")]
+            if timed_out_subcommand == "diff"
+            else [_result(stdout="")],
+        }
+    )
+    monkeypatch.setattr(codex_cloud.proc, "run", fake)
+    ticks = iter([0, 0, 601])
+
+    result = codex_cloud.run_cloud_task(
+        "x",
+        env_id="e",
+        timeout=600,
+        poll_interval=0,
+        sleep=lambda seconds: None,
+        clock=lambda: next(ticks, 601),
+    )
+
+    assert result.ok is False
+    assert result.status == "timeout"
+    assert result.timed_out is True
+    assert result.failure_kind == "timeout"
+    assert timed_out_stage in result.detail
 
 
 def test_run_cloud_task_polls_past_incidental_failure_words(monkeypatch):

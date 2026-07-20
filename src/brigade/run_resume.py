@@ -17,7 +17,16 @@ from .roster import Agent, Roster, _as_env
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
 _NONTERMINAL_RUN_STATUSES = frozenset(
-    {"started", "planning", "dispatching", "synthesizing", "artifact-collection", "running"}
+    {
+        "started",
+        "planning",
+        "dispatching",
+        "result-processing",
+        "synthesizing",
+        "handoff",
+        "artifact-collection",
+        "running",
+    }
 )
 
 

@@ -343,6 +343,35 @@ def test_run_authenticated_cursor_reaches_acpx_and_preserves_short_final(monkeyp
     assert calls[2][0] == "acpx"
 
 
+def test_run_cursor_reuses_registry_for_all_preflight_and_execution_calls(monkeypatch, tmp_path):
+    registry = proc.ProcessRegistry()
+    registries = []
+
+    def fake_run(argv, **kwargs):
+        registries.append(kwargs.get("process_registry"))
+        if argv == ["acpx", "--version"]:
+            return proc.Result(0, "acpx 0.12.0\n", "")
+        if argv == ["cursor-agent", "status", "--format", "json"]:
+            return proc.Result(0, '{"isAuthenticated":true,"status":"authenticated"}\n', "")
+        return proc.Result(0, _success_stream(), "")
+
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter.proc, "run", fake_run)
+
+    result = acpx_adapter.run_cursor(
+        "inspect",
+        cwd=tmp_path,
+        timeout=120,
+        model="composer-2.5",
+        version="0.12.0",
+        read_only=True,
+        process_registry=registry,
+    )
+
+    assert result.ok is True
+    assert registries == [registry, registry, registry]
+
+
 def test_build_argv_is_bounded_and_permission_specific(tmp_path):
     read = acpx_adapter.build_argv(
         prompt="inspect",

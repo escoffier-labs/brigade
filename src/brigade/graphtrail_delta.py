@@ -97,7 +97,7 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
             "graphtrail_timeout_seconds": timeout,
             "sync": sync,
         }
-    except BaseException as exc:
+    except Exception as exc:
         return _status("capture_failed", f"code graph delta unavailable: {type(exc).__name__}: {exc}")
 
 
@@ -247,11 +247,11 @@ def capture_after_and_diff(
         return _write_and_compact(
             run_dir, payload, snapshot_path=snapshot_path, after_snapshot_path=after_snapshot_path
         )
-    except BaseException as exc:
+    except Exception as exc:
         payload = _status("capture_failed", f"code graph delta unavailable: {type(exc).__name__}: {exc}")
         try:
             return _write_and_compact(run_dir, payload)
-        except BaseException:
+        except Exception:
             return _compact(payload)
 
 
@@ -261,7 +261,7 @@ def _compact_summary(delta: dict[str, Any] | None) -> str:
         if not isinstance(delta, dict):
             return "code graph delta unavailable"
         return str(delta.get("summary") or _summary(str(delta.get("status") or "unknown"), {}, 0, 0))
-    except BaseException:
+    except Exception:
         return "code graph delta unavailable"
 
 

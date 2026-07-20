@@ -7,6 +7,7 @@ does not store provider keys or import provider SDKs.
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 import os
 import re
@@ -507,7 +508,20 @@ def detect(cli_ref: str) -> bool:
     return resolve_agent_executable(cli_ref).runnable
 
 
-def ollama_model_present(model: str, executable: proc.ExecutableIdentity | None = None) -> tuple[bool, str]:
+def _accepts_process_registry(function: Callable[..., object]) -> bool:
+    parameters = inspect.signature(function).parameters.values()
+    return any(
+        parameter.name == "process_registry" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def ollama_model_present(
+    model: str,
+    executable: proc.ExecutableIdentity | None = None,
+    *,
+    process_registry: proc.ProcessRegistry | None = None,
+) -> tuple[bool, str]:
     """Check whether an ollama model is already pulled locally.
 
     `ollama run` on a missing model silently auto-pulls it (tens of GB for
@@ -517,7 +531,10 @@ def ollama_model_present(model: str, executable: proc.ExecutableIdentity | None 
     ollama = executable or proc.resolve_executable("ollama")
     if not ollama.runnable or ollama.path is None:
         return False, "ollama is not installed"
-    listing = proc.run([ollama.path, "list"], timeout=15.0)
+    if process_registry is None:
+        listing = proc.run([ollama.path, "list"], timeout=15.0)
+    else:
+        listing = proc.run([ollama.path, "list"], timeout=15.0, process_registry=process_registry)
     if listing.code != 0:
         reason = listing.stderr.strip() or f"exit {listing.code}"
         return False, f"could not list local ollama models ({reason[:120]}); is the ollama server running?"
@@ -657,6 +674,7 @@ def run_agent(
     reasoning: str | None = None,
     env: dict[str, str] | None = None,
     resume_session_id: str | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
 ) -> AgentResult:
     child_env: dict[str, str] | None = None
     resolved_overrides: dict[str, str] | None = None
@@ -719,12 +737,27 @@ def run_agent(
             )
         from . import codex_cloud
 
+        if process_registry is not None and _accepts_process_registry(codex_cloud.run_cloud_task):
+            return codex_cloud.run_cloud_task(
+                prompt,
+                env_id=env_id,
+                timeout=timeout,
+                cwd=cwd,
+                process_registry=process_registry,
+            )
         return codex_cloud.run_cloud_task(prompt, env_id=env_id, timeout=timeout, cwd=cwd)
 
     if cli_ref.startswith(_OLLAMA_PREFIX):
         ollama_model = cli_ref[len(_OLLAMA_PREFIX) :]
         if ollama_model:
-            present, missing_detail = ollama_model_present(ollama_model, executable)
+            if process_registry is not None and _accepts_process_registry(ollama_model_present):
+                present, missing_detail = ollama_model_present(
+                    ollama_model,
+                    executable,
+                    process_registry=process_registry,
+                )
+            else:
+                present, missing_detail = ollama_model_present(ollama_model, executable)
             if not present:
                 return AgentResult(text="", ok=False, detail=missing_detail)
     cursor_limitation = None
@@ -769,6 +802,7 @@ def run_agent(
             cwd=cwd,
             env=child_env,
             stdin=prompt.encode(),
+            process_registry=process_registry,
         )
     else:
         result = proc.run(
@@ -776,6 +810,7 @@ def run_agent(
             timeout=timeout,
             cwd=cwd,
             env=child_env,
+            process_registry=process_registry,
         )
 
     def scrub_detail(detail: str) -> str:

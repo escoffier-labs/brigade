@@ -753,6 +753,65 @@ def test_run_agent_threads_cwd_into_argv_builder(monkeypatch, tmp_path):
     ]
 
 
+def test_ollama_model_present_threads_process_registry(monkeypatch):
+    registry = agents.proc.ProcessRegistry()
+    seen = {}
+
+    def fake_run(argv, timeout=30.0, process_registry=None):
+        seen.update(argv=argv, timeout=timeout, process_registry=process_registry)
+        return agents.proc.Result(0, "NAME ID SIZE MODIFIED\nllama3.3:latest id size now\n", "")
+
+    executable = agents.proc.ExecutableIdentity(
+        command="ollama", path="/x/ollama", kind="native", runnable=True, detail="test"
+    )
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    present, detail = agents.ollama_model_present("llama3.3", executable, process_registry=registry)
+
+    assert present
+    assert detail == ""
+    assert seen["process_registry"] is registry
+
+
+def test_ollama_model_present_preserves_legacy_proc_call_shape(monkeypatch):
+    def fake_run(argv, timeout=30.0):
+        return agents.proc.Result(0, "NAME ID SIZE MODIFIED\nllama3.3:latest id size now\n", "")
+
+    executable = agents.proc.ExecutableIdentity(
+        command="ollama", path="/x/ollama", kind="native", runnable=True, detail="test"
+    )
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    assert agents.ollama_model_present("llama3.3", executable) == (True, "")
+
+
+def test_run_agent_threads_process_registry_to_ollama_preflight(monkeypatch):
+    registry = agents.proc.ProcessRegistry()
+    seen = {}
+
+    def fake_present(model, executable=None, process_registry=None):
+        seen["process_registry"] = process_registry
+        return False, "stop before dispatch"
+
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents, "ollama_model_present", fake_present)
+
+    result = agents.run_agent("ollama:llama3.3", "fix it", process_registry=registry)
+
+    assert not result.ok
+    assert seen["process_registry"] is registry
+
+
+def test_run_agent_preserves_legacy_ollama_preflight_call_shape(monkeypatch):
+    def fake_present(model, executable=None):
+        return False, "stop before dispatch"
+
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents, "ollama_model_present", fake_present)
+
+    assert not agents.run_agent("ollama:llama3.3", "fix it").ok
+
+
 def test_run_agent_antigravity_with_no_cwd_allows_current_cwd(monkeypatch, tmp_path):
     captured = {}
 
