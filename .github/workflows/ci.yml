@@ -197,6 +197,10 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
       - name: Exercise generated-release provenance contract
         run: python -m pytest tests/test_component_manifest_provenance.py -q
 

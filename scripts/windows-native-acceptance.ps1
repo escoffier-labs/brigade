@@ -509,13 +509,24 @@ try {
     & brigade --version
     if ($LASTEXITCODE -ne 0) { throw "brigade --version failed" }
 
-    Write-Step "brigade setup (online)"
-    & brigade setup
-    if ($LASTEXITCODE -ne 0) { throw "brigade setup failed" }
+    if ($InstallMode -eq "source") {
+        Write-Step "brigade setup (online)"
+        & brigade setup --manifest-source standalone
+        if ($LASTEXITCODE -ne 0) { throw "brigade setup failed" }
 
-    Write-Step "brigade setup --offline"
-    & brigade setup --offline
-    if ($LASTEXITCODE -ne 0) { throw "brigade setup --offline failed" }
+        Write-Step "brigade setup --offline"
+        & brigade setup --offline --manifest-source standalone
+        if ($LASTEXITCODE -ne 0) { throw "brigade setup --offline failed" }
+    }
+    else {
+        Write-Step "brigade setup (online)"
+        & brigade setup
+        if ($LASTEXITCODE -ne 0) { throw "brigade setup failed" }
+
+        Write-Step "brigade setup --offline"
+        & brigade setup --offline
+        if ($LASTEXITCODE -ne 0) { throw "brigade setup --offline failed" }
+    }
 
     $report = Get-ComponentReport -StderrRoot $acceptRoot
     Assert-AllComponentsHealthy $report

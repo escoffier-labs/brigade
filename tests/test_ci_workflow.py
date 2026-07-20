@@ -114,6 +114,16 @@ def test_ci_workflow_does_not_skip_docs_only_content_guard():
     assert "python -m content_guard scan" in text
 
 
+def test_ci_component_manifest_provenance_job_installs_dev_test_dependencies():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "component-manifest-provenance")
+
+    install = 'python -m pip install -e ".[dev]"'
+    pytest = "python -m pytest tests/test_component_manifest_provenance.py -q"
+    assert install in section
+    assert section.index(install) < section.index(pytest)
+
+
 def test_agents_doc_names_ci_only_jobs_outside_local_verify():
     text = (ROOT / "AGENTS.md").read_text()
 
@@ -228,6 +238,34 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "$env:XDG_CACHE_HOME" in text
     assert "finally" in text
     assert "#requires -Version 5.1" in text
+
+
+def test_windows_native_acceptance_source_setup_uses_standalone_manifest_online_and_offline():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    online = text.index('Write-Step "brigade setup (online)"')
+    setup = text[
+        text.rfind('if ($InstallMode -eq "source") {', 0, online) : text.index("$report = Get-ComponentReport")
+    ]
+
+    source = re.search(r'if \(\$InstallMode -eq "source"\) \{(?P<body>.*?)\n    \}', setup, re.DOTALL)
+    assert source is not None
+    assert "& brigade setup --manifest-source standalone" in source.group("body")
+    assert "& brigade setup --offline --manifest-source standalone" in source.group("body")
+
+
+def test_windows_native_acceptance_pypi_setup_keeps_exact_manifest_default_and_digest_check():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    online = text.index('Write-Step "brigade setup (online)"')
+    setup = text[
+        text.rfind('if ($InstallMode -eq "source") {', 0, online) : text.index("$report = Get-ComponentReport")
+    ]
+
+    published = re.search(r"else \{(?P<body>.*?)\n    \}", setup, re.DOTALL)
+    assert published is not None
+    assert re.search(r"(?m)^        & brigade setup$", published.group("body"))
+    assert re.search(r"(?m)^        & brigade setup --offline$", published.group("body"))
+    assert "--manifest-source standalone" not in published.group("body")
+    assert "Assert-ManagedComponentDigests -Manifest $releaseManifest" in text
 
 
 def test_windows_native_acceptance_path_and_install_ordering():
