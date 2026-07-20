@@ -49,7 +49,7 @@ Use narrow external dry-runs before importing provider data:
 
 ```bash
 miseledger crawl github --repo escoffier-labs/miseledger --numbers 34 --limit 1 --dry-run --json
-miseledger crawl gmail --account you@example.com --query "subject:miseledger" --limit 1 --metadata-only --dry-run --json
+miseledger crawl gmail --account "$GMAIL_ACCOUNT" --query "subject:miseledger" --limit 1 --metadata-only --dry-run --json
 scripts/smoke_gmail_metadata.sh
 ```
 

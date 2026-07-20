@@ -116,7 +116,7 @@ miseledger crawl github --repo escoffier-labs/miseledger --numbers 34,35 --limit
 miseledger crawl slack --workspace T123 --json
 miseledger crawl granola --json
 miseledger crawl notion --json
-miseledger crawl gmail --account me@example.com --query "subject:miseledger" --json
+miseledger crawl gmail --account "$GMAIL_ACCOUNT" --query "subject:miseledger" --json
 miseledger crawl telegram --chat "MiseLedger" --json
 miseledger import adapter discrawl.adapter.jsonl --json
 ```
