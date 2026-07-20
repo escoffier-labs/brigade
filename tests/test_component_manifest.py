@@ -258,7 +258,7 @@ def test_bundled_manifest_pins_miseledger_and_graphtrail_assets():
     manifest = component_manifest.load()
 
     assert manifest.schema_version == 1
-    assert manifest.brigade_version == "0.23.3"
+    assert manifest.brigade_version == "0.24.0"
     assert manifest.manifest_revision == "2026-07-19"
     assert manifest.supported_platforms == component_manifest.SUPPORTED_PLATFORMS
     assert set(manifest.components) == set(component_manifest.KNOWN_COMPONENT_IDS)
