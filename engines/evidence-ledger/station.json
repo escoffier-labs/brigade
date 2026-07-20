@@ -1,0 +1,41 @@
+{
+  "schema": "brigade.station.v1",
+  "name": "miseledger",
+  "station": "evidence",
+  "summary": "local evidence archive, bounded retrieval, and untrusted context bundles",
+  "lifecycle": "active",
+  "tools": [
+    {
+      "name": "miseledger",
+      "kind": "executable",
+      "command": "miseledger",
+      "summary": "local-first SQLite archive for agent sessions and imported evidence",
+      "install": ["go", "install", "github.com/escoffier-labs/miseledger/cmd/miseledger@latest"],
+      "surfaces": [
+        {
+          "kind": "doctor-json",
+          "command": ["miseledger", "doctor", "--json"],
+          "read_only": false,
+          "timeout_seconds": 120,
+          "probe": ["miseledger", "doctor", "--help"],
+          "probe_contains": ["--json", "--mcp", "--archive"]
+        },
+        {
+          "kind": "brief-markdown",
+          "command": ["miseledger", "evidence", "<task>", "--markdown", "--limit", "5"],
+          "read_only": false,
+          "timeout_seconds": 10,
+          "max_chars": 4000,
+          "probe": ["miseledger", "evidence", "--help"],
+          "probe_contains": ["--markdown", "--limit"]
+        },
+        {
+          "kind": "verify-exit",
+          "command": ["miseledger", "version"],
+          "read_only": true,
+          "timeout_seconds": 10
+        }
+      ]
+    }
+  ]
+}

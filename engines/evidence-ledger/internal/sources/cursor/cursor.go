@@ -1,0 +1,586 @@
+// Package cursor imports local Cursor history into the archive.
+//
+// Current Cursor releases keep searchable conversation text in
+// User/globalStorage/conversation-search.db. Older Cursor Agent CLI releases
+// also exposed two plain JSON surfaces that remain supported:
+//
+//   - prompt_history.json: a deduplicated JSON array of the prompts the user
+//     typed. This is the primary Ctrl+F surface for recalling a session.
+//   - chats/<hash>/meta.json and acp-sessions/<id>/meta.json: per-session
+//     metadata (title, timestamps, workspace). Each becomes an agent_session
+//     collection so it shows up in `miseledger sessions`.
+//
+// Legacy per-session store.db files hold message bodies as binary blobs (a versioned
+// internal encoding), so message text is intentionally NOT decoded here. A
+// chat directory that has a store.db but no meta.json is still surfaced as a
+// discoverable session (so the user can resume it) with a warning.
+package cursor
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/escoffier-labs/miseledger/internal/adapter"
+	"github.com/escoffier-labs/miseledger/internal/sources"
+	_ "modernc.org/sqlite"
+)
+
+// DefaultRoot returns the Cursor Agent config root for the current OS,
+// matching the upstream WI() resolution. It does not check existence.
+func DefaultRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.Getenv("HOME")
+	}
+	return defaultRoot(runtime.GOOS, home, strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")), strings.TrimSpace(os.Getenv("APPDATA")))
+}
+
+func defaultRoot(goos, home, xdg, appData string) string {
+	switch goos {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "Cursor", "User")
+	case "windows":
+		if appData == "" {
+			appData = filepath.Join(home, "AppData", "Roaming")
+		}
+		return filepath.Join(appData, "Cursor", "User")
+	}
+	if xdg != "" {
+		return filepath.Join(xdg, "Cursor", "User")
+	}
+	return filepath.Join(home, ".config", "Cursor", "User")
+}
+
+// CountSessions returns the number of discoverable current conversations and
+// legacy prompt/session surfaces without reading conversation titles or bodies.
+func CountSessions(path string) (int, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	if !info.IsDir() {
+		if filepath.Base(path) != "conversation-search.db" {
+			return 0, nil
+		}
+		return countConversationRows(path)
+	}
+
+	count := 0
+	if dbPath := filepath.Join(path, "globalStorage", "conversation-search.db"); fileExists(dbPath) {
+		n, err := countConversationRows(dbPath)
+		if err != nil {
+			return 0, err
+		}
+		count += n
+	}
+	if fileExists(filepath.Join(path, "prompt_history.json")) {
+		count++
+	}
+	for _, sub := range []string{"chats", "acp-sessions"} {
+		entries, err := os.ReadDir(filepath.Join(path, sub))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
+func countConversationRows(dbPath string) (int, error) {
+	u := &url.URL{Scheme: "file", Path: dbPath}
+	query := u.Query()
+	query.Set("mode", "ro")
+	u.RawQuery = query.Encode()
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var count int
+	if err := db.QueryRow(`select count(*) from conversations`).Scan(&count); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return count, nil
+}
+
+// Generate walks a Cursor config root (or a direct prompt_history.json file)
+// and emits adapter records for prompt history and chat sessions.
+func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, error) {
+	since, hasSince, err := sources.ParseSince(opts.Since)
+	if err != nil {
+		return sources.Result{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return sources.Result{}, err
+	}
+	gen := &generator{opts: opts, since: since, hasSince: hasSince, w: w}
+	if !info.IsDir() {
+		if filepath.Base(path) == "conversation-search.db" {
+			if err := gen.emitConversationSearch(path); err != nil {
+				return gen.result, err
+			}
+		} else if err := gen.emitPromptHistory(path); err != nil {
+			return gen.result, err
+		}
+		gen.result.Files = gen.scans
+		return gen.result, nil
+	}
+	root := path
+	if dbPath := filepath.Join(root, "globalStorage", "conversation-search.db"); fileExists(dbPath) {
+		if err := gen.emitConversationSearch(dbPath); err != nil {
+			return gen.result, err
+		}
+	}
+	if hp := filepath.Join(root, "prompt_history.json"); fileExists(hp) {
+		if err := gen.emitPromptHistory(hp); err != nil {
+			return gen.result, err
+		}
+	}
+	for _, sub := range []string{"chats", "acp-sessions"} {
+		dir := filepath.Join(root, sub)
+		if err := gen.emitSessions(dir); err != nil {
+			return gen.result, err
+		}
+	}
+	gen.result.Files = gen.scans
+	return gen.result, nil
+}
+
+func (g *generator) emitConversationSearch(dbPath string) error {
+	scanPath := dbPath
+	if fileExists(dbPath + "-wal") {
+		scanPath = dbPath + "-wal"
+	}
+	scan, skip, err := g.openScan(scanPath)
+	if err != nil {
+		return err
+	}
+	if skip {
+		return g.afterFile(*scan)
+	}
+
+	u := &url.URL{Scheme: "file", Path: dbPath}
+	query := u.Query()
+	query.Set("mode", "ro")
+	u.RawQuery = query.Encode()
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	rows, err := db.Query(`
+		select c.id, c.title, c.updated_at, c.is_archived, c.scope,
+		       coalesce(c.root_fingerprint, ''), coalesce(f.body, '')
+		from conversations c
+		join conversation_fts f on f.rowid = c.fts_rowid
+		order by c.updated_at, c.id`)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			g.warn(scan, fmt.Sprintf("%s: required conversation tables are missing: %s", dbPath, err))
+			g.scans = append(g.scans, *scan)
+			return g.afterFile(*scan)
+		}
+		return err
+	}
+	defer rows.Close()
+	var ordinal int64
+	for rows.Next() {
+		var id, title, scope, rootFingerprint, body string
+		var updatedAt int64
+		var archived int
+		if err := rows.Scan(&id, &title, &updatedAt, &archived, &scope, &rootFingerprint, &body); err != nil {
+			return err
+		}
+		if g.limited() {
+			continue
+		}
+		timestamp := epochString(float64(updatedAt))
+		if !sources.KeepTimestamp(timestamp, g.since, g.hasSince) {
+			continue
+		}
+		text := strings.TrimSpace(title + "\n" + body)
+		if text == "" {
+			continue
+		}
+		ordinal++
+		rec := adapter.Record{
+			Schema: adapter.SchemaV1,
+			Source: adapter.Source{Kind: "cursor", Name: "Cursor"},
+			Collection: adapter.Collection{
+				ExternalID: "cursor:conversation:" + id,
+				Kind:       "agent_session",
+				Name:       firstNonEmpty(title, id),
+				Metadata: sources.Metadata(map[string]any{
+					"harness": "cursor", "session_id": id, "scope": scope,
+					"root_fingerprint": rootFingerprint, "archived": archived != 0,
+				}),
+			},
+			Item: adapter.Item{
+				ExternalID: "cursor:conversation-body:" + id,
+				Kind:       "message",
+				UpdatedAt:  timestamp,
+				Text:       text,
+				Tags:       []string{"cursor", "agent-session"},
+				Metadata: sources.Metadata(map[string]any{
+					"harness": "cursor", "session_id": id, "surface": "conversation_search",
+					"scope": scope, "root_fingerprint": rootFingerprint, "archived": archived != 0,
+					"bodies_indexed": true, "source_file": dbPath, "ordinal": ordinal,
+				}),
+			},
+			Actor: sources.ActorFromRole("cursor", "assistant", "conversation"),
+			Raw: adapter.RawRef{
+				Format: "sqlite", Hash: "sha256:" + sources.HashBytes([]byte(id+"\x00"+text)),
+				Path: dbPath, Ordinal: &ordinal,
+			},
+		}
+		sources.ApplyRedaction(&rec, g.opts)
+		if err := sources.WriteRecord(g.w, rec); err != nil {
+			return err
+		}
+		g.result.Records++
+		scan.Records++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	g.scans = append(g.scans, *scan)
+	return g.afterFile(*scan)
+}
+
+type generator struct {
+	opts     sources.Options
+	since    time.Time
+	hasSince bool
+	w        io.Writer
+	result   sources.Result
+	scans    []sources.FileScan
+}
+
+func (g *generator) limited() bool {
+	return g.opts.Limit > 0 && g.result.Records >= g.opts.Limit
+}
+
+func (g *generator) emitPromptHistory(path string) error {
+	scan, skip, err := g.openScan(path)
+	if err != nil {
+		return err
+	}
+	if skip {
+		if err := g.afterFile(*scan); err != nil {
+			return err
+		}
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	scan.ContentHash = "sha256:" + sources.HashBytes(raw)
+	var prompts []string
+	if err := json.Unmarshal(raw, &prompts); err != nil {
+		g.warn(scan, fmt.Sprintf("%s: prompt_history.json is not a JSON string array: %s", path, err))
+		g.scans = append(g.scans, *scan)
+		if err := g.afterFile(*scan); err != nil {
+			return err
+		}
+		return nil
+	}
+	for idx, prompt := range prompts {
+		if g.limited() {
+			break
+		}
+		text := strings.TrimSpace(prompt)
+		if text == "" {
+			continue
+		}
+		ordinal := int64(idx + 1)
+		rec := adapter.Record{
+			Schema: adapter.SchemaV1,
+			Source: adapter.Source{Kind: "cursor", Name: "Cursor Agent"},
+			Collection: adapter.Collection{
+				ExternalID: "cursor:prompt-history",
+				Kind:       "prompt_history",
+				Name:       "Cursor Prompt History",
+				Metadata:   sources.Metadata(map[string]any{"harness": "cursor", "surface": "prompt_history"}),
+			},
+			Item: adapter.Item{
+				ExternalID: "cursor:prompt:" + sources.StableID(text),
+				Kind:       "message",
+				Text:       text,
+				Tags:       []string{"cursor", "prompt-history"},
+				Metadata:   sources.Metadata(map[string]any{"harness": "cursor", "surface": "prompt_history", "source_file": path, "ordinal": ordinal}),
+			},
+			Actor: sources.ActorFromRole("cursor", "user", "prompt"),
+			Raw: adapter.RawRef{
+				Format:  "json",
+				Hash:    "sha256:" + sources.HashBytes([]byte(text)),
+				Path:    path,
+				Ordinal: &ordinal,
+			},
+		}
+		sources.ApplyRedaction(&rec, g.opts)
+		if err := sources.WriteRecord(g.w, rec); err != nil {
+			return err
+		}
+		g.result.Records++
+		scan.Records++
+	}
+	g.scans = append(g.scans, *scan)
+	if err := g.afterFile(*scan); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (g *generator) emitSessions(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if g.limited() {
+			break
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		sessionDir := filepath.Join(dir, entry.Name())
+		if err := g.emitSession(sessionDir, entry.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (g *generator) emitSession(sessionDir, id string) error {
+	metaPath := filepath.Join(sessionDir, "meta.json")
+	storePath := filepath.Join(sessionDir, "store.db")
+	hasStore := fileExists(storePath)
+	if !fileExists(metaPath) {
+		// No JSON metadata. If there is a store.db, surface a minimal,
+		// resumable session record so the chat is still discoverable.
+		if hasStore {
+			g.warn(nil, fmt.Sprintf("%s: chat has store.db but no meta.json; message bodies are binary and not indexed", sessionDir))
+			return g.writeSession(sessionDir, id, id, "", "", storePath, true)
+		}
+		return nil
+	}
+	scan, skip, err := g.openScan(metaPath)
+	if err != nil {
+		return err
+	}
+	if skip {
+		if err := g.afterFile(*scan); err != nil {
+			return err
+		}
+		return nil
+	}
+	raw, err := os.ReadFile(metaPath)
+	if err != nil {
+		return err
+	}
+	scan.ContentHash = "sha256:" + sources.HashBytes(raw)
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		g.warn(scan, fmt.Sprintf("%s: meta.json is not a JSON object: %s", metaPath, err))
+		g.scans = append(g.scans, *scan)
+		if err := g.afterFile(*scan); err != nil {
+			return err
+		}
+		return nil
+	}
+	sessionID := firstString(meta, "id", "chatId", "sessionId", "uuid")
+	if sessionID == "" {
+		sessionID = id
+	}
+	title := firstString(meta, "title", "name", "summary")
+	createdAt := firstTimestamp(meta, "createdAt", "created_at", "createdAtMs", "updatedAt", "updated_at")
+	workspace := firstString(meta, "workspace", "workspacePath", "cwd", "rootPath")
+	body := sessionText(meta, title, sessionID)
+	if !sources.KeepTimestamp(createdAt, g.since, g.hasSince) {
+		g.scans = append(g.scans, *scan)
+		if err := g.afterFile(*scan); err != nil {
+			return err
+		}
+		return nil
+	}
+	rawPath := storePath
+	if !hasStore {
+		rawPath = metaPath
+	}
+	if err := g.writeSession(sessionDir, sessionID, body, createdAt, workspace, rawPath, hasStore); err != nil {
+		return err
+	}
+	scan.Records++
+	g.scans = append(g.scans, *scan)
+	if err := g.afterFile(*scan); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (g *generator) writeSession(sessionDir, sessionID, text, createdAt, workspace, rawPath string, hasStore bool) error {
+	if strings.TrimSpace(text) == "" {
+		text = sessionID
+	}
+	ordinal := int64(1)
+	rec := adapter.Record{
+		Schema: adapter.SchemaV1,
+		Source: adapter.Source{Kind: "cursor", Name: "Cursor Agent"},
+		Collection: adapter.Collection{
+			ExternalID: "cursor:session:" + sessionID,
+			Kind:       "agent_session",
+			Name:       firstNonEmpty(text, sessionID),
+			Metadata:   sources.Metadata(map[string]any{"harness": "cursor", "session_id": sessionID, "session_dir": sessionDir, "workspace": workspace}),
+		},
+		Item: adapter.Item{
+			ExternalID: "cursor:session-meta:" + sessionID,
+			Kind:       "message",
+			CreatedAt:  createdAt,
+			Text:       text,
+			Tags:       []string{"cursor", "agent-session"},
+			Metadata:   sources.Metadata(map[string]any{"harness": "cursor", "session_id": sessionID, "session_dir": sessionDir, "workspace": workspace, "store_db": hasStore, "bodies_indexed": false, "source_file": rawPath, "ordinal": ordinal}),
+		},
+		Actor: sources.ActorFromRole("cursor", "system", "session"),
+		Raw: adapter.RawRef{
+			Format:  "cursor-session",
+			Hash:    "sha256:" + sources.HashBytes([]byte(sessionDir)),
+			Path:    rawPath,
+			Ordinal: &ordinal,
+		},
+	}
+	sources.ApplyRedaction(&rec, g.opts)
+	if err := sources.WriteRecord(g.w, rec); err != nil {
+		return err
+	}
+	g.result.Records++
+	return nil
+}
+
+// openScan stats a file and applies the incremental-skip decision. A skipped
+// file is recorded in the manifest and reported via skip=true.
+func (g *generator) openScan(path string) (*sources.FileScan, bool, error) {
+	scan, skip, err := sources.PrepareFileScan(path, g.opts)
+	if err != nil {
+		return nil, false, err
+	}
+	if skip {
+		g.scans = append(g.scans, scan)
+	}
+	return &scan, skip, nil
+}
+
+func (g *generator) warn(scan *sources.FileScan, msg string) {
+	g.result.Warnings = append(g.result.Warnings, msg)
+	if scan != nil {
+		scan.Warnings++
+	}
+}
+
+func (g *generator) afterFile(scan sources.FileScan) error {
+	if g.opts.AfterFile == nil {
+		return nil
+	}
+	return g.opts.AfterFile(scan)
+}
+
+func sessionText(meta map[string]any, title, sessionID string) string {
+	parts := []string{}
+	if title != "" {
+		parts = append(parts, title)
+	}
+	for _, key := range []string{"summary", "lastMessage", "preview", "firstMessage"} {
+		if s := sources.TextFromAny(meta[key], 4000); s != "" && s != title {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 {
+		return sessionID
+	}
+	return strings.Join(parts, "\n")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		switch t := m[key].(type) {
+		case string:
+			if strings.TrimSpace(t) != "" {
+				return t
+			}
+		case float64:
+			return strconv.FormatFloat(t, 'f', -1, 64)
+		}
+	}
+	return ""
+}
+
+// firstTimestamp returns the first present timestamp key as an RFC3339 string.
+// It accepts RFC3339 strings and epoch numbers in seconds or milliseconds.
+func firstTimestamp(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		switch t := m[key].(type) {
+		case string:
+			s := strings.TrimSpace(t)
+			if s == "" {
+				continue
+			}
+			if _, err := time.Parse(time.RFC3339, s); err == nil {
+				return s
+			}
+			if n, err := strconv.ParseFloat(s, 64); err == nil {
+				return epochString(n)
+			}
+		case float64:
+			return epochString(t)
+		}
+	}
+	return ""
+}
+
+func epochString(n float64) string {
+	if n <= 0 {
+		return ""
+	}
+	// Heuristic: values past ~the year 2001 in seconds are < 1e12; larger
+	// values are milliseconds.
+	if n > 1e12 {
+		return time.UnixMilli(int64(n)).UTC().Format(time.RFC3339)
+	}
+	return time.Unix(int64(n), 0).UTC().Format(time.RFC3339)
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}

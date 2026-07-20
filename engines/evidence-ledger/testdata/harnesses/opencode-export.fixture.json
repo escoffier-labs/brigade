@@ -1,0 +1,57 @@
+{
+  "info": {
+    "id": "ses_fixture",
+    "projectID": "proj_fixture",
+    "directory": "/home/demo/project",
+    "path": "/home/demo/project",
+    "title": "Fixture session",
+    "agent": "build",
+    "model": "provider/model",
+    "time": 1780457883333,
+    "version": "1.15.13"
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_user",
+        "sessionID": "ses_fixture",
+        "role": "user",
+        "time": 1780457883333,
+        "model": "provider/model"
+      },
+      "parts": [
+        {
+          "id": "prt_user_text",
+          "type": "text",
+          "text": "OpenCode adapter contract fixture",
+          "time": 1780457883333
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_assistant",
+        "sessionID": "ses_fixture",
+        "role": "assistant",
+        "time": 1780457884333,
+        "model": "provider/model"
+      },
+      "parts": [
+        {
+          "id": "prt_assistant_text",
+          "type": "text",
+          "text": "Collected evidence for the adapter contract.",
+          "time": 1780457884333
+        },
+        {
+          "id": "prt_tool",
+          "type": "tool",
+          "tool": "bash",
+          "callID": "call_fixture",
+          "text": "go test ./...",
+          "time": 1780457884333
+        }
+      ]
+    }
+  ]
+}

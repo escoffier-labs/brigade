@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
+    branches: [master]
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+      - run: govulncheck ./...
+      - run: go build -o bin/miseledger ./cmd/miseledger
+      - run: go build -o bin/sessionfind ./cmd/sessionfind
+      - run: scripts/check_release_workflow.sh
+      - run: scripts/smoke_archive.sh
+      - run: scripts/smoke_mcp.sh
+      - run: scripts/smoke_http.sh

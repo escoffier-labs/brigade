@@ -1,0 +1,34 @@
+name: Bug report
+description: miseledger imported wrong, lost data, or errored
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Use synthetic data.** Don't paste real evidence; a tiny made-up `adapter.v1` record that reproduces is ideal.
+  - type: input
+    id: version
+    attributes:
+      label: miseledger version
+      placeholder: "0.2.0 (miseledger version)"
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      placeholder: "miseledger import adapter ..., search, export markdown, ..."
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: Minimal input (synthetic)
+      description: The smallest adapter record or ledger state that reproduces it.
+      render: json
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. actual
+    validations:
+      required: true
