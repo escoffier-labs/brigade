@@ -63,7 +63,7 @@ Format: trigger, then the rule, then what to do instead.
 - Bumping the version: update `pyproject.toml`, `src/brigade/__init__.py`, and
   every template `_brigade_version` field together. `./scripts/verify` checks
   the sync.
-- Committing: conventional commits, no co-authorship trailers.
+- Committing: use conventional commits. In escoffier-labs organizations and original solomonneas repositories, commits for substantial coding work should carry the coding agent's co-author trailer. External repositories and upstream third-party PRs remain trailer-free.
 
 ## Orientation
 
