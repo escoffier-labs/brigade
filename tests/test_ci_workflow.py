@@ -383,6 +383,18 @@ def test_windows_native_acceptance_restricts_reported_executables_to_the_clean_m
     assert "-ManagedBin $managedBin" in text
 
 
+def test_windows_native_acceptance_constructs_managed_prefix_with_one_platform_separator():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    managed_path = _extract_powershell_function(text, "Get-ManagedExecutablePath")
+
+    assert (
+        ".TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)"
+    ) in managed_path
+    assert '$managedPrefix = "$managedRoot$([System.IO.Path]::DirectorySeparatorChar)"' in managed_path
+    assert '.TrimEnd("\\\\")' not in managed_path
+    assert '$managedPrefix = "$managedRoot\\\\"' not in managed_path
+
+
 def test_windows_native_acceptance_passes_managed_bin_to_every_executable_lookup():
     text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
     digest_assertion = _extract_powershell_function(text, "Assert-ManagedComponentDigests")

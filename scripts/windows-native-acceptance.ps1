@@ -427,8 +427,8 @@ function Get-ManagedExecutablePath {
     if (-not (Test-Path $path)) {
         throw "managed executable missing for ${ComponentId}: $path"
     }
-    $managedRoot = (Resolve-Path -LiteralPath $ManagedBin -ErrorAction Stop).Path.TrimEnd("\\")
-    $managedPrefix = "$managedRoot\\"
+    $managedRoot = (Resolve-Path -LiteralPath $ManagedBin -ErrorAction Stop).Path.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $managedPrefix = "$managedRoot$([System.IO.Path]::DirectorySeparatorChar)"
     $resolved = (Resolve-Path -LiteralPath $path -ErrorAction Stop).Path
     if (-not $resolved.StartsWith($managedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "managed executable for $ComponentId is outside the clean managed bin: $resolved"
