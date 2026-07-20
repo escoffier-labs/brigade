@@ -14,6 +14,7 @@ from brigade import agents
 from brigade import cli
 from brigade import localio
 from brigade import proc
+from brigade import roster
 from brigade import runguard
 from brigade import runs_cmd
 
@@ -33,6 +34,46 @@ def test_run_cli_rejects_missing_cwd(tmp_path, capsys):
     rc = cli.main(["run", "do something", "--cwd", str(tmp_path / "missing")])
     assert rc == 2
     assert "--cwd is not a directory" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("task", ["", " \t\n"])
+def test_run_cli_rejects_blank_task_before_run_setup(tmp_path, capsys, monkeypatch, task):
+    config_dir = tmp_path / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "roster.toml").write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
+    runs_dir = config_dir / "runs"
+    calls = []
+    resolve_roster = roster.resolve_roster
+
+    def tracked_resolve_roster(*args, **kwargs):
+        calls.append("resolve_roster")
+        return resolve_roster(*args, **kwargs)
+
+    def tracked_make_run_dir(*args, **kwargs):
+        calls.append("make_run_dir")
+        return runs_dir / "unexpected"
+
+    @contextmanager
+    def tracked_run_lock(*args, **kwargs):
+        calls.append("run_lock")
+        yield
+
+    def tracked_run(*args, **kwargs):
+        calls.append("run")
+        return 0
+
+    monkeypatch.setattr(roster, "resolve_roster", tracked_resolve_roster)
+    monkeypatch.setattr(aboyeur, "make_run_dir", tracked_make_run_dir)
+    monkeypatch.setattr(runguard, "run_lock", tracked_run_lock)
+    monkeypatch.setattr(aboyeur, "run", tracked_run)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", task, "--cwd", str(tmp_path)])
+
+    assert exc.value.code == 2
+    assert "argument task: must not be empty or whitespace" in capsys.readouterr().err
+    assert calls == []
+    assert not runs_dir.exists()
 
 
 def test_run_cli_loads_roster_and_dispatches(tmp_path, monkeypatch):

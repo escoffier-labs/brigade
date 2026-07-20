@@ -80,6 +80,12 @@ def _terminalize_escaped_run(
         raise
 
 
+def _non_empty_task(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("must not be empty or whitespace")
+    return value
+
+
 def _non_negative_seconds(value: str) -> float:
     try:
         parsed = float(value)
@@ -93,7 +99,11 @@ def _non_negative_seconds(value: str) -> float:
 def register(sub: argparse._SubParsersAction) -> None:
     # run
     p_run = sub.add_parser("run", help="Run a bounded cross-model orchestration task.")
-    p_run.add_argument("task", help="Task for the aboyeur to plan, dispatch, and synthesize.")
+    p_run.add_argument(
+        "task",
+        type=_non_empty_task,
+        help="Task for the aboyeur to plan, dispatch, and synthesize.",
+    )
     p_run.add_argument(
         "--roster",
         type=Path,
