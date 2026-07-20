@@ -59,17 +59,33 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
 
-  windows-native-acceptance:
-    name: windows-native-acceptance
+  published-artifact-acceptance:
+    name: published-artifact-acceptance (${{ matrix.os }})
     needs: build-and-publish
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            kind: unix
+          - os: macos-13
+            kind: unix
+          - os: windows-latest
+            kind: windows
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - name: Run published artifact acceptance (Unix)
+        if: matrix.kind == 'unix'
+        env:
+          BRIGADE_VERSION: ${{ github.ref_name }}
+        run: python scripts/published-artifact-acceptance.py --brigade-version "${BRIGADE_VERSION#v}"
       - name: Run Windows native acceptance (published CLI)
+        if: matrix.kind == 'windows'
         shell: powershell
         env:
           BRIGADE_VERSION: ${{ github.ref_name }}

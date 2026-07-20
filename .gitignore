@@ -58,6 +58,7 @@ Thumbs.db
 /memory/
 /scripts/*
 !/scripts/windows-native-acceptance.ps1
+!/scripts/published-artifact-acceptance.py
 /skills/
 
 # Local plan/spec scratch dirs only. Reviewed planning artifacts ARE
