@@ -1504,11 +1504,30 @@ def repo_worktree_fingerprint(target: Path) -> str | None:
     return localio.stable_hash(sorted(lines))
 
 
-def _bash_write_detected(target: Path, baseline: object) -> bool:
+def _bash_write_detected(
+    target: Path,
+    baseline: object,
+    *,
+    session_id: str,
+    started_at: object,
+) -> bool:
     if not isinstance(baseline, str) or not baseline:
         return False
     current = repo_worktree_fingerprint(target)
-    return current is not None and current != baseline
+    if current is None or current == baseline:
+        return False
+    started = localio.parse_iso_datetime(started_at)
+    if started is None:
+        return True
+    for other_state in iter_session_states(target, limit=MAX_RECENT_SESSION_STATES):
+        if other_state.get("session_id") == session_id:
+            continue
+        if other_state.get("write_observed") is not True or other_state.get("repo_fingerprint") != current:
+            continue
+        other_write = localio.parse_iso_datetime(other_state.get("last_write_at"))
+        if other_write is not None and other_write >= started:
+            return False
+    return True
 
 
 def _session_fingerprint(session_id: str) -> str:
@@ -1570,6 +1589,9 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
     pending_fp = payload.get("pending_bash_fingerprint")
     if isinstance(pending_fp, str) and pending_fp:
         normalized["pending_bash_fingerprint"] = pending_fp
+    pending_started = localio.parse_iso_datetime(payload.get("pending_bash_started_at"))
+    if pending_started is not None and pending_started <= now:
+        normalized["pending_bash_started_at"] = pending_started.isoformat()
     denied = payload.get("verify_denied_count")
     if isinstance(denied, int) and not isinstance(denied, bool) and denied >= 0:
         normalized["verify_denied_count"] = denied
@@ -1662,6 +1684,7 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         baseline = repo_worktree_fingerprint(target)
         if baseline is not None:
             state["pending_bash_fingerprint"] = baseline
+            state["pending_bash_started_at"] = localio.utc_now_iso()
             write_session_state(target, session_id, state)
         if not is_raw_verification(command):
             return None
@@ -1699,7 +1722,12 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             tool_name == "Bash" and _is_confident_bash_write(post_tool_input.get("command"))
         )
         if not wrote and tool_name == "Bash":
-            wrote = _bash_write_detected(target, state.get("pending_bash_fingerprint"))
+            wrote = _bash_write_detected(
+                target,
+                state.get("pending_bash_fingerprint"),
+                session_id=session_id,
+                started_at=state.get("pending_bash_started_at"),
+            )
         if wrote:
             state["write_observed"] = True
             written_at = localio.utc_now_iso()
@@ -1713,9 +1741,11 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             if updated_fp is not None:
                 state["repo_fingerprint"] = updated_fp
             state.pop("pending_bash_fingerprint", None)
+            state.pop("pending_bash_started_at", None)
             write_session_state(target, session_id, state)
         elif state.get("pending_bash_fingerprint") is not None:
             state.pop("pending_bash_fingerprint", None)
+            state.pop("pending_bash_started_at", None)
             write_session_state(target, session_id, state)
         return None
 
