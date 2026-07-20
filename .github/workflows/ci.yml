@@ -9,6 +9,141 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code_graph: ${{ steps.filter.outputs.code_graph }}
+      evidence_ledger: ${{ steps.filter.outputs.evidence_ledger }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code_graph:
+              - 'engines/code-graph/**'
+              - 'src/brigade/templates/components/manifest-v1.json'
+              - '.github/workflows/ci.yml'
+            evidence_ledger:
+              - 'engines/evidence-ledger/**'
+              - 'src/brigade/templates/components/manifest-v1.json'
+              - '.github/workflows/ci.yml'
+
+  code-graph-msrv:
+    name: MSRV (Rust 1.85)
+    needs: changes
+    if: ${{ needs.changes.outputs.code_graph == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engines/code-graph
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engines/code-graph
+      - name: Check locked all-features build
+        run: cargo check --locked --all-features
+
+  code-graph-build-and-test:
+    name: build-and-test
+    needs: changes
+    if: ${{ needs.changes.outputs.code_graph == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engines/code-graph
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engines/code-graph
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --all-features
+      - name: Build (default, no-network)
+        run: cargo build --release
+
+  code-graph-feature-configurations:
+    name: Feature configuration (${{ matrix.name }})
+    needs: changes
+    if: ${{ needs.changes.outputs.code_graph == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: no-default
+            cargo_args: --no-default-features
+          - name: default
+            cargo_args: ""
+          - name: watch-only
+            cargo_args: --no-default-features --features watch
+          - name: codesearch-only
+            cargo_args: --no-default-features --features codesearch
+          - name: miseledger-only
+            cargo_args: --no-default-features --features miseledger
+          - name: all-features
+            cargo_args: --all-features
+    defaults:
+      run:
+        working-directory: engines/code-graph
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engines/code-graph
+      - name: Check locked feature configuration
+        run: cargo check --locked ${{ matrix.cargo_args }}
+
+  code-graph-windows:
+    name: Windows (stable, default features)
+    needs: changes
+    if: ${{ needs.changes.outputs.code_graph == 'true' }}
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: engines/code-graph
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engines/code-graph
+      - name: Test locked default features
+        run: cargo test --locked
+
+  evidence-ledger-test:
+    needs: changes
+    if: ${{ needs.changes.outputs.evidence_ledger == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engines/evidence-ledger
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+      - run: govulncheck ./...
+      - run: go build -o bin/miseledger ./cmd/miseledger
+      - run: go build -o bin/sessionfind ./cmd/sessionfind
+      - run: scripts/check_release_workflow.sh
+      - run: scripts/smoke_archive.sh
+      - run: scripts/smoke_mcp.sh
+      - run: scripts/smoke_http.sh
+
   lint:
     runs-on: ubuntu-latest
     steps:

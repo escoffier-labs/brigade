@@ -6,6 +6,97 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _workflow_job_section(text: str, job_name: str) -> str:
+    start = text.index(f"  {job_name}:")
+    next_job = re.search(r"^  [a-z0-9][a-z0-9-]*:$", text[start + 1 :], re.MULTILINE)
+    end = start + 1 + next_job.start() if next_job else len(text)
+    return text[start:end]
+
+
+def test_ci_workflow_path_filter_has_valid_structure_and_engine_paths():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    changes = _workflow_job_section(text, "changes")
+
+    assert "jobs:\n  changes:" in text
+    assert "runs-on: ubuntu-latest" in changes
+    assert "uses: dorny/paths-filter@v3" in changes
+    assert "code_graph: ${{ steps.filter.outputs.code_graph }}" in changes
+    assert "evidence_ledger: ${{ steps.filter.outputs.evidence_ledger }}" in changes
+    assert "code-graph:" not in changes
+    assert "evidence-ledger:" not in changes
+
+    for path in (
+        "engines/code-graph/**",
+        "engines/evidence-ledger/**",
+        "src/brigade/templates/components/manifest-v1.json",
+        ".github/workflows/ci.yml",
+    ):
+        assert path in changes
+
+
+def test_ci_workflow_gates_native_engine_jobs_with_valid_expressions():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    expected_jobs = {
+        "code-graph-msrv": "code_graph",
+        "code-graph-build-and-test": "code_graph",
+        "code-graph-feature-configurations": "code_graph",
+        "code-graph-windows": "code_graph",
+        "evidence-ledger-test": "evidence_ledger",
+    }
+
+    job_names = re.findall(r"^  ([a-z0-9][a-z0-9-]*):$", text, re.MULTILINE)
+    assert {name for name in job_names if name.startswith(("code-graph-", "evidence-ledger-"))} == set(expected_jobs)
+
+    for job_name, output_name in expected_jobs.items():
+        section = _workflow_job_section(text, job_name)
+        assert "needs: changes" in section
+        assert f"if: ${{{{ needs.changes.outputs.{output_name} == 'true' }}}}" in section
+        assert "self-hosted" not in section
+
+
+def test_ci_workflow_runs_embedded_engine_commands_from_engine_directories():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+
+    for job_name in (
+        "code-graph-msrv",
+        "code-graph-build-and-test",
+        "code-graph-feature-configurations",
+        "code-graph-windows",
+    ):
+        section = _workflow_job_section(text, job_name)
+        assert "working-directory: engines/code-graph" in section
+        assert "uses: Swatinem/rust-cache@v2" in section
+        assert "workspaces: engines/code-graph" in section
+
+    code_graph = _workflow_job_section(text, "code-graph-build-and-test")
+    for command in (
+        "cargo fmt --check",
+        "cargo clippy --all-targets --all-features -- -D warnings",
+        "cargo test --all-features",
+        "cargo build --release",
+    ):
+        assert command in code_graph
+
+    feature_configurations = _workflow_job_section(text, "code-graph-feature-configurations")
+    assert "cargo check --locked ${{ matrix.cargo_args }}" in feature_configurations
+
+    evidence_ledger = _workflow_job_section(text, "evidence-ledger-test")
+    assert "working-directory: engines/evidence-ledger" in evidence_ledger
+    for command in (
+        "go test ./...",
+        "go vet ./...",
+        "go install golang.org/x/vuln/cmd/govulncheck@v1.3.0",
+        "govulncheck ./...",
+        "go build -o bin/miseledger ./cmd/miseledger",
+        "go build -o bin/sessionfind ./cmd/sessionfind",
+        "scripts/check_release_workflow.sh",
+        "scripts/smoke_archive.sh",
+        "scripts/smoke_mcp.sh",
+        "scripts/smoke_http.sh",
+    ):
+        assert command in evidence_ledger
+
+
 def test_ci_workflow_does_not_skip_docs_only_content_guard():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
 
