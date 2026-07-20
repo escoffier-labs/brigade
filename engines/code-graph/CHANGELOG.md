@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deprecated
+- The direct `miseledger` Cargo feature, `graphtrail context --evidence`, and `graphtrail links` are deprecated but remain functional. Use `brigade code sync .`, `brigade code context "rate limiting" --markdown`, `brigade code impact dispatch --json`, `brigade evidence crawl plan --target .`, `brigade evidence search "dispatch"`, `brigade evidence search "dispatch" --code-reference '{"schema":"brigade.code-reference.v1","repository":"escoffier-labs/brigade","revision":{"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"file_path":"src/brigade/receipts_cmd.py","qualified_name":"brigade.receipts_cmd._metadata_with_delta","symbol_kind":"function","source_span":{"start_line":788,"line_count":3}}'`, and `brigade evidence doctor --target .` for structured composition. An exact code reference is matched before lexical fallback. Compatibility lasts through at least two minor GraphTrail releases or 90 days after the first GraphTrail release containing this deprecation, whichever is longer. Removal cannot occur before that policy is satisfied. The standalone release pipeline is unchanged.
+
 ## [0.4.0] - 2026-07-17
 
 ### Fixed

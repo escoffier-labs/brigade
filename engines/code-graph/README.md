@@ -187,6 +187,22 @@ cargo build --features codesearch --bin graphtrail-mcp
 cargo run --features miseledger -- links "dispatch" --json
 ```
 
+### MiseLedger adapter deprecation
+
+The direct `miseledger` Cargo feature, `graphtrail context --evidence`, and `graphtrail links` are deprecated but remain functional. Use Brigade for structured composition instead:
+
+```bash
+brigade code sync .
+brigade code context "rate limiting" --markdown
+brigade code impact dispatch --json
+brigade evidence crawl plan --target .
+brigade evidence search "dispatch"
+brigade evidence search "dispatch" --code-reference '{"schema":"brigade.code-reference.v1","repository":"escoffier-labs/brigade","revision":{"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"file_path":"src/brigade/receipts_cmd.py","qualified_name":"brigade.receipts_cmd._metadata_with_delta","symbol_kind":"function","source_span":{"start_line":788,"line_count":3}}'
+brigade evidence doctor --target .
+```
+
+An exact code reference is matched before lexical fallback. GraphTrail will keep the direct adapter functional through at least two minor GraphTrail releases or 90 days after the first GraphTrail release containing this deprecation, whichever is longer. Removal cannot occur before that compatibility policy is satisfied. The direct adapter keeps its existing default database resolution and read-only FTS behavior during the compatibility window.
+
 When `codesearch` is enabled, GraphTrail also reads the shared Code Search index
 manifest from `CODE_INDEX_MANIFEST`, `XDG_DATA_HOME/code-index/manifest.json`, or
 `~/.local/share/code-index/manifest.json`. `CODE_SEARCH_URL` still wins when it is

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs, path::Path};
+use std::{collections::HashSet, fs, path::Path, process::Command};
 
 use serde_json::Value;
 
@@ -188,6 +188,128 @@ fn supported_toolchain_and_agent_workflow_are_documented() {
             "AGENTS.md must document the refresh contract: {required}"
         );
     }
+}
+
+#[test]
+fn miseledger_deprecation_contract_is_build_time_and_documented() {
+    let build_script = repository_file("build.rs");
+    for required in [
+        "CARGO_FEATURE_MISELEDGER",
+        "cargo:rerun-if-env-changed=CARGO_FEATURE_MISELEDGER",
+        "cargo:warning=GraphTrail's direct MiseLedger adapter is deprecated.",
+        "brigade code sync",
+        "brigade code context",
+        "brigade code impact",
+        "brigade evidence crawl",
+        "brigade evidence search",
+        "brigade evidence doctor",
+        "two minor GraphTrail releases or 90 days",
+        "will not be removed before that compatibility policy is satisfied",
+    ] {
+        assert!(
+            build_script.contains(required),
+            "build.rs must preserve the MiseLedger deprecation warning contract: {required}"
+        );
+    }
+
+    let adapter = repository_file("src/adapters/miseledger.rs");
+    for required in [
+        "pub const DEPRECATION_WARNING",
+        "pub fn emit_deprecation_warning()",
+        "eprintln!(\"{DEPRECATION_WARNING}\")",
+        "SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX",
+    ] {
+        assert!(
+            adapter.contains(required),
+            "MiseLedger adapter must preserve: {required}"
+        );
+    }
+
+    for path in ["README.md", "CHANGELOG.md"] {
+        let document = repository_file(path);
+        for required in [
+            "`miseledger` Cargo feature",
+            "`graphtrail context --evidence`",
+            "`graphtrail links`",
+            "brigade code sync",
+            "brigade code context",
+            "brigade code impact",
+            "brigade evidence crawl",
+            "brigade evidence search",
+            "brigade evidence doctor",
+            "--code-reference",
+            "brigade.code-reference.v1",
+            "An exact code reference is matched before lexical fallback.",
+            "two minor GraphTrail releases or 90 days",
+            "Removal cannot occur before",
+        ] {
+            assert!(
+                document.contains(required),
+                "{path} must document the MiseLedger deprecation contract: {required}"
+            );
+        }
+    }
+
+    let manifest = repository_file("Cargo.toml");
+    assert!(
+        manifest.contains("miseledger = []"),
+        "the MiseLedger feature must remain available during the compatibility window"
+    );
+}
+
+#[test]
+fn miseledger_deprecation_warning_requires_the_miseledger_feature() {
+    let target_dir = tempfile::tempdir().unwrap();
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+
+    let without_feature = Command::new(&cargo)
+        .current_dir(manifest_dir)
+        .env(
+            "CARGO_TARGET_DIR",
+            target_dir.path().join("without-feature"),
+        )
+        .args(["check", "--locked", "--no-default-features"])
+        .output()
+        .expect("cargo check without the MiseLedger feature must run");
+    assert!(
+        without_feature.status.success(),
+        "cargo check without the MiseLedger feature failed:\n{}",
+        String::from_utf8_lossy(&without_feature.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&without_feature.stderr)
+            .contains("GraphTrail's direct MiseLedger adapter is deprecated."),
+        "cargo check without the MiseLedger feature emitted the deprecation warning:\n{}",
+        String::from_utf8_lossy(&without_feature.stderr)
+    );
+
+    let with_feature = Command::new(&cargo)
+        .current_dir(manifest_dir)
+        .env(
+            "CARGO_TARGET_DIR",
+            target_dir.path().join("with-miseledger"),
+        )
+        .args([
+            "check",
+            "--locked",
+            "--no-default-features",
+            "--features",
+            "miseledger",
+        ])
+        .output()
+        .expect("cargo check with the MiseLedger feature must run");
+    assert!(
+        with_feature.status.success(),
+        "cargo check with the MiseLedger feature failed:\n{}",
+        String::from_utf8_lossy(&with_feature.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&with_feature.stderr)
+            .contains("GraphTrail's direct MiseLedger adapter is deprecated."),
+        "cargo check with the MiseLedger feature did not emit the deprecation warning:\n{}",
+        String::from_utf8_lossy(&with_feature.stderr)
+    );
 }
 
 #[test]
