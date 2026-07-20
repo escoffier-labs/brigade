@@ -368,6 +368,50 @@ def test_posttooluse_records_python_c_write_via_repo_snapshot(tmp_path: Path):
     assert blocked["decision"] == "block"
 
 
+def test_posttooluse_ignores_concurrent_session_write_during_read_only_bash(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    reader_session = "read-only-bash"
+    writer_session = "concurrent-writer"
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=reader_session,
+        tool_name="Bash",
+        tool_input={"command": f"{sys.executable} -c \"print('noop')\""},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    pending_reader_state = runtime.read_session_state(target, reader_session)
+    assert "pending_bash_fingerprint" in pending_reader_state
+    assert "pending_bash_started_at" in pending_reader_state
+
+    changed = target / "concurrent.py"
+    changed.write_text("changed\n")
+    assert (
+        runtime.handle_payload(
+            "PostToolUse",
+            _payload(
+                target,
+                "PostToolUse",
+                session_id=writer_session,
+                tool_name="Write",
+                tool_input={"file_path": str(changed)},
+            ),
+        )
+        is None
+    )
+    assert runtime.read_session_state(target, writer_session)["write_observed"] is True
+
+    assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
+    reader_state = runtime.read_session_state(target, reader_session)
+    assert reader_state["write_observed"] is False
+    assert "pending_bash_fingerprint" not in reader_state
+    assert "pending_bash_started_at" not in reader_state
+    assert (
+        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader_session, stop_hook_active=False))
+        is None
+    )
+
+
 def test_posttooluse_snapshot_fails_open_when_state_cannot_be_inspected(tmp_path: Path, monkeypatch):
     target = _wired_claude(tmp_path)
     session_id = "snapshot-unavailable"
