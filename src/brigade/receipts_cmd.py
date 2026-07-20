@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import __version__
+from . import code_references
 from . import localio
 from . import receipt_signing
 
@@ -31,6 +32,8 @@ MISELEDGER_CURSOR_REL = Path(".brigade") / "work" / "miseledger-export-cursor.js
 MISELEDGER_EXPORT_RESULT_SCHEMA = "brigade.miseledger_export_result.v1"
 MISELEDGER_FLEET_EXPORT_RESULT_SCHEMA = "brigade.miseledger_fleet_export_result.v1"
 _FLEET_STATUS_PRECEDENCE = ("failed", "exported", "nothing-new", "empty")
+_CODE_REFERENCE_LIMIT = 100
+_COMPACT_CODE_REFERENCE_NODE_LIMIT = 20
 
 
 def _rel(path: Path, target: Path) -> str:
@@ -720,6 +723,100 @@ def _metadata_with_git(metadata: dict[str, Any], payload: dict[str, Any]) -> dic
     return metadata
 
 
+def _code_reference_repository(target: Path) -> str | None:
+    remote = _git_value(target, "remote", "get-url", "origin")
+    if remote is None:
+        return None
+    parts = _github_remote_parts(remote)
+    if parts is None:
+        return None
+    _, owner, repository = parts
+    return f"{owner}/{repository}"
+
+
+def _code_references_from_delta(payload: dict[str, Any], target: Path) -> tuple[list[dict[str, Any]], int, bool]:
+    delta = payload.get("code_graph_delta")
+    git = _receipt_git(payload)
+    repository = _code_reference_repository(target)
+    if not isinstance(delta, dict) or git is None or repository is None:
+        return [], 0, False
+    commit = git.get("head")
+    if not isinstance(commit, str):
+        return [], 0, False
+    references: list[dict[str, Any]] = []
+    compact_nodes = delta.get("code_reference_nodes")
+    if isinstance(compact_nodes, list):
+        node_sources: list[tuple[Any, str | None]] = [(compact_nodes, None)]
+    else:
+        node_sources = [
+            (delta.get("added_nodes"), "added"),
+            (delta.get("changed_nodes"), "changed"),
+            (delta.get("removed_nodes"), "removed"),
+        ]
+    malformed_candidate = False
+    for nodes, fallback_change_kind in node_sources:
+        if not isinstance(nodes, list):
+            continue
+        for node in nodes:
+            normalized = code_references.normalize_delta_node(node, fallback_change_kind)
+            if normalized is None:
+                malformed_candidate = True
+                continue
+            change_kind = normalized["change_kind"]
+            file_path = normalized["file_path"]
+            qualified_name = normalized["qualified_name"]
+            symbol_kind = normalized["kind"]
+            start_line = normalized["start_line"]
+            end_line = normalized["end_line"]
+            reference = {
+                "schema": code_references.SCHEMA,
+                "repository": repository,
+                "revision": {"commit": commit},
+                "file_path": file_path,
+                "qualified_name": qualified_name,
+                "symbol_kind": symbol_kind,
+                "source_span": {"start_line": start_line, "line_count": end_line - start_line + 1},
+                "change_kind": change_kind,
+            }
+            try:
+                code_references.validate(reference)
+            except ValueError:
+                continue
+            references.append(reference)
+    references.sort(key=code_references.canonical_json)
+    total = len(references)
+    declared_total = delta.get("code_reference_nodes_total")
+    declared_truncated = delta.get("code_reference_nodes_truncated")
+    trusted_compaction_total = (
+        isinstance(compact_nodes, list)
+        and not malformed_candidate
+        and isinstance(declared_total, int)
+        and not isinstance(declared_total, bool)
+        and (
+            (declared_truncated is False and declared_total == total)
+            or (
+                declared_truncated is True
+                and total == _COMPACT_CODE_REFERENCE_NODE_LIMIT
+                and declared_total > _COMPACT_CODE_REFERENCE_NODE_LIMIT
+            )
+        )
+    )
+    if trusted_compaction_total and isinstance(declared_total, int):
+        total = declared_total
+    truncated = (trusted_compaction_total and declared_truncated is True) or total > _CODE_REFERENCE_LIMIT
+    return references, total, truncated
+
+
+def _metadata_with_code_references(metadata: dict[str, Any], payload: dict[str, Any], target: Path) -> dict[str, Any]:
+    references, total, truncated = _code_references_from_delta(payload, target)
+    if not references:
+        return metadata
+    metadata["code_references"] = references[:_CODE_REFERENCE_LIMIT]
+    metadata["code_references_total"] = total
+    metadata["code_references_truncated"] = truncated
+    return metadata
+
+
 def _metadata_with_digest_signature(metadata: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     digests = payload.get("digests")
     if not isinstance(digests, dict):
@@ -925,6 +1022,7 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
         "commands": commands,
     }
     metadata = _metadata_with_delta(metadata, payload)
+    metadata = _metadata_with_code_references(metadata, payload, target)
     metadata = _metadata_with_git(metadata, payload)
     metadata = _metadata_with_digest_signature(metadata, payload)
     text = f"Brigade work verify run {run_id} status={payload.get('status') or 'unknown'} commands={len(commands)}."
@@ -986,6 +1084,7 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
         "read_only": payload.get("read_only"),
     }
     metadata = _metadata_with_delta(metadata, payload)
+    metadata = _metadata_with_code_references(metadata, payload, target)
     metadata = _metadata_with_git(metadata, payload)
     metadata = _metadata_with_digest_signature(metadata, payload)
     text = f"Brigade run {run_id} status={payload.get('status') or 'unknown'}."

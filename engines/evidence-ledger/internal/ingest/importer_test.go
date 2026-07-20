@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -42,6 +43,55 @@ func TestImportAdapterReaderIdempotent(t *testing.T) {
 	}
 	if items != 1 {
 		t.Fatalf("items = %d, want 1", items)
+	}
+}
+
+func TestImportAdapterReaderPreservesSchemaConformantCodeReferencesInItemMetadata(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := json.Marshal(map[string]any{"code_references": []map[string]any{testCodeReference()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := map[string]any{
+		"schema":     "miseledger.adapter.v1",
+		"source":     map[string]any{"kind": "code-reference-test", "name": "Code reference test"},
+		"collection": map[string]any{"external_id": "code-reference:collection", "kind": "agent_session", "name": "code reference"},
+		"item": map[string]any{
+			"external_id": "code-reference:item:1",
+			"kind":        "message",
+			"created_at":  "2026-07-19T00:00:00Z",
+			"text":        "stored through the existing metadata surface",
+			"tags":        []string{"code-reference"},
+			"metadata":    json.RawMessage(metadata),
+		},
+		"actor":     map[string]any{"external_id": "code-reference:actor", "type": "agent", "name": "fixture"},
+		"artifacts": []any{}, "links": []any{}, "relations": []any{},
+		"raw": map[string]any{"format": "json", "path": "code-reference.jsonl", "ordinal": 1},
+	}
+	line, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportAdapterReader(db, strings.NewReader(string(line)+"\n"), "code-reference://fixture", "code-reference-test"); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := db.QueryRow(`select metadata_json from items where external_id = 'code-reference:item:1'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+		t.Fatal(err)
+	}
+	if got := stored["code_references"]; fmt.Sprint(got) != fmt.Sprint([]any{testCodeReference()}) {
+		t.Fatalf("code_references = %#v, want %#v", got, []any{testCodeReference()})
 	}
 }
 
@@ -362,4 +412,17 @@ func TestImportOpenCodeGeneratedAdapterRecords(t *testing.T) {
 
 func adapterRecord(sourceKind, externalID, text, rawPath string, ordinal int) string {
 	return fmt.Sprintf(`{"schema":"miseledger.adapter.v1","source":{"kind":%q,"name":"Test"},"collection":{"external_id":"collection","kind":"agent_session","name":"collection"},"item":{"external_id":%q,"kind":"message","created_at":"2026-06-03T00:00:00Z","text":%q,"tags":["test"]},"actor":{"external_id":"actor","type":"human","name":"actor"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":%q,"ordinal":%d}}`+"\n", sourceKind, externalID, text, rawPath, ordinal)
+}
+
+func testCodeReference() map[string]any {
+	return map[string]any{
+		"schema":         "brigade.code-reference.v1",
+		"repository":     "escoffier-labs/brigade",
+		"revision":       map[string]any{"commit": strings.Repeat("a", 40)},
+		"file_path":      "src/brigade/receipts_cmd.py",
+		"qualified_name": "brigade.receipts_cmd._metadata_with_delta",
+		"symbol_kind":    "function",
+		"source_span":    map[string]any{"start_line": 787, "line_count": 3},
+		"change_kind":    "changed",
+	}
 }

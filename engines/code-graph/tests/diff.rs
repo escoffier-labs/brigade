@@ -48,7 +48,7 @@ def added():
 
     assert_eq!(
         json,
-        r#"{"schema_version":3,"summary":{"added_nodes":1,"removed_nodes":1,"changed_nodes":1,"added_edges":1,"removed_edges":1,"added_edges_line_insensitive":1,"removed_edges_line_insensitive":1},"added_nodes":[{"kind":"function","qualified_name":"added","file_path":"mod.py","start_line":7,"signature":"def added():"}],"removed_nodes":[{"kind":"function","qualified_name":"removed","file_path":"mod.py","start_line":7,"signature":"def removed():"}],"changed_nodes":[{"kind":"function","qualified_name":"changed","file_path":"mod.py","start_line":4,"signature":"def changed(x):","previous":{"start_line":4,"signature":"def changed():"}}],"added_edges":[{"source":"added","source_file":"mod.py","target":"keep","target_file":"mod.py","line":8}],"removed_edges":[{"source":"removed","source_file":"mod.py","target":"keep","target_file":"mod.py","line":8}]}"#
+        r#"{"schema_version":3,"summary":{"added_nodes":1,"removed_nodes":1,"changed_nodes":1,"added_edges":1,"removed_edges":1,"added_edges_line_insensitive":1,"removed_edges_line_insensitive":1},"added_nodes":[{"kind":"function","qualified_name":"added","file_path":"mod.py","start_line":7,"end_line":8,"signature":"def added():"}],"removed_nodes":[{"kind":"function","qualified_name":"removed","file_path":"mod.py","start_line":7,"end_line":8,"signature":"def removed():"}],"changed_nodes":[{"kind":"function","qualified_name":"changed","file_path":"mod.py","start_line":4,"end_line":5,"signature":"def changed(x):","previous":{"start_line":4,"signature":"def changed():"}}],"added_edges":[{"source":"added","source_file":"mod.py","target":"keep","target_file":"mod.py","line":8}],"removed_edges":[{"source":"removed","source_file":"mod.py","target":"keep","target_file":"mod.py","line":8}]}"#
     );
 }
 
@@ -117,6 +117,9 @@ def baz():
         .expect("changed node carries previous metadata");
     assert_eq!(previous.start_line, 1);
     assert_eq!(previous.signature, "def foo():");
+    assert_eq!(diff.added_nodes[0].end_line, 8);
+    assert_eq!(diff.removed_nodes[0].end_line, 8);
+    assert_eq!(diff.changed_nodes[0].end_line, 2);
 
     assert!(diff.added_edges[0].source.contains("baz"));
     assert!(diff.added_edges[0].target.contains("foo"));

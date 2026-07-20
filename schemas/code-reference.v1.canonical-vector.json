@@ -1,0 +1,13 @@
+{
+  "reference": {
+    "schema": "brigade.code-reference.v1",
+    "repository": "escoffier-labs/brigade",
+    "revision": {"commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "file_path": "src/brigade/receipts_cmd.py",
+    "qualified_name": "brigade.receipts_cmd.café",
+    "symbol_kind": "function",
+    "source_span": {"start_line": 1e0, "line_count": 2.0},
+    "change_kind": "changed"
+  },
+  "canonical_json": "{\"change_kind\":\"changed\",\"file_path\":\"src/brigade/receipts_cmd.py\",\"qualified_name\":\"brigade.receipts_cmd.café\",\"repository\":\"escoffier-labs/brigade\",\"revision\":{\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"schema\":\"brigade.code-reference.v1\",\"source_span\":{\"line_count\":2,\"start_line\":1},\"symbol_kind\":\"function\"}"
+}

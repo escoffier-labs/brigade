@@ -202,6 +202,7 @@ pub struct DiffNode {
     pub qualified_name: String,
     pub file_path: String,
     pub start_line: usize,
+    pub end_line: usize,
     pub signature: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous: Option<DiffNodePrevious>,

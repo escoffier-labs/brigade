@@ -161,6 +161,7 @@ fn to_node(row: &SymRow, previous: Option<DiffNodePrevious>) -> DiffNode {
         qualified_name: row.qualified_name.clone(),
         file_path: row.file_path.clone(),
         start_line: row.start_line,
+        end_line: row.end_line,
         signature: row.signature.clone(),
         previous,
     }
