@@ -97,6 +97,10 @@ Before posting output, remove tokens, private hostnames, private repo names, pri
 
 The `ingester-misclassified` template is the most useful one to file early. If a handoff that should have promoted to a card got bounced (or vice versa), that is a real bug in the routing rules, not a corner case. We want to see it.
 
+## Credits
+
+Brigade is written and maintained by Solomon Neas. Development runs through the same multi-model seat roster the tool orchestrates, so commits sometimes carry co-author trailers for the coding agents that did substantial work on them.
+
 ## License
 
 By contributing you agree that your contribution is licensed under the MIT License, same as the rest of the repo.
