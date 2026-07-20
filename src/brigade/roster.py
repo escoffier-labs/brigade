@@ -39,6 +39,7 @@ class Agent:
     transport_version: str | None = None
     env: dict[str, str] | None = None
     invalid_final_fallback: str | None = None
+    read_only_capable: bool = True
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,12 @@ def _as_positive_number(value: object, field: str) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{field} must be a positive number")
     return float(value)
+
+
+def _as_bool(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    return value
 
 
 def _as_sandbox(value: object) -> str | None:
@@ -246,6 +253,10 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
         invalid_final_fallback = (
             _as_str(fallback_raw, f"agents.{agent_name}.invalid_final_fallback") if fallback_raw is not None else None
         )
+        read_only_capable = _as_bool(
+            raw_agent.get("read_only_capable", True),
+            f"agents.{agent_name}.read_only_capable",
+        )
 
         cli_raw = raw_agent.get("cli")
         has_endpoint = endpoint is not None and model is not None
@@ -301,6 +312,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             transport_version=transport_version,
             env=env,
             invalid_final_fallback=invalid_final_fallback,
+            read_only_capable=read_only_capable,
         )
 
     if orchestrator not in parsed_agents:
@@ -341,3 +353,9 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
 
 def workers(roster: Roster) -> list[Agent]:
     return [agent for name, agent in roster.agents.items() if name != roster.orchestrator]
+
+
+def read_only_capability_error(agent: Agent) -> str | None:
+    if agent.read_only_capable:
+        return None
+    return f"worker {agent.name!r} cannot run in read-only mode: agents.{agent.name}.read_only_capable is false"

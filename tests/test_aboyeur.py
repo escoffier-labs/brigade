@@ -31,6 +31,23 @@ def _roster():
     )
 
 
+def _roster_with_incapable_worker():
+    return Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "codex", "plan and synthesize"),
+            "coder": Agent(
+                "coder",
+                "cursor",
+                "write code",
+                model="composer-2.5",
+                read_only_capable=False,
+            ),
+        },
+        max_workers=1,
+    )
+
+
 def _timeout_roster():
     return Roster(
         orchestrator="chef",
@@ -151,6 +168,20 @@ def test_parse_plan_accepts_plain_json():
     assert plan == [aboyeur.Assignment(worker="coder", task="implement it")]
 
 
+def test_parse_plan_rejects_incapable_worker_only_in_read_only_mode():
+    text = '{"assignments":[{"worker":"coder","task":"inspect it"}]}'
+
+    with pytest.raises(
+        ValueError,
+        match=r"coder.*read-only mode.*agents\.coder\.read_only_capable is false",
+    ):
+        aboyeur.parse_plan(text, _roster_with_incapable_worker(), read_only=True)
+
+    assert aboyeur.parse_plan(text, _roster_with_incapable_worker()) == [
+        aboyeur.Assignment(worker="coder", task="inspect it")
+    ]
+
+
 def test_parse_plan_accepts_staged_json_and_defaults_missing_stage():
     plan = aboyeur.parse_plan(
         json.dumps(
@@ -253,6 +284,19 @@ def test_build_plan_prompt_describes_stage_contract():
     assert "stage 1" in prompt
     assert "same stage run in parallel" in prompt
     assert "later stages receive earlier-stage worker results" in prompt
+
+
+def test_build_plan_prompt_exposes_read_only_capability():
+    prompt = aboyeur.build_plan_prompt("inspect feature", _roster_with_incapable_worker(), read_only=True)
+
+    assert "coder: cli=cursor; read_only_capable=false; role=write code" in prompt
+    assert "Assign only workers with read_only_capable=true" in prompt
+
+
+def test_build_plan_prompt_hides_read_only_capability_for_writable_runs():
+    prompt = aboyeur.build_plan_prompt("build feature", _roster_with_incapable_worker())
+
+    assert "read_only_capable" not in prompt
 
 
 def test_worker_prompt_without_prior_context_keeps_original_contract():
@@ -2288,6 +2332,37 @@ def test_roster_payload_includes_invalid_final_fallback():
     payload = aboyeur._roster_payload(_grok_roster(fallback=True))
 
     assert payload["agents"]["grok_cli"]["invalid_final_fallback"] == "cursor_grok"
+
+
+def test_roster_payload_includes_read_only_capability():
+    payload = aboyeur._roster_payload(_roster_with_incapable_worker())
+
+    assert payload["agents"]["chef"]["read_only_capable"] is True
+    assert payload["agents"]["coder"]["read_only_capable"] is False
+
+
+def test_direct_worker_rejects_incapable_read_only_seat_before_artifacts(monkeypatch, tmp_path, capsys):
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(
+        aboyeur,
+        "code_graph_brief",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("validation happened too late")),
+    )
+
+    rc = aboyeur.run(
+        "inspect feature",
+        _roster_with_incapable_worker(),
+        worker="coder",
+        read_only=True,
+        cwd=tmp_path,
+        output_dir=output_dir,
+    )
+
+    assert rc == 2
+    assert not output_dir.exists()
+    err = capsys.readouterr().err
+    assert "coder" in err
+    assert "agents.coder.read_only_capable is false" in err
 
 
 def test_roster_payload_includes_sandbox():

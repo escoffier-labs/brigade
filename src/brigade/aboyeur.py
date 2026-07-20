@@ -37,7 +37,7 @@ from .run_receipts import (
     write_worker_logs as _write_worker_logs,
 )
 from .run_transport import Assignment, WorkerResult
-from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
+from .roster import Agent, Roster, is_cli_allowed, read_only_capability_error, timeout_for, workers
 from .route_catalog import RouteBrief, route_brief, uncovered_stages, unknown_covers
 
 CODE_GRAPH_HEADING = "## Code graph context (GraphTrail, read-only)"
@@ -368,12 +368,18 @@ def build_plan_prompt(
     evidence: EvidenceBrief | None = None,
     route: RouteBrief | None = None,
 ) -> str:
-    worker_lines = "\n".join(f"- {agent.name}: cli={agent.cli}; role={agent.role}" for agent in workers(roster))
+    worker_lines = "\n".join(
+        f"- {agent.name}: cli={agent.cli}; "
+        + (f"read_only_capable={str(agent.read_only_capable).lower()}; " if read_only else "")
+        + f"role={agent.role}"
+        for agent in workers(roster)
+    )
     if not worker_lines:
         worker_lines = "- no workers configured"
 
     note = f"\nCorrection needed: {corrective_note}\n" if corrective_note else ""
     policy = f"\n\n{_read_only_rules()}\n" if read_only else ""
+    capability_rule = "- Assign only workers with read_only_capable=true.\n" if read_only else ""
     route_section = ""
     route_rule = ""
     if route is not None and route.attached and route.text:
@@ -395,6 +401,7 @@ def build_plan_prompt(
         "- Assignments in the same stage run in parallel; later stages receive earlier-stage worker results.\n"
         "- Omit stage only for backwards-compatible stage 1 assignments.\n"
         "- Assign only listed workers.\n"
+        f"{capability_rule}"
         "- Use zero assignments only if no worker is useful."
         f"{route_rule}"
         f"{policy}"
@@ -571,7 +578,7 @@ def _read_only_rules() -> str:
     )
 
 
-def parse_plan(text: str, roster: Roster) -> list[Assignment]:
+def parse_plan(text: str, roster: Roster, *, read_only: bool = False) -> list[Assignment]:
     try:
         payload = _extract_json(text)
     except json.JSONDecodeError as exc:
@@ -601,6 +608,10 @@ def parse_plan(text: str, roster: Roster) -> list[Assignment]:
             raise ValueError(f"assignment references unknown worker: {worker!r}")
         if worker == roster.orchestrator:
             raise ValueError("assignment cannot target the orchestrator")
+        if read_only:
+            capability_error = read_only_capability_error(roster.agents[worker])
+            if capability_error is not None:
+                raise ValueError(capability_error)
         if not isinstance(subtask, str) or not subtask.strip():
             raise ValueError("assignment.task must be a non-empty string")
         raw_covers = item.get("covers", [])
@@ -824,7 +835,7 @@ def plan(
         _record_plan_attempt(attempts, stage="initial", result=first)
         raise RuntimeError(f"orchestrator failed during plan: {first.detail}")
     try:
-        assignments = parse_plan(first.text, roster)
+        assignments = parse_plan(first.text, roster, read_only=read_only)
         _record_plan_attempt(
             attempts,
             stage="initial",
@@ -859,7 +870,7 @@ def plan(
             _record_plan_attempt(attempts, stage="correction", result=second)
             raise RuntimeError(f"orchestrator failed during plan correction: {second.detail}") from exc
         try:
-            assignments = parse_plan(second.text, roster)
+            assignments = parse_plan(second.text, roster, read_only=read_only)
             _record_plan_attempt(
                 attempts,
                 stage="correction",
@@ -911,7 +922,7 @@ def plan(
         _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result)
         return assignments
     try:
-        revised = parse_plan(revised_result.text, roster)
+        revised = parse_plan(revised_result.text, roster, read_only=read_only)
     except ValueError as exc:
         _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result, parse_error=str(exc))
         return assignments
@@ -1838,6 +1849,7 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
                 "role": agent.role,
                 "timeout_seconds": agent.timeout_seconds,
                 "invalid_final_fallback": agent.invalid_final_fallback,
+                "read_only_capable": agent.read_only_capable,
                 # env tables hold names and references only, never secret
                 # values (enforced at roster load), so persisting them for
                 # resume is safe.
@@ -1960,12 +1972,16 @@ def _run_payload(
     return payload
 
 
-def _direct_worker_error(worker: str, roster: Roster) -> str | None:
+def _direct_worker_error(worker: str, roster: Roster, *, read_only: bool = False) -> str | None:
     agent = roster.agents.get(worker)
     if agent is None:
         return f"unknown worker: {worker}"
     if worker == roster.orchestrator:
         return f"--worker cannot target orchestrator seat: {worker}"
+    if read_only:
+        capability_error = read_only_capability_error(agent)
+        if capability_error is not None:
+            return capability_error
     if agent.cli is None:
         return f"worker has no CLI adapter: {worker}"
     if not is_cli_allowed(agent.cli, roster):
@@ -2181,7 +2197,7 @@ def run(
         return _run_payload(lock_workspace=lock_workspace, **kwargs)
 
     if worker is not None:
-        worker_error = _direct_worker_error(worker, roster)
+        worker_error = _direct_worker_error(worker, roster, read_only=read_only)
         if worker_error is not None:
             print(f"error: {worker_error}", file=sys.stderr)
             return 2
