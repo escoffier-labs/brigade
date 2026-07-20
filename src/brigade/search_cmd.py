@@ -1,8 +1,10 @@
 """Search station commands for GraphTrail + code-search integration.
 
-These commands plan and report. They do not start code-search-api, rebuild
-indexes, or mutate the graph database unless the operator runs the printed
-sidecar commands.
+GraphTrail and code-search remain process-boundary binaries. Explicit
+``brigade code sync|context|impact`` commands, plus their ``brigade search``
+compatibility aliases, execute GraphTrail. ``brigade search sync plan`` stays
+review-only. Brigade never starts code-search-api, and workspace doctor remains
+fail-open when optional search tools are absent.
 """
 
 from __future__ import annotations
@@ -26,8 +28,10 @@ DOCS = {
 }
 
 BOUNDARIES = [
-    "GraphTrail and code-search stay process-boundary binaries; Brigade only installs, plans, and health-checks.",
-    "Brigade does not start code-search-api or run graphtrail sync from these commands.",
+    "GraphTrail and code-search stay process-boundary binaries.",
+    "Explicit `brigade code sync|context|impact` commands execute GraphTrail across a process boundary; `brigade search sync|context|impact` are compatibility aliases.",
+    "`brigade search sync plan` is review-only and never executes GraphTrail.",
+    "Brigade never starts code-search-api.",
     "Search station tools are optional and fail-open for workspace doctor.",
     "The code-search-mcp compatibility key is maintained by code-search-api/mcp.",
 ]

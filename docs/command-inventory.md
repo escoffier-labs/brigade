@@ -19,12 +19,13 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade budgets` (extras): 2 command path(s)
 - `brigade center` (extras): 29 command path(s)
 - `brigade chat` (extras): 7 command path(s)
+- `brigade code`: 3 command path(s)
 - `brigade completions`: 1 command path(s)
 - `brigade context` (extras): 8 command path(s)
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood` (extras): 1 command path(s)
-- `brigade evidence`: 4 command path(s)
+- `brigade evidence`: 6 command path(s)
 - `brigade extras`: 3 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -57,7 +58,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 8 command path(s)
 - `brigade scrub`: 1 command path(s)
-- `brigade search`: 3 command path(s)
+- `brigade search`: 6 command path(s)
 - `brigade security`: 15 command path(s)
 - `brigade setup`: 1 command path(s)
 - `brigade skills`: 29 command path(s)
@@ -111,6 +112,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade chat sweep import-issues` (extras)
 - `brigade chat sweep ingest` (extras)
 - `brigade chat sweep validate` (extras)
+- `brigade code context`
+- `brigade code impact`
+- `brigade code sync`
 - `brigade completions`
 - `brigade context archive` (extras)
 - `brigade context build` (extras)
@@ -148,9 +152,11 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade daily unblock`
 - `brigade doctor`
 - `brigade dogfood` (extras)
+- `brigade evidence crawl`
 - `brigade evidence crawl plan`
 - `brigade evidence doctor`
 - `brigade evidence export plan`
+- `brigade evidence search`
 - `brigade evidence status`
 - `brigade extras off`
 - `brigade extras on`
@@ -416,8 +422,11 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs steer`
 - `brigade runs watch`
 - `brigade scrub`
+- `brigade search context`
 - `brigade search doctor`
+- `brigade search impact`
 - `brigade search status`
+- `brigade search sync`
 - `brigade search sync plan`
 - `brigade security closeout`
 - `brigade security config`

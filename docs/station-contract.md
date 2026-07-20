@@ -18,7 +18,7 @@ Fresh repo installs use the `repo` profile: core, skills, memory, guard, securit
 | `memory` | bootstrap-doctor (optional); memory maintenance is built in | `brigade memory status|lint|compact` plus memory-care for card freshness |
 | `pantry` | agentpantry (Go sidecar) | plans and health-checks sealed browser-session sync; never starts source/sink |
 | `search` | code-search, graphtrail | local semantic search plus a code-graph CLI for callers, impact, and structural diffs |
-| `evidence` | miseledger (Go sidecar) | plans crawl/export and health-checks the local evidence ledger; does not crawl for you |
+| `evidence` | miseledger (Go sidecar) | explicitly runs local MiseLedger for `brigade evidence crawl|search`; crawl/export plans are review-only, and Brigade neither starts daemons nor uploads data |
 
 ## Inspecting a station before install
 

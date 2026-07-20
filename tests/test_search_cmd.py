@@ -66,7 +66,13 @@ def test_sync_plan_is_review_only(tmp_path):
     rendered = search_cmd.health.render_plan_md("search sync plan", payload)
 
     assert ["graphtrail", "sync", str(tmp_path.resolve())] in payload["commands"]
-    assert "Brigade does not start code-search-api" in payload["boundaries"][1]
+    assert any("brigade code sync" in boundary for boundary in payload["boundaries"])
+    assert any("brigade search sync plan" in boundary for boundary in payload["boundaries"])
+    assert any("Brigade never starts code-search-api" in boundary for boundary in payload["boundaries"])
+    assert not any("only installs, plans, and health-checks" in boundary for boundary in payload["boundaries"])
+    assert not any(
+        "does not start code-search-api or run graphtrail sync" in boundary for boundary in payload["boundaries"]
+    )
     assert "graphtrail sync" in rendered
 
 

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
-from brigade import evidence_cmd
+from brigade import code_cmd, evidence_cmd, search_cmd
 
 
 def test_evidence_status_reports_uninstalled(monkeypatch, tmp_path):
@@ -17,6 +18,61 @@ def test_evidence_status_reports_uninstalled(monkeypatch, tmp_path):
     assert "brigade add evidence" in payload["summary"]
     assert "brigade evidence crawl plan" in payload["next_commands"]
     assert payload["pipeline"][0].startswith("miseledger crawl")
+
+
+def test_evidence_status_distinguishes_explicit_execution_from_review_only_plans(monkeypatch, tmp_path):
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: None)
+
+    payload = evidence_cmd.status_payload(tmp_path)
+    boundaries = payload["boundaries"]
+
+    assert (
+        "Explicit user-invoked `brigade evidence crawl` and `brigade evidence search` execute MiseLedger across a process boundary."
+        in boundaries
+    )
+    assert (
+        "Review-only `brigade evidence crawl plan` and `brigade evidence export plan` never execute MiseLedger."
+        in boundaries
+    )
+    assert "Brigade does not start daemons or upload data; receipt export remains local." in boundaries
+    assert "Brigade does not crawl sessions or import adapter JSONL from these commands." not in boundaries
+    assert "only: they do not crawl sessions" not in (evidence_cmd.__doc__ or "")
+    repo_root = Path(__file__).parents[1]
+    quickstart = (repo_root / "QUICKSTART.md").read_text()
+    station_contract = (repo_root / "docs" / "station-contract.md").read_text()
+    search_docstring = search_cmd.__doc__ or ""
+    evidence_docstring = evidence_cmd.__doc__ or ""
+
+    assert "brigade evidence crawl sessions" in quickstart
+    assert "brigade evidence search" in quickstart
+    assert "brigade evidence crawl plan     # review-only" in quickstart
+    assert "brigade evidence export plan    # review-only" in quickstart
+    assert "brigade code sync .             # preferred GraphTrail facade" in quickstart
+    assert "brigade search sync|context|impact` remain compatibility aliases" in quickstart
+    assert "explicitly runs local MiseLedger for `brigade evidence crawl|search`" in station_contract
+    assert "crawl/export plans are review-only" in station_contract
+    assert "Explicit user-invoked" in evidence_docstring
+    assert "brigade code sync|context|impact" in search_docstring
+    assert "compatibility aliases" in search_docstring
+    assert "sync plan`` stays\nreview-only" in search_docstring
+    for text in (quickstart, station_contract, search_docstring, evidence_docstring):
+        assert "does not crawl for you" not in text
+
+
+def test_code_run_relays_child_stderr_unchanged(monkeypatch, capsys):
+    monkeypatch.setattr(code_cmd.context_cmd, "_graphtrail_bin", lambda: "/x/graphtrail")
+    monkeypatch.setattr(code_cmd.proc, "run", lambda *_, **__: code_cmd.proc.Result(7, "", "graph warning\\n"))
+
+    assert code_cmd.run("impact", ["brigade.cli.main"]) == 7
+    assert capsys.readouterr().err == "graph warning\\n"
+
+
+def test_evidence_run_engine_relays_child_stderr_unchanged(monkeypatch, capsys):
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: "/x/miseledger")
+    monkeypatch.setattr(evidence_cmd.proc, "run", lambda *_, **__: evidence_cmd.proc.Result(6, "", "ledger warning\\n"))
+
+    assert evidence_cmd.run_engine("search", ["needle"]) == 6
+    assert capsys.readouterr().err == "ledger warning\\n"
 
 
 def test_evidence_status_ok_with_status_json(monkeypatch, tmp_path):
@@ -91,7 +147,7 @@ def test_crawl_plan_is_review_only(tmp_path):
     rendered = evidence_cmd._render_plan_md(payload)
 
     assert ["miseledger", "crawl", "sessions"] in payload["commands"]
-    assert "Brigade does not execute miseledger crawl" in payload["boundaries"][0]
+    assert "review-only crawl plan never executes MiseLedger" in payload["boundaries"][0]
     assert "miseledger crawl sessions" in rendered
 
 

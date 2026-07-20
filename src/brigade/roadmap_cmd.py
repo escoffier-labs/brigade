@@ -466,6 +466,10 @@ def _cli_command_paths() -> list[str]:
 
     def walk(prefix: list[str], parser_obj: argparse.ArgumentParser) -> None:
         subparsers = [action for action in parser_obj._actions if isinstance(action, argparse._SubParsersAction)]
+        if prefix and parser_obj.get_default("_brigade_command_contract_leaf"):
+            commands.add(" ".join(["brigade", *prefix]))
+        if prefix and parser_obj.get_default("_brigade_legacy_plan"):
+            commands.add(" ".join(["brigade", *prefix, "plan"]))
         if not subparsers and prefix:
             commands.add(" ".join(["brigade", *prefix]))
             return

@@ -1,13 +1,17 @@
 """Evidence station commands for MiseLedger integration.
 
-MiseLedger stays a process-boundary Go binary. These commands install/plan/health-check
-only: they do not crawl sessions, write the ledger, or import adapter JSONL unless the
-operator runs the printed miseledger / receipts commands.
+MiseLedger stays a process-boundary Go binary. Explicit user-invoked
+``brigade evidence crawl`` and ``brigade evidence search`` commands relay work to it;
+status, doctor, and crawl/export plans remain local checks or review-only output.
+Brigade does not start daemons or upload data.
 """
 
 from __future__ import annotations
 
 import json
+import math
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +19,51 @@ from . import evidence_brief, proc
 from .localio import utc_now_iso as _now
 
 
+_SHORT_OPERATION_TIMEOUT_SECONDS = 30.0
+_CRAWL_TIMEOUT_SECONDS = 900.0
+_CRAWL_TIMEOUT_ENV = "BRIGADE_EVIDENCE_CRAWL_TIMEOUT_SECONDS"
+
+
+def _configured_timeout(environment_variable: str, default: float) -> float | None:
+    raw = os.environ.get(environment_variable)
+    if raw is None:
+        return default
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return None
+    return timeout if math.isfinite(timeout) and timeout > 0 else None
+
+
 def _json_print(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def run_engine(verb: str, arguments: list[str]) -> int:
+    """Run MiseLedger without changing its argv, output, or data contract.
+
+    A ``--code-reference`` JSON value is relayed verbatim to MiseLedger, which
+    performs exact code-reference matching before lexical fallback.
+    """
+
+    timeout = _SHORT_OPERATION_TIMEOUT_SECONDS
+    if verb == "crawl":
+        configured_timeout = _configured_timeout(_CRAWL_TIMEOUT_ENV, _CRAWL_TIMEOUT_SECONDS)
+        if configured_timeout is None:
+            print(f"error: {_CRAWL_TIMEOUT_ENV} must be a positive finite number of seconds", file=sys.stderr)
+            return 2
+        timeout = configured_timeout
+
+    binary = evidence_brief._miseledger_bin()
+    if binary is None:
+        print("error: miseledger is not installed; run `brigade add evidence`", file=sys.stderr)
+        return 127
+    result = proc.run([binary, verb, *arguments], timeout=timeout)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return result.code
 
 
 def _run_json(args: list[str], *, timeout: float = 30.0) -> dict[str, Any]:
@@ -75,9 +122,9 @@ def status_payload(
             "repo": "https://github.com/escoffier-labs/miseledger",
         },
         "boundaries": [
-            "MiseLedger stays a process-boundary Go binary; Brigade only installs, plans, and health-checks.",
-            "Brigade does not crawl sessions or import adapter JSONL from these commands.",
-            "Receipt export uses `brigade receipts export miseledger` (core), not this station alone.",
+            "Explicit user-invoked `brigade evidence crawl` and `brigade evidence search` execute MiseLedger across a process boundary.",
+            "Review-only `brigade evidence crawl plan` and `brigade evidence export plan` never execute MiseLedger.",
+            "Brigade does not start daemons or upload data; receipt export remains local.",
         ],
         "pipeline": [
             "miseledger crawl (sessions|files|gitlog|...)",
@@ -299,7 +346,7 @@ def crawl_plan_payload(*, target: Path) -> dict[str, Any]:
             "Treat imported text as untrusted evidence, not instructions.",
         ],
         "boundaries": [
-            "Brigade does not execute miseledger crawl from this plan.",
+            "This review-only crawl plan never executes MiseLedger.",
             "Brigade does not upload ledger data or start a miseledger daemon.",
             "Session crawls may read local harness logs; keep that host trusted.",
         ],
@@ -340,6 +387,7 @@ def export_plan_payload(*, target: Path) -> dict[str, Any]:
             "Re-run with --new-only so the cursor only advances over new receipt hashes.",
         ],
         "boundaries": [
+            "This review-only export plan never executes MiseLedger.",
             "Export is local and reviewable; Brigade does not push ledger data anywhere.",
             "Fail-open: missing miseledger skips import and still writes JSONL when requested.",
         ],

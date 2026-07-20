@@ -25,15 +25,15 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
-    p_sync = search_sub.add_parser("sync", help="Plan graphtrail/code-search setup without executing it.")
-    sync_sub = p_sync.add_subparsers(dest="search_sync_command", metavar="<sync-command>")
-    sync_sub.required = True
-    p_sync_plan = sync_sub.add_parser("plan", help="Plan graphtrail sync and optional code-search serve.")
-    p_sync_plan.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace for plan paths and --write."
-    )
-    p_sync_plan.add_argument("--write", action="store_true", help="Write plan under .brigade/search/plans/.")
-    p_sync_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_sync = search_sub.add_parser("sync", help="Run `graphtrail sync`, or use `sync plan` to preview setup.")
+    # The opaque remainder lets `search sync <path>` remain a direct alias.
+    # `sync plan` is parsed in dispatch to preserve its established spelling.
+    p_sync.add_argument("engine_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    p_sync.set_defaults(_brigade_command_contract_leaf=True, _brigade_legacy_plan=True)
+
+    for verb in ("context", "impact"):
+        command = search_sub.add_parser(verb, help=f"Compatibility alias for `brigade code {verb}`.")
+        command.add_argument("engine_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
 
     p_search.set_defaults(func=dispatch)
 
@@ -46,9 +46,27 @@ def dispatch(args) -> int:
     if args.search_command == "doctor":
         return search_cmd.doctor(target=args.target, json_output=args.json)
     if args.search_command == "sync":
-        if args.search_sync_command == "plan":
-            return search_cmd.sync_plan(target=args.target, write=args.write, json_output=args.json)
-        args._brigade_parser.error(f"unknown search sync command: {args.search_sync_command}")
-        return 2
+        if args.engine_args and args.engine_args[0] == "plan":
+            plan_args = _sync_plan_parser().parse_args(args.engine_args[1:])
+            return search_cmd.sync_plan(target=plan_args.target, write=plan_args.write, json_output=plan_args.json)
+        return _run_code_alias("sync", args.engine_args)
+    if args.search_command in ("context", "impact"):
+        return _run_code_alias(args.search_command, args.engine_args)
     args._brigade_parser.error(f"unknown search command: {args.search_command}")
     return 2
+
+
+def _sync_plan_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="brigade search sync plan")
+    parser.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace for plan paths and --write."
+    )
+    parser.add_argument("--write", action="store_true", help="Write plan under .brigade/search/plans/.")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    return parser
+
+
+def _run_code_alias(verb: str, arguments: list[str]) -> int:
+    from .. import code_cmd
+
+    return code_cmd.run(verb, arguments)

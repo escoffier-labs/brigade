@@ -2082,6 +2082,67 @@ func TestSearchUsesExactCodeReferenceBeforeLexicalFallbackAndLegacyItemsStillSea
 	}
 }
 
+func TestCLISearchAllowsOnlyValidExactCodeReferenceWithoutLexicalQuery(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	insertSyntheticSearchArchive(t, db, 40)
+
+	reference := CodeReference{
+		Schema:        "brigade.code-reference.v1",
+		Repository:    "escoffier-labs/brigade",
+		Revision:      CodeRevision{Commit: strings.Repeat("a", 40)},
+		FilePath:      "src/brigade/receipts_cmd.py",
+		QualifiedName: "brigade.receipts_cmd._metadata_with_delta",
+		SymbolKind:    "function",
+		SourceSpan:    SourceSpan{StartLine: 787, LineCount: 3},
+		ChangeKind:    "changed",
+	}
+	metadata, err := json.Marshal(map[string]any{"code_references": []CodeReference{reference}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update items set metadata_json = ? where id = 'item-001'`, string(metadata)); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exactOnly := runJSON(t, "search", "--code-reference", string(encoded), "--json")
+	if results := exactOnly["results"].([]any); len(results) != 1 || results[0].(map[string]any)["id"] != "item-001" {
+		t.Fatalf("exact-only CLI search = %#v", exactOnly)
+	}
+
+	missing := reference
+	missing.ChangeKind = "removed"
+	missingEncoded, err := json.Marshal(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exactOnlyMiss := runJSON(t, "search", "--code-reference", string(missingEncoded), "--json")
+	if results := exactOnlyMiss["results"].([]any); len(results) != 0 {
+		t.Fatalf("exact-only nonmatch fell through to lexical search: %#v", exactOnlyMiss)
+	}
+
+	combinedFallback := runJSON(t, "search", "needle", "--code-reference", string(missingEncoded), "--limit", "5", "--json")
+	if results := combinedFallback["results"].([]any); len(results) != 5 || results[0].(map[string]any)["id"] != "item-030" {
+		t.Fatalf("combined CLI fallback = %#v", combinedFallback)
+	}
+
+	if code, _, stderr := run("search", "--code-reference", "{}", "--json"); code == 0 || !strings.Contains(stderr, "invalid code reference") {
+		t.Fatalf("malformed exact-only reference code=%d stderr=%q", code, stderr)
+	}
+	if code, _, stderr := run("search", "--json"); code == 0 || !strings.Contains(stderr, "usage: miseledger search <query>") {
+		t.Fatalf("missing query and reference code=%d stderr=%q", code, stderr)
+	}
+}
+
 func TestCodeReferenceIntegerVectorsAreAcceptedAndCanonicalized(t *testing.T) {
 	data, err := os.ReadFile(repoPath(t, "../../schemas/code-reference.v1.integer-vectors.json"))
 	if err != nil {
