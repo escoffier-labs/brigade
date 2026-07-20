@@ -204,6 +204,41 @@ def test_smoke_uses_only_absolute_managed_executables(acceptance_module, tmp_pat
     assert {Path(argv[0]).name for argv in calls} == set(acceptance_module.COMPONENT_IDS)
 
 
+def test_smoke_accepts_sessionfind_command_list_help(acceptance_module, tmp_path):
+    managed_bin = tmp_path / "xdg-data" / "brigade" / "bin"
+    _write_managed_binaries(managed_bin)
+
+    def runner(argv, **kwargs):
+        if Path(argv[0]).name == "graphtrail-mcp":
+            return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
+        if Path(argv[0]).name == "sessionfind":
+            return subprocess.CompletedProcess(argv, 0, "\n  sessionfind query [PATH]...\n", "")
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    acceptance_module.smoke_managed_components(
+        {component_id: managed_bin / component_id for component_id in acceptance_module.COMPONENT_IDS},
+        runner=runner,
+    )
+
+
+def test_smoke_rejects_sessionfind_unrelated_success_output(acceptance_module, tmp_path):
+    managed_bin = tmp_path / "xdg-data" / "brigade" / "bin"
+    _write_managed_binaries(managed_bin)
+
+    def runner(argv, **kwargs):
+        if Path(argv[0]).name == "graphtrail-mcp":
+            return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
+        if Path(argv[0]).name == "sessionfind":
+            return subprocess.CompletedProcess(argv, 0, "commands available", "no help text")
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="sessionfind smoke produced no help text"):
+        acceptance_module.smoke_managed_components(
+            {component_id: managed_bin / component_id for component_id in acceptance_module.COMPONENT_IDS},
+            runner=runner,
+        )
+
+
 def test_poison_binary_invocation_is_a_failure(acceptance_module, tmp_path):
     marker = tmp_path / "poison-invoked"
     marker.write_text("graphtrail\n")

@@ -157,7 +157,9 @@ def smoke_managed_components(
 
     run_checked([managed_paths["miseledger"], "version"], runner=runner, env=env)
     sessionfind = run_checked([managed_paths["sessionfind"], "--help"], runner=runner, env=env)
-    if "usage" not in f"{sessionfind.stdout}{sessionfind.stderr}".lower():
+    if "usage" not in f"{sessionfind.stdout}{sessionfind.stderr}".lower() and not any(
+        line.strip().startswith("sessionfind ") for line in sessionfind.stdout.splitlines()
+    ):
         raise AcceptanceError("sessionfind smoke produced no help text")
 
 
