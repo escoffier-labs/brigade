@@ -1,4 +1,7 @@
 import importlib.util
+import hashlib
+import json
+import stat
 import subprocess
 from pathlib import Path
 
@@ -245,3 +248,121 @@ def test_poison_binary_invocation_is_a_failure(acceptance_module, tmp_path):
 
     with pytest.raises(acceptance_module.AcceptanceError, match="poison"):
         acceptance_module.assert_no_poison_invocation(marker)
+
+
+def test_release_asset_verification_requires_one_tag_and_verifies_all_native_bytes(acceptance_module, tmp_path):
+    version = "1.2.3"
+    tag = "v1.2.3"
+    base = f"https://github.com/escoffier-labs/brigade/releases/download/{tag}/"
+    assets = {}
+    components = {}
+    for component in acceptance_module.COMPONENT_IDS:
+        platform_assets = {}
+        for platform in acceptance_module.SUPPORTED_PLATFORMS:
+            name = f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
+            body = name.encode()
+            assets[base + name] = body
+            platform_assets[platform] = {
+                "asset_name": name,
+                "byte_size": len(body),
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "download_url": base + name,
+            }
+        components[component] = {
+            "source": {"repository": "escoffier-labs/brigade", "release_tag": tag},
+            "assets": platform_assets,
+        }
+    manifest = {"components": components}
+    manifest_body = json.dumps(manifest, sort_keys=True).encode()
+    assets[base + "component-manifest-v1.json"] = manifest_body
+    checksums = {
+        name.rsplit("/", 1)[-1]: hashlib.sha256(body).hexdigest()
+        for name, body in assets.items()
+        if name != base + "checksums.txt"
+    }
+    assets[base + "checksums.txt"] = "".join(
+        f"{digest}  {name}\n" for name, digest in sorted(checksums.items())
+    ).encode()
+
+    verified = acceptance_module.verify_release_assets(
+        version,
+        tmp_path,
+        fetch_bytes=lambda url: assets[url],
+    )
+
+    assert set(verified["native_paths"]) == set(acceptance_module.COMPONENT_IDS)
+    assert len(list((tmp_path / "release-assets").iterdir())) == 21
+
+
+def test_release_asset_verification_marks_posix_assets_executable_but_not_windows(
+    acceptance_module, tmp_path, monkeypatch
+):
+    version = "1.2.3"
+    tag = "v1.2.3"
+    base = f"https://github.com/escoffier-labs/brigade/releases/download/{tag}/"
+    assets = {}
+    components = {}
+    for component in acceptance_module.COMPONENT_IDS:
+        platform_assets = {}
+        for platform in acceptance_module.SUPPORTED_PLATFORMS:
+            name = f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
+            body = name.encode()
+            assets[base + name] = body
+            platform_assets[platform] = {
+                "asset_name": name,
+                "byte_size": len(body),
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "download_url": base + name,
+            }
+        components[component] = {
+            "source": {"repository": "escoffier-labs/brigade", "release_tag": tag},
+            "assets": platform_assets,
+        }
+    manifest_body = json.dumps({"components": components}, sort_keys=True).encode()
+    assets[base + "component-manifest-v1.json"] = manifest_body
+    assets[base + "checksums.txt"] = "".join(
+        f"{hashlib.sha256(body).hexdigest()}  {url.rsplit('/', 1)[-1]}\n" for url, body in sorted(assets.items())
+    ).encode()
+
+    chmod_calls = []
+    original_chmod = Path.chmod
+
+    def record_chmod(path, mode, *args, **kwargs):
+        chmod_calls.append((path, mode))
+        return original_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "chmod", record_chmod)
+
+    verified = acceptance_module.verify_release_assets(version, tmp_path, fetch_bytes=lambda url: assets[url])
+
+    expected_paths = {
+        path
+        for paths in verified["native_paths"].values()
+        for platform, path in paths.items()
+        if platform != "windows-amd64"
+    }
+    assert {path for path, _ in chmod_calls} == expected_paths
+    assert all(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH) for _, mode in chmod_calls)
+
+
+def test_managed_digest_verification_rejects_binary_not_from_release_manifest(acceptance_module, tmp_path):
+    managed = tmp_path / "managed"
+    _write_managed_binaries(managed)
+    manifest = {
+        "components": {
+            component: {
+                "assets": {
+                    "linux-amd64": {
+                        "sha256": "a" * 64,
+                        "asset_name": component + "-linux-amd64",
+                    }
+                }
+            }
+            for component in acceptance_module.COMPONENT_IDS
+        }
+    }
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="digest"):
+        acceptance_module.verify_managed_component_digests(
+            manifest, {name: managed / name for name in acceptance_module.COMPONENT_IDS}, "linux-amd64"
+        )

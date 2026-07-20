@@ -14,7 +14,7 @@ def test_search_status_reports_uninstalled(monkeypatch, tmp_path):
 
     assert payload["installed"] is False
     assert payload["health"] == "missing"
-    assert "brigade add" in payload["summary"]
+    assert "brigade setup" in payload["summary"]
     assert "brigade search sync plan" in payload["next_commands"]
     assert payload["pipeline"][0] == "graphtrail sync"
 

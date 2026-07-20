@@ -18,11 +18,14 @@ from typing import Any, Callable, Mapping, Sequence
 
 
 COMPONENT_IDS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
+REPOSITORY = "escoffier-labs/brigade"
 PYPI_PROJECT_URL = "https://pypi.org/pypi/brigade-cli/json"
 PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
 PYPI_POLL_INTERVAL_SECONDS = 5
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 JsonFetcher = Callable[[str], Any]
+BytesFetcher = Callable[[str], bytes]
 
 
 class AcceptanceError(RuntimeError):
@@ -35,9 +38,156 @@ def managed_bin_path(data_home: Path, profile: Path, *, platform: str | None = N
     return data_home / "brigade" / "bin"
 
 
+def host_platform_key() -> str:
+    machine = __import__("platform").machine().lower()
+    os_name = "darwin" if sys.platform == "darwin" else "linux" if sys.platform.startswith("linux") else "windows"
+    arch = "arm64" if machine in {"arm64", "aarch64"} else "amd64" if machine in {"x86_64", "amd64"} else machine
+    platform = f"{os_name}-{arch}"
+    if platform not in SUPPORTED_PLATFORMS:
+        raise AcceptanceError(f"unsupported acceptance host platform {platform!r}")
+    return platform
+
+
 def fetch_pypi_json(url: str) -> Any:
     with urllib.request.urlopen(url, timeout=15) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_bytes(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=60) as response:
+        return response.read()
+
+
+def _sha256_bytes(value: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_path(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _release_url(version: str, filename: str) -> str:
+    return f"https://github.com/{REPOSITORY}/releases/download/v{version}/{filename}"
+
+
+def _parse_checksums(text: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for number, raw in enumerate(text.splitlines(), start=1):
+        parts = raw.split()
+        if len(parts) != 2 or len(parts[0]) != 64 or any(char not in "0123456789abcdef" for char in parts[0]):
+            raise AcceptanceError(f"checksums.txt line {number} is malformed")
+        digest, name = parts
+        if name in result:
+            raise AcceptanceError(f"checksums.txt repeats {name!r}")
+        result[name] = digest
+    return result
+
+
+def verify_release_assets(
+    version: str,
+    destination: Path,
+    *,
+    fetch_bytes: BytesFetcher = fetch_bytes,
+) -> dict[str, Any]:
+    """Fetch the immutable release manifest and verify every native release asset."""
+    tag = f"v{version}"
+    release_dir = destination / "release-assets"
+    release_dir.mkdir(parents=True, exist_ok=True)
+    manifest_url = _release_url(version, "component-manifest-v1.json")
+    try:
+        manifest_bytes = fetch_bytes(manifest_url)
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AcceptanceError(f"could not fetch release component manifest: {exc}") from exc
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("components"), dict):
+        raise AcceptanceError("release component manifest has no components object")
+    components = manifest["components"]
+    if set(components) != set(COMPONENT_IDS):
+        raise AcceptanceError("release component manifest must contain exactly four components")
+
+    expected: dict[str, tuple[str, str]] = {}
+    native_paths: dict[str, dict[str, Path]] = {component: {} for component in COMPONENT_IDS}
+    for component in COMPONENT_IDS:
+        record = components.get(component)
+        if not isinstance(record, dict):
+            raise AcceptanceError(f"release component manifest entry {component!r} is invalid")
+        source = record.get("source")
+        if not isinstance(source, dict) or source.get("repository") != REPOSITORY or source.get("release_tag") != tag:
+            raise AcceptanceError(f"release component {component!r} does not point to {REPOSITORY}@{tag}")
+        component_assets = record.get("assets")
+        if not isinstance(component_assets, dict) or set(component_assets) != set(SUPPORTED_PLATFORMS):
+            raise AcceptanceError(f"release component {component!r} does not publish the full platform matrix")
+        for platform in SUPPORTED_PLATFORMS:
+            asset = component_assets[platform]
+            if not isinstance(asset, dict):
+                raise AcceptanceError(f"release component {component!r} asset {platform!r} is invalid")
+            name = asset.get("asset_name")
+            digest = asset.get("sha256")
+            url = asset.get("download_url")
+            expected_name = f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
+            if name != expected_name or not isinstance(digest, str) or len(digest) != 64:
+                raise AcceptanceError(f"release component {component!r} asset {platform!r} has invalid metadata")
+            if url != _release_url(version, name):
+                raise AcceptanceError(
+                    f"release component {component!r} asset {name!r} does not use its immutable release URL"
+                )
+            if name in expected:
+                raise AcceptanceError(f"release component manifest repeats native asset {name!r}")
+            expected[name] = (digest, url)
+
+    checksums_url = _release_url(version, "checksums.txt")
+    try:
+        checksums = _parse_checksums(fetch_bytes(checksums_url).decode("utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AcceptanceError(f"could not fetch release checksums.txt: {exc}") from exc
+    expected_checksum_names = set(expected) | {"component-manifest-v1.json"}
+    if set(checksums) != expected_checksum_names:
+        raise AcceptanceError("checksums.txt must cover exactly all 20 native assets and component-manifest-v1.json")
+    if checksums.get("component-manifest-v1.json") != _sha256_bytes(manifest_bytes):
+        raise AcceptanceError("release manifest digest does not match checksums.txt")
+    (release_dir / "component-manifest-v1.json").write_bytes(manifest_bytes)
+    for name, (digest, url) in sorted(expected.items()):
+        if checksums.get(name) != digest:
+            raise AcceptanceError(f"checksums.txt digest for {name!r} does not match the release manifest")
+        try:
+            body = fetch_bytes(url)
+        except OSError as exc:
+            raise AcceptanceError(f"could not download release asset {name!r}: {exc}") from exc
+        if _sha256_bytes(body) != digest:
+            raise AcceptanceError(f"release asset {name!r} digest does not match the release manifest")
+        path = release_dir / name
+        path.write_bytes(body)
+        component, platform = next(
+            (component, platform)
+            for component in COMPONENT_IDS
+            for platform in SUPPORTED_PLATFORMS
+            if name == f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
+        )
+        if platform != "windows-amd64":
+            path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        native_paths[component][platform] = path
+    return {"manifest": manifest, "native_paths": native_paths}
+
+
+def verify_managed_component_digests(manifest: Any, managed_paths: Mapping[str, Path], platform: str) -> None:
+    components = manifest.get("components") if isinstance(manifest, dict) else None
+    if not isinstance(components, dict):
+        raise AcceptanceError("release manifest has no component digest map")
+    for component in COMPONENT_IDS:
+        asset = components.get(component, {}).get("assets", {}).get(platform)
+        if not isinstance(asset, dict) or not isinstance(asset.get("sha256"), str):
+            raise AcceptanceError(f"release manifest is missing {component} {platform} digest")
+        actual = _sha256_path(managed_paths[component])
+        if actual != asset["sha256"]:
+            raise AcceptanceError(f"managed {component} digest does not match the Brigade release manifest")
 
 
 def wait_for_pypi_version(
@@ -163,6 +313,28 @@ def smoke_managed_components(
         raise AcceptanceError("sessionfind smoke produced no help text")
 
 
+def smoke_rosetta_darwin_amd64(native_paths: Mapping[str, Mapping[str, Path]], *, runner: Runner) -> None:
+    if sys.platform != "darwin":
+        raise AcceptanceError("--rosetta-darwin-amd64 requires macOS")
+    paths = {component: native_paths[component]["darwin-amd64"] for component in COMPONENT_IDS}
+    graphtrail = run_checked(["arch", "-x86_64", paths["graphtrail"], "--version"], runner=runner)
+    if not graphtrail.stdout.strip():
+        raise AcceptanceError("Rosetta graphtrail smoke produced no version output")
+    mcp = run_checked(
+        ["arch", "-x86_64", paths["graphtrail-mcp"]],
+        runner=runner,
+        input_text='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n',
+    )
+    try:
+        response = json.loads(mcp.stdout)
+    except json.JSONDecodeError as exc:
+        raise AcceptanceError("Rosetta graphtrail-mcp smoke returned malformed JSON-RPC") from exc
+    if response.get("jsonrpc") != "2.0" or response.get("id") != 1 or "result" not in response:
+        raise AcceptanceError("Rosetta graphtrail-mcp smoke returned invalid JSON-RPC")
+    run_checked(["arch", "-x86_64", paths["miseledger"], "version"], runner=runner)
+    run_checked(["arch", "-x86_64", paths["sessionfind"], "--help"], runner=runner)
+
+
 def assert_no_poison_invocation(marker: Path) -> None:
     if marker.exists() and marker.read_text().strip():
         raise AcceptanceError(f"poison component binary was invoked: {marker.read_text().strip()}")
@@ -177,7 +349,7 @@ def _write_poison_binaries(poison_dir: Path, marker: Path) -> None:
         poison.chmod(poison.stat().st_mode | stat.S_IXUSR)
 
 
-def run_acceptance(version: str, *, runner: Runner = subprocess.run) -> None:
+def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_darwin_amd64: bool = False) -> None:
     if not version or version.startswith("v"):
         raise AcceptanceError("--brigade-version must be an exact PyPI version without a v prefix")
 
@@ -193,6 +365,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run) -> None:
         for directory in (profile, data_home, pipx_home, pipx_bin, root / "xdg-config", root / "xdg-cache"):
             directory.mkdir(parents=True)
         _write_poison_binaries(poison_dir, marker)
+        release = verify_release_assets(version, root)
 
         env = os.environ.copy()
         env.update(
@@ -225,7 +398,10 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run) -> None:
             except json.JSONDecodeError as exc:
                 raise AcceptanceError("brigade version --components --json returned malformed JSON") from exc
             managed_paths = validate_component_report(report, managed_bin_path(data_home, profile))
+            verify_managed_component_digests(release["manifest"], managed_paths, host_platform_key())
             smoke_managed_components(managed_paths, runner=runner, env=env)
+            if rosetta_darwin_amd64:
+                smoke_rosetta_darwin_amd64(release["native_paths"], runner=runner)
         finally:
             assert_no_poison_invocation(marker)
 
@@ -233,9 +409,10 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--brigade-version", required=True)
+    parser.add_argument("--rosetta-darwin-amd64", action="store_true")
     args = parser.parse_args(argv)
     try:
-        run_acceptance(args.brigade_version)
+        run_acceptance(args.brigade_version, rosetta_darwin_amd64=args.rosetta_darwin_amd64)
     except AcceptanceError as exc:
         print(f"published artifact acceptance failed: {exc}", file=sys.stderr)
         return 1

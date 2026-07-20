@@ -1068,7 +1068,7 @@ def _loop_stations_payload(target: Path) -> dict[str, Any]:
         graph = {
             "ok": False,
             "status": "missing-bin",
-            "detail": "graphtrail not on PATH (optional: cargo install graphtrail)",
+            "detail": "graphtrail not on PATH (run `brigade setup`; Cargo is one-release compatibility only)",
         }
 
     ledger_bin = evidence_brief._miseledger_bin()
@@ -1082,7 +1082,7 @@ def _loop_stations_payload(target: Path) -> dict[str, Any]:
         ledger = {
             "ok": False,
             "status": "missing-bin",
-            "detail": "miseledger not on PATH (optional: brigade add evidence)",
+            "detail": "miseledger not on PATH (run `brigade setup`; go install is one-release compatibility only)",
         }
 
     rates: list[float] = []

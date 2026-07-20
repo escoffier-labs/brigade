@@ -82,7 +82,7 @@ def inspect_components(
     manifest_brigade_version: str | None = None
     manifest: component_manifest.ComponentManifest | None = None
     try:
-        manifest = component_manifest.load(manifest_source)
+        manifest = component_manifest.load(manifest_path) if manifest_path is not None else component_manifest.load()
     except ValueError as exc:
         return _environment_blocked_report(
             manifest_source=manifest_source,

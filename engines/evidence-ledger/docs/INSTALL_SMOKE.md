@@ -1,6 +1,6 @@
-# Install Smoke
+# Standalone Compatibility Install Smoke
 
-This smoke proves the public release installer can install MiseLedger, then import fixture-only data into a temporary local archive.
+This smoke covers the standalone public release installer as a one-release compatibility fallback. It is not general installation guidance. Brigade-managed engine smoke starts with `brigade setup`, which verifies the unified release manifest before installing MiseLedger.
 
 It does not import private session logs.
 

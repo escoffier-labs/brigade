@@ -56,7 +56,7 @@ def run_engine(verb: str, arguments: list[str]) -> int:
 
     binary = evidence_brief._miseledger_bin()
     if binary is None:
-        print("error: miseledger is not installed; run `brigade add evidence`", file=sys.stderr)
+        print("error: miseledger is not installed; run `brigade setup`", file=sys.stderr)
         return 127
     result = proc.run([binary, verb, *arguments], timeout=timeout)
     if result.stdout:
@@ -106,14 +106,14 @@ def status_payload(
         "installed": installed,
         "binary": binary,
         "health": "missing",
-        "summary": "miseledger not installed; run `brigade add evidence`",
+        "summary": "miseledger not installed; run `brigade setup`",
         "status": None,
         "doctor": None,
         "export_cursor_present": cursor.is_file(),
         "export_cursor_path": str(cursor),
         "advisory": True,
         "next_commands": [
-            "brigade add evidence",
+            "brigade setup",
             "brigade evidence crawl plan",
             "brigade evidence doctor",
         ],

@@ -22,6 +22,7 @@ When the user wants Brigade installed in a target repo or operator workspace, wo
 
 ```bash
 pipx install brigade-cli
+brigade setup
 brigade --version
 brigade operator quickstart --target . --harnesses codex --dry-run
 brigade operator quickstart --target . --harnesses codex

@@ -107,9 +107,8 @@
           {
             "command": "graphtrail",
             "install": [
-              "cargo",
-              "install",
-              "graphtrail"
+              "brigade",
+              "setup"
             ],
             "kind": "executable",
             "name": "graphtrail",
@@ -167,7 +166,7 @@
         ]
       },
       "source": {
-        "manifest_sha256": "0e8d9f7a962d5f20857713e39698b567cce7a9e9043db732cf6ab266f3f47176",
+        "manifest_sha256": "fe402e8c09b0c1ef0f0468ea075d7d09b502ba77a3eb79d4b162e72d0a2ca252",
         "repository": "graphtrail",
         "revision": "e2c7868c8fe0471469f66e90b020845fb56a7ca6"
       }
@@ -183,9 +182,8 @@
           {
             "command": "miseledger",
             "install": [
-              "go",
-              "install",
-              "github.com/escoffier-labs/miseledger/cmd/miseledger@latest"
+              "brigade",
+              "setup"
             ],
             "kind": "executable",
             "name": "miseledger",
@@ -248,7 +246,7 @@
         ]
       },
       "source": {
-        "manifest_sha256": "fe41dcad9536bbd23832501f20b1cbd1afd60af79e6a9672a36fdd6235cebfe1",
+        "manifest_sha256": "511afd8a4787f2dfcd3dbcccb5e213909a09a6adf5ae7cf07449b127c740965d",
         "repository": "miseledger",
         "revision": "87c563dcb6bd1950ac0c28542de47c1556b9f7ea"
       }

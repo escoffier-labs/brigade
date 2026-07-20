@@ -114,6 +114,16 @@ def test_ci_workflow_does_not_skip_docs_only_content_guard():
     assert "python -m content_guard scan" in text
 
 
+def test_ci_component_manifest_provenance_job_installs_dev_test_dependencies():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "component-manifest-provenance")
+
+    install = 'python -m pip install -e ".[dev]"'
+    pytest = "python -m pytest tests/test_component_manifest_provenance.py -q"
+    assert install in section
+    assert section.index(install) < section.index(pytest)
+
+
 def test_agents_doc_names_ci_only_jobs_outside_local_verify():
     text = (ROOT / "AGENTS.md").read_text()
 
@@ -230,6 +240,34 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "#requires -Version 5.1" in text
 
 
+def test_windows_native_acceptance_source_setup_uses_standalone_manifest_online_and_offline():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    online = text.index('Write-Step "brigade setup (online)"')
+    setup = text[
+        text.rfind('if ($InstallMode -eq "source") {', 0, online) : text.index("$report = Get-ComponentReport")
+    ]
+
+    source = re.search(r'if \(\$InstallMode -eq "source"\) \{(?P<body>.*?)\n    \}', setup, re.DOTALL)
+    assert source is not None
+    assert "& brigade setup --manifest-source standalone" in source.group("body")
+    assert "& brigade setup --offline --manifest-source standalone" in source.group("body")
+
+
+def test_windows_native_acceptance_pypi_setup_keeps_exact_manifest_default_and_digest_check():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    online = text.index('Write-Step "brigade setup (online)"')
+    setup = text[
+        text.rfind('if ($InstallMode -eq "source") {', 0, online) : text.index("$report = Get-ComponentReport")
+    ]
+
+    published = re.search(r"else \{(?P<body>.*?)\n    \}", setup, re.DOTALL)
+    assert published is not None
+    assert re.search(r"(?m)^        & brigade setup$", published.group("body"))
+    assert re.search(r"(?m)^        & brigade setup --offline$", published.group("body"))
+    assert "--manifest-source standalone" not in published.group("body")
+    assert "Assert-ManagedComponentDigests -Manifest $releaseManifest" in text
+
+
 def test_windows_native_acceptance_path_and_install_ordering():
     text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
     main = text[text.index("$acceptRoot = $null") :]
@@ -334,6 +372,43 @@ def test_windows_native_acceptance_assigned_return_functions_do_not_leak_stdout(
             )
 
 
+def test_windows_native_acceptance_restricts_reported_executables_to_the_clean_managed_bin():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    managed_path = _extract_powershell_function(text, "Get-ManagedExecutablePath")
+
+    assert "[System.IO.Path]::IsPathRooted($path)" in managed_path
+    assert "Resolve-Path -LiteralPath $ManagedBin" in managed_path
+    assert "Resolve-Path -LiteralPath $path" in managed_path
+    assert "StartsWith($managedPrefix" in managed_path
+    assert "-ManagedBin $managedBin" in text
+
+
+def test_windows_native_acceptance_constructs_managed_prefix_with_one_platform_separator():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    managed_path = _extract_powershell_function(text, "Get-ManagedExecutablePath")
+
+    assert (
+        ".TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)"
+    ) in managed_path
+    assert '$managedPrefix = "$managedRoot$([System.IO.Path]::DirectorySeparatorChar)"' in managed_path
+    assert '.TrimEnd("\\\\")' not in managed_path
+    assert '$managedPrefix = "$managedRoot\\\\"' not in managed_path
+
+
+def test_windows_native_acceptance_passes_managed_bin_to_every_executable_lookup():
+    text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    digest_assertion = _extract_powershell_function(text, "Assert-ManagedComponentDigests")
+
+    assert "[string]$ManagedBin" in digest_assertion
+    assert (
+        "Get-ManagedExecutablePath -Report $Report -ComponentId $componentId -ManagedBin $ManagedBin"
+        in digest_assertion
+    )
+    assert "Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin" in text
+    for call in re.findall(r"(?m)^(?!function\s).*Get-ManagedExecutablePath[^\r\n]*", text):
+        assert "-ManagedBin" in call
+
+
 def test_windows_native_acceptance_miseledger_marker_is_in_verify_command_filename():
     """MiseLedger indexes work-verify item.text (command text), not command stdout."""
     text = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
@@ -346,6 +421,27 @@ def test_windows_native_acceptance_miseledger_marker_is_in_verify_command_filena
     assert "& $miseledgerExe search $acceptanceMarker" in section
     assert "verify_smoke.py" not in section
     assert 'print("{0}")' not in section
+
+
+def test_hyperv_acceptance_is_a_tracked_maintainer_contract_not_a_self_hosted_job():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    orchestrator = (ROOT / "scripts/hyper-v-native-acceptance.ps1").read_text()
+    runbook = (ROOT / "docs/runbooks/hyper-v-native-acceptance.md").read_text()
+
+    assert "self-hosted" not in workflow
+    assert "Restore-VMSnapshot" in orchestrator
+    assert '"clean"' in orchestrator
+    assert "-BrigadeVersion" in orchestrator
+    assert 'Assert-CommandMissing "go"' in orchestrator
+    assert 'Assert-CommandMissing "cargo"' in orchestrator
+    assert "Get-VMIntegrationService" in orchestrator
+    assert "Heartbeat" in orchestrator
+    assert "PowerShell Direct" in orchestrator
+    assert "Start-Sleep -Seconds 2" in orchestrator
+    assert "timed out waiting" in orchestrator
+    assert orchestrator.index("Start-VM -Name $VmName") < orchestrator.index("Get-VMIntegrationService")
+    assert orchestrator.index("Get-VMIntegrationService") < orchestrator.index("Invoke-Command -VMName")
+    assert "exact immutable release tag" in runbook
 
 
 def test_windows_native_acceptance_brigade_version_regex_matches_cli_output():

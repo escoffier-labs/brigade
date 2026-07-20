@@ -15,7 +15,7 @@ def test_evidence_status_reports_uninstalled(monkeypatch, tmp_path):
 
     assert payload["installed"] is False
     assert payload["health"] == "missing"
-    assert "brigade add evidence" in payload["summary"]
+    assert "brigade setup" in payload["summary"]
     assert "brigade evidence crawl plan" in payload["next_commands"]
     assert payload["pipeline"][0].startswith("miseledger crawl")
 

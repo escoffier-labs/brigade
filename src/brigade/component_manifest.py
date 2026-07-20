@@ -69,12 +69,29 @@ def manifest_path() -> Path:
     return templates.template_root() / "components" / "manifest-v1.json"
 
 
-def load(path: Path | None = None) -> ComponentManifest:
+def load(path: Path | None = None, *, allow_standalone_legacy_revisions: bool = False) -> ComponentManifest:
     source = path or manifest_path()
     try:
         raw = json.loads(source.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"component manifest could not be loaded: {source}") from exc
+    return _load_raw(
+        source,
+        raw,
+        allow_standalone_legacy_revisions=allow_standalone_legacy_revisions or path is None,
+    )
+
+
+def load_bytes(content: bytes, *, source: Path, allow_standalone_legacy_revisions: bool = False) -> ComponentManifest:
+    """Parse an already verified manifest without writing it to disk."""
+    try:
+        raw = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"component manifest could not be loaded: {source}") from exc
+    return _load_raw(source, raw, allow_standalone_legacy_revisions=allow_standalone_legacy_revisions)
+
+
+def _load_raw(source: Path, raw: Any, *, allow_standalone_legacy_revisions: bool) -> ComponentManifest:
     if not isinstance(raw, dict):
         raise ValueError(
             f"unsupported component manifest schema version {None!r}; this Brigade supports {SCHEMA_VERSION}"
@@ -114,7 +131,9 @@ def load(path: Path | None = None) -> ComponentManifest:
             continue
         if not isinstance(value, dict):
             raise ValueError(f"component manifest component {name!r} must be an object")
-        components[name] = _parse_known_component(name, value)
+        components[name] = _parse_known_component(
+            name, value, allow_standalone_legacy_revisions=allow_standalone_legacy_revisions
+        )
 
     missing = [component_id for component_id in KNOWN_COMPONENT_IDS if component_id not in components]
     if missing:
@@ -185,14 +204,14 @@ def _supported_platforms(raw: dict[str, Any]) -> tuple[str, ...]:
     return tuple(platforms)
 
 
-def _parse_known_component(name: str, raw: dict[str, Any]) -> Component:
+def _parse_known_component(name: str, raw: dict[str, Any], *, allow_standalone_legacy_revisions: bool) -> Component:
     _reject_unexpected_keys(
         raw,
         allowed=frozenset({"component_revision", "source", "executable", "assets"}),
         owner=f"component {name!r}",
     )
     component_revision = _required_str(raw, "component_revision", name)
-    if name in UNPUBLISHED_COMPONENT_IDS and not _GIT_SHA.fullmatch(component_revision):
+    if not allow_standalone_legacy_revisions and not _GIT_SHA.fullmatch(component_revision):
         raise ValueError(f"component {name!r} field 'component_revision' must be a 40-character lowercase git SHA")
     source_raw = raw.get("source")
     if not isinstance(source_raw, dict):

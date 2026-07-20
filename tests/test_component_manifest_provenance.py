@@ -1,7 +1,8 @@
-"""Tests for scripts/verify_component_manifest_provenance.py."""
+"""Tests for unified Brigade release manifest provenance."""
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -9,36 +10,21 @@ from pathlib import Path
 
 import pytest
 
+
 ROOT = Path(__file__).resolve().parents[1]
-
-MISELEDGER_BASE = "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/"
-CHECKSUMS_URL = MISELEDGER_BASE + "checksums.txt"
-RELEASE_API = "https://api.github.com/repos/escoffier-labs/miseledger/releases/tags/v0.6.0"
-
-MISELEDGER_ASSETS = {
-    "miseledger-darwin-amd64": {
-        "byte_size": 16659744,
-        "sha256": "fb952aefd763a624e2c0346e7cc22dde8af812649ece97bd6cb62f16bc9881df",
-    },
-    "miseledger-linux-amd64": {
-        "byte_size": 16441315,
-        "sha256": "246893c8c39318f774fc7a06338b5a8e87bf84661b1951251b2c0c971e9a7a6c",
-    },
-    "miseledger-windows-amd64.exe": {
-        "byte_size": 16616960,
-        "sha256": "033f9a492435068cd7e2bd1882422c1419189f60898071411656595a93640e39",
-    },
-    "sessionfind-linux-amd64": {
-        "byte_size": 16445238,
-        "sha256": "5b42f573d44f4301b0e1cfc2008842849c7704c0f96e390c2f5461f1f8059ac0",
-    },
-}
+REPOSITORY = "escoffier-labs/brigade"
+TAG = "v1.2.3"
+BASE = f"https://github.com/{REPOSITORY}/releases/download/{TAG}/"
+API = f"https://api.github.com/repos/{REPOSITORY}/releases/tags/{TAG}"
+REF_API = f"https://api.github.com/repos/{REPOSITORY}/git/ref/tags/{TAG}"
+TAG_API = f"https://api.github.com/repos/{REPOSITORY}/git/tags/"
+COMPONENTS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 
 
-def _load_provenance_module():
+def _module():
     spec = importlib.util.spec_from_file_location(
-        "verify_component_manifest_provenance_test",
-        ROOT / "scripts/verify_component_manifest_provenance.py",
+        "verify_component_manifest_provenance_test", ROOT / "scripts/verify_component_manifest_provenance.py"
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -47,306 +33,282 @@ def _load_provenance_module():
     return module
 
 
-def _asset(name: str, *, byte_size: int, sha256: str) -> dict:
-    return {
-        "asset_name": name,
-        "byte_size": byte_size,
-        "sha256": sha256,
-        "download_url": MISELEDGER_BASE + name,
-    }
+def _asset_name(component: str, platform: str) -> str:
+    return f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
 
 
-def _minimal_manifest(*, miseledger_assets: dict | None = None) -> dict:
-    if miseledger_assets is None:
-        assets = {
-            "linux-amd64": _asset(
-                "miseledger-linux-amd64",
-                byte_size=MISELEDGER_ASSETS["miseledger-linux-amd64"]["byte_size"],
-                sha256=MISELEDGER_ASSETS["miseledger-linux-amd64"]["sha256"],
-            ),
+def _manifest() -> dict:
+    components = {}
+    for component in COMPONENTS:
+        assets = {}
+        for platform in PLATFORMS:
+            name = _asset_name(component, platform)
+            body = name.encode()
+            assets[platform] = {
+                "asset_name": name,
+                "byte_size": len(body),
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "download_url": BASE + name,
+            }
+        components[component] = {
+            "component_revision": "a" * 40,
+            "source": {"repository": REPOSITORY, "release_tag": TAG},
+            "executable": component,
+            "assets": assets,
         }
-    else:
-        assets = miseledger_assets
     return {
         "schema_version": 1,
-        "brigade_version": "test",
-        "manifest_revision": "2026-07-18",
-        "supported_platforms": [
-            "linux-amd64",
-            "linux-arm64",
-            "darwin-amd64",
-            "darwin-arm64",
-            "windows-amd64",
-        ],
-        "components": {
-            "graphtrail": {
-                "component_revision": "a" * 40,
-                "source": {"repository": "escoffier-labs/graphtrail"},
-                "executable": "graphtrail",
-                "assets": {},
-            },
-            "graphtrail-mcp": {
-                "component_revision": "a" * 40,
-                "source": {"repository": "escoffier-labs/graphtrail"},
-                "executable": "graphtrail-mcp",
-                "assets": {},
-            },
-            "miseledger": {
-                "component_revision": "v0.6.0",
-                "source": {"repository": "escoffier-labs/miseledger", "release_tag": "v0.6.0"},
-                "executable": "miseledger",
-                "assets": assets,
-            },
-            "sessionfind": {
-                "component_revision": "v0.6.0",
-                "source": {"repository": "escoffier-labs/miseledger"},
-                "executable": "sessionfind",
-                "assets": {},
-            },
-        },
+        "brigade_version": "1.2.3",
+        "manifest_revision": "v1.2.3+" + "a" * 40,
+        "supported_platforms": list(PLATFORMS),
+        "components": components,
     }
 
 
-def _release_payload(extra_assets: dict[str, dict] | None = None) -> dict:
-    assets = []
-    merged = dict(MISELEDGER_ASSETS)
-    if extra_assets:
-        merged.update(extra_assets)
-    for name, meta in merged.items():
-        assets.append(
-            {
-                "name": name,
-                "size": meta["byte_size"],
-                "browser_download_url": MISELEDGER_BASE + name,
-                "digest": f"sha256:{meta['sha256']}",
-            }
-        )
-    assets.append(
+def _release(manifest: dict) -> tuple[dict, str, str]:
+    native = {
+        asset["asset_name"]: asset
+        for component in manifest["components"].values()
+        for asset in component["assets"].values()
+    }
+    manifest_body = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    manifest_digest = hashlib.sha256(manifest_body.encode()).hexdigest()
+    checksum_map = {name: asset["sha256"] for name, asset in native.items()}
+    checksum_map["component-manifest-v1.json"] = manifest_digest
+    checksums = "".join(f"{digest}  {name}\n" for name, digest in sorted(checksum_map.items()))
+    assets = [
         {
-            "name": "checksums.txt",
-            "size": 123,
-            "browser_download_url": CHECKSUMS_URL,
+            "name": name,
+            "size": asset["byte_size"],
+            "digest": f"sha256:{asset['sha256']}",
+            "browser_download_url": BASE + name,
         }
+        for name, asset in sorted(native.items())
+    ]
+    assets.extend(
+        [
+            {
+                "name": "component-manifest-v1.json",
+                "size": len(manifest_body.encode()),
+                "digest": f"sha256:{manifest_digest}",
+                "browser_download_url": BASE + "component-manifest-v1.json",
+            },
+            {
+                "name": "checksums.txt",
+                "size": len(checksums.encode()),
+                "digest": f"sha256:{hashlib.sha256(checksums.encode()).hexdigest()}",
+                "browser_download_url": BASE + "checksums.txt",
+            },
+        ]
     )
-    return {"tag_name": "v0.6.0", "assets": assets}
+    return {"tag_name": TAG, "target_commitish": "main", "assets": assets}, checksums, manifest_body
 
 
-def _checksums_text(asset_map: dict[str, dict] | None = None) -> str:
-    merged = dict(MISELEDGER_ASSETS)
-    if asset_map:
-        merged.update(asset_map)
-    return "\n".join(f"{meta['sha256']}  {name}" for name, meta in sorted(merged.items())) + "\n"
-
-
-def _mock_fetcher(
-    *,
-    release: dict | None = None,
-    checksums: str | None = None,
-    release_status: int = 200,
-) -> object:
-    release_payload = release if release is not None else _release_payload()
-    checksums_body = checksums if checksums is not None else _checksums_text()
+def _fetcher(release: dict, checksums: str, manifest_body: str, *, tag_ref=None, tag_objects=None):
+    tag_ref = tag_ref or {"ref": f"refs/tags/{TAG}", "object": {"type": "commit", "sha": "a" * 40}}
+    tag_objects = tag_objects or {}
 
     def fetch(url: str) -> tuple[int, str]:
-        if url == RELEASE_API:
-            if release_status != 200:
-                return release_status, "not found"
-            return 200, json.dumps(release_payload)
-        if url == CHECKSUMS_URL:
-            return 200, checksums_body
-        raise AssertionError(f"unexpected fetch url: {url}")
+        if url == API:
+            return 200, json.dumps(release)
+        if url == REF_API:
+            return 200, json.dumps(tag_ref)
+        if url.startswith(TAG_API):
+            return 200, json.dumps(tag_objects[url.removeprefix(TAG_API)])
+        if url == BASE + "checksums.txt":
+            return 200, checksums
+        if url == BASE + "component-manifest-v1.json":
+            return 200, manifest_body
+        raise AssertionError(f"unexpected fetch URL: {url}")
 
     return fetch
 
 
-def test_verify_manifest_provenance_success(tmp_path):
-    module = _load_provenance_module()
-    manifest_path = tmp_path / "manifest-v1.json"
-    manifest_path.write_text(json.dumps(_minimal_manifest()))
+def test_verifier_accepts_exact_one_release_inventory_and_release_page_manifest(tmp_path):
+    module = _module()
+    manifest = _manifest()
+    release, checksums, manifest_body = _release(manifest)
+    path = tmp_path / "manifest.json"
+    path.write_text(manifest_body)
 
-    errors = module.verify_manifest(manifest_path, fetch=_mock_fetcher())
-
-    assert errors == []
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "match"),
-    [
-        ("byte_size", 1, "byte_size"),
-        ("sha256", "a" * 64, "sha256"),
-    ],
-)
-def test_verify_manifest_provenance_reports_release_mismatches(tmp_path, field, value, match):
-    module = _load_provenance_module()
-    assets = _minimal_manifest()["components"]["miseledger"]["assets"]
-    assets["linux-amd64"][field] = value
-    manifest_path = tmp_path / "manifest-v1.json"
-    manifest_path.write_text(json.dumps(_minimal_manifest(miseledger_assets=assets)))
-
-    errors = module.verify_manifest(manifest_path, fetch=_mock_fetcher())
-
-    assert any(match in error for error in errors)
+    assert module.verify_manifest(path, fetch=_fetcher(release, checksums, manifest_body)) == []
 
 
-def test_verify_manifest_provenance_reports_browser_download_url_mismatch(tmp_path):
-    module = _load_provenance_module()
-    release = _release_payload()
-    for asset in release["assets"]:
-        if asset["name"] == "miseledger-linux-amd64":
-            asset["browser_download_url"] = MISELEDGER_BASE + "other-name"
-            break
-    manifest_path = tmp_path / "manifest-v1.json"
-    manifest_path.write_text(json.dumps(_minimal_manifest()))
+def test_verifier_rejects_component_release_coordinate_drift(tmp_path):
+    module = _module()
+    manifest = _manifest()
+    manifest["components"]["miseledger"]["source"]["repository"] = "escoffier-labs/miseledger"
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
+    release, checksums, manifest_body = _release(_manifest())
 
-    errors = module.verify_manifest(manifest_path, fetch=_mock_fetcher(release=release))
+    errors = module.verify_manifest(path, fetch=_fetcher(release, checksums, manifest_body))
 
-    assert any("browser_download_url" in error for error in errors)
+    assert any("escoffier-labs/brigade" in error for error in errors)
 
 
-def test_verify_manifest_provenance_reports_missing_api_digest(tmp_path):
-    module = _load_provenance_module()
-    release = _release_payload()
-    for asset in release["assets"]:
-        if asset["name"] == "miseledger-linux-amd64":
-            asset.pop("digest", None)
-            break
-    manifest_path = tmp_path / "manifest-v1.json"
-    manifest_path.write_text(json.dumps(_minimal_manifest()))
-
-    errors = module.verify_manifest(manifest_path, fetch=_mock_fetcher(release=release))
-
-    assert any("digest" in error for error in errors)
-
-
-def test_verify_manifest_provenance_reports_checksums_mismatch(tmp_path):
-    module = _load_provenance_module()
-    manifest_path = tmp_path / "manifest-v1.json"
-    manifest_path.write_text(json.dumps(_minimal_manifest()))
-    checksums = _checksums_text(
-        {
-            "miseledger-linux-amd64": {
-                "byte_size": 16441315,
-                "sha256": "b" * 64,
-            }
-        }
+def test_verifier_rejects_incomplete_matrix_extra_release_asset_and_checksum_gap(tmp_path):
+    module = _module()
+    manifest = _manifest()
+    del manifest["components"]["sessionfind"]["assets"]["darwin-arm64"]
+    release, checksums, manifest_body = _release(_manifest())
+    release["assets"].append(
+        {"name": "unexpected", "size": 1, "digest": "sha256:" + "a" * 64, "browser_download_url": BASE + "unexpected"}
     )
+    checksums = checksums.replace("component-manifest-v1.json\n", "missing-manifest\n")
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
 
-    errors = module.verify_manifest(manifest_path, fetch=_mock_fetcher(checksums=checksums))
+    errors = module.verify_manifest(path, fetch=_fetcher(release, checksums, manifest_body))
 
+    assert any("full platform matrix" in error for error in errors)
+    assert any("unexpected assets" in error for error in errors)
     assert any("checksums.txt" in error for error in errors)
 
 
-def test_verify_manifest_provenance_reports_wrong_repo_or_tag(tmp_path):
-    module = _load_provenance_module()
-    assets = _minimal_manifest()["components"]["miseledger"]["assets"]
-    assets["linux-amd64"]["download_url"] = (
-        "https://github.com/other/repo/releases/download/v9.9.9/miseledger-linux-amd64"
-    )
-    manifest_path = tmp_path / "manifest-v1.json"
-    manifest_path.write_text(json.dumps(_minimal_manifest(miseledger_assets=assets)))
+def test_verifier_requires_release_page_manifest_matching_the_local_manifest(tmp_path):
+    module = _module()
+    manifest = _manifest()
+    release, checksums, _ = _release(manifest)
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
-    errors = module.verify_manifest(manifest_path, fetch=_mock_fetcher())
+    errors = module.verify_manifest(path, fetch=_fetcher(release, checksums, "{}\n"))
 
-    assert any("repository" in error or "release_tag" in error for error in errors)
+    assert any("release-page component-manifest-v1.json" in error for error in errors)
 
 
-def test_verify_manifest_provenance_accepts_sha_revision_with_semantic_release_tag(tmp_path):
-    module = _load_provenance_module()
-    release_tag = "v0.1.0"
-    graphtrail_base = f"https://github.com/escoffier-labs/graphtrail/releases/download/{release_tag}/"
-    graphtrail_api = f"https://api.github.com/repos/escoffier-labs/graphtrail/releases/tags/{release_tag}"
-    asset_name = "graphtrail-linux-amd64"
-    sha256 = "a" * 64
-    manifest = _minimal_manifest(miseledger_assets={})
-    manifest["components"]["graphtrail"] = {
-        "component_revision": "b" * 40,
-        "source": {"repository": "escoffier-labs/graphtrail", "release_tag": release_tag},
-        "executable": "graphtrail",
-        "assets": {
-            "linux-amd64": {
-                "asset_name": asset_name,
-                "byte_size": 100,
-                "sha256": sha256,
-                "download_url": graphtrail_base + asset_name,
-            }
-        },
-    }
-    release = {
-        "tag_name": release_tag,
-        "assets": [
-            {
-                "name": asset_name,
-                "size": 100,
-                "browser_download_url": graphtrail_base + asset_name,
-                "digest": f"sha256:{sha256}",
-            },
-            {
-                "name": "checksums.txt",
-                "size": 10,
-                "browser_download_url": graphtrail_base + "checksums.txt",
-            },
-        ],
-    }
-    checksums = f"{sha256}  {asset_name}\n"
+def test_verifier_rejects_fetched_checksums_bytes_that_do_not_match_release_asset_digest(tmp_path):
+    module = _module()
+    manifest = _manifest()
+    release, checksums, manifest_body = _release(manifest)
+    checksum_asset = next(asset for asset in release["assets"] if asset["name"] == "checksums.txt")
+    checksum_asset["digest"] = "sha256:" + "b" * 64
+    path = tmp_path / "manifest.json"
+    path.write_text(manifest_body)
 
-    def fetch(url: str) -> tuple[int, str]:
-        if url == graphtrail_api:
-            return 200, json.dumps(release)
-        if url == graphtrail_base + "checksums.txt":
-            return 200, checksums
-        raise AssertionError(f"unexpected fetch url: {url}")
+    errors = module.verify_manifest(path, fetch=_fetcher(release, checksums, manifest_body))
 
-    manifest_path = tmp_path / "manifest-v1.json"
-    manifest_path.write_text(json.dumps(manifest))
-
-    errors = module.verify_manifest(manifest_path, fetch=fetch)
-
-    assert errors == []
+    assert any("checksums.txt" in error and "digest" in error for error in errors)
 
 
-def test_verify_manifest_provenance_reports_missing_release_tag(tmp_path):
-    module = _load_provenance_module()
-    manifest = _minimal_manifest()
-    del manifest["components"]["miseledger"]["source"]["release_tag"]
-    manifest_path = tmp_path / "manifest-v1.json"
-    manifest_path.write_text(json.dumps(manifest))
+def test_verifier_rejects_component_revision_mismatched_to_resolved_tag_commit(tmp_path):
+    module = _module()
+    manifest = _manifest()
+    manifest["components"]["miseledger"]["component_revision"] = "b" * 40
+    release, checksums, manifest_body = _release(manifest)
+    path = tmp_path / "manifest.json"
+    path.write_text(manifest_body)
 
-    errors = module.verify_manifest(manifest_path, fetch=_mock_fetcher())
+    errors = module.verify_manifest(path, fetch=_fetcher(release, checksums, manifest_body))
 
-    assert any("source.release_tag must be set" in error for error in errors)
-
-
-def test_verify_manifest_provenance_reports_mismatched_release_tag(tmp_path):
-    module = _load_provenance_module()
-    manifest = _minimal_manifest()
-    manifest["components"]["miseledger"]["source"]["release_tag"] = "v9.9.9"
-    manifest_path = tmp_path / "manifest-v1.json"
-    manifest_path.write_text(json.dumps(manifest))
-
-    errors = module.verify_manifest(manifest_path, fetch=_mock_fetcher())
-
-    assert any("source.release_tag" in error and "download_url tag" in error for error in errors)
+    assert any("component_revision" in error and "tag commit" in error for error in errors)
 
 
-def test_verify_manifest_provenance_reports_duplicate_asset_names(tmp_path):
-    module = _load_provenance_module()
-    duplicate = _asset(
-        "miseledger-linux-amd64",
-        byte_size=MISELEDGER_ASSETS["miseledger-linux-amd64"]["byte_size"],
-        sha256=MISELEDGER_ASSETS["miseledger-linux-amd64"]["sha256"],
-    )
-    manifest_path = tmp_path / "manifest-v1.json"
-    manifest_path.write_text(
-        json.dumps(
-            _minimal_manifest(
-                miseledger_assets={
-                    "linux-amd64": duplicate,
-                    "linux-arm64": duplicate,
-                }
-            )
+def test_verifier_dereferences_annotated_tag_and_ignores_release_target_commitish(tmp_path):
+    module = _module()
+    manifest = _manifest()
+    release, checksums, manifest_body = _release(manifest)
+    path = tmp_path / "manifest.json"
+    path.write_text(manifest_body)
+    first_tag = "b" * 40
+    second_tag = "c" * 40
+
+    assert (
+        module.verify_manifest(
+            path,
+            fetch=_fetcher(
+                release,
+                checksums,
+                manifest_body,
+                tag_ref={"ref": f"refs/tags/{TAG}", "object": {"type": "tag", "sha": first_tag}},
+                tag_objects={
+                    first_tag: {"tag": TAG, "object": {"type": "tag", "sha": second_tag}},
+                    second_tag: {"tag": TAG, "object": {"type": "commit", "sha": "a" * 40}},
+                },
+            ),
         )
+        == []
     )
 
-    errors = module.verify_manifest(manifest_path, fetch=_mock_fetcher())
 
-    assert any("duplicate" in error for error in errors)
+@pytest.mark.parametrize(
+    ("tag_ref", "tag_objects"),
+    (
+        ({"ref": "refs/tags/v9.9.9", "object": {"type": "commit", "sha": "a" * 40}}, {}),
+        ({"ref": f"refs/tags/{TAG}", "object": {"type": "blob", "sha": "a" * 40}}, {}),
+        (
+            {"ref": f"refs/tags/{TAG}", "object": {"type": "tag", "sha": "b" * 40}},
+            {"b" * 40: {"tag": "v9.9.9", "object": {"type": "commit", "sha": "a" * 40}}},
+        ),
+        (
+            {"ref": f"refs/tags/{TAG}", "object": {"type": "tag", "sha": "b" * 40}},
+            {"b" * 40: {"tag": TAG, "object": {"type": "tag", "sha": "b" * 40}}},
+        ),
+    ),
+)
+def test_verifier_fails_closed_for_malformed_or_cyclic_tag_objects(tmp_path, tag_ref, tag_objects):
+    module = _module()
+    manifest = _manifest()
+    release, checksums, manifest_body = _release(manifest)
+    path = tmp_path / "manifest.json"
+    path.write_text(manifest_body)
+
+    errors = module.verify_manifest(
+        path, fetch=_fetcher(release, checksums, manifest_body, tag_ref=tag_ref, tag_objects=tag_objects)
+    )
+
+    assert any("tag" in error for error in errors)
+
+
+def test_verifier_fails_closed_for_excessively_nested_annotated_tags(tmp_path):
+    module = _module()
+    manifest = _manifest()
+    release, checksums, manifest_body = _release(manifest)
+    path = tmp_path / "manifest.json"
+    path.write_text(manifest_body)
+    shas = [f"{index:040x}" for index in range(1, module.MAX_TAG_DEREFERENCE_DEPTH + 2)]
+    tag_objects = {
+        sha: {"tag": TAG, "object": {"type": "tag", "sha": next_sha}}
+        for sha, next_sha in zip(shas[:-1], shas[1:], strict=True)
+    }
+
+    errors = module.verify_manifest(
+        path,
+        fetch=_fetcher(
+            release,
+            checksums,
+            manifest_body,
+            tag_ref={"ref": f"refs/tags/{TAG}", "object": {"type": "tag", "sha": shas[0]}},
+            tag_objects=tag_objects,
+        ),
+    )
+
+    assert any("depth" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "asset_name, digest",
+    (
+        ("component-manifest-v1.json", None),
+        ("checksums.txt", None),
+        ("graphtrail-linux-amd64", None),
+        ("component-manifest-v1.json", {"sha256": "not-a-string"}),
+    ),
+)
+def test_verifier_collects_errors_for_missing_or_malformed_github_release_digests(tmp_path, asset_name, digest):
+    module = _module()
+    manifest = _manifest()
+    release, checksums, manifest_body = _release(manifest)
+    asset = next(item for item in release["assets"] if item["name"] == asset_name)
+    if digest is None:
+        asset.pop("digest")
+    else:
+        asset["digest"] = digest
+    path = tmp_path / "manifest.json"
+    path.write_text(manifest_body)
+
+    errors = module.verify_manifest(path, fetch=_fetcher(release, checksums, manifest_body))
+
+    assert errors
+    assert any(asset_name in error and "digest" in error for error in errors)

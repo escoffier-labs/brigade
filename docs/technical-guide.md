@@ -1338,7 +1338,7 @@ See [QUICKSTART.md](QUICKSTART.md) for setup, verification, and the ingest flow.
 > **In plain terms:** "stations" group built-in capabilities and optional tools Brigade can install and wire for you. Managed tools run as separate command-line processes. Content Guard is embedded in Brigade, so `brigade add guard` only offers the optional Plating helper.
 
 Some stations can install and wire external tools for you.
-Run `brigade add <station>` to install any tool attached to that station that is not already on your PATH, then wire its default config.
+Run `brigade setup` first to install GraphTrail, `graphtrail-mcp`, MiseLedger, and SessionFind from the running CLI's exact release manifest. `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain one-release compatibility paths for independent installs; they are not required after setup. Use `brigade add <station>` for station-specific tools that setup does not manage, then wire their default config.
 Tools are never imported in process; Brigade shells out to each CLI, so the boundary stays model-neutral and mixed-language.
 `brigade add <path>` also discovers a local `station.json` manifest from an external station repo. The manifest path reports the station name, install command, and machine surfaces. Install commands from a manifest are not executed unless `--install` is passed.
 
@@ -1346,8 +1346,6 @@ Tools are never imported in process; Brigade shells out to each CLI, so the boun
 brigade add memory   # bootstrap-doctor (optional); status/lint/compact are built in
 brigade add guard    # embedded scrub path + optional plating
 brigade add tokens   # token-glace (+ optional usage-tracker)
-brigade add search   # graphtrail + optional code-search
-brigade add evidence # miseledger
 brigade add skills   # built-in skills + optional Skillet roster
 brigade add pantry   # agentpantry (extras surface)
 brigade stations discover --root ~/repos
@@ -1377,10 +1375,10 @@ Use `brigade pantry expiry-alert` to report near-expiry sessions and preview the
 These plan commands do not generate or copy PSKs, start services, or mutate browser, GitHub, OpenClaw, or other auth files. Product page: https://brigade.tools/agentpantry.
 
 `evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade never imports it.
-`brigade add evidence` installs miseledger and prints the crawl/export path.
+`brigade setup` installs MiseLedger and its SessionFind companion from the exact release manifest. `brigade add evidence` remains a one-release compatibility fallback for an independent install.
 Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands. `brigade evidence crawl <args...>` and `brigade evidence search <args...>` relay a safe argv list to MiseLedger, preserving its text or JSON output and exit status. `--code-reference <brigade.code-reference.v1 JSON>` is passed to MiseLedger unchanged, so its exact code-reference lookup runs before lexical fallback. Crawl defaults to 900 seconds and can be changed with the positive finite numeric `BRIGADE_EVIDENCE_CRAWL_TIMEOUT_SECONDS`; search remains at 30 seconds. An invalid crawl timeout reports a diagnostic and exits 2 before starting MiseLedger. `brigade evidence crawl plan` still previews miseledger init/crawl/doctor commands, and `brigade evidence export plan` still previews `brigade receipts export miseledger --new-only --import`. Product page: https://brigade.tools/miseledger.
 
-`code` runs GraphTrail through a process boundary: `brigade code sync|context|impact <args...>` uses safe argument forwarding and preserves engine text, JSON, and exit status. Sync defaults to 900 seconds and can be changed with the positive finite numeric `BRIGADE_CODE_SYNC_TIMEOUT_SECONDS`; context and impact remain at 30 seconds. An invalid sync timeout reports a diagnostic and exits 2 before starting GraphTrail. `search` retains its `status`, `doctor`, and `sync plan` surfaces; its executable `sync`, `context`, and `impact` forms are compatibility aliases for `code` for at least two minor releases or 90 days, whichever is longer. `search` still wires optional code-search-api, and the `code-search-mcp` compatibility key points to the bridge maintained under `code-search-api/mcp`.
+`code` runs the GraphTrail installed by `brigade setup` through a process boundary: `brigade code sync|context|impact <args...>` uses safe argument forwarding and preserves engine text, JSON, and exit status. Sync defaults to 900 seconds and can be changed with the positive finite numeric `BRIGADE_CODE_SYNC_TIMEOUT_SECONDS`; context and impact remain at 30 seconds. An invalid sync timeout reports a diagnostic and exits 2 before starting GraphTrail. `brigade add search` and `brigade add graphtrail` remain one-release compatibility paths for independent installations. `search` retains its `status`, `doctor`, and `sync plan` surfaces; its executable `sync`, `context`, and `impact` forms are compatibility aliases for `code` for at least two minor releases or 90 days, whichever is longer. `search` still wires optional code-search-api, and the `code-search-mcp` compatibility key points to the bridge maintained under `code-search-api/mcp`.
 
 `tokens` wires Token Glace (current name; TokenJuice is the old name) and optional usage-tracker spend export.
 Use `brigade tokens status` / `doctor` and review-only `brigade tokens wire plan`.
@@ -1388,7 +1386,7 @@ Use `brigade tokens status` / `doctor` and review-only `brigade tokens wire plan
 `plating` is an optional guard-station publish helper (`brigade add plating`) for demo SVG render, leak scan, and output-drift verify. Not required for scrub.
 
 `evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade never imports it.
-`brigade add evidence` installs miseledger and prints the crawl/export path.
+`brigade setup` installs MiseLedger and its SessionFind companion from the exact release manifest. `brigade add evidence` remains a one-release compatibility fallback for an independent install.
 Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands. `brigade evidence crawl <args...>` and `brigade evidence search <args...>` relay a safe argv list to MiseLedger, preserving its text or JSON output and exit status. `brigade evidence crawl plan` still previews miseledger init/crawl/doctor commands, and `brigade evidence export plan` still previews `brigade receipts export miseledger --new-only --import`. Product page: https://brigade.tools/miseledger.
 
 Security commands:

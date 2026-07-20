@@ -42,6 +42,7 @@ Install:
 
 ```bash
 pipx install brigade-cli
+brigade setup
 ```
 
 Set up a repo:
@@ -344,7 +345,8 @@ Evidence ledger tools:
 
 - [MiseLedger](https://github.com/escoffier-labs/miseledger): local-first evidence ledger. One binary crawls sessions, files, git history, and chat sources (`miseledger crawl ...`), stores `miseledger.adapter.v1` JSONL in SQLite with FTS5, and emits Brigade-ready evidence bundles. No separate exporter install.
 - Brigade station CLI (process boundary):
-  - `brigade add evidence` installs miseledger and prints the crawl/export path
+  - `brigade setup` installs MiseLedger and SessionFind with GraphTrail and `graphtrail-mcp` from the exact release manifest
+  - `brigade add evidence` is a one-release compatibility fallback for an independent MiseLedger install
   - `brigade evidence status` / `doctor` — advisory health + next commands
   - `brigade evidence crawl <args...>` / `search <args...>` - transparent MiseLedger execution; engine output and exit code pass through
   - `brigade evidence crawl plan` / `export plan` — review-only plans under `.brigade/evidence/plans/`

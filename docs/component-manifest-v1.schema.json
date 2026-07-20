@@ -128,7 +128,7 @@
       "additionalProperties": false,
       "required": ["component_revision", "source", "executable", "assets"],
       "properties": {
-        "component_revision": {"type": "string", "minLength": 1},
+        "component_revision": {"$ref": "#/$defs/graphtrail_component_revision"},
         "source": {
           "type": "object",
           "additionalProperties": false,

@@ -50,6 +50,13 @@ def _managed_paths(env: dict[str, str]) -> dict[str, Path]:
     }
 
 
+def test_default_component_report_loads_bundled_compatibility_manifest(tmp_path):
+    report = component_report.inspect_components(env=linux_env(tmp_path), system="linux")
+
+    assert report.platform_error is None
+    assert report.manifest_revision == "2026-07-19"
+
+
 def _write_healthy_install(env: dict[str, str], manifest_path: Path) -> None:
     manifest = component_manifest.load(manifest_path)
     roots = resolve_roots(env=env, system="linux")

@@ -73,6 +73,29 @@ def installed_previous_state_path(data_root_path: str) -> str:
     return _join(data_root_path, "brigade", "installed.previous.json", windows=_is_windows_path(data_root_path))
 
 
+def update_state_path(data_root_path: str) -> str:
+    """Return the user-global immutable update state path."""
+    return _join(data_root_path, "brigade", "update-state.json", windows=_is_windows_path(data_root_path))
+
+
+def update_lock_path(data_root_path: str) -> str:
+    """Return the shared stable/beta update lock path."""
+    return _join(data_root_path, "brigade", "update.lock", windows=_is_windows_path(data_root_path))
+
+
+def verified_manifest_path(cache_root_path: str, sha256: str) -> str:
+    """Return the immutable cache path for a verified release manifest."""
+    if not _SHA256.fullmatch(sha256):
+        raise ValueError("sha256 must be 64 lowercase hex characters")
+    return _join(
+        cache_root_path,
+        "brigade",
+        "release-manifests",
+        f"{sha256}.json",
+        windows=_is_windows_path(cache_root_path),
+    )
+
+
 def cached_asset_path(cache_root_path: str, sha256: str, asset_name: str) -> str:
     if not _SHA256.fullmatch(sha256):
         raise ValueError("sha256 must be 64 lowercase hex characters")

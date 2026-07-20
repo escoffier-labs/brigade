@@ -64,6 +64,22 @@ def write_text_atomic(path: Path, data: str) -> None:
         raise
 
 
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    """Write bytes to path atomically, creating parents."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     """Write payload as indented, key-sorted JSON, atomically, creating parents."""
     write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")

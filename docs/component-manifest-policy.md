@@ -3,23 +3,19 @@
 Brigade ships a standalone component manifest contract for Phase 1 native tools. It is separate
 from `brigade.station.v1` and `station_manifest.load`.
 
-## Phase 1 components
+## Unified-release components
 
 | Component id | Executable | Native release status |
 | --- | --- | --- |
-| `graphtrail` | `graphtrail` | pinned to GraphTrail commit `64fcd2f9`, assets unpublished |
-| `graphtrail-mcp` | `graphtrail-mcp` | pinned to GraphTrail commit `64fcd2f9`, assets unpublished |
-| `miseledger` | `miseledger` | pinned to MiseLedger v0.6.0 |
-| `sessionfind` | `sessionfind` | pinned to MiseLedger v0.6.0 |
+| `graphtrail` | `graphtrail` | built from the tagged Brigade commit |
+| `graphtrail-mcp` | `graphtrail-mcp` | built from the tagged Brigade commit |
+| `miseledger` | `miseledger` | built from the tagged Brigade commit |
+| `sessionfind` | `sessionfind` | built from the tagged Brigade commit |
 
-GraphTrail components record an immutable 40-character lowercase git SHA in `component_revision`.
-Published components also record the GitHub release tag in `source.release_tag`. The engine revision
-and release tag are independent: GraphTrail may pin a commit SHA while release assets use a semantic
-tag such as `v0.1.0`. Issue #354 will update the GraphTrail commit SHA and add its release tag and
-assets.
-
-MiseLedger components record the release tag in both `component_revision` and `source.release_tag`
-(`v0.6.0` today).
+Every component records the immutable 40-character tagged Brigade commit in `component_revision`.
+Every `source.repository` is `escoffier-labs/brigade`, and every `source.release_tag` is the same
+immutable Brigade tag. The package template is replaced with the generated manifest before its wheel
+and sdist are built. Schema version remains v1.
 
 ## Platform matrix
 
@@ -31,10 +27,8 @@ All Phase 1 components share one fixed support matrix:
 - `darwin-arm64`
 - `windows-amd64`
 
-Unsupported host platforms fail with the resolved key and the supported keys. Requesting an
-unpublished component/platform pair (for example GraphTrail on any platform today) raises an
-`unsupported-component-platform` diagnostic. Brigade never invents a filename and never falls
-back to Cargo builds.
+Unsupported host platforms fail with the resolved key and the supported keys. Brigade never invents
+a filename and never falls back to Cargo builds.
 
 ## Asset filenames
 
@@ -51,19 +45,21 @@ requires the download URL final segment to match `asset_name` exactly.
 ## Schema and runtime validation
 
 `docs/component-manifest-v1.schema.json` is the structural contract for manifest authorship and
-review. `brigade.component_manifest.load` enforces the same platform matrix, asset naming rules,
-and download URL invariants at runtime, including exact `supported_platforms` order, full-matrix
-published assets, and empty or complete unpublished assets. Unknown component ids remain a soft
-diagnostic; malformed known components are a hard failure.
+review. Unified release and update validation enforce the same platform matrix, asset naming rules,
+download URL invariants, and a 40-character lowercase `component_revision` for every component.
+The revision must equal the immutable target commit of the resolved Brigade release. Unknown
+component ids remain a soft diagnostic; malformed known components are a hard failure.
 
-CI runs `scripts/verify_component_manifest_provenance.py` in a separate job from `./scripts/verify`.
-That script reads the bundled manifest, calls the GitHub Releases tag API with `urllib`, compares
-each published asset's name, `byte_size`, `browser_download_url`, and API `sha256:<hex>` digest,
-cross-checks every manifest `sha256`/name pair against the release `checksums.txt`, and verifies
-that each published component's `source.release_tag` matches the GitHub release tag embedded in
-asset `download_url` values. It never compares `component_revision` to the release tag and never
-downloads native binaries. Local runs work without `GITHUB_TOKEN`; CI passes `github.token` for
-rate-limit headroom.
+`scripts/generate_component_manifest.py` derives the final manifest in deterministic order from the
+tag, commit, exact 20 filenames, byte sizes, and SHA-256 values. It also writes `checksums.txt`,
+which contains exactly those 20 assets and `component-manifest-v1.json`.
+
+The release gate runs `scripts/verify_component_manifest_provenance.py` after creating the release.
+It requires exactly one `escoffier-labs/brigade` tag for all four components, the complete five-platform
+matrix, exactly 20 native assets plus the manifest and checksum file, matching release API digests,
+the complete checksum map, matching fetched `checksums.txt` bytes, and a release-page manifest
+byte-for-byte equal to the packaged manifest. It uses injected fetchers in unit tests. Attestation verification is deliberately performed by `gh
+attestation verify` in the release workflow rather than represented by an API boolean.
 
 ## User-local path invariants
 
@@ -90,7 +86,11 @@ Brigade does not relocate `.graphtrail/graphtrail.db` or MiseLedger archive path
   emit a deterministic diagnostic. The manifest is not rejected.
 - Malformed known components or assets are a hard failure naming component, platform, and field.
 
-## Phase 1 boundaries
+## Current boundaries
 
-Issue #353 defines schema, pins, path invariants, and validation only. Downloading, unpacking,
-rollback, and managed-catalog rewrites are reserved for later issues.
+This policy owns one release and update contract. `brigade update --channel stable` resolves the
+latest immutable Brigade release, installs that exact CLI version, and runs setup against its
+verified manifest. Beta uses the validated main commit while retaining the verified stable release
+manifest. `brigade setup` resolves the running CLI's exact release manifest; offline automatic
+setup requires a verified exact-release cache. The bundled legacy manifest is available only with
+`--manifest-source standalone`.

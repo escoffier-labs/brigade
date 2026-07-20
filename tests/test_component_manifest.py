@@ -162,7 +162,7 @@ MISELEDGER_V060_ASSETS = [
 
 def _minimal_known_component(
     *,
-    component_revision: str = "v0.6.0",
+    component_revision: str = GRAPHTRAIL_SHA,
     repository: str = "escoffier-labs/miseledger",
     release_tag: str | None = "v0.6.0",
     executable: str = "miseledger",
@@ -282,7 +282,7 @@ def test_bundled_manifest_pins_miseledger_and_graphtrail_assets():
     ids=[f"{comp}-{plat}" for comp, plat, *_ in MISELEDGER_V060_ASSETS],
 )
 def test_bundled_manifest_pins_miseledger_v060_assets(component_id, platform, asset_name, byte_size, sha256):
-    manifest = component_manifest.load()
+    manifest = component_manifest.load(allow_standalone_legacy_revisions=True)
     asset = manifest.components[component_id].assets[platform]
     assert asset.asset_name == asset_name
     assert asset.byte_size == byte_size
@@ -295,7 +295,7 @@ def test_bundled_manifest_pins_miseledger_v060_assets(component_id, platform, as
 
 
 def test_bundled_manifest_pins_graphtrail_v040_assets():
-    manifest = component_manifest.load()
+    manifest = component_manifest.load(allow_standalone_legacy_revisions=True)
     asset = manifest.components["graphtrail"].assets["linux-amd64"]
     assert asset.byte_size == 12802256
     assert asset.sha256 == "e78c73a80a2eadbe297066739044e2c5fcdd187c8219198f453bd004bf9c9a55"
@@ -303,14 +303,14 @@ def test_bundled_manifest_pins_graphtrail_v040_assets():
 
 
 def test_bundled_manifest_pins_graphtrail_mcp_v040_assets():
-    manifest = component_manifest.load()
+    manifest = component_manifest.load(allow_standalone_legacy_revisions=True)
     asset = manifest.components["graphtrail-mcp"].assets["linux-amd64"]
     assert asset.byte_size == 11981944
     assert asset.sha256 == "66606e4e394973766e1e91d3b0b78b26bd9077076cc85e62b9d0faf9780e7154"
 
 
 def test_bundled_manifest_pins_graphtrail_to_git_sha():
-    manifest = component_manifest.load()
+    manifest = component_manifest.load(allow_standalone_legacy_revisions=True)
     for component_id in ("graphtrail", "graphtrail-mcp"):
         revision = manifest.components[component_id].component_revision
         assert revision == GRAPHTRAIL_SHA
@@ -657,6 +657,21 @@ def test_manifest_rejects_graphtrail_revision_that_is_not_git_sha(tmp_path, monk
     path.write_text(json.dumps(base))
     with pytest.raises(ValueError, match="must be a 40-character lowercase git SHA"):
         component_manifest.load(path)
+
+
+def test_manifest_rejects_non_git_component_revision_for_every_unified_component(tmp_path):
+    base = json.loads(_write_manifest(tmp_path).read_text())
+    base["components"]["sessionfind"]["component_revision"] = "v0.6.0"
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(base))
+
+    with pytest.raises(ValueError, match="component 'sessionfind' field 'component_revision'.*40-character"):
+        component_manifest.load(path)
+
+
+def test_explicit_manifest_path_rejects_bundled_tag_revision():
+    with pytest.raises(ValueError, match="component 'miseledger' field 'component_revision'.*40-character"):
+        component_manifest.load(component_manifest.manifest_path())
 
 
 def test_manifest_rejects_published_component_without_release_tag(tmp_path):

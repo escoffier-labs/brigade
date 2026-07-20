@@ -74,9 +74,7 @@ def fixture_asset_name(component_id: str, *, platform: str) -> str:
 
 
 def test_component_revision(component_id: str) -> str:
-    if component_id in ("graphtrail", "graphtrail-mcp"):
-        return GRAPHTRAIL_SHA
-    return "fixture-revision"
+    return GRAPHTRAIL_SHA
 
 
 def write_verified_cache(cache_path: Path, *, payload: bytes) -> None:

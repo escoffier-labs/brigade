@@ -37,11 +37,12 @@ Brigade runs on Linux, macOS, and Windows with Python 3.10 or newer. The CLI and
 ```bash
 pipx install brigade-cli
 pipx ensurepath          # then open a new shell so `brigade` is on PATH
+brigade setup             # install verified native Brigade engines
 brigade operator quickstart --target ./my-repo --harnesses codex
 brigade operator doctor --target ./my-repo --profile local-operator
 ```
 
-That wires memory, handoffs, a local MCP catalog, the work loop, and guardrails into one repo for one harness, then prints ready. Default footprint is small: `AGENTS.md`, `SAFETY_RULES.md`, a handoff template, and `.brigade/` state. Add `--dry-run` to preview; `--full` for the whole kit. Nothing leaves your machine.
+`brigade setup` is the default engine installation path and uses the running CLI's exact release manifest. That wires memory, handoffs, a local MCP catalog, the work loop, and guardrails into one repo for one harness, then prints ready. Default footprint is small: `AGENTS.md`, `SAFETY_RULES.md`, a handoff template, and `.brigade/` state. Add `--dry-run` to preview; `--full` for the whole kit. Nothing leaves your machine.
 
 ```
 operator doctor: ~/my-repo
@@ -103,22 +104,25 @@ Self-improving means the fleet gets better from measured work, not from the mode
 
 <p align="center"><em>Hub marks (circular + hairline). Each links to its <code>brigade.tools/…</code> page.</em></p>
 
-Brigade is the hub. Optional tools stay in their own repos; `brigade add <station>` installs them, and `status` / `doctor` health-check what is present. Core works with zero sidecars.
+Brigade is the hub. `brigade setup` installs GraphTrail, `graphtrail-mcp`, MiseLedger, and SessionFind from the running CLI's exact release manifest. Optional stations stay in their own repos; use `brigade add <station>` for pantry, tokens, and other station-specific tools. `status` and `doctor` health-check what is present. Core works with zero sidecars.
 
 | | Station | Install | Plugs into | Role |
 |---|---|---|---|---|
-| <a href="https://brigade.tools/graphtrail"><img src="docs/assets/marks/graphtrail-circle.svg" width="28" height="28" alt="GraphTrail"></a> | **[GraphTrail](https://brigade.tools/graphtrail)** | `brigade add search` (bundle: code-search + GraphTrail) | **Prove** | Code graph; `brigade run` prepends a context pack when a graph exists |
-| <a href="https://brigade.tools/miseledger"><img src="docs/assets/marks/miseledger-circle.svg" width="28" height="28" alt="MiseLedger"></a> | **[MiseLedger](https://brigade.tools/miseledger)** | `brigade add evidence` | **Prove** / **Remember** | Evidence ledger; export briefs into the next work context |
+| <a href="https://brigade.tools/graphtrail"><img src="docs/assets/marks/graphtrail-circle.svg" width="28" height="28" alt="GraphTrail"></a> | **[GraphTrail](https://brigade.tools/graphtrail)** | `brigade setup` | **Prove** | Code graph; `brigade run` prepends a context pack when a graph exists |
+| <a href="https://brigade.tools/miseledger"><img src="docs/assets/marks/miseledger-circle.svg" width="28" height="28" alt="MiseLedger"></a> | **[MiseLedger](https://brigade.tools/miseledger)** | `brigade setup` | **Prove** / **Remember** | Evidence ledger; export briefs into the next work context |
 | <a href="https://brigade.tools/agentpantry"><img src="docs/assets/marks/agentpantry-circle.svg" width="28" height="28" alt="Agent Pantry"></a> | **[Agent Pantry](https://brigade.tools/agentpantry)** | `brigade add pantry` | **Share** | Encrypted browser-session / secret sync across machines |
 | <a href="https://brigade.tools/content-guard"><img src="docs/assets/marks/content-guard-circle.svg" width="28" height="28" alt="Content Guard"></a> | **[Content Guard](https://brigade.tools/content-guard)** | built in (`guard` / `scrub`) | **Share** / **Remember** | Secrets and PII scan before publish ([docs](docs/security.md)) |
 | <a href="https://brigade.tools/skillet"><img src="docs/assets/marks/skillet-circle.svg" width="28" height="28" alt="Skillet"></a> | **[Skills / Skillet](https://brigade.tools/skillet)** | built-in on init; Skillet roster optional | **Improve** | Portable skills; reconcile promotes or rolls them back |
 | <a href="https://brigade.tools/token-glace"><img src="docs/assets/marks/token-glace-circle.svg" width="28" height="28" alt="Token Glace"></a> | **[Token Glace](https://brigade.tools/token-glace)** | `brigade add tokens` | **Prove** | Compact noisy tool output before it burns context |
 
 ```bash
-brigade add pantry && brigade add evidence && brigade add search
+brigade setup
+brigade add pantry
 brigade add tokens
 brigade status --target .
 ```
+
+For one release, `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain compatibility paths for independent installations. They are not required after `brigade setup`.
 
 Station pages: [GraphTrail](https://brigade.tools/graphtrail) · [MiseLedger](https://brigade.tools/miseledger) · [Agent Pantry](https://brigade.tools/agentpantry) · [Content Guard](https://brigade.tools/content-guard) · [Skillet](https://brigade.tools/skillet) · [Token Glace](https://brigade.tools/token-glace). Full station reference (install, profiles, `brigade add`, contract): [docs/station-contract.md](docs/station-contract.md).
 

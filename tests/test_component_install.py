@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 import brigade
-from brigade import component_install, component_manifest, component_paths, component_state
+from brigade import component_install, component_manifest, component_paths, component_state, update_cmd
 from brigade.component_install import (
     ComponentInstallError,
     _WINDOWS_HTTPS_PRIME_COMMAND,
@@ -76,6 +76,41 @@ def _install_fixture_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
     monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
     return env, manifest_path
+
+
+def _prepare_auto_release_setup(tmp_path, monkeypatch):
+    """Route automatic setup through an immutable release fixture."""
+    env = linux_env(tmp_path)
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True)
+    write_test_manifest(bundled, brigade_version=brigade.__version__)
+    manifest_bytes = bundled.read_bytes()
+    release = update_cmd.ResolvedRelease(
+        42,
+        f"v{brigade.__version__}",
+        brigade.__version__,
+        "a" * 40,
+        "https://github.com/escoffier-labs/brigade/releases/download/"
+        f"v{brigade.__version__}/component-manifest-v1.json",
+        len(manifest_bytes),
+        hashlib.sha256(manifest_bytes).hexdigest(),
+        manifest_bytes,
+    )
+    monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
+    monkeypatch.setattr(update_cmd, "resolve_release", lambda *_args, **_kwargs: release)
+    monkeypatch.setattr(
+        update_cmd,
+        "validate_release_manifest",
+        lambda _release, path: component_manifest.load(path),
+    )
+    monkeypatch.setattr(
+        update_cmd,
+        "validate_release_manifest_bytes",
+        lambda resolved: component_manifest.load_bytes(resolved.manifest_bytes, source=Path(resolved.manifest_url)),
+    )
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    return env, release
 
 
 def _managed_paths(env: dict[str, str]) -> dict[str, Path]:
@@ -628,6 +663,240 @@ def test_setup_rejects_brigade_version_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
     rc = setup_native_components(env=env)
     assert rc == 1
+
+
+def test_setup_only_accepts_the_exact_compatibility_manifest_version(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    write_test_manifest(manifest_path, brigade_version="9.9.9")
+    monkeypatch.setattr("brigade.__version__", "0.23.0", raising=False)
+    assert (
+        setup_native_components(
+            dry_run=True,
+            env=env,
+            manifest_path=manifest_path,
+            allow_compatible_stable_manifest="9.9.8",
+        )
+        == 1
+    )
+    assert (
+        setup_native_components(
+            dry_run=True,
+            env=env,
+            manifest_path=manifest_path,
+            allow_compatible_stable_manifest="9.9.9",
+        )
+        == 0
+    )
+
+
+def test_setup_rejects_compatibility_handoff_without_manifest(tmp_path):
+    assert (
+        setup_native_components(
+            dry_run=True,
+            env=linux_env(tmp_path),
+            allow_compatible_stable_manifest="1.2.3",
+        )
+        == 1
+    )
+
+
+def test_setup_auto_offline_does_not_select_an_available_bundled_manifest(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True)
+    write_test_manifest(bundled, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
+
+    with pytest.raises(ComponentInstallError, match="offline setup requires a verified exact-release manifest cache"):
+        component_install._load_setup_manifest(
+            manifest_path=None,
+            manifest_source="auto",
+            offline=True,
+            opener=FakeOpener({}),
+            env=env,
+        )
+
+
+def test_setup_auto_online_publishes_release_state_for_following_offline_setup(tmp_path, monkeypatch):
+    env, release = _prepare_auto_release_setup(tmp_path, monkeypatch)
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+    assert setup_native_components(offline=True, env=env, opener=FakeOpener({})) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
+    assert state is not None
+    assert (state.channel, state.owner, state.cli_coordinate) == (
+        "stable",
+        "brigade setup",
+        brigade.__version__,
+    )
+    assert (
+        state.component_release_id,
+        state.component_tag,
+        state.component_target_commit,
+        state.component_manifest_url,
+        state.component_manifest_sha256,
+    ) == (
+        release.release_id,
+        release.tag,
+        release.target_commit,
+        release.manifest_url,
+        release.manifest_sha256,
+    )
+
+
+def test_setup_auto_offline_rejects_a_replaced_cached_manifest(tmp_path, monkeypatch, capsys):
+    env, release = _prepare_auto_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, release.manifest_sha256))
+    cached.write_bytes(cached.read_bytes() + b"\n")
+
+    assert setup_native_components(offline=True, env=env, opener=FakeOpener({})) == 1
+    assert "cached exact-release manifest digest does not match update state" in capsys.readouterr().err
+
+
+def test_setup_auto_offline_validates_the_hashed_cached_bytes_after_path_replacement(tmp_path, monkeypatch):
+    env, release = _prepare_auto_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, release.manifest_sha256))
+    expected = component_manifest.load(cached)
+    replacement = json.loads(cached.read_text())
+    replacement["manifest_revision"] = "replacement"
+    replacement_bytes = json.dumps(replacement).encode()
+    original_read_bytes = Path.read_bytes
+    replaced = False
+
+    def read_then_replace(path: Path) -> bytes:
+        nonlocal replaced
+        result = original_read_bytes(path)
+        if path == cached and not replaced:
+            cached.write_bytes(replacement_bytes)
+            replaced = True
+        return result
+
+    monkeypatch.setattr(Path, "read_bytes", read_then_replace)
+
+    manifest, auto_release = component_install._load_setup_manifest(
+        manifest_path=None,
+        manifest_source="auto",
+        offline=True,
+        opener=FakeOpener({}),
+        env=env,
+    )
+
+    assert replaced is True
+    assert auto_release is None
+    assert manifest.manifest_revision == expected.manifest_revision
+
+
+def test_setup_auto_offline_translates_rejected_cached_manifest_update_errors(tmp_path, monkeypatch, capsys):
+    env, _release = _prepare_auto_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+    monkeypatch.setattr(
+        update_cmd,
+        "validate_release_manifest_bytes",
+        lambda _release: (_ for _ in ()).throw(update_cmd.UpdateError("cached manifest rejected")),
+    )
+
+    assert setup_native_components(offline=True, env=env, opener=FakeOpener({})) == 1
+    err = capsys.readouterr().err
+    assert "component setup: exact release manifest setup failed: cached manifest rejected" in err
+    assert "Traceback" not in err
+
+
+def test_setup_auto_online_translates_manifest_cache_collisions(tmp_path, monkeypatch, capsys):
+    env, release = _prepare_auto_release_setup(tmp_path, monkeypatch)
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, release.manifest_sha256))
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"collision")
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 1
+    err = capsys.readouterr().err
+    assert "component setup: exact release manifest setup failed: verified manifest cache digest collision" in err
+    assert "Traceback" not in err
+
+
+def test_setup_auto_failure_does_not_publish_release_state(tmp_path, monkeypatch):
+    env, _release = _prepare_auto_release_setup(tmp_path, monkeypatch)
+
+    def failed_smoke(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads()), runner=failed_smoke) == 1
+
+    roots = resolve_roots(env=env, system="linux")
+    assert not Path(component_paths.update_state_path(roots.data_root)).exists()
+
+
+def test_setup_auto_preserves_beta_channel_ownership_while_refreshing_components(tmp_path, monkeypatch):
+    env, release = _prepare_auto_release_setup(tmp_path, monkeypatch)
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.update_state_path(roots.data_root))
+    update_cmd.write_update_state(
+        state_path,
+        update_cmd.UpdateState(
+            1,
+            "beta",
+            "brigade update",
+            "b" * 40,
+            41,
+            "v1.2.2",
+            "a" * 40,
+            "https://github.com/escoffier-labs/brigade/releases/download/v1.2.2/component-manifest-v1.json",
+            "c" * 64,
+            "2026-07-20T12:00:00+00:00",
+        ),
+    )
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+
+    state = update_cmd.load_update_state(state_path)
+    assert state is not None
+    assert (state.channel, state.owner, state.cli_coordinate) == ("beta", "brigade update", "b" * 40)
+    assert (state.component_release_id, state.component_tag, state.component_manifest_sha256) == (
+        release.release_id,
+        release.tag,
+        release.manifest_sha256,
+    )
+
+
+def test_explicit_setup_manifest_does_not_publish_unified_update_state(tmp_path, monkeypatch):
+    env, manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+
+    assert (
+        setup_native_components(
+            env=env,
+            manifest_path=manifest_path,
+            opener=FakeOpener(all_fixture_payloads()),
+        )
+        == 0
+    )
+
+    roots = resolve_roots(env=env, system="linux")
+    assert not Path(component_paths.update_state_path(roots.data_root)).exists()
+
+
+def test_standalone_setup_fallback_does_not_publish_unified_update_state(tmp_path, monkeypatch):
+    env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+
+    assert (
+        setup_native_components(
+            env=env,
+            manifest_source="standalone",
+            opener=FakeOpener(all_fixture_payloads()),
+        )
+        == 0
+    )
+
+    roots = resolve_roots(env=env, system="linux")
+    assert not Path(component_paths.update_state_path(roots.data_root)).exists()
 
 
 def test_setup_rejects_dry_run_with_rollback(tmp_path):

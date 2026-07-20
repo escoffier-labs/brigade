@@ -54,7 +54,7 @@ func TestBrigadeStationManifestMatchesMiseLedgerCLI(t *testing.T) {
 	if tool.Name != "miseledger" || tool.Kind != "executable" || tool.Command != "miseledger" {
 		t.Fatalf("unexpected tool identity: %#v", tool)
 	}
-	wantInstall := []string{"go", "install", "github.com/escoffier-labs/miseledger/cmd/miseledger@latest"}
+	wantInstall := []string{"brigade", "setup"}
 	if !reflect.DeepEqual(tool.Install, wantInstall) {
 		t.Fatalf("install = %q, want %q", tool.Install, wantInstall)
 	}
