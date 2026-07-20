@@ -20,7 +20,7 @@ Brigade is the local-first operator CLI for agent memory, handoffs, and reviewab
 
 - Personal details, hostnames, IPs, account IDs, or live auth profiles in templates or tests. The whole point of this kit is to keep that stuff out of public repos. The `content-guard` job in CI will fail if it finds any.
 - Cron jobs or hooks that post or call out to the network without explicit opt-in.
-- AI-co-authorship trailers on commits (`Co-Authored-By: <model>`). Conventional commits only.
+- Commits must use conventional commits. In-house commits in escoffier-labs organizations and original solomonneas repositories should include a co-author trailer for a coding agent that did substantial work; external repositories and upstream third-party PRs remain trailer-free.
 
 ## Planning artifacts
 
