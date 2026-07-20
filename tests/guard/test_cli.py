@@ -276,6 +276,44 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["commits_with_findings"], 1)
         self.assertEqual(payload["commits"][0]["findings"][0]["rule_id"], "coauthored-by-trailer")
 
+    def test_git_commit_scan_blocks_approved_agent_coauthor_trailer_by_default(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "user@example"], cwd=repo, check=True)
+            (repo / "README.md").write_text("example\n")
+            subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "commit",
+                    "-m",
+                    "feat: example",
+                    "-m",
+                    "Co-authored-by: Codex <codex@openai.com>",
+                ],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            proc = subprocess.run(
+                [sys.executable, "-m", "brigade.guard.git_commits", "--range", "HEAD", "--json"],
+                cwd=repo,
+                env={"PYTHONPATH": str(ROOT / "src")},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(proc.returncode, 1)
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["blocked"])
+        self.assertEqual(payload["commits_with_findings"], 1)
+        self.assertEqual(payload["commits"][0]["findings"][0]["rule_id"], "coauthored-by-trailer")
+
     def test_git_commit_scan_allows_clean_commit_message(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = Path(tmp)

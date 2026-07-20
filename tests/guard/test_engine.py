@@ -6,7 +6,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from brigade.guard.engine import scan_text
-from brigade.guard.policy import Policy, load_policy
+from brigade.guard.git_commits import _default_commit_policy
+from brigade.guard.git_scan import _default_repo_policy
+from brigade.guard.policy import Policy, default_policy, load_policy
 from brigade.guard.types import Rule, ScanOptions
 
 
@@ -112,6 +114,61 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result.findings[0].rule_id, "coauthored-by-trailer")
         self.assertTrue(result.blocked)
         self.assertEqual(result.redacted_text, "feat: change\n\n")
+
+    def test_inhouse_policy_allows_only_approved_agent_coauthor_trailers(self) -> None:
+        rejected = "feat: change\n\nCo-authored-by: Example User <person@private.test>\n"
+        inhouse_policy = load_policy(default_policy("in-house-repo.json"))
+
+        rejected_result = scan_text(rejected, policy=inhouse_policy)
+
+        for address in (
+            "noreply@anthropic.com",
+            "codex@openai.com",
+            "cursoragent@cursor.com",
+            "12345@users.noreply.github.com",
+        ):
+            allowed = f"feat: change\n\nCo-authored-by: Agent <{address}>\n"
+            allowed_result = scan_text(allowed, policy=inhouse_policy)
+            self.assertEqual(allowed_result.findings, [])
+            self.assertEqual(allowed_result.redacted_text, allowed)
+
+        outbound_result = scan_text(
+            "feat: change\n\nCo-authored-by: Codex <codex@openai.com>\n",
+            policy=load_policy(default_policy("pr-draft.json")),
+        )
+        self.assertTrue(rejected_result.blocked)
+        self.assertEqual(rejected_result.redacted_text, "feat: change\n\n")
+        self.assertTrue(outbound_result.blocked)
+        self.assertEqual(outbound_result.redacted_text, "feat: change\n\n")
+
+    def test_inhouse_policy_blocks_private_display_email_in_approved_agent_trailer(self) -> None:
+        message = "feat: change\n\nCo-authored-by: secret.person@corp.internal <codex@openai.com>\n"
+        inhouse_policy = load_policy(default_policy("in-house-repo.json"))
+
+        result = scan_text(message, policy=inhouse_policy)
+
+        self.assertEqual(
+            [(finding.rule_id, finding.match) for finding in result.findings],
+            [("email", "secret.person@corp.internal")],
+        )
+        self.assertTrue(result.blocked)
+        self.assertEqual(
+            result.redacted_text,
+            "feat: change\n\nCo-authored-by: <PRIVATE_EMAIL> <codex@openai.com>\n",
+        )
+
+    def test_external_defaults_strip_approved_agent_coauthor_trailers(self) -> None:
+        message = "feat: change\n\nCo-authored-by: Codex <codex@openai.com>\n"
+        policies = (
+            load_policy(default_policy("public-repo.json")),
+            _default_commit_policy(),
+            _default_repo_policy(),
+        )
+
+        for policy in policies:
+            result = scan_text(message, policy=policy)
+            self.assertTrue(result.blocked)
+            self.assertEqual(result.redacted_text, "feat: change\n\n")
 
     def test_policy_can_enable_opf_backend(self) -> None:
         with TemporaryDirectory() as tmp:

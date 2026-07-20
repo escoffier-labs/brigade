@@ -29,6 +29,8 @@ from .. import (
     tools_cmd,
     work_cmd,
 )
+from ..guard.engine import scan_text
+from ..guard.policy import Policy, default_policy, load_policy
 from ..selection import KNOWN_HARNESSES
 from ..localio import (
     read_json_dict as _read_json,
@@ -52,6 +54,42 @@ def _commit_subjects(target: Path, base_ref: str | None) -> list[str]:
     if result.returncode != 0:
         return []
     return [_release_safe_text(line.strip()) for line in result.stdout.splitlines() if line.strip()]
+
+
+def _commit_messages(target: Path, base_ref: str | None, *, guard_policy: Policy) -> list[str]:
+    args = ["log", "--format=%B%x00"]
+    if base_ref:
+        args.append(f"{base_ref}..HEAD")
+    else:
+        args.extend(["-n", "20"])
+    result = _git(target, *args)
+    if result.returncode != 0:
+        return []
+    messages = []
+    for message in result.stdout.split("\x00"):
+        safe_message = _release_safe_commit_text(message, guard_policy=guard_policy)
+        if safe_message:
+            messages.append(safe_message)
+    return messages
+
+
+def _release_safe_commit_text(message: str, *, guard_policy: Policy) -> str:
+    cleaned = _release_safe_text(message.strip())
+    return scan_text(cleaned, policy=guard_policy).redacted_text.strip()
+
+
+def _load_guard_policy(selection: str | Path | None) -> Policy:
+    if selection is None:
+        return load_policy(default_policy("public-repo.json"))
+
+    path = Path(selection)
+    if path.is_file():
+        return load_policy(path)
+
+    name = str(selection)
+    if not name.endswith(".json"):
+        name = f"{name}.json"
+    return load_policy(default_policy(name))
 
 
 def _changelog_unreleased(path: Path) -> list[str]:
@@ -88,13 +126,14 @@ def _latest_release_or_payload(target: Path, *, base_ref: str | None) -> dict[st
     }
 
 
-def _candidate_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
+def _candidate_payload(target: Path, *, base_ref: str | None, guard_policy: str | Path | None = None) -> dict[str, Any]:
     readiness = _latest_release_or_payload(target, base_ref=base_ref)
     evidence = readiness.get("evidence") if isinstance(readiness.get("evidence"), dict) else {}
     git = evidence.get("git") if isinstance(evidence.get("git"), dict) else _git_state(target)
     changed_files = evidence.get("docs", {}).get("changed_files") if isinstance(evidence.get("docs"), dict) else None
     if not isinstance(changed_files, list):
         changed_files = _changed_files(target, base_ref)
+    active_guard_policy = _load_guard_policy(guard_policy)
     return {
         "target": str(target),
         "base_ref": base_ref,
@@ -147,7 +186,9 @@ def _candidate_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
         },
         "release_notes_inputs": {
             "changelog_unreleased": _changelog_unreleased(target),
-            "commit_subjects": _commit_subjects(target, base_ref),
+            # Keep the serialized key for release-candidate schema compatibility;
+            # its values now contain full sanitized commit messages.
+            "commit_subjects": _commit_messages(target, base_ref, guard_policy=active_guard_policy),
             "touched_docs": [path for path in changed_files if str(path).startswith("docs/")],
         },
         "command_contract": _command_contract_snapshot(target),
@@ -502,12 +543,18 @@ def schema(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
-def candidate_plan(*, target: Path, base_ref: str | None = "origin/main", json_output: bool = False) -> int:
+def candidate_plan(
+    *,
+    target: Path,
+    base_ref: str | None = "origin/main",
+    guard_policy: str | Path | None = None,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    candidate = _candidate_payload(target, base_ref=base_ref)
+    candidate = _candidate_payload(target, base_ref=base_ref, guard_policy=guard_policy)
     candidate.update(
         {
             "candidate_id": "planned",
@@ -532,7 +579,13 @@ def candidate_plan(*, target: Path, base_ref: str | None = "origin/main", json_o
     return 0
 
 
-def candidate_build(*, target: Path, base_ref: str | None = "origin/main", json_output: bool = False) -> int:
+def candidate_build(
+    *,
+    target: Path,
+    base_ref: str | None = "origin/main",
+    guard_policy: str | Path | None = None,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -540,7 +593,7 @@ def candidate_build(*, target: Path, base_ref: str | None = "origin/main", json_
     created = _now()
     candidate_id = f"{created.strftime('%Y%m%d-%H%M%S')}-candidate-{uuid4().hex[:6]}"
     candidate_dir = _release_candidates_root(target) / candidate_id
-    candidate = _candidate_payload(target, base_ref=base_ref)
+    candidate = _candidate_payload(target, base_ref=base_ref, guard_policy=guard_policy)
     candidate.update(
         {
             "candidate_id": candidate_id,

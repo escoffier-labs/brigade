@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "Explicit opt-in policy for in-house repository history and release inputs.",
+    "It permits only the approved agent attribution address patterns."
+  ],
+  "name": "in-house-repo",
+  "allow_agent_coauthors": true,
+  "backends": {
+    "opf": {
+      "enabled": false,
+      "action": "warn",
+      "device": "cpu"
+    }
+  },
+  "defaults": {
+    "infrastructure": "block",
+    "secret": "block",
+    "pii": "block",
+    "personal": "block",
+    "business": "block",
+    "attribution": "block",
+    "tooling": "warn"
+  },
+  "rules": {
+    "loopback-ipv4": "warn",
+    "localhost-port": "warn",
+    "localhost-bare": "warn",
+    "port-reference": "warn",
+    "opf-pii": "warn"
+  },
+  "custom_rules": []
+}
