@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-07-20
+
+### Added
+- Native component releases now publish one verified asset set for `brigade setup`, and `brigade update` has explicit `stable` and `beta` update channels. (#364 / #398)
+- The Phase 4A policy documents migration and archive gates for GraphTrail, GraphTrail MCP, MiseLedger, and SessionFind. The compatibility window has not started, and the policy does not authorize archival. (#399)
+
+### Deprecated
+- GraphTrail's direct `miseledger` Cargo feature, `graphtrail context --evidence`, and `graphtrail links` are deprecated. They remain functional for at least two minor GraphTrail releases or 90 days after the first GraphTrail release containing this deprecation, whichever is longer. Use `brigade code sync`, `brigade code context`, `brigade code impact`, `brigade evidence crawl`, `brigade evidence search`, and `brigade evidence doctor`. (#392)
+
+### Fixed
+- In-house repository and release-input guard policies preserve only approved agent co-author trailers; outbound public policies still strip them. (#386 / #396)
+- Concurrent sessions no longer mistake another session's write for their own, so completed closeout does not re-arm. (#380 / #395)
+- Published-artifact acceptance recognizes SessionFind command-list help output. (#393)
+
 ## [0.24.0] - 2026-07-20
 
 ### Added
@@ -99,7 +113,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release preflight now bumps and synchronizes every version stamp before the full verification and cold-start gates, and the checklist confirms the published PyPI version after tagging.
 - MCP Codex/Grok empty-`args` fingerprint conflicts: `to_provider` no longer emits `args: []`, matching TOML render which omits empty arrays, so force-sync stays idempotent. (#181)
 - MCP import of url-only servers no longer lands as invalid `stdio`+`url`; coerce to `http`/`sse`, including OpenClaw sources with a bogus `transport: stdio` or a command that is actually a URL. (#182)
-- Unreleased: `brigade update` adds immutable `stable` and CI-green-main `beta` channels, explicit channel ownership transfer, a user-global lock/state, and exact release-manifest handoff to `brigade setup`. This describes pending release behavior; no release has shipped from this entry.
 - Productized GraphTrail ↔ Brigade ↔ MiseLedger dogfood path: `brigade operator checkup` reports optional loop health (`graph` / `ledger` / last and mean `brief_hit_rate` from run receipts) without blocking readiness; `brigade add graphtrail` installs the code-graph tool under the search station; QUICKSTART documents install → checkup → export → rank.
 - Outcome rank/reconcile surfaces mean `context_eval.brief_hit_rate` per skill as a quality signal (secondary sort among equal Wilson scores; install/rollback thresholds still use verified exit codes only).
 - `brigade-work` skill teaches the full loop: verify with capture → outcome from run → MiseLedger export → evidence brief next time.
@@ -835,7 +848,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/escoffier-labs/brigade/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/escoffier-labs/brigade/compare/v0.23.3...v0.24.0
 [0.23.3]: https://github.com/escoffier-labs/brigade/compare/v0.23.2...v0.23.3
 [0.23.2]: https://github.com/escoffier-labs/brigade/compare/v0.23.1...v0.23.2
