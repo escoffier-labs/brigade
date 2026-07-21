@@ -572,9 +572,21 @@ def dispatch(
             return finish(missing_fallback, agent, attempts)
 
         fallback_agent = roster.agents[fallback_name]
-        fallback_preflight = _cloudflare_preflight_failure(fallback_agent, assignment)
-        if fallback_preflight is not None:
-            return fallback_preflight
+        fallback_cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(fallback_agent.model)
+        if fallback_cloudflare_detail is not None:
+            # Route through finish() so the accumulated grok attempt history and
+            # elapsed duration are preserved in the persisted WorkerResult.
+            return finish(
+                agents.AgentResult(
+                    text="",
+                    ok=False,
+                    detail=fallback_cloudflare_detail,
+                    failure_phase="preflight",
+                    failure_kind="provider-config",
+                ),
+                fallback_agent,
+                attempts,
+            )
         fallback_prompt = build_prompt(
             fallback_agent,
             assignment,

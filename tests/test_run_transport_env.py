@@ -597,6 +597,10 @@ def test_cloudflare_gateway_preflight_fallback_agent_fails_without_launch(monkey
     assert "CLOUDFLARE_ACCOUNT_ID" in result.detail
     assert "CLOUDFLARE_GATEWAY_ID" in result.detail
     assert "codex" not in calls
+    # The fallback preflight must route through finish() so the accumulated grok
+    # attempt history is preserved, not dropped by returning a bare preflight result.
+    assert len(result.attempts) >= 1
+    assert any(attempt.worker == "grok_cli" for attempt in result.attempts)
 
 
 def test_endpoint_host_records_all_distinct_hosts(monkeypatch):
