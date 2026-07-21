@@ -34,17 +34,28 @@ def managed_groups() -> dict[str, list[dict[str, Any]]]:
     }
 
 
-def is_managed_handler(value: object, event: str | None = None) -> bool:
+def _command_tokens(value: object) -> list[str] | None:
+    """Shell-split a command-type hook handler's command, or None if it is not one.
+
+    Shared by is_managed_handler and is_legacy_handler so both predicates apply
+    the same tokenization rules.
+    """
     if not isinstance(value, dict):
-        return False
+        return None
     if value.get("type") != "command":
-        return False
+        return None
     command = value.get("command")
     if not isinstance(command, str):
-        return False
+        return None
     try:
-        tokens = shlex.split(command)
+        return shlex.split(command)
     except ValueError:
+        return None
+
+
+def is_managed_handler(value: object, event: str | None = None) -> bool:
+    tokens = _command_tokens(value)
+    if tokens is None:
         return False
     parsed_event = tokens[4] if len(tokens) > 4 else None
     return bool(
@@ -77,17 +88,7 @@ def is_legacy_handler(value: object) -> bool:
     anchored to the executable position so unrelated foreign user hooks that
     merely mention the filename are never touched.
     """
-    if not isinstance(value, dict):
-        return False
-    if value.get("type") != "command":
-        return False
-    command = value.get("command")
-    if not isinstance(command, str):
-        return False
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return False
+    tokens = _command_tokens(value)
     if not tokens:
         return False
     if Path(tokens[0]).name == LEGACY_SCRIPT_NAME:
