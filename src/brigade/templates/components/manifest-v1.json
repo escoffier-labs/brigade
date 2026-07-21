@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "brigade_version": "0.24.0",
+  "brigade_version": "0.25.0",
   "manifest_revision": "2026-07-19",
   "supported_platforms": [
     "linux-amd64",

@@ -14,32 +14,38 @@ def _release_changelog(version: str) -> str:
     return text[start:end]
 
 
-def test_current_release_has_expected_v024_release_notes():
-    assert __version__ == "0.24.0"
+def test_current_release_has_expected_v025_release_notes():
+    assert __version__ == "0.25.0"
+    assert "no release has shipped from this entry" not in (ROOT / "CHANGELOG.md").read_text()
 
     text = _release_changelog(__version__)
 
     assert text.count("### Added") == 1
+    assert text.count("### Deprecated") == 1
     assert text.count("### Fixed") == 1
     for expected in (
-        "reports managed native component installation state",
-        "Windows native acceptance now installs and exercises the supported component paths",
-        "GraphTrail v0.4.0",
-        "MiseLedger v0.6.0",
-        "standalone repositories and release pipelines remain unchanged until Phase 4",
-        "`brigade.code-reference.v1`",
-        "evidence lookups before lexical fallback",
-        "`brigade code sync|context|impact`",
-        "`brigade evidence crawl|search|doctor`",
-        "two minor releases or 90 days, whichever is longer",
-        "terminalizes interrupted and stale runs",
-        "refuses read-only execution for seats without that capability",
-        "rejects empty tasks",
-        "#374 / #375",
-        "#379 / #381",
-        "#361 / PR #389",
-        "#362 / PR #390",
-        "#382 / #383 / #384",
+        "one verified asset set for `brigade setup`",
+        "explicit `stable` and `beta` update channels",
+        "Phase 4A policy documents migration and archive gates",
+        "The compatibility window has not started",
+        "does not authorize archival",
+        "direct `miseledger` Cargo feature",
+        "`graphtrail context --evidence`",
+        "`graphtrail links`",
+        "at least two minor GraphTrail releases or 90 days",
+        "`brigade code sync`",
+        "`brigade evidence crawl`",
+        "In-house repository and release-input guard policies",
+        "only approved agent co-author trailers",
+        "outbound public policies still strip them",
+        "completed closeout does not re-arm",
+        "SessionFind command-list help output",
+        "#364 / #398",
+        "#399",
+        "#392",
+        "#386 / #396",
+        "#380 / #395",
+        "#393",
     ):
         assert expected in text
 

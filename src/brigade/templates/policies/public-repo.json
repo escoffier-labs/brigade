@@ -4,7 +4,7 @@
     "Used by brigade pre-push hook and `brigade scrub`.",
     "Override by pointing CONTENT_GUARD_POLICY at your own copy of this file."
   ],
-  "_brigade_version": "0.24.0",
+  "_brigade_version": "0.25.0",
   "categories": {
     "secret": "block",
     "private-network": "block",
