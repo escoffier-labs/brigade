@@ -1677,3 +1677,55 @@ def test_run_agent_env_ref_empty_value_is_typed_failure(monkeypatch):
     assert not result.ok
     assert result.failure_kind == "env-ref-missing"
     assert "is not set or is empty" in result.detail
+
+
+_CF_MODEL_ROUTE = "cloudflare-ai-gateway/openai/gpt-5.3-codex"
+
+
+@pytest.mark.parametrize(
+    ("route", "expected"),
+    [
+        (_CF_MODEL_ROUTE, True),
+        ("cloudflare-ai-gateway-other/openai/gpt-5.3-codex", False),
+        ("openai-cloudflare-ai-gateway/gpt-5.3-codex", False),
+        ("foo/cloudflare-ai-gateway/openai/gpt-5.3-codex", False),
+        (None, False),
+        ("", False),
+    ],
+)
+def test_is_cloudflare_ai_gateway_route(route, expected):
+    assert agents.is_cloudflare_ai_gateway_route(route) is expected
+
+
+def test_missing_cloudflare_ai_gateway_env_vars_both_missing():
+    assert agents.missing_cloudflare_ai_gateway_env_vars({}) == [
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_GATEWAY_ID",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("env", "expected_missing"),
+    [
+        ({"CLOUDFLARE_ACCOUNT_ID": "fake-account-id-for-test"}, ["CLOUDFLARE_GATEWAY_ID"]),
+        ({"CLOUDFLARE_GATEWAY_ID": "fake-gateway-id-for-test"}, ["CLOUDFLARE_ACCOUNT_ID"]),
+        (
+            {
+                "CLOUDFLARE_ACCOUNT_ID": "fake-account-id-for-test",
+                "CLOUDFLARE_GATEWAY_ID": "fake-gateway-id-for-test",
+            },
+            [],
+        ),
+    ],
+)
+def test_missing_cloudflare_ai_gateway_env_vars_partial(env, expected_missing):
+    assert agents.missing_cloudflare_ai_gateway_env_vars(env) == expected_missing
+
+
+def test_missing_cloudflare_ai_gateway_env_vars_empty_string_counts_as_missing():
+    assert agents.missing_cloudflare_ai_gateway_env_vars(
+        {
+            "CLOUDFLARE_ACCOUNT_ID": "",
+            "CLOUDFLARE_GATEWAY_ID": "fake-gateway-id-for-test",
+        }
+    ) == ["CLOUDFLARE_ACCOUNT_ID"]

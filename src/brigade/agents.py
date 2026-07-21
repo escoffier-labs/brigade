@@ -12,6 +12,7 @@ import json
 import os
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List
@@ -21,6 +22,8 @@ from .result_integrity import validate_final_output
 
 _OLLAMA_PREFIX = "ollama:"
 _CODEX_CLOUD_PREFIX = "codex-cloud:"
+_CLOUDFLARE_AI_GATEWAY_PREFIX = "cloudflare-ai-gateway/"
+_CLOUDFLARE_AI_GATEWAY_REQUIRED_ENV = ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID")
 _NONRECOVERABLE_GROK_OUTPUT_FAILURES = frozenset(
     {
         "provider-error",
@@ -576,6 +579,50 @@ def secret_ref_targets(env: dict[str, str]) -> set[str]:
     """Target keys resolved from *_REF entries: the only values scrub may touch."""
 
     return {key[: -len("_REF")] for key in env if key.endswith("_REF") and key != "_REF"}
+
+
+def is_cloudflare_ai_gateway_route(model: str | None) -> bool:
+    """Return True if the model route is a Cloudflare AI Gateway route.
+
+    The first path segment must be exactly ``cloudflare-ai-gateway``, not a
+    substring such as ``cloudflare-ai-gateway-other``.
+    """
+
+    if not model:
+        return False
+    if not model.startswith(_CLOUDFLARE_AI_GATEWAY_PREFIX):
+        return False
+    return len(model) > len(_CLOUDFLARE_AI_GATEWAY_PREFIX)
+
+
+def missing_cloudflare_ai_gateway_env_vars(
+    env: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Return the required Cloudflare AI Gateway env vars that are missing.
+
+    Reads only variable names and presence; never reads or prints values.
+    Empty strings count as missing.
+    ``env`` defaults to ``os.environ``.
+    """
+
+    if env is None:
+        env = os.environ
+    return [name for name in _CLOUDFLARE_AI_GATEWAY_REQUIRED_ENV if not env.get(name)]
+
+
+def cloudflare_ai_gateway_preflight_detail(model: str | None) -> str | None:
+    """Return a provider-config detail if the Cloudflare route lacks env.
+
+    Empty string values are treated as missing. Returns None when the route is
+    not a Cloudflare AI Gateway route or when all required env vars are present.
+    """
+
+    if not is_cloudflare_ai_gateway_route(model):
+        return None
+    missing = missing_cloudflare_ai_gateway_env_vars()
+    if not missing:
+        return None
+    return f"Cloudflare AI Gateway seat missing required env vars: {', '.join(missing)}; set them before running"
 
 
 _MIN_SCRUB_VALUE_LENGTH = 8

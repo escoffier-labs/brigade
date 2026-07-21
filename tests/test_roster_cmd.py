@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from brigade import agents
 from brigade import cli
 from brigade import model_inventory
@@ -414,6 +416,68 @@ def test_roster_doctor_fails_pin_on_ollama_ref(monkeypatch, tmp_target, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "ollama names its model in the cli ref" in out
+
+
+_CF_MODEL_ROUTE = "cloudflare-ai-gateway/openai/gpt-5.3-codex"
+_FAKE_CF_ACCOUNT = "fake-account-id-for-test"
+_FAKE_CF_GATEWAY = "fake-gateway-id-for-test"
+
+
+def _write_cloudflare_gateway_roster(tmp_target) -> None:
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nmodel = "gpt-5.5"\nrole = "plan"\n'
+        f'[agents.cf_worker]\ncli = "codex"\nmodel = "{_CF_MODEL_ROUTE}"\nrole = "worker"\n',
+    )
+
+
+def _clear_cloudflare_gateway_env(monkeypatch) -> None:
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_GATEWAY_ID", raising=False)
+
+
+def test_roster_doctor_ok_for_cloudflare_gateway_when_env_present(monkeypatch, tmp_target, capsys):
+    _write_cloudflare_gateway_roster(tmp_target)
+    _clear_cloudflare_gateway_env(monkeypatch)
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", _FAKE_CF_ACCOUNT)
+    monkeypatch.setenv("CLOUDFLARE_GATEWAY_ID", _FAKE_CF_GATEWAY)
+
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "[ok]   agent: cf_worker cloudflare gateway" in out
+    assert "required env vars are set" in out
+    assert _FAKE_CF_ACCOUNT not in out
+    assert _FAKE_CF_GATEWAY not in out
+
+
+@pytest.mark.parametrize(
+    ("env", "missing_vars"),
+    [
+        ({}, ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID")),
+        ({"CLOUDFLARE_ACCOUNT_ID": _FAKE_CF_ACCOUNT}, ("CLOUDFLARE_GATEWAY_ID",)),
+        ({"CLOUDFLARE_GATEWAY_ID": _FAKE_CF_GATEWAY}, ("CLOUDFLARE_ACCOUNT_ID",)),
+    ],
+)
+def test_roster_doctor_fails_cloudflare_gateway_when_env_missing(monkeypatch, tmp_target, capsys, env, missing_vars):
+    _write_cloudflare_gateway_roster(tmp_target)
+    _clear_cloudflare_gateway_env(monkeypatch)
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "[fail] agent: cf_worker cloudflare gateway" in out
+    for var in missing_vars:
+        assert var in out
+    assert _FAKE_CF_ACCOUNT not in out
+    assert _FAKE_CF_GATEWAY not in out
 
 
 def test_roster_doctor_endpoint_agent_skips_pin_check(tmp_target, capsys):

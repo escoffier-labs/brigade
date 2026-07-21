@@ -725,6 +725,15 @@ def _run_orchestrator(
             ok=False,
             detail="codex-cloud seats are workers only; pick a local CLI for the orchestrator",
         )
+    cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(orchestrator.model)
+    if cloudflare_detail is not None:
+        return agents.AgentResult(
+            text="",
+            ok=False,
+            detail=cloudflare_detail,
+            failure_phase="preflight",
+            failure_kind="provider-config",
+        )
     kwargs: dict[str, object] = {
         "timeout": timeout_for(orchestrator, roster),
         "cwd": cwd,
@@ -1951,6 +1960,8 @@ def _run_payload(
         payload["error"] = error
         if failure_phase is not None or failure_kind is not None:
             payload["failure_phase"] = failure_phase or "unknown"
+            if failure_kind is not None:
+                payload["failure_kind"] = failure_kind
             failure_payload: dict[str, object] = {
                 "phase": failure_phase or "unknown",
                 "kind": failure_kind or "unknown",
@@ -2333,6 +2344,12 @@ def run(
             if output_dir is not None:
                 finished_at = datetime.now(timezone.utc)
                 _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
+                failure_phase = "planning"
+                if isinstance(final_attempt, dict):
+                    attempt_phase = final_attempt.get("failure_phase")
+                    attempt_kind = final_attempt.get("failure_kind")
+                    if attempt_phase == "preflight" and attempt_kind == "provider-config":
+                        failure_phase = "preflight"
                 _write_json(
                     output_dir / "run.json",
                     _payload(
@@ -2346,7 +2363,7 @@ def run(
                         finished_at=finished_at,
                         output_dir=output_dir,
                         error=str(exc),
-                        failure_phase="planning",
+                        failure_phase=failure_phase,
                         failure_kind=failure_kind,
                         failure_seat=roster.orchestrator,
                         code_graph=code_graph,
