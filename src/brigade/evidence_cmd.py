@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import evidence_brief, proc
+from . import evidence_brief, evidence_runtime, proc
 from .localio import utc_now_iso as _now
 
 
@@ -35,8 +35,233 @@ def _configured_timeout(environment_variable: str, default: float) -> float | No
     return timeout if math.isfinite(timeout) and timeout > 0 else None
 
 
+def _last_run_dir(target: Path) -> Path:
+    return target / ".brigade" / "evidence"
+
+
+def _last_run_path(target: Path, source: str) -> Path:
+    return _last_run_dir(target) / f"{source}-last-run.json"
+
+
+def _read_last_run(target: Path, source: str) -> dict[str, Any] | None:
+    path = _last_run_path(target, source)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_last_run(
+    target: Path,
+    source: str,
+    *,
+    status: str,
+    exit_code: int,
+    crawler_version: str | None,
+    database: str | None,
+    started_at: str,
+    finished_at: str,
+    detail: str,
+) -> None:
+    _last_run_dir(target).mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": status,
+        "exit_code": exit_code,
+        "crawler_version": crawler_version,
+        "database": database,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "detail": detail,
+    }
+    _last_run_path(target, source).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+_HEALTH_RANK = {
+    "ok": 0,
+    "warn": 1,
+    "incomplete": 2,
+    "unwired": 3,
+    "timeout": 4,
+    "missing": 5,
+    "fail": 6,
+}
+
+
+def _health_rank(health: str | None) -> int:
+    if health is None:
+        return 0
+    return _HEALTH_RANK.get(health, 0)
+
+
+def _env_override_active(source: str) -> bool:
+    """Return True when an explicit crawler override is present for ``source``."""
+    if os.environ.get(f"{source.upper()}_CRAWLER_BIN"):
+        return True
+    if source == "discord" and os.environ.get("DISCRAWL_BIN"):
+        return True
+    return False
+
+
+def _enrich_crawler_health(payload: dict[str, Any], target: Path) -> dict[str, Any]:
+    """Add per-source crawler health and upgrade the overall health if needed.
+
+    A failed crawler compatibility check or an unhealthy last-run must be
+    visible before a clean ``NO_PENDING`` queue state.  The station stays
+    advisory in the workspace doctor path; only ``brigade evidence doctor``
+    reflects crawler-driven failures in its own exit code.
+    """
+
+    target = target.expanduser().resolve()
+    crawlers: dict[str, Any] = {}
+    worst_health = payload.get("health")
+    for source in evidence_runtime.known_sources():
+        last_run = _read_last_run(target, source)
+        if last_run is None and not _env_override_active(source):
+            # No evidence the operator expects this crawler; keep the station
+            # advisory and do not probe the host for optional tools.
+            continue
+        runtime = evidence_runtime.resolve_crawler(source)
+        if runtime is None:
+            continue
+        compat = evidence_runtime.check_compatibility(runtime)
+        block = {
+            "resolved_path": runtime.resolved_path,
+            "version": runtime.version,
+            "compatibility": {"state": compat.state, "detail": compat.detail},
+            "required_capabilities": runtime.required_capabilities,
+            "config_path": compat.config_path,
+            "override": runtime.override,
+            "latest_run": last_run,
+        }
+        crawlers[source] = block
+        if _health_rank(compat.state) > _health_rank(worst_health):
+            worst_health = compat.state
+        if last_run is not None:
+            last_status = last_run.get("status")
+            if _health_rank(last_status) > _health_rank(worst_health):
+                worst_health = last_status
+    if crawlers:
+        payload["crawlers"] = crawlers
+        if worst_health != payload.get("health"):
+            payload["health"] = worst_health
+            if worst_health == "fail":
+                payload["summary"] = f"crawler unhealthy; {payload['summary']}"
+    return payload
+
+
 def _json_print(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _run_miseledger_result(
+    verb: str,
+    arguments: list[str],
+    *,
+    env: dict[str, str] | None = None,
+) -> proc.Result:
+    """Run MiseLedger and return the raw result without printing."""
+
+    timeout = _SHORT_OPERATION_TIMEOUT_SECONDS
+    if verb == "crawl":
+        configured_timeout = _configured_timeout(_CRAWL_TIMEOUT_ENV, _CRAWL_TIMEOUT_SECONDS)
+        if configured_timeout is None:
+            print(f"error: {_CRAWL_TIMEOUT_ENV} must be a positive finite number of seconds", file=sys.stderr)
+            return proc.Result(2, "", "")
+        timeout = configured_timeout
+
+    binary = evidence_brief._miseledger_bin()
+    if binary is None:
+        print("error: miseledger is not installed; run `brigade setup`", file=sys.stderr)
+        return proc.Result(127, "", "miseledger is not installed; run `brigade setup`")
+    run_kwargs: dict[str, Any] = {}
+    if env is not None:
+        run_kwargs["env"] = env
+    return proc.run([binary, verb, *arguments], timeout=timeout, **run_kwargs)
+
+
+def _run_miseledger(verb: str, arguments: list[str], *, env: dict[str, str] | None = None) -> int:
+    """Run MiseLedger, relaying output and returning the exit code."""
+
+    result = _run_miseledger_result(verb, arguments, env=env)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return result.code
+
+
+def _run_crawl(arguments: list[str]) -> int:
+    """Resolve and health-check the crawler before delegating to MiseLedger.
+
+    The resolved crawler's directory is prepended to PATH so that MiseLedger's
+    own discovery lands on the same binary.  A true miseledger ``--crawler``
+    pass-through flag does not exist today and is a MiseLedger-side follow-up.
+    """
+
+    raw_source = arguments[0] if arguments else None
+    # Normalize the source for gating so a differently-cased spelling (e.g.
+    # "Discord") cannot bypass the compatibility gate; the original arguments are
+    # still passed to MiseLedger unchanged.
+    source = raw_source.lower() if raw_source is not None else None
+    env = dict(os.environ)
+    target = Path.cwd().expanduser().resolve()
+    started_at = _now()
+
+    if source is None:
+        return _run_miseledger("crawl", arguments)
+
+    runtime = evidence_runtime.resolve_crawler(source, env=env)
+    if runtime is None:
+        # No crawler contract for this source; delegate directly.
+        return _run_miseledger("crawl", arguments)
+
+    compat = evidence_runtime.check_compatibility(runtime, env=env)
+    if compat.state == "fail":
+        detail = compat.detail
+        print(f"error: evidence crawl refused for {source}: {detail}", file=sys.stderr)
+        _write_last_run(
+            target=target,
+            source=source,
+            status="fail",
+            exit_code=1,
+            crawler_version=runtime.version,
+            database=compat.database,
+            started_at=started_at,
+            finished_at=_now(),
+            detail=detail,
+        )
+        return 1
+
+    if runtime.resolved_path is None:
+        print(f"error: evidence crawl refused for {source}: no executable resolved", file=sys.stderr)
+        return 1
+
+    # Prepend the resolved crawler directory so MiseLedger rediscovers the same
+    # binary.  This is a Brigade-side substitute for a miseledger --crawler flag.
+    crawler_dir = str(Path(runtime.resolved_path).parent)
+    env["PATH"] = crawler_dir + os.pathsep + env.get("PATH", "")
+
+    result = _run_miseledger_result("crawl", arguments, env=env)
+    status = "ok" if result.code == 0 else "fail"
+    _write_last_run(
+        target=target,
+        source=source,
+        status=status,
+        exit_code=result.code,
+        crawler_version=runtime.version,
+        database=compat.database,
+        started_at=started_at,
+        finished_at=_now(),
+        detail=(result.stderr or "").strip()[:500],
+    )
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return result.code
 
 
 def run_engine(verb: str, arguments: list[str]) -> int:
@@ -46,24 +271,9 @@ def run_engine(verb: str, arguments: list[str]) -> int:
     performs exact code-reference matching before lexical fallback.
     """
 
-    timeout = _SHORT_OPERATION_TIMEOUT_SECONDS
     if verb == "crawl":
-        configured_timeout = _configured_timeout(_CRAWL_TIMEOUT_ENV, _CRAWL_TIMEOUT_SECONDS)
-        if configured_timeout is None:
-            print(f"error: {_CRAWL_TIMEOUT_ENV} must be a positive finite number of seconds", file=sys.stderr)
-            return 2
-        timeout = configured_timeout
-
-    binary = evidence_brief._miseledger_bin()
-    if binary is None:
-        print("error: miseledger is not installed; run `brigade setup`", file=sys.stderr)
-        return 127
-    result = proc.run([binary, verb, *arguments], timeout=timeout)
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
-    return result.code
+        return _run_crawl(arguments)
+    return _run_miseledger(verb, arguments)
 
 
 def _run_json(args: list[str], *, timeout: float = 30.0) -> dict[str, Any]:
@@ -91,13 +301,12 @@ def _cursor_path(target: Path) -> Path:
     return target / ".brigade" / "work" / "miseledger-export-cursor.json"
 
 
-def status_payload(
+def _build_status_payload(
     target: Path,
     *,
     include_doctor: bool = True,
     timeout: float = 120.0,
 ) -> dict[str, Any]:
-    target = target.expanduser().resolve()
     binary = evidence_brief._miseledger_bin()
     installed = binary is not None
     cursor = _cursor_path(target)
@@ -270,6 +479,17 @@ def status_payload(
     return payload
 
 
+def status_payload(
+    target: Path,
+    *,
+    include_doctor: bool = True,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    payload = _build_status_payload(target, include_doctor=include_doctor, timeout=timeout)
+    return _enrich_crawler_health(payload, target)
+
+
 def status(*, target: Path, json_output: bool = False) -> int:
     payload = status_payload(target)
     if json_output:
@@ -283,6 +503,11 @@ def status(*, target: Path, json_output: bool = False) -> int:
         for key in ("items", "item_count", "sources", "archive", "path", "db"):
             if key in status_data:
                 print(f"{key}: {status_data.get(key)}")
+    crawlers = payload.get("crawlers")
+    if isinstance(crawlers, dict):
+        for source, block in crawlers.items():
+            compat = block.get("compatibility") or {}
+            print(f"crawler/{source}: {compat.get('state')} - {compat.get('detail')}")
     doctor_data = (payload.get("doctor") or {}).get("stdout_json") or {}
     if isinstance(doctor_data, dict) and doctor_data.get("checks"):
         print("checks:")
@@ -316,7 +541,7 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
         _print_next(payload)
         print(
             "note: evidence checks are advisory for workspace doctor; "
-            "this command exits 1 on miseledger fail/incomplete/timeout"
+            "this command exits 1 on miseledger fail/incomplete/timeout or crawler fail"
         )
     health = payload.get("health")
     if health in ("fail", "incomplete", "timeout"):
