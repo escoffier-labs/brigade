@@ -3,10 +3,10 @@
 > **Status: Phase 4A policy is active. Phase 4B archival execution is not authorized.**
 
 Phase 4A and Phase 4B are this policy's execution split within RFC Phase 4.
-This policy records the planned compatibility window for the unified Brigade
-release. The window has not started because v0.25.0 is not yet a live release.
-It does not authorize, execute, or claim completion of any archival step. Phase
-4B requires the gates and checklist below.
+This policy records the active compatibility window for the unified Brigade
+release. v0.25.0 is live, so the window began at T0 on
+2026-07-21T00:50:15Z. It does not authorize, execute, or claim completion of
+any archival step. Phase 4B requires the gates and checklist below.
 
 ## Scope and references
 
@@ -35,27 +35,25 @@ future archive checklist.
 
 | Record | Value |
 | --- | --- |
-| Planned first unified compatibility-bearing minor | v0.25.0 |
-| Planned publication date | 2026-07-20 |
-| Conditional 90-day calendar gate | 2026-10-18, only if v0.25.0 publishes on 2026-07-20 |
+| First unified compatibility-bearing minor | v0.25.0 |
+| Published at | 2026-07-21T00:50:15Z |
+| UTC calendar gate | 2026-10-19 |
+| Exact 90-day timestamp | 2026-10-19T00:50:15Z |
 | Second compatibility-bearing minor | v0.26.0 |
-| Earliest removal or archival release | v0.27.0 |
-| T0 | The actual published date shown on the Brigade release page, once v0.25.0 is live |
-| Current status | The compatibility window has not started. Phase 4B archival execution is not authorized |
+| Earliest removal or archival release | v0.27.0, after the calendar gate |
+| T0 | v0.25.0 published at 2026-07-21T00:50:15Z |
+| Current status | The compatibility window is active. Phase 4B archival execution remains unauthorized |
 
-v0.25.0 is the planned first compatibility-bearing unified minor. v0.26.0 is
-the second. The release page's actual published date is T0. The compatibility
-window begins only when that live release exists. If v0.25.0 publishes on
-2026-07-20, the conditional calendar gate is 2026-10-18. If publication occurs
-on a date other than 2026-07-20, recompute T0 + 90 days before treating any
-calendar date as valid.
+v0.25.0 is the first compatibility-bearing unified minor, and v0.26.0 is the
+second. T0 is the live v0.25.0 publication timestamp, 2026-07-21T00:50:15Z.
+The UTC calendar gate date is 2026-10-19. The gate does not open until
+2026-10-19T00:50:15Z.
 
-Removal or archival may first ship in v0.27.0, and only after the actual
-calendar gate of T0 + 90 days. Both the version gate and the calendar gate must
-be satisfied.
+Removal or archival may first ship in v0.27.0 after the calendar gate. Both the
+version gate and the calendar gate must be satisfied.
 
-If v0.27.0 ships before the actual calendar gate, wait for the calendar gate.
-If the actual calendar gate arrives before v0.27.0, wait for the version gate.
+If v0.27.0 ships before the calendar gate, wait for the calendar gate. If the
+calendar gate arrives before v0.27.0, wait for the version gate.
 A release date alone does not authorize removal, and a version number alone
 does not authorize archival.
 

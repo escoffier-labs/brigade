@@ -27,7 +27,7 @@ def test_current_release_has_expected_v025_release_notes():
         "one verified asset set for `brigade setup`",
         "explicit `stable` and `beta` update channels",
         "Phase 4A policy documents migration and archive gates",
-        "The compatibility window has not started",
+        "The compatibility window is active as of the v0.25.0 publication",
         "does not authorize archival",
         "direct `miseledger` Cargo feature",
         "`graphtrail context --evidence`",
@@ -69,8 +69,8 @@ def test_repo_memory_handoff_template_matches_agents_guidance():
 
 def test_phase_4a_compatibility_and_archive_policy_is_tracked():
     path = ROOT / "docs" / "phase-4a-compatibility-and-archive.md"
-    planned_date = date(2026, 7, 20)
-    conditional_gate = date(2026, 10, 18)
+    published_date = date(2026, 7, 21)
+    calendar_gate = date(2026, 10, 19)
 
     assert path.is_file()
     text = path.read_text()
@@ -82,10 +82,10 @@ def test_phase_4a_compatibility_and_archive_policy_is_tracked():
         "both the version gate and the calendar gate",
         "v0.26.0",
         "Phase 4A and Phase 4B are this policy's execution split within RFC Phase 4",
-        "The compatibility window has not started",
-        "If publication occurs on a date other than 2026-07-20, recompute T0 + 90 days",
-        "The release page's actual published date is T0",
-        "recompute T0 + 90 days",
+        "v0.25.0 is live, so the window began at T0 on 2026-07-21T00:50:15Z",
+        "Status: Phase 4A policy is active. Phase 4B archival execution is not authorized.",
+        "The UTC calendar gate date is 2026-10-19.",
+        "The gate does not open until 2026-10-19T00:50:15Z.",
         "A release date alone does not authorize removal, and a version number alone does not authorize archival.",
         "`graphtrail`",
         "`graphtrail-mcp`",
@@ -144,12 +144,12 @@ def test_phase_4a_compatibility_and_archive_policy_is_tracked():
     ):
         assert expected in policy_text
 
-    assert f"| Planned publication date | {planned_date.isoformat()} |" in text
+    assert "| Published at | 2026-07-21T00:50:15Z |" in text
+    assert f"| UTC calendar gate | {calendar_gate.isoformat()} |" in text
+    assert "| Exact 90-day timestamp | 2026-10-19T00:50:15Z |" in text
     assert (
-        "| Conditional 90-day calendar gate | "
-        f"{conditional_gate.isoformat()}, only if v0.25.0 publishes on "
-        f"{planned_date.isoformat()} |"
+        "| Current status | The compatibility window is active. Phase 4B archival execution remains unauthorized |"
     ) in text
-    assert conditional_gate == planned_date + timedelta(days=90)
+    assert calendar_gate == published_date + timedelta(days=90)
     assert "- [x]" not in text.lower()
     assert text.count("- [ ]") == 15
