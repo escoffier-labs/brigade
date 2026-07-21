@@ -111,6 +111,26 @@ def test_component_report_uses_verified_exact_release_manifest_after_unified_set
     assert all(component.status == "healthy" for component in report.components)
 
 
+def test_component_report_falls_back_when_release_manifest_asset_is_unsupported(tmp_path, monkeypatch):
+    env, _release = _prepare_unified_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+
+    original_resolve = component_manifest.resolve_asset
+
+    def fake_resolve(manifest, component_id, platform):
+        if manifest.path != component_manifest.manifest_path():
+            raise ValueError("release manifest asset is unsupported")
+        return original_resolve(manifest, component_id, platform)
+
+    monkeypatch.setattr(component_manifest, "resolve_asset", fake_resolve)
+
+    report = component_report.inspect_components(env=env, system="linux")
+
+    assert report.manifest_path == str(component_manifest.manifest_path())
+    assert report.platform_error is None
+    assert all(component.status == "healthy" for component in report.components)
+
+
 def test_component_report_ignores_stale_release_cache_after_explicit_setup(tmp_path, monkeypatch):
     env, _release = _prepare_unified_release_setup(tmp_path, monkeypatch)
     assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0

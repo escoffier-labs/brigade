@@ -280,7 +280,10 @@ def _installed_state_matches_manifest(
         if installed is None:
             return False
         component = manifest.components[component_id]
-        asset = component_manifest.resolve_asset(manifest, component_id, installed_state.platform)
+        try:
+            asset = component_manifest.resolve_asset(manifest, component_id, installed_state.platform)
+        except ValueError:
+            return False
         if (
             installed.component_revision != component.component_revision
             or installed.asset_name != asset.asset_name

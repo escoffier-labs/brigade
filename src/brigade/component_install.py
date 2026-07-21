@@ -778,7 +778,7 @@ def _load_setup_manifest(
             update_cmd.UpdatePaths(Path(roots.data_root), Path(roots.cache_root), Path("unused")), release
         )
         return update_cmd.validate_release_manifest_bytes(release), release
-    except (update_cmd.UpdateError, ExactReleaseManifestError) as exc:
+    except (update_cmd.UpdateError, ExactReleaseManifestError, ValueError) as exc:
         raise ComponentInstallError(f"exact release manifest setup failed: {exc}") from exc
 
 
