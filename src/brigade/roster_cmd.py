@@ -195,6 +195,22 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
                         f"{agent.cli} does not support model pinning; drop model= or switch cli",
                     )
                 )
+            # Endpoint-mode agents are intentionally exempt: their model is a
+            # remote HTTP model name, not a local CLI route that needs Cloudflare
+            # env vars (the cli=None branch above already continued past this).
+            if agents.is_cloudflare_ai_gateway_route(agent.model):
+                missing = agents.missing_cloudflare_ai_gateway_env_vars()
+                label = f"agent: {name} cloudflare gateway"
+                if missing:
+                    checks.append(
+                        (
+                            doctor_mod.FAIL,
+                            label,
+                            f"requires env vars: {', '.join(missing)}; set them before running",
+                        )
+                    )
+                else:
+                    checks.append((doctor_mod.OK, label, "required env vars are set"))
         if agent.reasoning is not None:
             if agents.supports_reasoning(agent.cli):
                 checks.append((doctor_mod.OK, f"agent: {name} reasoning", f"{agent.reasoning} via {agent.cli}"))

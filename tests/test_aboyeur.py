@@ -3154,6 +3154,63 @@ def test_plan_output_validation_failure_preserves_typed_receipts(monkeypatch, tm
     }
 
 
+def test_orchestrator_cloudflare_preflight_fails_before_plan_and_reaches_run_json(monkeypatch, tmp_path, capsys):
+    _CF_MODEL_ROUTE = "cloudflare-ai-gateway/openai/gpt-5.3-codex"
+    _FAKE_CF_ACCOUNT = "fake-account-id-for-test"
+    _FAKE_CF_GATEWAY = "fake-gateway-id-for-test"
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(
+                name="chef",
+                cli="codex",
+                role="plan",
+                model=_CF_MODEL_ROUTE,
+            ),
+            "coder": Agent(name="coder", cli="codex", role="worker"),
+        },
+        max_workers=1,
+    )
+
+    def should_not_run(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("agents.run_agent must not be called when Cloudflare orchestrator env is missing")
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", should_not_run)
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_GATEWAY_ID", raising=False)
+
+    output_dir = tmp_path / "run"
+    rc = aboyeur.run(
+        "build feature",
+        roster,
+        output_dir=output_dir,
+        code_graph_enabled=False,
+        route_enabled=False,
+    )
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "orchestrator failed during plan" in err
+    assert "Cloudflare AI Gateway" in err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure_phase"] == "preflight"
+    assert run_meta["failure_kind"] == "provider-config"
+    assert run_meta["failure"] == {
+        "phase": "preflight",
+        "kind": "provider-config",
+        "detail": (
+            "orchestrator failed during plan: "
+            "Cloudflare AI Gateway seat missing required env vars: "
+            "CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_GATEWAY_ID; set them before running"
+        ),
+        "seat": "chef",
+    }
+    assert _FAKE_CF_ACCOUNT not in str(run_meta)
+    assert _FAKE_CF_GATEWAY not in str(run_meta)
+
+
 def test_synthesis_failure_writes_artifact(monkeypatch, tmp_path, capsys):
     calls = []
 

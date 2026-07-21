@@ -2,6 +2,8 @@
 
 import threading
 
+import pytest
+
 from brigade import acpx_adapter, agents
 from brigade import run_transport
 from brigade.roster import Agent, Roster
@@ -376,6 +378,225 @@ def test_endpoint_host_generalizes_to_any_base_url(monkeypatch):
     )
     result = _dispatch(roster, monkeypatch, captured)[0]
     assert result.endpoint_host == "openai-lane.example.com"
+
+
+_CF_MODEL_ROUTE = "cloudflare-ai-gateway/openai/gpt-5.3-codex"
+_FAKE_CF_ACCOUNT = "fake-account-id-for-test"
+_FAKE_CF_GATEWAY = "fake-gateway-id-for-test"
+
+
+def _assert_cloudflare_values_not_echoed(result):
+    """Secret values from env must never leak into WorkerResult or its payload."""
+    payload = str(result)
+    assert _FAKE_CF_ACCOUNT not in result.detail
+    assert _FAKE_CF_GATEWAY not in result.detail
+    assert _FAKE_CF_ACCOUNT not in payload
+    assert _FAKE_CF_GATEWAY not in payload
+
+
+def _cloudflare_gateway_roster():
+    chef = Agent(name="chef", cli="codex", role="plan")
+    worker = Agent(name="cf_worker", cli="codex", role="worker", model=_CF_MODEL_ROUTE)
+    return Roster(orchestrator="chef", agents={"chef": chef, "cf_worker": worker})
+
+
+def _dispatch_cloudflare_worker(monkeypatch, *, run_impl):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", run_impl)
+    return run_transport.dispatch(
+        [Assignment(worker="cf_worker", task="do the thing")],
+        _cloudflare_gateway_roster(),
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        read_only=True,
+    )
+
+
+def _clear_cloudflare_gateway_env(monkeypatch) -> None:
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_GATEWAY_ID", raising=False)
+
+
+def test_cloudflare_gateway_preflight_fails_without_required_env(monkeypatch):
+    _clear_cloudflare_gateway_env(monkeypatch)
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("proc.run must not be called when Cloudflare gateway env is missing")
+
+    result = _dispatch_cloudflare_worker(monkeypatch, run_impl=should_not_run)[0]
+
+    assert not result.ok
+    assert result.failure_phase == "preflight"
+    assert result.failure_kind == "provider-config"
+    assert "CLOUDFLARE_ACCOUNT_ID" in result.detail
+    assert "CLOUDFLARE_GATEWAY_ID" in result.detail
+
+
+@pytest.mark.parametrize(
+    ("env", "missing_vars"),
+    [
+        ({}, ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID")),
+        ({"CLOUDFLARE_ACCOUNT_ID": _FAKE_CF_ACCOUNT}, ("CLOUDFLARE_GATEWAY_ID",)),
+        ({"CLOUDFLARE_GATEWAY_ID": _FAKE_CF_GATEWAY}, ("CLOUDFLARE_ACCOUNT_ID",)),
+    ],
+)
+def test_cloudflare_gateway_preflight_names_each_missing_env_var(monkeypatch, env, missing_vars):
+    _clear_cloudflare_gateway_env(monkeypatch)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("proc.run must not be called when Cloudflare gateway env is missing")
+
+    result = _dispatch_cloudflare_worker(monkeypatch, run_impl=should_not_run)[0]
+
+    assert not result.ok
+    assert result.failure_kind == "provider-config"
+    for var in missing_vars:
+        assert var in result.detail
+    _assert_cloudflare_values_not_echoed(result)
+
+
+def test_cloudflare_gateway_preflight_payload_serializes_provider_config_failure(monkeypatch):
+    from brigade.run_receipts import worker_payload
+
+    _clear_cloudflare_gateway_env(monkeypatch)
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("proc.run must not be called when Cloudflare gateway env is missing")
+
+    entry = worker_payload(_dispatch_cloudflare_worker(monkeypatch, run_impl=should_not_run))[0]
+
+    assert entry["ok"] is False
+    assert entry["failure_phase"] == "preflight"
+    assert entry["failure_kind"] == "provider-config"
+    assert "CLOUDFLARE_ACCOUNT_ID" in entry["detail"]
+    assert "CLOUDFLARE_GATEWAY_ID" in entry["detail"]
+
+
+def test_cloudflare_gateway_preflight_empty_string_env_counts_as_missing(monkeypatch):
+    _clear_cloudflare_gateway_env(monkeypatch)
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "")
+    monkeypatch.setenv("CLOUDFLARE_GATEWAY_ID", _FAKE_CF_GATEWAY)
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("proc.run must not be called when Cloudflare gateway env is missing")
+
+    result = _dispatch_cloudflare_worker(monkeypatch, run_impl=should_not_run)[0]
+
+    assert not result.ok
+    assert result.failure_phase == "preflight"
+    assert result.failure_kind == "provider-config"
+    assert "CLOUDFLARE_ACCOUNT_ID" in result.detail
+    assert "CLOUDFLARE_GATEWAY_ID" not in result.detail
+    _assert_cloudflare_values_not_echoed(result)
+
+
+def test_cloudflare_gateway_preflight_passes_when_env_present(monkeypatch):
+    _clear_cloudflare_gateway_env(monkeypatch)
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", _FAKE_CF_ACCOUNT)
+    monkeypatch.setenv("CLOUDFLARE_GATEWAY_ID", _FAKE_CF_GATEWAY)
+    captured = {"called": False}
+
+    def fake_run(argv, **kw):
+        captured["called"] = True
+        return agents.proc.Result(0, "worker answer", "")
+
+    result = _dispatch_cloudflare_worker(monkeypatch, run_impl=fake_run)[0]
+
+    assert result.ok
+    assert captured["called"] is True
+
+
+def test_non_cloudflare_route_unaffected_when_gateway_env_missing(monkeypatch):
+    _clear_cloudflare_gateway_env(monkeypatch)
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["called"] = True
+        return agents.proc.Result(0, "worker answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "coder": Agent(name="coder", cli="codex", role="worker", model="gpt-5.5"),
+        },
+    )
+    result = run_transport.dispatch(
+        [Assignment(worker="coder", task="do the thing")],
+        roster,
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        read_only=True,
+    )[0]
+
+    assert result.ok
+    assert captured["called"] is True
+
+
+def test_cloudflare_gateway_preflight_fallback_agent_fails_without_launch(monkeypatch):
+    _clear_cloudflare_gateway_env(monkeypatch)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "grok_cli": Agent(
+                name="grok_cli",
+                cli="grok",
+                role="worker",
+                model="grok-4.5",
+                invalid_final_fallback="cf_fallback",
+            ),
+            "cf_fallback": Agent(
+                name="cf_fallback",
+                cli="codex",
+                role="worker",
+                model=_CF_MODEL_ROUTE,
+            ),
+        },
+        max_workers=1,
+    )
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        calls.append(cli_ref)
+        if cli_ref == "grok":
+            return agents.AgentResult(
+                text="",
+                ok=False,
+                detail="grok produced malformed final output",
+                failure_phase="output-validation",
+                failure_kind="malformed-final-output",
+                session_id="session-1",
+                requested_model="grok-4.5",
+            )
+        raise AssertionError(f"run_agent must not be called for {cli_ref!r} after fallback preflight fails")
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+
+    results = run_transport.dispatch(
+        [Assignment(worker="grok_cli", task="do the thing")],
+        roster,
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        read_only=True,
+        direct=True,
+    )
+
+    assert len(results) == 1
+    result = results[0]
+    assert not result.ok
+    assert result.failure_phase == "preflight"
+    assert result.failure_kind == "provider-config"
+    assert "CLOUDFLARE_ACCOUNT_ID" in result.detail
+    assert "CLOUDFLARE_GATEWAY_ID" in result.detail
+    assert "codex" not in calls
 
 
 def test_endpoint_host_records_all_distinct_hosts(monkeypatch):

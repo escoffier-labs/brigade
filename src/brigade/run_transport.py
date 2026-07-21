@@ -72,6 +72,26 @@ def _is_direct_grok_invalid_final(
     )
 
 
+def _cloudflare_preflight_failure(agent: Agent, assignment: Assignment) -> WorkerResult | None:
+    """Return a preflight failure if the agent's Cloudflare route lacks env.
+
+    Empty string values are treated as missing.
+    """
+
+    detail = agents.cloudflare_ai_gateway_preflight_detail(agent.model)
+    if detail is None:
+        return None
+    return WorkerResult(
+        worker=assignment.worker,
+        task=assignment.task,
+        text="",
+        ok=False,
+        detail=detail,
+        failure_phase="preflight",
+        failure_kind="provider-config",
+    )
+
+
 def _worker_attempt(
     *,
     kind: str,
@@ -280,6 +300,9 @@ def dispatch(
                     else f"{agent.cli} is not allowed by limits.allow_models"
                 ),
             )
+        preflight = _cloudflare_preflight_failure(agent, assignment)
+        if preflight is not None:
+            return preflight
         prompt = build_prompt(
             agent,
             assignment,
@@ -549,6 +572,9 @@ def dispatch(
             return finish(missing_fallback, agent, attempts)
 
         fallback_agent = roster.agents[fallback_name]
+        fallback_preflight = _cloudflare_preflight_failure(fallback_agent, assignment)
+        if fallback_preflight is not None:
+            return fallback_preflight
         fallback_prompt = build_prompt(
             fallback_agent,
             assignment,
