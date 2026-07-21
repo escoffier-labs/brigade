@@ -1,12 +1,45 @@
 # Phase 4A Compatibility Policy and Phase 4B Archive Checklist
 
-> **Status: Phase 4A policy is active. Phase 4B archival execution is not authorized.**
+> **Status: The compatibility window is compressed by maintainer decision
+> (2026-07-21). Phase 4B archival execution is authorized once the remaining
+> checklist items below are complete.**
 
 Phase 4A and Phase 4B are this policy's execution split within RFC Phase 4.
-This policy records the active compatibility window for the unified Brigade
-release. v0.25.0 is live, so the window began at T0 on
-2026-07-21T00:50:15Z. It does not authorize, execute, or claim completion of
-any archival step. Phase 4B requires the gates and checklist below.
+This policy records the compatibility window for the unified Brigade release.
+v0.25.0 is live; the window began at T0 on 2026-07-21T00:50:15Z.
+
+## Maintainer decision: compressed window (2026-07-21)
+
+The original policy set a dual gate (v0.27.0 and a 90-day calendar gate at
+2026-10-19). That gate protected external consumers of the standalone
+mirrors. The maintainer reviewed the exposure and recorded this decision:
+
+- Both mirrors are the maintainer's own MIT-licensed code under the same
+  owner (escoffier-labs). There are no external users to protect: zero
+  forks, zero known reverse dependencies, and the GitHub clone counts trace
+  to the maintainer's own fleet and CI.
+- No legal or dependency blocker exists.
+
+The dual gate is therefore waived. Archival may execute as soon as the
+remaining Phase 4B checklist items are complete. The following original
+requirements are explicitly **waived by the same decision**:
+
+- The 90-day calendar gate and the v0.27.0 version gate.
+- The final `graphtrail` 0.5.0 crates.io compatibility release. The
+  published crate versions stay unyanked for reproducibility; the crate is
+  marked deprecated and maintenance-frozen with no further releases.
+- The Brigade-owned session list/search facade as a pre-archival blocker for
+  `sessionfind`. The `sessionfind` shim ships in the managed engine set and
+  keeps working after the mirrors are archived; the facade remains ordinary
+  roadmap work, not an archive gate.
+
+Non-negotiables that survive the compression unchanged:
+
+- Existing databases, data paths, and schemas are non-destructive
+  invariants. No action relocates, deletes, or destructively migrates them.
+- The `master` branches of the mirrors are never rewritten or force-pushed.
+  Migration notices and any security fixes are ordinary commits on top.
+- Archiving a mirror freezes it read-only on GitHub; it deletes nothing.
 
 ## Scope and references
 
@@ -31,57 +64,35 @@ Agent Pantry is out of scope. agent-notify/#366 is out of scope. Neither
 repository is part of this compatibility policy, source-history migration, or
 future archive checklist.
 
-## Release record and dual gate
+## Release record
 
 | Record | Value |
 | --- | --- |
 | First unified compatibility-bearing minor | v0.25.0 |
 | Published at | 2026-07-21T00:50:15Z |
-| UTC calendar gate | 2026-10-19 |
-| Exact 90-day timestamp | 2026-10-19T00:50:15Z |
-| Second compatibility-bearing minor | v0.26.0 |
-| Earliest removal or archival release | v0.27.0, after the calendar gate |
 | T0 | v0.25.0 published at 2026-07-21T00:50:15Z |
-| Current status | The compatibility window is active. Phase 4B archival execution remains unauthorized |
-
-v0.25.0 is the first compatibility-bearing unified minor, and v0.26.0 is the
-second. T0 is the live v0.25.0 publication timestamp, 2026-07-21T00:50:15Z.
-The UTC calendar gate date is 2026-10-19. The gate does not open until
-2026-10-19T00:50:15Z.
-
-Removal or archival may first ship in v0.27.0 after the calendar gate. Both the
-version gate and the calendar gate must be satisfied.
-
-If v0.27.0 ships before the calendar gate, wait for the calendar gate. If the
-calendar gate arrives before v0.27.0, wait for the version gate.
-A release date alone does not authorize removal, and a version number alone
-does not authorize archival.
+| Original dual gate | v0.27.0 + 2026-10-19 calendar gate (waived 2026-07-21) |
+| Current status | Window compressed; Phase 4B authorized pending checklist completion |
 
 ## Compatibility contract
 
-The compatibility window covers these executable shims:
+The managed engine set installed by `brigade setup` continues to ship these
+executables:
 
 - `graphtrail`
 - `graphtrail-mcp`
 - `miseledger`
 - `sessionfind`
 
-It also covers the `brigade search sync`, `brigade search context`, and
-`brigade search impact` executable aliases for `brigade code sync`,
-`brigade code context`, and `brigade code impact`. Standalone manifest-source
-and independent-install compatibility paths retain their separately documented
+Archiving the mirrors does not remove or change any of them; they are the
+engines, distributed and pinned by Brigade. The `brigade search sync`,
+`brigade search context`, and `brigade search impact` executable aliases for
+`brigade code sync`, `brigade code context`, and `brigade code impact` also
+remain. Standalone manifest-source and independent-install compatibility
+paths retain their separately documented
 [one-release fallback](update-channels.md).
 
-At T0, the governed operation inventory for each v0.25.0 shim is its public
-subcommands, help behavior, and JSON contracts. For every shipped non-meta
-operation, Phase 4B requires either a behavior-equivalent Brigade-owned path
-or an explicit maintainer decision to retain the shim. An operation without a
-disposition blocks removal.
-
-`--help`, `--version`, and `version` are compatibility probes, not migration
-workflows that require replacement commands. They must remain functional for
-the compatibility window. This includes `sessionfind version`; its probe does
-not imply that it needs a user-workflow replacement command.
+Current compatibility-equivalent engine commands for `sessionfind`:
 
 | Compatibility invocation | Current compatibility-equivalent engine command |
 | --- | --- |
@@ -89,38 +100,14 @@ not imply that it needs a user-workflow replacement command.
 | `sessionfind search <query>` | `miseledger sessions search <query>` |
 | `sessionfind <query>` | `miseledger sessions search <query>` |
 
-The `miseledger sessions list` and `miseledger sessions search` entries are
-current compatibility-equivalent engine commands, not final Brigade-owned
-replacements. Because `miseledger` is in the same shim cohort as `sessionfind`,
-`sessionfind` is not removal-ready until a Brigade-owned session list/search
-facade exists, tests prove equivalent filters and JSON behavior, and its
-deprecation message names that Brigade command. A missing Brigade-owned session
-facade blocks Phase 4B.
-
-`brigade setup` is the distribution replacement command for `graphtrail-mcp`.
-It installs the Brigade-managed `graphtrail-mcp` binary. MCP clients retain the
-`graphtrail-mcp` protocol but must move their configuration to the managed
-absolute path. The `graphtrail-mcp` deprecation message must name `brigade
-setup`, the managed-path configuration change, and the earliest removal
-condition: v0.27.0 after the actual T0 + 90-day calendar gate, with both the
-version gate and the calendar gate satisfied.
-
-For each shipped non-meta operation, Phase 4B requires either a
-behavior-equivalent Brigade-owned path or an explicit maintainer decision to
-retain the shim. Any operation without that disposition blocks removal.
+`brigade setup` is the distribution replacement for every standalone install
+path. MCP clients retain the `graphtrail-mcp` protocol but configure the
+managed absolute path (`brigade setup` records it in `installed.json`, and
+Brigade's config generators emit it).
 
 Existing databases, data paths, and schemas are non-destructive invariants.
 No compatibility action may relocate, delete, or migrate an existing database
 or data path destructively.
-
-Each deprecation message must name the replacement command and state the
-earliest removal condition: v0.27.0 after the actual T0 + 90-day calendar gate,
-with both the version gate and the calendar gate satisfied. For code-graph
-invocations, name the applicable `brigade code sync`, `brigade code context`,
-or `brigade code impact` command. For MiseLedger-backed evidence invocations,
-name the applicable `brigade evidence crawl`, `brigade evidence search`, or
-`brigade evidence doctor` command. For sessionfind invocations, use the mappings
-above. There are no silent removals.
 
 ## Frozen standalone mirrors
 
@@ -129,49 +116,31 @@ The `master` branches of `escoffier-labs/graphtrail` and
 commit maps anchor the source-history migration.
 
 Migration notices are ordinary commits on top of `master`. Security fixes may
-also be ordinary commits during the compatibility window. No feature work
+also be ordinary commits while the mirrors remain unarchived. No feature work
 returns to either mirror.
 
 ## GraphTrail crates.io policy
 
-Publish graphtrail 0.5.0 from the Brigade monorepo as the final compatibility
-minor. It must retain working legacy binaries and features and include migration
-warnings. Patch releases during the compatibility window are limited to security
-and release-integrity fixes.
+Per the 2026-07-21 maintainer decision, no further crates.io releases ship.
+Leave every published crate version unyanked for reproducibility. Mark the
+crate deprecated and maintenance-frozen, and remove current `cargo install`
+guidance from documentation.
 
-After both gates are satisfied, leave every published crate version unyanked for
-reproducibility. Mark the crate deprecated and maintenance-frozen, remove current
-`cargo install` guidance, and publish no feature releases.
+## Phase 4B checklist (compressed)
 
-## Future Phase 4B checklist
-
-All unchecked items below describe future work. They are not authorization to
-perform it while Phase 4A is active.
-
-- [ ] Confirm both the version gate and the calendar gate.
-- [ ] Verify every shim and Brigade search alias, including its replacement command and earliest removal message.
-- [ ] Capture the T0 shim operation inventory and disposition every shipped non-meta operation with a behavior-equivalent Brigade-owned path or an explicit maintainer decision to retain the shim.
-- [ ] Build and verify the Brigade-owned session list/search facade, including equivalent filters and JSON behavior, then name it in the `sessionfind` deprecation message.
-- [ ] Migrate `graphtrail-mcp` MCP client configuration to the Brigade-managed absolute path installed by `brigade setup`, and verify its deprecation message.
-- [ ] Audit and migrate Brigade-generated MCP configs, including `src/brigade/cursor_user_cmd.py`, from PATH-based `graphtrail-mcp` and `miseledger` commands to managed absolute paths.
-- [ ] Audit, transfer, or close remaining issues with links to [#364](https://github.com/escoffier-labs/brigade/issues/364) and [#365](https://github.com/escoffier-labs/brigade/issues/365).
-- [ ] Publish and verify the final `graphtrail` 0.5.0 compatibility release.
+- [x] Maintainer decision recorded waiving the dual gate (this document, 2026-07-21).
+- [x] Audit and migrate Brigade-generated MCP configs, including `src/brigade/cursor_user_cmd.py`, from PATH-based `graphtrail-mcp` and `miseledger` commands to managed absolute paths (PR #419).
+- [ ] Migrate operator MCP client configuration to the Brigade-managed absolute path installed by `brigade setup`.
 - [ ] Confirm migration notices as ordinary commits on both mirrors.
 - [ ] Verify that neither standalone `master` branch was rewritten or force-pushed.
 - [ ] Update product and documentation links to the Brigade release path.
-- [ ] Capture final release and acceptance evidence.
-- [ ] Obtain maintainer approval for Phase 4B execution.
-- [ ] Archive `escoffier-labs/graphtrail` (prohibited during Phase 4A).
-- [ ] Archive `escoffier-labs/miseledger` (prohibited during Phase 4A).
+- [ ] Archive `escoffier-labs/graphtrail`.
+- [ ] Archive `escoffier-labs/miseledger`.
 
 ## Stop and rollback conditions
 
-Stop Phase 4B before archival if either dual gate is unmet, a shim or alias
-lacks its required message, a data-path or schema invariant is at risk, the
-final crate release is not verified, a migration notice is missing, or
-maintainer approval is absent.
-
-If a pre-archive compatibility problem appears, keep the mirrors active and
-repair it with an ordinary commit or a security/release-integrity patch as
-applicable. Do not rewrite standalone `master`, do not force-push, and do not
-archive either repository until every Phase 4B checklist item is complete.
+Stop before archival if a data-path or schema invariant is at risk or a
+migration notice is missing. If a pre-archive compatibility problem appears,
+keep the mirrors active and repair it with an ordinary commit. Do not rewrite
+standalone `master`, do not force-push. After archival, a mirror can be
+unarchived from GitHub settings at any time if a repair is ever needed.
