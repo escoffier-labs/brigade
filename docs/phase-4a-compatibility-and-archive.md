@@ -130,7 +130,7 @@ guidance from documentation.
 
 - [x] Maintainer decision recorded waiving the dual gate (this document, 2026-07-21).
 - [x] Audit and migrate Brigade-generated MCP configs, including `src/brigade/cursor_user_cmd.py`, from PATH-based `graphtrail-mcp` and `miseledger` commands to managed absolute paths (PR #419).
-- [ ] Migrate operator MCP client configuration to the Brigade-managed absolute path installed by `brigade setup`.
+- [x] Migrate operator MCP client configuration to the Brigade-managed absolute path installed by `brigade setup` (operator machine migrated 2026-07-21: codex, Cursor, OpenClaw, and Claude configs plus the capped MCP wrapper now use the managed set).
 - [ ] Confirm migration notices as ordinary commits on both mirrors.
 - [ ] Verify that neither standalone `master` branch was rewritten or force-pushed.
 - [ ] Update product and documentation links to the Brigade release path.
