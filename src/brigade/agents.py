@@ -132,12 +132,12 @@ def _qwen_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | No
 
 
 def _kimi_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
-    argv = ["kimi", "--print", "-p", prompt, "--final-message-only"]
-    if read_only or sandbox == "read-only":
-        argv.insert(1, "--plan")
-    else:
-        argv.insert(1, "--yolo")
-    return argv
+    # Kimi Code 0.28 prompt mode rejects combining -p with the interactive
+    # --plan/--yolo permission flags ("Cannot combine --prompt with --yolo"),
+    # auto-approves tool calls, and prints the final response directly, so
+    # read-only can only be enforced through the prompt (soft).
+    task = _read_only_prompt(prompt) if read_only or sandbox == "read-only" else prompt
+    return ["kimi", "-p", task]
 
 
 def _adal_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
@@ -203,7 +203,7 @@ READ_ONLY_ENFORCEMENT: dict[str, str] = {
     "aider": "hard",
     "continue": "hard",
     "qwen": "hard",
-    "kimi": "hard",
+    "kimi": "soft",
     "goose": "soft",
     "copilot": "soft",
     "adal": "soft",
@@ -416,7 +416,7 @@ _MODEL_PIN: dict[str, tuple[str, Callable[[List[str], str, str], List[str]]]] = 
     "grok": ("-m", _pin_after_cmd),  # grok -m X -p <prompt>
     "opencode": ("-m", _pin_after_subcmd),  # opencode run -m X <prompt>   (X = provider/model)
     "pi": ("--model", _pin_after_cmd),  # pi --model X [--tools ...] -p <prompt>
-    "kimi": ("-m", _pin_after_cmd),  # kimi -m X [--plan] --print -p <prompt> --final-message-only
+    "kimi": ("-m", _pin_after_cmd),  # kimi -m X -p <prompt>
     "cursor": ("--model", _pin_after_cmd),  # cursor-agent --model X -p --output-format text -f <prompt>
     "antigravity": ("--model", _pin_after_cmd),  # agy --model X [--sandbox] --print <prompt>
 }

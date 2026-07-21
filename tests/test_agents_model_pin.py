@@ -74,21 +74,15 @@ def test_pins_model_for_kimi():
         "kimi",
         "-m",
         "kimi-k2.5",
-        "--yolo",
-        "--print",
         "-p",
         "P",
-        "--final-message-only",
     ]
     assert agents.build_argv("kimi", "P", read_only=True, model="kimi-k2.5") == [
         "kimi",
         "-m",
         "kimi-k2.5",
-        "--plan",
-        "--print",
         "-p",
-        "P",
-        "--final-message-only",
+        agents._read_only_prompt("P"),
     ]
 
 

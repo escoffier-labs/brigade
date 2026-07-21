@@ -33,14 +33,7 @@ def test_build_argv_for_known_clis():
     assert agents.build_argv("continue", "hi") == ["cn", "-p", "hi"]
     assert agents.build_argv("copilot", "hi") == ["copilot", "-p", "hi"]
     assert agents.build_argv("qwen", "hi") == ["qwen", "-p", "hi", "--approval-mode", "yolo"]
-    assert agents.build_argv("kimi", "hi") == [
-        "kimi",
-        "--yolo",
-        "--print",
-        "-p",
-        "hi",
-        "--final-message-only",
-    ]
+    assert agents.build_argv("kimi", "hi") == ["kimi", "-p", "hi"]
     assert agents.build_argv("adal", "hi") == ["adal", "-q", "hi"]
     assert agents.build_argv("openhands", "hi") == ["openhands", "--headless", "-t", "hi"]
     assert agents.build_argv("grok", "hi") == ["grok", "-p", "hi", "--always-approve"]
@@ -80,14 +73,9 @@ def test_build_argv_for_read_only_codex():
     ]
     assert agents.build_argv("continue", "hi", read_only=True) == ["cn", "-p", "hi", "--readonly"]
     assert agents.build_argv("qwen", "hi", read_only=True) == ["qwen", "-p", "hi", "--approval-mode", "plan"]
-    assert agents.build_argv("kimi", "hi", read_only=True) == [
-        "kimi",
-        "--plan",
-        "--print",
-        "-p",
-        "hi",
-        "--final-message-only",
-    ]
+    kimi_read_only = agents.build_argv("kimi", "hi", read_only=True)
+    assert kimi_read_only[:2] == ["kimi", "-p"]
+    assert kimi_read_only[-1].startswith("Read-only planning run.")
     assert agents.build_argv("goose", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("copilot", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("adal", "hi", read_only=True)[-1].startswith("Read-only planning run.")
@@ -198,24 +186,11 @@ def test_build_argv_cursor_sandbox_read_only_uses_plan_mode():
     ]
 
 
-def test_build_argv_kimi_writable_uses_yolo_and_read_only_keeps_plan():
-    assert agents.build_argv("kimi", "hi") == [
-        "kimi",
-        "--yolo",
-        "--print",
-        "-p",
-        "hi",
-        "--final-message-only",
-    ]
+def test_build_argv_kimi_prompt_mode_uses_soft_read_only_instruction():
+    assert agents.build_argv("kimi", "hi") == ["kimi", "-p", "hi"]
     read_only = agents.build_argv("kimi", "hi", read_only=True)
-    assert read_only == [
-        "kimi",
-        "--plan",
-        "--print",
-        "-p",
-        "hi",
-        "--final-message-only",
-    ]
+    assert read_only[:2] == ["kimi", "-p"]
+    assert read_only[-1].startswith("Read-only planning run.")
     assert "--yolo" not in read_only
 
 
