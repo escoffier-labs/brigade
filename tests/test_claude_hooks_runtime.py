@@ -619,6 +619,78 @@ def test_repo_worktree_fingerprint_detects_untracked_tail_byte_change(tmp_path: 
     assert baseline != updated
 
 
+def test_repo_worktree_fingerprint_hashes_large_untracked_without_read_bytes(tmp_path: Path, monkeypatch):
+    target = _git_wired_claude(tmp_path)
+    large = target / "model.cache"
+    with large.open("wb") as handle:
+        handle.seek(100 * 1024 * 1024 - 1)
+        handle.write(b"\0")
+    hash_calls: list[str] = []
+    real_run = runtime._run_snapshot_git
+
+    def tracked_run(repo: Path, *git_args: str):
+        if git_args[:1] == ("hash-object",):
+            hash_calls.append(git_args[-1])
+        return real_run(repo, *git_args)
+
+    def forbid_read_bytes(self: Path, *args, **kwargs):
+        raise AssertionError("repo_worktree_fingerprint must not read whole file bytes in-process")
+
+    monkeypatch.setattr(runtime, "_run_snapshot_git", tracked_run)
+    monkeypatch.setattr(Path, "read_bytes", forbid_read_bytes)
+
+    fingerprint = runtime.repo_worktree_fingerprint(target)
+
+    assert fingerprint is not None
+    assert "model.cache" in hash_calls
+
+
+def test_wired_target_from_payload_ignores_incidental_repo_paths(tmp_path: Path):
+    cwd_repo = _configured_git_repo(tmp_path / "cwdrepo")
+    incidental = _configured_git_repo(tmp_path / "incidental")
+    command = f"rg pattern {incidental}/tracked.txt"
+
+    resolved = runtime.wired_target_from_payload(
+        _payload(
+            cwd_repo,
+            "PreToolUse",
+            tool_name="Bash",
+            tool_input={"command": command},
+        )
+    )
+
+    assert resolved == cwd_repo.resolve()
+
+
+def test_wired_target_from_payload_without_cwd_uses_named_repo_not_process_dir(tmp_path: Path):
+    named = _configured_git_repo(tmp_path / "named")
+    # Payload omits cwd; the command explicitly names a wired repo.
+    payload = {
+        "session_id": "no-cwd",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": f"rg pattern {named}/tracked.txt"},
+    }
+
+    resolved = runtime.wired_target_from_payload(payload)
+
+    assert resolved == named.resolve()
+
+
+def test_wired_target_from_payload_without_cwd_and_no_named_repo_returns_none(tmp_path: Path):
+    # Payload omits cwd and the command mentions no wired repo path.
+    payload = {
+        "session_id": "no-cwd",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo hello"},
+    }
+
+    resolved = runtime.wired_target_from_payload(payload)
+
+    assert resolved is None
+
+
 def test_repo_worktree_fingerprint_returns_none_when_hash_object_fails_for_untracked(tmp_path: Path, monkeypatch):
     target = _git_wired_claude(tmp_path)
     (target / "new.txt").write_text("content")

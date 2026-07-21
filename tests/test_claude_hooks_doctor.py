@@ -220,6 +220,73 @@ def test_doctor_uses_last_write_time_for_receipt_threshold(tmp_path: Path, capsy
     assert "dormant" in check["detail"]
 
 
+def test_status_payload_reports_legacy_handlers(tmp_path: Path):
+    target = _wired(tmp_path)
+    settings = target / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text())
+    payload["hooks"]["SessionStart"] = [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "python3 hooks/brigade-work-loop.py --event SessionStart",
+                }
+            ]
+        }
+    ]
+    payload["hooks"]["Stop"] = [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "python3 hooks/brigade-work-loop.py --event Stop",
+                }
+            ]
+        }
+    ]
+    settings.write_text(json.dumps(payload, indent=2) + "\n")
+
+    from brigade.claude_hooks.install_cmd import status_payload
+
+    status = status_payload(target)
+
+    assert status["legacy_handler_count"] == 2
+    assert status["legacy_events"] == ["SessionStart", "Stop"]
+
+
+def test_doctor_warns_for_legacy_handlers_with_repair_command(tmp_path: Path, capsys):
+    target = _wired(tmp_path)
+    settings = target / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text())
+    payload["hooks"]["SessionStart"] = [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "python3 hooks/brigade-work-loop.py --event SessionStart",
+                }
+            ]
+        }
+    ]
+    settings.write_text(json.dumps(payload, indent=2) + "\n")
+
+    check = _loop_check(target, capsys)
+
+    assert check["status"] == "WARN"
+    assert ".claude/settings.json" in check["detail"]
+    assert f"brigade work hooks install --target {target}" in check["detail"]
+    # The base state detail is preserved, not replaced by the legacy-only message.
+    assert "state=" in check["detail"]
+
+
+def test_doctor_reports_normal_state_when_no_legacy_handler(tmp_path: Path, capsys):
+    target = _wired(tmp_path)
+    check = _loop_check(target, capsys)
+    assert check["status"] == "OK"
+    assert "state=enforced" in check["detail"]
+    assert "legacy" not in check["detail"]
+
+
 def test_doctor_skips_old_state_files_and_caps_recent_candidates(tmp_path: Path, capsys, monkeypatch):
     target = _wired(tmp_path)
     from brigade.claude_hooks import runtime
