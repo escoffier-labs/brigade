@@ -106,16 +106,16 @@ def test_phase_4a_compatibility_and_archive_policy_is_tracked():
         "| Compatibility invocation | Current compatibility-equivalent engine command |",
         "Existing databases, data paths, and schemas are non-destructive invariants.",
         "Archiving a mirror freezes it read-only on GitHub. It deletes nothing.",
-        "- [ ] Confirm migration notices as ordinary commits on both mirrors.",
-        "- [ ] Verify that neither standalone `master` branch was rewritten or force-pushed.",
+        "- [x] Confirm migration notices as ordinary commits on both mirrors",
+        "- [x] Verify that neither standalone `master` branch was rewritten or force-pushed",
         "- [ ] Update product and documentation links to the Brigade release path.",
-        "- [ ] Archive `escoffier-labs/graphtrail`.",
-        "- [ ] Archive `escoffier-labs/miseledger`.",
+        "- [x] Archive `escoffier-labs/graphtrail` (archived 2026-07-21).",
+        "- [x] Archive `escoffier-labs/miseledger` (archived 2026-07-21).",
     ):
         assert expected in policy_text
 
     assert "| Published at | 2026-07-21T00:50:15Z |" in text
     assert "| Original dual gate | v0.27.0 + 2026-10-19 calendar gate (waived 2026-07-21) |" in text
     assert "| Current status | Window compressed. Phase 4B authorized pending checklist completion |" in text
-    assert text.count("- [x]") == 3
-    assert text.count("- [ ]") == 5
+    assert text.count("- [x]") == 7
+    assert text.count("- [ ]") == 1
