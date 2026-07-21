@@ -780,3 +780,294 @@ def test_doctor_collapses_missing_managed_tools_to_one_line(tmp_path, capsys, mo
     manual_lines = [line for line in out.splitlines() if "not installed; run `brigade add" in line]
     assert len(manual_lines) <= 1, manual_lines
     assert "managed tools not installed" in out
+
+
+# --- memory-care producer collision (#403) ---
+
+FAKE_CRON_COMMAND = "FAKE-CRON-PAYLOAD-SECRET-TOKEN-abc123"
+
+
+def _write_openclaw_cron(tmp_target: Path, jobs: list[dict], monkeypatch) -> None:
+    openclaw_dir = tmp_target / ".openclaw"
+    cron_dir = openclaw_dir / "cron"
+    cron_dir.mkdir(parents=True)
+    (openclaw_dir / "openclaw.json").write_text(
+        json.dumps(
+            {
+                "plugins": {"entries": {"memory-core": {}}},
+                "agents": {"defaults": {"model": {"primary": "example-provider/example-model"}}},
+            }
+        )
+    )
+    payload_jobs = []
+    for job in jobs:
+        entry = dict(job)
+        entry.setdefault("command", FAKE_CRON_COMMAND)
+        payload_jobs.append(entry)
+    (cron_dir / "jobs.json").write_text(json.dumps({"jobs": payload_jobs}))
+    monkeypatch.setenv("HOME", str(tmp_target))
+    monkeypatch.setattr(Path, "home", lambda: tmp_target)
+
+
+def _write_scanners_toml(tmp_target: Path, body: str) -> None:
+    brigade = tmp_target / ".brigade"
+    brigade.mkdir(parents=True, exist_ok=True)
+    (brigade / "scanners.toml").write_text(body)
+
+
+def _write_memory_care_config(tmp_target: Path, *, output_path: str | None = None) -> None:
+    brigade = tmp_target / ".brigade"
+    brigade.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    if output_path is not None:
+        lines.append(f"output_path = {json.dumps(output_path)}")
+    (brigade / "memory-care.toml").write_text("\n".join(lines) + ("\n" if lines else ""))
+
+
+def _producer_collision_checks(results: list) -> list:
+    return [result for result in results if result[1] == "memory-care: producer collision"]
+
+
+def _run_producer_collision_check(tmp_target: Path) -> list:
+    return doctor_mod._check_memory_care_producer_collision(tmp_target)
+
+
+def test_doctor_warns_memory_care_writer_collision(tmp_target: Path, monkeypatch):
+    """A Brigade memory-care scan writer and legacy cron sharing one dir -> one warning."""
+    _write_memory_care_config(tmp_target, output_path="memory/cards/decay")
+    _write_scanners_toml(
+        tmp_target,
+        """
+[[scanner]]
+id = "memory-care-scan"
+source = "memory-care"
+command = "brigade memory care scan"
+cadence = "daily@03:00"
+enabled = true
+timeout = 180
+output_path = "memory/cards/decay/refresh-queue.json"
+conflict_window = "02:55-03:15"
+""",
+    )
+    _write_openclaw_cron(
+        tmp_target,
+        [
+            {
+                "name": "Card Decay Scanner (Daily)",
+                "enabled": True,
+                "schedule": {"kind": "cron", "expr": "30 5 * * *", "tz": "Example/Place"},
+            },
+        ],
+        monkeypatch,
+    )
+
+    results = _run_producer_collision_check(tmp_target)
+    collisions = _producer_collision_checks(results)
+
+    assert len(collisions) == 1
+    status, name, detail = collisions[0]
+    assert status == doctor_mod.WARN
+    assert name == "memory-care: producer collision"
+    assert "memory/cards/decay" in detail
+    assert "brigade memory-care" in detail
+    assert "legacy Card Decay Scanner (Daily)" in detail
+
+
+def test_doctor_no_collision_with_memory_care_consumer_scanner(tmp_target: Path, monkeypatch):
+    """A consumer scanner that reads the queue must not be classified as a producer."""
+    _write_scanners_toml(
+        tmp_target,
+        """
+[[scanner]]
+id = "memory-care"
+source = "memory-care"
+command = "brigade memory care import-issues --json"
+cadence = "daily@03:00"
+enabled = true
+timeout = 180
+output_path = "memory/cards/decay/refresh-queue.json"
+conflict_window = "02:55-03:15"
+""",
+    )
+    _write_openclaw_cron(
+        tmp_target,
+        [
+            {
+                "name": "Card Decay Scanner (Daily)",
+                "enabled": True,
+                "schedule": {"kind": "cron", "expr": "30 5 * * *", "tz": "Example/Place"},
+            },
+        ],
+        monkeypatch,
+    )
+
+    results = _run_producer_collision_check(tmp_target)
+    assert _producer_collision_checks(results) == []
+
+
+def test_doctor_no_collision_with_refresh_consumer(tmp_target: Path, monkeypatch):
+    _write_memory_care_config(tmp_target)
+    _write_openclaw_cron(
+        tmp_target,
+        [
+            {
+                "name": "Card Decay Auto-Refresh (Safe)",
+                "enabled": True,
+                "schedule": {"kind": "cron", "expr": "40 5 * * *", "tz": "Example/Place"},
+            },
+        ],
+        monkeypatch,
+    )
+
+    results = _run_producer_collision_check(tmp_target)
+
+    assert _producer_collision_checks(results) == []
+
+
+def test_doctor_no_collision_with_custom_memory_care_output_path(tmp_target: Path, monkeypatch):
+    _write_memory_care_config(tmp_target, output_path=".brigade/memory-care/custom-decay")
+    _write_openclaw_cron(
+        tmp_target,
+        [
+            {
+                "name": "Card Decay Scanner (Daily)",
+                "enabled": True,
+                "schedule": {"kind": "cron", "expr": "30 5 * * *", "tz": "Example/Place"},
+            },
+        ],
+        monkeypatch,
+    )
+
+    results = _run_producer_collision_check(tmp_target)
+
+    assert _producer_collision_checks(results) == []
+
+
+def test_doctor_warns_when_custom_memory_care_output_collides(tmp_target: Path, monkeypatch):
+    _write_memory_care_config(tmp_target, output_path="memory/cards/decay")
+    _write_openclaw_cron(
+        tmp_target,
+        [
+            {
+                "name": "Card Decay Scanner (Daily)",
+                "enabled": True,
+                "schedule": {"kind": "cron", "expr": "30 5 * * *", "tz": "Example/Place"},
+            },
+        ],
+        monkeypatch,
+    )
+
+    results = _run_producer_collision_check(tmp_target)
+    collisions = _producer_collision_checks(results)
+
+    assert len(collisions) == 1
+    _, _, detail = collisions[0]
+    assert "memory/cards/decay" in detail
+    assert "brigade memory-care" in detail
+    assert "legacy Card Decay Scanner (Daily)" in detail
+
+
+def test_doctor_memory_care_collision_redacts_sensitive_cron_details(tmp_target: Path, monkeypatch):
+    _write_memory_care_config(tmp_target, output_path="memory/cards/decay")
+    _write_scanners_toml(
+        tmp_target,
+        """
+[[scanner]]
+id = "memory-care-scan"
+source = "memory-care"
+command = "brigade memory care scan"
+cadence = "daily@03:00"
+enabled = true
+timeout = 180
+output_path = "memory/cards/decay/refresh-queue.json"
+conflict_window = "02:55-03:15"
+""",
+    )
+    _write_openclaw_cron(
+        tmp_target,
+        [
+            {
+                "name": "Card Decay Scanner (Daily)",
+                "enabled": True,
+                "schedule": {"kind": "cron", "expr": "30 5 * * *", "tz": "Example/Place"},
+            },
+        ],
+        monkeypatch,
+    )
+
+    results = _run_producer_collision_check(tmp_target)
+    collisions = _producer_collision_checks(results)
+    assert len(collisions) == 1
+
+    detail = collisions[0][2]
+    assert "memory/cards/decay" in detail
+    assert FAKE_CRON_COMMAND not in detail
+    assert "SECRET-TOKEN" not in detail
+    assert str(tmp_target) not in detail
+    assert "/home/" not in detail
+    assert "30 5 * * *" not in detail
+    assert "Example/Place" not in detail
+    assert "jobs.json" not in detail
+    assert ".openclaw" not in detail
+
+
+def test_doctor_memory_care_collision_suggested_next_step_is_read_only(tmp_target: Path, monkeypatch):
+    _write_memory_care_config(tmp_target, output_path="memory/cards/decay")
+    _write_scanners_toml(
+        tmp_target,
+        """
+[[scanner]]
+id = "memory-care-scan"
+source = "memory-care"
+command = "brigade memory care scan"
+cadence = "daily@03:00"
+enabled = true
+timeout = 180
+output_path = "memory/cards/decay/refresh-queue.json"
+conflict_window = "02:55-03:15"
+""",
+    )
+    _write_openclaw_cron(
+        tmp_target,
+        [
+            {
+                "name": "Card Decay Scanner (Daily)",
+                "enabled": True,
+                "schedule": {"kind": "cron", "expr": "30 5 * * *", "tz": "Example/Place"},
+            },
+        ],
+        monkeypatch,
+    )
+
+    results = _run_producer_collision_check(tmp_target)
+    collisions = _producer_collision_checks(results)
+    assert len(collisions) == 1
+
+    detail = collisions[0][2].lower()
+    assert "brigade memory care status" in detail
+    assert "read-only" in detail
+    for destructive in ("rm ", "unlink(", "write_text", "edit card", "overwrite"):
+        assert destructive not in detail
+    # The diagnostic must not leak the raw cron payload, schedule, or workspace path.
+    assert FAKE_CRON_COMMAND not in detail
+    assert str(tmp_target) not in detail
+    assert "30 5 * * *" not in detail
+    assert "example/place" not in detail
+    assert "jobs.json" not in detail
+    assert ".openclaw" not in detail
+
+
+def test_doctor_no_collision_with_shipped_scanners_toml(tmp_target: Path, monkeypatch):
+    """The repo's shipped scanners.toml contains only memory-care consumers; no collision."""
+    _write_memory_care_config(tmp_target)  # default Brigade output path
+    shipped = Path(__file__).parent.parent.joinpath(".brigade", "scanners.toml").read_text()
+    _write_scanners_toml(tmp_target, shipped)
+    # Point HOME at the temp target so any host-global cron state is isolated.
+    openclaw_dir = tmp_target / ".openclaw"
+    (openclaw_dir / "cron").mkdir(parents=True)
+    (openclaw_dir / "cron" / "jobs.json").write_text(json.dumps({"jobs": []}))
+    monkeypatch.setenv("HOME", str(tmp_target))
+    monkeypatch.setattr(Path, "home", lambda: tmp_target)
+
+    results = _run_producer_collision_check(tmp_target)
+    assert _producer_collision_checks(results) == []

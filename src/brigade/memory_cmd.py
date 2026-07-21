@@ -79,6 +79,19 @@ def _read_output_dir(target: Path, config: MemoryCareConfig) -> Path:
     return output
 
 
+def memory_care_producer_artifacts(target: Path, config: MemoryCareConfig) -> list[tuple[Path, str]]:
+    """Return the absolute artifact paths produced by the Brigade memory-care scanner.
+
+    Uses the write location (`_output_dir`), not the reader fallback, so
+    producer-collision checks compare actual write destinations.
+    """
+    output = _output_dir(target, config)
+    return [
+        (output / "scan-latest.json", "brigade memory-care"),
+        (output / "refresh-queue.json", "brigade memory-care"),
+    ]
+
+
 def _scan_path(target: Path, config: MemoryCareConfig) -> Path:
     return _read_output_dir(target, config) / "scan-latest.json"
 

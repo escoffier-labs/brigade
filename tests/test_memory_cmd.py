@@ -586,3 +586,27 @@ def test_memory_care_backfill_falls_back_to_mtime_outside_git(tmp_path, capsys):
     item = payload["candidates"][0]
     assert item["source"] == "file-mtime"
     assert item["last_reviewed"] == "2026-04-02"
+
+
+def test_memory_care_producer_artifacts_use_write_dir_not_read_fallback(tmp_path):
+    legacy = tmp_path / "memory" / "cards" / "decay"
+    legacy.mkdir(parents=True)
+    (legacy / "scan-latest.json").write_text('{"scan_date": "2026-06-01", "counts": {}}')
+
+    config = memory_cmd.MemoryCareConfig()
+    artifacts = memory_cmd.memory_care_producer_artifacts(tmp_path, config)
+
+    assert artifacts == [
+        (tmp_path / ".brigade" / "memory-care" / "decay" / "scan-latest.json", "brigade memory-care"),
+        (tmp_path / ".brigade" / "memory-care" / "decay" / "refresh-queue.json", "brigade memory-care"),
+    ]
+
+
+def test_memory_care_producer_artifacts_honor_custom_output_path(tmp_path):
+    config = memory_cmd.MemoryCareConfig(output_path=".brigade/memory-care/custom-decay")
+    artifacts = memory_cmd.memory_care_producer_artifacts(tmp_path, config)
+
+    assert artifacts == [
+        (tmp_path / ".brigade" / "memory-care" / "custom-decay" / "scan-latest.json", "brigade memory-care"),
+        (tmp_path / ".brigade" / "memory-care" / "custom-decay" / "refresh-queue.json", "brigade memory-care"),
+    ]
