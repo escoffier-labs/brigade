@@ -1,7 +1,6 @@
 package ingest
 
 import (
-	"bufio"
 	"compress/gzip"
 	"crypto/sha256"
 	"database/sql"
@@ -113,8 +112,6 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 
 	result := AdapterResult{SourceKind: sourceKind, SourcePath: sourcePath}
 	h := sha256.New()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	ordinal := int64(0)
 	warnedOverrideKinds := map[string]bool{}
 
@@ -145,16 +142,20 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		return nil
 	}
 
-	for scanner.Scan() {
-		line := append([]byte(nil), scanner.Bytes()...)
+	scanErr := sources.EachLine(r, sources.MaxLineBytes, func(raw []byte, tooLong bool, size int64) error {
 		ordinal++
+		if tooLong {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("line %d: line too long (%d bytes > %d limit), skipped", ordinal, size, sources.MaxLineBytes))
+			return nil
+		}
+		line := append([]byte(nil), raw...)
 		if len(strings.TrimSpace(string(line))) == 0 {
-			continue
+			return nil
 		}
 		if recordScan != nil {
 			file, ok, err := parseSourceScanSentinel(line)
 			if err != nil {
-				return AdapterResult{}, err
+				return err
 			}
 			if ok {
 				if sourceKind == "" {
@@ -162,13 +163,10 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 					result.SourceKind = sourceKind
 				}
 				if err := flush(batchCount > 0); err != nil {
-					return AdapterResult{}, err
+					return err
 				}
 				generatedHash := "sha256:" + hex.EncodeToString(h.Sum(nil))
-				if err := recordScan(sourceKind, generatedHash, file); err != nil {
-					return AdapterResult{}, err
-				}
-				continue
+				return recordScan(sourceKind, generatedHash, file)
 			}
 		}
 		_, _ = h.Write(line)
@@ -176,7 +174,7 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		rec, err := adapter.Parse(line)
 		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("line %d: %s", ordinal, err))
-			continue
+			return nil
 		}
 		embeddedKind := rec.Source.Kind
 		if sourceOverride != "" && embeddedKind != "" && embeddedKind != sourceOverride && !warnedOverrideKinds[embeddedKind] {
@@ -193,7 +191,7 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		inserted, err := upsertRecord(tx, rec, sourcePath, ordinal, line)
 		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("line %d: %s", ordinal, err))
-			continue
+			return nil
 		}
 		if inserted {
 			result.Inserted++
@@ -201,12 +199,13 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		batchCount++
 		if batchCount >= importBatchSize {
 			if err := flush(true); err != nil {
-				return AdapterResult{}, err
+				return err
 			}
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return AdapterResult{}, err
+		return nil
+	})
+	if scanErr != nil {
+		return AdapterResult{}, scanErr
 	}
 	sourceHash := "sha256:" + hex.EncodeToString(h.Sum(nil))
 	if sourceKind == "" {
