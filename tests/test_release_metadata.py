@@ -14,38 +14,32 @@ def _release_changelog(version: str) -> str:
     return text[start:end]
 
 
-def test_current_release_has_expected_v025_release_notes():
-    assert __version__ == "0.25.0"
+def test_current_release_has_expected_v0251_release_notes():
+    assert __version__ == "0.25.1"
     assert "no release has shipped from this entry" not in (ROOT / "CHANGELOG.md").read_text()
 
     text = _release_changelog(__version__)
 
     assert text.count("### Added") == 1
-    assert text.count("### Deprecated") == 1
     assert text.count("### Fixed") == 1
+    assert text.count("### Removed") == 1
+    assert text.count("### Deprecated") == 0
     for expected in (
-        "one verified asset set for `brigade setup`",
-        "explicit `stable` and `beta` update channels",
-        "Phase 4A policy documents migration and archive gates",
-        "The compatibility window is active as of the v0.25.0 publication",
-        "does not authorize archival",
-        "direct `miseledger` Cargo feature",
-        "`graphtrail context --evidence`",
-        "`graphtrail links`",
-        "at least two minor GraphTrail releases or 90 days",
-        "`brigade code sync`",
-        "`brigade evidence crawl`",
-        "In-house repository and release-input guard policies",
-        "only approved agent co-author trailers",
-        "outbound public policies still strip them",
-        "completed closeout does not re-arm",
-        "SessionFind command-list help output",
-        "#364 / #398",
-        "#399",
-        "#392",
-        "#386 / #396",
-        "#380 / #395",
-        "#393",
+        "owns crawler runtime selection",
+        "read-only compatibility check before delegating to MiseLedger",
+        "`NO_PENDING` queue no longer masks a failed producer",
+        "preflight `cloudflare-ai-gateway/` seats",
+        "`CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_GATEWAY_ID`",
+        "more than one enabled producer can write the same memory-care queue artifact",
+        "obsolete standalone `brigade-work-loop.py` hook",
+        "skips an oversized JSONL line instead of aborting",
+        "`solo-mise` command alias",
+        "#404",
+        "#394",
+        "#403",
+        "#397",
+        "#420",
+        "#421",
     ):
         assert expected in text
 

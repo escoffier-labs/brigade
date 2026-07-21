@@ -4,7 +4,7 @@
     "social drafts, and docs that will be published, not just pushed.",
     "Use via: brigade scrub --policy public-content"
   ],
-  "_brigade_version": "0.25.0",
+  "_brigade_version": "0.25.1",
   "categories": {
     "secret": "block",
     "private-network": "block",
