@@ -114,6 +114,7 @@ def test_phase_4a_compatibility_and_archive_policy_is_tracked():
         "Archiving a mirror freezes it read-only on GitHub. It deletes nothing.",
         "- [ ] Confirm migration notices as ordinary commits on both mirrors.",
         "- [ ] Verify that neither standalone `master` branch was rewritten or force-pushed.",
+        "- [ ] Update product and documentation links to the Brigade release path.",
         "- [ ] Archive `escoffier-labs/graphtrail`.",
         "- [ ] Archive `escoffier-labs/miseledger`.",
     ):
