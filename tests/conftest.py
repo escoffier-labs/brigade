@@ -71,6 +71,11 @@ def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
     monkeypatch.setenv("XDG_DATA_HOME", str(data_root))
     monkeypatch.setenv("LOCALAPPDATA", str(data_root))
 
+    # A developer shell may export engine overrides (GRAPHTRAIL_BIN, ...);
+    # clear them so the override channel only fires when a test sets it.
+    for env_var in component_bins.ENV_OVERRIDES.values():
+        monkeypatch.delenv(env_var, raising=False)
+
     real_resolve = component_bins.resolve
     baseline_path = os.environ.get("PATH", "")
     baseline_entries = set(filter(None, baseline_path.split(os.pathsep)))

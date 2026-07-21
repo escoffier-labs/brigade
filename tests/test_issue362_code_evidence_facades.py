@@ -422,7 +422,9 @@ def test_evidence_crawl_plan_stays_plan_only_and_preserves_json_contract(monkeyp
     assert rc == 0
     assert calls == []
     assert payload["kind"] == "crawl"
-    assert ["miseledger", "crawl", "sessions"] in payload["commands"]
+    # The plan emits the resolved miseledger path so the commands run
+    # regardless of the invoking shell's PATH.
+    assert ["/fake/miseledger", "crawl", "sessions"] in payload["commands"]
 
 
 # --- legacy health/plan JSON contracts (must keep passing) ------------------

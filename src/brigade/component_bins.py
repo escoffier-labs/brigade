@@ -90,6 +90,8 @@ def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     home_path = Path(home) if home else Path.home()
     for relative in _LEGACY_RELATIVE.get(name, ()):
         legacy = home_path / relative
+        if os.name == "nt" and legacy.suffix.lower() != ".exe":
+            legacy = legacy.with_suffix(".exe")
         if _is_executable(legacy):
             return str(legacy)
     return None

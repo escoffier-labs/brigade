@@ -327,18 +327,19 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
 def crawl_plan_payload(*, target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     binary = evidence_brief._miseledger_bin()
+    miseledger_cmd = binary or "miseledger"
     return {
         "target": str(target),
         "kind": "crawl",
         "created_at": _now(),
         "installed": binary is not None,
         "commands": [
-            ["miseledger", "init"],
-            ["miseledger", "crawl", "sessions"],
-            ["miseledger", "crawl", "files", "--root", str(target)],
-            ["miseledger", "crawl", "gitlog", "--repo", str(target)],
-            ["miseledger", "status", "--json"],
-            ["miseledger", "doctor"],
+            [miseledger_cmd, "init"],
+            [miseledger_cmd, "crawl", "sessions"],
+            [miseledger_cmd, "crawl", "files", "--root", str(target)],
+            [miseledger_cmd, "crawl", "gitlog", "--repo", str(target)],
+            [miseledger_cmd, "status", "--json"],
+            [miseledger_cmd, "doctor"],
         ],
         "manual_steps": [
             "Run crawls on the machine that holds the harness session logs (often the agent host).",
