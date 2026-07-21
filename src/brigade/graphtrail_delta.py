@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -13,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import code_references
+from . import code_references, component_bins
 
 SNAPSHOT_NAME = "graphtrail-before.db"
 SNAPSHOT_AFTER_NAME = "graphtrail-after.db"
@@ -270,14 +269,7 @@ def _compact_summary(delta: dict[str, Any] | None) -> str:
 
 
 def _graphtrail_bin() -> str | None:
-    override = os.environ.get("GRAPHTRAIL_BIN")
-    if override and Path(override).is_file():
-        return override
-    found = shutil.which("graphtrail")
-    if found:
-        return found
-    fallback = Path.home() / ".cargo" / "bin" / "graphtrail"
-    return str(fallback) if fallback.is_file() else None
+    return component_bins.resolve("graphtrail")
 
 
 def _run_graphtrail(

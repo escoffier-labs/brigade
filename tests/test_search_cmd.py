@@ -28,6 +28,9 @@ def test_search_status_ok_with_graphtrail(monkeypatch, tmp_path):
         return f"/x/{cmd}" if cmd == "graphtrail" else None
 
     monkeypatch.setattr(search_cmd.proc, "which", which)
+    monkeypatch.setattr(
+        search_cmd.component_bins, "resolve", lambda name, **kw: f"/x/{name}" if name == "graphtrail" else None
+    )
 
     def fake_run(args, **kw):
         if args[:2] == ["/x/graphtrail", "doctor"]:
@@ -49,6 +52,9 @@ def test_search_status_unwired_without_db(monkeypatch, tmp_path):
         return f"/x/{cmd}" if cmd == "graphtrail" else None
 
     monkeypatch.setattr(search_cmd.proc, "which", which)
+    monkeypatch.setattr(
+        search_cmd.component_bins, "resolve", lambda name, **kw: f"/x/{name}" if name == "graphtrail" else None
+    )
     monkeypatch.setattr(
         search_cmd.proc,
         "run",

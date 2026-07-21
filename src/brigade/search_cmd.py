@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import proc
+from . import component_bins, proc
 from . import station_health as health
 
 
@@ -39,7 +39,7 @@ BOUNDARIES = [
 
 def status_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    graphtrail_bin = proc.which("graphtrail")
+    graphtrail_bin = component_bins.resolve("graphtrail")
     api_bin = proc.which("code-search-api")
     mcp_bin = proc.which("code-search-mcp")
     db = target / ".graphtrail" / "graphtrail.db"
@@ -221,7 +221,7 @@ def sync_plan_payload(*, target: Path) -> dict[str, Any]:
         "title": "search sync plan",
         "created_at": health.now_iso(),
         "installed": {
-            "graphtrail": proc.which("graphtrail") is not None,
+            "graphtrail": component_bins.resolve("graphtrail") is not None,
             "code-search-api": proc.which("code-search-api") is not None,
             "code-search-mcp": proc.which("code-search-mcp") is not None,
         },

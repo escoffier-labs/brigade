@@ -39,19 +39,41 @@ def _isolate_hermes_home(tmp_path_factory, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_managed_tools_on_path(monkeypatch, request):
-    """Default to the bare-host baseline: no managed tool detected on PATH.
+    """Default to the bare-host baseline: no managed tool resolves.
 
-    The doctor folds in installed managed tools, but a dev host may have some
-    of them globally installed. Neutralize detection so checks assert against
-    the documented bare-`$HOME` condition. Tests that exercise installed tools
-    re-patch `managed.proc.which` in their own body, which overrides this.
+    Managed-tool resolution goes through ``component_bins.resolve``, which
+    reaches outside the test sandbox: the developer's real installed.json,
+    legacy install dirs, and real PATH binaries. Left live, the suite behaves
+    differently on a wired dev host than on CI, and can even execute real
+    engine binaries against real archives. This fixture pins the bare-host
+    condition while keeping the two sandboxed channels tests legitimately use:
+    an explicit env override (GRAPHTRAIL_BIN, MISELEDGER_BIN, ...) resolves
+    with full semantics, and a test-modified PATH resolves via plain
+    ``shutil.which``. Tests that need a specific binary re-patch
+    ``component_bins.resolve`` in their own body.
 
-    `tests/test_proc.py` validates `proc.which` against real binaries, and the
-    opt-in adapter write probes must detect their real CLIs. Both modules opt
-    out because patching `managed.proc.which` patches the shared function.
+    `tests/test_proc.py` validates `proc.which` against real binaries, the
+    opt-in adapter write probes must detect their real CLIs, and
+    `tests/test_component_bins.py` tests the real resolution order. Those
+    modules opt out.
     """
-    if request.module.__name__.rsplit(".", 1)[-1] in {"test_proc", "test_agent_write_probes"}:
+    if request.module.__name__.rsplit(".", 1)[-1] in {"test_proc", "test_agent_write_probes", "test_component_bins"}:
         return
-    from brigade import managed
+    import os
+    import shutil
 
+    from brigade import component_bins, managed
+
+    real_resolve = component_bins.resolve
+    baseline_path = os.environ.get("PATH", "")
+
+    def bare_host_resolve(name, *, env=None):
+        environment = env if env is not None else os.environ
+        if environment.get(component_bins.ENV_OVERRIDES.get(name, "")):
+            return real_resolve(name, env=env)
+        if os.environ.get("PATH", "") != baseline_path:
+            return shutil.which(name)
+        return None
+
+    monkeypatch.setattr(component_bins, "resolve", bare_host_resolve)
     monkeypatch.setattr(managed.proc, "which", lambda cmd: None)

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from . import component_bins
 
 HEADING = "## Untrusted run evidence (MiseLedger, read-only)"
 LIMIT_BYTES = 2000
@@ -42,16 +42,7 @@ class EvidenceBrief:
 
 
 def _miseledger_bin() -> str | None:
-    override = os.environ.get("MISELEDGER_BIN")
-    if override:
-        path = Path(override).expanduser()
-        if path.is_file():
-            return str(path)
-        found_override = shutil.which(override)
-        if found_override:
-            return found_override
-        return None
-    return shutil.which("miseledger")
+    return component_bins.resolve("miseledger")
 
 
 def _query(cwd: Path, task: str) -> str:

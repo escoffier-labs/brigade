@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import __version__, localio
+from . import __version__, component_bins, localio
 
 STATE_VERSION = 1
 MANAGED_MCP_NAMES = ("brigade", "graphtrail", "miseledger")
@@ -39,14 +39,21 @@ def _coowned_json_text(payload: object) -> str:
 
 
 def _mcp_servers() -> dict[str, dict[str, Any]]:
+    # Engine servers resolve to the managed absolute path from `brigade setup`
+    # so the generated config does not depend on Cursor's spawn-time PATH. The
+    # bare name is kept only as a pre-setup fallback.
     return {
         "brigade": {
             "command": "brigade",
             "args": ["memory", "serve-mcp", "--stdio", "--target", "."],
             "timeout": 60,
         },
-        "graphtrail": {"command": "graphtrail-mcp"},
-        "miseledger": {"command": "miseledger", "args": ["mcp"], "timeout": 60},
+        "graphtrail": {"command": component_bins.resolve("graphtrail-mcp") or "graphtrail-mcp"},
+        "miseledger": {
+            "command": component_bins.resolve("miseledger") or "miseledger",
+            "args": ["mcp"],
+            "timeout": 60,
+        },
     }
 
 

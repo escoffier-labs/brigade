@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -11,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import proc, work_cmd
+from . import component_bins, proc, work_cmd
 from .localio import (
     read_json_dict as _read_json,
     stable_hash as _stable_hash,
@@ -100,16 +99,9 @@ def _latest_json(root: Path, filename: str) -> dict[str, Any] | None:
 
 
 def _graphtrail_bin() -> str | None:
-    """Resolve the graphtrail binary: $GRAPHTRAIL_BIN, then PATH, then ~/.cargo/bin (so it
-    works even when the spawning environment's PATH omits the cargo bin dir)."""
-    override = os.environ.get("GRAPHTRAIL_BIN")
-    if override and Path(override).is_file():
-        return override
-    found = proc.which("graphtrail")
-    if found:
-        return found
-    fallback = Path.home() / ".cargo" / "bin" / "graphtrail"
-    return str(fallback) if fallback.is_file() else None
+    """Resolve the graphtrail binary: $GRAPHTRAIL_BIN, then the managed install
+    from ``brigade setup``, then PATH, then the legacy ~/.cargo/bin location."""
+    return component_bins.resolve("graphtrail")
 
 
 def _code_graph_summary(target: Path, selected_task: dict[str, Any] | None) -> dict[str, Any] | None:

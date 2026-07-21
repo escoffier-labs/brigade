@@ -23,14 +23,14 @@ def test_code_graph_summary_none_without_db(tmp_target):
 def test_code_graph_summary_none_without_task(tmp_target, monkeypatch):
     tmp_target.mkdir(parents=True)
     _make_db(tmp_target)
-    monkeypatch.setattr(context_cmd.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(context_cmd.component_bins, "resolve", lambda name, **kw: "/x/" + name)
     assert context_cmd._code_graph_summary(tmp_target, None) is None
 
 
 def test_code_graph_summary_parses_and_trims(tmp_target, monkeypatch):
     tmp_target.mkdir(parents=True)
     _make_db(tmp_target)
-    monkeypatch.setattr(context_cmd.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(context_cmd.component_bins, "resolve", lambda name, **kw: "/x/" + name)
 
     pack = {
         "schema_version": 1,
@@ -70,7 +70,7 @@ def test_code_graph_summary_parses_and_trims(tmp_target, monkeypatch):
 def test_code_graph_summary_none_on_nonzero_exit(tmp_target, monkeypatch):
     tmp_target.mkdir(parents=True)
     _make_db(tmp_target)
-    monkeypatch.setattr(context_cmd.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(context_cmd.component_bins, "resolve", lambda name, **kw: "/x/" + name)
     monkeypatch.setattr(context_cmd.proc, "run", lambda args, **kw: proc.Result(code=1, stdout="", stderr="boom"))
     assert context_cmd._code_graph_summary(tmp_target, {"text": "x"}) is None
 

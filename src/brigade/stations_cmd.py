@@ -15,7 +15,7 @@ import time
 from typing import Any
 import unicodedata
 
-from . import managed, profiles, registry, station_manifest
+from . import component_bins, managed, profiles, registry, station_manifest
 from .install import DEFAULT_WIRED_SKILLS
 
 
@@ -733,7 +733,7 @@ def verify_payload(ref: str, *, check_managed: bool = False) -> dict[str, Any]:
         env = _isolated_environment(Path(temp))
         tool_payloads: list[dict[str, Any]] = []
         for tool in manifest.tools:
-            resolved_tool = shutil.which(tool.command) if tool.kind == "executable" else None
+            resolved_tool = component_bins.resolve(tool.command) if tool.kind == "executable" else None
             if resolved_tool:
                 resolved_tool = str(Path(resolved_tool).resolve())
             surfaces = [
