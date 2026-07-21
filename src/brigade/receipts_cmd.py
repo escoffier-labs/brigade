@@ -5,7 +5,6 @@ from __future__ import annotations
 import hmac
 import json
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,6 +14,7 @@ from urllib.parse import urlparse
 
 from . import __version__
 from . import code_references
+from . import component_bins
 from . import localio
 from . import receipt_signing
 
@@ -1241,7 +1241,7 @@ def _import_miseledger_file(
     """
     if failed_on_error is None:
         failed_on_error = strict
-    binary = shutil.which("miseledger")
+    binary = component_bins.resolve("miseledger")
     if binary is None:
         if failed_on_error and strict:
             print(

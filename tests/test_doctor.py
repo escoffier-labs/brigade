@@ -759,6 +759,9 @@ def test_doctor_includes_agent_notify_managed_tool(monkeypatch, tmp_target, caps
     monkeypatch.setenv("TEST_TELEGRAM_BOT_TOKEN", "token")
     monkeypatch.setenv("TEST_TELEGRAM_CHAT_ID", "chat")
     monkeypatch.setattr(managed.proc, "which", lambda c: "/x/" + c if c == "agent-notify" else None)
+    monkeypatch.setattr(
+        managed.component_bins, "resolve", lambda name, **kw: "/x/" + name if name == "agent-notify" else None
+    )
 
     rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
