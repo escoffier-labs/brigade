@@ -63,9 +63,11 @@ Safe fix plans are copied into memory-care imports as metadata so the work inbox
 `brigade memory care scan` writes:
 
 ```text
-memory/cards/decay/scan-latest.json
-memory/cards/decay/refresh-queue.json
+.brigade/memory-care/decay/scan-latest.json
+.brigade/memory-care/decay/refresh-queue.json
 ```
+
+Before 0.9.1, scans wrote to `memory/cards/decay/`. Readers still fall back to that location when the default path has no `scan-latest.json` and the legacy path has existing output, so existing workspaces keep their queue continuity.
 
 Queue entries include card identity, issue type, severity, priority, safe summary, evidence references, suggested refresh action, acceptance criteria, source item key, source fingerprint, and safe fix-plan metadata when available. `brigade memory care import-issues` imports those entries as source `memory-care` task imports with dedupe and dismissed-until-changed behavior.
 
