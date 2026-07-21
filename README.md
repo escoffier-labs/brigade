@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Local control plane for multi-agent coding: share MCP, tools, and memory; remember across sessions; prove runs with file receipts; improve only from real exit codes. Code intelligence (GraphTrail) and evidence memory (MiseLedger) are built-in engines. Optional stations like Agent Pantry plug into the same loop. Diff before every write. No daemon, no lock-in.
+  Local control plane for multi-agent coding: share MCP, tools, and memory; remember across sessions; prove runs with file receipts; improve only from real exit codes. Two features are built in: Code, a code-intelligence graph (formerly GraphTrail), and Evidence, a receipt and memory ledger (formerly MiseLedger). Optional stations like Agent Pantry plug into the same loop. Diff before every write. No daemon, no lock-in.
 </p>
 
 <p align="center">
@@ -21,6 +21,8 @@
   <img src="https://shieldcn.dev/pypi/v/brigade-cli.svg?label=pypi&size=xs" alt="PyPI version">
   <img src="https://shieldcn.dev/pypi/dm/brigade-cli.svg?size=xs" alt="PyPI downloads per month">
   <img src="https://shieldcn.dev/badge/python-3.10+-blue.svg?logo=python&logoColor=white&size=xs" alt="Python 3.10+">
+  <img src="https://shieldcn.dev/badge/rust-Code_engine-b7410e.svg?logo=rust&logoColor=white&size=xs" alt="Rust: the Code engine">
+  <img src="https://shieldcn.dev/badge/go-Evidence_engine-00add8.svg?logo=go&logoColor=white&size=xs" alt="Go: the Evidence engine">
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
@@ -89,9 +91,9 @@ Self-improving means the fleet gets better from measured work, not from the mode
 <p align="center">
   <a href="https://brigade.tools"><img src="docs/assets/marks/brigade-circle.svg" alt="Brigade" width="40" height="40"></a>
   &nbsp;
-  <a href="https://brigade.tools/graphtrail"><img src="docs/assets/marks/graphtrail-circle.svg" alt="GraphTrail" width="40" height="40"></a>
+  <a href="https://brigade.tools/code-intelligence"><img src="docs/assets/marks/graphtrail-circle.svg" alt="Code (formerly GraphTrail)" width="40" height="40"></a>
   &nbsp;
-  <a href="https://brigade.tools/miseledger"><img src="docs/assets/marks/miseledger-circle.svg" alt="MiseLedger" width="40" height="40"></a>
+  <a href="https://brigade.tools/evidence-memory"><img src="docs/assets/marks/miseledger-circle.svg" alt="Evidence (formerly MiseLedger)" width="40" height="40"></a>
   &nbsp;
   <a href="https://brigade.tools/agentpantry"><img src="docs/assets/marks/agentpantry-circle.svg" alt="Agent Pantry" width="40" height="40"></a>
   &nbsp;
@@ -104,12 +106,12 @@ Self-improving means the fleet gets better from measured work, not from the mode
 
 <p align="center"><em>Hub marks (circular + hairline). Each links to its <code>brigade.tools/…</code> page.</em></p>
 
-GraphTrail and MiseLedger are Brigade's engines, not separate products. Their source lives in this repository under `engines/`, and `brigade setup` installs `graphtrail`, `graphtrail-mcp`, `miseledger`, and `sessionfind` from the running CLI's exact release manifest, digest-verified, with no Rust or Go toolchain required. Optional stations stay in their own repos; use `brigade add <station>` for pantry, tokens, and other station-specific tools. `status` and `doctor` health-check what is present. Core works with no stations installed.
+Code and Evidence are built-in Brigade features, not separate products. Code is the code-intelligence graph (formerly GraphTrail). Evidence is the receipt and memory ledger (formerly MiseLedger). Their source lives in this repository under `engines/`, and `brigade setup` installs both (the `graphtrail`, `graphtrail-mcp`, `miseledger`, and `sessionfind` binaries) from the running CLI's exact release manifest, digest-verified, with no Rust or Go toolchain required. Optional stations stay in their own repos; use `brigade add <station>` for pantry, tokens, and other station-specific tools. `status` and `doctor` health-check what is present. Core works with no stations installed.
 
 | | Component | Install | Plugs into | Role |
 |---|---|---|---|---|
-| <a href="https://brigade.tools/graphtrail"><img src="docs/assets/marks/graphtrail-circle.svg" width="28" height="28" alt="GraphTrail"></a> | **[GraphTrail](https://brigade.tools/graphtrail)** | `brigade setup` | **Prove** | Code graph; `brigade run` prepends a context pack when a graph exists |
-| <a href="https://brigade.tools/miseledger"><img src="docs/assets/marks/miseledger-circle.svg" width="28" height="28" alt="MiseLedger"></a> | **[MiseLedger](https://brigade.tools/miseledger)** | `brigade setup` | **Prove** / **Remember** | Evidence ledger; export briefs into the next work context |
+| <a href="https://brigade.tools/code-intelligence"><img src="docs/assets/marks/graphtrail-circle.svg" width="28" height="28" alt="Code"></a> | **[Code](https://brigade.tools/code-intelligence)** (formerly GraphTrail) | `brigade setup` | **Prove** | Code-intelligence graph; `brigade run` prepends a context pack when a graph exists |
+| <a href="https://brigade.tools/evidence-memory"><img src="docs/assets/marks/miseledger-circle.svg" width="28" height="28" alt="Evidence"></a> | **[Evidence](https://brigade.tools/evidence-memory)** (formerly MiseLedger) | `brigade setup` | **Prove** / **Remember** | Receipt and memory ledger; export briefs into the next work context |
 | <a href="https://brigade.tools/agentpantry"><img src="docs/assets/marks/agentpantry-circle.svg" width="28" height="28" alt="Agent Pantry"></a> | **[Agent Pantry](https://brigade.tools/agentpantry)** | `brigade add pantry` | **Share** | Encrypted browser-session / secret sync across machines |
 | <a href="https://brigade.tools/content-guard"><img src="docs/assets/marks/content-guard-circle.svg" width="28" height="28" alt="Content Guard"></a> | **[Content Guard](https://brigade.tools/content-guard)** | built in (`guard` / `scrub`) | **Share** / **Remember** | Secrets and PII scan before publish ([docs](docs/security.md)) |
 | <a href="https://brigade.tools/skillet"><img src="docs/assets/marks/skillet-circle.svg" width="28" height="28" alt="Skillet"></a> | **[Skills / Skillet](https://brigade.tools/skillet)** | built-in on init; Skillet roster optional | **Improve** | Portable skills; reconcile promotes or rolls them back |
@@ -122,7 +124,7 @@ brigade add tokens
 brigade status --target .
 ```
 
-GraphTrail and MiseLedger ship from this repository's unified releases. The remaining rows are optional stations with their own repos. For one release, `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain compatibility paths for independent installations. They are not required after `brigade setup`.
+Code and Evidence ship from this repository's unified releases. The remaining rows are optional stations with their own repos. For one release, `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain compatibility paths for the old standalone installs. They are not required after `brigade setup`.
 
 Capability pages: [Code Intelligence](https://brigade.tools/code-intelligence) · [Evidence Memory](https://brigade.tools/evidence-memory). Station pages: [Agent Pantry](https://brigade.tools/agentpantry) · [Content Guard](https://brigade.tools/content-guard) · [Skillet](https://brigade.tools/skillet) · [Token Glace](https://brigade.tools/token-glace). Full station reference (install, profiles, `brigade add`, contract): [docs/station-contract.md](docs/station-contract.md).
 
@@ -247,7 +249,7 @@ All of them get handoff templates and ingest source coverage. Most also get proj
 
 The same review-and-receipt pattern covers the rest of an operator's day, and you can ignore all of it until you need it. Most of these live behind `brigade extras on`, one command that adds the 18 operator-suite groups (release trains, fleet health, mission control, research, chat archives) to the CLI; until then `brigade --help` stays at the 24 core groups.
 
-- **Cross-model runs**: `brigade run "<task>"` plans, dispatches, and synthesizes one bounded task across the agent CLIs in your roster, so an expensive model can think while cheaper ones do the grunt work. It can attach GraphTrail and upstream-drift context under a shared brief budget, then records which briefs attached in `run.json`. `--worktree` runs everything in a detached git checkout that comes back as a reviewable `changes.patch`.
+- **Cross-model runs**: `brigade run "<task>"` plans, dispatches, and synthesizes one bounded task across the agent CLIs in your roster, so an expensive model can think while cheaper ones do the grunt work. It can attach code-graph and upstream-drift context under a shared brief budget, then records which briefs attached in `run.json`. `--worktree` runs everything in a detached git checkout that comes back as a reviewable `changes.patch`.
 - **Daily loop**: `brigade work brief` shows pending work, imports, and warnings; `brigade daily status` keeps it bounded and cheap.
 - **Friction logs**: `brigade friction scan` mines recent notes, handoffs, and session artifacts for reviewable workflow friction.
 - **Security and scrub**: `brigade security scan` is a local read-only scanner for agent workspaces. `brigade scrub` gates content before it leaves the machine, and `brigade guard` exposes the embedded content guard CLI.
