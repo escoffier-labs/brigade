@@ -13,6 +13,7 @@ def test_read_only_enforcement_classification():
     assert agents.read_only_enforcement("grok") == "hard"
     assert agents.read_only_enforcement("goose") == "soft"
     assert agents.read_only_enforcement("crush") == "soft"
+    assert agents.read_only_enforcement("kimi") == "soft"
     assert agents.read_only_enforcement("claude") == "none"
     assert agents.read_only_enforcement("opencode") == "none"
     assert agents.read_only_enforcement("ollama:llama3") == "none"
