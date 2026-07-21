@@ -1058,10 +1058,30 @@ conflict_window = "02:55-03:15"
 
 
 def test_doctor_no_collision_with_shipped_scanners_toml(tmp_target: Path, monkeypatch):
-    """The repo's shipped scanners.toml contains only memory-care consumers; no collision."""
+    """A scanners.toml of only memory-care CONSUMERS (like the shipped one) is no collision.
+
+    Mirrors the shipped registry's memory-care entries (queue readers, not the
+    ``brigade memory care scan`` writer) as an inline fixture, so the test stays
+    hermetic and never reads the repo's own gitignored .brigade/scanners.toml.
+    """
     _write_memory_care_config(tmp_target)  # default Brigade output path
-    shipped = Path(__file__).parent.parent.joinpath(".brigade", "scanners.toml").read_text()
-    _write_scanners_toml(tmp_target, shipped)
+    shipped_consumers = (
+        "[[scanner]]\n"
+        "id = 'memory-refresh'\n"
+        "source = 'memory-refresh'\n"
+        "command = 'brigade work import memory-refresh --json'\n"
+        "cadence = 'daily@02:45'\n"
+        "enabled = true\n"
+        "output_path = 'memory/cards/decay/refresh-queue.json'\n\n"
+        "[[scanner]]\n"
+        "id = 'memory-care'\n"
+        "source = 'memory-care'\n"
+        "command = 'brigade memory care import-issues --json'\n"
+        "cadence = 'daily@03:00'\n"
+        "enabled = false\n"
+        "output_path = 'memory/cards/decay/refresh-queue.json'\n"
+    )
+    _write_scanners_toml(tmp_target, shipped_consumers)
     # Point HOME at the temp target so any host-global cron state is isolated.
     openclaw_dir = tmp_target / ".openclaw"
     (openclaw_dir / "cron").mkdir(parents=True)
