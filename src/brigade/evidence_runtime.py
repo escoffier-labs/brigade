@@ -286,7 +286,10 @@ def check_compatibility(runtime: CrawlerRuntime, env: dict[str, str] | None = No
     if runtime.override is not None:
         default_path = shutil.which(runtime.binary_name, path=env.get("PATH"))
         if runtime.resolved_path != default_path:
-            state = "warn"
+            # Surface override drift, but never downgrade a version-floor / capability
+            # failure to warn - an incompatible runtime must still be refused.
+            if state != "fail":
+                state = "warn"
             detail_parts.append(
                 f"override binary {runtime.override} resolves to a different path than default {runtime.binary_name}"
             )

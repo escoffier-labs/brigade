@@ -188,3 +188,23 @@ def test_check_compatibility_warns_on_override_different_path(monkeypatch, tmp_p
 
     assert compat.state == "warn"
     assert "override binary" in compat.detail
+
+
+def test_check_compatibility_override_drift_does_not_downgrade_version_fail(monkeypatch, tmp_path):
+    # An override binary below the version floor must stay FAIL even though it
+    # also drifts from the default path - override drift must never mask an
+    # incompatible runtime, or _run_crawl would stop refusing it.
+    bin_dir = _make_bin(tmp_path)
+    _write_script(bin_dir / "discrawl", _discrawl_script(version="0.8.0"))
+    override_dir = tmp_path / "override"
+    override_dir.mkdir()
+    override = _write_script(override_dir / "discrawl", _discrawl_script(version="0.7.0"))
+    monkeypatch.setenv("PATH", _path_with(tmp_path, bin_dir))
+    monkeypatch.setenv("DISCORD_CRAWLER_BIN", str(override))
+    runtime = evidence_runtime.resolve_crawler("discord")
+
+    assert runtime is not None
+    compat = evidence_runtime.check_compatibility(runtime)
+
+    assert compat.state == "fail"
+    assert "version below floor" in compat.detail
