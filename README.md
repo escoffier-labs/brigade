@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Local control plane for multi-agent coding: share MCP, tools, and memory; remember across sessions; prove runs with file receipts; improve only from real exit codes. Optional stations (GraphTrail, MiseLedger, Agent Pantry) plug into that loop. Diff before every write. No daemon, no lock-in.
+  Local control plane for multi-agent coding: share MCP, tools, and memory; remember across sessions; prove runs with file receipts; improve only from real exit codes. Code intelligence (GraphTrail) and evidence memory (MiseLedger) are built-in engines. Optional stations like Agent Pantry plug into the same loop. Diff before every write. No daemon, no lock-in.
 </p>
 
 <p align="center">
@@ -104,9 +104,9 @@ Self-improving means the fleet gets better from measured work, not from the mode
 
 <p align="center"><em>Hub marks (circular + hairline). Each links to its <code>brigade.tools/…</code> page.</em></p>
 
-Brigade is the hub. `brigade setup` installs GraphTrail, `graphtrail-mcp`, MiseLedger, and SessionFind from the running CLI's exact release manifest. Optional stations stay in their own repos; use `brigade add <station>` for pantry, tokens, and other station-specific tools. `status` and `doctor` health-check what is present. Core works with zero sidecars.
+GraphTrail and MiseLedger are Brigade's engines, not separate products. Their source lives in this repository under `engines/`, and `brigade setup` installs `graphtrail`, `graphtrail-mcp`, `miseledger`, and `sessionfind` from the running CLI's exact release manifest, digest-verified, with no Rust or Go toolchain required. Optional stations stay in their own repos; use `brigade add <station>` for pantry, tokens, and other station-specific tools. `status` and `doctor` health-check what is present. Core works with no stations installed.
 
-| | Station | Install | Plugs into | Role |
+| | Component | Install | Plugs into | Role |
 |---|---|---|---|---|
 | <a href="https://brigade.tools/graphtrail"><img src="docs/assets/marks/graphtrail-circle.svg" width="28" height="28" alt="GraphTrail"></a> | **[GraphTrail](https://brigade.tools/graphtrail)** | `brigade setup` | **Prove** | Code graph; `brigade run` prepends a context pack when a graph exists |
 | <a href="https://brigade.tools/miseledger"><img src="docs/assets/marks/miseledger-circle.svg" width="28" height="28" alt="MiseLedger"></a> | **[MiseLedger](https://brigade.tools/miseledger)** | `brigade setup` | **Prove** / **Remember** | Evidence ledger; export briefs into the next work context |
@@ -122,7 +122,7 @@ brigade add tokens
 brigade status --target .
 ```
 
-For one release, `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain compatibility paths for independent installations. They are not required after `brigade setup`.
+GraphTrail and MiseLedger ship from this repository's unified releases. The remaining rows are optional stations with their own repos. For one release, `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain compatibility paths for independent installations. They are not required after `brigade setup`.
 
 Station pages: [GraphTrail](https://brigade.tools/graphtrail) · [MiseLedger](https://brigade.tools/miseledger) · [Agent Pantry](https://brigade.tools/agentpantry) · [Content Guard](https://brigade.tools/content-guard) · [Skillet](https://brigade.tools/skillet) · [Token Glace](https://brigade.tools/token-glace). Full station reference (install, profiles, `brigade add`, contract): [docs/station-contract.md](docs/station-contract.md).
 
