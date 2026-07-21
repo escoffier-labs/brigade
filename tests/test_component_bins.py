@@ -81,27 +81,39 @@ def test_resolve_prefers_managed_over_path(tmp_path, monkeypatch):
     managed = _write_executable(tmp_path / "managed" / "graphtrail")
     on_path = _write_executable(tmp_path / "pathdir" / "graphtrail")
     _write_installed_state(tmp_path / "data", {"graphtrail": managed})
-    monkeypatch.setenv("PATH", str(on_path.parent))
-    assert component_bins.resolve("graphtrail", env=_env(tmp_path)) == str(managed)
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+    env = _env(tmp_path, PATH=str(on_path.parent))
+    assert component_bins.resolve("graphtrail", env=env) == str(managed)
 
 
-def test_resolve_falls_back_to_path(tmp_path, monkeypatch):
+def test_resolve_falls_back_to_supplied_path(tmp_path, monkeypatch):
     on_path = _write_executable(tmp_path / "pathdir" / "graphtrail")
-    monkeypatch.setenv("PATH", str(on_path.parent))
-    assert component_bins.resolve("graphtrail", env=_env(tmp_path)) == str(on_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+    env = _env(tmp_path, PATH=str(on_path.parent))
+    assert component_bins.resolve("graphtrail", env=env) == str(on_path)
 
 
 def test_resolve_falls_back_to_legacy_location(tmp_path, monkeypatch):
     legacy = _write_executable(tmp_path / ".cargo" / "bin" / "graphtrail")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-    assert component_bins.resolve("graphtrail", env=_env(tmp_path)) == str(legacy)
+    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+    env = _env(tmp_path, PATH=str(tmp_path / "empty"))
+    assert component_bins.resolve("graphtrail", env=env) == str(legacy)
 
 
 def test_resolve_unknown_name_uses_path_only(tmp_path, monkeypatch):
     on_path = _write_executable(tmp_path / "pathdir" / "custom-tool")
-    monkeypatch.setenv("PATH", str(on_path.parent))
-    assert component_bins.resolve("custom-tool", env=_env(tmp_path)) == str(on_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+    env = _env(tmp_path, PATH=str(on_path.parent))
+    assert component_bins.resolve("custom-tool", env=env) == str(on_path)
+
+
+def test_resolve_override_tilde_uses_supplied_home(tmp_path, monkeypatch):
+    override_bin = _write_executable(tmp_path / "supplied-home" / "tools" / "graphtrail")
+    monkeypatch.setenv("HOME", str(tmp_path / "host-home"))
+    env = _env(tmp_path, GRAPHTRAIL_BIN="~/tools/graphtrail")
+    env["HOME"] = str(tmp_path / "supplied-home")
+    assert component_bins.resolve("graphtrail", env=env) == str(override_bin)
 
 
 def test_resolve_argv_rewrites_engine_head(tmp_path, monkeypatch):

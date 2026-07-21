@@ -42,15 +42,18 @@ def _mcp_servers() -> dict[str, dict[str, Any]]:
     # Engine servers resolve to the managed absolute path from `brigade setup`
     # so the generated config does not depend on Cursor's spawn-time PATH. The
     # bare name is kept only as a pre-setup fallback.
+    def _absolute(resolved: str | None, fallback: str) -> str:
+        return str(Path(resolved).expanduser().resolve()) if resolved else fallback
+
     return {
         "brigade": {
             "command": "brigade",
             "args": ["memory", "serve-mcp", "--stdio", "--target", "."],
             "timeout": 60,
         },
-        "graphtrail": {"command": component_bins.resolve("graphtrail-mcp") or "graphtrail-mcp"},
+        "graphtrail": {"command": _absolute(component_bins.resolve("graphtrail-mcp"), "graphtrail-mcp")},
         "miseledger": {
-            "command": component_bins.resolve("miseledger") or "miseledger",
+            "command": _absolute(component_bins.resolve("miseledger"), "miseledger"),
             "args": ["mcp"],
             "timeout": 60,
         },

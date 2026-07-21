@@ -43,6 +43,17 @@ def _is_executable(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
+def _expand_home(value: str, environment: Mapping[str, str]) -> Path:
+    """Expand a leading ``~`` against the supplied environment's HOME."""
+    home = environment.get("HOME")
+    if home:
+        if value == "~":
+            return Path(home)
+        if value.startswith("~/"):
+            return Path(home) / value[2:]
+    return Path(value).expanduser()
+
+
 def managed_path(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     """Return the installed.json executable for ``name`` when present on disk."""
     try:
@@ -65,7 +76,7 @@ def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     search_path = environment.get("PATH")
     override = environment.get(ENV_OVERRIDES.get(name, ""))
     if override:
-        candidate = Path(override).expanduser()
+        candidate = _expand_home(override, environment)
         if _is_executable(candidate):
             return str(candidate)
         return shutil.which(override, path=search_path)
@@ -76,7 +87,7 @@ def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     if found:
         return found
     home = environment.get("HOME")
-    home_path = Path(home).expanduser() if home else Path.home()
+    home_path = Path(home) if home else Path.home()
     for relative in _LEGACY_RELATIVE.get(name, ()):
         legacy = home_path / relative
         if _is_executable(legacy):

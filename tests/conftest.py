@@ -38,7 +38,7 @@ def _isolate_hermes_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_managed_tools_on_path(monkeypatch, request):
+def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
     """Default to the bare-host baseline: no managed tool resolves.
 
     Managed-tool resolution goes through ``component_bins.resolve``, which
@@ -63,6 +63,13 @@ def _no_managed_tools_on_path(monkeypatch, request):
     import shutil
 
     from brigade import component_bins, managed
+
+    # Point the managed-component data root at a temp dir so nothing in the
+    # suite (component_bins.managed_path, doctor's components check) reads the
+    # developer's real installed.json or managed bin dir.
+    data_root = tmp_path_factory.mktemp("component_data")
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_root))
+    monkeypatch.setenv("LOCALAPPDATA", str(data_root))
 
     real_resolve = component_bins.resolve
     baseline_path = os.environ.get("PATH", "")
