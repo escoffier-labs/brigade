@@ -27,7 +27,7 @@ def test_current_release_has_expected_v025_release_notes():
         "one verified asset set for `brigade setup`",
         "explicit `stable` and `beta` update channels",
         "Phase 4A policy documents migration and archive gates",
-        "The compatibility window has not started",
+        "The compatibility window is active as of the v0.25.0 publication",
         "does not authorize archival",
         "direct `miseledger` Cargo feature",
         "`graphtrail context --evidence`",

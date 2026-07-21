@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Native component releases now publish one verified asset set for `brigade setup`, and `brigade update` has explicit `stable` and `beta` update channels. (#364 / #398)
-- The Phase 4A policy documents migration and archive gates for GraphTrail, GraphTrail MCP, MiseLedger, and SessionFind. The compatibility window has not started, and the policy does not authorize archival. (#399)
+- The Phase 4A policy documents migration and archive gates for GraphTrail, GraphTrail MCP, MiseLedger, and SessionFind. The compatibility window is active as of the v0.25.0 publication, and the policy does not authorize archival. (#399)
 
 ### Deprecated
 - GraphTrail's direct `miseledger` Cargo feature, `graphtrail context --evidence`, and `graphtrail links` are deprecated. They remain functional for at least two minor GraphTrail releases or 90 days after the first GraphTrail release containing this deprecation, whichever is longer. Use `brigade code sync`, `brigade code context`, `brigade code impact`, `brigade evidence crawl`, `brigade evidence search`, and `brigade evidence doctor`. (#392)
