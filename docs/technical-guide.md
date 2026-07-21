@@ -190,7 +190,7 @@ Or, to track `main`:
 pipx install git+https://github.com/escoffier-labs/brigade
 ```
 
-The workspace config directory is `.brigade` (older `.solo-mise` installs are still read), and the `solo-mise` command is a deprecated alias for `brigade`.
+The workspace config directory is `.brigade` (older `.solo-mise` installs are still read).
 
 ## Quick path
 

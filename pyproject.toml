@@ -49,7 +49,6 @@ Issues = "https://github.com/escoffier-labs/brigade/issues"
 
 [project.scripts]
 brigade = "brigade.cli:main"
-solo-mise = "brigade.cli:main_deprecated"
 
 [tool.setuptools.packages.find]
 where = ["src"]
