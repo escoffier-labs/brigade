@@ -201,7 +201,11 @@ def _run_crawl(arguments: list[str]) -> int:
     pass-through flag does not exist today and is a MiseLedger-side follow-up.
     """
 
-    source = arguments[0] if arguments else None
+    raw_source = arguments[0] if arguments else None
+    # Normalize the source for gating so a differently-cased spelling (e.g.
+    # "Discord") cannot bypass the compatibility gate; the original arguments are
+    # still passed to MiseLedger unchanged.
+    source = raw_source.lower() if raw_source is not None else None
     env = dict(os.environ)
     target = Path.cwd().expanduser().resolve()
     started_at = _now()

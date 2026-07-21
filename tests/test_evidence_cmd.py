@@ -222,6 +222,29 @@ def test_crawl_refuses_unreadable_archive(monkeypatch, tmp_path):
     assert "schema-too-new" in last_run["detail"]
 
 
+def test_crawl_gate_is_case_insensitive(monkeypatch, tmp_path):
+    # A differently-cased source (e.g. "Discord") must not bypass the
+    # compatibility gate; it is normalized to the "discord" contract and refused.
+    monkeypatch.chdir(tmp_path)
+    _write_fake_bin(tmp_path, "discrawl", _discrawl_script(database="schema-too-new"))
+    marker = tmp_path / "miseledger_invoked.txt"
+    miseledger = _write_fake_bin(
+        tmp_path,
+        "miseledger",
+        f'echo "invoked" > "{marker}"\nexit 0\n',
+    )
+    monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+
+    rc = evidence_cmd.run_engine("crawl", ["Discord"])
+
+    assert rc == 1
+    assert not marker.exists()
+    last_run = evidence_cmd._read_last_run(tmp_path, "discord")
+    assert last_run is not None
+    assert last_run["status"] == "fail"
+
+
 def test_crawl_delegates_with_crawler_dir_on_path(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     _write_fake_bin(tmp_path, "discrawl", _discrawl_script())
