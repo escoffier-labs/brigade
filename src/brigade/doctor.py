@@ -70,7 +70,16 @@ def _check_claude_work_loop(target: Path) -> CheckResult | None:
     if payload is None:
         return None
     status = OK if payload["state"] == "enforced" else WARN
-    return (status, "claude work loop", str(payload["detail"]))
+    detail = str(payload["detail"])
+    hooks = payload.get("hooks") or {}
+    legacy_count = hooks.get("legacy_handler_count", 0)
+    if legacy_count:
+        status = WARN
+        detail = (
+            f"{detail}; {legacy_count} legacy hook handler(s) in .claude/settings.json - "
+            f"run `brigade work hooks install --target {target}` to reconcile"
+        )
+    return (status, "claude work loop", detail)
 
 
 def memory_station_checks(ctx: DoctorContext) -> List[CheckResult]:

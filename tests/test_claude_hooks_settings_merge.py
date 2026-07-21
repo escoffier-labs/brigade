@@ -7,7 +7,12 @@ from pathlib import Path
 
 from brigade import cli
 from brigade.claude_hooks.install_cmd import hooks_install, hooks_status, hooks_uninstall, hooks_update, status_payload
-from brigade.claude_hooks.package import PACKAGE_ID, PACKAGE_VERSION, managed_command
+from brigade.claude_hooks.package import (
+    PACKAGE_ID,
+    PACKAGE_VERSION,
+    is_legacy_handler,
+    managed_command,
+)
 from brigade.install import install_selection
 from brigade.selection import Selection
 
@@ -316,3 +321,224 @@ def test_claude_templates_import_agents_md():
     for rel in ("repo/CLAUDE.md", "workspace/CLAUDE.md"):
         text = (root / rel).read_text()
         assert any(line.strip() == "@AGENTS.md" for line in text.splitlines())
+
+
+LEGACY_WORK_LOOP_CMD = "python3 hooks/brigade-work-loop.py --event SessionStart"
+
+
+def _legacy_handler(event: str) -> dict[str, str]:
+    return {
+        "type": "command",
+        "command": LEGACY_WORK_LOOP_CMD.replace("SessionStart", event),
+    }
+
+
+def test_hooks_install_removes_legacy_standalone_handler_and_is_idempotent(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    settings = target / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    seeded = {
+        "hooks": {
+            "SessionStart": [{"hooks": [_legacy_handler("SessionStart")]}],
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        _legacy_handler("PreToolUse"),
+                        {"type": "command", "command": "echo foreign-pretool"},
+                    ],
+                }
+            ],
+        }
+    }
+    settings.write_text(json.dumps(seeded, indent=2) + "\n")
+
+    assert hooks_install(target=target) == 0
+    after_first = json.loads(settings.read_text())
+    pre_cmds = [
+        handler["command"]
+        for group in after_first["hooks"]["PreToolUse"]
+        for handler in group.get("hooks", [])
+        if isinstance(handler, dict)
+    ]
+    assert "echo foreign-pretool" in pre_cmds
+    assert not any("brigade-work-loop.py" in cmd for cmd in pre_cmds)
+    session_cmds = [
+        handler["command"]
+        for group in after_first["hooks"]["SessionStart"]
+        for handler in group.get("hooks", [])
+        if isinstance(handler, dict)
+    ]
+    assert not any("brigade-work-loop.py" in cmd for cmd in session_cmds)
+    assert any(cmd.startswith("brigade work hook-run") for cmd in session_cmds)
+
+    before_second = settings.read_text()
+    assert hooks_install(target=target) == 0
+    assert settings.read_text() == before_second
+
+
+def test_is_legacy_handler_anchors_to_executable_position():
+    # False positives: mentions of the filename in non-executable positions.
+    assert is_legacy_handler({"type": "command", "command": "grep -r brigade-work-loop.py ."}) is False
+    assert is_legacy_handler({"type": "command", "command": "echo hi # brigade-work-loop.py"}) is False
+    assert is_legacy_handler({"type": "command", "command": 'echo "docs/brigade-work-loop.py"'}) is False
+    # Direct executable form.
+    assert (
+        is_legacy_handler(
+            {
+                "type": "command",
+                "command": "python3 /home/u/.claude/hooks/brigade-work-loop.py --event PreToolUse",
+            }
+        )
+        is True
+    )
+    assert (
+        is_legacy_handler(
+            {
+                "type": "command",
+                "command": "/opt/brigade/hooks/brigade-work-loop.py",
+            }
+        )
+        is True
+    )
+    # Interpreter form with flags.
+    assert (
+        is_legacy_handler(
+            {
+                "type": "command",
+                "command": "python3 -u /x/brigade-work-loop.py",
+            }
+        )
+        is True
+    )
+    # Similar but not matching basenames.
+    assert is_legacy_handler({"type": "command", "command": "/x/brigade-work-loop.py.bak"}) is False
+    assert is_legacy_handler({"type": "command", "command": "/x/my-brigade-work-loop.py"}) is False
+    # Interpreter form that runs a module or inline code, not the script.
+    assert is_legacy_handler({"type": "command", "command": "python3 -c 'print(1)'"}) is False
+    assert is_legacy_handler({"type": "command", "command": "python3 -m brigade_work_loop"}) is False
+
+
+def test_hooks_install_removes_legacy_coexisting_with_managed_and_foreign(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    settings = target / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    seeded = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "hooks": [
+                        _legacy_handler("SessionStart"),
+                        {"type": "command", "command": "echo foreign-session"},
+                        {"type": "command", "command": managed_command("SessionStart")},
+                    ]
+                }
+            ]
+        }
+    }
+    settings.write_text(json.dumps(seeded, indent=2) + "\n")
+
+    assert hooks_update(target=target) == 0
+
+    payload = json.loads(settings.read_text())
+    session_cmds = [
+        handler["command"]
+        for group in payload["hooks"]["SessionStart"]
+        for handler in group.get("hooks", [])
+        if isinstance(handler, dict)
+    ]
+    assert "echo foreign-session" in session_cmds
+    assert not any("brigade-work-loop.py" in cmd for cmd in session_cmds)
+    assert managed_command("SessionStart") in session_cmds
+
+
+def test_hooks_install_removes_legacy_from_multiple_managed_events(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    settings = target / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    seeded = {
+        "hooks": {
+            "SessionStart": [{"hooks": [_legacy_handler("SessionStart")]}],
+            "Stop": [{"hooks": [_legacy_handler("Stop")]}],
+        }
+    }
+    settings.write_text(json.dumps(seeded, indent=2) + "\n")
+
+    before = status_payload(target)
+    assert before["legacy_handler_count"] == 2
+    assert before["legacy_events"] == ["SessionStart", "Stop"]
+
+    assert hooks_install(target=target) == 0
+
+    payload = json.loads(settings.read_text())
+    for event in ("SessionStart", "Stop"):
+        cmds = [
+            handler["command"]
+            for group in payload["hooks"][event]
+            for handler in group.get("hooks", [])
+            if isinstance(handler, dict)
+        ]
+        assert not any("brigade-work-loop.py" in cmd for cmd in cmds)
+        assert managed_command(event) in cmds
+
+    after = status_payload(target)
+    assert after["legacy_handler_count"] == 0
+    assert after["legacy_events"] == []
+
+
+def test_hooks_uninstall_removes_legacy_and_preserves_foreign(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    settings = target / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    seeded = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "hooks": [
+                        _legacy_handler("SessionStart"),
+                        {"type": "command", "command": "echo foreign-session"},
+                    ]
+                }
+            ]
+        }
+    }
+    settings.write_text(json.dumps(seeded, indent=2) + "\n")
+
+    assert hooks_uninstall(target=target) == 0
+
+    payload = json.loads(settings.read_text())
+    cmds = [
+        handler["command"]
+        for group in payload["hooks"]["SessionStart"]
+        for handler in group.get("hooks", [])
+        if isinstance(handler, dict)
+    ]
+    assert cmds == ["echo foreign-session"]
+
+
+def test_status_payload_counts_legacy_and_foreign_as_disjoint(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    settings = target / ".claude" / "settings.json"
+    payload = json.loads(settings.read_text())
+    payload["hooks"]["SessionStart"] = [
+        {
+            "hooks": [
+                _legacy_handler("SessionStart"),
+                {"type": "command", "command": "echo foreign-1"},
+            ]
+        }
+    ]
+    payload["hooks"]["Stop"] = [
+        {
+            "hooks": [
+                _legacy_handler("Stop"),
+                {"type": "command", "command": "echo foreign-2"},
+            ]
+        }
+    ]
+    settings.write_text(json.dumps(payload, indent=2) + "\n")
+
+    status = status_payload(target)
+    assert status["legacy_handler_count"] == 2
+    assert status["foreign_handler_count"] == 2
+    assert status["legacy_events"] == ["SessionStart", "Stop"]

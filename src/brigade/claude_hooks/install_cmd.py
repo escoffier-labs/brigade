@@ -9,7 +9,7 @@ from typing import Any
 
 from .. import localio
 from ..config import load_config
-from .package import MANAGED_EVENTS, PACKAGE_ID, PACKAGE_VERSION, is_managed_handler, managed_groups
+from .package import MANAGED_EVENTS, PACKAGE_ID, PACKAGE_VERSION, is_legacy_handler, is_managed_handler, managed_groups
 
 SETTINGS_REL_PATH = Path(".claude/settings.json")
 SIDECAR_REL_PATH = Path(".brigade/claude-hooks.json")
@@ -35,7 +35,12 @@ def _load_settings(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     return payload, None
 
 
-def _without_managed(groups: object, event: str) -> list[object]:
+def _without_managed_or_legacy(groups: object, event: str) -> list[object]:
+    """Drop managed and legacy standalone handlers, preserving genuine foreign hooks.
+
+    Groups that become empty after dropping handlers are removed so install/update
+    reconciliation is idempotent and does not leave stale empty arrays behind.
+    """
     if not isinstance(groups, list):
         return []
     kept: list[object] = []
@@ -47,7 +52,9 @@ def _without_managed(groups: object, event: str) -> list[object]:
         if not isinstance(handlers, list):
             kept.append(group)
             continue
-        foreign = [handler for handler in handlers if not is_managed_handler(handler)]
+        foreign = [
+            handler for handler in handlers if not is_managed_handler(handler) and not is_legacy_handler(handler)
+        ]
         if foreign:
             updated = dict(group)
             updated["hooks"] = foreign
@@ -64,7 +71,7 @@ def _merge_settings(settings: dict[str, Any]) -> dict[str, Any]:
     hooks: dict[str, Any] = dict(existing_hooks)
     specs = managed_groups()
     for event in MANAGED_EVENTS:
-        hooks[event] = _without_managed(hooks.get(event), event) + specs[event]
+        hooks[event] = _without_managed_or_legacy(hooks.get(event), event) + specs[event]
     merged["hooks"] = hooks
     return merged
 
@@ -78,7 +85,7 @@ def _remove_settings(settings: dict[str, Any]) -> dict[str, Any]:
         if event not in MANAGED_EVENTS or not isinstance(groups, list):
             hooks[event] = groups
             continue
-        cleaned = _without_managed(groups, event)
+        cleaned = _without_managed_or_legacy(groups, event)
         if cleaned:
             hooks[event] = cleaned
     if hooks:
@@ -173,6 +180,8 @@ def status_payload(target: Path) -> dict[str, Any]:
     present: list[str] = []
     current_events: list[str] = []
     foreign_count = 0
+    legacy_count = 0
+    legacy_events: list[str] = []
     expected_groups = managed_groups()
     for event, groups in hooks.items():
         managed_signatures: list[str] = []
@@ -184,6 +193,10 @@ def status_payload(target: Path) -> dict[str, Any]:
                 for handler in handlers:
                     if is_managed_handler(handler, event):
                         managed_signatures.append(_managed_signature(group, handler))
+                    elif is_legacy_handler(handler):
+                        legacy_count += 1
+                        if event not in legacy_events:
+                            legacy_events.append(event)
                     else:
                         foreign_count += 1
         if event in MANAGED_EVENTS and managed_signatures:
@@ -201,6 +214,7 @@ def status_payload(target: Path) -> dict[str, Any]:
     ordered_current = [event for event in MANAGED_EVENTS if event in current_events]
     missing = [event for event in MANAGED_EVENTS if event not in ordered_present]
     stale = [event for event in ordered_present if event not in ordered_current]
+    ordered_legacy_events = [event for event in MANAGED_EVENTS if event in legacy_events]
     return {
         "target": str(target),
         "package_id": PACKAGE_ID,
@@ -212,6 +226,8 @@ def status_payload(target: Path) -> dict[str, Any]:
         "missing_events": missing,
         "stale_events": stale,
         "foreign_handler_count": foreign_count,
+        "legacy_handler_count": legacy_count,
+        "legacy_events": ordered_legacy_events,
         "sidecar": sidecar,
         "error": error,
     }
@@ -229,6 +245,7 @@ def hooks_status(*, target: Path, json_output: bool = False) -> int:
         if payload["missing_events"]:
             print(f"missing: {', '.join(payload['missing_events'])}")
         print(f"foreign_handlers: {payload.get('foreign_handler_count', 0)}")
+        print(f"legacy_handlers: {payload.get('legacy_handler_count', 0)}")
         if payload.get("error"):
             print(f"error: {payload['error']}")
     return 2 if payload.get("error") else 0

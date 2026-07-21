@@ -11,6 +11,7 @@ PACKAGE_VERSION = "1.0.0"
 PACKAGE_REF = f"{PACKAGE_ID}@{PACKAGE_VERSION}"
 COMMAND_PREFIX = "brigade work hook-run"
 MANAGED_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop")
+LEGACY_SCRIPT_NAME = "brigade-work-loop.py"
 
 
 def managed_command(event: str) -> str:
@@ -33,17 +34,28 @@ def managed_groups() -> dict[str, list[dict[str, Any]]]:
     }
 
 
-def is_managed_handler(value: object, event: str | None = None) -> bool:
+def _command_tokens(value: object) -> list[str] | None:
+    """Shell-split a command-type hook handler's command, or None if it is not one.
+
+    Shared by is_managed_handler and is_legacy_handler so both predicates apply
+    the same tokenization rules.
+    """
     if not isinstance(value, dict):
-        return False
+        return None
     if value.get("type") != "command":
-        return False
+        return None
     command = value.get("command")
     if not isinstance(command, str):
-        return False
+        return None
     try:
-        tokens = shlex.split(command)
+        return shlex.split(command)
     except ValueError:
+        return None
+
+
+def is_managed_handler(value: object, event: str | None = None) -> bool:
+    tokens = _command_tokens(value)
+    if tokens is None:
         return False
     parsed_event = tokens[4] if len(tokens) > 4 else None
     return bool(
@@ -56,3 +68,34 @@ def is_managed_handler(value: object, event: str | None = None) -> bool:
         and tokens[6].startswith(f"{PACKAGE_ID}@")
         and len(tokens[6]) > len(PACKAGE_ID) + 1
     )
+
+
+def _is_python_interpreter(token: str) -> bool:
+    name = Path(token).name
+    if name in {"python", "python3"}:
+        return True
+    if name.startswith("python3.") and name[8:].isdigit():
+        return True
+    return False
+
+
+def is_legacy_handler(value: object) -> bool:
+    """Identify obsolete standalone Brigade work-loop hook registrations.
+
+    Matches a command-type handler whose command executes the standalone
+    ``brigade-work-loop.py`` script, either directly as the first token or as
+    the first non-flag argument after an explicit Python interpreter. This is
+    anchored to the executable position so unrelated foreign user hooks that
+    merely mention the filename are never touched.
+    """
+    tokens = _command_tokens(value)
+    if not tokens:
+        return False
+    if Path(tokens[0]).name == LEGACY_SCRIPT_NAME:
+        return True
+    if not _is_python_interpreter(tokens[0]):
+        return False
+    for token in tokens[1:]:
+        if not token.startswith("-"):
+            return Path(token).name == LEGACY_SCRIPT_NAME
+    return False

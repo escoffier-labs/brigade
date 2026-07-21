@@ -625,7 +625,7 @@ Start-of-day commands:
 - `brigade work brief` shows branch state, active sessions, pending tasks, import counts, latest dogfood run, and the command to continue.
 - `brigade work status` is the quick dashboard for branch state, dogfood readiness, paths, latest run, and extracted next step.
 - `brigade work doctor` checks dogfood config, security config, evidence bundles, Codex CLI, artifact paths, handoff inbox, task acceptance, issue-backed tasks, stale active sessions, ignore coverage, and latest run context.
-- `brigade work hooks install|update|status|uninstall` manages the project-scoped Claude Code work-loop package while preserving foreign settings and hooks. The runtime entrypoint is `brigade work hook-run`; it is called by Claude Code rather than by operators.
+- `brigade work hooks install|update|status|uninstall` manages the project-scoped Claude Code work-loop package while preserving foreign settings and hooks. The runtime entrypoint is `brigade work hook-run`; it is called by Claude Code rather than by operators. The work-loop snapshot fingerprint skips normally-gitignored directories such as model caches, virtualenvs (`.venv`), `__pycache__`, `node_modules`, and generated databases.
 - `brigade work resume` shows the active or latest session, latest dogfood run, extracted next step, and suggested command.
 - `brigade work inbox` groups pending scanner imports by source, kind, priority, age, and acceptance coverage, then suggests plan, promote, dismiss, or run commands.
 - `brigade work backup status` reads local backup health summaries and reports snapshot, check, prune, and restore rehearsal risk without running backup commands.

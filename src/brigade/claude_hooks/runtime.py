@@ -449,7 +449,7 @@ def _verifier_target_from_command(command: str, cwd: Path, *, depth: int = 0) ->
     return None
 
 
-def _command_candidate_paths(command: str, cwd: Path, *, depth: int = 0) -> list[Path]:
+def _command_candidate_paths(command: str, cwd: Path, *, depth: int = 0, include_cwd: bool = False) -> list[Path]:
     command = _strip_heredoc_bodies(command)
     candidates: list[Path] = []
     tokenized, groups = _command_segment_groups(command)
@@ -459,7 +459,7 @@ def _command_candidate_paths(command: str, cwd: Path, *, depth: int = 0) -> list
         tokens = []
     nested = _nested_shell_script(tokens)
     if nested is not None and depth < 4:
-        candidates.extend(_command_candidate_paths(nested, cwd, depth=depth + 1))
+        candidates.extend(_command_candidate_paths(nested, cwd, depth=depth + 1, include_cwd=include_cwd))
     if tokenized:
         effective = cwd
         for separator, segment in groups:
@@ -474,6 +474,11 @@ def _command_candidate_paths(command: str, cwd: Path, *, depth: int = 0) -> list
     for index, token in enumerate(tokens[:-1]):
         if Path(token).name == "git" and tokens[index + 1] == "-C" and index + 2 < len(tokens):
             candidates.append(_resolve_command_path(tokens[index + 2], cwd))
+    if include_cwd:
+        # Session cwd takes precedence over incidental bare paths so a command
+        # that merely mentions another wired repo (e.g. `rg pattern {other}/file`)
+        # is still attributed to the session repo, not the mentioned path.
+        candidates.append(cwd)
     for token in tokens:
         if token.startswith("-") or token in _SHELL_SEPARATORS:
             continue
@@ -493,6 +498,7 @@ def wired_target_from_payload(payload: dict[str, Any]) -> Path | None:
         cwd = Path(str(payload.get("cwd") or ".")).expanduser().resolve(strict=False)
     except OSError:
         return resolve_wired_target(payload.get("cwd"))
+    has_cwd = bool(payload.get("cwd"))
     tool_name = str(payload.get("tool_name") or "")
     tool_input = _as_tool_input(payload.get("tool_input"))
     if tool_name == "Bash":
@@ -502,7 +508,7 @@ def wired_target_from_payload(payload: dict[str, Any]) -> Path | None:
             wired = resolve_wired_target(str(verifier_target))
             if wired is not None:
                 return wired
-        for candidate in _command_candidate_paths(command, cwd):
+        for candidate in _command_candidate_paths(command, cwd, include_cwd=has_cwd):
             wired = resolve_wired_target(str(candidate))
             if wired is not None:
                 return wired
