@@ -52,6 +52,14 @@ class ComponentInstallError(RuntimeError):
     """Raised when a component install step fails verification."""
 
 
+class ExactReleaseManifestError(RuntimeError):
+    """Raised when matching update state cannot provide a verified manifest."""
+
+    def __init__(self, message: str, manifest_path: Path) -> None:
+        super().__init__(message)
+        self.manifest_path = manifest_path
+
+
 _SETUP_ACTIONS: tuple[str, ...] = ("verify-cache", "download", "materialize", "smoke")
 
 
@@ -89,6 +97,51 @@ def resolve_roots(
         cache_root=cache_root_path,
         env=environment,
     )
+
+
+def uses_bundled_compatibility_manifest() -> bool:
+    """Return whether automatic manifest selection starts at the bundled fallback."""
+    bundled_path = templates.template_root() / "components" / "manifest-v1.json"
+    return component_manifest.manifest_path() == bundled_path
+
+
+def load_verified_exact_release_manifest(
+    roots: SetupRoots,
+) -> tuple[component_manifest.ComponentManifest, Path] | None:
+    """Read the current release manifest recorded in update state without mutating it."""
+    from brigade import update_cmd
+
+    state_path = Path(component_paths.update_state_path(roots.data_root))
+    state = update_cmd.load_update_state(state_path)
+    if state is None or state.component_tag != f"v{brigade.__version__}":
+        return None
+
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, state.component_manifest_sha256))
+    if not cached.is_file():
+        raise ExactReleaseManifestError("cached exact-release manifest is missing", cached)
+    try:
+        cached_bytes = cached.read_bytes()
+    except OSError as exc:
+        raise ExactReleaseManifestError(f"cached exact-release manifest cannot be read: {exc}", cached) from exc
+    if hashlib.sha256(cached_bytes).hexdigest() != state.component_manifest_sha256:
+        raise ExactReleaseManifestError("cached exact-release manifest digest does not match update state", cached)
+
+    release = update_cmd.ResolvedRelease(
+        state.component_release_id,
+        state.component_tag,
+        brigade.__version__,
+        state.component_target_commit,
+        state.component_manifest_url,
+        len(cached_bytes),
+        state.component_manifest_sha256,
+        cached_bytes,
+    )
+    try:
+        return update_cmd.validate_release_manifest_bytes(release), cached
+    except update_cmd.UpdateError as exc:
+        raise ExactReleaseManifestError(str(exc), cached) from exc
+    except ValueError as exc:
+        raise ExactReleaseManifestError(f"cached exact-release manifest is invalid: {exc}", cached) from exc
 
 
 def build_setup_plan(
@@ -707,8 +760,7 @@ def _load_setup_manifest(
     if manifest_source != "auto":
         raise ComponentInstallError("manifest source must be auto or standalone")
 
-    bundled_path = templates.template_root() / "components" / "manifest-v1.json"
-    if component_manifest.manifest_path() != bundled_path:
+    if not uses_bundled_compatibility_manifest():
         return component_manifest.load(), None
 
     from brigade import update_cmd
@@ -716,25 +768,9 @@ def _load_setup_manifest(
     roots = resolve_roots(env=env)
     try:
         if offline:
-            state_path = Path(component_paths.update_state_path(roots.data_root))
-            state = update_cmd.load_update_state(state_path)
-            if state is not None and state.component_tag == f"v{brigade.__version__}":
-                cached = Path(component_paths.verified_manifest_path(roots.cache_root, state.component_manifest_sha256))
-                if cached.is_file():
-                    cached_bytes = cached.read_bytes()
-                    if hashlib.sha256(cached_bytes).hexdigest() != state.component_manifest_sha256:
-                        raise ComponentInstallError("cached exact-release manifest digest does not match update state")
-                    release = update_cmd.ResolvedRelease(
-                        state.component_release_id,
-                        state.component_tag,
-                        brigade.__version__,
-                        state.component_target_commit,
-                        state.component_manifest_url,
-                        len(cached_bytes),
-                        state.component_manifest_sha256,
-                        cached_bytes,
-                    )
-                    return update_cmd.validate_release_manifest_bytes(release), None
+            cached_manifest = load_verified_exact_release_manifest(roots)
+            if cached_manifest is not None:
+                return cached_manifest[0], None
             raise ComponentInstallError("offline setup requires a verified exact-release manifest cache")
 
         release = update_cmd.resolve_release(update_cmd._DefaultHttp(), latest=False, tag=f"v{brigade.__version__}")
@@ -742,7 +778,7 @@ def _load_setup_manifest(
             update_cmd.UpdatePaths(Path(roots.data_root), Path(roots.cache_root), Path("unused")), release
         )
         return update_cmd.validate_release_manifest_bytes(release), release
-    except update_cmd.UpdateError as exc:
+    except (update_cmd.UpdateError, ExactReleaseManifestError, ValueError) as exc:
         raise ComponentInstallError(f"exact release manifest setup failed: {exc}") from exc
 
 

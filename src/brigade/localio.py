@@ -37,7 +37,7 @@ def read_json_dict(path: Path) -> dict[str, Any] | None:
     """Read a JSON object from path; return None when missing, invalid, or not a dict."""
     try:
         payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
 
