@@ -14,7 +14,7 @@ This file is direction-only. The full per-feature completion detail through v0.8
 - **import / inbox**: a holding queue where found work waits for your review.
 - **receipt**: a local file logging that something happened, kept for audit and proof.
 - **gate**: a manual approval checkpoint; nothing risky happens without your yes.
-- **station**: an optional sidecar tool Brigade installs and health-checks (evidence, pantry, tokens, search, …) without folding its runtime into the Python package.
+- **station**: an optional sidecar tool Brigade installs and health-checks (pantry, tokens, content guard, …) without folding its runtime into the Python package. The Code and Evidence engines are not stations: they ship inside Brigade under `engines/`.
 - **dogfood**: Brigade being used on itself or the maintainer's real setup.
 
 The one rule behind all of it: Brigade writes local files and queues, but it never publishes, edits canonical memory, runs background daemons, or touches remote servers on its own. Everything waits for an explicit command.
