@@ -10,6 +10,13 @@ import pytest
 from brigade import localio
 
 
+def test_read_json_dict_invalid_utf8_returns_none(tmp_path: Path):
+    path = tmp_path / "invalid-utf8.json"
+    path.write_bytes(b'{"value":"\xff"}')
+
+    assert localio.read_json_dict(path) is None
+
+
 def test_write_json_round_trips_and_is_sorted(tmp_path: Path):
     path = tmp_path / "nested" / "receipt.json"
     localio.write_json(path, {"b": 2, "a": 1})

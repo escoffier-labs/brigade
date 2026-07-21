@@ -810,6 +810,24 @@ def test_setup_auto_offline_translates_rejected_cached_manifest_update_errors(tm
     assert "Traceback" not in err
 
 
+def test_setup_auto_online_translates_invalid_release_manifest(tmp_path, monkeypatch):
+    env, _release = _prepare_auto_release_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        update_cmd,
+        "validate_release_manifest_bytes",
+        lambda _release: (_ for _ in ()).throw(ValueError("release manifest is invalid")),
+    )
+
+    with pytest.raises(ComponentInstallError, match="exact release manifest setup failed: release manifest is invalid"):
+        component_install._load_setup_manifest(
+            manifest_path=None,
+            manifest_source="auto",
+            offline=False,
+            opener=FakeOpener({}),
+            env=env,
+        )
+
+
 def test_setup_auto_online_translates_manifest_cache_collisions(tmp_path, monkeypatch, capsys):
     env, release = _prepare_auto_release_setup(tmp_path, monkeypatch)
     roots = resolve_roots(env=env, system="linux")

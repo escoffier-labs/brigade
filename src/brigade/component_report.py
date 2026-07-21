@@ -75,31 +75,62 @@ def inspect_components(
 ) -> ComponentReport:
     """Inspect managed native components without mutating user data."""
     environment = dict(env if env is not None else os.environ)
-    manifest_source = manifest_path or component_manifest.manifest_path()
     manifest_unknown: tuple[str, ...] = ()
     manifest_schema_version: int | None = None
     manifest_revision: str | None = None
     manifest_brigade_version: str | None = None
-    manifest: component_manifest.ComponentManifest | None = None
-    try:
-        manifest = component_manifest.load(manifest_path) if manifest_path is not None else component_manifest.load()
-    except ValueError as exc:
-        return _environment_blocked_report(
-            manifest_source=manifest_source,
-            platform_error=str(exc),
-            manifest=None,
-        )
-    manifest_schema_version = manifest.schema_version
-    manifest_revision = manifest.manifest_revision
-    manifest_brigade_version = manifest.brigade_version
-    manifest_unknown = manifest.unknown_component_diagnostics
-
     roots: component_install.SetupRoots | None = None
     environment_error: str | None = None
     try:
         roots = component_install.resolve_roots(env=environment, system=system)
     except ValueError as exc:
         environment_error = str(exc)
+
+    state_path = Path(
+        component_paths.installed_state_path(roots.data_root if roots is not None else _UNAVAILABLE_DATA_ROOT)
+    )
+    installed_state, state_file_status = _read_installed_state(state_path) if roots is not None else (None, "missing")
+
+    manifest_source = manifest_path or component_manifest.manifest_path()
+    manifest: component_manifest.ComponentManifest | None = None
+    try:
+        if manifest_path is not None:
+            manifest = component_manifest.load(manifest_path)
+        elif roots is not None and component_install.uses_bundled_compatibility_manifest():
+            exact_release_manifest = component_install.load_verified_exact_release_manifest(roots)
+            if exact_release_manifest is None:
+                manifest = component_manifest.load()
+            else:
+                manifest, manifest_source = exact_release_manifest
+                if installed_state is not None and not _installed_state_matches_manifest(installed_state, manifest):
+                    manifest = component_manifest.load()
+                    manifest_source = component_manifest.manifest_path()
+        else:
+            manifest = component_manifest.load()
+    except component_install.ExactReleaseManifestError as exc:
+        return _environment_blocked_report(
+            manifest_source=exc.manifest_path,
+            platform_error=str(exc),
+            manifest=None,
+            roots=roots,
+            state_path=state_path,
+            installed_state=installed_state,
+            state_file_status=state_file_status,
+        )
+    except ValueError as exc:
+        return _environment_blocked_report(
+            manifest_source=manifest_source,
+            platform_error=str(exc),
+            manifest=None,
+            roots=roots,
+            state_path=state_path,
+            installed_state=installed_state,
+            state_file_status=state_file_status,
+        )
+    manifest_schema_version = manifest.schema_version
+    manifest_revision = manifest.manifest_revision
+    manifest_brigade_version = manifest.brigade_version
+    manifest_unknown = manifest.unknown_component_diagnostics
 
     platform: str | None = None
     platform_error: str | None = environment_error
@@ -115,10 +146,11 @@ def inspect_components(
             platform_error=platform_error or "component environment is unavailable",
             manifest=manifest,
             manifest_unknown_diagnostics=manifest_unknown,
+            roots=roots,
+            state_path=state_path,
+            installed_state=installed_state,
+            state_file_status=state_file_status,
         )
-
-    state_path = Path(component_paths.installed_state_path(roots.data_root))
-    installed_state, state_file_status = _read_installed_state(state_path)
 
     inspections: list[ComponentInspection] = []
     for component_id in component_manifest.KNOWN_COMPONENT_IDS:
@@ -160,9 +192,14 @@ def _environment_blocked_report(
     platform_error: str,
     manifest: component_manifest.ComponentManifest | None,
     manifest_unknown_diagnostics: tuple[str, ...] = (),
+    roots: component_install.SetupRoots | None = None,
+    state_path: Path | None = None,
+    installed_state: component_state.InstalledState | None = None,
+    state_file_status: STATE_FILE_STATUS = "missing",
 ) -> ComponentReport:
     """Return a read-only unsupported report when roots or manifest cannot be resolved."""
-    state_path = Path(component_paths.installed_state_path(_UNAVAILABLE_DATA_ROOT))
+    report_state_path = state_path or Path(component_paths.installed_state_path(_UNAVAILABLE_DATA_ROOT))
+    data_root = roots.data_root if roots is not None else _UNAVAILABLE_DATA_ROOT
     components = tuple(
         ComponentInspection(
             component_id=component_id,
@@ -171,16 +208,36 @@ def _environment_blocked_report(
             expected_component_revision=(
                 manifest.components[component_id].component_revision if manifest is not None else None
             ),
-            installed_component_revision=None,
+            installed_component_revision=(
+                installed_state.components[component_id].component_revision
+                if installed_state is not None and component_id in installed_state.components
+                else None
+            ),
             expected_asset_name=None,
             expected_byte_size=None,
             expected_sha256=None,
-            installed_asset_name=None,
-            installed_byte_size=None,
-            installed_sha256=None,
-            recorded_executable=None,
+            installed_asset_name=(
+                installed_state.components[component_id].asset_name
+                if installed_state is not None and component_id in installed_state.components
+                else None
+            ),
+            installed_byte_size=(
+                installed_state.components[component_id].byte_size
+                if installed_state is not None and component_id in installed_state.components
+                else None
+            ),
+            installed_sha256=(
+                installed_state.components[component_id].sha256
+                if installed_state is not None and component_id in installed_state.components
+                else None
+            ),
+            recorded_executable=(
+                installed_state.components[component_id].executable
+                if installed_state is not None and component_id in installed_state.components
+                else None
+            ),
             managed_executable_path=component_paths.managed_executable_path(
-                _UNAVAILABLE_DATA_ROOT,
+                data_root,
                 component_id,
             ),
             actual_byte_size=None,
@@ -198,14 +255,44 @@ def _environment_blocked_report(
         platform=None,
         platform_error=platform_error,
         state_schema_version=component_state.SCHEMA_VERSION,
-        installed_state_path=str(state_path),
-        state_file_status="missing",
-        installed_manifest_revision=None,
-        installed_brigade_version=None,
-        installed_platform=None,
+        installed_state_path=str(report_state_path),
+        state_file_status=state_file_status,
+        installed_manifest_revision=installed_state.manifest_revision if installed_state else None,
+        installed_brigade_version=installed_state.brigade_version if installed_state else None,
+        installed_platform=installed_state.platform if installed_state else None,
         manifest_unknown_diagnostics=manifest_unknown_diagnostics,
         components=components,
     )
+
+
+def _installed_state_matches_manifest(
+    installed_state: component_state.InstalledState,
+    manifest: component_manifest.ComponentManifest,
+) -> bool:
+    """Return whether installed components use the manifest's exact recorded coordinates."""
+    if (
+        installed_state.manifest_revision != manifest.manifest_revision
+        or installed_state.brigade_version != manifest.brigade_version
+    ):
+        return False
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        installed = installed_state.components.get(component_id)
+        if installed is None:
+            return False
+        component = manifest.components[component_id]
+        try:
+            asset = component_manifest.resolve_asset(manifest, component_id, installed_state.platform)
+        except ValueError:
+            return False
+        if (
+            installed.component_revision != component.component_revision
+            or installed.asset_name != asset.asset_name
+            or installed.byte_size != asset.byte_size
+            or installed.sha256 != asset.sha256
+            or installed.download_url != asset.download_url
+        ):
+            return False
+    return True
 
 
 def doctor_checks(
