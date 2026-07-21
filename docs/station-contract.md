@@ -1,12 +1,12 @@
 # Stations reference
 
-Brigade is the hub. Most stations wire an optional standalone tool, installed with `brigade add <station>` and health-checked by `brigade status` and `brigade doctor`. Each external tool is its own repo, independently installable, with no library coupling back into Brigade.
+Brigade is the hub. Most stations wire an optional standalone tool, installed with `brigade add <station>` and health-checked by `brigade status` and `brigade doctor`. Each station tool is its own repo, independently installable, with no library coupling back into Brigade. The code-graph and evidence engines are not stations: they live in this repository under `engines/` and are installed by `brigade setup` from the release manifest.
 
 ## Selecting stations
 
-Use `brigade profiles list` to see built-in station bundles and `brigade stations list` to see which stations are selected by the default repo profile before installing any sidecar tools. `brigade stations list --json` also shows each managed tool's machine surfaces: doctor JSON, markdown briefs, summary JSON, and verify commands where the tool supports them.
+Use `brigade profiles list` to see built-in station bundles and `brigade stations list` to see which stations are selected by the default repo profile before installing any station tools. `brigade stations list --json` also shows each managed tool's machine surfaces: doctor JSON, markdown briefs, summary JSON, and verify commands where the tool supports them.
 
-Fresh repo installs use the `repo` profile: core, skills, memory, guard, security, tokens, evidence, and search are selected up front. `brigade init` wires the built-in skills immediately, including `brigade-work` and `ultra-work-scout`, so new Codex users can run the Brigade work loop and broad Scout scoping from the start. External sidecars stay in their own repos and install only when you run `brigade add <station>`.
+Fresh repo installs use the `repo` profile: core, skills, memory, guard, security, tokens, evidence, and search are selected up front. `brigade init` wires the built-in skills immediately, including `brigade-work` and `ultra-work-scout`, so new Codex users can run the Brigade work loop and broad Scout scoping from the start. External stations stay in their own repos and install only when you run `brigade add <station>`.
 
 ## The `brigade add` reference
 
@@ -17,8 +17,8 @@ Fresh repo installs use the `repo` profile: core, skills, memory, guard, securit
 | `tokens` | token-glace | tracks token spend across your harnesses and compacts noisy output |
 | `memory` | bootstrap-doctor (optional); memory maintenance is built in | `brigade memory status|lint|compact` plus memory-care for card freshness |
 | `pantry` | agentpantry (Go sidecar) | plans and health-checks sealed browser-session sync; never starts source/sink |
-| `search` | code-search, graphtrail | local semantic search plus a code-graph CLI for callers, impact, and structural diffs |
-| `evidence` | miseledger (Go sidecar) | explicitly runs local MiseLedger for `brigade evidence crawl|search`; crawl/export plans are review-only, and Brigade neither starts daemons nor uploads data |
+| `search` | code-search; GraphTrail is installed by `brigade setup` | local semantic search plus the code-graph engine for callers, impact, and structural diffs |
+| `evidence` | MiseLedger, the evidence engine installed by `brigade setup` | explicitly runs local MiseLedger for `brigade evidence crawl|search`; crawl/export plans are review-only, and Brigade neither starts daemons nor uploads data |
 
 ## Inspecting a station before install
 

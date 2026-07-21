@@ -124,7 +124,7 @@ brigade status --target .
 
 GraphTrail and MiseLedger ship from this repository's unified releases. The remaining rows are optional stations with their own repos. For one release, `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain compatibility paths for independent installations. They are not required after `brigade setup`.
 
-Station pages: [GraphTrail](https://brigade.tools/graphtrail) · [MiseLedger](https://brigade.tools/miseledger) · [Agent Pantry](https://brigade.tools/agentpantry) · [Content Guard](https://brigade.tools/content-guard) · [Skillet](https://brigade.tools/skillet) · [Token Glace](https://brigade.tools/token-glace). Full station reference (install, profiles, `brigade add`, contract): [docs/station-contract.md](docs/station-contract.md).
+Capability pages: [Code Intelligence](https://brigade.tools/code-intelligence) · [Evidence Memory](https://brigade.tools/evidence-memory). Station pages: [Agent Pantry](https://brigade.tools/agentpantry) · [Content Guard](https://brigade.tools/content-guard) · [Skillet](https://brigade.tools/skillet) · [Token Glace](https://brigade.tools/token-glace). Full station reference (install, profiles, `brigade add`, contract): [docs/station-contract.md](docs/station-contract.md).
 
 ## One MCP catalog, synced into every tool
 
@@ -309,7 +309,7 @@ I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions. 
 - [Security and Content Guard](docs/security.md): scanner policies, handoff guards, import flow.
 - [Handoff promotion](docs/handoff-promotion.md): how notes move toward memory.
 - [Repo fleet](docs/repo-fleet.md) and [Tool catalog](docs/tool-catalog.md).
-- [Station contract](docs/station-contract.md): how `brigade stations verify` checks a sidecar's `station.json` (isolation, manifest rules, exit codes).
+- [Station contract](docs/station-contract.md): how `brigade stations verify` checks a station's `station.json` (isolation, manifest rules, exit codes).
 - [Command inventory](docs/command-inventory.md): every public CLI command.
 - [Maintainers](MAINTAINERS.md), [Governance](GOVERNANCE.md), [Security](SECURITY.md), and [Contributing](CONTRIBUTING.md).
 - [Roadmap](ROADMAP.md) and [roadmap archive](docs/roadmap-archive.md).
