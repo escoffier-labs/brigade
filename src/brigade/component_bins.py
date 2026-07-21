@@ -62,23 +62,23 @@ def managed_path(name: str, *, env: Mapping[str, str] | None = None) -> str | No
 def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     """Resolve ``name`` to an executable path, or None when nowhere to be found."""
     environment = env if env is not None else os.environ
+    search_path = environment.get("PATH")
     override = environment.get(ENV_OVERRIDES.get(name, ""))
     if override:
         candidate = Path(override).expanduser()
         if _is_executable(candidate):
             return str(candidate)
-        found = shutil.which(override)
-        if found:
-            return found
-        return None
+        return shutil.which(override, path=search_path)
     managed = managed_path(name, env=env)
     if managed:
         return managed
-    found = shutil.which(name)
+    found = shutil.which(name, path=search_path)
     if found:
         return found
+    home = environment.get("HOME")
+    home_path = Path(home).expanduser() if home else Path.home()
     for relative in _LEGACY_RELATIVE.get(name, ()):
-        legacy = Path.home() / relative
+        legacy = home_path / relative
         if _is_executable(legacy):
             return str(legacy)
     return None

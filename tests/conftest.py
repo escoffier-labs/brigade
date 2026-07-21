@@ -66,13 +66,21 @@ def _no_managed_tools_on_path(monkeypatch, request):
 
     real_resolve = component_bins.resolve
     baseline_path = os.environ.get("PATH", "")
+    baseline_entries = set(filter(None, baseline_path.split(os.pathsep)))
 
     def bare_host_resolve(name, *, env=None):
         environment = env if env is not None else os.environ
         if environment.get(component_bins.ENV_OVERRIDES.get(name, "")):
             return real_resolve(name, env=env)
-        if os.environ.get("PATH", "") != baseline_path:
-            return shutil.which(name)
+        current_path = os.environ.get("PATH", "")
+        if current_path != baseline_path:
+            # Search only the entries the test itself introduced, so a test
+            # that prepends a temp dir to the host PATH still cannot resolve
+            # real host binaries.
+            test_path = os.pathsep.join(
+                entry for entry in current_path.split(os.pathsep) if entry and entry not in baseline_entries
+            )
+            return shutil.which(name, path=test_path) if test_path else None
         return None
 
     monkeypatch.setattr(component_bins, "resolve", bare_host_resolve)

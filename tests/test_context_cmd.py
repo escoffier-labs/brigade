@@ -50,7 +50,7 @@ def test_code_graph_summary_parses_and_trims(tmp_target, monkeypatch):
     }
 
     def fake_run(args, **kw):
-        assert Path(args[0]).name == "graphtrail"
+        assert args[0] == "/x/graphtrail"
         assert "context" in args and "--json" in args
         return proc.Result(code=0, stdout=json.dumps(pack), stderr="")
 

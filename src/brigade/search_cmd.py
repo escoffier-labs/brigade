@@ -168,7 +168,7 @@ def status_payload(target: Path) -> dict[str, Any]:
     if overall in ("fail", "unwired", "incomplete", "timeout"):
         payload["next_commands"] = [
             "brigade search sync plan",
-            "graphtrail sync",
+            f"{graphtrail_bin or 'graphtrail'} sync",
             "brigade search doctor",
         ]
     elif not graphtrail_bin:
@@ -214,6 +214,8 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
 
 def sync_plan_payload(*, target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
+    graphtrail_bin = component_bins.resolve("graphtrail")
+    graphtrail_cmd = graphtrail_bin or "graphtrail"
     return {
         "target": str(target),
         "station": "search",
@@ -221,15 +223,15 @@ def sync_plan_payload(*, target: Path) -> dict[str, Any]:
         "title": "search sync plan",
         "created_at": health.now_iso(),
         "installed": {
-            "graphtrail": component_bins.resolve("graphtrail") is not None,
+            "graphtrail": graphtrail_bin is not None,
             "code-search-api": proc.which("code-search-api") is not None,
             "code-search-mcp": proc.which("code-search-mcp") is not None,
         },
         "compatibility": {"code-search-mcp": {"owner": "code-search-api/mcp"}},
         "commands": [
-            ["graphtrail", "sync", str(target)],
-            ["graphtrail", "doctor", "--json"],
-            ["graphtrail", "stats", "--json"],
+            [graphtrail_cmd, "sync", str(target)],
+            [graphtrail_cmd, "doctor", "--json"],
+            [graphtrail_cmd, "stats", "--json"],
             ["code-search-api", "index"],
             ["code-search-api", "serve"],
         ],

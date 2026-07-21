@@ -282,10 +282,10 @@ def test_code_search_mcp_doctor_is_presence_only():
 
 def test_miseledger_doctor_parses_status(monkeypatch):
     t = managed.resolve("miseledger")
-    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: "miseledger")
+    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: "/x/miseledger")
 
     def fake_run(args, **kw):
-        assert args == ["miseledger", "doctor", "--json"]
+        assert args == ["/x/miseledger", "doctor", "--json"]
         assert kw == {"timeout": 120.0}
         return managed.proc.Result(
             code=0,
@@ -333,10 +333,10 @@ def test_miseledger_doctor_handles_garbage_output(monkeypatch):
 
 def test_miseledger_doctor_warns_distinctly_on_timeout(monkeypatch):
     t = managed.resolve("miseledger")
-    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: "miseledger")
+    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: "/x/miseledger")
 
     def fake_run(args, **kw):
-        assert args == ["miseledger", "doctor", "--json"]
+        assert args == ["/x/miseledger", "doctor", "--json"]
         assert kw == {"timeout": 120.0}
         return managed.proc.Result(code=124, stdout="", stderr="timeout after 120.0s")
 
