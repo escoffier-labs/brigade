@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,7 +10,16 @@ from pathlib import Path
 import pytest
 
 import brigade
-from brigade import cli, component_manifest, component_paths, component_report, component_state, doctor as doctor_mod
+from brigade import (
+    cli,
+    component_install,
+    component_manifest,
+    component_paths,
+    component_report,
+    component_state,
+    doctor as doctor_mod,
+    update_cmd,
+)
 from brigade.component_install import resolve_roots, setup_native_components
 from brigade.install import install_selection
 from brigade.selection import Selection
@@ -50,11 +60,234 @@ def _managed_paths(env: dict[str, str]) -> dict[str, Path]:
     }
 
 
+def _prepare_unified_release_setup(tmp_path: Path, monkeypatch) -> tuple[dict[str, str], update_cmd.ResolvedRelease]:
+    """Route setup through a cached exact-release manifest fixture."""
+    env = linux_env(tmp_path)
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True)
+    write_test_manifest(bundled, brigade_version=brigade.__version__)
+    manifest_bytes = bundled.read_bytes()
+    release = update_cmd.ResolvedRelease(
+        42,
+        f"v{brigade.__version__}",
+        brigade.__version__,
+        "a" * 40,
+        "https://github.com/escoffier-labs/brigade/releases/download/"
+        f"v{brigade.__version__}/component-manifest-v1.json",
+        len(manifest_bytes),
+        hashlib.sha256(manifest_bytes).hexdigest(),
+        manifest_bytes,
+    )
+    monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
+    monkeypatch.setattr(update_cmd, "resolve_release", lambda *_args, **_kwargs: release)
+    monkeypatch.setattr(
+        update_cmd,
+        "validate_release_manifest_bytes",
+        lambda resolved: component_manifest.load_bytes(resolved.manifest_bytes, source=Path(resolved.manifest_url)),
+    )
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    return env, release
+
+
 def test_default_component_report_loads_bundled_compatibility_manifest(tmp_path):
     report = component_report.inspect_components(env=linux_env(tmp_path), system="linux")
 
     assert report.platform_error is None
     assert report.manifest_revision == "2026-07-19"
+
+
+def test_component_report_uses_verified_exact_release_manifest_after_unified_setup(tmp_path, monkeypatch):
+    env, release = _prepare_unified_release_setup(tmp_path, monkeypatch)
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, release.manifest_sha256))
+    report = component_report.inspect_components(env=env, system="linux")
+
+    assert report.manifest_path == str(cached)
+    assert report.state_file_status == "valid"
+    assert all(component.status == "healthy" for component in report.components)
+
+
+def test_component_report_ignores_stale_release_cache_after_explicit_setup(tmp_path, monkeypatch):
+    env, _release = _prepare_unified_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    update_state_path = Path(component_paths.update_state_path(roots.data_root))
+    update_state_before = update_state_path.read_bytes()
+
+    explicit_manifest = tmp_path / "explicit-manifest.json"
+    write_test_manifest(explicit_manifest, brigade_version=brigade.__version__)
+    explicit_data = json.loads(explicit_manifest.read_text())
+    explicit_data["manifest_revision"] = "explicit-revision"
+    explicit_data["components"]["graphtrail"]["component_revision"] = "b" * 40
+    explicit_manifest.write_text(json.dumps(explicit_data))
+    assert (
+        setup_native_components(
+            env=env,
+            manifest_path=explicit_manifest,
+            opener=FakeOpener(all_fixture_payloads()),
+        )
+        == 0
+    )
+
+    report = component_report.inspect_components(env=env, system="linux")
+
+    assert update_state_path.read_bytes() == update_state_before
+    assert report.manifest_path == str(component_manifest.manifest_path())
+    assert report.manifest_revision == "fixture"
+    assert report.installed_manifest_revision == "explicit-revision"
+
+
+def test_component_report_ignores_stale_release_cache_after_explicit_setup_with_only_manifest_revision_changed(
+    tmp_path, monkeypatch
+):
+    env, _release = _prepare_unified_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    update_state_path = Path(component_paths.update_state_path(roots.data_root))
+    update_state_before = update_state_path.read_bytes()
+
+    explicit_manifest = tmp_path / "explicit-manifest.json"
+    write_test_manifest(explicit_manifest, brigade_version=brigade.__version__)
+    explicit_data = json.loads(explicit_manifest.read_text())
+    explicit_data["manifest_revision"] = "explicit-revision"
+    explicit_manifest.write_text(json.dumps(explicit_data))
+    assert (
+        setup_native_components(
+            env=env,
+            manifest_path=explicit_manifest,
+            opener=FakeOpener(all_fixture_payloads()),
+        )
+        == 0
+    )
+
+    report = component_report.inspect_components(env=env, system="linux")
+
+    assert update_state_path.read_bytes() == update_state_before
+    assert report.manifest_path == str(component_manifest.manifest_path())
+    assert report.manifest_revision == "fixture"
+    assert report.installed_manifest_revision == "explicit-revision"
+
+
+def test_component_report_without_matching_update_state_uses_standalone_manifest(tmp_path):
+    env = linux_env(tmp_path)
+
+    report = component_report.inspect_components(env=env, system="linux")
+
+    assert report.manifest_path == str(component_manifest.manifest_path())
+    assert report.manifest_revision == "2026-07-19"
+
+
+def test_component_report_reports_tampered_matching_release_manifest_cache(tmp_path, monkeypatch):
+    env, release = _prepare_unified_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, release.manifest_sha256))
+    cached.write_bytes(cached.read_bytes() + b"\n")
+
+    report = component_report.inspect_components(env=env, system="linux")
+
+    assert report.manifest_path == str(cached)
+    assert report.manifest_schema_version is None
+    assert report.platform_error == "cached exact-release manifest digest does not match update state"
+    assert report.state_file_status == "valid"
+    assert report.installed_manifest_revision == "fixture"
+    assert report.installed_brigade_version == brigade.__version__
+    assert report.installed_platform == "linux-amd64"
+    assert all(component.installed_component_revision is not None for component in report.components)
+    checks = component_report.doctor_checks(env=env, system="linux")
+    assert checks == [
+        (doctor_mod.FAIL, "components: manifest", "cached exact-release manifest digest does not match update state")
+    ]
+
+
+def test_component_report_matching_update_state_missing_cache(tmp_path, monkeypatch):
+    env, release = _prepare_unified_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, release.manifest_sha256))
+    assert cached.is_file()
+    cached.unlink()
+
+    report = component_report.inspect_components(env=env, system="linux")
+
+    assert report.manifest_path == str(cached)
+    assert report.manifest_schema_version is None
+    assert report.platform_error == "cached exact-release manifest is missing"
+    assert report.state_file_status == "valid"
+    assert report.installed_manifest_revision == "fixture"
+    assert report.installed_brigade_version == brigade.__version__
+    assert report.installed_platform == "linux-amd64"
+    assert all(component.installed_component_revision is not None for component in report.components)
+    checks = component_report.doctor_checks(env=env, system="linux")
+    assert checks == [(doctor_mod.FAIL, "components: manifest", "cached exact-release manifest is missing")]
+
+
+def test_component_report_mismatched_update_tag_falls_back_to_bundled(tmp_path, monkeypatch):
+    env, release = _prepare_unified_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.update_state_path(roots.data_root))
+    assert state_path.is_file()
+
+    state = update_cmd.load_update_state(state_path)
+    assert state is not None
+
+    mismatched_state = update_cmd.UpdateState(
+        schema_version=state.schema_version,
+        channel=state.channel,
+        owner=state.owner,
+        cli_coordinate=state.cli_coordinate,
+        component_release_id=state.component_release_id,
+        component_tag="v99.99.99",
+        component_target_commit=state.component_target_commit,
+        component_manifest_url="https://github.com/escoffier-labs/brigade/releases/download/v99.99.99/component-manifest-v1.json",
+        component_manifest_sha256=state.component_manifest_sha256,
+        updated_at=state.updated_at,
+    )
+    update_cmd.write_update_state(state_path, mismatched_state)
+
+    report = component_report.inspect_components(env=env, system="linux")
+
+    assert report.manifest_path == str(component_manifest.manifest_path())
+    assert report.manifest_revision == "fixture"
+
+
+def test_component_report_invalid_utf8_update_state_falls_back_to_bundled(tmp_path, monkeypatch):
+    env, _release = _prepare_unified_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.update_state_path(roots.data_root))
+    state_path.write_bytes(b'{"component_tag":"\xff"}')
+
+    report = component_report.inspect_components(env=env, system="linux")
+
+    assert report.manifest_path == str(component_manifest.manifest_path())
+    assert report.manifest_revision == "fixture"
+
+
+def test_component_report_explicit_manifest_path_overrides_matching_state(tmp_path, monkeypatch):
+    env, release = _prepare_unified_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+
+    explicit_manifest_file = tmp_path / "explicit-manifest.json"
+    write_test_manifest(explicit_manifest_file, brigade_version=brigade.__version__)
+
+    data = json.loads(explicit_manifest_file.read_text())
+    data["manifest_revision"] = "explicit-rev-123"
+    explicit_manifest_file.write_text(json.dumps(data))
+
+    report = component_report.inspect_components(env=env, system="linux", manifest_path=explicit_manifest_file)
+
+    assert report.manifest_path == str(explicit_manifest_file)
+    assert report.manifest_revision == "explicit-rev-123"
 
 
 def _write_healthy_install(env: dict[str, str], manifest_path: Path) -> None:
