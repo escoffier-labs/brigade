@@ -1,0 +1,46 @@
+# Review-heavy preset: separate reviewer seats with cross-model coverage.
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "Plan the work, choose useful workers, and synthesize the final answer."
+purpose = "Orchestrate runs and synthesize worker output."
+spec = "Codex orchestrator for review-heavy runs"
+requires = { cli = "codex" }
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.implement]
+cli = "codex"
+role = "Make precise code changes and report what changed."
+purpose = "Primary implementation worker for writable tasks."
+spec = "Primary Codex implementation worker"
+requires = { cli = "codex" }
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.reviewer]
+cli = "codex"
+model = "gpt-5.6-sol-medium"
+role = "Inspect code and reports, verify claims against the diff, and flag problems."
+purpose = "Primary cross-model reviewer on the codex lane."
+spec = "Primary Codex cross-model reviewer"
+requires = { cli = "codex" }
+fallback = ["reviewer_claude"]
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.reviewer_claude]
+cli = "claude"
+model = "claude-sonnet-5"
+role = "Inspect code and reports from a different model family."
+purpose = "Secondary reviewer when the codex reviewer lane is unavailable."
+spec = "Claude fallback reviewer"
+requires = { cli = "claude" }
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = ["Keep one dispatch to one flat review pass; avoid internal subagent fan-out."]
+
+[limits]
+max_workers = 4
+timeout_seconds = 600
+allow_models = ["codex", "claude"]

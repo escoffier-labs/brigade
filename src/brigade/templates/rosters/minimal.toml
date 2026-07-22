@@ -1,0 +1,25 @@
+# Minimal single-CLI preset: codex orchestrator plus one worker seat.
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "Plan the work, choose useful workers, and synthesize the final answer."
+purpose = "Orchestrate runs and synthesize worker output."
+spec = "Single-subscription orchestrator on the operator's primary Codex lane"
+requires = { cli = "codex" }
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.implement]
+cli = "codex"
+role = "Make precise code changes and report what changed."
+purpose = "Primary implementation worker for writable tasks."
+spec = "Same Codex CLI as the orchestrator; Brigade dispatches writable work here"
+requires = { cli = "codex" }
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[limits]
+max_workers = 2
+timeout_seconds = 600
+allow_models = ["codex"]

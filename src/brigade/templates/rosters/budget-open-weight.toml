@@ -1,0 +1,35 @@
+# Budget open-weight preset: prefer local OSS, fall back to codex.
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "Plan the work, choose useful workers, and synthesize the final answer."
+purpose = "Orchestrate runs and synthesize worker output."
+spec = "Codex orchestrator for open-weight-first runs"
+requires = { cli = "codex" }
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.implement_oss]
+cli = "ollama:llama3.2:3b"
+role = "Implement changes with a local open-weight model."
+purpose = "Zero-marginal-cost implementation worker when the model is already pulled."
+spec = "Small local model; zero marginal API cost"
+requires = { cli = "ollama" }
+fallback = ["implement_codex"]
+stats = { speed = "slow", source = "author-receipts-2026-07" }
+caveats = ["Requires the model pulled locally; brigade never auto-pulls."]
+
+[agents.implement_codex]
+cli = "codex"
+role = "Make precise code changes and report what changed."
+purpose = "Cloud fallback when the local OSS model is unavailable."
+spec = "Codex fallback when the local model is unavailable"
+requires = { cli = "codex" }
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[limits]
+max_workers = 3
+timeout_seconds = 600
+allow_models = ["codex", "ollama:*"]

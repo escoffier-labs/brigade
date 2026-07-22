@@ -10,8 +10,10 @@ from typing import Literal
 
 from . import agents as agent_adapters
 from . import toml_compat
+from .templates import template_root
 
 SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
+BUNDLED_PRESET_IDS = frozenset({"minimal", "budget-open-weight", "review-heavy", "full-multi-lane"})
 CODEX_TRANSPORT_CHOICES = ("exec", "app-server")
 AGENT_TRANSPORT_CHOICES = ("direct", "acpx")
 ACPX_TRANSPORT_VERSION = "0.12.0"
@@ -23,6 +25,18 @@ class RosterResolution:
     path: Path
     source: RosterSource
     shadowed: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True)
+class SeatRequirements:
+    cli: str | None = None
+    auth: str | None = None
+
+
+@dataclass(frozen=True)
+class SeatStats:
+    speed: str
+    source: str
 
 
 @dataclass(frozen=True)
@@ -40,6 +54,12 @@ class Agent:
     env: dict[str, str] | None = None
     invalid_final_fallback: str | None = None
     read_only_capable: bool = True
+    purpose: str | None = None
+    spec: str | None = None
+    requires: SeatRequirements | None = None
+    fallback: tuple[str, ...] = ()
+    stats: SeatStats | None = None
+    caveats: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -82,6 +102,76 @@ def _as_sandbox(value: object) -> str | None:
         choices = ", ".join(SANDBOX_CHOICES)
         raise ValueError(f"limits.sandbox must be one of: {choices}")
     return value
+
+
+def _as_optional_str(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    return _as_str(value, field)
+
+
+def _as_string_list(value: object, field: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list of strings")
+    if not value and not allow_empty:
+        raise ValueError(f"{field} must be a non-empty list of strings")
+    parsed: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{field}[{index}] must be a non-empty string")
+        parsed.append(item.strip())
+    return tuple(parsed)
+
+
+def _as_requires(value: object, agent_name: str) -> SeatRequirements | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"agents.{agent_name}.requires must be a TOML table")
+    if not value:
+        return None
+    unknown = set(value) - {"cli", "auth"}
+    if unknown:
+        keys = ", ".join(sorted(unknown))
+        raise ValueError(f"agents.{agent_name}.requires has unknown keys: {keys}")
+    cli = _as_optional_str(value.get("cli"), f"agents.{agent_name}.requires.cli")
+    auth = _as_optional_str(value.get("auth"), f"agents.{agent_name}.requires.auth")
+    if auth is not None and auth != "logged-in":
+        raise ValueError(f"agents.{agent_name}.requires.auth must be 'logged-in'")
+    if auth is not None and cli is None:
+        raise ValueError(f"agents.{agent_name}.requires.auth requires requires.cli")
+    if cli is None and auth is None:
+        return None
+    return SeatRequirements(cli=cli, auth=auth)
+
+
+def _as_stats(value: object, agent_name: str) -> SeatStats | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"agents.{agent_name}.stats must be a TOML table")
+    speed = _as_str(value.get("speed"), f"agents.{agent_name}.stats.speed")
+    source = _as_str(value.get("source"), f"agents.{agent_name}.stats.source")
+    unknown = set(value) - {"speed", "source"}
+    if unknown:
+        keys = ", ".join(sorted(unknown))
+        raise ValueError(f"agents.{agent_name}.stats has unknown keys: {keys}")
+    return SeatStats(speed=speed, source=source)
+
+
+def _as_caveats(value: object, agent_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError(f"agents.{agent_name}.caveats must be a list of strings")
+    parsed: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ValueError(f"agents.{agent_name}.caveats[{index}] must be a string")
+        parsed.append(item.strip())
+    return tuple(parsed)
 
 
 _ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -178,6 +268,39 @@ def resolve_roster_path(target: Path, explicit: Path | None = None) -> Path:
     return resolve_roster(target, explicit).path
 
 
+def _validate_preset_id(preset_id: str) -> str:
+    normalized = preset_id.strip()
+    if not normalized:
+        raise ValueError("preset id must be a non-empty string")
+    if normalized != preset_id or normalized in {".", ".."} or "/" in normalized or "\\" in normalized:
+        raise ValueError(f"unknown preset: {preset_id!r}")
+    if normalized not in BUNDLED_PRESET_IDS:
+        raise ValueError(f"unknown preset: {preset_id!r}")
+    return normalized
+
+
+def preset_path(preset_id: str) -> Path:
+    """Return the packaged TOML path for a curated bundled roster preset."""
+
+    normalized = _validate_preset_id(preset_id)
+    return template_root() / "rosters" / f"{normalized}.toml"
+
+
+def load_preset(preset_id: str) -> Roster:
+    """Load a curated bundled roster preset by id."""
+
+    path = preset_path(preset_id)
+    if not path.is_file():
+        raise FileNotFoundError(f"preset not found: {preset_id!r} (looked at {path})")
+    return load_roster(path)
+
+
+def list_preset_ids() -> tuple[str, ...]:
+    """Return the stable bundled preset ids in catalog order."""
+
+    return tuple(sorted(BUNDLED_PRESET_IDS))
+
+
 def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Roster:
     path = path.expanduser().resolve()
     if not path.exists():
@@ -260,6 +383,16 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             raw_agent.get("read_only_capable", True),
             f"agents.{agent_name}.read_only_capable",
         )
+        purpose = _as_optional_str(raw_agent.get("purpose"), f"agents.{agent_name}.purpose")
+        spec = _as_optional_str(raw_agent.get("spec"), f"agents.{agent_name}.spec")
+        requires = _as_requires(raw_agent.get("requires"), agent_name)
+        seat_fallback_raw = raw_agent.get("fallback")
+        if seat_fallback_raw is None:
+            fallback: tuple[str, ...] = ()
+        else:
+            fallback = _as_string_list(seat_fallback_raw, f"agents.{agent_name}.fallback", allow_empty=True)
+        stats = _as_stats(raw_agent.get("stats"), agent_name)
+        caveats = _as_caveats(raw_agent.get("caveats"), agent_name)
 
         cli_raw = raw_agent.get("cli")
         has_endpoint = endpoint is not None and model is not None
@@ -316,6 +449,12 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             env=env,
             invalid_final_fallback=invalid_final_fallback,
             read_only_capable=read_only_capable,
+            purpose=purpose,
+            spec=spec,
+            requires=requires,
+            fallback=fallback,
+            stats=stats,
+            caveats=caveats,
         )
 
     if orchestrator not in parsed_agents:
@@ -327,16 +466,16 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             continue
         if agent.cli != "grok" or agent.transport != "direct":
             raise ValueError(f"agents.{agent_name}.invalid_final_fallback requires a direct grok seat")
-        fallback = parsed_agents.get(fallback_name)
-        if fallback is None:
+        fallback_agent = parsed_agents.get(fallback_name)
+        if fallback_agent is None:
             raise ValueError(
                 f"agents.{agent_name}.invalid_final_fallback references {fallback_name!r}, which is not defined"
             )
-        if fallback_name == orchestrator or fallback.cli != "cursor" or fallback.transport != "acpx":
+        if fallback_name == orchestrator or fallback_agent.cli != "cursor" or fallback_agent.transport != "acpx":
             raise ValueError(f"agents.{agent_name}.invalid_final_fallback must name a reviewed cursor-grok acpx seat")
-        if fallback.model is None or not fallback.model.lower().startswith("grok-"):
+        if fallback_agent.model is None or not fallback_agent.model.lower().startswith("grok-"):
             raise ValueError(f"agents.{agent_name}.invalid_final_fallback target must use a grok model")
-        if fallback.transport_version != ACPX_TRANSPORT_VERSION:
+        if fallback_agent.transport_version != ACPX_TRANSPORT_VERSION:
             raise ValueError(
                 f"agents.{agent_name}.invalid_final_fallback target requires reviewed acpx version "
                 f"{ACPX_TRANSPORT_VERSION}"

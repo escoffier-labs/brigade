@@ -1,0 +1,97 @@
+# Full multi-lane preset: implement, scout, and review lanes with ordered fallbacks.
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "Plan the work, choose useful workers, and synthesize the final answer."
+purpose = "Orchestrate runs and synthesize worker output."
+spec = "Codex orchestrator for multi-lane runs"
+requires = { cli = "codex" }
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.implement]
+cli = "cursor"
+model = "composer-2.5"
+role = "Make precise code changes and report what changed."
+purpose = "Fast implementation worker on the flat Cursor subscription."
+spec = "Fast Cursor Composer implementation on the flat subscription"
+requires = { cli = "cursor", auth = "logged-in" }
+fallback = ["implement_codex", "implement_oss"]
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = ["Composer models return empty text in read-only plan mode."]
+
+[agents.implement_codex]
+cli = "codex"
+role = "Make precise code changes and report what changed."
+purpose = "Codex fallback when Cursor is unavailable."
+spec = "Codex implementation fallback"
+requires = { cli = "codex" }
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.implement_oss]
+cli = "ollama:llama3.2:3b"
+role = "Implement changes with a local open-weight model."
+purpose = "Local OSS fallback when cloud implementation lanes are unavailable."
+spec = "Local OSS implementation fallback"
+requires = { cli = "ollama" }
+stats = { speed = "slow", source = "author-receipts-2026-07" }
+caveats = ["Requires the model pulled locally; brigade never auto-pulls."]
+
+[agents.scout]
+cli = "cursor"
+model = "gpt-5.4-mini-low"
+role = "Inventory files, grep, and summarize findings cheaply."
+purpose = "Cheap scout lane for triage that does not deserve a frontier model."
+spec = "Cheap Cursor scout for inventories and triage"
+requires = { cli = "cursor", auth = "logged-in" }
+fallback = ["scout_codex"]
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.scout_codex]
+cli = "codex"
+model = "gpt-5.4-mini-low"
+role = "Inventory files, grep, and summarize findings cheaply."
+purpose = "Codex fallback scout lane."
+spec = "Codex scout fallback"
+requires = { cli = "codex" }
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.review]
+cli = "codex"
+model = "gpt-5.6-sol-medium"
+role = "Inspect code and reports, verify claims against the diff, and flag problems."
+purpose = "Primary review lane with ordered cross-model fallbacks."
+spec = "Primary Codex cross-model reviewer"
+requires = { cli = "codex" }
+fallback = ["review_claude", "review_antigravity"]
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.review_claude]
+cli = "claude"
+model = "claude-sonnet-5"
+role = "Inspect code and reports from a different model family."
+purpose = "Claude fallback reviewer."
+spec = "Claude fallback reviewer"
+requires = { cli = "claude" }
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = ["Keep one dispatch to one flat review pass; avoid internal subagent fan-out."]
+
+[agents.review_antigravity]
+cli = "antigravity"
+model = "Claude Sonnet 4.6 (Thinking)"
+role = "Inspect code and reports on the free Google lane."
+purpose = "Antigravity fallback reviewer when paid review lanes are unavailable."
+spec = "Free Antigravity fallback reviewer"
+requires = { cli = "antigravity" }
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[limits]
+max_workers = 6
+timeout_seconds = 600
+allow_models = ["codex", "claude", "cursor", "antigravity", "ollama:*"]
