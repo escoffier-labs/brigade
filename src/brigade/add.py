@@ -148,7 +148,7 @@ def _run_manifest_add(ref: str, *, install_manifest: bool) -> int:
         return 0
     rc = 0
     for tool in manifest.tools:
-        installed = tool.kind == "executable" and managed.proc.which(tool.command) is not None
+        installed = tool.kind == "executable" and managed.component_bins.resolve(tool.command) is not None
         marker = "installed" if installed else "missing"
         if tool.kind == "skill-roster":
             marker = "skill-roster"

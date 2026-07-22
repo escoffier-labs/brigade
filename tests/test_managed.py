@@ -30,11 +30,11 @@ def test_for_station_filters():
     assert names == {"bootstrap-doctor"}
 
 
-def test_detect_uses_which(monkeypatch):
+def test_detect_uses_resolver(monkeypatch):
     t = managed.resolve("bootstrap-doctor")
-    monkeypatch.setattr(managed.proc, "which", lambda c: None)
+    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: None)
     assert t.detect() is False
-    monkeypatch.setattr(managed.proc, "which", lambda c: "/usr/bin/" + c)
+    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: "/usr/bin/" + name)
     assert t.detect() is True
 
 
@@ -216,7 +216,9 @@ def test_search_tools_attach_to_search_station():
 def test_graphtrail_doctor_reports_missing_db(monkeypatch, tmp_path):
     t = managed.resolve("graphtrail")
     assert t is not None
-    monkeypatch.setattr(managed.proc, "which", lambda c: "/usr/bin/graphtrail" if c == "graphtrail" else None)
+    monkeypatch.setattr(
+        managed.component_bins, "resolve", lambda name, **kw: "/usr/bin/graphtrail" if name == "graphtrail" else None
+    )
     ctx = DoctorContext(target=tmp_path, selection=None, harnesses=[])
     results = t.doctor(ctx)
     assert results[0][0] == "WARN"
@@ -280,9 +282,10 @@ def test_code_search_mcp_doctor_is_presence_only():
 
 def test_miseledger_doctor_parses_status(monkeypatch):
     t = managed.resolve("miseledger")
+    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: "/x/miseledger")
 
     def fake_run(args, **kw):
-        assert args == ["miseledger", "doctor", "--json"]
+        assert args == ["/x/miseledger", "doctor", "--json"]
         assert kw == {"timeout": 120.0}
         return managed.proc.Result(
             code=0,
@@ -298,6 +301,7 @@ def test_miseledger_doctor_parses_status(monkeypatch):
 
 def test_miseledger_doctor_warns_on_unavailable_fts(monkeypatch):
     t = managed.resolve("miseledger")
+    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: "miseledger")
 
     def fake_run(args, **kw):
         return managed.proc.Result(
@@ -315,6 +319,7 @@ def test_miseledger_doctor_warns_on_unavailable_fts(monkeypatch):
 
 def test_miseledger_doctor_handles_garbage_output(monkeypatch):
     t = managed.resolve("miseledger")
+    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: "miseledger")
 
     def fake_run(args, **kw):
         return managed.proc.Result(code=1, stdout="boom", stderr="kaboom")
@@ -328,9 +333,10 @@ def test_miseledger_doctor_handles_garbage_output(monkeypatch):
 
 def test_miseledger_doctor_warns_distinctly_on_timeout(monkeypatch):
     t = managed.resolve("miseledger")
+    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: "/x/miseledger")
 
     def fake_run(args, **kw):
-        assert args == ["miseledger", "doctor", "--json"]
+        assert args == ["/x/miseledger", "doctor", "--json"]
         assert kw == {"timeout": 120.0}
         return managed.proc.Result(code=124, stdout="", stderr="timeout after 120.0s")
 

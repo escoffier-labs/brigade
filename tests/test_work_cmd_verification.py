@@ -375,6 +375,32 @@ def test_work_verify_run_command_still_rejects_shell_metacharacters(tmp_path, ca
     assert "--argv-json" in receipt["commands"][0]["stderr_summary"]
 
 
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--command", "bash ./check.sh"),
+        ("--argv-json", json.dumps(["bash", "-c", "true"])),
+    ],
+)
+def test_work_verify_run_rejects_shell_interpreter_with_remedy(tmp_path, capsys, option, value):
+    # A shell interpreter is never a valid verify executable (verify runs argv
+    # directly with shell=False). Both the --command and --argv-json paths reject
+    # it, and the message must name the remedy - mirroring the metacharacter
+    # branch - so a caller is not left at a dead end. It must NOT point at
+    # --argv-json, which applies the same block.
+    _init_git_repo(tmp_path)
+
+    rc = cli.main(["work", "verify", "run", "--target", str(tmp_path), option, value, "--json"])
+    receipt = json.loads(capsys.readouterr().out)
+    summary = receipt["commands"][0]["stderr_summary"]
+    assert rc != 0
+    assert receipt["status"] == "rejected"
+    assert receipt["commands"][0]["status"] == "rejected"
+    assert "high-risk verification command: bash" in summary
+    assert "resolvable executable" in summary
+    assert "--argv-json" not in summary
+
+
 def test_work_verify_run_command_and_argv_json_are_mutually_exclusive(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main(

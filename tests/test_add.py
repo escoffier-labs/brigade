@@ -51,7 +51,7 @@ def test_add_accepts_managed_tool_name(monkeypatch, tmp_target, capsys):
 
 def test_add_skips_install_when_already_present(monkeypatch, tmp_target):
     calls = []
-    monkeypatch.setattr(managed.proc, "which", lambda c: "/x/" + c)  # already installed
+    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: "/x/" + name)  # already installed
 
     def fake_run(args, **kw):
         calls.append(args)

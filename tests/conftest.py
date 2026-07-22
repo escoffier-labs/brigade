@@ -38,20 +38,62 @@ def _isolate_hermes_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_managed_tools_on_path(monkeypatch, request):
-    """Default to the bare-host baseline: no managed tool detected on PATH.
+def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
+    """Default to the bare-host baseline: no managed tool resolves.
 
-    The doctor folds in installed managed tools, but a dev host may have some
-    of them globally installed. Neutralize detection so checks assert against
-    the documented bare-`$HOME` condition. Tests that exercise installed tools
-    re-patch `managed.proc.which` in their own body, which overrides this.
+    Managed-tool resolution goes through ``component_bins.resolve``, which
+    reaches outside the test sandbox: the developer's real installed.json,
+    legacy install dirs, and real PATH binaries. Left live, the suite behaves
+    differently on a wired dev host than on CI, and can even execute real
+    engine binaries against real archives. This fixture pins the bare-host
+    condition while keeping the two sandboxed channels tests legitimately use:
+    an explicit env override (GRAPHTRAIL_BIN, MISELEDGER_BIN, ...) resolves
+    with full semantics, and a test-modified PATH resolves via plain
+    ``shutil.which``. Tests that need a specific binary re-patch
+    ``component_bins.resolve`` in their own body.
 
-    `tests/test_proc.py` validates `proc.which` against real binaries, and the
-    opt-in adapter write probes must detect their real CLIs. Both modules opt
-    out because patching `managed.proc.which` patches the shared function.
+    `tests/test_proc.py` validates `proc.which` against real binaries, the
+    opt-in adapter write probes must detect their real CLIs, and
+    `tests/test_component_bins.py` tests the real resolution order. Those
+    modules opt out.
     """
-    if request.module.__name__.rsplit(".", 1)[-1] in {"test_proc", "test_agent_write_probes"}:
+    if request.module.__name__.rsplit(".", 1)[-1] in {"test_proc", "test_agent_write_probes", "test_component_bins"}:
         return
-    from brigade import managed
+    import os
+    import shutil
 
+    from brigade import component_bins, managed
+
+    # Point the managed-component data root at a temp dir so nothing in the
+    # suite (component_bins.managed_path, doctor's components check) reads the
+    # developer's real installed.json or managed bin dir.
+    data_root = tmp_path_factory.mktemp("component_data")
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_root))
+    monkeypatch.setenv("LOCALAPPDATA", str(data_root))
+
+    # A developer shell may export engine overrides (GRAPHTRAIL_BIN, ...);
+    # clear them so the override channel only fires when a test sets it.
+    for env_var in component_bins.ENV_OVERRIDES.values():
+        monkeypatch.delenv(env_var, raising=False)
+
+    real_resolve = component_bins.resolve
+    baseline_path = os.environ.get("PATH", "")
+    baseline_entries = set(filter(None, baseline_path.split(os.pathsep)))
+
+    def bare_host_resolve(name, *, env=None):
+        environment = env if env is not None else os.environ
+        if environment.get(component_bins.ENV_OVERRIDES.get(name, "")):
+            return real_resolve(name, env=env)
+        current_path = os.environ.get("PATH", "")
+        if current_path != baseline_path:
+            # Search only the entries the test itself introduced, so a test
+            # that prepends a temp dir to the host PATH still cannot resolve
+            # real host binaries.
+            test_path = os.pathsep.join(
+                entry for entry in current_path.split(os.pathsep) if entry and entry not in baseline_entries
+            )
+            return shutil.which(name, path=test_path) if test_path else None
+        return None
+
+    monkeypatch.setattr(component_bins, "resolve", bare_host_resolve)
     monkeypatch.setattr(managed.proc, "which", lambda cmd: None)

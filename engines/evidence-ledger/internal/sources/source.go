@@ -120,33 +120,98 @@ func ListJSONLFiles(root string, include func(string) bool) ([]string, error) {
 	return files, nil
 }
 
+// MaxLineBytes bounds a single JSONL line read by the streaming importers.
+// A line beyond it is skipped with a warning instead of aborting the whole
+// import the way bufio.Scanner's ErrTooLong used to.
+const MaxLineBytes = 10 * 1024 * 1024
+
+// EachLine invokes each for every line in r, like bufio.Scanner with
+// ScanLines but without a fatal length limit: a line longer than max is
+// drained and delivered with tooLong=true and a nil line, and reading
+// continues on the next line. size is the line's full byte count (terminator
+// excluded). The line slice is reused between calls; callers must copy it if
+// they retain it.
+func EachLine(r io.Reader, max int, each func(line []byte, tooLong bool, size int64) error) error {
+	br := bufio.NewReaderSize(r, 64*1024)
+	var line []byte
+	var size int64
+	tooLong := false
+	emit := func() error {
+		var l []byte
+		if !tooLong {
+			l = line
+		}
+		err := each(l, tooLong, size)
+		line = line[:0]
+		size = 0
+		tooLong = false
+		return err
+	}
+	for {
+		chunk, err := br.ReadSlice('\n')
+		content := chunk
+		endOfLine := err == nil
+		if endOfLine {
+			content = chunk[:len(chunk)-1]
+			if len(content) > 0 && content[len(content)-1] == '\r' {
+				content = content[:len(content)-1]
+			}
+		}
+		size += int64(len(content))
+		if !tooLong {
+			line = append(line, content...)
+			if len(line) > max {
+				tooLong = true
+				line = line[:0]
+			}
+		}
+		switch {
+		case endOfLine:
+			if err := emit(); err != nil {
+				return err
+			}
+		case err == bufio.ErrBufferFull:
+			// mid-line; keep accumulating (or draining)
+		case err == io.EOF:
+			if size > 0 || tooLong {
+				if !tooLong && len(line) > 0 && line[len(line)-1] == '\r' {
+					line = line[:len(line)-1]
+					size--
+				}
+				if err := emit(); err != nil {
+					return err
+				}
+			}
+			return nil
+		default:
+			return err
+		}
+	}
+}
+
 func scanJSONL(path string, each func(RawEvent) error) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	var ordinal int64
-	for scanner.Scan() {
+	return EachLine(f, MaxLineBytes, func(raw []byte, tooLong bool, size int64) error {
 		ordinal++
-		line := append([]byte(nil), scanner.Bytes()...)
+		if tooLong {
+			warning := fmt.Sprintf("line too long (%d bytes > %d limit), skipped", size, MaxLineBytes)
+			return each(RawEvent{Path: path, Ordinal: ordinal, Object: map[string]any{"_warning": warning}})
+		}
+		line := append([]byte(nil), raw...)
 		if strings.TrimSpace(string(line)) == "" {
-			continue
+			return nil
 		}
 		var obj map[string]any
 		if err := json.Unmarshal(line, &obj); err != nil {
-			if err := each(RawEvent{Path: path, Ordinal: ordinal, Line: line, Object: map[string]any{"_warning": "malformed json: " + err.Error()}}); err != nil {
-				return err
-			}
-			continue
+			return each(RawEvent{Path: path, Ordinal: ordinal, Line: line, Object: map[string]any{"_warning": "malformed json: " + err.Error()}})
 		}
-		if err := each(RawEvent{Path: path, Ordinal: ordinal, Line: line, Object: obj}); err != nil {
-			return err
-		}
-	}
-	return scanner.Err()
+		return each(RawEvent{Path: path, Ordinal: ordinal, Line: line, Object: obj})
+	})
 }
 
 func DefaultInclude(path string) bool {

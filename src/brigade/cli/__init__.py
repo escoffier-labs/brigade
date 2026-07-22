@@ -236,13 +236,5 @@ def main(argv=None) -> int:
     return func(args)
 
 
-def main_deprecated(argv=None) -> int:
-    print(
-        "warning: the 'solo-mise' command is deprecated; use 'brigade' instead.",
-        file=sys.stderr,
-    )
-    return main(argv)
-
-
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())

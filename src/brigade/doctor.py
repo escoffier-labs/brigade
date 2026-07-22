@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -89,6 +90,7 @@ def memory_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks.extend(_check_memory_cards(ctx.target))
     checks.extend(_check_memory_index(ctx.target))
     checks.extend(_check_memory_care(ctx.target))
+    checks.extend(_check_memory_care_producer_collision(ctx.target))
     return checks
 
 
@@ -633,6 +635,104 @@ def _check_memory_care(target: Path) -> List[CheckResult]:
     else:
         results.append((WARN, "memory-care: refresh-queue", f"missing at {queue}"))
 
+    return results
+
+
+def _is_memory_care_scan_command(command: str) -> bool:
+    """Return True when a scanner command is the Brigade memory-care writer."""
+    try:
+        parts = shlex.split(command.strip())
+    except ValueError:
+        return False
+    return len(parts) >= 4 and parts[:4] == ["brigade", "memory", "care", "scan"]
+
+
+def _check_memory_care_producer_collision(target: Path) -> List[CheckResult]:
+    """Warn when two enabled producers can write the same memory-care artifact.
+
+    This is a read-only migration-planning check. It inspects configured
+    producers, resolves their output destinations, and reports collisions. It
+    never disables a cron job, edits a card, or mutates a queue file.
+    """
+    from . import memory_cmd
+    from .work_cmd.config import _scanner_output_path
+
+    target = target.expanduser().resolve()
+    producer_dirs: dict[Path, set[str]] = {}
+
+    def _add(dir_path: Path, label: str) -> None:
+        producer_dirs.setdefault(dir_path, set()).add(label)
+
+    p1_exists = False
+    config_dir: Path | None = None
+
+    # Brigade memory-care scanner configured for this workspace.
+    if memory_cmd.config_path(target).is_file():
+        p1_exists = True
+        try:
+            config = memory_cmd.load_config(target) or memory_cmd.MemoryCareConfig()
+        except ValueError:
+            config = memory_cmd.MemoryCareConfig()
+        config_dir = memory_cmd._output_dir(target, config).expanduser().resolve()
+        _add(config_dir, "brigade memory-care")
+
+    # Enabled Brigade scanners whose command is the memory-care writer.
+    scanners_path = target / ".brigade" / "scanners.toml"
+    if scanners_path.is_file():
+        try:
+            data = memory_cmd.tomllib.loads(scanners_path.read_text())
+        except (memory_cmd.tomllib.TOMLDecodeError, OSError):
+            data = {}
+        if isinstance(data, dict):
+            for scanner in data.get("scanner", []):
+                if not isinstance(scanner, dict):
+                    continue
+                if not scanner.get("enabled", False):
+                    continue
+                command = scanner.get("command")
+                if not isinstance(command, str) or not _is_memory_care_scan_command(command):
+                    continue
+                p1_exists = True
+                output_path = _scanner_output_path(target, scanner)
+                if output_path is None:
+                    continue
+                scanner_dir = output_path.expanduser().resolve().parent
+                if scanner_dir == config_dir:
+                    # Same producer as the configured writer; do not double-count.
+                    continue
+                _add(scanner_dir, f"brigade memory-care scanner {scanner.get('id', 'unknown')}")
+
+    # Legacy OpenClaw cron producer (only when this target is a memory-care workspace).
+    if p1_exists:
+        jobs_path = Path.home() / ".openclaw" / "cron" / "jobs.json"
+        if jobs_path.is_file():
+            try:
+                data = json.loads(jobs_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                data = {}
+            jobs = data.get("jobs", []) if isinstance(data, dict) else []
+            legacy_job = _find_job(jobs, "Card Decay Scanner (Daily)")
+            if legacy_job is not None and legacy_job.get("enabled", False):
+                legacy_dir = (target / "memory/cards/decay").expanduser().resolve()
+                _add(legacy_dir, "legacy Card Decay Scanner (Daily)")
+
+    results: List[CheckResult] = []
+    for dir_path, labels in sorted(producer_dirs.items()):
+        if len(labels) < 2:
+            continue
+        try:
+            rel = dir_path.relative_to(target)
+        except ValueError:
+            rel = dir_path.name
+        labels_str = ", ".join(sorted(labels))
+        detail = (
+            f"writer collision on `{rel}`: enabled producers are {labels_str}. "
+            "Migration order: (1) verify the Brigade output with `brigade memory care status`; "
+            "(2) point consumers at the Brigade output location; "
+            "(3) disable the legacy 'Card Decay Scanner (Daily)' cron job. "
+            "This check is read-only; no queue files, cards, or cron jobs were changed."
+        )
+        results.append((WARN, "memory-care: producer collision", detail))
     return results
 
 

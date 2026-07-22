@@ -3,10 +3,13 @@ package ingest
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/escoffier-labs/miseledger/internal/archive"
 	"github.com/escoffier-labs/miseledger/internal/sources"
@@ -43,6 +46,42 @@ func TestImportAdapterReaderIdempotent(t *testing.T) {
 	}
 	if items != 1 {
 		t.Fatalf("items = %d, want 1", items)
+	}
+}
+
+// Regression: an adapter line beyond the 10MB scanner limit used to abort the
+// whole import with bufio.Scanner: token too long. It must be skipped with a
+// warning while surrounding records still import.
+func TestImportAdapterReaderSkipsOversizedLine(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	record := func(id, text string) string {
+		return `{"schema":"miseledger.adapter.v1","source":{"kind":"oversize-test","name":"Oversize Test"},"collection":{"external_id":"oversize:collection","kind":"agent_session","name":"oversize"},"item":{"external_id":"oversize:item:` + id + `","kind":"message","created_at":"2026-07-14T00:00:00Z","text":"` + text + `","tags":["oversize"]},"actor":{"external_id":"oversize:actor","type":"human","name":"reader"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"oversize.jsonl","ordinal":1}}`
+	}
+	jsonl := record("1", "before") + "\n" +
+		record("huge", strings.Repeat("a", sources.MaxLineBytes+1024)) + "\n" +
+		record("2", "after") + "\n"
+	res, err := ImportAdapterReader(db, strings.NewReader(jsonl), "oversize://fixture", "oversize-test")
+	if err != nil {
+		t.Fatalf("import must not abort on an oversized line: %v", err)
+	}
+	if res.Inserted != 2 {
+		t.Fatalf("inserted = %d, want 2", res.Inserted)
+	}
+	var warned bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "line too long") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("expected a line-too-long warning, got %d warnings", len(res.Warnings))
 	}
 }
 
@@ -282,9 +321,12 @@ func TestNativeReaderRecordsCommittedFileScanBeforeInterruptedImport(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
-	b.WriteString(strings.Repeat("x", 11*1024*1024))
+	// Interrupt the stream with a read error after the sentinel. (This used to
+	// be an 11MB line tripping bufio.Scanner's limit; oversized lines are now
+	// skipped with a warning instead of aborting, so they no longer interrupt.)
+	interrupted := io.MultiReader(strings.NewReader(b.String()), iotest.ErrReader(errors.New("simulated interruption")))
 
-	_, err = ImportNativeReaderProgress(db, strings.NewReader(b.String()), "native://fixture", "native-scan", nil, func(sourceKind, generatedHash string, file sources.FileScan) error {
+	_, err = ImportNativeReaderProgress(db, interrupted, "native://fixture", "native-scan", nil, func(sourceKind, generatedHash string, file sources.FileScan) error {
 		return RecordSourceScans(db, sourceKind, generatedHash, []sources.FileScan{file}, true)
 	})
 	if err == nil {
@@ -315,8 +357,13 @@ func TestNativeReaderDoesNotRecordScanForUncommittedFile(t *testing.T) {
 	if err := archive.Migrate(db); err != nil {
 		t.Fatal(err)
 	}
-	stream := adapterRecord("native-uncommitted", "file1:item:1", "uncommitted file record", "file1.jsonl", 1) + strings.Repeat("x", 11*1024*1024)
-	_, err = ImportNativeReaderProgress(db, strings.NewReader(stream), "native://fixture", "native-uncommitted", nil, func(sourceKind, generatedHash string, file sources.FileScan) error {
+	// Interrupt with a read error before any file-complete sentinel arrives
+	// (formerly an 11MB line tripping bufio.Scanner's limit).
+	stream := io.MultiReader(
+		strings.NewReader(adapterRecord("native-uncommitted", "file1:item:1", "uncommitted file record", "file1.jsonl", 1)),
+		iotest.ErrReader(errors.New("simulated interruption")),
+	)
+	_, err = ImportNativeReaderProgress(db, stream, "native://fixture", "native-uncommitted", nil, func(sourceKind, generatedHash string, file sources.FileScan) error {
 		return RecordSourceScans(db, sourceKind, generatedHash, []sources.FileScan{file}, true)
 	})
 	if err == nil {

@@ -107,6 +107,38 @@ func TestGenerateMalformedAndUnknownInput(t *testing.T) {
 	}
 }
 
+// Regression: a rollout file with a single line beyond the 10MB scanner limit
+// used to abort the whole codex import with bufio.Scanner: token too long.
+// The oversized line must be skipped with a warning while every other line in
+// the same file (and the rest of the tree) still imports.
+func TestGenerateSkipsOversizedLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-oversized.jsonl")
+	huge := `{"type":"event_msg","timestamp":"2026-07-14T19:29:49Z","payload":{"session_id":"s","role":"assistant","message":"` +
+		strings.Repeat("a", sources.MaxLineBytes+1024) + `"}}`
+	content := strings.Join([]string{
+		`{"type":"event_msg","timestamp":"2026-07-14T19:29:48Z","payload":{"session_id":"s","role":"user","message":"before the oversized line"}}`,
+		huge,
+		`{"type":"event_msg","timestamp":"2026-07-14T19:29:50Z","payload":{"session_id":"s","role":"assistant","message":"after the oversized line"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recs, res := parseRecords(t, path, sources.Options{})
+	if len(recs) != 2 {
+		t.Fatalf("records = %d, want the two normal lines to import", len(recs))
+	}
+	var warned bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "line too long") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("expected a line-too-long warning, got %v", res.Warnings)
+	}
+}
+
 func TestGenerateMissingPathErrors(t *testing.T) {
 	var buf bytes.Buffer
 	if _, err := Generate(filepath.Join(t.TempDir(), "nope.jsonl"), sources.Options{}, &buf); err == nil {

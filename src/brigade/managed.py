@@ -14,7 +14,7 @@ import urllib.request
 from dataclasses import dataclass, replace
 from typing import Any, Callable, List, Optional, Tuple
 
-from . import managed_snapshot, proc
+from . import component_bins, managed_snapshot, proc
 from .doctor import OK, WARN, FAIL, MANUAL
 from .station import CheckResult, DoctorContext
 
@@ -42,7 +42,7 @@ class ManagedTool:
     surfaces: Tuple[MachineSurface, ...] = ()
 
     def detect(self) -> bool:
-        return proc.which(self.command) is not None
+        return component_bins.resolve(self.command) is not None
 
 
 # ---- adapters -------------------------------------------------------------
@@ -263,7 +263,8 @@ def _agent_notify_wire(ctx: DoctorContext) -> List[CheckResult]:
 def _graphtrail_doctor(ctx: DoctorContext) -> List[CheckResult]:
     """Health-check GraphTrail for the target workspace (optional station)."""
     name = "graphtrail (code graph)"
-    if not proc.which("graphtrail"):
+    binary = component_bins.resolve("graphtrail")
+    if not binary:
         return [
             (
                 MANUAL,
@@ -274,7 +275,7 @@ def _graphtrail_doctor(ctx: DoctorContext) -> List[CheckResult]:
     db = ctx.target / ".graphtrail" / "graphtrail.db"
     if not db.is_file():
         return [(WARN, name, "installed; run `graphtrail sync` to build .graphtrail/graphtrail.db")]
-    r = proc.run(["graphtrail", "doctor", "--json"], timeout=30.0)
+    r = proc.run([binary, "doctor", "--json"], timeout=30.0)
     if r.code != 0:
         return [(WARN, name, f"doctor exit {r.code}; graph may need re-sync")]
     return [(OK, name, f"db present at {db}")]
@@ -318,7 +319,10 @@ def _plating_doctor(ctx: DoctorContext) -> List[CheckResult]:
 # are advisory: they never FAIL a workspace doctor run.
 def _miseledger_doctor(ctx: DoctorContext) -> List[CheckResult]:
     name = "miseledger (evidence archive)"
-    r = proc.run(["miseledger", "doctor", "--json"], timeout=120.0)
+    binary = component_bins.resolve("miseledger")
+    if not binary:
+        return [(MANUAL, name, "not installed; run `brigade setup`")]
+    r = proc.run([binary, "doctor", "--json"], timeout=120.0)
     if r.code == 124:
         return [
             (
@@ -479,7 +483,7 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         station="evidence",
         command="miseledger",
         summary="local-first evidence ledger: imports adapter JSONL, FTS search, evidence bundles",
-        install_args=["go", "install", "github.com/escoffier-labs/miseledger/cmd/miseledger@latest"],
+        install_args=["brigade", "setup"],
         wire=_noop_wire,
         doctor=_miseledger_doctor,
         surfaces=(
@@ -504,14 +508,15 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         ),
     ),
     # GraphTrail closes the other half of the receipts-to-context loop: code-graph
-    # briefs and deltas on verify/run receipts. Install is cargo-based; doctor is
-    # fail-open (MANUAL when absent) like every other optional sidecar.
+    # briefs and deltas on verify/run receipts. Install is the managed engine
+    # binary from `brigade setup`; doctor is fail-open (MANUAL when absent) like
+    # every other optional sidecar.
     ManagedTool(
         name="graphtrail",
         station="search",
         command="graphtrail",
         summary="local code-graph CLI: callers, callees, impact, context briefs, and structural diffs",
-        install_args=["cargo", "install", "graphtrail"],
+        install_args=["brigade", "setup"],
         wire=_noop_wire,
         doctor=_graphtrail_doctor,
         surfaces=(

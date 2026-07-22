@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-07-21
+
+### Added
+- `brigade evidence` now owns crawler runtime selection: it resolves the crawler binary, runs a read-only compatibility check before delegating to MiseLedger, refuses an incompatible runtime, persists per-source last-run, and makes evidence doctor/status health the worst of MiseLedger health, crawler compatibility, and the latest crawl - so a `NO_PENDING` queue no longer masks a failed producer. (#404)
+- `brigade roster doctor` and worker dispatch preflight `cloudflare-ai-gateway/` seats for `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_GATEWAY_ID`, failing before the child launches and classifying the failure as provider configuration. (#394)
+- `brigade doctor` warns when more than one enabled producer can write the same memory-care queue artifact, with a read-only migration plan. (#403)
+
+### Fixed
+- Install/update reconciliation now detects and removes the obsolete standalone `brigade-work-loop.py` hook (anchored to executable position so unrelated hooks are never touched) and reports a stale legacy registration with the exact repair command, preventing the legacy hook's unbounded untracked-file read from OOMing a session. (#397)
+- Evidence ledger import skips an oversized JSONL line instead of aborting the whole import. (#420)
+
+### Removed
+- The `solo-mise` command alias, deprecated since the Brigade rename. Use `brigade`. The `.solo-mise` workspace-directory read fallback is unaffected. (#421)
+
 ## [0.25.0] - 2026-07-20
 
 ### Added
