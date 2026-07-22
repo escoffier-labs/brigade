@@ -350,6 +350,28 @@ def dispatch(args) -> int:
     # work. Dry, read-only, and worktree runs never edit the tree, so reviewing
     # uncommitted changes stays possible without --allow-dirty.
     write_run = not args.dry_run and not args.read_only and effective_sandbox != "read-only"
+    # --allow-dirty in a dirty primary checkout would let ground truth attribute
+    # pre-existing work to the worker; require a linked worktree (or --worktree)
+    # so attribution stays clean. A clean tree, or a linked worktree the user
+    # created themselves, may still run dirty.
+    if (
+        args.allow_dirty
+        and write_run
+        and not args.worktree
+        and runguard.is_git_worktree(run_cwd)
+        and runguard.is_primary_checkout(run_cwd)
+    ):
+        try:
+            runguard.require_clean_worktree(run_cwd)
+        except runguard.DirtyWorktreeError:
+            print(
+                "error: --allow-dirty is not allowed in a primary checkout with uncommitted "
+                "changes; brigade would attribute pre-existing changes to the worker. "
+                "Commit or stash, use a linked git worktree, or pass --worktree to run in an "
+                "isolated checkout.",
+                file=sys.stderr,
+            )
+            return 2
     try:
         if write_run and not args.worktree and not args.allow_dirty and runguard.is_git_worktree(run_cwd):
             runguard.require_clean_worktree(run_cwd)

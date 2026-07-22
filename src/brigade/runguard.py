@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import json
 import os
 import shutil
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -573,6 +575,254 @@ def remove_worktree(repo: Path, worktree_path: Path) -> None:
     result = _git(root, "worktree", "remove", "--force", str(worktree_path), timeout=120.0)
     if result.code != 0:
         shutil.rmtree(worktree_path, ignore_errors=True)
+
+
+def is_primary_checkout(cwd: Path) -> bool:
+    """True when cwd is the main checkout rather than a linked git worktree.
+
+    In a primary checkout `--git-dir` and `--git-common-dir` resolve to the
+    same ``<toplevel>/.git`` directory; a linked worktree's ``--git-dir`` lives
+    under ``<common>/.git/worktrees/<name>`` and so differs from the common dir.
+    Returns False when cwd is not inside a work tree at all.
+    """
+    git_dir = _git(cwd, "rev-parse", "--git-dir")
+    common_dir = _git(cwd, "rev-parse", "--git-common-dir")
+    if git_dir.code != 0 or common_dir.code != 0:
+        return False
+    raw_git = git_dir.stdout.strip()
+    raw_common = common_dir.stdout.strip()
+    try:
+        git_path = (Path(raw_git) if Path(raw_git).is_absolute() else (cwd / raw_git)).resolve()
+        common_path = (Path(raw_common) if Path(raw_common).is_absolute() else (cwd / raw_common)).resolve()
+        return git_path == common_path
+    except OSError:
+        return False
+
+
+@dataclass(frozen=True)
+class PreRunSnapshot:
+    """Pre-run git state used to attribute only worker changes to the worker.
+
+    Captures branch, HEAD, and a content-sensitive fingerprint for every
+    tracked file already dirty and every untracked file already present, so
+    ground truth can compare final state to the baseline and attribute only
+    the paths the worker actually touched (a further edit to a file that was
+    already dirty is detected, while a baseline-dirty file the worker left
+    alone is excluded). Fingerprints encode content, filesystem type, and
+    mode, so deletions and type changes are detected too. Raw file contents
+    and secrets are never persisted: only a one-way digest per path is stored.
+    A branch/HEAD drift check can fail the run if the ref moves out from under
+    the worker.
+    """
+
+    branch: str
+    head: str
+    tracked_dirty: tuple[tuple[str, str], ...]
+    untracked: tuple[tuple[str, str], ...]
+
+    @property
+    def tracked_dirty_paths(self) -> tuple[str, ...]:
+        return tuple(path for path, _ in self.tracked_dirty)
+
+    @property
+    def untracked_paths(self) -> tuple[str, ...]:
+        return tuple(path for path, _ in self.untracked)
+
+
+def _tracked_dirty_paths(cwd: Path) -> list[str]:
+    result = _git(cwd, "diff", "--name-only", "HEAD")
+    if result.code != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RunGuardError(f"failed to list tracked dirty files: {detail}")
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _path_fingerprint(cwd: Path, relpath: str) -> str:
+    """Content- and type-sensitive fingerprint for a working-tree path.
+
+    Encodes filesystem type (regular file, symlink, directory, special, or
+    missing), mode, and content digest so a further edit, a deletion, or a
+    type/mode change to a baseline-dirty or untracked file is detected while an
+    untouched baseline file compares equal. Only a one-way digest is returned;
+    raw file contents are read transiently to hash and never persisted.
+    """
+    full = cwd / relpath
+    try:
+        st = full.lstat()
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unreadable"
+    mode = st.st_mode & 0o7777
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            target = os.readlink(full)
+        except OSError:
+            return f"link:{mode}:unreadable"
+        return f"link:{mode}:{target}"
+    if stat.S_ISDIR(st.st_mode):
+        try:
+            entries = sorted(os.listdir(full))
+        except OSError:
+            return f"dir:{mode}:unreadable"
+        return f"dir:{mode}:{','.join(entries)}"
+    if not stat.S_ISREG(st.st_mode):
+        return f"special:{mode}"
+    h = hashlib.sha256()
+    try:
+        with full.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                h.update(chunk)
+    except OSError:
+        return f"file:{mode}:unreadable"
+    return f"file:{mode}:{h.hexdigest()}"
+
+
+def _fingerprint_map(cwd: Path, paths: list[str]) -> tuple[tuple[str, str], ...]:
+    return tuple((path, _path_fingerprint(cwd, path)) for path in sorted(set(paths)))
+
+
+def capture_pre_run_snapshot(cwd: Path | None) -> PreRunSnapshot | None:
+    """Capture pre-run git state, or None when cwd is not a git work tree.
+
+    Raises RunGuardError when the tree is a git work tree but git state cannot
+    be read, so preflight fails loudly instead of silently disabling safety.
+    """
+    if cwd is None or not is_git_worktree(cwd):
+        return None
+    head = _git(cwd, "rev-parse", "HEAD")
+    branch = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+    # A repo with no commits has no HEAD; treat that as a non-snapshotable tree
+    # so ground truth falls back to its unavailable path rather than crashing.
+    if head.code != 0 or branch.code != 0:
+        return None
+    tracked_dirty_paths = _tracked_dirty_paths(cwd)
+    untracked_paths = _untracked_files(cwd)
+    return PreRunSnapshot(
+        head=head.stdout.strip(),
+        branch=branch.stdout.strip(),
+        tracked_dirty=_fingerprint_map(cwd, tracked_dirty_paths),
+        untracked=_fingerprint_map(cwd, untracked_paths),
+    )
+
+
+def snapshot_payload(snapshot: PreRunSnapshot | None) -> dict[str, object] | None:
+    if snapshot is None:
+        return None
+    return {
+        "schema": "brigade.pre_run_snapshot.v1",
+        "branch": snapshot.branch,
+        "head": snapshot.head,
+        "tracked_dirty_files": list(snapshot.tracked_dirty_paths),
+        # Content-sensitive fingerprints per path so the persisted snapshot can
+        # audit and reproduce the worker-change comparison: a reviewer can re-run
+        # the baseline-vs-final fingerprint diff without recapturing the tree.
+        # Only one-way digests are stored; raw file contents are never persisted.
+        "tracked_dirty_fingerprints": dict(snapshot.tracked_dirty),
+        "untracked_files": list(snapshot.untracked_paths),
+        "untracked_fingerprints": dict(snapshot.untracked),
+    }
+
+
+def detect_branch_head_drift(cwd: Path | None, snapshot: PreRunSnapshot | None) -> str | None:
+    """Return a human detail when branch or HEAD moved since the snapshot."""
+    if snapshot is None or cwd is None:
+        return None
+    head = _git(cwd, "rev-parse", "HEAD")
+    branch = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+    if head.code != 0 or branch.code != 0:
+        detail = head.stderr.strip() or branch.stderr.strip() or "git rev-parse failed"
+        return f"could not re-read git state after run: {detail}"
+    current_head = head.stdout.strip()
+    current_branch = branch.stdout.strip()
+    if current_head != snapshot.head and current_branch != snapshot.branch:
+        return (
+            f"git state drifted during run: branch {snapshot.branch!r} -> {current_branch!r}, "
+            f"HEAD {snapshot.head[:12]} -> {current_head[:12]}"
+        )
+    if current_head != snapshot.head:
+        return f"git HEAD drifted during run: {snapshot.head[:12]} -> {current_head[:12]}"
+    if current_branch != snapshot.branch:
+        return f"git branch drifted during run: {snapshot.branch!r} -> {current_branch!r}"
+    return None
+
+
+def changes_relative_to_snapshot(cwd: Path | None, snapshot: PreRunSnapshot | None) -> tuple[list[str], list[str]]:
+    """Changed/untracked files attributable to the worker, relative to snapshot.
+
+    Compares final working-tree state to the content-sensitive baseline so a
+    further edit, deletion, or type/mode change to a file that was already
+    dirty or untracked before the run is detected, while a baseline file the
+    worker left alone is excluded. Newly dirtied tracked files and new
+    untracked files are attributed to the worker. The union of baseline and
+    final dirty/untracked paths is covered, so a baseline-dirty tracked file
+    the worker restored to HEAD (no longer listed by `git diff --name-only
+    HEAD`) is still detected as a content change. Returns ([], []) when no
+    snapshot is available.
+
+    Fails closed: if a final git query fails, RunGuardError is raised with a
+    precise reason instead of returning an empty result the caller would treat
+    as an available clean run.
+    """
+    if snapshot is None or cwd is None:
+        return [], []
+    try:
+        current_tracked = _tracked_dirty_paths(cwd)
+    except RunGuardError as exc:
+        raise RunGuardError(f"could not re-read tracked dirty files after run: {exc}") from exc
+    try:
+        current_untracked = _untracked_files(cwd)
+    except RunGuardError as exc:
+        raise RunGuardError(f"could not re-read untracked files after run: {exc}") from exc
+    baseline_tracked = dict(snapshot.tracked_dirty)
+    baseline_untracked = dict(snapshot.untracked)
+
+    changed: list[str] = []
+    current_tracked_set = set(current_tracked)
+    for path in current_tracked:
+        baseline = baseline_tracked.get(path)
+        if baseline is None:
+            # Newly dirtied by the worker.
+            changed.append(path)
+            continue
+        # Already dirty at baseline: attribute only if the worker touched it
+        # (content, deletion, or type/mode change).
+        if _path_fingerprint(cwd, path) != baseline:
+            changed.append(path)
+    # A baseline-dirty tracked file the worker restored to HEAD is no longer
+    # listed by `git diff --name-only HEAD`, so it is absent from
+    # current_tracked. Compare its final fingerprint to the baseline and
+    # attribute the restore (a content change back to HEAD) to the worker. This
+    # covers the union of baseline and final dirty tracked paths, not just the
+    # final set.
+    for path, baseline in baseline_tracked.items():
+        if path in current_tracked_set:
+            continue
+        if _path_fingerprint(cwd, path) != baseline:
+            changed.append(path)
+
+    untracked: list[str] = []
+    current_untracked_set = set(current_untracked)
+    for path in current_untracked:
+        baseline = baseline_untracked.get(path)
+        if baseline is None:
+            # New untracked file created by the worker.
+            untracked.append(path)
+            continue
+        # Already untracked at baseline: attribute only if the worker mutated it.
+        if _path_fingerprint(cwd, path) != baseline:
+            untracked.append(path)
+
+    # A baseline untracked file the worker deleted is no longer listed by git,
+    # so compare final state explicitly and report it as an untracked-path
+    # change attributable to the worker.
+    for path, baseline in baseline_untracked.items():
+        if path in current_untracked_set:
+            continue
+        if _path_fingerprint(cwd, path) != baseline:
+            untracked.append(path)
+
+    return changed, untracked
 
 
 def _tracked_diff(cwd: Path) -> tuple[str, int]:
