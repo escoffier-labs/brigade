@@ -1,7 +1,9 @@
 import json
+from pathlib import Path
 
 import pytest
 
+from brigade import __version__ as BRIGADE_VERSION
 from brigade import harness_profile_cmd, harness_profiles, skills_cmd
 
 
@@ -360,3 +362,178 @@ def test_skill_ownership_is_persisted_per_file_not_per_command(tmp_path, monkeyp
     assert json.loads(state_path.read_text())["skills"]["reviewed"]["files"] == {
         "SKILL.md": harness_profile_cmd.digest_bytes(b"# a\n")
     }
+
+
+def _valid_state_payload(base_workspace: Path, **overrides) -> dict:
+    payload = {
+        "schema_version": harness_profiles.PROFILE_STATE_VERSION,
+        "package_version": BRIGADE_VERSION,
+        "harness": "codex",
+        "workspace": str(base_workspace.expanduser().resolve()),
+        "instructions": {},
+        "skills": {},
+        "generated": {},
+        "mcp": {},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_load_profile_state_missing_returns_seeded_schema_v2_state(tmp_path):
+    state_path = tmp_path / "brigade" / "install-state.json"
+    state_path.parent.mkdir(parents=True)
+
+    loaded = harness_profile_cmd.load_profile_state(state_path=state_path, workspace=tmp_path, harness="codex")
+    assert loaded.error is None
+    assert loaded.state["schema_version"] == harness_profiles.PROFILE_STATE_VERSION
+    assert loaded.state["package_version"] == BRIGADE_VERSION
+    assert loaded.state["harness"] == "codex"
+    assert loaded.state["workspace"] == str(tmp_path.expanduser().resolve())
+    for section in ("instructions", "skills", "generated", "mcp"):
+        assert loaded.state[section] == {}
+    assert "artifacts" not in loaded.state
+
+
+def test_load_profile_state_rejects_unreadable_bytes_and_invalid_json(tmp_path):
+    state_path = tmp_path / "brigade" / "install-state.json"
+    state_path.parent.mkdir(parents=True)
+
+    state_path.write_bytes(b"\xff\xfe\x00")
+    assert (
+        harness_profile_cmd.load_profile_state(state_path=state_path, workspace=tmp_path, harness="codex").error
+        == "ownership state is unreadable"
+    )
+
+    state_path.write_text("{not json")
+    assert (
+        harness_profile_cmd.load_profile_state(state_path=state_path, workspace=tmp_path, harness="codex").error
+        == "ownership state is unreadable"
+    )
+
+
+def test_load_profile_state_rejects_non_object_json(tmp_path):
+    state_path = tmp_path / "brigade" / "install-state.json"
+    state_path.parent.mkdir(parents=True)
+
+    state_path.write_text("[]")
+    assert (
+        harness_profile_cmd.load_profile_state(state_path=state_path, workspace=tmp_path, harness="codex").error
+        == "ownership state is not an object"
+    )
+
+
+def test_load_profile_state_rejects_unsupported_or_missing_schema_version(tmp_path):
+    state_path = tmp_path / "brigade" / "install-state.json"
+    state_path.parent.mkdir(parents=True)
+
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 999,
+                "harness": "codex",
+                "workspace": str(tmp_path.resolve()),
+            }
+        )
+    )
+    assert (
+        harness_profile_cmd.load_profile_state(state_path=state_path, workspace=tmp_path, harness="codex").error
+        == "unsupported ownership state version: 999"
+    )
+
+    state_path.write_text(
+        json.dumps(
+            {
+                "harness": "codex",
+                "workspace": str(tmp_path.resolve()),
+            }
+        )
+    )
+    assert (
+        harness_profile_cmd.load_profile_state(state_path=state_path, workspace=tmp_path, harness="codex").error
+        == "unsupported ownership state version: None"
+    )
+
+
+def test_load_profile_state_rejects_harness_mismatch(tmp_path):
+    state_path = tmp_path / "brigade" / "install-state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps(_valid_state_payload(tmp_path, harness="claude")))
+
+    assert (
+        harness_profile_cmd.load_profile_state(state_path=state_path, workspace=tmp_path, harness="codex").error
+        == "ownership harness mismatch: claude != codex"
+    )
+
+
+def test_load_profile_state_rejects_workspace_mismatch(tmp_path):
+    state_path = tmp_path / "brigade" / "install-state.json"
+    state_path.parent.mkdir(parents=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    state_path.write_text(json.dumps(_valid_state_payload(tmp_path, workspace=str(other.expanduser().resolve()))))
+
+    assert harness_profile_cmd.load_profile_state(state_path=state_path, workspace=tmp_path, harness="codex").error == (
+        f"ownership workspace mismatch: {other.expanduser().resolve()} != {tmp_path.expanduser().resolve()}"
+    )
+
+
+def test_load_profile_state_rejects_non_object_sections_in_order(tmp_path):
+    state_path = tmp_path / "brigade" / "install-state.json"
+    state_path.parent.mkdir(parents=True)
+
+    for bad_section in ("instructions", "skills", "generated", "mcp"):
+        payload = _valid_state_payload(tmp_path)
+        for section in ("instructions", "skills", "generated", "mcp"):
+            payload[section] = [] if section == bad_section else {}
+        state_path.write_text(json.dumps(payload))
+        assert (
+            harness_profile_cmd.load_profile_state(state_path=state_path, workspace=tmp_path, harness="codex").error
+            == f"ownership state section is not an object: {bad_section}"
+        )
+
+
+def test_load_profile_state_returns_valid_state_unchanged(tmp_path):
+    state_path = tmp_path / "brigade" / "install-state.json"
+    state_path.parent.mkdir(parents=True)
+    original = _valid_state_payload(
+        tmp_path,
+        instructions={"digest": "abc"},
+        skills={"reviewed": {"files": {"SKILL.md": "deadbeef"}}},
+        generated={"pi": {"files": {"index.ts": "deadbeef"}}},
+        mcp={"servers": {"brigade": {}}},
+    )
+    state_path.write_text(json.dumps(original))
+    before = state_path.read_bytes()
+
+    loaded = harness_profile_cmd.load_profile_state(state_path=state_path, workspace=tmp_path, harness="codex")
+    assert loaded.error is None
+    assert loaded.state == original
+    # no rewrite when package_version is current
+    assert state_path.read_bytes() == before
+
+
+def test_load_profile_state_refreshes_stale_package_version_atomically(tmp_path):
+    state_path = tmp_path / "brigade" / "install-state.json"
+    state_path.parent.mkdir(parents=True)
+    stale = _valid_state_payload(
+        tmp_path,
+        package_version="0.0.0-old",
+        instructions={"digest": "abc"},
+        skills={"reviewed": {"files": {"SKILL.md": "deadbeef"}}},
+    )
+    state_path.write_text(json.dumps(stale))
+
+    loaded = harness_profile_cmd.load_profile_state(state_path=state_path, workspace=tmp_path, harness="codex")
+    assert loaded.error is None
+    assert loaded.state["package_version"] == BRIGADE_VERSION
+
+    persisted = json.loads(state_path.read_text())
+    assert persisted["package_version"] == BRIGADE_VERSION
+    # refresh does not add public mutation/report fields
+    assert set(persisted.keys()) == set(stale.keys())
+    assert set(loaded.state.keys()) == set(stale.keys())
+    assert "reload_required" not in persisted
+    assert "written_files" not in persisted
+    # non-version fields are preserved
+    assert persisted["instructions"] == stale["instructions"]
+    assert persisted["skills"] == stale["skills"]

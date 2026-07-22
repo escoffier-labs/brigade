@@ -9,10 +9,12 @@ resolution live in the sibling ``harness_profiles`` module.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import __version__ as BRIGADE_VERSION
 from . import harness_profiles, localio
 
 _RECOVERY_COMMAND = "brigade harness install <harness> --scope user --adopt --write"
@@ -270,11 +272,12 @@ def empty_profile_state(*, workspace: Path, harness: str) -> dict[str, Any]:
     """Return a fresh schema-v2 ownership state seeded for ``workspace``/``harness``."""
     return {
         "schema_version": harness_profiles.PROFILE_STATE_VERSION,
+        "package_version": BRIGADE_VERSION,
         "workspace": str(workspace.expanduser().resolve()),
         "harness": harness,
         "instructions": {},
         "skills": {},
-        "artifacts": {},
+        "generated": {},
         "mcp": {},
     }
 
@@ -282,6 +285,76 @@ def empty_profile_state(*, workspace: Path, harness: str) -> dict[str, Any]:
 def write_profile_state(*, state_path: Path, state: dict[str, Any]) -> None:
     """Persist ``state`` atomically as sorted-key JSON at ``state_path``."""
     localio.write_json(state_path, state)
+
+
+@dataclass(frozen=True)
+class LoadedProfileState:
+    """Result of loading and validating a profile ownership-state file."""
+
+    state: dict[str, Any]
+    error: str | None
+
+
+_PROFILE_STATE_SECTIONS: tuple[str, ...] = ("instructions", "skills", "generated", "mcp")
+
+
+def load_profile_state(*, state_path: Path, workspace: Path, harness: str) -> LoadedProfileState:
+    """Load and validate the ownership state at ``state_path``.
+
+    A missing path returns a fresh schema-v2 state seeded for ``workspace`` and
+    ``harness`` with no error and no write. An existing path must be readable
+    UTF-8 JSON. Validation order is: top-level object, exact schema version,
+    harness identity, resolved workspace identity, then each of
+    ``instructions``/``skills``/``generated``/``mcp`` being an object. A valid
+    state is returned unchanged except ``package_version``: if it differs from
+    the current ``BRIGADE_VERSION`` an independent top-level copy is written
+    atomically and returned. Malformed files are never mutated.
+    """
+    if not state_path.exists():
+        return LoadedProfileState(empty_profile_state(workspace=workspace, harness=harness), None)
+
+    try:
+        raw = state_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return LoadedProfileState({}, "ownership state is unreadable")
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError:
+        return LoadedProfileState({}, "ownership state is unreadable")
+
+    if not isinstance(state, dict):
+        return LoadedProfileState({}, "ownership state is not an object")
+
+    version = state.get("schema_version")
+    if version != harness_profiles.PROFILE_STATE_VERSION:
+        return LoadedProfileState({}, f"unsupported ownership state version: {version}")
+
+    if state.get("harness") != harness:
+        return LoadedProfileState({}, f"ownership harness mismatch: {state.get('harness')} != {harness}")
+
+    stored_workspace = state.get("workspace")
+    if isinstance(stored_workspace, str) and stored_workspace:
+        stored_resolved: Any = Path(stored_workspace).expanduser().resolve()
+    else:
+        stored_resolved = stored_workspace
+    requested_resolved = workspace.expanduser().resolve()
+    if stored_resolved != requested_resolved:
+        return LoadedProfileState(
+            {},
+            f"ownership workspace mismatch: {stored_resolved} != {requested_resolved}",
+        )
+
+    for section in _PROFILE_STATE_SECTIONS:
+        if not isinstance(state.get(section), dict):
+            return LoadedProfileState({}, f"ownership state section is not an object: {section}")
+
+    if state.get("package_version") != BRIGADE_VERSION:
+        refreshed = dict(state)
+        refreshed["package_version"] = BRIGADE_VERSION
+        write_profile_state(state_path=state_path, state=refreshed)
+        return LoadedProfileState(refreshed, None)
+
+    return LoadedProfileState(state, None)
 
 
 def _validate_skill_id(skill_id: str) -> None:
