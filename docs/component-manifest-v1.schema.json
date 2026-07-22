@@ -26,8 +26,41 @@
     },
     "components": {
       "type": "object",
-      "required": ["graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"],
+      "required": ["agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"],
       "properties": {
+        "agent-notify": {
+          "allOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["component_revision", "source", "executable", "assets"],
+              "properties": {
+                "component_revision": {"$ref": "#/$defs/graphtrail_component_revision"},
+                "executable": {"const": "agent-notify"},
+                "source": {},
+                "assets": {}
+              }
+            },
+            {
+              "oneOf": [
+                {
+                  "properties": {
+                    "source": {"$ref": "#/$defs/unpublished_source"},
+                    "assets": {"$ref": "#/$defs/empty_assets"}
+                  },
+                  "required": ["source", "assets"]
+                },
+                {
+                  "properties": {
+                    "source": {"$ref": "#/$defs/published_source"},
+                    "assets": {"$ref": "#/$defs/published_assets"}
+                  },
+                  "required": ["source", "assets"]
+                }
+              ]
+            }
+          ]
+        },
         "graphtrail": {
           "allOf": [
             {

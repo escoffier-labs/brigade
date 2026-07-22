@@ -611,9 +611,19 @@ def test_doctor_checks_codex_inbox_when_selected(tmp_target: Path, capsys):
         includes=[],
     )
     install_selection(tmp_target, sel)
-    doctor_mod.run(tmp_target)
-    out = capsys.readouterr().out
-    assert ".codex/memory-handoffs" in out
+    capsys.readouterr()  # drain install output before the doctor run
+
+    # Assert the production contract directly via structured output: a selected
+    # Codex harness must produce an OK handoff-inbox check that names the real
+    # .codex/memory-handoffs path. Do not depend on compact-output truncation
+    # or on check ordering, which the managed-tool additions can shift.
+    doctor_mod.run(tmp_target, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    inbox_checks = {check["name"]: check for check in payload["checks"] if check["name"].startswith("handoff: codex")}
+    assert "handoff: codex inbox" in inbox_checks
+    codex_inbox = inbox_checks["handoff: codex inbox"]
+    assert codex_inbox["status"] == doctor_mod.OK
+    assert ".codex/memory-handoffs" in codex_inbox["detail"]
 
 
 def test_doctor_reports_default_wired_skills_for_selected_harnesses(tmp_target: Path, capsys):

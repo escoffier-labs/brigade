@@ -118,8 +118,9 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         if tool.detect():
             print(f"  [skip] {tool.name} already installed")
         else:
-            print(f"  [install] {tool.name}: {' '.join(tool.install_args)}")
-            r = managed.proc.run(tool.install_args, timeout=300)
+            install_command = tool.install_command()
+            print(f"  [install] {tool.name}: {' '.join(install_command)}")
+            r = managed.proc.run(install_command, timeout=300)
             if r.code != 0:
                 print(f"  [fail] {tool.name} install exited {r.code}: {r.stderr.strip()[:120]}", file=sys.stderr)
                 rc = 1

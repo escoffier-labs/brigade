@@ -36,14 +36,14 @@ def _healthy_report(managed_bin):
     return {
         "components": [
             _component(component_id, managed_bin / component_id)
-            for component_id in ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+            for component_id in ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
         ]
     }
 
 
 def _write_managed_binaries(managed_bin):
     managed_bin.mkdir(parents=True)
-    for component_id in ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"):
+    for component_id in ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"):
         executable = managed_bin / component_id
         executable.write_text("#!/bin/sh\nexit 0\n")
         executable.chmod(0o755)
@@ -109,13 +109,13 @@ def test_component_report_rejects_missing_or_unhealthy_component(acceptance_modu
         acceptance_module.validate_component_report(report, managed_bin)
 
 
-def test_component_report_requires_exactly_four_components(acceptance_module, tmp_path):
+def test_component_report_requires_exactly_five_components(acceptance_module, tmp_path):
     managed_bin = tmp_path / "xdg-data" / "brigade" / "bin"
     _write_managed_binaries(managed_bin)
     report = _healthy_report(managed_bin)
     report["components"].pop()
 
-    with pytest.raises(acceptance_module.AcceptanceError, match="exactly 4"):
+    with pytest.raises(acceptance_module.AcceptanceError, match="exactly 5"):
         acceptance_module.validate_component_report(report, managed_bin)
 
 
@@ -197,6 +197,8 @@ def test_smoke_uses_only_absolute_managed_executables(acceptance_module, tmp_pat
             return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
         if Path(argv[0]).name == "sessionfind":
             return subprocess.CompletedProcess(argv, 0, "usage: sessionfind", "")
+        if Path(argv[0]).name == "agent-notify":
+            return subprocess.CompletedProcess(argv, 0, '{"version":"acceptance"}', "")
         return subprocess.CompletedProcess(argv, 0, "ok", "")
 
     acceptance_module.smoke_managed_components(
@@ -216,6 +218,8 @@ def test_smoke_accepts_sessionfind_command_list_help(acceptance_module, tmp_path
             return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
         if Path(argv[0]).name == "sessionfind":
             return subprocess.CompletedProcess(argv, 0, "\n  sessionfind query [PATH]...\n", "")
+        if Path(argv[0]).name == "agent-notify":
+            return subprocess.CompletedProcess(argv, 0, '{"version":"acceptance"}', "")
         return subprocess.CompletedProcess(argv, 0, "ok", "")
 
     acceptance_module.smoke_managed_components(
@@ -233,6 +237,8 @@ def test_smoke_rejects_sessionfind_unrelated_success_output(acceptance_module, t
             return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
         if Path(argv[0]).name == "sessionfind":
             return subprocess.CompletedProcess(argv, 0, "commands available", "no help text")
+        if Path(argv[0]).name == "agent-notify":
+            return subprocess.CompletedProcess(argv, 0, '{"version":"acceptance"}', "")
         return subprocess.CompletedProcess(argv, 0, "ok", "")
 
     with pytest.raises(acceptance_module.AcceptanceError, match="sessionfind smoke produced no help text"):
@@ -291,7 +297,7 @@ def test_release_asset_verification_requires_one_tag_and_verifies_all_native_byt
     )
 
     assert set(verified["native_paths"]) == set(acceptance_module.COMPONENT_IDS)
-    assert len(list((tmp_path / "release-assets").iterdir())) == 21
+    assert len(list((tmp_path / "release-assets").iterdir())) == 26
 
 
 def test_release_asset_verification_marks_posix_assets_executable_but_not_windows(

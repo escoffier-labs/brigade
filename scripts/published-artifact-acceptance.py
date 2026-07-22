@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 
-COMPONENT_IDS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
 PYPI_PROJECT_URL = "https://pypi.org/pypi/brigade-cli/json"
@@ -111,7 +111,7 @@ def verify_release_assets(
         raise AcceptanceError("release component manifest has no components object")
     components = manifest["components"]
     if set(components) != set(COMPONENT_IDS):
-        raise AcceptanceError("release component manifest must contain exactly four components")
+        raise AcceptanceError("release component manifest must contain exactly five components")
 
     expected: dict[str, tuple[str, str]] = {}
     native_paths: dict[str, dict[str, Path]] = {component: {} for component in COMPONENT_IDS}
@@ -150,7 +150,7 @@ def verify_release_assets(
         raise AcceptanceError(f"could not fetch release checksums.txt: {exc}") from exc
     expected_checksum_names = set(expected) | {"component-manifest-v1.json"}
     if set(checksums) != expected_checksum_names:
-        raise AcceptanceError("checksums.txt must cover exactly all 20 native assets and component-manifest-v1.json")
+        raise AcceptanceError("checksums.txt must cover exactly all 25 native assets and component-manifest-v1.json")
     if checksums.get("component-manifest-v1.json") != _sha256_bytes(manifest_bytes):
         raise AcceptanceError("release manifest digest does not match checksums.txt")
     (release_dir / "component-manifest-v1.json").write_bytes(manifest_bytes)
@@ -248,7 +248,7 @@ def validate_component_report(report: Any, managed_bin: Path) -> dict[str, Path]
         raise AcceptanceError("component report did not contain a components list")
     components = report["components"]
     if len(components) != len(COMPONENT_IDS):
-        raise AcceptanceError(f"expected exactly 4 components, got {len(components)}")
+        raise AcceptanceError(f"expected exactly 5 components, got {len(components)}")
 
     root = managed_bin.resolve()
     managed_paths: dict[str, Path] = {}
@@ -311,6 +311,13 @@ def smoke_managed_components(
         line.strip().startswith("sessionfind ") for line in sessionfind.stdout.splitlines()
     ):
         raise AcceptanceError("sessionfind smoke produced no help text")
+    agent_notify = run_checked([managed_paths["agent-notify"], "version", "--json"], runner=runner, env=env)
+    try:
+        agent_notify_payload = json.loads(agent_notify.stdout)
+    except json.JSONDecodeError as exc:
+        raise AcceptanceError("agent-notify smoke returned malformed JSON") from exc
+    if not isinstance(agent_notify_payload, dict) or not agent_notify_payload.get("version"):
+        raise AcceptanceError("agent-notify smoke JSON missing version field")
 
 
 def smoke_rosetta_darwin_amd64(native_paths: Mapping[str, Mapping[str, Path]], *, runner: Runner) -> None:

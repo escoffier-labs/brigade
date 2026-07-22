@@ -10,6 +10,12 @@
     "windows-amd64"
   ],
   "components": {
+    "agent-notify": {
+      "component_revision": "c0e69dae7ab36ca0aba76ca7ee3669707214a0dd",
+      "source": {"repository": "escoffier-labs/brigade"},
+      "executable": "agent-notify",
+      "assets": {}
+    },
     "graphtrail": {
       "component_revision": "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb",
       "source": {"repository": "escoffier-labs/graphtrail", "release_tag": "v0.4.0"},

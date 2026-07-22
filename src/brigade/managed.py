@@ -40,9 +40,20 @@ class ManagedTool:
     wire: Callable[[DoctorContext], List[CheckResult]]  # lay config; returns notes
     doctor: Callable[[DoctorContext], List[CheckResult]]  # health via proc
     surfaces: Tuple[MachineSurface, ...] = ()
+    # Optional resolver that returns the install argv chosen for this tool at
+    # call time (e.g. `brigade setup` for release-pinned components vs a source
+    # install command for pre-release components). When unset, install_args is
+    # used verbatim.
+    install_resolver: Optional[Callable[[], List[str]]] = None
 
     def detect(self) -> bool:
         return component_bins.resolve(self.command) is not None
+
+    def install_command(self) -> List[str]:
+        """Return the argv used to install this tool, resolving per-context if needed."""
+        if self.install_resolver is not None:
+            return self.install_resolver()
+        return list(self.install_args)
 
 
 # ---- adapters -------------------------------------------------------------
@@ -260,6 +271,40 @@ def _agent_notify_wire(ctx: DoctorContext) -> List[CheckResult]:
     ]
 
 
+def _agent_notify_install_command() -> List[str]:
+    """Choose the agent-notify install argv from release-vs-source context.
+
+    Released CLIs start automatic manifest selection at the bundled compatibility
+    manifest (where agent-notify has empty assets). That bundled published-set
+    must not decide the install route: `brigade setup` loads the exact release
+    manifest (checksums, attestations, pinned assets) via the same auto path as
+    every other managed component.
+
+    `go install @latest` is reserved for an explicit source-install context
+    where manifest selection is not the bundled release path and agent-notify
+    is not published, so no release component can exist. Never treat a missing
+    or unreadable manifest as a release-asset failure that falls back to
+    `go install` on a released CLI.
+    """
+    from . import component_install, component_manifest
+
+    source_install = ["go", "install", "github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest"]
+    # Released CLI: auto setup resolves the release manifest. Do not consult the
+    # bundled compatibility manifest's published-component set.
+    if component_install.uses_bundled_compatibility_manifest():
+        return ["brigade", "setup"]
+
+    # Explicit source / non-bundled manifest: setup only when agent-notify is
+    # published there; otherwise no release component can exist.
+    try:
+        manifest = component_manifest.load()
+    except ValueError:
+        return source_install
+    if "agent-notify" in component_manifest.published_component_ids(manifest):
+        return ["brigade", "setup"]
+    return source_install
+
+
 def _graphtrail_doctor(ctx: DoctorContext) -> List[CheckResult]:
     """Health-check GraphTrail for the target workspace (optional station)."""
     name = "graphtrail (code graph)"
@@ -464,7 +509,8 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         station="notifications",
         command="agent-notify",
         summary="private operator notifications for agent events",
-        install_args=["go", "install", "github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest"],
+        install_args=["brigade", "setup"],
+        install_resolver=_agent_notify_install_command,
         wire=_agent_notify_wire,
         doctor=_agent_notify_doctor,
         surfaces=(

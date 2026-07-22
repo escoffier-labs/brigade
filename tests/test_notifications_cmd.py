@@ -29,7 +29,7 @@ def _configured_doctor_result(profile: str = "operator") -> notifications_cmd.pr
 
 
 def test_notifications_status_reports_missing_agent_notify(monkeypatch, tmp_target, capsys):
-    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: None)
+    monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: None)
 
     rc = notifications_cmd.status(target=tmp_target, json_output=True)
     out = capsys.readouterr().out
@@ -67,7 +67,7 @@ def test_notifications_status_uses_non_sending_doctor_probe(monkeypatch, tmp_tar
             stderr="",
         )
 
-    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: "/usr/bin/agent-notify")
     monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
 
     rc = notifications_cmd.status(target=tmp_target, profile="operator", json_output=True)
@@ -76,7 +76,7 @@ def test_notifications_status_uses_non_sending_doctor_probe(monkeypatch, tmp_tar
 
     assert rc == 0
     assert seen == {
-        "args": ["agent-notify", "doctor", "--json", "--skip-network", "--profile", "operator"],
+        "args": ["/usr/bin/agent-notify", "doctor", "--json", "--skip-network", "--profile", "operator"],
         "timeout": 30.0,
         "stdin": None,
     }
@@ -99,7 +99,7 @@ def test_notifications_status_discards_failed_doctor_output(monkeypatch, tmp_tar
             stderr=f"provider request failed: {sentinel_url}",
         )
 
-    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: "/usr/bin/agent-notify")
     monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
 
     assert notifications_cmd.status(target=tmp_target, profile="operator", json_output=True) == 0
@@ -117,7 +117,7 @@ def test_notifications_status_discards_failed_doctor_output(monkeypatch, tmp_tar
 
 
 def test_notifications_setup_plan_prints_hook_snippets(monkeypatch, tmp_target, capsys):
-    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: None)
+    monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: None)
 
     rc = notifications_cmd.setup_plan(target=tmp_target, profile="agent-stop")
     out = capsys.readouterr().out
@@ -136,13 +136,13 @@ def test_notifications_setup_plan_runs_non_sending_doctor(monkeypatch, tmp_targe
         seen["args"] = args
         return notifications_cmd.proc.Result(code=2, stdout="{}", stderr="ignored")
 
-    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: "/usr/bin/agent-notify")
     monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
 
     assert notifications_cmd.setup_plan(target=tmp_target, profile="operator", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
 
-    assert seen["args"] == ["agent-notify", "doctor", "--json", "--skip-network", "--profile", "operator"]
+    assert seen["args"] == ["/usr/bin/agent-notify", "doctor", "--json", "--skip-network", "--profile", "operator"]
     assert payload["doctor_probe"] == {
         "configured": False,
         "probe_exit_code": 2,
@@ -151,7 +151,7 @@ def test_notifications_setup_plan_runs_non_sending_doctor(monkeypatch, tmp_targe
 
 
 def test_notifications_health_is_read_only_when_missing(monkeypatch, tmp_target):
-    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: None)
+    monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: None)
 
     payload = notifications_cmd.health(tmp_target)
 
@@ -167,7 +167,7 @@ def test_notifications_health_is_read_only_when_missing(monkeypatch, tmp_target)
 
 def test_notifications_surface_in_center_work_and_daily(monkeypatch, tmp_target, capsys):
     tmp_target.mkdir()
-    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: None)
+    monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: None)
 
     center_payload = center_cmd.status_payload(tmp_target)
     assert center_payload["notifications"]["status"] == "manual"
@@ -191,7 +191,7 @@ def test_notifications_event_record_writes_local_receipt_without_sending(monkeyp
         calls.append(args)
         return _configured_doctor_result()
 
-    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: "/usr/bin/agent-notify")
     monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
 
     rc = notifications_cmd.event_record(
@@ -232,7 +232,7 @@ def test_notifications_event_record_can_explicitly_send(monkeypatch, tmp_target,
         seen["stdin"] = stdin
         return notifications_cmd.proc.Result(code=0, stdout="sent", stderr="")
 
-    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: "/usr/bin/agent-notify")
     monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
 
     assert (
@@ -265,7 +265,7 @@ def test_notifications_event_record_can_explicitly_send(monkeypatch, tmp_target,
     assert payload["sent"] is True
     assert payload["send_exit_code"] == 0
     assert payload["send_failure_class"] is None
-    assert seen["args"] == ["agent-notify", "send", "--profile", "operator"]
+    assert seen["args"] == ["/usr/bin/agent-notify", "send", "--profile", "operator"]
     assert seen["stdin"] == (
         b'{"body":"Brigade CI passed.","level":"success","source":"ci","tags":["ci-green"],"title":"CI green"}\n'
     )
@@ -293,7 +293,7 @@ def test_notifications_event_record_preserves_send_exit_meanings(
         seen["stdin"] = stdin
         return notifications_cmd.proc.Result(code=exit_code, stdout="ignored", stderr="ignored")
 
-    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: "/usr/bin/agent-notify")
     monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
 
     rc = notifications_cmd.event_record(
@@ -329,7 +329,7 @@ def test_notifications_event_record_discards_child_failure_output(monkeypatch, t
             stderr=f"authorization={sentinel_token}",
         )
 
-    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: "/usr/bin/agent-notify")
     monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
 
     assert (

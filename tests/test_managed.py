@@ -513,6 +513,86 @@ def test_standalone_content_guard_is_not_a_managed_install():
     assert {tool.name for tool in managed.for_station("guard")} == {"plating"}
 
 
-def test_agent_notify_install_args_use_escoffier_labs():
+def test_agent_notify_install_args_route_release_installs_through_brigade_setup():
     t = managed.resolve("agent-notify")
-    assert "github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest" in " ".join(t.install_args)
+    # Release installs go through the managed component resolver, not `go install`.
+    assert t.install_args == ["brigade", "setup"]
+    # The source-install fallback is carried by the resolver, not install_args.
+    assert t.install_resolver is not None
+
+
+def test_agent_notify_install_command_uses_brigade_setup_for_released_cli(monkeypatch):
+    """Released CLIs must not consult the bundled compatibility published-set."""
+    from brigade import component_install, component_manifest
+
+    monkeypatch.setattr(component_install, "uses_bundled_compatibility_manifest", lambda: True)
+
+    def _raise(_manifest):
+        raise AssertionError("released CLI must not read bundled published_component_ids")
+
+    monkeypatch.setattr(component_manifest, "published_component_ids", _raise)
+    monkeypatch.setattr(
+        component_manifest,
+        "load",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("released CLI must not load compatibility manifest")),
+    )
+    t = managed.resolve("agent-notify")
+    assert t.install_command() == ["brigade", "setup"]
+
+
+def test_agent_notify_install_command_uses_go_install_for_source_context(monkeypatch):
+    """Source installs with no published agent-notify use go install only."""
+    from brigade import component_install, component_manifest
+
+    monkeypatch.setattr(component_install, "uses_bundled_compatibility_manifest", lambda: False)
+    monkeypatch.setattr(
+        component_manifest,
+        "published_component_ids",
+        lambda _manifest: ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"),
+    )
+    monkeypatch.setattr(component_manifest, "load", lambda *a, **k: object())
+    t = managed.resolve("agent-notify")
+    command = t.install_command()
+    assert command == ["go", "install", "github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest"]
+
+
+def test_agent_notify_install_command_uses_brigade_setup_when_source_manifest_publishes(monkeypatch):
+    from brigade import component_install, component_manifest
+
+    monkeypatch.setattr(component_install, "uses_bundled_compatibility_manifest", lambda: False)
+    published = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+    monkeypatch.setattr(
+        component_manifest,
+        "published_component_ids",
+        lambda _manifest: published,
+    )
+    monkeypatch.setattr(component_manifest, "load", lambda *a, **k: object())
+    t = managed.resolve("agent-notify")
+    assert t.install_command() == ["brigade", "setup"]
+
+
+def test_agent_notify_install_command_released_cli_never_falls_back_to_go_install(monkeypatch):
+    """Released CLI always routes through setup; never go install on manifest failure."""
+    from brigade import component_install, component_manifest
+
+    monkeypatch.setattr(component_install, "uses_bundled_compatibility_manifest", lambda: True)
+    monkeypatch.setattr(
+        component_manifest,
+        "load",
+        lambda *a, **k: (_ for _ in ()).throw(ValueError("bundled manifest unreadable")),
+    )
+    t = managed.resolve("agent-notify")
+    assert t.install_command() == ["brigade", "setup"]
+
+
+def test_agent_notify_install_command_source_uses_go_install_when_manifest_unreadable(monkeypatch):
+    from brigade import component_install, component_manifest
+
+    monkeypatch.setattr(component_install, "uses_bundled_compatibility_manifest", lambda: False)
+    monkeypatch.setattr(
+        component_manifest,
+        "load",
+        lambda *a, **k: (_ for _ in ()).throw(ValueError("source manifest unreadable")),
+    )
+    t = managed.resolve("agent-notify")
+    assert t.install_command() == ["go", "install", "github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest"]

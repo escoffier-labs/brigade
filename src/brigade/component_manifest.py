@@ -21,12 +21,17 @@ SUPPORTED_PLATFORMS: tuple[str, ...] = (
     "windows-amd64",
 )
 KNOWN_COMPONENT_IDS: tuple[str, ...] = (
+    "agent-notify",
     "graphtrail",
     "graphtrail-mcp",
     "miseledger",
     "sessionfind",
 )
-UNPUBLISHED_COMPONENT_IDS: frozenset[str] = frozenset()
+# Components registered in KNOWN_COMPONENT_IDS but not yet shipped from a Brigade
+# release. The bundled compatibility manifest carries them with empty assets so
+# the loader accepts the manifest before the first release that publishes them;
+# `brigade setup` skips them until a release manifest pins real native assets.
+UNPUBLISHED_COMPONENT_IDS: frozenset[str] = frozenset({"agent-notify"})
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _PLATFORM = re.compile(r"^(linux|darwin|windows)-(amd64|arm64)$")
@@ -168,6 +173,20 @@ def resolve_asset(manifest: ComponentManifest, component_id: str, platform: str)
             f"{', '.join(sorted(component.assets)) or 'none'}"
         )
     return asset
+
+
+def published_component_ids(manifest: ComponentManifest) -> tuple[str, ...]:
+    """Return the known components that have pinned native assets in ``manifest``.
+
+    Order follows :data:`KNOWN_COMPONENT_IDS`; unpublished components (empty
+    asset matrix) are excluded so setup, smoke, and rollback exact-set logic
+    operate only on components a release actually ships.
+    """
+    return tuple(
+        component_id
+        for component_id in KNOWN_COMPONENT_IDS
+        if component_id in manifest.components and manifest.components[component_id].assets
+    )
 
 
 def platform_key(*, system: str | None = None, machine: str | None = None) -> str:

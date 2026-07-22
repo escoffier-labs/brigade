@@ -329,7 +329,7 @@ function Assert-ReleaseManifestAndAssets {
         $checksums[$Matches[2]] = $Matches[1]
     }
     $expected = @()
-    foreach ($componentId in @("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+    foreach ($componentId in @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
         $component = $manifest.components.$componentId
         if (-not $component -or $component.source.repository -ne "escoffier-labs/brigade" -or $component.source.release_tag -ne $tag) {
             throw "release manifest component $componentId does not point to escoffier-labs/brigade@$tag"
@@ -347,8 +347,8 @@ function Assert-ReleaseManifestAndAssets {
             }
         }
     }
-    if ($expected.Count -ne 20 -or $checksums.Count -ne 21 -or -not $checksums.ContainsKey("component-manifest-v1.json")) {
-        throw "release checksums must contain exactly 20 native assets and component-manifest-v1.json"
+    if ($expected.Count -ne 25 -or $checksums.Count -ne 26 -or -not $checksums.ContainsKey("component-manifest-v1.json")) {
+        throw "release checksums must contain exactly 25 native assets and component-manifest-v1.json"
     }
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant() -ne $checksums["component-manifest-v1.json"]) {
         throw "release manifest digest mismatch"
@@ -362,7 +362,7 @@ function Assert-ManagedComponentDigests {
         $Report,
         [string]$ManagedBin
     )
-    foreach ($componentId in @("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+    foreach ($componentId in @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
         $path = Get-ManagedExecutablePath -Report $Report -ComponentId $componentId -ManagedBin $ManagedBin
         $expected = $Manifest.components.$componentId.assets."windows-amd64".sha256
         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant() -ne $expected) {
@@ -394,8 +394,8 @@ function Assert-OperatorDoctorReady {
 
 function Assert-AllComponentsHealthy {
     param($Report)
-    if ($Report.components.Count -ne 4) {
-        throw "expected 4 components, got $($Report.components.Count)"
+    if ($Report.components.Count -ne 5) {
+        throw "expected 5 components, got $($Report.components.Count)"
     }
     foreach ($component in $Report.components) {
         if ($component.status -ne "healthy") {
@@ -538,11 +538,20 @@ try {
     $graphtrailMcpExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail-mcp" -ManagedBin $managedBin
     $miseledgerExe = Get-ManagedExecutablePath -Report $report -ComponentId "miseledger" -ManagedBin $managedBin
     $sessionfindExe = Get-ManagedExecutablePath -Report $report -ComponentId "sessionfind" -ManagedBin $managedBin
+    $agentNotifyExe = Get-ManagedExecutablePath -Report $report -ComponentId "agent-notify" -ManagedBin $managedBin
 
     $mcpResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & $graphtrailMcpExe
     if ($LASTEXITCODE -ne 0 -or $mcpResponse -notmatch '"jsonrpc"') { throw "graphtrail-mcp absolute-path smoke failed" }
     & $sessionfindExe --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "sessionfind absolute-path smoke failed" }
+    $agentNotifyVersion = & $agentNotifyExe version --json
+    if ($LASTEXITCODE -ne 0) { throw "agent-notify absolute-path smoke failed" }
+    try {
+        $agentNotifyPayload = $agentNotifyVersion | ConvertFrom-Json
+    } catch {
+        throw "agent-notify absolute-path smoke returned malformed JSON"
+    }
+    if (-not $agentNotifyPayload.version) { throw "agent-notify absolute-path smoke JSON missing version field" }
 
     $workRepo = Join-Path $acceptRoot "repo"
     New-Item -ItemType Directory -Force -Path $workRepo | Out-Null

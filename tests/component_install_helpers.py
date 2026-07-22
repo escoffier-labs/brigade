@@ -51,6 +51,11 @@ def smoke_stub_script(name: str) -> str:
             '    print("sessionfind <query> ...")\n'
             "    raise SystemExit(0)\nraise SystemExit(1)\n"
         )
+    if name == "agent-notify":
+        return (
+            '#!/usr/bin/env python3\nimport json, sys\nif sys.argv[1:] == ["version", "--json"]:\n'
+            '    print(json.dumps({"version": "test 0.1.0"}))\n    raise SystemExit(0)\nraise SystemExit(1)\n'
+        )
     raise ValueError(name)
 
 
@@ -73,7 +78,7 @@ def fixture_asset_name(component_id: str, *, platform: str) -> str:
     return base
 
 
-def test_component_revision(component_id: str) -> str:
+def fixture_component_revision(component_id: str) -> str:
     return GRAPHTRAIL_SHA
 
 
@@ -111,7 +116,7 @@ def write_test_manifest(path: Path, *, brigade_version: str) -> component_manife
                 "download_url": asset.download_url,
             }
         components[component_id] = {
-            "component_revision": test_component_revision(component_id),
+            "component_revision": fixture_component_revision(component_id),
             "source": {"repository": FIXTURE_REPOSITORY, "release_tag": "fixture"},
             "executable": component_id,
             "assets": assets,

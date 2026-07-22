@@ -63,6 +63,11 @@ def test_publish_workflow_builds_the_complete_native_matrix_then_attests_and_rel
         "graphtrail-mcp-windows-amd64.exe",
         "miseledger-darwin-arm64",
         "sessionfind-linux-arm64",
+        "agent-notify-linux-amd64",
+        "agent-notify-linux-arm64",
+        "agent-notify-darwin-amd64",
+        "agent-notify-darwin-arm64",
+        "agent-notify-windows-amd64.exe",
         "component-manifest-v1.json",
     ):
         assert subject in text
@@ -147,3 +152,48 @@ def test_publish_release_reruns_compare_existing_assets_then_upload_only_missing
     assert 'gh release create "$TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --verify-tag' in section
     assert "--target" not in section
     assert "--clobber" not in section
+
+
+def test_publish_workflow_builds_five_bare_agent_notify_binaries_from_stations_notify():
+    text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
+    section = text[text.index("  build-agent-notify-native:") : text.index("  assemble-release:")]
+
+    assert "needs: validate-release" in section
+    assert "if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')" in section
+    # Exactly five platform targets, one bare binary each.
+    assert section.count("- platform: ") == 5
+    for platform in (
+        "linux-amd64",
+        "linux-arm64",
+        "darwin-amd64",
+        "darwin-arm64",
+        "windows-amd64",
+    ):
+        assert f"- platform: {platform}" in section
+    assert "working-directory: stations/notify" in section
+    assert "CGO_ENABLED: '0'" in section
+    assert "go build -trimpath" in section
+    assert "./cmd/agent-notify" in section
+    # Bare binaries: no version metadata injection, no ldflags.
+    assert "-ldflags" not in section
+    assert "-X " not in section
+    assert "actions/upload-artifact@v4" in section
+    assert "if-no-files-found: error" in section
+
+
+def test_publish_workflow_assemble_release_counts_25_native_assets_and_27_release_files():
+    text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
+    assemble = text[text.index("  assemble-release:") : text.index("  create-release:")]
+
+    assert 'test "$(find downloaded -type f | wc -l)" -eq 25' in assemble
+    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 27' in assemble
+    assert "pattern: agent-notify-*" in assemble
+    # assemble-release waits on the agent-notify native job.
+    needs_line = next(line for line in assemble.splitlines() if line.strip().startswith("needs:"))
+    assert "build-agent-notify-native" in needs_line
+
+
+def test_publish_release_gate_requires_27_release_assets():
+    text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
+    gate = text[text.index("  release-asset-gate:") : text.index("  build-and-publish:")]
+    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 27' in gate

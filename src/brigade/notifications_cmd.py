@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from . import proc, toml_compat as tomllib
+from . import component_bins, proc, toml_compat as tomllib
 
 CHANNEL_ENVS = {
     "discord": ("DISCORD_WEBHOOK_URL",),
@@ -51,7 +51,8 @@ def _profile_args(profile: str | None) -> list[str]:
 
 
 def _doctor_argv(profile: str | None) -> list[str]:
-    return ["agent-notify", "doctor", "--json", "--skip-network", *_profile_args(profile)]
+    binary = component_bins.resolve("agent-notify") or "agent-notify"
+    return [binary, "doctor", "--json", "--skip-network", *_profile_args(profile)]
 
 
 def _failure_class(code: int) -> str | None:
@@ -190,7 +191,7 @@ def _checks_from_status(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _status_payload(profile: str | None = None) -> dict[str, Any]:
-    binary = proc.which("agent-notify")
+    binary = component_bins.resolve("agent-notify")
     if binary is None:
         return {
             "installed": False,
@@ -422,7 +423,7 @@ def _event_payload(
     health_payload = health(target, profile=profile)
     selected_profile = health_payload.get("profile")
     effective_profile = selected_profile if isinstance(selected_profile, str) else profile
-    argv = ["agent-notify", "send", *_profile_args(effective_profile)]
+    argv = list(component_bins.resolve_argv(["agent-notify", "send", *_profile_args(effective_profile)]))
     return {
         "target": str(target),
         "event_id": event_id,

@@ -63,6 +63,47 @@ def test_add_skips_install_when_already_present(monkeypatch, tmp_target):
     assert not any(a[:1] in (["pipx"], ["npm"], ["pip"]) for a in calls)
 
 
+def test_add_skips_agent_notify_when_component_bins_resolves(monkeypatch, tmp_target, capsys):
+    """Preserve component_bins resolution order: do not reinstall when already found."""
+    calls = []
+    monkeypatch.setattr(
+        managed.component_bins,
+        "resolve",
+        lambda name, **kw: "/managed/agent-notify" if name == "agent-notify" else None,
+    )
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        return managed.proc.Result(0, "", "")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    rc = add_mod.run(target=tmp_target, station="notifications")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[skip] agent-notify already installed" in out
+    assert not any(args[:2] == ["brigade", "setup"] for args in calls)
+    assert not any(args[:2] == ["go", "install"] for args in calls)
+
+
+def test_add_agent_notify_uses_install_command_resolver(monkeypatch, tmp_target, capsys):
+    calls = []
+    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: None)
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        return managed.proc.Result(0, "", "")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    tool = managed.resolve("agent-notify")
+    assert tool is not None
+    expected = tool.install_command()
+    rc = add_mod.run(target=tmp_target, station="agent-notify")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert expected in calls
+    assert f"[install] agent-notify: {' '.join(expected)}" in out
+
+
 def test_add_skills_explains_builtin_and_skillet_paths(tmp_target, capsys):
     rc = add_mod.run(target=tmp_target, station="skills")
     out = capsys.readouterr().out

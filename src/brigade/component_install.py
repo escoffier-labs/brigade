@@ -150,9 +150,9 @@ def build_setup_plan(
     platform: str,
     roots: SetupRoots,
 ) -> list[SetupPlanAction]:
-    """Build a deterministic dry-run/install plan for every known component."""
+    """Build a deterministic dry-run/install plan for every published component."""
     plan: list[SetupPlanAction] = []
-    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+    for component_id in component_manifest.published_component_ids(manifest):
         asset = component_manifest.resolve_asset(manifest, component_id, platform)
         component = manifest.components[component_id]
         cache_path = component_paths.cached_asset_path(
@@ -499,9 +499,13 @@ def _invoke_smoke_runner(
     )
 
 
-def _validate_smoke_managed_paths(managed_paths: Mapping[str, str]) -> dict[str, Path]:
+def _validate_smoke_managed_paths(
+    managed_paths: Mapping[str, str],
+    *,
+    expected_components: Sequence[str] = _SMOKE_COMPONENT_IDS,
+) -> dict[str, Path]:
     keys = set(managed_paths)
-    expected = set(_SMOKE_COMPONENT_IDS)
+    expected = set(expected_components)
     if keys != expected:
         missing = sorted(expected - keys)
         extra = sorted(keys - expected)
@@ -515,7 +519,7 @@ def _validate_smoke_managed_paths(managed_paths: Mapping[str, str]) -> dict[str,
         )
 
     resolved: dict[str, Path] = {}
-    for component_id in _SMOKE_COMPONENT_IDS:
+    for component_id in expected_components:
         raw = managed_paths[component_id]
         path = Path(raw)
         if not path.is_absolute():
@@ -622,19 +626,52 @@ def _smoke_sessionfind(
         raise ComponentInstallError(f"sessionfind smoke failed: {path} --help produced no help text")
 
 
+def _smoke_agent_notify(
+    path: Path,
+    run: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    argv = [str(path), "version", "--json"]
+    try:
+        completed = _invoke_smoke_runner(run, argv)
+    except subprocess.TimeoutExpired as exc:
+        raise ComponentInstallError(f"agent-notify smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
+    except OSError as exc:
+        raise ComponentInstallError(f"agent-notify smoke failed to run {path}: {exc}") from exc
+
+    if completed.returncode != 0:
+        raise ComponentInstallError(f"agent-notify smoke failed: {path} version --json exited {completed.returncode}")
+    stdout = (completed.stdout or "").strip()
+    if not stdout:
+        raise ComponentInstallError(f"agent-notify smoke failed: {path} version --json produced empty stdout")
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise ComponentInstallError(f"agent-notify smoke failed: {path} returned malformed JSON") from exc
+    if not isinstance(payload, dict) or not payload.get("version"):
+        raise ComponentInstallError(f"agent-notify smoke failed: {path} JSON missing version field")
+
+
+_SMOKE_DISPATCH: dict[str, Callable[[Path, Callable[..., subprocess.CompletedProcess[str]]], None]] = {
+    "agent-notify": _smoke_agent_notify,
+    "graphtrail": _smoke_graphtrail,
+    "graphtrail-mcp": _smoke_graphtrail_mcp,
+    "miseledger": _smoke_miseledger,
+    "sessionfind": _smoke_sessionfind,
+}
+
+
 def run_post_install_smoke(
     managed_paths: Mapping[str, str],
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    expected_components: Sequence[str] = _SMOKE_COMPONENT_IDS,
 ) -> None:
     """Run post-install smoke checks using only absolute managed executable paths."""
-    paths = _validate_smoke_managed_paths(managed_paths)
+    paths = _validate_smoke_managed_paths(managed_paths, expected_components=expected_components)
     run = runner if runner is not None else _default_smoke_runner
 
-    _smoke_graphtrail(paths["graphtrail"], run)
-    _smoke_graphtrail_mcp(paths["graphtrail-mcp"], run)
-    _smoke_miseledger(paths["miseledger"], run)
-    _smoke_sessionfind(paths["sessionfind"], run)
+    for component_id in expected_components:
+        _SMOKE_DISPATCH[component_id](paths[component_id], run)
 
 
 def _load_rollback_state(
@@ -648,11 +685,6 @@ def _load_rollback_state(
     state = component_state.load_installed_state(path)
     if state is None:
         raise ComponentInstallError(f"invalid {label} installed state: {path}")
-    expected_components = set(component_manifest.KNOWN_COMPONENT_IDS)
-    if set(state.components) != expected_components:
-        raise ComponentInstallError(
-            f"{label} installed state requires exactly {len(expected_components)} components: {path}"
-        )
     if state.platform != platform:
         raise ComponentInstallError(
             f"{label} installed state platform {state.platform!r} does not match host {platform!r}"
@@ -660,13 +692,82 @@ def _load_rollback_state(
     return state
 
 
+def _ordered_component_ids(state: component_state.InstalledState) -> tuple[str, ...]:
+    """Return the state's component ids in :data:`KNOWN_COMPONENT_IDS` order."""
+    present = set(state.components)
+    return tuple(cid for cid in component_manifest.KNOWN_COMPONENT_IDS if cid in present)
+
+
+def _validate_rollback_component_sets(
+    current: component_state.InstalledState,
+    previous: component_state.InstalledState,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return ``(restore_ids, remove_ids)`` for a rollback transaction.
+
+    Component sets may differ: a four-component prior install upgraded with
+    agent-notify rolls back by restoring the previous set and removing only
+    managed binaries introduced by the current transaction.
+    """
+    current_ids = set(current.components)
+    previous_ids = set(previous.components)
+    known = set(component_manifest.KNOWN_COMPONENT_IDS)
+    if not previous_ids or not previous_ids <= known:
+        raise ComponentInstallError("previous installed state lists unknown or no components; cannot roll back")
+    if not current_ids or not current_ids <= known:
+        raise ComponentInstallError("current installed state lists unknown or no components; cannot roll back")
+    restore_ids = _ordered_component_ids(previous)
+    remove_ids = tuple(
+        component_id
+        for component_id in component_manifest.KNOWN_COMPONENT_IDS
+        if component_id in current_ids and component_id not in previous_ids
+    )
+    return restore_ids, remove_ids
+
+
+def _managed_binary_belongs_to_transaction(
+    path: Path,
+    record: component_state.InstalledComponentRecord,
+) -> bool:
+    """Return True when ``path`` is the managed binary from ``record``."""
+    if Path(record.executable) != path:
+        return False
+    if not path.is_file():
+        return False
+    try:
+        verify_cached_asset(path, byte_size=record.byte_size, sha256=record.sha256)
+    except ComponentInstallError:
+        return False
+    return True
+
+
+def _remove_transaction_managed_binaries(
+    *,
+    data_root: str,
+    current: component_state.InstalledState,
+    remove_ids: Sequence[str],
+) -> None:
+    """Remove managed binaries introduced by the current install transaction.
+
+    Only deletes the managed path under the user data root when it matches the
+    current installed record. External PATH or env-override binaries are never
+    touched.
+    """
+    for component_id in remove_ids:
+        record = current.components[component_id]
+        managed_path = Path(component_paths.managed_executable_path(data_root, component_id))
+        if not _managed_binary_belongs_to_transaction(managed_path, record):
+            continue
+        managed_path.unlink()
+
+
 def _rollback_cache_paths(
     state: component_state.InstalledState,
     *,
     cache_root: str,
+    component_ids: Sequence[str],
 ) -> dict[str, Path]:
     cache_paths: dict[str, Path] = {}
-    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+    for component_id in component_ids:
         record = state.components[component_id]
         try:
             cache_path = component_paths.cached_asset_path(
@@ -699,9 +800,10 @@ def _setup_rollback(
         label="previous",
         platform=platform,
     )
-    cache_paths = _rollback_cache_paths(previous_state, cache_root=roots.cache_root)
+    restore_ids, remove_ids = _validate_rollback_component_sets(current_state, previous_state)
+    cache_paths = _rollback_cache_paths(previous_state, cache_root=roots.cache_root, component_ids=restore_ids)
 
-    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+    for component_id in restore_ids:
         record = previous_state.components[component_id]
         verify_cached_asset(
             cache_paths[component_id],
@@ -711,17 +813,20 @@ def _setup_rollback(
 
     managed_paths = {
         component_id: Path(component_paths.managed_executable_path(roots.data_root, component_id))
-        for component_id in component_manifest.KNOWN_COMPONENT_IDS
+        for component_id in restore_ids
     }
-    managed_snapshots = _snapshot_managed_executables(list(managed_paths.values()))
+    remove_paths = [
+        Path(component_paths.managed_executable_path(roots.data_root, component_id)) for component_id in remove_ids
+    ]
+    managed_snapshots = _snapshot_managed_executables([*managed_paths.values(), *remove_paths])
     state_snapshots = _snapshot_managed_executables([current_state_path, previous_state_path])
     try:
-        for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        for component_id in restore_ids:
             materialize_executable(
                 cache_path=cache_paths[component_id],
                 managed_path=managed_paths[component_id],
             )
-        for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        for component_id in restore_ids:
             record = previous_state.components[component_id]
             verify_cached_asset(
                 managed_paths[component_id],
@@ -731,6 +836,12 @@ def _setup_rollback(
         run_post_install_smoke(
             {component_id: str(path) for component_id, path in managed_paths.items()},
             runner=runner,
+            expected_components=restore_ids,
+        )
+        _remove_transaction_managed_binaries(
+            data_root=roots.data_root,
+            current=current_state,
+            remove_ids=remove_ids,
         )
         component_state.write_installed_state(current_state_path, previous_state)
         component_state.write_installed_state(previous_state_path, current_state)
@@ -906,6 +1017,7 @@ def setup_native_components(
             run_post_install_smoke(
                 {component_id: str(path) for component_id, path in managed_paths.items()},
                 runner=runner,
+                expected_components=component_manifest.published_component_ids(manifest),
             )
             next_state = component_state.InstalledState(
                 schema_version=component_state.SCHEMA_VERSION,
