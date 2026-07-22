@@ -130,6 +130,7 @@ def dispatch(args) -> int:
                 json_output=args.json,
                 capture=args.capture,
                 capture_kind=args.capture_kind,
+                reuse=not args.no_reuse,
             )
         if args.verify_command == "runs":
             return work_cmd.verify_runs(target=args.target, limit=args.limit, json_output=args.json)

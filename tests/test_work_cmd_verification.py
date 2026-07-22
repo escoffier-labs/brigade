@@ -236,6 +236,118 @@ def test_work_verify_plan_run_list_show(tmp_path, capsys):
     assert "python3 -c" in out
 
 
+def _init_verify_target_with_head(target):
+    target.mkdir(parents=True, exist_ok=True)
+    _init_git_repo_with_head(target)
+
+
+def test_verify_reuses_identical_tree(tmp_target, monkeypatch):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    rc1 = verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
+    assert rc1 == 0
+    rc2 = verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
+    assert rc2 == 0
+    receipts = verification._verify_receipts(tmp_target)
+    assert len(receipts) == 2
+    newest = receipts[0]
+    assert newest["status"] == "completed"
+    assert newest["reused_from"] == receipts[1]["run_id"]
+    # the reused receipt carries forward the prior run's command records
+    assert newest["commands"] == receipts[1]["commands"]
+
+
+def test_verify_no_reuse_flag_forces_run(tmp_target, monkeypatch):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
+    verification.verify_run(target=tmp_target, commands=["true"], timeout=60, reuse=False)
+    receipts = verification._verify_receipts(tmp_target)
+    assert "reused_from" not in receipts[0]
+
+
+def test_verify_dirty_tree_not_reused(tmp_target, monkeypatch):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
+    (tmp_target / "newfile.txt").write_text("x\n")
+    verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
+    receipts = verification._verify_receipts(tmp_target)
+    assert "reused_from" not in receipts[0]
+
+
+def test_verify_failed_receipt_not_reused(tmp_target, monkeypatch):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    rc = verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    assert rc != 0
+    receipts = verification._verify_receipts(tmp_target)
+    assert "reused_from" not in receipts[0]
+
+
+def _init_git_repo_with_fixed_head(path):
+    """Init a git repo whose HEAD commit hash is deterministic across calls.
+
+    Pinning author/committer dates makes two repos produce an identical HEAD
+    so a tree-fingerprint regression test can isolate the untracked-segment
+    boundary collision (``{"a": "bc"}`` vs ``{"ab": "c"}``) instead of being
+    masked by differing commit hashes.
+    """
+    subprocess.run(["git", "init"], cwd=path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=path, check=True)
+    (path / ".gitignore").write_text(".brigade/\n")
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+    }
+    subprocess.run(["git", "add", ".gitignore"], cwd=path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, stdout=subprocess.DEVNULL, env=env)
+
+
+def test_tree_fingerprint_distinguishes_untracked_name_content_boundary(tmp_path):
+    # Two repos with identical committed HEAD content but untracked sets that
+    # concatenate to the same byte stream ({"a": "bc"} vs {"ab": "c"}) must
+    # fingerprint to distinct non-None values: the name/content boundary is
+    # part of the hashed identity, not just the raw concatenation.
+    from brigade.work_cmd import verification
+
+    target_a = tmp_path / "repo-a"
+    target_b = tmp_path / "repo-b"
+    target_a.mkdir()
+    target_b.mkdir()
+    _init_git_repo_with_fixed_head(target_a)
+    _init_git_repo_with_fixed_head(target_b)
+
+    head_a = subprocess.check_output(["git", "-C", str(target_a), "rev-parse", "HEAD"], text=True).strip()
+    head_b = subprocess.check_output(["git", "-C", str(target_b), "rev-parse", "HEAD"], text=True).strip()
+    assert head_a == head_b, "test setup: HEAD commits must be identical to isolate the untracked collision"
+
+    (target_a / "a").write_text("bc")
+    (target_b / "ab").write_text("c")
+
+    fp_a = verification._tree_fingerprint(target_a)
+    fp_b = verification._tree_fingerprint(target_b)
+
+    assert fp_a is not None
+    assert fp_b is not None
+    assert fp_a != fp_b
+
+
 def test_work_verify_run_argv_json_bypasses_metacharacter_heuristic(tmp_path, capsys):
     # A quoted argument containing shell metacharacters (semicolons, quotes) is safe
     # when it arrives as pre-parsed argv: shell=False was already the execution mode,
@@ -1446,6 +1558,7 @@ def test_work_verify_run_cli_passes_graphtrail_timeout_override(tmp_path, monkey
             "json_output": True,
             "capture": None,
             "capture_kind": "skill",
+            "reuse": True,
         }
     ]
 
@@ -1568,9 +1681,51 @@ def test_work_verify_and_closeout_cli(tmp_path, monkeypatch):
                 "json_output": True,
                 "capture": None,
                 "capture_kind": "skill",
+                "reuse": True,
             },
         ),
         ("verify-runs", {"target": tmp_path, "limit": 3, "json_output": True}),
         ("verify-show", {"target": tmp_path, "run_id": "latest", "json_output": True}),
         ("closeout", {"target": tmp_path, "session_id": "latest", "json_output": True}),
     ]
+
+
+def test_tree_fingerprint_distinguishes_tracked_binary_changes(tmp_path):
+    # `git diff HEAD` elides binary content ("Binary files differ"), so two
+    # different modifications of a tracked binary would collide without
+    # --binary. The fingerprint must include the binary delta.
+    from brigade.work_cmd import verification
+
+    target_a = tmp_path / "repo-a"
+    target_b = tmp_path / "repo-b"
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+    }
+    for target in (target_a, target_b):
+        target.mkdir()
+        _init_git_repo_with_fixed_head(target)
+        (target / "blob.bin").write_bytes(b"\x00\x01\x02base")
+        subprocess.run(["git", "add", "blob.bin"], cwd=target, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(
+            ["git", "commit", "-m", "add blob"],
+            cwd=target,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            env=env,
+        )
+
+    head_a = subprocess.check_output(["git", "-C", str(target_a), "rev-parse", "HEAD"], text=True).strip()
+    head_b = subprocess.check_output(["git", "-C", str(target_b), "rev-parse", "HEAD"], text=True).strip()
+    assert head_a == head_b, "test setup: HEAD commits must be identical to isolate the binary-diff collision"
+
+    (target_a / "blob.bin").write_bytes(b"\x00\x01\x02changed-one-way")
+    (target_b / "blob.bin").write_bytes(b"\x00\x01\x02changed-another")
+
+    fp_a = verification._tree_fingerprint(target_a)
+    fp_b = verification._tree_fingerprint(target_b)
+
+    assert fp_a is not None
+    assert fp_b is not None
+    assert fp_a != fp_b

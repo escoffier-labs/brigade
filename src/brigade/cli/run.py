@@ -240,6 +240,17 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Memory Handoff inbox. Defaults to .claude/memory-handoffs under --cwd.",
     )
+    p_run.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="Do not skip later stages when an earlier stage worker fails (pre-2026-07 behavior).",
+    )
+    p_run.add_argument(
+        "--scheduler",
+        choices=("waves", "dag"),
+        default="waves",
+        help="Worker scheduling: fixed integer-stage waves (default) or router-DAG ready queue.",
+    )
     p_run.set_defaults(func=dispatch)
 
 
@@ -462,6 +473,8 @@ def dispatch(args) -> int:
                 run_kwargs["route_template"] = args.route_template
             if args.route_signals:
                 run_kwargs["route_overrides"] = tuple(args.route_signals)
+            run_kwargs["fail_fast"] = not args.keep_going
+            run_kwargs["scheduler"] = args.scheduler
             try:
                 rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
             except runguard.RetainRunLockError:

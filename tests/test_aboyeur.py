@@ -2530,7 +2530,7 @@ def test_worker_failure_is_sent_to_synthesis(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("build feature", _roster()) == 0
+    assert aboyeur.run("build feature", _roster()) == 3
     assert "not installed" in calls[-1][1]
 
 
@@ -3525,7 +3525,7 @@ def test_disallowed_worker_is_recorded_not_run(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("build feature", _restricted_roster(), route_enabled=False) == 0
+    assert aboyeur.run("build feature", _restricted_roster(), route_enabled=False) == 3
     assert [call[0] for call in calls] == ["codex", "codex"]
     assert "not allowed by limits.allow_models" in calls[-1][1]
 
