@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import __version__ as BRIGADE_VERSION
-from . import harness_profiles, localio
+from . import cursor_user_cmd, harness_profiles, localio, skills_cmd
 
 _RECOVERY_COMMAND = "brigade harness install <harness> --scope user --adopt --write"
 
@@ -705,19 +706,25 @@ def apply_skill_removals(
     removed: list[str] = []
 
     for plan in plans:
-        if plan.action != "remove":
-            continue
-        try:
-            plan.path.unlink()
-        except FileNotFoundError:
-            continue
-        except PermissionError:
-            raise
-        removed.append(str(plan.path))
-        record = new_state.get("skills", {}).get(plan.skill_id)
-        if isinstance(record, dict) and isinstance(record.get("files"), dict):
-            record["files"].pop(plan.relative_path, None)
-        write_profile_state(state_path=state_path, state=new_state)
+        if plan.action == "remove":
+            try:
+                plan.path.unlink()
+            except FileNotFoundError:
+                continue
+            except PermissionError:
+                raise
+            removed.append(str(plan.path))
+            record = new_state.get("skills", {}).get(plan.skill_id)
+            if isinstance(record, dict) and isinstance(record.get("files"), dict):
+                record["files"].pop(plan.relative_path, None)
+            write_profile_state(state_path=state_path, state=new_state)
+        elif plan.action == "none" and plan.status == "absent":
+            # the owned file is already gone on disk: clear stale ownership so a
+            # repeated uninstall converges. Conflict surfaces keep ownership.
+            record = new_state.get("skills", {}).get(plan.skill_id)
+            if isinstance(record, dict) and isinstance(record.get("files"), dict):
+                record["files"].pop(plan.relative_path, None)
+            write_profile_state(state_path=state_path, state=new_state)
 
     # prune recorded created directories deepest-first; rmdir only, never unlink
     skills = new_state.get("skills")
@@ -755,3 +762,1080 @@ def apply_skill_removals(
 
     write_profile_state(state_path=state_path, state=new_state)
     return sorted(removed)
+
+
+# --- Issue #438 Task 7: aggregate orchestration ---
+
+_MCP_PENDING = {"status": "pending", "items": []}
+_PRIVATE_KEYS = ("digest", "fingerprint", "desired_digest", "desired_fingerprint", "prior_index")
+
+
+def _strip_private(value):
+    if isinstance(value, dict):
+        return {
+            k: _strip_private(v) for k, v in value.items() if not any(k.endswith(p) or p in k for p in _PRIVATE_KEYS)
+        }
+    if isinstance(value, list):
+        return [_strip_private(v) for v in value]
+    return value
+
+
+def _result(
+    harness,
+    *,
+    status,
+    ready,
+    instruction_ready,
+    skills_ready,
+    reload_hint,
+    items,
+    conflicts,
+    files_written,
+    files_removed,
+    migration,
+    capabilities,
+):
+    return {
+        "harness": harness,
+        "status": status,
+        "ready": ready,
+        "instruction_ready": instruction_ready,
+        "skills_ready": skills_ready,
+        "reload_hint": reload_hint,
+        "items": _strip_private(items),
+        "conflicts": _strip_private(conflicts),
+        "files_written": sorted(files_written),
+        "files_removed": sorted(files_removed),
+        "migration": migration,
+        "capabilities": capabilities,
+        "mcp": dict(_MCP_PENDING),
+    }
+
+
+def _git_tracks(workspace: Path, rel: str) -> bool | None:
+    """Return True if ``workspace/rel`` is inside a git work tree and tracked.
+
+    ``None`` means "could not prove tracked" (not in a work tree, or git failed);
+    callers may proceed in that case. Uses ``stdin=DEVNULL`` and a 10s timeout.
+    """
+    try:
+        inside = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--is-inside-work-tree"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        return None
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(workspace), "ls-files", "--error-unmatch", rel],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if tracked.returncode == 0:
+        return True
+    return None
+
+
+def _load_state_for_profile(profile, workspace):
+    """Return (state, error, migration, retire_mcp_names, retire_file_paths)."""
+    if profile.harness == "cursor":
+        loaded = load_cursor_profile_state(state_path=profile.state_path, workspace=workspace, root=profile.user_root)
+        return loaded.state, loaded.error, loaded.migration, loaded.retire_mcp_names, loaded.retire_file_paths
+    loaded = load_profile_state(state_path=profile.state_path, workspace=workspace, harness=profile.harness)
+    return loaded.state, loaded.error, None, (), ()
+
+
+def _plan_instruction_for_profile(profile, state, adopt, workspace, *, guard_tracked_write=True):
+    """Return (plan_or_None, conflict_item_or_None). plan is a SurfacePlan or None when cursor.
+
+    When ``guard_tracked_write`` is True (install), a workspace file tracked by
+    git is a write conflict. When False (doctor), the tracked-ness is ignored:
+    doctor only reports whether the current content is the managed block, so a
+    tracked file carrying current managed content is ready.
+    """
+    if profile.instruction_path is None:
+        return None, None
+    path = profile.instruction_path
+    if profile.harness == "openclaw" and guard_tracked_write:
+        try:
+            rel = path.resolve().relative_to(workspace.resolve()).as_posix()
+        except ValueError:
+            rel = path.name
+        tracked = _git_tracks(workspace, rel)
+        if tracked is True:
+            return None, {
+                "surface": "instruction",
+                "path": str(path),
+                "status": "conflict",
+                "action": "preserve",
+                "detail": f"tracked by git; refusing to mutate repo file: {path}",
+            }
+    desired = harness_profiles.managed_instruction_text()
+    plan = plan_instruction(path=path, desired=desired, state=state, adopt=adopt)
+    if plan.status == "conflict":
+        return plan, {
+            "surface": "instruction",
+            "path": str(path),
+            "status": "conflict",
+            "action": "preserve",
+            "detail": plan.detail,
+        }
+    return plan, None
+
+
+def _plan_skills_for_profile(profile, state, workspace):
+    """Return (plans, conflict_items, error). On ValueError/error returns empty plans + conflict."""
+    conflicts = []
+    try:
+        packages = skills_cmd.user_profile_skill_packages(
+            workspace=workspace, harness=profile.harness, minimum_trust="workspace"
+        )
+    except Exception as exc:  # registry failures are a profile conflict, not a crash
+        return (
+            (),
+            [
+                {
+                    "surface": "skills",
+                    "path": str(profile.skills_root),
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": str(exc),
+                }
+            ],
+            None,
+        )
+    try:
+        plans = plan_skills(skills_root=profile.skills_root, packages=packages, state=state)
+    except ValueError as exc:
+        return (
+            (),
+            [
+                {
+                    "surface": "skills",
+                    "path": str(profile.skills_root),
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": str(exc),
+                }
+            ],
+            None,
+        )
+    for p in plans:
+        if p.status == "conflict":
+            conflicts.append(
+                {
+                    "surface": "skill",
+                    "skill_id": p.skill_id,
+                    "path": str(p.path),
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": p.detail,
+                }
+            )
+    return plans, conflicts, None
+
+
+def _plan_cursor_generated(profile, state):
+    """Plan plugin/rule/hook generated files against v2 ``generated`` ownership."""
+    root = profile.user_root
+    generated = cursor_user_cmd.cursor_generated_files(root)
+    gen_state = state.get("generated", {}) if isinstance(state, dict) else {}
+    owned_files = gen_state.get("files", {}) if isinstance(gen_state, dict) else {}
+    items, conflicts, writes = [], [], []
+    for path, (text, executable, surface) in generated.items():
+        rel = cursor_user_cmd._relative(root, path)
+        desired_digest = digest_text(text)
+        if not path.exists():
+            status, action = "missing", "create"
+        elif not path.is_file():
+            status, action = "conflict", "preserve"
+        else:
+            try:
+                live = path.read_text()
+                mode_ok = not executable or bool(path.stat().st_mode & 0o111)
+            except (OSError, UnicodeError) as exc:
+                items.append(
+                    {
+                        "surface": surface,
+                        "path": str(path),
+                        "status": "conflict",
+                        "action": "preserve",
+                        "detail": str(exc),
+                    }
+                )
+                conflicts.append(items[-1])
+                continue
+            live_digest = digest_text(live)
+            if live_digest == desired_digest and mode_ok:
+                status, action = "current", "none"
+            elif live_digest == desired_digest:
+                status, action = "stale", "update"
+            elif owned_files.get(rel) == live_digest:
+                status, action = "stale", "update"
+            else:
+                status, action = "conflict", "preserve"
+        item = {"surface": surface, "path": str(path), "status": status, "action": action}
+        items.append(item)
+        if status == "conflict":
+            conflicts.append(item)
+        if action in {"create", "update"}:
+            writes.append((path, text, executable, rel, desired_digest))
+    return items, conflicts, writes
+
+
+def _plan_cursor_hook(profile, state):
+    """Plan the co-owned hooks.json sessionStart registration against v2 ownership."""
+    root = profile.user_root
+    hook_path = root / "hooks.json"
+    doc, error = cursor_user_cmd._read_json_object(hook_path)
+    desired_hook = cursor_user_cmd._hook_entry(root)
+    desired_fp = cursor_user_cmd._digest_value(desired_hook)
+    gen_state = state.get("generated", {}) if isinstance(state, dict) else {}
+    owned_hooks = gen_state.get("hooks", {}) if isinstance(gen_state, dict) else {}
+    item = {"surface": "hook-config", "path": str(hook_path), "name": "sessionStart"}
+    if doc is None:
+        item.update(status="conflict", action="preserve", detail=error or "could not read hooks configuration")
+        return item, [item], None, None
+    hooks = doc.get("hooks")
+    if hooks is None:
+        hooks = {}
+    if not isinstance(hooks, dict):
+        item.update(status="conflict", action="preserve", detail="existing hooks field must be an object")
+        return item, [item], None, None
+    entries = hooks.get("sessionStart")
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list):
+        item.update(status="conflict", action="preserve", detail="existing sessionStart hooks must be a list")
+        return item, [item], None, None
+    if desired_hook in entries:
+        item.update(status="current", action="none")
+        return item, [], None, desired_fp
+    prior_fp = owned_hooks.get("sessionStart")
+    prior_index = None
+    if isinstance(prior_fp, str):
+        prior_index = next((i for i, e in enumerate(entries) if cursor_user_cmd._digest_value(e) == prior_fp), None)
+    if prior_index is None:
+        item.update(status="missing", action="create")
+    else:
+        item.update(status="stale", action="update", prior_index=prior_index)
+    return item, [], (doc, desired_hook, item), desired_fp
+
+
+def _missing_dirs_under(path: Path, root: Path) -> list[Path]:
+    """Return ancestor dirs under ``root`` (not including ``root``) missing before a write, leaf-first."""
+    missing: list[Path] = []
+    cur = path.parent
+    root_resolved = root.resolve()
+    while cur != root_resolved and root_resolved in cur.parents:
+        if cur.exists():
+            break
+        missing.append(cur)
+        cur = cur.parent
+    return missing
+
+
+def _apply_instruction(plan, state):
+    if plan is None or plan.action not in {"create", "update"}:
+        return None
+    # instruction files live directly in the user root; created dirs under root are rare.
+    localio.write_text_atomic(plan.path, plan.rendered)
+    state["instructions"] = {"digest": plan.desired_digest, "created_directories": []}
+    return str(plan.path)
+
+
+def _apply_cursor_generated(writes, state, root):
+    written = []
+    gen = state.setdefault("generated", {})
+    files = gen.setdefault("files", {})
+    if not isinstance(files, dict):
+        files = {}
+        gen["files"] = files
+    created_dirs = gen.setdefault("created_directories", [])
+    if not isinstance(created_dirs, list):
+        created_dirs = []
+        gen["created_directories"] = created_dirs
+    for path, text, executable, rel, desired_digest in writes:
+        # Record only the brigade-loop plugin leaf dirs as created so uninstall
+        # rmdir()s those, never foreign-occupied ancestors like ``plugins/local``
+        # or the shared ``hooks/`` dir (which foreign hooks may share).
+        localio.write_text_atomic(path, text)
+        if executable:
+            try:
+                path.chmod(path.stat().st_mode | 0o755)
+            except OSError:
+                pass
+        files[rel] = desired_digest
+        parts = Path(rel).parts
+        if parts[:3] == ("plugins", "local", "brigade-loop"):
+            # record the leaf parent dir and the brigade-loop package root
+            for depth in (len(parts) - 1, 3):
+                cand = "/".join(parts[:depth])
+                if cand and cand not in created_dirs:
+                    created_dirs.append(cand)
+        written.append(str(path))
+    return written
+
+
+def _apply_cursor_hook(hook_plan, state, root):
+    if hook_plan is None:
+        return None
+    doc, desired_hook, item = hook_plan
+    if item["action"] not in {"create", "update"}:
+        return None
+    hooks = doc.setdefault("hooks", {})
+    entries = hooks.setdefault("sessionStart", [])
+    if item["action"] == "create":
+        entries.append(desired_hook)
+    else:
+        entries[item["prior_index"]] = desired_hook
+    hook_path = root / "hooks.json"
+    localio.write_text_atomic(hook_path, cursor_user_cmd._coowned_json_text(doc))
+    gen = state.setdefault("generated", {})
+    hooks_owned = gen.setdefault("hooks", {})
+    if not isinstance(hooks_owned, dict):
+        hooks_owned = {}
+        gen["hooks"] = hooks_owned
+    hooks_owned["sessionStart"] = cursor_user_cmd._digest_value(desired_hook)
+    return str(hook_path)
+
+
+def _retire_cursor_legacy(root, retire_file_paths, retire_mcp_names):
+    removed: list[str] = []
+    for path in retire_file_paths:
+        try:
+            path.unlink()
+            removed.append(str(path))
+        except FileNotFoundError:
+            continue
+        cur = path.parent
+        root_resolved = root.resolve()
+        while cur != root_resolved and root_resolved in cur.parents:
+            try:
+                cur.rmdir()
+            except OSError:
+                break
+            cur = cur.parent
+    mcp_path = root / "mcp.json"
+    doc, _ = cursor_user_cmd._read_json_object(mcp_path)
+    if doc is not None:
+        servers = doc.get("mcpServers")
+        if isinstance(servers, dict):
+            for name in retire_mcp_names:
+                servers.pop(name, None)
+            localio.write_text_atomic(mcp_path, cursor_user_cmd._coowned_json_text(doc))
+    return removed
+
+
+def _replan_skills_after_retire(profile, state, workspace):
+    """Recompute registry packages and plan skills against the post-retirement fs.
+
+    Returns ``(plans, conflicts)``. A registry failure or unsafe path is a
+    per-skill conflict (plans empty); the caller preserves accurate per-file
+    state and reports a conflict rather than lying ready.
+    """
+    conflicts: list[dict] = []
+    try:
+        packages = skills_cmd.user_profile_skill_packages(
+            workspace=workspace, harness=profile.harness, minimum_trust="workspace"
+        )
+    except Exception as exc:
+        return (), [
+            {
+                "surface": "skills",
+                "path": str(profile.skills_root),
+                "status": "conflict",
+                "action": "preserve",
+                "detail": str(exc),
+            }
+        ]
+    try:
+        plans = plan_skills(skills_root=profile.skills_root, packages=packages, state=state)
+    except ValueError as exc:
+        return (), [
+            {
+                "surface": "skills",
+                "path": str(profile.skills_root),
+                "status": "conflict",
+                "action": "preserve",
+                "detail": str(exc),
+            }
+        ]
+    for p in plans:
+        if p.status == "conflict":
+            conflicts.append(
+                {
+                    "surface": "skill",
+                    "skill_id": p.skill_id,
+                    "path": str(p.path),
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": p.detail,
+                }
+            )
+    return plans, conflicts
+
+
+def _install_profile(profile, workspace, write, adopt):
+    state, error, migration, retire_mcp, retire_paths = _load_state_for_profile(profile, workspace)
+    items: list[dict] = []
+    conflicts: list[dict] = []
+    files_written: list[str] = []
+
+    if error is not None:
+        conflicts.append(
+            {
+                "surface": "ownership-state",
+                "path": str(profile.state_path),
+                "status": "conflict",
+                "action": "preserve",
+                "detail": error,
+            }
+        )
+        return (
+            _result(
+                profile.harness,
+                status="conflict",
+                ready=False,
+                instruction_ready=False,
+                skills_ready=False,
+                reload_hint=profile.reload_hint,
+                items=conflicts,
+                conflicts=conflicts,
+                files_written=[],
+                files_removed=[],
+                migration=migration,
+                capabilities=profile.capabilities,
+            ),
+            False,
+        )
+
+    instr_plan, instr_conflict = _plan_instruction_for_profile(
+        profile, state, adopt, workspace, guard_tracked_write=True
+    )
+    if instr_conflict is not None:
+        conflicts.append(instr_conflict)
+    if instr_plan is not None:
+        items.append(
+            {
+                "surface": "instruction",
+                "path": str(profile.instruction_path),
+                "status": instr_plan.status,
+                "action": instr_plan.action,
+            }
+        )
+    instruction_ready = instr_conflict is None
+
+    is_migration = migration is not None
+    # Migration defers the skill stage until after legacy retirement so the
+    # registry becomes the sole owner of the skill surface; pre-retirement
+    # skill plans would see the legacy bundled copy and are not final.
+    if is_migration:
+        skill_plans: tuple[SkillFilePlan, ...] = ()
+        skill_conflicts: list[dict] = []
+    else:
+        skill_plans, skill_conflicts, _ = _plan_skills_for_profile(profile, state, workspace)
+    conflicts.extend(skill_conflicts)
+    for p in skill_plans:
+        items.append(
+            {"surface": "skill", "skill_id": p.skill_id, "path": str(p.path), "status": p.status, "action": p.action}
+        )
+    skills_ready = not skill_conflicts
+
+    gen_items, gen_conflicts, gen_writes = [], [], []
+    hook_item, hook_conflict, hook_plan, hook_fp = None, [], None, None
+    if profile.harness == "cursor":
+        gen_items, gen_conflicts, gen_writes = _plan_cursor_generated(profile, state)
+        items.extend(gen_items)
+        conflicts.extend(gen_conflicts)
+        hook_item, hook_conflict, hook_plan, hook_fp = _plan_cursor_hook(profile, state)
+        items.append({k: v for k, v in hook_item.items() if k != "prior_index"})
+        conflicts.extend(hook_conflict)
+    generated_ready = not gen_conflicts and not hook_conflict
+
+    ready = instruction_ready and skills_ready and generated_ready
+    files_removed: list[str] = []
+
+    if write and ready:
+        wf = _apply_instruction(instr_plan, state)
+        if wf:
+            files_written.append(wf)
+        if profile.harness == "cursor":
+            # 2. apply generated/hook repairs before any legacy retirement
+            gw = _apply_cursor_generated(gen_writes, state, profile.user_root)
+            files_written.extend(gw)
+            hw = _apply_cursor_hook(hook_plan, state, profile.user_root)
+            if hw:
+                files_written.append(hw)
+            if is_migration:
+                # 3. retire only validated legacy MCP names and file paths;
+                #    report retirements in files_removed, never files_written
+                removed = _retire_cursor_legacy(profile.user_root, retire_paths, retire_mcp)
+                files_removed.extend(removed)
+                # 4. recompute packages + plan_skills against the post-retirement
+                #    filesystem, then apply and own registry skill files
+                skill_plans, skill_conflicts = _replan_skills_after_retire(profile, state, workspace)
+                conflicts.extend(skill_conflicts)
+                skills_ready = not skill_conflicts
+                if not skills_ready:
+                    # persist accurate per-file state and return conflict; do not lie ready
+                    write_profile_state(state_path=profile.state_path, state=state)
+                    return _result(
+                        profile.harness,
+                        status="conflict",
+                        ready=False,
+                        instruction_ready=instruction_ready,
+                        skills_ready=False,
+                        reload_hint=profile.reload_hint,
+                        items=items,
+                        conflicts=conflicts,
+                        files_written=files_written,
+                        files_removed=files_removed,
+                        migration=migration,
+                        capabilities=profile.capabilities,
+                    ), bool(files_written or files_removed)
+                for p in skill_plans:
+                    items.append(
+                        {
+                            "surface": "skill",
+                            "skill_id": p.skill_id,
+                            "path": str(p.path),
+                            "status": p.status,
+                            "action": p.action,
+                        }
+                    )
+                state, sw = apply_skill_plan(
+                    skills_root=profile.skills_root,
+                    packages=tuple(
+                        skills_cmd.user_profile_skill_packages(
+                            workspace=workspace, harness=profile.harness, minimum_trust="workspace"
+                        )
+                    ),
+                    plans=skill_plans,
+                    prior_state=state,
+                    state_path=profile.state_path,
+                )
+                files_written.extend(sw)
+            elif skill_plans:
+                # non-migration cursor path retains normal skill behavior
+                state, sw = apply_skill_plan(
+                    skills_root=profile.skills_root,
+                    packages=tuple(
+                        skills_cmd.user_profile_skill_packages(
+                            workspace=workspace, harness=profile.harness, minimum_trust="workspace"
+                        )
+                    ),
+                    plans=skill_plans,
+                    prior_state=state,
+                    state_path=profile.state_path,
+                )
+                files_written.extend(sw)
+        elif skill_plans:
+            state, sw = apply_skill_plan(
+                skills_root=profile.skills_root,
+                packages=tuple(
+                    skills_cmd.user_profile_skill_packages(
+                        workspace=workspace, harness=profile.harness, minimum_trust="workspace"
+                    )
+                ),
+                plans=skill_plans,
+                prior_state=state,
+                state_path=profile.state_path,
+            )
+            files_written.extend(sw)
+        # 5. persist v2
+        write_profile_state(state_path=profile.state_path, state=state)
+        status = "updated" if (files_written or files_removed) else "current"
+        reload_required = bool(files_written or files_removed)
+    elif write and not ready:
+        status = "conflict"
+        reload_required = False
+    else:
+        status = "current" if ready else "conflict"
+        reload_required = not write  # dry-run always signals reload hint per legacy cursor contract
+
+    return _result(
+        profile.harness,
+        status=status,
+        ready=ready,
+        instruction_ready=instruction_ready,
+        skills_ready=skills_ready,
+        reload_hint=profile.reload_hint,
+        items=items,
+        conflicts=conflicts,
+        files_written=files_written,
+        files_removed=files_removed,
+        migration=migration,
+        capabilities=profile.capabilities,
+    ), reload_required
+
+
+def _plan_cursor_generated_removals(profile, state):
+    root = profile.user_root
+    gen_state = state.get("generated", {}) if isinstance(state, dict) else {}
+    owned_files = gen_state.get("files", {}) if isinstance(gen_state, dict) else {}
+    if not isinstance(owned_files, dict):
+        return [], []
+    items, conflicts = [], []
+    for rel, owned_digest in sorted(owned_files.items()):
+        path = root / rel
+        item = {"surface": "generated", "path": str(path)}
+        if not path.exists():
+            item.update(status="absent", action="none")
+        elif not path.is_file():
+            item.update(status="conflict", action="preserve")
+            conflicts.append(item)
+        else:
+            try:
+                live = digest_text(path.read_text())
+            except (OSError, UnicodeError) as exc:
+                item.update(status="conflict", action="preserve", detail=str(exc))
+                conflicts.append(item)
+            else:
+                if live == owned_digest:
+                    item.update(status="managed", action="remove")
+                else:
+                    item.update(status="conflict", action="preserve", detail="owned generated file was edited")
+                    conflicts.append(item)
+        items.append(item)
+    return items, conflicts
+
+
+def _plan_cursor_hook_removal(profile, state):
+    root = profile.user_root
+    gen_state = state.get("generated", {}) if isinstance(state, dict) else {}
+    owned_hooks = gen_state.get("hooks", {}) if isinstance(gen_state, dict) else {}
+    fp = owned_hooks.get("sessionStart") if isinstance(owned_hooks, dict) else None
+    hook_path = root / "hooks.json"
+    item = {"surface": "hook-config", "path": str(hook_path), "name": "sessionStart"}
+    if not isinstance(fp, str):
+        item.update(status="absent", action="none")
+        return item, [], None
+    doc, error = cursor_user_cmd._read_json_object(hook_path)
+    entries = None
+    if doc is not None and isinstance(doc.get("hooks"), dict):
+        entries = doc["hooks"].get("sessionStart", [])
+    index = (
+        next((i for i, e in enumerate(entries) if cursor_user_cmd._digest_value(e) == fp), None)
+        if isinstance(entries, list)
+        else None
+    )
+    if index is not None:
+        item.update(status="managed", action="remove")
+        return item, [], (doc, index)
+    if not hook_path.exists():
+        item.update(status="absent", action="none")
+        return item, [], None
+    item.update(status="conflict", action="preserve", detail=error or "managed hook was edited or removed")
+    return item, [item], None
+
+
+def _uninstall_profile(profile, workspace, write):
+    state, error, migration, _retire_mcp, _retire_paths = _load_state_for_profile(profile, workspace)
+    items: list[dict] = []
+    conflicts: list[dict] = []
+    files_removed: list[str] = []
+
+    if error is not None:
+        conflicts.append(
+            {
+                "surface": "ownership-state",
+                "path": str(profile.state_path),
+                "status": "conflict",
+                "action": "preserve",
+                "detail": error,
+            }
+        )
+        return (
+            _result(
+                profile.harness,
+                status="conflict",
+                ready=False,
+                instruction_ready=False,
+                skills_ready=False,
+                reload_hint=profile.reload_hint,
+                items=conflicts,
+                conflicts=conflicts,
+                files_written=[],
+                files_removed=[],
+                migration=None,
+                capabilities=profile.capabilities,
+            ),
+            False,
+        )
+
+    instr_plan = None
+    instr_conflict = None
+    if profile.instruction_path is not None:
+        instr_plan = plan_instruction_removal(path=profile.instruction_path, state=state)
+        items.append(
+            {
+                "surface": "instruction",
+                "path": str(profile.instruction_path),
+                "status": instr_plan.status,
+                "action": instr_plan.action,
+            }
+        )
+        if instr_plan.status == "conflict":
+            instr_conflict = items[-1]
+            conflicts.append(items[-1])
+    instruction_ready = instr_conflict is None
+
+    skill_removals = plan_skill_removals(skills_root=profile.skills_root, state=state)
+    for p in skill_removals:
+        items.append(
+            {"surface": "skill", "skill_id": p.skill_id, "path": str(p.path), "status": p.status, "action": p.action}
+        )
+        if p.status == "conflict":
+            conflicts.append(items[-1])
+    skills_ready = not any(p.status == "conflict" for p in skill_removals)
+
+    gen_items, gen_conflicts = [], []
+    hook_item, hook_conflict, hook_remove = None, [], None
+    if profile.harness == "cursor":
+        gen_items, gen_conflicts = _plan_cursor_generated_removals(profile, state)
+        items.extend(gen_items)
+        conflicts.extend(gen_conflicts)
+        hook_item, hook_conflict, hook_remove = _plan_cursor_hook_removal(profile, state)
+        items.append({k: v for k, v in hook_item.items() if k != "prior_index"})
+        conflicts.extend(hook_conflict)
+    generated_ready = not gen_conflicts and not hook_conflict
+
+    ready = instruction_ready and skills_ready and generated_ready
+
+    reload_required = False
+    if write:
+        # Execute each independently safe plan even when other plans conflict:
+        # digest-matching owned files are removed; conflict surfaces are preserved.
+        if instr_plan is not None and instr_plan.action == "remove":
+            localio.write_text_atomic(instr_plan.path, instr_plan.rendered)
+            files_removed.append(str(instr_plan.path))
+            state["instructions"] = {}
+        elif instr_plan is not None and instr_plan.status == "absent":
+            # owned file already gone: clear stale instruction ownership
+            state["instructions"] = {}
+        if skill_removals:
+            removed = apply_skill_removals(
+                skills_root=profile.skills_root,
+                plans=skill_removals,
+                state=state,
+                state_path=profile.state_path,
+            )
+            files_removed.extend(removed)
+            # always reload the persisted state (for cursor too): apply_skill_removals
+            # persists a cloned new state, so the in-memory `state` is now stale.
+            state = load_profile_state(
+                state_path=profile.state_path, workspace=workspace, harness=profile.harness
+            ).state
+        if profile.harness == "cursor":
+            for item in gen_items:
+                if item["action"] == "remove":
+                    p = Path(item["path"])
+                    try:
+                        p.unlink()
+                        files_removed.append(str(p))
+                    except FileNotFoundError:
+                        pass
+                    rel = cursor_user_cmd._relative(profile.user_root, p)
+                    gen = state.get("generated", {})
+                    if isinstance(gen.get("files"), dict):
+                        gen["files"].pop(rel, None)
+                elif item["action"] == "none" and item["status"] == "absent":
+                    # owned generated file already gone: clear stale ownership
+                    p = Path(item["path"])
+                    rel = cursor_user_cmd._relative(profile.user_root, p)
+                    gen = state.get("generated", {})
+                    if isinstance(gen.get("files"), dict):
+                        gen["files"].pop(rel, None)
+            if hook_remove is not None:
+                doc, index = hook_remove
+                entries = doc["hooks"]["sessionStart"]
+                entries.pop(index)
+                if not entries:
+                    doc["hooks"].pop("sessionStart", None)
+                localio.write_text_atomic(profile.user_root / "hooks.json", cursor_user_cmd._coowned_json_text(doc))
+                files_removed.append(str(profile.user_root / "hooks.json"))
+                gen = state.get("generated", {})
+                if isinstance(gen.get("hooks"), dict):
+                    gen["hooks"].pop("sessionStart", None)
+            # rmdir recorded created directories deepest-first; never recursive
+            gen = state.get("generated", {})
+            created = gen.get("created_directories", []) if isinstance(gen, dict) else []
+            root_resolved = profile.user_root.resolve()
+            for rel in sorted(created, key=lambda r: (-len(Path(r).parts), r)):
+                d = (root_resolved / rel).resolve()
+                if not d.is_relative_to(root_resolved):
+                    continue
+                try:
+                    d.rmdir()
+                except OSError:
+                    continue
+                if isinstance(created, list):
+                    created.remove(rel)
+        # remove state file only when every owned section is empty (instructions,
+        # skills, generated files/hooks/created dirs, and mcp). Keep state on
+        # conflicts so the conflict surface stays owned for a future adopt.
+        gen_state = state.get("generated", {}) if isinstance(state.get("generated"), dict) else {}
+        owned_empty = (
+            not state.get("instructions")
+            and not state.get("skills")
+            and not gen_state.get("files")
+            and not gen_state.get("hooks")
+            and not gen_state.get("created_directories")
+            and not state.get("mcp")
+        )
+        if owned_empty and not conflicts:
+            try:
+                profile.state_path.unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            write_profile_state(state_path=profile.state_path, state=state)
+        reload_required = bool(files_removed)
+        if conflicts:
+            status = "conflict"
+        elif files_removed:
+            status = "updated"
+        else:
+            status = "current"
+    elif write and not ready:
+        status = "conflict"
+        reload_required = False
+    else:
+        status = "current" if ready else "conflict"
+        reload_required = not write
+
+    return _result(
+        profile.harness,
+        status=status,
+        ready=ready,
+        instruction_ready=instruction_ready,
+        skills_ready=skills_ready,
+        reload_hint=profile.reload_hint,
+        items=items,
+        conflicts=conflicts,
+        files_written=[],
+        files_removed=files_removed,
+        migration=None,
+        capabilities=profile.capabilities,
+    ), reload_required
+
+
+def _doctor_profile(profile, workspace, verify_mcp):
+    state, error, migration, _rm, _rf = _load_state_for_profile(profile, workspace)
+    checks: list[dict] = []
+    conflicts: list[dict] = []
+    ready = True
+
+    def _check(cid, ok, detail):
+        checks.append({"id": cid, "status": "OK" if ok else "FAIL", "detail": detail})
+
+    if error is not None:
+        _check("ownership-state", False, error)
+        conflicts.append(
+            {
+                "surface": "ownership-state",
+                "path": str(profile.state_path),
+                "status": "conflict",
+                "action": "preserve",
+                "detail": error,
+            }
+        )
+        result = _result(
+            profile.harness,
+            status="conflict",
+            ready=False,
+            instruction_ready=False,
+            skills_ready=False,
+            reload_hint=profile.reload_hint,
+            items=conflicts,
+            conflicts=conflicts,
+            files_written=[],
+            files_removed=[],
+            migration=None,
+            capabilities=profile.capabilities,
+        )
+        result["checks"] = checks
+        return result, False
+
+    _check("ownership-state", True, str(profile.state_path))
+
+    if profile.instruction_path is not None:
+        instr_plan, instr_conflict = _plan_instruction_for_profile(
+            profile, state, adopt=False, workspace=workspace, guard_tracked_write=False
+        )
+        ok = instr_plan is not None and instr_plan.status == "current"
+        _check("instruction-current", ok, str(profile.instruction_path))
+        if instr_conflict is not None:
+            conflicts.append(instr_conflict)
+        instruction_ready = ok
+    else:
+        instruction_ready = True
+    ready = ready and instruction_ready
+
+    skill_plans, skill_conflicts, _ = _plan_skills_for_profile(profile, state, workspace)
+    skills_ok = not skill_conflicts and all(p.status == "current" for p in skill_plans)
+    _check("skills-current", skills_ok, str(profile.skills_root))
+    conflicts.extend(skill_conflicts)
+    skills_ready = skills_ok
+    ready = ready and skills_ready
+
+    generated_ready = True
+    if profile.harness == "cursor":
+        gen_items, gen_conflicts, _gen_writes = _plan_cursor_generated(profile, state)
+        gen_ok = True
+        for item in gen_items:
+            surface = item["surface"]
+            ok = item["status"] == "current"
+            _check(f"{surface}-current", ok, item["path"])
+            gen_ok = gen_ok and ok
+            if item["status"] == "conflict":
+                conflicts.append(item)
+        hook_item, hook_conflict, _hp, _hfp = _plan_cursor_hook(profile, state)
+        hook_ok = hook_item["status"] == "current"
+        _check("session-hook", hook_ok, hook_item["path"])
+        if hook_conflict:
+            conflicts.extend(hook_conflict)
+        generated_ready = gen_ok and hook_ok
+        ready = ready and generated_ready
+
+    status = "current" if ready else "conflict"
+    result = _result(
+        profile.harness,
+        status=status,
+        ready=ready,
+        instruction_ready=instruction_ready,
+        skills_ready=skills_ready,
+        reload_hint=profile.reload_hint,
+        items=conflicts,
+        conflicts=conflicts,
+        files_written=[],
+        files_removed=[],
+        migration=migration,
+        capabilities=profile.capabilities,
+    )
+    result["checks"] = checks
+    return result, False
+
+
+def _run_profiles(
+    operation, *, harness, workspace, write, allow_global_stdio, adopt, verify_mcp, json_output, home=None
+):
+    if home is None:
+        home = Path.home()
+    workspace = workspace.expanduser().resolve()
+    profiles = harness_profiles.resolve_profiles(harness=harness, home=home, workspace=workspace)
+    results = []
+    any_not_ready = False
+    any_reload = False
+    for profile in profiles:
+        if operation == "install":
+            result, reload_required = _install_profile(profile, workspace, write, adopt)
+        elif operation == "uninstall":
+            result, reload_required = _uninstall_profile(profile, workspace, write)
+        else:
+            result, reload_required = _doctor_profile(profile, workspace, verify_mcp)
+        results.append(result)
+        if not result["ready"]:
+            any_not_ready = True
+        if reload_required:
+            any_reload = True
+
+    reload_required = (not write and operation in {"install", "uninstall"}) or any_reload
+    payload = {
+        "schema_version": 1,
+        "operation": operation,
+        "harness": harness,
+        "scope": "user",
+        "workspace": str(workspace),
+        "write": write,
+        "ready": not any_not_ready,
+        "reload_required": reload_required,
+        "results": results,
+    }
+    if json_output:
+        print(json.dumps(_strip_private(payload), indent=2, sort_keys=True))
+    else:
+        _emit_human(payload)
+    return 1 if any_not_ready else 0
+
+
+def _emit_human(payload):
+    operation = payload.get("operation", "harness")
+    print(f"harness {operation}: {payload['harness']}")
+    for row in payload.get("results", []):
+        marker = "ok" if row["ready"] else "conflict"
+        print(f"- {row['harness']}: {row['status']} [{marker}]")
+        for item in row.get("items", []):
+            if item.get("status") == "conflict":
+                name = f" [{item.get('name')}]" if item.get("name") else ""
+                print(f"  ! {item['path']}{name}")
+    if payload.get("reload_required"):
+        print("next: reload harness windows")
+
+
+def install(
+    *,
+    harness: str,
+    workspace: Path,
+    write: bool = False,
+    allow_global_stdio: bool = False,
+    adopt: bool = False,
+    json_output: bool = False,
+    home: Path | None = None,
+) -> int:
+    return _run_profiles(
+        "install",
+        harness=harness,
+        workspace=workspace,
+        write=write,
+        allow_global_stdio=allow_global_stdio,
+        adopt=adopt,
+        verify_mcp=False,
+        json_output=json_output,
+        home=home,
+    )
+
+
+def uninstall(
+    *, harness: str, workspace: Path, write: bool = False, json_output: bool = False, home: Path | None = None
+) -> int:
+    return _run_profiles(
+        "uninstall",
+        harness=harness,
+        workspace=workspace,
+        write=write,
+        allow_global_stdio=False,
+        adopt=False,
+        verify_mcp=False,
+        json_output=json_output,
+        home=home,
+    )
+
+
+def doctor(
+    *, harness: str, workspace: Path, verify_mcp: bool = False, json_output: bool = False, home: Path | None = None
+) -> int:
+    return _run_profiles(
+        "doctor",
+        harness=harness,
+        workspace=workspace,
+        write=False,
+        allow_global_stdio=False,
+        adopt=False,
+        verify_mcp=verify_mcp,
+        json_output=json_output,
+        home=home,
+    )

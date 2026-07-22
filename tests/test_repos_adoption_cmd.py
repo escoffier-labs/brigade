@@ -153,6 +153,31 @@ def test_adoption_report_distinguishes_all_fleet_states(tmp_path, monkeypatch, c
     assert cursor_user_cmd.install(write=True, json_output=True) == 0
     capsys.readouterr()
 
+<<<<<<< HEAD
+=======
+    # Cursor readiness requires schema-v2 generated ownership and a separately
+    # registry-projected brigade-work package.
+    from brigade import harness_profile_cmd
+
+    cursor_root = cursor_user_cmd._cursor_root()
+    v2_state = harness_profile_cmd.empty_profile_state(workspace=workspace, harness="cursor")
+    generated = cursor_user_cmd.cursor_generated_files(cursor_root)
+    v2_state["generated"] = {
+        "files": {
+            cursor_user_cmd._relative(cursor_root, path): cursor_user_cmd._digest_text(text)
+            for path, (text, _exec, _surface) in generated.items()
+        },
+        "hooks": {},
+        "created_directories": [],
+    }
+    harness_profile_cmd.write_profile_state(state_path=cursor_root / "brigade" / "install-state.json", state=v2_state)
+    skill_source = Path(cursor_user_cmd.__file__).parent / "templates" / "skills" / "brigade-work"
+    skill_root = cursor_root / "skills" / "brigade-work"
+    skill_root.mkdir(parents=True, exist_ok=True)
+    for name in ("SKILL.md", "skill.json", "CHANGELOG.md"):
+        (skill_root / name).write_bytes((skill_source / name).read_bytes())
+
+>>>>>>> 7d7fab5 (feat(harness): add aggregate user profile CLI)
     repos = [
         ("active", active),
         ("bypassed", bypassed),
