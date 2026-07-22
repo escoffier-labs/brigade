@@ -62,9 +62,11 @@ cell from the recorded `cell.json`:
 - Any other state value: the cell re-runs (only exact terminal-state
   membership causes a skip).
 
-Attempt numbers are `max(existing attempt numbers under attempts/) + 1`,
-tolerating gaps and non-`attempt-NNN` directories; a deleted attempt directory
-never causes a number to be reused.
+Attempt numbers are `max(existing attempt numbers) + 1` over two sources —
+the `attempt-NNN` directories under `attempts/` and the `attempt` value
+recorded in `cell.json` — tolerating gaps and non-`attempt-NNN` directories.
+Because `cell.json` persists the last attempt number, deleting even the
+highest attempt directory never causes a number to be reused.
 
 Every `cell.json` — both the `running` marker written before the run and the
 final receipt — records `manifest_digest`, the canonical digest of the

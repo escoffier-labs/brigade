@@ -331,13 +331,19 @@ _ATTEMPT_DIR = re.compile(r"attempt-(\d+)")
 
 def _attempt_number(cell_dir: Path) -> int:
     attempts = cell_dir / "attempts"
-    if not attempts.is_dir():
-        return 1
-    numbers = [
-        int(match.group(1))
-        for entry in attempts.iterdir()
-        if entry.is_dir() and (match := _ATTEMPT_DIR.fullmatch(entry.name)) is not None
-    ]
+    numbers = (
+        [
+            int(match.group(1))
+            for entry in attempts.iterdir()
+            if entry.is_dir() and (match := _ATTEMPT_DIR.fullmatch(entry.name)) is not None
+        ]
+        if attempts.is_dir()
+        else []
+    )
+    recorded = _load_json(cell_dir / "cell.json") or {}
+    prior = recorded.get("attempt")
+    if isinstance(prior, int) and not isinstance(prior, bool):
+        numbers.append(prior)
     return max(numbers, default=0) + 1
 
 

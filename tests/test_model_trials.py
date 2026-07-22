@@ -83,6 +83,14 @@ def test_attempt_number_uses_max_plus_one_and_tolerates_gaps(tmp_path):
     assert model_trials._attempt_number(tmp_path) == 4
 
 
+def test_attempt_number_does_not_reuse_deleted_highest_attempt(tmp_path):
+    attempts = tmp_path / "attempts"
+    attempts.mkdir()
+    (attempts / "attempt-001").mkdir()
+    (tmp_path / "cell.json").write_text(json.dumps({"attempt": 3}))
+    assert model_trials._attempt_number(tmp_path) == 4
+
+
 def test_expand_cells_is_stable_and_conditions_change_identity():
     first = model_trials.expand_cells(_manifest(), _roster())
     second = model_trials.expand_cells(_manifest(), _roster())
