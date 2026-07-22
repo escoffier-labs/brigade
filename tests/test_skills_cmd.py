@@ -8,6 +8,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 from brigade import cli, skills_cmd
 
 
@@ -1399,3 +1401,210 @@ def test_skills_mcp_stdio_serves_read_only_resources(tmp_path, capsys, monkeypat
     assert "install_skill" not in tool_names
     assert '"id": "security-review"' in by_id[5]["result"]["content"][0]["text"]
     assert by_id[6]["result"]["isError"] is True
+
+
+# --- user_profile_skill_packages (Task 3 of issue #438) -----------------------
+
+_EIGHT_HARNESSES = [
+    "codex",
+    "claude",
+    "cursor",
+    "pi",
+    "openclaw",
+    "grok",
+    "opencode",
+    "kimi",
+]
+
+
+def _write_reviewed_skill(root, name="reviewed", *, supported_harnesses=None, trust_level="workspace", enabled=True):
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(f"# {name.title()}\n\nDo the work.\n")
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "check.py").write_text("print(1)\n")
+    (skill_dir / "skill.json").write_text(
+        json.dumps(
+            {
+                "id": name,
+                "title": name.title(),
+                "version": "1.0.0",
+                "required_tools": [],
+                "required_mcp_servers": [],
+                "supported_harnesses": supported_harnesses
+                if supported_harnesses is not None
+                else list(_EIGHT_HARNESSES),
+                "trust_level": trust_level,
+                "enabled": enabled,
+                "tests": [],
+            }
+        )
+    )
+    return skill_dir
+
+
+def test_user_profile_skill_packages_select_reviewed_supported_full_packages(tmp_path, capsys):
+    source = _write_reviewed_skill(tmp_path / "source", name="reviewed")
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+
+    packages = skills_cmd.user_profile_skill_packages(workspace=tmp_path, harness="codex", minimum_trust="workspace")
+
+    assert [p.skill_id for p in packages] == ["reviewed"]
+    pkg = packages[0]
+    assert pkg.source_identity == "registry://skills/reviewed"
+    assert isinstance(pkg.source_fingerprint, str) and pkg.source_fingerprint
+    assert isinstance(pkg.metadata_fingerprint, str) and pkg.metadata_fingerprint
+    # nested regular file included byte-for-byte
+    assert "scripts/check.py" in pkg.files
+    assert pkg.files["scripts/check.py"] == b"print(1)\n"
+    # SKILL.md is rendered for the harness, not copied verbatim
+    assert "SKILL.md" in pkg.files
+    assert pkg.files["SKILL.md"] != b"# Reviewed\n\nDo the work.\n"
+    assert pkg.files["SKILL.md"].startswith(b"---\n")
+    assert b'name: "reviewed"' in pkg.files["SKILL.md"]
+    # file keys are sorted by POSIX relative path
+    assert list(pkg.files) == sorted(pkg.files)
+
+
+def test_user_profile_skill_packages_reject_unsafe_and_disabled_entries(tmp_path, capsys):
+    disabled = _write_reviewed_skill(tmp_path / "sources", name="disabled", enabled=False)
+    assert skills_cmd.import_skill(target=tmp_path, source=disabled, json_output=True) == 0
+    capsys.readouterr()
+
+    linked = _write_reviewed_skill(tmp_path / "sources", name="linked")
+    assert skills_cmd.import_skill(target=tmp_path, source=linked, json_output=True) == 0
+    capsys.readouterr()
+    registry_linked = tmp_path / ".brigade" / "skills" / "registry" / "linked"
+    # a symlink to a directory outside the skill (must be skipped, not followed)
+    (registry_linked / "escape").symlink_to(tmp_path)
+    # a symlinked regular file pointing outside (must be skipped)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("nope\n")
+    (registry_linked / "escape-file.txt").symlink_to(outside)
+    # a nested symlinked directory
+    (registry_linked / "nested").mkdir()
+    (registry_linked / "nested" / "linkdir").symlink_to(tmp_path)
+    (registry_linked / "nested" / "real.txt").write_text("ok\n")
+    # a .git directory with descendants (must be skipped entirely)
+    (registry_linked / ".git").mkdir()
+    (registry_linked / ".git" / "config").write_text("[core]\n")
+    (registry_linked / ".git" / "hooks").mkdir()
+    (registry_linked / ".git" / "hooks" / "post").write_text("x\n")
+
+    packages = skills_cmd.user_profile_skill_packages(workspace=tmp_path, harness="codex", minimum_trust="workspace")
+
+    ids = [p.skill_id for p in packages]
+    assert "disabled" not in ids
+    linked_pkg = next(p for p in packages if p.skill_id == "linked")
+    assert all(not key.startswith(".git/") and key != ".git" for key in linked_pkg.files)
+    assert "escape" not in linked_pkg.files
+    assert "escape-file.txt" not in linked_pkg.files
+    assert "nested/linkdir" not in linked_pkg.files
+    assert all(not key.startswith("escape/") for key in linked_pkg.files)
+    assert all(not key.startswith("nested/linkdir/") for key in linked_pkg.files)
+    # no key with a ".." component
+    assert all(".." not in Path(key).parts for key in linked_pkg.files)
+    # nested real file still included
+    assert linked_pkg.files["nested/real.txt"] == b"ok\n"
+
+
+def test_user_profile_skill_packages_excludes_unsupported_and_below_trust(tmp_path, capsys):
+    unsupported = _write_reviewed_skill(tmp_path / "sources", name="unsupported", supported_harnesses=["claude"])
+    assert skills_cmd.import_skill(target=tmp_path, source=unsupported, json_output=True) == 0
+    capsys.readouterr()
+
+    lowtrust = _write_reviewed_skill(tmp_path / "sources", name="lowtrust", trust_level="unreviewed")
+    assert skills_cmd.import_skill(target=tmp_path, source=lowtrust, json_output=True) == 0
+    capsys.readouterr()
+
+    packages = skills_cmd.user_profile_skill_packages(workspace=tmp_path, harness="codex", minimum_trust="workspace")
+    ids = [p.skill_id for p in packages]
+    assert "unsupported" not in ids
+    assert "lowtrust" not in ids
+
+
+def test_user_profile_skill_packages_rejects_unknown_harness_and_trust(tmp_path, capsys):
+    source = _write_reviewed_skill(tmp_path / "source", name="reviewed")
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+
+    with pytest.raises(ValueError):
+        skills_cmd.user_profile_skill_packages(
+            workspace=tmp_path, harness="not-a-real-harness", minimum_trust="workspace"
+        )
+    with pytest.raises(ValueError):
+        skills_cmd.user_profile_skill_packages(workspace=tmp_path, harness="codex", minimum_trust="not-a-trust-level")
+
+
+def test_user_profile_skill_packages_deterministic_order(tmp_path, capsys):
+    for name in ("bravo", "alpha"):
+        source = _write_reviewed_skill(tmp_path / "sources", name=name)
+        assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+        capsys.readouterr()
+
+    packages = skills_cmd.user_profile_skill_packages(workspace=tmp_path, harness="codex", minimum_trust="workspace")
+    assert [p.skill_id for p in packages] == ["alpha", "bravo"]
+
+
+def test_user_profile_skill_packages_caps_exclude_whole_package(tmp_path, capsys):
+    many = tmp_path / "source" / "many"
+    many.mkdir(parents=True)
+    (many / "SKILL.md").write_text("# Many\n\nDo the work.\n")
+    (many / "skill.json").write_text(
+        json.dumps(
+            {
+                "id": "many",
+                "title": "Many",
+                "version": "1.0.0",
+                "required_tools": [],
+                "required_mcp_servers": [],
+                "supported_harnesses": list(_EIGHT_HARNESSES),
+                "trust_level": "workspace",
+                "tests": [],
+            }
+        )
+    )
+    for index in range(513):
+        (many / f"f{index}.txt").write_text("x\n")
+    assert skills_cmd.import_skill(target=tmp_path, source=many, json_output=True) == 0
+    capsys.readouterr()
+
+    packages = skills_cmd.user_profile_skill_packages(workspace=tmp_path, harness="codex", minimum_trust="workspace")
+    assert "many" not in [p.skill_id for p in packages]
+
+    big = tmp_path / "source" / "big"
+    big.mkdir(parents=True)
+    (big / "SKILL.md").write_text("# Big\n\nDo the work.\n")
+    (big / "skill.json").write_text(
+        json.dumps(
+            {
+                "id": "big",
+                "title": "Big",
+                "version": "1.0.0",
+                "required_tools": [],
+                "required_mcp_servers": [],
+                "supported_harnesses": list(_EIGHT_HARNESSES),
+                "trust_level": "workspace",
+                "tests": [],
+            }
+        )
+    )
+    (big / "blob.bin").write_bytes(b"0" * (8 * 1024 * 1024 + 1))
+    assert skills_cmd.import_skill(target=tmp_path, source=big, json_output=True) == 0
+    capsys.readouterr()
+
+    packages = skills_cmd.user_profile_skill_packages(workspace=tmp_path, harness="codex", minimum_trust="workspace")
+    assert "big" not in [p.skill_id for p in packages]
+
+
+def test_user_profile_skill_packages_creates_no_directories(tmp_path, capsys):
+    source = _write_reviewed_skill(tmp_path / "source", name="reviewed")
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+
+    before = {p for p in tmp_path.rglob("*") if p.is_dir()}
+    packages = skills_cmd.user_profile_skill_packages(workspace=tmp_path, harness="codex", minimum_trust="workspace")
+    after = {p for p in tmp_path.rglob("*") if p.is_dir()}
+    assert packages
+    assert before == after
