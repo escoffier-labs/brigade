@@ -329,7 +329,7 @@ function Assert-ReleaseManifestAndAssets {
         $checksums[$Matches[2]] = $Matches[1]
     }
     $expected = @()
-    foreach ($componentId in @("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+    foreach ($componentId in @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
         $component = $manifest.components.$componentId
         if (-not $component -or $component.source.repository -ne "escoffier-labs/brigade" -or $component.source.release_tag -ne $tag) {
             throw "release manifest component $componentId does not point to escoffier-labs/brigade@$tag"
@@ -347,8 +347,8 @@ function Assert-ReleaseManifestAndAssets {
             }
         }
     }
-    if ($expected.Count -ne 20 -or $checksums.Count -ne 21 -or -not $checksums.ContainsKey("component-manifest-v1.json")) {
-        throw "release checksums must contain exactly 20 native assets and component-manifest-v1.json"
+    if ($expected.Count -ne 25 -or $checksums.Count -ne 26 -or -not $checksums.ContainsKey("component-manifest-v1.json")) {
+        throw "release checksums must contain exactly 25 native assets and component-manifest-v1.json"
     }
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant() -ne $checksums["component-manifest-v1.json"]) {
         throw "release manifest digest mismatch"
@@ -362,7 +362,7 @@ function Assert-ManagedComponentDigests {
         $Report,
         [string]$ManagedBin
     )
-    foreach ($componentId in @("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+    foreach ($componentId in @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
         $path = Get-ManagedExecutablePath -Report $Report -ComponentId $componentId -ManagedBin $ManagedBin
         $expected = $Manifest.components.$componentId.assets."windows-amd64".sha256
         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant() -ne $expected) {
@@ -392,15 +392,89 @@ function Assert-OperatorDoctorReady {
     }
 }
 
-function Assert-AllComponentsHealthy {
-    param($Report)
-    if ($Report.components.Count -ne 4) {
-        throw "expected 4 components, got $($Report.components.Count)"
+function Get-UnpublishedComponentIds {
+    param([string]$ManifestPath)
+    # Source-mode acceptance runs against the bundled compatibility manifest,
+    # which intentionally carries not-yet-released components with an empty
+    # asset matrix so the loader accepts the manifest before the first release
+    # pins real native assets. Those entries are the only components source
+    # acceptance may skip: a component with declared assets must still install
+    # and smoke, even if the report labels it "unsupported".
+    #
+    # Windows PowerShell 5.1 treats an empty JSON object as a truthy
+    # PSCustomObject whose .PSObject.Properties.Count is unreliable unless the
+    # Properties collection is forced through @(). Without that wrapper,
+    # agent-notify's empty assets map is never classified as unpublished and the
+    # post-setup health assertion fails with unsupported-component-platform.
+    if (-not (Test-Path -LiteralPath $ManifestPath)) {
+        throw "bundled compatibility manifest not found at $ManifestPath"
     }
+    $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+    $unpublished = [System.Collections.Generic.List[string]]::new()
+    foreach ($property in $manifest.components.PSObject.Properties) {
+        $assets = $property.Value.assets
+        if ($null -eq $assets -or @($assets.PSObject.Properties).Count -eq 0) {
+            $unpublished.Add([string]$property.Name)
+        }
+    }
+    # Write-Output -NoEnumerate keeps a single empty-asset id as a one-element
+    # string[] instead of unrolling to a scalar that foreach would iterate by char.
+    Write-Output -NoEnumerate $unpublished.ToArray()
+}
+
+function Assert-AllComponentsHealthy {
+    param(
+        $Report,
+        [string[]]$Skippable = @()
+    )
+    if ($Report.components.Count -ne 5) {
+        throw "expected 5 components, got $($Report.components.Count)"
+    }
+    $skippableSet = @{}
+    foreach ($id in $Skippable) { $skippableSet[$id] = $true }
     foreach ($component in $Report.components) {
+        if ($skippableSet.ContainsKey($component.component_id)) {
+            # The bundled compatibility manifest carries this component with no
+            # pinned assets, so source setup skips it and the report must show
+            # "unsupported". A healthy status here would mean setup installed an
+            # unpublished component, which is a contract violation.
+            if ($component.status -ne "unsupported") {
+                throw "skippable component $($component.component_id) must be unsupported in source mode, got $($component.status): $($component.detail)"
+            }
+            continue
+        }
         if ($component.status -ne "healthy") {
             throw "component $($component.component_id) is $($component.status): $($component.detail)"
         }
+    }
+}
+
+function Assert-AgentNotifyVersionMetadata {
+    param(
+        $Payload,
+        [string]$Version
+    )
+    # A bare `go build` leaves main.version/main.commit/main.buildDate at their
+    # dev/unknown/unknown defaults. Published release assets must report the
+    # requested Brigade release version, a hex git SHA (the release build
+    # injects the full github.sha, but a short SHA is also valid), and a UTC
+    # build timestamp. This only runs in pypi mode; source mode skips
+    # unpublished components (agent-notify has no pinned assets in the bundled
+    # compatibility manifest), so the skip behavior is preserved.
+    if (-not $Payload -or -not $Payload.version) {
+        throw "agent-notify smoke JSON missing version field"
+    }
+    if ($Payload.version -eq "dev" -or $Payload.version -eq "unknown") {
+        throw "agent-notify version must not report dev/unknown metadata: $($Payload.version)"
+    }
+    if ($Version -and $Payload.version -ne $Version) {
+        throw "agent-notify version mismatch: expected $Version, got $($Payload.version)"
+    }
+    if (-not $Payload.commit -or $Payload.commit -eq "unknown" -or $Payload.commit -notmatch '^[0-9a-f]{7,40}$') {
+        throw "agent-notify commit must be a hex git SHA (short or full SHA), not 'unknown'"
+    }
+    if (-not $Payload.build_date -or $Payload.build_date -eq "unknown" -or $Payload.build_date -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') {
+        throw "agent-notify build_date must be a UTC timestamp (YYYY-MM-DDTHH:MM:SSZ), not 'unknown'"
     }
 }
 
@@ -509,8 +583,20 @@ try {
     & brigade --version
     if ($LASTEXITCODE -ne 0) { throw "brigade --version failed" }
 
+    # Source-mode acceptance runs against the bundled compatibility manifest,
+    # which carries not-yet-released components with empty assets. Compute that
+    # empty-asset set before both setup invocations so online and offline setup
+    # are only expected to install published components; post-setup health and
+    # smoke assertions reuse the same set. Published/release acceptance never
+    # skips anything and keeps bare setup (every published component).
+    [string[]]$unpublishedIds = @()
     if ($InstallMode -eq "source") {
+        $bundledManifestPath = Join-Path $RepoRoot "src\brigade\templates\components\manifest-v1.json"
+        [string[]]$unpublishedIds = @(Get-UnpublishedComponentIds -ManifestPath $bundledManifestPath)
+
         Write-Step "brigade setup (online)"
+        # Standalone manifest + published_component_ids omits empty-asset entries
+        # such as agent-notify; do not add flags that would request them.
         & brigade setup --manifest-source standalone
         if ($LASTEXITCODE -ne 0) { throw "brigade setup failed" }
 
@@ -529,11 +615,13 @@ try {
     }
 
     $report = Get-ComponentReport -StderrRoot $acceptRoot
-    Assert-AllComponentsHealthy $report
+    Assert-AllComponentsHealthy -Report $report -Skippable $unpublishedIds
     $managedBin = Join-Path $env:LOCALAPPDATA "brigade\bin"
     if ($InstallMode -eq "pypi") {
         Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin
     }
+    $requiredIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |
+        Where-Object { $unpublishedIds -notcontains $_ }
     $graphtrailExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail" -ManagedBin $managedBin
     $graphtrailMcpExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail-mcp" -ManagedBin $managedBin
     $miseledgerExe = Get-ManagedExecutablePath -Report $report -ComponentId "miseledger" -ManagedBin $managedBin
@@ -543,6 +631,17 @@ try {
     if ($LASTEXITCODE -ne 0 -or $mcpResponse -notmatch '"jsonrpc"') { throw "graphtrail-mcp absolute-path smoke failed" }
     & $sessionfindExe --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "sessionfind absolute-path smoke failed" }
+    if ($requiredIds -contains "agent-notify") {
+        $agentNotifyExe = Get-ManagedExecutablePath -Report $report -ComponentId "agent-notify" -ManagedBin $managedBin
+        $agentNotifyVersion = & $agentNotifyExe version --json
+        if ($LASTEXITCODE -ne 0) { throw "agent-notify absolute-path smoke failed" }
+        try {
+            $agentNotifyPayload = $agentNotifyVersion | ConvertFrom-Json
+        } catch {
+            throw "agent-notify absolute-path smoke returned malformed JSON"
+        }
+        Assert-AgentNotifyVersionMetadata -Payload $agentNotifyPayload -Version $BrigadeVersion
+    }
 
     $workRepo = Join-Path $acceptRoot "repo"
     New-Item -ItemType Directory -Force -Path $workRepo | Out-Null

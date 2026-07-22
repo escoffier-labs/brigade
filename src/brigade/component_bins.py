@@ -24,6 +24,7 @@ from . import component_paths, component_state
 
 # Engine name -> env var override honored before any other resolution step.
 ENV_OVERRIDES = {
+    "agent-notify": "AGENT_NOTIFY_BIN",
     "graphtrail": "GRAPHTRAIL_BIN",
     "graphtrail-mcp": "GRAPHTRAIL_MCP_BIN",
     "miseledger": "MISELEDGER_BIN",
@@ -32,6 +33,7 @@ ENV_OVERRIDES = {
 
 # Pre-consolidation install locations still honored as a last resort.
 _LEGACY_RELATIVE = {
+    "agent-notify": (Path("go") / "bin" / "agent-notify",),
     "graphtrail": (Path(".cargo") / "bin" / "graphtrail",),
     "graphtrail-mcp": (Path(".cargo") / "bin" / "graphtrail-mcp",),
     "miseledger": (Path(".local") / "bin" / "miseledger",),

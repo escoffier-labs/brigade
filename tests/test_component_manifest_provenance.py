@@ -18,7 +18,7 @@ BASE = f"https://github.com/{REPOSITORY}/releases/download/{TAG}/"
 API = f"https://api.github.com/repos/{REPOSITORY}/releases/tags/{TAG}"
 REF_API = f"https://api.github.com/repos/{REPOSITORY}/git/ref/tags/{TAG}"
 TAG_API = f"https://api.github.com/repos/{REPOSITORY}/git/tags/"
-COMPONENTS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+COMPONENTS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 
 

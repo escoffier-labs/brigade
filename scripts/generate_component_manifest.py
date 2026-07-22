@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-COMPONENT_IDS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")

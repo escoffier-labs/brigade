@@ -19,7 +19,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = ROOT / "src/brigade/templates/components/manifest-v1.json"
 REPOSITORY = "escoffier-labs/brigade"
-COMPONENT_IDS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 USER_AGENT = "brigade-component-manifest-provenance/1.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -136,7 +136,7 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
     if not isinstance(components, dict):
         return ["component manifest field 'components' must be an object"]
     if set(components) != set(COMPONENT_IDS):
-        errors.append("component manifest must contain exactly graphtrail, graphtrail-mcp, miseledger, sessionfind")
+        errors.append("component manifest must contain exactly " + ", ".join(COMPONENT_IDS))
 
     tag: str | None = None
     expected_native: dict[str, dict[str, Any]] = {}

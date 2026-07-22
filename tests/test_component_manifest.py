@@ -11,6 +11,7 @@ from brigade import component_manifest
 
 MISELEDGER_BASE = "https://github.com/escoffier-labs/miseledger/releases/download/v0.6.0/"
 GRAPHTRAIL_BASE = "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/"
+AGENT_NOTIFY_BASE = "https://github.com/escoffier-labs/agent-notify/releases/download/v0.1.0/"
 GRAPHTRAIL_SHA = "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb"
 
 GRAPHTRAIL_V040_ASSETS = [
@@ -159,6 +160,44 @@ MISELEDGER_V060_ASSETS = [
     ),
 ]
 
+AGENT_NOTIFY_V010_ASSETS = [
+    (
+        "agent-notify",
+        "darwin-amd64",
+        "agent-notify-darwin-amd64",
+        11659776,
+        "1111111111111111111111111111111111111111111111111111111111111111",
+    ),
+    (
+        "agent-notify",
+        "darwin-arm64",
+        "agent-notify-darwin-arm64",
+        10784066,
+        "2222222222222222222222222222222222222222222222222222222222222222",
+    ),
+    (
+        "agent-notify",
+        "linux-amd64",
+        "agent-notify-linux-amd64",
+        11445238,
+        "3333333333333333333333333333333333333333333333333333333333333333",
+    ),
+    (
+        "agent-notify",
+        "linux-arm64",
+        "agent-notify-linux-arm64",
+        10315773,
+        "4444444444444444444444444444444444444444444444444444444444444444",
+    ),
+    (
+        "agent-notify",
+        "windows-amd64",
+        "agent-notify-windows-amd64.exe",
+        11620032,
+        "5555555555555555555555555555555555555555555555555555555555555555",
+    ),
+]
+
 
 def _minimal_known_component(
     *,
@@ -220,6 +259,24 @@ def _full_graphtrail_assets(component_id: str) -> dict:
     return assets
 
 
+def _agent_notify_asset(asset_name: str, byte_size: int, sha256: str) -> dict:
+    return {
+        "asset_name": asset_name,
+        "byte_size": byte_size,
+        "sha256": sha256,
+        "download_url": AGENT_NOTIFY_BASE + asset_name,
+    }
+
+
+def _full_agent_notify_assets(component_id: str) -> dict:
+    assets: dict = {}
+    for comp, platform, asset_name, byte_size, sha256 in AGENT_NOTIFY_V010_ASSETS:
+        if comp != component_id:
+            continue
+        assets[platform] = _agent_notify_asset(asset_name, byte_size, sha256)
+    return assets
+
+
 def _write_manifest(tmp_path: Path, **overrides) -> Path:
     payload = {
         "schema_version": 1,
@@ -227,6 +284,13 @@ def _write_manifest(tmp_path: Path, **overrides) -> Path:
         "manifest_revision": "2026-07-18",
         "supported_platforms": list(component_manifest.SUPPORTED_PLATFORMS),
         "components": {
+            "agent-notify": _minimal_known_component(
+                component_revision=GRAPHTRAIL_SHA,
+                repository="escoffier-labs/agent-notify",
+                release_tag="v0.1.0",
+                executable="agent-notify",
+                assets=_full_agent_notify_assets("agent-notify"),
+            ),
             "graphtrail": _minimal_known_component(
                 component_revision=GRAPHTRAIL_SHA,
                 repository="escoffier-labs/graphtrail",
@@ -316,6 +380,25 @@ def test_bundled_manifest_pins_graphtrail_to_git_sha():
         assert revision == GRAPHTRAIL_SHA
         assert len(revision) == 40
         assert all(ch in "0123456789abcdef" for ch in revision)
+
+
+def test_bundled_manifest_carries_agent_notify_as_unpublished_prerelease():
+    manifest = component_manifest.load(allow_standalone_legacy_revisions=True)
+    assert "agent-notify" in manifest.components
+    agent_notify = manifest.components["agent-notify"]
+    assert agent_notify.executable == "agent-notify"
+    assert agent_notify.assets == {}
+    assert agent_notify.source.release_tag is None
+    assert agent_notify.source.repository == "escoffier-labs/brigade"
+    assert "agent-notify" in component_manifest.UNPUBLISHED_COMPONENT_IDS
+    assert "agent-notify" not in component_manifest.published_component_ids(manifest)
+    published = component_manifest.published_component_ids(manifest)
+    assert published == (
+        "graphtrail",
+        "graphtrail-mcp",
+        "miseledger",
+        "sessionfind",
+    )
 
 
 def test_schema_contract_requires_exact_platform_order_and_known_components():
@@ -518,7 +601,7 @@ def test_manifest_ignores_unknown_components_with_deterministic_diagnostic(tmp_p
     assert "future-tool" not in manifest.components
     assert manifest.unknown_component_diagnostics == (
         "component manifest lists unknown component 'future-tool'; known components: "
-        "graphtrail, graphtrail-mcp, miseledger, sessionfind",
+        "agent-notify, graphtrail, graphtrail-mcp, miseledger, sessionfind",
     )
 
 
@@ -534,7 +617,7 @@ def test_manifest_ignores_unknown_components_regardless_of_value_shape(tmp_path,
     assert "future-tool" not in manifest.components
     assert manifest.unknown_component_diagnostics == (
         "component manifest lists unknown component 'future-tool'; known components: "
-        "graphtrail, graphtrail-mcp, miseledger, sessionfind",
+        "agent-notify, graphtrail, graphtrail-mcp, miseledger, sessionfind",
     )
 
 

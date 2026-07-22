@@ -140,8 +140,65 @@ jobs:
           path: release-assets/
           if-no-files-found: error
 
+  build-agent-notify-native:
+    name: agent-notify native (${{ matrix.platform }})
+    needs: validate-release
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            goos: linux
+            goarch: amd64
+          - platform: linux-arm64
+            goos: linux
+            goarch: arm64
+          - platform: darwin-amd64
+            goos: darwin
+            goarch: amd64
+          - platform: darwin-arm64
+            goos: darwin
+            goarch: arm64
+          - platform: windows-amd64
+            goos: windows
+            goarch: amd64
+    defaults:
+      run:
+        working-directory: stations/notify
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - name: Build agent-notify binary with exact release metadata
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          AGENT_NOTIFY_TAG: ${{ github.ref_name }}
+          AGENT_NOTIFY_COMMIT: ${{ github.sha }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/release-assets"
+          suffix=""
+          if [ "$GOOS" = windows ]; then suffix=.exe; fi
+          # Tag version without the leading v, the full release commit SHA, and
+          # one UTC build timestamp shared by every ldflags -X injection so the
+          # five platform assets report identical release metadata instead of
+          # the dev/unknown/unknown defaults a bare `go build` leaves behind.
+          VERSION="${AGENT_NOTIFY_TAG#v}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          go build -trimpath -ldflags "-X main.version=${VERSION} -X main.commit=${AGENT_NOTIFY_COMMIT} -X main.buildDate=${BUILD_DATE} -s -w" -o "$GITHUB_WORKSPACE/release-assets/agent-notify-${{ matrix.platform }}$suffix" ./cmd/agent-notify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-notify-${{ matrix.platform }}
+          path: release-assets/
+          if-no-files-found: error
+
   assemble-release:
-    needs: [build-rust-native, build-go-native]
+    needs: [build-rust-native, build-go-native, build-agent-notify-native]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -158,19 +215,23 @@ jobs:
         with:
           pattern: go-*
           path: downloaded/go
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agent-notify-*
+          path: downloaded/agent-notify
       - name: Generate and validate complete release inventory
         env:
           TAG: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
         run: |
           mkdir release-assets
-          test "$(find downloaded -type f | wc -l)" -eq 20
+          test "$(find downloaded -type f | wc -l)" -eq 25
           test -z "$(find downloaded -type f -printf '%f\n' | sort | uniq -d)"
           find downloaded -type f -exec cp {} release-assets/ \;
           python scripts/generate_component_manifest.py --tag "$TAG" --commit "$COMMIT" \
             --assets-dir release-assets --output release-assets/component-manifest-v1.json \
             --checksums-output release-assets/checksums.txt
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 22
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 27
       - uses: actions/attest@v4
         with:
           subject-path: |
@@ -194,6 +255,11 @@ jobs:
             release-assets/sessionfind-darwin-amd64
             release-assets/sessionfind-darwin-arm64
             release-assets/sessionfind-windows-amd64.exe
+            release-assets/agent-notify-linux-amd64
+            release-assets/agent-notify-linux-arm64
+            release-assets/agent-notify-darwin-amd64
+            release-assets/agent-notify-darwin-arm64
+            release-assets/agent-notify-windows-amd64.exe
             release-assets/component-manifest-v1.json
       - uses: actions/upload-artifact@v4
         with:
@@ -285,7 +351,7 @@ jobs:
         run: |
           mkdir release-assets
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 22
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 27
           (cd release-assets && sha256sum --check checksums.txt)
           python scripts/verify_component_manifest_provenance.py --manifest release-assets/component-manifest-v1.json
           while read -r _digest asset; do

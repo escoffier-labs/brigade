@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -17,12 +18,20 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 
-COMPONENT_IDS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
 PYPI_PROJECT_URL = "https://pypi.org/pypi/brigade-cli/json"
 PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
 PYPI_POLL_INTERVAL_SECONDS = 5
+# agent-notify ldflags inject main.version, main.commit, and main.buildDate.
+# A bare `go build` leaves "dev" / "unknown" / "unknown"; published release
+# assets must report the exact Brigade release version, a hex git SHA (the
+# release build injects the full github.sha, but a short SHA is also valid),
+# and a UTC build timestamp shaped like YYYY-MM-DDTHH:MM:SSZ.
+_PLACEHOLDER_METADATA = {"dev", "unknown"}
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+_BUILD_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 JsonFetcher = Callable[[str], Any]
 BytesFetcher = Callable[[str], bytes]
@@ -111,7 +120,7 @@ def verify_release_assets(
         raise AcceptanceError("release component manifest has no components object")
     components = manifest["components"]
     if set(components) != set(COMPONENT_IDS):
-        raise AcceptanceError("release component manifest must contain exactly four components")
+        raise AcceptanceError("release component manifest must contain exactly five components")
 
     expected: dict[str, tuple[str, str]] = {}
     native_paths: dict[str, dict[str, Path]] = {component: {} for component in COMPONENT_IDS}
@@ -150,7 +159,7 @@ def verify_release_assets(
         raise AcceptanceError(f"could not fetch release checksums.txt: {exc}") from exc
     expected_checksum_names = set(expected) | {"component-manifest-v1.json"}
     if set(checksums) != expected_checksum_names:
-        raise AcceptanceError("checksums.txt must cover exactly all 20 native assets and component-manifest-v1.json")
+        raise AcceptanceError("checksums.txt must cover exactly all 25 native assets and component-manifest-v1.json")
     if checksums.get("component-manifest-v1.json") != _sha256_bytes(manifest_bytes):
         raise AcceptanceError("release manifest digest does not match checksums.txt")
     (release_dir / "component-manifest-v1.json").write_bytes(manifest_bytes)
@@ -248,7 +257,7 @@ def validate_component_report(report: Any, managed_bin: Path) -> dict[str, Path]
         raise AcceptanceError("component report did not contain a components list")
     components = report["components"]
     if len(components) != len(COMPONENT_IDS):
-        raise AcceptanceError(f"expected exactly 4 components, got {len(components)}")
+        raise AcceptanceError(f"expected exactly 5 components, got {len(components)}")
 
     root = managed_bin.resolve()
     managed_paths: dict[str, Path] = {}
@@ -285,8 +294,38 @@ def validate_component_report(report: Any, managed_bin: Path) -> dict[str, Path]
     return managed_paths
 
 
+def validate_agent_notify_version_payload(payload: Any, version: str) -> None:
+    """Require agent-notify version JSON to carry the exact release metadata.
+
+    A bare `go build` leaves main.version/main.commit/main.buildDate at their
+    `dev`/`unknown`/`unknown` defaults. Published release assets must report the
+    requested Brigade release version, a hex git SHA (the release build injects
+    the full github.sha, but a short SHA is also accepted), and a UTC build
+    timestamp. `dev`/`unknown` placeholders are rejected for every field.
+    """
+    if not isinstance(payload, dict):
+        raise AcceptanceError("agent-notify smoke returned a non-object version payload")
+    actual_version = payload.get("version")
+    if not isinstance(actual_version, str) or not actual_version:
+        raise AcceptanceError("agent-notify smoke JSON missing version field")
+    if actual_version in _PLACEHOLDER_METADATA:
+        raise AcceptanceError(f"agent-notify version must not report dev/unknown metadata: {actual_version!r}")
+    if actual_version != version:
+        raise AcceptanceError(f"agent-notify version mismatch: expected {version!r}, got {actual_version!r}")
+    commit = payload.get("commit")
+    if not isinstance(commit, str) or commit in _PLACEHOLDER_METADATA or not _COMMIT_SHA_RE.match(commit):
+        raise AcceptanceError("agent-notify commit must be a hex git SHA (short or full SHA), not 'unknown'")
+    build_date = payload.get("build_date")
+    if not isinstance(build_date, str) or build_date in _PLACEHOLDER_METADATA or not _BUILD_DATE_RE.match(build_date):
+        raise AcceptanceError("agent-notify build_date must be a UTC timestamp (YYYY-MM-DDTHH:MM:SSZ), not 'unknown'")
+
+
 def smoke_managed_components(
-    managed_paths: Mapping[str, Path], *, runner: Runner = subprocess.run, env: Mapping[str, str] | None = None
+    managed_paths: Mapping[str, Path],
+    *,
+    version: str,
+    runner: Runner = subprocess.run,
+    env: Mapping[str, str] | None = None,
 ) -> None:
     graphtrail = run_checked([managed_paths["graphtrail"], "--version"], runner=runner, env=env)
     if not graphtrail.stdout.strip():
@@ -311,6 +350,12 @@ def smoke_managed_components(
         line.strip().startswith("sessionfind ") for line in sessionfind.stdout.splitlines()
     ):
         raise AcceptanceError("sessionfind smoke produced no help text")
+    agent_notify = run_checked([managed_paths["agent-notify"], "version", "--json"], runner=runner, env=env)
+    try:
+        agent_notify_payload = json.loads(agent_notify.stdout)
+    except json.JSONDecodeError as exc:
+        raise AcceptanceError("agent-notify smoke returned malformed JSON") from exc
+    validate_agent_notify_version_payload(agent_notify_payload, version)
 
 
 def smoke_rosetta_darwin_amd64(native_paths: Mapping[str, Mapping[str, Path]], *, runner: Runner) -> None:
@@ -399,7 +444,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
                 raise AcceptanceError("brigade version --components --json returned malformed JSON") from exc
             managed_paths = validate_component_report(report, managed_bin_path(data_home, profile))
             verify_managed_component_digests(release["manifest"], managed_paths, host_platform_key())
-            smoke_managed_components(managed_paths, runner=runner, env=env)
+            smoke_managed_components(managed_paths, version=version, runner=runner, env=env)
             if rosetta_darwin_amd64:
                 smoke_rosetta_darwin_amd64(release["native_paths"], runner=runner)
         finally:

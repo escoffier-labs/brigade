@@ -13,7 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "generate_component_manifest.py"
-COMPONENTS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+COMPONENTS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 
 

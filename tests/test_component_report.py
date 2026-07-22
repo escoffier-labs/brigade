@@ -27,9 +27,9 @@ from brigade.selection import Selection
 from tests.component_install_helpers import (
     FakeOpener,
     all_fixture_payloads,
+    fixture_component_revision,
     fixture_payload,
     linux_env,
-    test_component_revision as fixture_component_revision,
     write_test_manifest,
 )
 

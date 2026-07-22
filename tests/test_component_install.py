@@ -34,7 +34,9 @@ from brigade.component_install import (
 
 from tests.component_install_helpers import (
     FakeOpener,
+    FIXTURE_REPOSITORY,
     all_fixture_payloads,
+    fixture_component_revision,
     fixture_payload,
     linux_env,
     smoke_stub_script,
@@ -43,7 +45,8 @@ from tests.component_install_helpers import (
     write_verified_cache,
 )
 
-_SMOKE_COMPONENTS = ("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+_SMOKE_COMPONENTS = component_manifest.KNOWN_COMPONENT_IDS
+_FOUR_ENGINE_IDS = tuple(cid for cid in component_manifest.KNOWN_COMPONENT_IDS if cid != "agent-notify")
 
 
 def _write_managed_stub(tmp_path, component_id: str, *, script: str | None = None) -> str:
@@ -148,22 +151,25 @@ def _rollback_state(
     revision: str,
     version: str,
     executable: str | None = None,
+    component_ids: tuple[str, ...] | None = None,
 ) -> component_state.InstalledState:
     roots = resolve_roots(env=env, system="linux")
+    selected = component_ids if component_ids is not None else component_manifest.KNOWN_COMPONENT_IDS
     components: dict[str, component_state.InstalledComponentRecord] = {}
-    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+    for component_id in selected:
         payload = _rollback_payload(component_id, version=version)
         sha256 = hashlib.sha256(payload).hexdigest()
         asset_name = f"{component_id}-rollback-{version}"
         cache_path = Path(component_paths.cached_asset_path(roots.cache_root, sha256, asset_name))
         write_verified_cache(cache_path, payload=payload)
+        managed = component_paths.managed_executable_path(roots.data_root, component_id)
         components[component_id] = component_state.InstalledComponentRecord(
             component_revision=f"fixture-{version}",
             asset_name=asset_name,
             byte_size=len(payload),
             sha256=sha256,
             download_url=f"https://example.invalid/components/{asset_name}",
-            executable=executable or f"/untrusted/{component_id}",
+            executable=executable or managed,
         )
     return component_state.InstalledState(
         schema_version=component_state.SCHEMA_VERSION,
@@ -180,15 +186,18 @@ def _seed_rollback_pair(
     *,
     revision_a: str = "fixture-a",
     revision_b: str = "fixture-b",
+    previous_ids: tuple[str, ...] | None = None,
+    current_ids: tuple[str, ...] | None = None,
 ) -> tuple[component_state.InstalledState, component_state.InstalledState]:
     roots = resolve_roots(env=env, system="linux")
-    previous = _rollback_state(env, revision=revision_a, version="previous")
-    current = _rollback_state(env, revision=revision_b, version="current")
+    previous = _rollback_state(env, revision=revision_a, version="previous", component_ids=previous_ids)
+    current = _rollback_state(env, revision=revision_b, version="current", component_ids=current_ids)
     component_state.write_installed_state(Path(component_paths.installed_state_path(roots.data_root)), current)
     component_state.write_installed_state(
         Path(component_paths.installed_previous_state_path(roots.data_root)), previous
     )
-    for component_id, path in _managed_paths(env).items():
+    for component_id in current.components:
+        path = Path(component_paths.managed_executable_path(roots.data_root, component_id))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(_rollback_payload(component_id, version="current"))
         path.chmod(0o700)
@@ -534,7 +543,7 @@ def test_resolve_roots_uses_xdg_paths(tmp_path):
     assert roots.cache_root == env["XDG_CACHE_HOME"]
 
 
-def test_build_setup_plan_lists_all_four_components(tmp_path):
+def test_build_setup_plan_lists_all_five_components(tmp_path):
     manifest_path = tmp_path / "manifest-v1.json"
     manifest = write_test_manifest(manifest_path, brigade_version=brigade.__version__)
     roots = resolve_roots(env=linux_env(tmp_path), system="linux")
@@ -1009,20 +1018,22 @@ def test_setup_rollback_rejects_missing_or_invalid_state_without_mutation(tmp_pa
     assert {component_id: path.read_bytes() for component_id, path in paths.items()} == managed_before
 
 
-def test_setup_rollback_rejects_partial_component_state_without_mutation(tmp_path):
+def test_setup_rollback_rejects_unknown_component_state_without_mutation(tmp_path):
     env = linux_env(tmp_path)
     previous, _current = _seed_rollback_pair(env)
     current_path, previous_path = _rollback_state_paths(env)
     state_before = current_path.read_bytes()
-    partial = component_state.InstalledState(
+    unknown = component_state.InstalledState(
         schema_version=previous.schema_version,
         brigade_version=previous.brigade_version,
         manifest_revision=previous.manifest_revision,
         platform=previous.platform,
         installed_at=previous.installed_at,
-        components={"graphtrail": previous.components["graphtrail"]},
+        components={
+            "not-a-component": previous.components["graphtrail"],
+        },
     )
-    component_state.write_installed_state(previous_path, partial)
+    component_state.write_installed_state(previous_path, unknown)
     previous_before = previous_path.read_bytes()
     paths = _managed_paths(env)
     managed_before = {component_id: path.read_bytes() for component_id, path in paths.items()}
@@ -1031,6 +1042,142 @@ def test_setup_rollback_rejects_partial_component_state_without_mutation(tmp_pat
     assert current_path.read_bytes() == state_before
     assert previous_path.read_bytes() == previous_before
     assert {component_id: path.read_bytes() for component_id, path in paths.items()} == managed_before
+
+
+def test_setup_rollback_four_to_five_upgrade_restores_prior_and_removes_managed_agent_notify(tmp_path):
+    env = linux_env(tmp_path)
+    previous, current = _seed_rollback_pair(
+        env,
+        previous_ids=_FOUR_ENGINE_IDS,
+        current_ids=component_manifest.KNOWN_COMPONENT_IDS,
+    )
+    current_path, previous_path = _rollback_state_paths(env)
+    roots = resolve_roots(env=env, system="linux")
+    notify_path = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+    assert notify_path.is_file()
+
+    assert setup_native_components(rollback=True, env=env) == 0
+
+    restored = component_state.load_installed_state(current_path)
+    swapped = component_state.load_installed_state(previous_path)
+    assert restored == previous
+    assert swapped == current
+    assert set(restored.components) == set(_FOUR_ENGINE_IDS)
+    assert "agent-notify" not in restored.components
+    assert not notify_path.exists()
+    for component_id in _FOUR_ENGINE_IDS:
+        path = Path(component_paths.managed_executable_path(roots.data_root, component_id))
+        assert path.read_bytes() == _rollback_payload(component_id, version="previous")
+        assert path.stat().st_mode & 0o777 == 0o755
+
+
+def test_setup_rollback_four_to_five_never_removes_external_path_agent_notify(tmp_path):
+    env = linux_env(tmp_path)
+    previous, current = _seed_rollback_pair(
+        env,
+        previous_ids=_FOUR_ENGINE_IDS,
+        current_ids=component_manifest.KNOWN_COMPONENT_IDS,
+    )
+    roots = resolve_roots(env=env, system="linux")
+    managed_notify = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    path_notify = path_dir / "agent-notify"
+    path_notify.write_bytes(b"external-path-agent-notify")
+    path_notify.chmod(0o700)
+    # Current transaction points at PATH, not the managed path.
+    record = current.components["agent-notify"]
+    altered = component_state.InstalledState(
+        schema_version=current.schema_version,
+        brigade_version=current.brigade_version,
+        manifest_revision=current.manifest_revision,
+        platform=current.platform,
+        installed_at=current.installed_at,
+        components={
+            **{cid: current.components[cid] for cid in _FOUR_ENGINE_IDS},
+            "agent-notify": component_state.InstalledComponentRecord(
+                component_revision=record.component_revision,
+                asset_name=record.asset_name,
+                byte_size=record.byte_size,
+                sha256=record.sha256,
+                download_url=record.download_url,
+                executable=str(path_notify),
+            ),
+        },
+    )
+    component_state.write_installed_state(Path(component_paths.installed_state_path(roots.data_root)), altered)
+    managed_notify.unlink()
+
+    assert setup_native_components(rollback=True, env=env) == 0
+    assert path_notify.read_bytes() == b"external-path-agent-notify"
+    assert not managed_notify.exists()
+
+
+def test_setup_rollback_four_to_five_never_removes_env_override_agent_notify(tmp_path):
+    env = linux_env(tmp_path)
+    _seed_rollback_pair(
+        env,
+        previous_ids=_FOUR_ENGINE_IDS,
+        current_ids=component_manifest.KNOWN_COMPONENT_IDS,
+    )
+    roots = resolve_roots(env=env, system="linux")
+    managed_notify = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+    override = tmp_path / "override" / "agent-notify"
+    override.parent.mkdir()
+    override.write_bytes(b"env-override-agent-notify")
+    override.chmod(0o700)
+
+    assert setup_native_components(rollback=True, env=env) == 0
+    # Managed transaction binary is removed; env-override binary is never touched.
+    assert not managed_notify.exists()
+    assert override.read_bytes() == b"env-override-agent-notify"
+
+
+def test_setup_rollback_four_to_five_leaves_foreign_managed_path_untouched(tmp_path):
+    env = linux_env(tmp_path)
+    previous, current = _seed_rollback_pair(
+        env,
+        previous_ids=_FOUR_ENGINE_IDS,
+        current_ids=component_manifest.KNOWN_COMPONENT_IDS,
+    )
+    roots = resolve_roots(env=env, system="linux")
+    managed_notify = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+    foreign = b"foreign-managed-path-bytes-not-in-transaction"
+    managed_notify.write_bytes(foreign)
+    managed_notify.chmod(0o700)
+    # Record still claims the managed path, but bytes no longer match the transaction.
+    assert current.components["agent-notify"].executable == str(managed_notify)
+
+    assert setup_native_components(rollback=True, env=env) == 0
+    assert managed_notify.read_bytes() == foreign
+
+
+def test_setup_rollback_four_to_five_smoke_failure_restores_added_managed_binary(tmp_path):
+    env = linux_env(tmp_path)
+    _seed_rollback_pair(
+        env,
+        previous_ids=_FOUR_ENGINE_IDS,
+        current_ids=component_manifest.KNOWN_COMPONENT_IDS,
+    )
+    current_path, previous_path = _rollback_state_paths(env)
+    state_before = (current_path.read_bytes(), previous_path.read_bytes())
+    roots = resolve_roots(env=env, system="linux")
+    notify_path = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+    notify_before = notify_path.read_bytes()
+    engine_before = {
+        component_id: Path(component_paths.managed_executable_path(roots.data_root, component_id)).read_bytes()
+        for component_id in _FOUR_ENGINE_IDS
+    }
+
+    def failed_smoke(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom")
+
+    assert setup_native_components(rollback=True, env=env, runner=failed_smoke) == 1
+    assert (current_path.read_bytes(), previous_path.read_bytes()) == state_before
+    assert notify_path.read_bytes() == notify_before
+    for component_id, payload in engine_before.items():
+        path = Path(component_paths.managed_executable_path(roots.data_root, component_id))
+        assert path.read_bytes() == payload
 
 
 def test_setup_rollback_rejects_host_platform_mismatch_without_mutation(tmp_path):
@@ -1144,7 +1291,7 @@ def test_setup_rollback_twice_toggles_back_to_original_current_state(tmp_path):
         assert path.read_bytes() == _rollback_payload(component_id, version="current")
 
 
-def test_setup_install_writes_all_four_managed_files_and_state_after_smoke(tmp_path, monkeypatch):
+def test_setup_install_writes_all_five_managed_files_and_state_after_smoke(tmp_path, monkeypatch):
     env, _manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
     opener = FakeOpener(all_fixture_payloads())
 
@@ -1162,6 +1309,90 @@ def test_setup_install_writes_all_four_managed_files_and_state_after_smoke(tmp_p
         assert state.components[component_id].byte_size == byte_size
         assert state.components[component_id].sha256 == sha256
         assert state.components[component_id].executable == str(managed_path)
+
+
+def _write_unpublished_notify_manifest(path: Path, *, brigade_version: str) -> component_manifest.ComponentManifest:
+    """Manifest with the 4 native engines published and agent-notify unpublished."""
+    components: dict[str, object] = {}
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        if component_id == "agent-notify":
+            components[component_id] = {
+                "component_revision": fixture_component_revision(component_id),
+                "source": {"repository": FIXTURE_REPOSITORY},
+                "executable": "agent-notify",
+                "assets": {},
+            }
+            continue
+        assets: dict[str, object] = {}
+        for platform in component_manifest.SUPPORTED_PLATFORMS:
+            _, byte_size, sha256 = fixture_payload(component_id, platform=platform)
+            asset = manifest_asset_fixture(component_id, platform=platform)
+            assets[platform] = {
+                "asset_name": asset.asset_name,
+                "byte_size": byte_size,
+                "sha256": sha256,
+                "download_url": asset.download_url,
+            }
+        components[component_id] = {
+            "component_revision": fixture_component_revision(component_id),
+            "source": {"repository": FIXTURE_REPOSITORY, "release_tag": "fixture"},
+            "executable": component_id,
+            "assets": assets,
+        }
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "brigade_version": brigade_version,
+                "manifest_revision": "fixture",
+                "supported_platforms": list(component_manifest.SUPPORTED_PLATFORMS),
+                "components": components,
+            }
+        )
+    )
+    return component_manifest.load(path)
+
+
+def test_build_setup_plan_skips_unpublished_agent_notify(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    manifest = _write_unpublished_notify_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    roots = resolve_roots(env=env, system="linux")
+
+    plan = build_setup_plan(manifest, platform="linux-amd64", roots=roots)
+
+    # agent-notify is a known component carried unpublished (empty asset matrix);
+    # setup must skip it and emit the deterministic 4-action batch for each of
+    # the four published native engines, in KNOWN_COMPONENT_IDS order.
+    per_component = ("verify-cache", "download", "materialize", "smoke")
+    expected_published = ["graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"]
+    expected_ids = [component_id for component_id in expected_published for _ in per_component]
+    assert [action.component_id for action in plan] == expected_ids
+    assert [action.action for action in plan] == list(per_component) * len(expected_published)
+    assert "agent-notify" not in {action.component_id for action in plan}
+
+
+def test_setup_install_skips_unpublished_agent_notify_and_installs_four(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    _write_unpublished_notify_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    opener = FakeOpener(all_fixture_payloads())
+
+    assert setup_native_components(env=env, opener=opener) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    state = component_state.load_installed_state(state_path)
+    assert state is not None
+    expected = {"graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"}
+    assert set(state.components) == expected
+    assert "agent-notify" not in state.components
+    notify_path = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+    assert not notify_path.exists()
 
 
 def test_setup_state_is_absent_while_smoke_runs(tmp_path, monkeypatch):
@@ -1426,11 +1657,12 @@ def test_run_post_install_smoke_invokes_absolute_paths_only(tmp_path):
     run_post_install_smoke(managed, runner=_recording_runner(calls))
 
     assert {cmd[0] for cmd, _kwargs in calls} == set(managed.values())
-    assert calls[0][0] == [managed["graphtrail"], "--version"]
-    assert calls[1][0] == [managed["graphtrail-mcp"]]
-    assert "input" in calls[1][1]
-    assert calls[2][0] == [managed["miseledger"], "version"]
-    assert calls[3][0] == [managed["sessionfind"], "--help"]
+    assert calls[0][0] == [managed["agent-notify"], "version", "--json"]
+    assert calls[1][0] == [managed["graphtrail"], "--version"]
+    assert calls[2][0] == [managed["graphtrail-mcp"]]
+    assert "input" in calls[2][1]
+    assert calls[3][0] == [managed["miseledger"], "version"]
+    assert calls[4][0] == [managed["sessionfind"], "--help"]
 
 
 def test_run_post_install_smoke_rejects_relative_paths(tmp_path):
@@ -1442,7 +1674,7 @@ def test_run_post_install_smoke_rejects_relative_paths(tmp_path):
 
 def test_run_post_install_smoke_rejects_wrong_component_set(tmp_path):
     managed = {"graphtrail": _write_managed_stub(tmp_path, "graphtrail")}
-    with pytest.raises(ComponentInstallError, match="exactly 4 managed paths"):
+    with pytest.raises(ComponentInstallError, match="exactly 5 managed paths"):
         run_post_install_smoke(managed)
 
 

@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import re
 import subprocess
 
@@ -316,8 +317,15 @@ def test_windows_native_acceptance_source_setup_uses_standalone_manifest_online_
 
     source = re.search(r'if \(\$InstallMode -eq "source"\) \{(?P<body>.*?)\n    \}', setup, re.DOTALL)
     assert source is not None
-    assert "& brigade setup --manifest-source standalone" in source.group("body")
-    assert "& brigade setup --offline --manifest-source standalone" in source.group("body")
+    body = source.group("body")
+    # Empty-asset ids are derived before either setup invocation so online and
+    # offline share the published-only expectation set.
+    unpublished_at = body.index("$unpublishedIds = @(Get-UnpublishedComponentIds -ManifestPath $bundledManifestPath)")
+    online_at = body.index('Write-Step "brigade setup (online)"')
+    offline_at = body.index('Write-Step "brigade setup --offline"')
+    assert unpublished_at < online_at < offline_at
+    assert "& brigade setup --manifest-source standalone" in body
+    assert "& brigade setup --offline --manifest-source standalone" in body
 
 
 def test_windows_native_acceptance_pypi_setup_keeps_exact_manifest_default_and_digest_check():
@@ -523,3 +531,174 @@ def test_windows_native_acceptance_brigade_version_regex_matches_cli_output():
         match = re.match(pattern, line.strip())
         assert match is not None
         assert match.group(1).strip() == expected
+
+
+def test_windows_native_acceptance_source_mode_skips_only_bundled_unpublished_components():
+    """Source acceptance derives the skip set from the bundled compatibility
+    manifest's empty-asset entries, not from the component report's status, so a
+    component with declared assets that reports "unsupported" still fails."""
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    manifest = json.loads((ROOT / "src/brigade/templates/components/manifest-v1.json").read_text())
+
+    unpublished = [component_id for component_id, record in manifest["components"].items() if not record.get("assets")]
+    published = [component_id for component_id, record in manifest["components"].items() if record.get("assets")]
+    assert "agent-notify" in unpublished
+    assert set(unpublished) == {"agent-notify"}
+    assert published, "at least one published component must remain strictly required"
+
+    unpublished_fn = _extract_powershell_function(script, "Get-UnpublishedComponentIds")
+    assert "function Get-UnpublishedComponentIds" in unpublished_fn
+    assert "ConvertFrom-Json" in unpublished_fn
+    # Force Properties through @(...) so Windows PowerShell 5.1 reports Count 0
+    # for empty "assets": {} maps (bare .Count is unreliable and dropped agent-notify).
+    assert "@($assets.PSObject.Properties).Count -eq 0" in unpublished_fn
+    assert "Write-Output -NoEnumerate" in unpublished_fn
+    # The skip set is read from the bundled manifest on disk, not from the
+    # component report, so an unsupported component with declared assets is
+    # never treated as skippable.
+    assert "$Report" not in unpublished_fn
+
+    main = script[script.index("$acceptRoot = $null") :]
+    source_block = main[main.index('if ($InstallMode -eq "source") {') : main.index("$report = Get-ComponentReport")]
+    assert 'Join-Path $RepoRoot "src\\brigade\\templates\\components\\manifest-v1.json"' in source_block
+    assert (
+        "[string[]]$unpublishedIds = @(Get-UnpublishedComponentIds -ManifestPath $bundledManifestPath)" in source_block
+    )
+    # Empty-asset omission applies to both setup requests: ids are computed
+    # before online and offline standalone setup, then reused for health/smoke.
+    assert source_block.index(
+        "[string[]]$unpublishedIds = @(Get-UnpublishedComponentIds -ManifestPath $bundledManifestPath)"
+    ) < source_block.index('Write-Step "brigade setup (online)"')
+    assert source_block.index('Write-Step "brigade setup (online)"') < source_block.index(
+        'Write-Step "brigade setup --offline"'
+    )
+    assert "& brigade setup --manifest-source standalone" in source_block
+    assert "& brigade setup --offline --manifest-source standalone" in source_block
+    assert "[string[]]$unpublishedIds = @()" in main
+    assert "Assert-AllComponentsHealthy -Report $report -Skippable $unpublishedIds" in main
+
+    healthy_fn = _extract_powershell_function(script, "Assert-AllComponentsHealthy")
+    assert "[string[]]$Skippable = @()" in healthy_fn
+    assert "$skippableSet" in healthy_fn
+    assert 'if ($component.status -ne "unsupported")' in healthy_fn
+    assert 'if ($component.status -ne "healthy")' in healthy_fn
+
+    # The agent-notify absolute-path smoke is gated on the computed required set
+    # so source mode skips an unpublished agent-notify instead of invoking a
+    # missing managed binary.
+    assert '$requiredIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |' in main
+    assert "Where-Object { $unpublishedIds -notcontains $_ }" in main
+    assert 'if ($requiredIds -contains "agent-notify") {' in main
+    agent_block = main[main.index('if ($requiredIds -contains "agent-notify") {') :]
+    assert (
+        'Get-ManagedExecutablePath -Report $report -ComponentId "agent-notify" -ManagedBin $managedBin' in agent_block
+    )
+    assert "& $agentNotifyExe version --json" in agent_block
+
+
+def test_windows_native_acceptance_source_setup_command_contract_omits_empty_asset_components():
+    """Source-mode setup must request only published components: both online and
+    offline use standalone manifest selection (which omits empty-asset entries
+    via published_component_ids) after deriving that same empty-asset set for
+    post-setup assertions. Nonempty published assets stay required."""
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    manifest = json.loads((ROOT / "src/brigade/templates/components/manifest-v1.json").read_text())
+    unpublished = [component_id for component_id, record in manifest["components"].items() if not record.get("assets")]
+    published = [component_id for component_id, record in manifest["components"].items() if record.get("assets")]
+    assert unpublished == ["agent-notify"]
+    assert "graphtrail" in published
+
+    main = script[script.index("$acceptRoot = $null") :]
+    source_block = main[main.index('if ($InstallMode -eq "source") {') : main.index("$report = Get-ComponentReport")]
+    online_cmd = "& brigade setup --manifest-source standalone"
+    offline_cmd = "& brigade setup --offline --manifest-source standalone"
+    assert source_block.count(online_cmd) == 1
+    assert source_block.count(offline_cmd) == 1
+    # No alternate manifest path or component-selection flag that could request
+    # unpublished agent-notify or hide a published component failure.
+    assert "--manifest " not in source_block
+    assert "Get-UnpublishedComponentIds" in source_block
+    assert "@($assets.PSObject.Properties).Count -eq 0" in _extract_powershell_function(
+        script, "Get-UnpublishedComponentIds"
+    )
+
+
+def test_windows_native_acceptance_pypi_setup_command_contract_is_strict():
+    """PyPI/released mode must issue bare setup online and offline (every
+    published component) and never populate the empty-asset skip set."""
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    main = script[script.index("$acceptRoot = $null") :]
+    setup = main[main.index("[string[]]$unpublishedIds = @()") : main.index("$report = Get-ComponentReport")]
+    published = re.search(r"else \{(?P<body>.*?)\n    \}", setup, re.DOTALL)
+    assert published is not None
+    body = published.group("body")
+    assert re.search(r"(?m)^        & brigade setup$", body)
+    assert re.search(r"(?m)^        & brigade setup --offline$", body)
+    assert "--manifest-source" not in body
+    assert "Get-UnpublishedComponentIds" not in body
+    # Default empty skip set is only replaced inside the source branch.
+    assert setup.index("[string[]]$unpublishedIds = @()") < setup.index('if ($InstallMode -eq "source") {')
+    source_block = setup[setup.index('if ($InstallMode -eq "source") {') : setup.index("else {")]
+    assert "Get-UnpublishedComponentIds" in source_block
+
+
+def test_windows_native_acceptance_pypi_mode_never_skips_agent_notify():
+    """Published/release acceptance keeps the strict five-component contract:
+    no skip set, agent-notify must install, digest-check, and smoke by absolute
+    managed path."""
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    main = script[script.index("$acceptRoot = $null") :]
+
+    # The skip set is only populated in source mode; pypi mode leaves it empty.
+    setup = main[main.index("[string[]]$unpublishedIds = @()") : main.index("$report = Get-ComponentReport")]
+    source_block = setup[setup.index('if ($InstallMode -eq "source") {') : setup.index("else {")]
+    pypi_block = setup[setup.index("else {") :]
+    assert "[string[]]$unpublishedIds = @()" in setup
+    assert "Get-UnpublishedComponentIds" in source_block
+    assert "Get-UnpublishedComponentIds" not in pypi_block
+
+    assert "Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin" in main
+    digest_fn = _extract_powershell_function(script, "Assert-ManagedComponentDigests")
+    assert '"agent-notify"' in digest_fn
+    assert '"graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"' in digest_fn
+
+    release_fn = _extract_powershell_function(script, "Assert-ReleaseManifestAndAssets")
+    for component_id in ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"):
+        assert component_id in release_fn
+    assert (
+        'foreach ($platform in @("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64"))'
+        in release_fn
+    )
+
+
+def test_windows_native_acceptance_pypi_mode_rejects_bare_agent_notify_metadata():
+    """Published acceptance must reject the dev/unknown/unknown defaults a bare
+    `go build` leaves behind and require the exact Brigade release version plus a
+    hex git SHA (full or short) and a UTC build timestamp. Source-mode skip
+    behavior is untouched: the validation only runs inside the required-ids
+    agent-notify block, which source mode never enters for an unpublished
+    agent-notify."""
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    validator = _extract_powershell_function(script, "Assert-AgentNotifyVersionMetadata")
+    assert "function Assert-AgentNotifyVersionMetadata" in validator
+    assert "[string]$Version" in validator
+    assert '$Payload.version -eq "dev"' in validator
+    assert '$Payload.version -eq "unknown"' in validator
+    assert "$Payload.version -ne $Version" in validator
+    assert "$Payload.commit -eq " in validator
+    assert "$Payload.commit -notmatch '^[0-9a-f]{7,40}$'" in validator
+    assert "$Payload.build_date -eq " in validator
+    assert r"$Payload.build_date -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'" in validator
+
+    main = script[script.index("$acceptRoot = $null") :]
+    agent_block = main[main.index('if ($requiredIds -contains "agent-notify") {') :]
+    assert "Assert-AgentNotifyVersionMetadata -Payload $agentNotifyPayload -Version $BrigadeVersion" in agent_block
+    # The old loose "version field exists" check is gone.
+    assert "if (-not $agentNotifyPayload.version)" not in agent_block
+    # Source-mode skip behavior is preserved: the unpublished-ids derivation and
+    # the required-ids gating are unchanged.
+    source_block = main[main.index('if ($InstallMode -eq "source") {') : main.index("$report = Get-ComponentReport")]
+    assert (
+        "[string[]]$unpublishedIds = @(Get-UnpublishedComponentIds -ManifestPath $bundledManifestPath)" in source_block
+    )
+    assert "Where-Object { $unpublishedIds -notcontains $_ }" in main
