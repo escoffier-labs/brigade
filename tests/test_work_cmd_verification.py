@@ -236,6 +236,68 @@ def test_work_verify_plan_run_list_show(tmp_path, capsys):
     assert "python3 -c" in out
 
 
+def _init_verify_target_with_head(target):
+    target.mkdir(parents=True, exist_ok=True)
+    _init_git_repo_with_head(target)
+
+
+def test_verify_reuses_identical_tree(tmp_target, monkeypatch):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    rc1 = verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
+    assert rc1 == 0
+    rc2 = verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
+    assert rc2 == 0
+    receipts = verification._verify_receipts(tmp_target)
+    assert len(receipts) == 2
+    newest = receipts[0]
+    assert newest["status"] == "completed"
+    assert newest["reused_from"] == receipts[1]["run_id"]
+    # the reused receipt ran no commands
+    assert newest["commands"] == []
+
+
+def test_verify_no_reuse_flag_forces_run(tmp_target, monkeypatch):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
+    verification.verify_run(target=tmp_target, commands=["true"], timeout=60, reuse=False)
+    receipts = verification._verify_receipts(tmp_target)
+    assert "reused_from" not in receipts[0]
+
+
+def test_verify_dirty_tree_not_reused(tmp_target, monkeypatch):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
+    (tmp_target / "newfile.txt").write_text("x\n")
+    verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
+    receipts = verification._verify_receipts(tmp_target)
+    assert "reused_from" not in receipts[0]
+
+
+def test_verify_failed_receipt_not_reused(tmp_target, monkeypatch):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    rc = verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    assert rc != 0
+    receipts = verification._verify_receipts(tmp_target)
+    assert "reused_from" not in receipts[0]
+
+
 def test_work_verify_run_argv_json_bypasses_metacharacter_heuristic(tmp_path, capsys):
     # A quoted argument containing shell metacharacters (semicolons, quotes) is safe
     # when it arrives as pre-parsed argv: shell=False was already the execution mode,
@@ -1333,6 +1395,7 @@ def test_work_verify_run_cli_passes_graphtrail_timeout_override(tmp_path, monkey
             "json_output": True,
             "capture": None,
             "capture_kind": "skill",
+            "reuse": True,
         }
     ]
 
@@ -1455,6 +1518,7 @@ def test_work_verify_and_closeout_cli(tmp_path, monkeypatch):
                 "json_output": True,
                 "capture": None,
                 "capture_kind": "skill",
+                "reuse": True,
             },
         ),
         ("verify-runs", {"target": tmp_path, "limit": 3, "json_output": True}),

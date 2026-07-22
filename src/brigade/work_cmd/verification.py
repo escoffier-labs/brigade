@@ -1,6 +1,7 @@
 """Verify, acceptance, and closeout operations."""
 
 from __future__ import annotations
+import hashlib
 import json
 import os
 import re
@@ -308,6 +309,33 @@ def _write_verify_markdown(run_dir: Path, receipt: dict[str, Any]) -> None:
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
 
+def _tree_fingerprint(target: Path) -> str | None:
+    """Content hash of HEAD + tracked diff + untracked files. None outside git."""
+    try:
+        head = helpers._git(target, "rev-parse", "HEAD")
+        if head.returncode != 0:
+            return None
+        diff = helpers._git(target, "diff", "HEAD")
+        untracked = helpers._git(target, "ls-files", "--others", "--exclude-standard")
+        if diff.returncode != 0 or untracked.returncode != 0:
+            return None
+    except OSError:
+        # helpers._git only catches TimeoutExpired; a missing git binary (e.g. a
+        # test that restricts PATH) raises FileNotFoundError, an OSError subclass.
+        return None
+    hasher = hashlib.sha256()
+    hasher.update(head.stdout.encode())
+    hasher.update(diff.stdout.encode())
+    for name in sorted(untracked.stdout.splitlines()):
+        path = target / name
+        hasher.update(name.encode())
+        try:
+            hasher.update(path.read_bytes())
+        except OSError:
+            return None
+    return hasher.hexdigest()
+
+
 def _run_verify_commands(
     target: Path,
     commands: list[str | list[str]],
@@ -329,6 +357,8 @@ def _run_verify_commands(
         "path": str(run_dir),
         "evidence": _verification_evidence_payload(target),
         "commands": [],
+        "tree_fingerprint": _tree_fingerprint(target),
+        "planned_commands": [shlex.join(c) if isinstance(c, list) else c for c in commands],
     }
     claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
     if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
@@ -505,6 +535,52 @@ def _run_verify_commands(
     _write_verify_markdown(run_dir, receipt)
     _prune_verify_runs(target)
     return receipt, rc
+
+
+def _write_reused_receipt(
+    target: Path,
+    latest: dict[str, Any],
+    fingerprint: str | None,
+    planned_display: list[str],
+    timeout: int,
+) -> tuple[dict[str, Any], int]:
+    """Write a fresh receipt dir that records a reused passing run (no commands executed)."""
+    started = helpers._now()
+    run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
+    run_dir = helpers._verify_runs_root(target) / run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    completed_at = helpers._now()
+    receipt: dict[str, Any] = {
+        "run_id": run_id,
+        "target": str(target),
+        "status": "completed",
+        "started_at": started.isoformat(),
+        "completed_at": completed_at.isoformat(),
+        "duration_seconds": (completed_at - started).total_seconds(),
+        "timeout": timeout,
+        "path": str(run_dir),
+        "commands": [],
+        "reused_from": latest.get("run_id"),
+        "tree_fingerprint": fingerprint,
+        "planned_commands": planned_display,
+    }
+    git = _receipt_git_snapshot(target)
+    if git is not None:
+        receipt["git"] = git
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "logs": {},
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    signing_key = receipt_signing.load_key(target)
+    if signing_key is not None:
+        key, key_id = signing_key
+        receipt["digests"]["signature"] = receipt_signing.sign(receipt["digests"]["receipt_sha256"], key)
+        receipt["digests"]["key_id"] = key_id
+    helpers._write_json(run_dir / "receipt.json", receipt)
+    _write_verify_markdown(run_dir, receipt)
+    _prune_verify_runs(target)
+    return receipt, 0
 
 
 def _resolve_closeout_session(target: Path, session_id: str) -> tuple[Path | None, dict[str, Any] | None, str | None]:
@@ -688,6 +764,7 @@ def verify_run(
     json_output: bool = False,
     capture: str | None = None,
     capture_kind: str = "skill",
+    reuse: bool = True,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -705,7 +782,24 @@ def verify_run(
     if not planned:
         print("error: no verification commands found; pass --command", file=sys.stderr)
         return 2
-    receipt, rc = _run_verify_commands(target, planned, timeout, graphtrail_timeout=effective_graphtrail_timeout)
+    if reuse:
+        fingerprint = _tree_fingerprint(target)
+        latest = _latest_verify_receipt(target)
+        planned_display = [shlex.join(c) if isinstance(c, list) else c for c in planned]
+        if (
+            fingerprint is not None
+            and latest is not None
+            and latest.get("status") == "completed"
+            and latest.get("tree_fingerprint") == fingerprint
+            and latest.get("planned_commands") == planned_display
+        ):
+            receipt, rc = _write_reused_receipt(target, latest, fingerprint, planned_display, timeout)
+        else:
+            receipt, rc = _run_verify_commands(
+                target, planned, timeout, graphtrail_timeout=effective_graphtrail_timeout
+            )
+    else:
+        receipt, rc = _run_verify_commands(target, planned, timeout, graphtrail_timeout=effective_graphtrail_timeout)
     if json_output:
         if capture:
             # Record the outcome in the same command (closes the loop without a
