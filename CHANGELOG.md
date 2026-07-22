@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Passive update notice: after a successful command, brigade prints a one-line
+  stderr notice (at most once per 24h) when a newer release is on PyPI.
+  Anonymous, TTY-only, skipped in CI; disable with `BRIGADE_NO_UPDATE_CHECK=1`.
+
 ## [0.25.1] - 2026-07-21
 
 ### Added

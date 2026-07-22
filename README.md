@@ -44,6 +44,10 @@ brigade operator quickstart --target ./my-repo --harnesses codex
 brigade operator doctor --target ./my-repo --profile local-operator
 ```
 
+brigade prints a one-line notice when a new release is out (checked at most
+once a day via an anonymous request; set `BRIGADE_NO_UPDATE_CHECK=1` to
+disable - details in [docs/update-channels.md](docs/update-channels.md)).
+
 `brigade setup` is the default engine installation path and uses the running CLI's exact release manifest. That wires memory, handoffs, a local MCP catalog, the work loop, and guardrails into one repo for one harness, then prints ready. Default footprint is small: `AGENTS.md`, `SAFETY_RULES.md`, a handoff template, and `.brigade/` state. Add `--dry-run` to preview; `--full` for the whole kit. Nothing leaves your machine.
 
 ```
