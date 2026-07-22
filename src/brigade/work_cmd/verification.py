@@ -139,8 +139,8 @@ def _verify_child_popen_kwargs() -> dict[str, Any]:
 
 
 def _decode_verify_child_output(stdout: str | bytes | None, stderr: str | bytes | None) -> tuple[str, str]:
-    stdout_text = stdout.decode() if isinstance(stdout, bytes) else (stdout or "")
-    stderr_text = stderr.decode() if isinstance(stderr, bytes) else (stderr or "")
+    stdout_text = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else (stdout or "")
+    stderr_text = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else (stderr or "")
     return stdout_text, stderr_text
 
 
@@ -220,9 +220,12 @@ def _finalize_verify_receipt(
             receipt["status"] = "failed"
         else:
             receipt["status"] = "rejected"
-    git = _receipt_git_snapshot(target)
-    if git is not None:
-        receipt["git"] = git
+    try:
+        git = _receipt_git_snapshot(target)
+        if git is not None:
+            receipt["git"] = git
+    except Exception:
+        pass
     log_digests: dict[str, str] = {}
     for command in receipt["commands"]:
         if not isinstance(command, dict):
@@ -236,7 +239,10 @@ def _finalize_verify_receipt(
                 log_name = str(path.relative_to(run_dir))
             except ValueError:
                 log_name = path.name
-            log_digests[log_name] = localio.file_sha256(path)
+            try:
+                log_digests[log_name] = localio.file_sha256(path)
+            except OSError:
+                continue
     delta = receipt.get("code_graph_delta")
     if isinstance(delta, dict):
         sidecar_value = delta.get("sidecar_path")
@@ -247,21 +253,62 @@ def _finalize_verify_receipt(
                     log_name = str(sidecar_path.relative_to(run_dir))
                 except ValueError:
                     log_name = sidecar_path.name
-                log_digests[log_name] = localio.file_sha256(sidecar_path)
-    receipt["digests"] = {
-        "algorithm": "sha256",
-        "logs": dict(sorted(log_digests.items())),
-        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
-    }
-    signing_key = receipt_signing.load_key(target)
-    if signing_key is not None:
-        key, key_id = signing_key
-        receipt["digests"]["signature"] = receipt_signing.sign(receipt["digests"]["receipt_sha256"], key)
-        receipt["digests"]["key_id"] = key_id
-    helpers._write_json(run_dir / "receipt.json", receipt)
-    _write_verify_markdown(run_dir, receipt)
-    _prune_verify_runs(target)
+                try:
+                    log_digests[log_name] = localio.file_sha256(sidecar_path)
+                except OSError:
+                    pass
+    try:
+        receipt["digests"] = {
+            "algorithm": "sha256",
+            "logs": dict(sorted(log_digests.items())),
+            "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+        }
+        signing_key = receipt_signing.load_key(target)
+        if signing_key is not None:
+            key, key_id = signing_key
+            receipt["digests"]["signature"] = receipt_signing.sign(receipt["digests"]["receipt_sha256"], key)
+            receipt["digests"]["key_id"] = key_id
+    except Exception:
+        receipt.pop("digests", None)
+    try:
+        helpers._write_json(run_dir / "receipt.json", receipt)
+        _write_verify_markdown(run_dir, receipt)
+        _prune_verify_runs(target)
+    except Exception:
+        try:
+            helpers._write_json(run_dir / "receipt.json", receipt)
+        except OSError:
+            pass
     return receipt, rc
+
+
+def _safe_finalize_verify_receipt(
+    target: Path,
+    run_dir: Path,
+    receipt: dict[str, Any],
+    *,
+    started,
+    rc: int,
+    canceled: bool,
+) -> tuple[dict[str, Any], int]:
+    try:
+        return _finalize_verify_receipt(target, run_dir, receipt, started=started, rc=rc, canceled=canceled)
+    except BaseException:
+        if canceled:
+            receipt["status"] = _VERIFY_CANCELED_RECEIPT_STATUS
+            receipt.setdefault(
+                "interruption",
+                {"kind": "keyboard-interrupt", "detail": "verification canceled by user"},
+            )
+            rc = _VERIFY_CANCELED_RC
+        elif receipt.get("status") == "running":
+            receipt["status"] = "failed"
+        receipt.setdefault("completed_at", helpers._now().isoformat())
+        try:
+            helpers._write_json(run_dir / "receipt.json", receipt)
+        except OSError:
+            pass
+        return receipt, rc
 
 
 VERIFY_RUNS_KEEP = 50
@@ -455,125 +502,150 @@ def _run_verify_commands(
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
     run_dir = helpers._verify_runs_root(target) / run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
-    graph_delta_before = graphtrail_delta.capture_before(target, run_dir, timeout=graphtrail_timeout)
-    receipt: dict[str, Any] = {
-        "run_id": run_id,
-        "target": str(target),
-        "status": "running",
-        "started_at": started.isoformat(),
-        "timeout": timeout,
-        "path": str(run_dir),
-        "evidence": _verification_evidence_payload(target),
-        "commands": [],
-    }
-    claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
-    if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
-        receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
+    receipt: dict[str, Any] | None = None
+    graph_delta_before: dict[str, Any] | None = None
     rc = 0
     canceled = False
+    finalized = False
     try:
-        for index, command in enumerate(commands, start=1):
-            if isinstance(command, list):
-                argv, env_assignments, error = _verify_parse_argv(command, target)
-                display_command = shlex.join(command)
-            else:
-                argv, env_assignments, error = _verify_parse_command(command, target)
-                display_command = command
-            command_result: dict[str, Any] = {
-                "command": display_command,
-                "env": sorted(env_assignments),
-                "started_at": helpers._now().isoformat(),
-            }
-            stdout_path = run_dir / f"command-{index}-stdout.log"
-            stderr_path = run_dir / f"command-{index}-stderr.log"
-            if error or argv is None:
+        run_dir.mkdir(parents=True, exist_ok=False)
+        receipt = {
+            "run_id": run_id,
+            "target": str(target),
+            "status": "running",
+            "started_at": started.isoformat(),
+            "timeout": timeout,
+            "path": str(run_dir),
+            "evidence": _verification_evidence_payload(target),
+            "commands": [],
+        }
+        claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
+        if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
+            receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
+        try:
+            graph_delta_before = graphtrail_delta.capture_before(target, run_dir, timeout=graphtrail_timeout)
+        except KeyboardInterrupt:
+            canceled = True
+            rc = _VERIFY_CANCELED_RC
+            receipt.setdefault(
+                "interruption",
+                {"kind": "keyboard-interrupt", "detail": "verification canceled by user"},
+            )
+        if not canceled:
+            for index, command in enumerate(commands, start=1):
+                if isinstance(command, list):
+                    argv, env_assignments, error = _verify_parse_argv(command, target)
+                    display_command = shlex.join(command)
+                else:
+                    argv, env_assignments, error = _verify_parse_command(command, target)
+                    display_command = command
+                command_result: dict[str, Any] = {
+                    "command": display_command,
+                    "env": sorted(env_assignments),
+                    "started_at": helpers._now().isoformat(),
+                }
+                stdout_path = run_dir / f"command-{index}-stdout.log"
+                stderr_path = run_dir / f"command-{index}-stderr.log"
+                if error or argv is None:
+                    command_result.update(
+                        {
+                            "status": "rejected",
+                            "exit_code": 2,
+                            "stderr_summary": error,
+                            "stdout_summary": "",
+                            "stdout_log_path": str(stdout_path),
+                            "stderr_log_path": str(stderr_path),
+                        }
+                    )
+                    stdout_path.write_text("")
+                    stderr_path.write_text(str(error or "invalid command") + "\n")
+                    if rc == 0:
+                        rc = 2
+                    receipt["commands"].append(command_result)
+                    continue
+                run_env = os.environ.copy()
+                run_env.update(env_assignments)
+                execution_argv = _verify_execution_argv(argv, target)
+                command_started = helpers._now()
+                status, exit_code, stdout, stderr = _run_verify_child_process(
+                    execution_argv,
+                    cwd=target,
+                    env=run_env,
+                    timeout=timeout,
+                )
+                command_completed = helpers._now()
+                stdout_path.write_text(stdout)
+                stderr_path.write_text(stderr)
                 command_result.update(
                     {
-                        "status": "rejected",
-                        "exit_code": 2,
-                        "stderr_summary": error,
-                        "stdout_summary": "",
+                        "status": status,
+                        "exit_code": exit_code,
+                        "completed_at": command_completed.isoformat(),
+                        "duration_seconds": (command_completed - command_started).total_seconds(),
+                        "argv": argv,
+                        "stdout_summary": scanners_mod._scanner_run_summary(stdout),
+                        "stderr_summary": scanners_mod._scanner_run_summary(stderr),
                         "stdout_log_path": str(stdout_path),
                         "stderr_log_path": str(stderr_path),
                     }
                 )
-                stdout_path.write_text("")
-                stderr_path.write_text(str(error or "invalid command") + "\n")
-                if rc == 0:
-                    rc = 2
+                if status == _VERIFY_INTERRUPTED_COMMAND_STATUS:
+                    canceled = True
+                    rc = _VERIFY_CANCELED_RC
+                    receipt["commands"].append(command_result)
+                    break
+                if status == "timed_out":
+                    rc = 124
+                elif status == "failed" and exit_code is not None and rc == 0:
+                    rc = exit_code
+                elif status == "failed" and rc == 0:
+                    rc = 127
                 receipt["commands"].append(command_result)
-                continue
-            run_env = os.environ.copy()
-            run_env.update(env_assignments)
-            execution_argv = _verify_execution_argv(argv, target)
-            command_started = helpers._now()
-            status, exit_code, stdout, stderr = _run_verify_child_process(
-                execution_argv,
-                cwd=target,
-                env=run_env,
-                timeout=timeout,
-            )
-            command_completed = helpers._now()
-            stdout_path.write_text(stdout)
-            stderr_path.write_text(stderr)
-            command_result.update(
-                {
-                    "status": status,
-                    "exit_code": exit_code,
-                    "completed_at": command_completed.isoformat(),
-                    "duration_seconds": (command_completed - command_started).total_seconds(),
-                    "argv": argv,
-                    "stdout_summary": scanners_mod._scanner_run_summary(stdout),
-                    "stderr_summary": scanners_mod._scanner_run_summary(stderr),
-                    "stdout_log_path": str(stdout_path),
-                    "stderr_log_path": str(stderr_path),
-                }
-            )
-            if status == _VERIFY_INTERRUPTED_COMMAND_STATUS:
-                canceled = True
-                rc = _VERIFY_CANCELED_RC
-                receipt["commands"].append(command_result)
-                break
-            if status == "timed_out":
-                rc = 124
-            elif status == "failed" and exit_code is not None and rc == 0:
-                rc = exit_code
-            elif status == "failed" and rc == 0:
-                rc = 127
-            receipt["commands"].append(command_result)
-        if canceled and "code_graph_delta" not in receipt:
-            try:
+            if canceled and "code_graph_delta" not in receipt:
+                try:
+                    receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
+                        target, run_dir, graph_delta_before, timeout=graphtrail_timeout
+                    )
+                except (Exception, KeyboardInterrupt):
+                    receipt["code_graph_delta"] = graphtrail_delta._status(
+                        "unavailable",
+                        "code graph delta unavailable: verification canceled before graph capture completed",
+                    )
+            elif not canceled:
                 receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
                     target, run_dir, graph_delta_before, timeout=graphtrail_timeout
                 )
-            except (Exception, KeyboardInterrupt):
-                receipt["code_graph_delta"] = graphtrail_delta._status(
-                    "unavailable",
-                    "code graph delta unavailable: verification canceled before graph capture completed",
-                )
-        elif not canceled:
-            receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
-                target, run_dir, graph_delta_before, timeout=graphtrail_timeout
-            )
     except KeyboardInterrupt:
         canceled = True
         rc = _VERIFY_CANCELED_RC
-        receipt.setdefault(
-            "interruption",
-            {"kind": "keyboard-interrupt", "detail": "verification canceled by user"},
-        )
-        if "code_graph_delta" not in receipt:
-            try:
-                receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
-                    target, run_dir, graph_delta_before, timeout=graphtrail_timeout
-                )
-            except (Exception, KeyboardInterrupt):
-                receipt["code_graph_delta"] = graphtrail_delta._status(
-                    "unavailable",
-                    "code graph delta unavailable: verification canceled before graph capture completed",
-                )
-    return _finalize_verify_receipt(target, run_dir, receipt, started=started, rc=rc, canceled=canceled)
+        if receipt is not None:
+            receipt.setdefault(
+                "interruption",
+                {"kind": "keyboard-interrupt", "detail": "verification canceled by user"},
+            )
+            if "code_graph_delta" not in receipt and graph_delta_before is not None:
+                try:
+                    receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
+                        target, run_dir, graph_delta_before, timeout=graphtrail_timeout
+                    )
+                except (Exception, KeyboardInterrupt):
+                    receipt["code_graph_delta"] = graphtrail_delta._status(
+                        "unavailable",
+                        "code graph delta unavailable: verification canceled before graph capture completed",
+                    )
+    finally:
+        if receipt is not None and not finalized:
+            receipt, rc = _safe_finalize_verify_receipt(
+                target,
+                run_dir,
+                receipt,
+                started=started,
+                rc=rc,
+                canceled=canceled,
+            )
+            finalized = True
+    assert receipt is not None
+    return receipt, rc
 
 
 def _resolve_closeout_session(target: Path, session_id: str) -> tuple[Path | None, dict[str, Any] | None, str | None]:
