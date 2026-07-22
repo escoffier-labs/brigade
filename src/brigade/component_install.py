@@ -107,6 +107,8 @@ def uses_bundled_compatibility_manifest() -> bool:
 
 def load_verified_exact_release_manifest(
     roots: SetupRoots,
+    *,
+    online_stable_cache_repair: bool = False,
 ) -> tuple[component_manifest.ComponentManifest, Path] | None:
     """Read the current release manifest recorded in update state without mutating it.
 
@@ -131,6 +133,18 @@ def load_verified_exact_release_manifest(
     64-hex ``component_manifest_sha256``, ISO ``updated_at``); the digest
     check below validates provenance, and ``validate_release_manifest_bytes``
     validates the stable tag/version against the cached manifest.
+
+    When ``online_stable_cache_repair`` is set and the persisted state is a
+    matching stable state (``state.component_tag == v{brigade.__version__}``),
+    a missing or corrupt verified cache returns ``None`` instead of raising
+    so an online ``brigade setup`` falls through to exact-release resolution
+    and repairs the cache. A corrupt cache entry (unreadable, digest
+    mismatch, or invalid manifest bytes) is removed in this mode so the
+    caller's re-cache write is not blocked by the stale corrupt file; this
+    only touches a file whose content already fails the recorded-digest
+    provenance check. This only relaxes the matching-stable path: offline
+    stable setup and every beta path stay fail-closed, because neither can
+    repair the cache and a beta handoff cannot re-resolve an unreleased tag.
     """
     from brigade import update_cmd
 
@@ -154,13 +168,35 @@ def load_verified_exact_release_manifest(
         return None
 
     cached = Path(component_paths.verified_manifest_path(roots.cache_root, state.component_manifest_sha256))
+    # Online stable setup tolerates a missing/corrupt verified cache so the
+    # caller can re-resolve the exact release and repair it. Offline stable
+    # and all beta paths remain fail-closed: neither can repair the cache,
+    # and a beta handoff cannot re-resolve an unreleased v{cli} tag. In repair
+    # mode a corrupt entry is removed so the caller's re-cache write is not
+    # blocked by a stale file that already fails the recorded-digest check.
+    tolerate_cache_repair = online_stable_cache_repair and state.channel == "stable"
+
+    def _drop_corrupt_cache() -> None:
+        try:
+            cached.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     if not cached.is_file():
+        if tolerate_cache_repair:
+            return None
         raise ExactReleaseManifestError("cached exact-release manifest is missing", cached)
     try:
         cached_bytes = cached.read_bytes()
     except OSError as exc:
+        if tolerate_cache_repair:
+            _drop_corrupt_cache()
+            return None
         raise ExactReleaseManifestError(f"cached exact-release manifest cannot be read: {exc}", cached) from exc
     if hashlib.sha256(cached_bytes).hexdigest() != state.component_manifest_sha256:
+        if tolerate_cache_repair:
+            _drop_corrupt_cache()
+            return None
         raise ExactReleaseManifestError("cached exact-release manifest digest does not match update state", cached)
 
     release = update_cmd.ResolvedRelease(
@@ -179,8 +215,14 @@ def load_verified_exact_release_manifest(
         else:
             manifest = update_cmd.validate_release_manifest_bytes(release)
     except update_cmd.UpdateError as exc:
+        if tolerate_cache_repair:
+            _drop_corrupt_cache()
+            return None
         raise ExactReleaseManifestError(str(exc), cached) from exc
     except ValueError as exc:
+        if tolerate_cache_repair:
+            _drop_corrupt_cache()
+            return None
         raise ExactReleaseManifestError(f"cached exact-release manifest is invalid: {exc}", cached) from exc
     return manifest, cached
 
@@ -946,8 +988,11 @@ def _load_setup_manifest(
     roots = resolve_roots(env=env)
     try:
         # Persisted update state supplies a verified manifest cache that
-        # ``brigade setup`` reuses instead of re-resolving the release.
-        cached_manifest = load_verified_exact_release_manifest(roots)
+        # ``brigade setup`` reuses instead of re-resolving the release. Online
+        # stable setup tolerates a missing/corrupt cache so it can fall through
+        # to exact-release resolution and repair it; offline stable and all
+        # beta paths stay fail-closed.
+        cached_manifest = load_verified_exact_release_manifest(roots, online_stable_cache_repair=not offline)
         if offline:
             # Offline setup must reuse any verified cache: the exact-release
             # stable cache (state.component_tag == v{brigade.__version__}) or

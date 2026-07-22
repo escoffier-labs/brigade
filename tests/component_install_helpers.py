@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 from brigade import component_manifest
 
 GRAPHTRAIL_SHA = "64fcd2f9ec37f33e286708845a92e6cfa4abf3bb"
 GRAPHTRAIL_BASE = "https://github.com/escoffier-labs/graphtrail/releases/download/v0.4.0/"
 FIXTURE_REPOSITORY = "example/components"
+RELEASE_REPOSITORY = "escoffier-labs/brigade"
+MANIFEST_ASSET_NAME = "component-manifest-v1.json"
 
 
 def linux_env(root: Path) -> dict[str, str]:
@@ -217,3 +220,124 @@ class FakeOpener:
             response = _TrackingFakeResponse(payload)
         self.responses.append(response)
         return response
+
+
+def release_manifest_url(tag: str) -> str:
+    """The exact Brigade release manifest asset URL for ``tag``."""
+    return f"https://github.com/{RELEASE_REPOSITORY}/releases/download/{tag}/{MANIFEST_ASSET_NAME}"
+
+
+def release_component_asset_url(component_id: str, *, tag: str, platform: str) -> str:
+    """The exact Brigade release asset URL for one component on one platform."""
+    asset_name = fixture_asset_name(component_id, platform=platform)
+    return f"https://github.com/{RELEASE_REPOSITORY}/releases/download/{tag}/{asset_name}"
+
+
+def write_release_manifest(
+    path: Path, *, brigade_version: str, target_commit: str, drop_component: str | None = None
+) -> bytes:
+    """Write a manifest with real Brigade release coordinates.
+
+    Every component pins to ``target_commit`` and the real Brigade release
+    repository/tag/asset URLs so the real
+    :func:`brigade.update_cmd.validate_release_manifest_bytes` accepts it
+    against a release resolved for ``v{brigade_version}``.
+
+    ``drop_component`` omits one component id entirely so the manifest fails
+    ``load_bytes`` validation (``missing required components``) while remaining
+    otherwise well-formed; the returned bytes hash to their own digest so a
+    caller can persist a state recording that digest and exercise the
+    digest-matching-but-invalid path without violating content addressing.
+    """
+    tag = f"v{brigade_version}"
+    components: dict[str, object] = {}
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        if component_id == drop_component:
+            continue
+        assets: dict[str, object] = {}
+        for platform in component_manifest.SUPPORTED_PLATFORMS:
+            _, byte_size, sha256 = fixture_payload(component_id, platform=platform)
+            asset_name = fixture_asset_name(component_id, platform=platform)
+            assets[platform] = {
+                "asset_name": asset_name,
+                "byte_size": byte_size,
+                "sha256": sha256,
+                "download_url": release_component_asset_url(component_id, tag=tag, platform=platform),
+            }
+        components[component_id] = {
+            "component_revision": target_commit,
+            "source": {"repository": RELEASE_REPOSITORY, "release_tag": tag},
+            "executable": component_id,
+            "assets": assets,
+        }
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "brigade_version": brigade_version,
+                "manifest_revision": f"{tag}+{target_commit}",
+                "supported_platforms": list(component_manifest.SUPPORTED_PLATFORMS),
+                "components": components,
+            }
+        )
+    )
+    return path.read_bytes()
+
+
+def all_release_payloads(*, tag: str, platform: str = "linux-amd64") -> dict[str, bytes]:
+    """``FakeOpener`` payloads keyed by the real Brigade release asset URLs."""
+    payloads: dict[str, bytes] = {}
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        payload, _, _ = fixture_payload(component_id, platform=platform)
+        payloads[release_component_asset_url(component_id, tag=tag, platform=platform)] = payload
+    return payloads
+
+
+class FakeReleaseHttp:
+    """Fake GitHub HTTP transport for the real exact-tag release resolver.
+
+    Serves the release JSON, tag ref, and manifest bytes so
+    :func:`brigade.update_cmd.resolve_release` runs for real: it dereferences
+    the tag to ``target_commit``, verifies the manifest asset size and SHA-256
+    release digest, and downloads the manifest bytes. The component assets
+    themselves are still downloaded through the ``FakeOpener`` passed to
+    ``setup_native_components``.
+    """
+
+    def __init__(self, *, tag: str, manifest_bytes: bytes, target_commit: str, release_id: int = 42):
+        self.tag = tag
+        self.manifest_bytes = manifest_bytes
+        self.target_commit = target_commit
+        self.release_id = release_id
+        digest = hashlib.sha256(manifest_bytes).hexdigest()
+        self._release = {
+            "id": release_id,
+            "tag_name": tag,
+            "target_commitish": "main",
+            "draft": False,
+            "prerelease": False,
+            "assets": [
+                {
+                    "name": MANIFEST_ASSET_NAME,
+                    "size": len(manifest_bytes),
+                    "digest": f"sha256:{digest}",
+                    "browser_download_url": release_manifest_url(tag),
+                }
+            ],
+        }
+        self._ref = {"ref": f"refs/tags/{tag}", "object": {"type": "commit", "sha": target_commit}}
+        self.urls: list[str] = []
+
+    def json(self, url: str) -> Any:
+        self.urls.append(url)
+        if url == f"https://api.github.com/repos/{RELEASE_REPOSITORY}/releases/tags/{self.tag}":
+            return self._release
+        if url == f"https://api.github.com/repos/{RELEASE_REPOSITORY}/git/ref/tags/{self.tag}":
+            return self._ref
+        raise AssertionError(url)
+
+    def bytes(self, url: str) -> bytes:
+        self.urls.append(url)
+        if url != release_manifest_url(self.tag):
+            raise AssertionError(url)
+        return self.manifest_bytes

@@ -42,6 +42,11 @@ def _normalize_payload_health(raw: object, *, installed: bool | None) -> str:
         "timeout": "degraded",
         "incomplete": "degraded",
         "unwired": "not-configured",
+        # A station that is installed but known-incompatible (e.g. agentpantry
+        # below the evidence-backed version floor) reports ``unhealthy``. That
+        # is a hard station failure, not an unknown value: map it to ``failed``
+        # so the aggregate stays red rather than collapsing to ``unchecked``.
+        "unhealthy": "failed",
     }.get(value, "unchecked")
 
 
