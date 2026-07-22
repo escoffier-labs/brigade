@@ -108,9 +108,7 @@ _EXTRAS_MODULES = {
 
 
 _PASSTHROUGH_LEAVES = {
-    ("code", "sync"),
-    ("code", "context"),
-    ("code", "impact"),
+    *(("code", verb) for verb in _code_group.ENGINE_VERBS),
     ("evidence", "crawl"),
     ("evidence", "search"),
     ("search", "sync"),
