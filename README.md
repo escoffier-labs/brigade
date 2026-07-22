@@ -27,10 +27,22 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/brigade-demo.svg" alt="Recording: the code graph maps the repo and reports blast radius, a verify run writes a receipt with a real exit code, evidence search answers a question from the ledger, outcome rank scores skills and reconcile promotes one that earned it" width="800">
+  <img src="docs/assets/brigade-demo.svg" alt="Recording: an agent claims tests pass; a verify run writes a receipt with the real exit code, code impact shows what the change touched, evidence search finds the run in the ledger, and outcome rank scores the skill that did the work" width="800">
 </p>
 
-<p align="center"><em>The graph knows the blast radius. Every check leaves a receipt. The ledger answers questions. Skills promote only when receipts prove they helped.</em></p>
+<p align="center"><em>An agent said "tests pass." This is the claim becoming a record: receipt, graph, ledger, rank.</em></p>
+
+## The loop
+
+Every piece of work Brigade touches runs the same circuit:
+
+1. Intent and acceptance criteria go in.
+2. Prior evidence and code impact attach to the brief.
+3. Replaceable workers execute, bounded.
+4. Verification runs with a real exit code.
+5. The receipt, graph delta, and outcome land where the next run starts.
+
+Work enters as intent and leaves as evidence.
 
 ## Install
 
