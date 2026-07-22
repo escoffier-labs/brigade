@@ -24,6 +24,7 @@ def test_signal_value_rewards_only_model_unauthored_success():
     assert outcome.signal_value("verify", "completed") == 1
     assert outcome.signal_value("verify", "failed") == -1
     assert outcome.signal_value("verify", "timed_out") == -1
+    assert outcome.signal_value("verify", "canceled") == 0
     assert outcome.signal_value("friction", "cleared") == 1
     assert outcome.signal_value("friction", "recurred") == -1
     assert outcome.signal_value("learnings", "recurred") == -1

@@ -1298,6 +1298,119 @@ def test_work_verify_graphtrail_delta_timeout_differs_from_sync_command_failure(
     assert "sync failed" in before_sync["stderr"]
 
 
+def test_work_verify_run_terminalizes_keyboard_interrupt(tmp_path, capsys, monkeypatch):
+    from brigade.work_cmd import verification as verify_mod
+
+    _init_git_repo(tmp_path)
+    child_processes: list[subprocess.Popen[bytes]] = []
+
+    def interrupted_child_runner(execution_argv, *, cwd, env, timeout):
+        popen_kwargs = verify_mod._verify_child_popen_kwargs()
+        process = subprocess.Popen(
+            execution_argv,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            shell=False,
+            **popen_kwargs,
+        )
+        child_processes.append(process)
+        verify_mod.proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
+        return verify_mod._VERIFY_INTERRUPTED_COMMAND_STATUS, None, "partial-out", ""
+
+    monkeypatch.setattr(verify_mod, "_run_verify_child_process", interrupted_child_runner)
+
+    rc = work_cmd.verify_run(
+        target=tmp_path,
+        commands=[[sys.executable, "-c", "import time; time.sleep(3600)"]],
+        timeout=30,
+        json_output=True,
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 130
+    assert "Traceback" not in captured.err
+    assert child_processes
+    assert all(process.poll() is not None for process in child_processes)
+
+    receipt = json.loads(captured.out)
+    assert receipt["status"] == verify_mod._VERIFY_CANCELED_RECEIPT_STATUS
+    assert receipt["status"] != "failed"
+    assert receipt["status"] != "running"
+    assert receipt["completed_at"]
+    assert receipt["interruption"]["kind"] == "keyboard-interrupt"
+    assert receipt["commands"][0]["status"] == verify_mod._VERIFY_INTERRUPTED_COMMAND_STATUS
+    assert receipt["commands"][0]["status"] != "failed"
+
+    receipt_path = Path(receipt["path"]) / "receipt.json"
+    assert receipt_path.is_file()
+    persisted = json.loads(receipt_path.read_text())
+    assert persisted["status"] == verify_mod._VERIFY_CANCELED_RECEIPT_STATUS
+
+    from brigade import outcome_cmd
+
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="brigade-work", json_output=True) == 0
+    record = json.loads(capsys.readouterr().out)["record"]
+    assert record["signal_value"] == 0
+
+
+def test_work_verify_run_canceled_status_is_neutral_not_a_regression_signal(tmp_path, capsys):
+    from brigade.work_cmd import verification as verify_mod
+
+    _init_git_repo(tmp_path)
+
+    assert (
+        work_cmd.verify_run(
+            target=tmp_path,
+            commands=['python3 -c "raise SystemExit(3)"'],
+            json_output=True,
+        )
+        == 3
+    )
+    failed_receipt = json.loads(capsys.readouterr().out)
+    assert failed_receipt["status"] == "failed"
+
+    from brigade import outcome_cmd
+
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="brigade-work", json_output=True) == 0
+    failed_record = json.loads(capsys.readouterr().out)["record"]
+    assert failed_record["signal_value"] == -1
+    assert verify_mod._VERIFY_CANCELED_RECEIPT_STATUS != failed_receipt["status"]
+
+
+def test_run_verify_child_process_catches_keyboard_interrupt(tmp_path, monkeypatch):
+    from brigade.work_cmd import verification as verify_mod
+
+    real_popen = verify_mod.subprocess.Popen
+    child_processes: list[subprocess.Popen[bytes]] = []
+
+    def interrupting_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        child_processes.append(process)
+
+        def communicate(*communicate_args, **communicate_kwargs):
+            raise KeyboardInterrupt
+
+        process.communicate = communicate  # type: ignore[method-assign]
+        return process
+
+    monkeypatch.setattr(verify_mod.subprocess, "Popen", interrupting_popen)
+
+    status, exit_code, stdout, stderr = verify_mod._run_verify_child_process(
+        [sys.executable, "-c", "import time; time.sleep(3600)"],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        timeout=30,
+    )
+
+    assert status == verify_mod._VERIFY_INTERRUPTED_COMMAND_STATUS
+    assert exit_code is None
+    assert child_processes
+    assert all(process.poll() is not None for process in child_processes)
+
+
 def test_work_verify_run_cli_passes_graphtrail_timeout_override(tmp_path, monkeypatch):
     seen: list[dict[str, object]] = []
 

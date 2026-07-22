@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from .. import config, graphtrail_delta, localio, receipt_signing
+from .. import config, graphtrail_delta, localio, proc, receipt_signing
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -125,6 +125,143 @@ def _verify_execution_argv(argv: list[str], target: Path) -> list[str]:
             executable_path = target / executable_path
         execution_argv[0] = str(executable_path)
     return execution_argv
+
+
+_VERIFY_CANCELED_RC = 130
+_VERIFY_INTERRUPTED_COMMAND_STATUS = "interrupted"
+_VERIFY_CANCELED_RECEIPT_STATUS = "canceled"
+
+
+def _verify_child_popen_kwargs() -> dict[str, Any]:
+    if os.name == "posix":
+        return {"start_new_session": True}
+    return {"creationflags": proc._WINDOWS_NEW_PROCESS_GROUP}
+
+
+def _decode_verify_child_output(stdout: str | bytes | None, stderr: str | bytes | None) -> tuple[str, str]:
+    stdout_text = stdout.decode() if isinstance(stdout, bytes) else (stdout or "")
+    stderr_text = stderr.decode() if isinstance(stderr, bytes) else (stderr or "")
+    return stdout_text, stderr_text
+
+
+def _run_verify_child_process(
+    execution_argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int,
+) -> tuple[str, int | None, str, str]:
+    """Run one verify child in its own process group; return (status, exit_code, stdout, stderr)."""
+    popen_kwargs = _verify_child_popen_kwargs()
+    try:
+        process = subprocess.Popen(
+            execution_argv,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            shell=False,
+            **popen_kwargs,
+        )
+    except OSError as exc:
+        return "failed", 127, "", str(exc)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        stdout_text, stderr_text = _decode_verify_child_output(stdout, stderr)
+        if process.returncode == 0:
+            return "completed", 0, stdout_text, stderr_text
+        return "failed", process.returncode, stdout_text, stderr_text
+    except KeyboardInterrupt:
+        proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
+        stdout_text, stderr_text = "", ""
+        try:
+            stdout, stderr = process.communicate(timeout=proc._TIMED_OUT_DRAIN_SECONDS)
+            stdout_text, stderr_text = _decode_verify_child_output(stdout, stderr)
+        except KeyboardInterrupt:
+            pass
+        except subprocess.TimeoutExpired as exc:
+            stdout_text, stderr_text = _decode_verify_child_output(exc.output, exc.stderr)
+        return _VERIFY_INTERRUPTED_COMMAND_STATUS, None, stdout_text, stderr_text
+    except subprocess.TimeoutExpired as exc:
+        proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
+        stdout_text, stderr_text = _decode_verify_child_output(exc.stdout, exc.stderr)
+        try:
+            process.communicate(timeout=proc._TIMED_OUT_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        return "timed_out", None, stdout_text, stderr_text
+
+
+def _finalize_verify_receipt(
+    target: Path,
+    run_dir: Path,
+    receipt: dict[str, Any],
+    *,
+    started,
+    rc: int,
+    canceled: bool,
+) -> tuple[dict[str, Any], int]:
+    completed_at = helpers._now()
+    receipt["completed_at"] = completed_at.isoformat()
+    receipt["duration_seconds"] = (completed_at - started).total_seconds()
+    if canceled:
+        receipt["status"] = _VERIFY_CANCELED_RECEIPT_STATUS
+        receipt.setdefault(
+            "interruption",
+            {"kind": "keyboard-interrupt", "detail": "verification canceled by user"},
+        )
+        rc = _VERIFY_CANCELED_RC
+    else:
+        command_statuses = [c.get("status") for c in receipt["commands"] if isinstance(c, dict)]
+        if rc == 0:
+            receipt["status"] = "completed"
+        elif any(status in ("failed", "timed_out") for status in command_statuses):
+            receipt["status"] = "failed"
+        else:
+            receipt["status"] = "rejected"
+    git = _receipt_git_snapshot(target)
+    if git is not None:
+        receipt["git"] = git
+    log_digests: dict[str, str] = {}
+    for command in receipt["commands"]:
+        if not isinstance(command, dict):
+            continue
+        for key in ("stdout_log_path", "stderr_log_path"):
+            value = command.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            path = Path(value)
+            try:
+                log_name = str(path.relative_to(run_dir))
+            except ValueError:
+                log_name = path.name
+            log_digests[log_name] = localio.file_sha256(path)
+    delta = receipt.get("code_graph_delta")
+    if isinstance(delta, dict):
+        sidecar_value = delta.get("sidecar_path")
+        if isinstance(sidecar_value, str) and sidecar_value:
+            sidecar_path = Path(sidecar_value)
+            if sidecar_path.is_file():
+                try:
+                    log_name = str(sidecar_path.relative_to(run_dir))
+                except ValueError:
+                    log_name = sidecar_path.name
+                log_digests[log_name] = localio.file_sha256(sidecar_path)
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "logs": dict(sorted(log_digests.items())),
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    signing_key = receipt_signing.load_key(target)
+    if signing_key is not None:
+        key, key_id = signing_key
+        receipt["digests"]["signature"] = receipt_signing.sign(receipt["digests"]["receipt_sha256"], key)
+        receipt["digests"]["key_id"] = key_id
+    helpers._write_json(run_dir / "receipt.json", receipt)
+    _write_verify_markdown(run_dir, receipt)
+    _prune_verify_runs(target)
+    return receipt, rc
 
 
 VERIFY_RUNS_KEEP = 50
@@ -334,69 +471,56 @@ def _run_verify_commands(
     if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
         receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
     rc = 0
-    for index, command in enumerate(commands, start=1):
-        if isinstance(command, list):
-            argv, env_assignments, error = _verify_parse_argv(command, target)
-            display_command = shlex.join(command)
-        else:
-            argv, env_assignments, error = _verify_parse_command(command, target)
-            display_command = command
-        command_result: dict[str, Any] = {
-            "command": display_command,
-            "env": sorted(env_assignments),
-            "started_at": helpers._now().isoformat(),
-        }
-        stdout_path = run_dir / f"command-{index}-stdout.log"
-        stderr_path = run_dir / f"command-{index}-stderr.log"
-        if error or argv is None:
-            # The command never ran - Brigade's own parser refused it (shell
-            # metacharacters, a high-risk executable, or an unresolvable binary).
-            # Mark it 'rejected', not 'failed': a malformed command is invalid
-            # input, not a verified regression, so `outcome capture` must read it
-            # as neutral (0), never -1.
-            command_result.update(
-                {
-                    "status": "rejected",
-                    "exit_code": 2,
-                    "stderr_summary": error,
-                    "stdout_summary": "",
-                    "stdout_log_path": str(stdout_path),
-                    "stderr_log_path": str(stderr_path),
-                }
-            )
-            stdout_path.write_text("")
-            stderr_path.write_text(str(error or "invalid command") + "\n")
-            if rc == 0:
-                rc = 2
-            receipt["commands"].append(command_result)
-            continue
-        run_env = os.environ.copy()
-        run_env.update(env_assignments)
-        execution_argv = _verify_execution_argv(argv, target)
-        command_started = helpers._now()
-        try:
-            completed = subprocess.run(
+    canceled = False
+    try:
+        for index, command in enumerate(commands, start=1):
+            if isinstance(command, list):
+                argv, env_assignments, error = _verify_parse_argv(command, target)
+                display_command = shlex.join(command)
+            else:
+                argv, env_assignments, error = _verify_parse_command(command, target)
+                display_command = command
+            command_result: dict[str, Any] = {
+                "command": display_command,
+                "env": sorted(env_assignments),
+                "started_at": helpers._now().isoformat(),
+            }
+            stdout_path = run_dir / f"command-{index}-stdout.log"
+            stderr_path = run_dir / f"command-{index}-stderr.log"
+            if error or argv is None:
+                command_result.update(
+                    {
+                        "status": "rejected",
+                        "exit_code": 2,
+                        "stderr_summary": error,
+                        "stdout_summary": "",
+                        "stdout_log_path": str(stdout_path),
+                        "stderr_log_path": str(stderr_path),
+                    }
+                )
+                stdout_path.write_text("")
+                stderr_path.write_text(str(error or "invalid command") + "\n")
+                if rc == 0:
+                    rc = 2
+                receipt["commands"].append(command_result)
+                continue
+            run_env = os.environ.copy()
+            run_env.update(env_assignments)
+            execution_argv = _verify_execution_argv(argv, target)
+            command_started = helpers._now()
+            status, exit_code, stdout, stderr = _run_verify_child_process(
                 execution_argv,
                 cwd=target,
                 env=run_env,
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
                 timeout=timeout,
             )
             command_completed = helpers._now()
-            stdout = completed.stdout or ""
-            stderr = completed.stderr or ""
             stdout_path.write_text(stdout)
             stderr_path.write_text(stderr)
-            status = "completed" if completed.returncode == 0 else "failed"
-            if completed.returncode != 0 and rc == 0:
-                rc = completed.returncode
             command_result.update(
                 {
                     "status": status,
-                    "exit_code": completed.returncode,
+                    "exit_code": exit_code,
                     "completed_at": command_completed.isoformat(),
                     "duration_seconds": (command_completed - command_started).total_seconds(),
                     "argv": argv,
@@ -406,105 +530,50 @@ def _run_verify_commands(
                     "stderr_log_path": str(stderr_path),
                 }
             )
-        except subprocess.TimeoutExpired as exc:
-            command_completed = helpers._now()
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            stdout_path.write_text(stdout)
-            stderr_path.write_text(stderr)
-            command_result.update(
-                {
-                    "status": "timed_out",
-                    "exit_code": None,
-                    "completed_at": command_completed.isoformat(),
-                    "duration_seconds": (command_completed - command_started).total_seconds(),
-                    "argv": argv,
-                    "stdout_summary": scanners_mod._scanner_run_summary(stdout),
-                    "stderr_summary": scanners_mod._scanner_run_summary(stderr),
-                    "stdout_log_path": str(stdout_path),
-                    "stderr_log_path": str(stderr_path),
-                }
-            )
-            rc = 124
-        except OSError as exc:
-            command_completed = helpers._now()
-            stderr = str(exc)
-            stdout_path.write_text("")
-            stderr_path.write_text(stderr + "\n")
-            command_result.update(
-                {
-                    "status": "failed",
-                    "exit_code": 127,
-                    "completed_at": command_completed.isoformat(),
-                    "duration_seconds": (command_completed - command_started).total_seconds(),
-                    "argv": argv,
-                    "stdout_summary": "",
-                    "stderr_summary": scanners_mod._scanner_run_summary(stderr),
-                    "stdout_log_path": str(stdout_path),
-                    "stderr_log_path": str(stderr_path),
-                }
-            )
-            if rc == 0:
+            if status == _VERIFY_INTERRUPTED_COMMAND_STATUS:
+                canceled = True
+                rc = _VERIFY_CANCELED_RC
+                receipt["commands"].append(command_result)
+                break
+            if status == "timed_out":
+                rc = 124
+            elif status == "failed" and exit_code is not None and rc == 0:
+                rc = exit_code
+            elif status == "failed" and rc == 0:
                 rc = 127
-        receipt["commands"].append(command_result)
-    receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
-        target, run_dir, graph_delta_before, timeout=graphtrail_timeout
-    )
-    completed_at = helpers._now()
-    receipt["completed_at"] = completed_at.isoformat()
-    receipt["duration_seconds"] = (completed_at - started).total_seconds()
-    command_statuses = [c.get("status") for c in receipt["commands"] if isinstance(c, dict)]
-    if rc == 0:
-        receipt["status"] = "completed"
-    elif any(status in ("failed", "timed_out") for status in command_statuses):
-        # At least one command actually ran and failed/timed out: a real, verified
-        # regression. Otherwise the only non-zero outcome was a parser rejection,
-        # which is invalid input (neutral), not a regression.
-        receipt["status"] = "failed"
-    else:
-        receipt["status"] = "rejected"
-    git = _receipt_git_snapshot(target)
-    if git is not None:
-        receipt["git"] = git
-    log_digests: dict[str, str] = {}
-    for command in receipt["commands"]:
-        if not isinstance(command, dict):
-            continue
-        for key in ("stdout_log_path", "stderr_log_path"):
-            value = command.get(key)
-            if not isinstance(value, str) or not value:
-                continue
-            path = Path(value)
+            receipt["commands"].append(command_result)
+        if canceled and "code_graph_delta" not in receipt:
             try:
-                log_name = str(path.relative_to(run_dir))
-            except ValueError:
-                log_name = path.name
-            log_digests[log_name] = localio.file_sha256(path)
-    delta = receipt.get("code_graph_delta")
-    if isinstance(delta, dict):
-        sidecar_value = delta.get("sidecar_path")
-        if isinstance(sidecar_value, str) and sidecar_value:
-            sidecar_path = Path(sidecar_value)
-            if sidecar_path.is_file():
-                try:
-                    log_name = str(sidecar_path.relative_to(run_dir))
-                except ValueError:
-                    log_name = sidecar_path.name
-                log_digests[log_name] = localio.file_sha256(sidecar_path)
-    receipt["digests"] = {
-        "algorithm": "sha256",
-        "logs": dict(sorted(log_digests.items())),
-        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
-    }
-    signing_key = receipt_signing.load_key(target)
-    if signing_key is not None:
-        key, key_id = signing_key
-        receipt["digests"]["signature"] = receipt_signing.sign(receipt["digests"]["receipt_sha256"], key)
-        receipt["digests"]["key_id"] = key_id
-    helpers._write_json(run_dir / "receipt.json", receipt)
-    _write_verify_markdown(run_dir, receipt)
-    _prune_verify_runs(target)
-    return receipt, rc
+                receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
+                    target, run_dir, graph_delta_before, timeout=graphtrail_timeout
+                )
+            except (Exception, KeyboardInterrupt):
+                receipt["code_graph_delta"] = graphtrail_delta._status(
+                    "unavailable",
+                    "code graph delta unavailable: verification canceled before graph capture completed",
+                )
+        elif not canceled:
+            receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
+                target, run_dir, graph_delta_before, timeout=graphtrail_timeout
+            )
+    except KeyboardInterrupt:
+        canceled = True
+        rc = _VERIFY_CANCELED_RC
+        receipt.setdefault(
+            "interruption",
+            {"kind": "keyboard-interrupt", "detail": "verification canceled by user"},
+        )
+        if "code_graph_delta" not in receipt:
+            try:
+                receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
+                    target, run_dir, graph_delta_before, timeout=graphtrail_timeout
+                )
+            except (Exception, KeyboardInterrupt):
+                receipt["code_graph_delta"] = graphtrail_delta._status(
+                    "unavailable",
+                    "code graph delta unavailable: verification canceled before graph capture completed",
+                )
+    return _finalize_verify_receipt(target, run_dir, receipt, started=started, rc=rc, canceled=canceled)
 
 
 def _resolve_closeout_session(target: Path, session_id: str) -> tuple[Path | None, dict[str, Any] | None, str | None]:
@@ -705,7 +774,11 @@ def verify_run(
     if not planned:
         print("error: no verification commands found; pass --command", file=sys.stderr)
         return 2
-    receipt, rc = _run_verify_commands(target, planned, timeout, graphtrail_timeout=effective_graphtrail_timeout)
+    try:
+        receipt, rc = _run_verify_commands(target, planned, timeout, graphtrail_timeout=effective_graphtrail_timeout)
+    except KeyboardInterrupt:
+        print("error: verification canceled by user", file=sys.stderr)
+        return _VERIFY_CANCELED_RC
     if json_output:
         if capture:
             # Record the outcome in the same command (closes the loop without a
