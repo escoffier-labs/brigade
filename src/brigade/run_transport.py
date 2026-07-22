@@ -250,6 +250,7 @@ def dispatch(
     events_dir: Path | None = None,
     verbose: bool = False,
     authorized_writable_worktree: bool = False,
+    fail_fast: bool = True,
     on_stage_start: Callable[[int, tuple[str, ...]], None] | None = None,
     on_interrupt: Callable[[], None] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
@@ -616,9 +617,24 @@ def dispatch(
     if not assignments:
         return []
 
+    stage_order = sorted({assignment.stage for assignment in assignments})
+    abort_after_stage: int | None = None
     all_results: list[WorkerResult] = []
-    for stage in sorted({assignment.stage for assignment in assignments}):
+    for stage in stage_order:
         stage_assignments = [assignment for assignment in assignments if assignment.stage == stage]
+        if fail_fast and abort_after_stage is not None:
+            all_results.extend(
+                WorkerResult(
+                    worker=assignment.worker,
+                    task=assignment.task,
+                    text="",
+                    ok=False,
+                    status="skipped",
+                    detail=f"skipped: stage {abort_after_stage} prerequisite failed",
+                )
+                for assignment in stage_assignments
+            )
+            continue
         if on_stage_start is not None:
             on_stage_start(stage, tuple(assignment.worker for assignment in stage_assignments))
         stage_results_by_index: dict[int, WorkerResult] = {}
@@ -655,5 +671,8 @@ def dispatch(
             raise
         else:
             executor.shutdown(wait=True)
-        all_results.extend(stage_results_by_index[index] for index in range(len(stage_assignments)))
+        stage_results = [stage_results_by_index[index] for index in range(len(stage_assignments))]
+        all_results.extend(stage_results)
+        if fail_fast and any(not result.ok for result in stage_results):
+            abort_after_stage = stage
     return all_results

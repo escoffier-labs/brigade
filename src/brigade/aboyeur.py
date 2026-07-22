@@ -1135,6 +1135,7 @@ def dispatch(
     events_dir: Path | None = None,
     verbose: bool = False,
     authorized_writable_worktree: bool = False,
+    fail_fast: bool = True,
     on_stage_start: Callable[[int, tuple[str, ...]], None] | None = None,
     on_interrupt: Callable[[], None] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
@@ -1160,6 +1161,7 @@ def dispatch(
         events_dir=events_dir,
         verbose=verbose,
         authorized_writable_worktree=authorized_writable_worktree,
+        fail_fast=fail_fast,
         on_stage_start=on_stage_start,
         on_interrupt=on_interrupt,
         process_registry=process_registry,
@@ -2242,6 +2244,7 @@ def run(
     route_overrides: tuple[str, ...] = (),
     worker: str | None = None,
     authorized_writable_worktree: bool = False,
+    fail_fast: bool = True,
     defer_artifact_collection: bool = False,
 ) -> int:
     started_at = datetime.now(timezone.utc)
@@ -2679,6 +2682,7 @@ def run(
                 events_dir=(output_dir / "events") if (output_dir is not None and appserver is not None) else None,
                 verbose=verbose,
                 authorized_writable_worktree=authorized_writable_worktree,
+                fail_fast=fail_fast,
                 on_stage_start=stage_started,
                 on_interrupt=dispatch_interrupted,
                 process_registry=process_registry,
