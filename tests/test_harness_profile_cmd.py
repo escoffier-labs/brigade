@@ -123,12 +123,49 @@ def test_managed_instruction_uninstall_preserves_surrounding_bytes(tmp_path):
     assert "some notes" in removal.rendered
     assert removal.rendered == foreign
 
-    # a foreign-edited managed block is preserved, not removed
+    # a foreign-edited managed block (text inside the marked body) is preserved, not removed
     live = path.read_text()
-    edited_block = live.replace("some notes", "user-edit-inside-block")
+    edited_block = live.replace("using-skillet", "user-edit-inside-block")
     path.write_text(edited_block)
     edited = harness_profile_cmd.plan_instruction_removal(path=path, state={"instructions": {"digest": owned_digest}})
     assert (edited.status, edited.action) == ("conflict", "preserve")
+
+
+def test_unmanaged_prefix_suffix_changes_do_not_block_update_or_removal(tmp_path):
+    path = tmp_path / "AGENTS.md"
+    start, end = harness_profiles.INSTRUCTION_START, harness_profiles.INSTRUCTION_END
+    desired = harness_profiles.managed_instruction_text()
+
+    # install an owned block into a file that already has foreign prefix bytes
+    foreign = "# top\nsome notes\n"
+    path.write_text(foreign)
+    create = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {}})
+    assert (create.status, create.action) == ("missing", "create")
+    path.write_text(create.rendered)
+    owned_digest = create.desired_digest
+
+    # user later edits only unmanaged bytes: rewrite the prefix and append a suffix
+    components = harness_profile_cmd._split_components(path.read_text(), start, end)
+    assert components is not None
+    installed_before, installed_body, installed_after = components
+    assert installed_body == desired
+    changed_prefix = "# top\nNEW prefix\n\n"  # keeps the blank separator line install added
+    changed_suffix = "# trailing suffix\n"
+    edited_live = changed_prefix + f"{start}\n{installed_body}\n{end}\n" + changed_suffix
+    path.write_text(edited_live)
+
+    # a desired change is a safe update: managed block swapped, unmanaged bytes preserved
+    desired2 = desired.replace("using-skillet", "using-skillet-v2")
+    update = harness_profile_cmd.plan_instruction(
+        path=path, desired=desired2, state={"instructions": {"digest": owned_digest}}
+    )
+    assert (update.status, update.action) == ("stale", "update")
+    assert update.rendered == changed_prefix + f"{start}\n{desired2}\n{end}\n" + changed_suffix
+
+    # removal drops the block and exactly the separator newline install added
+    removal = harness_profile_cmd.plan_instruction_removal(path=path, state={"instructions": {"digest": owned_digest}})
+    assert (removal.status, removal.action) == ("managed", "remove")
+    assert removal.rendered == "# top\nNEW prefix\n" + changed_suffix
 
 
 def test_foreign_authored_block_is_conflict_with_recovery_command(tmp_path):

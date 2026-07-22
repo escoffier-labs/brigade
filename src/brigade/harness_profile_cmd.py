@@ -116,7 +116,7 @@ def plan_instruction(
                 path=path,
                 status="missing",
                 action="create",
-                desired_digest=digest_text(before + sep + desired),
+                desired_digest=desired_digest_body,
                 rendered=rendered,
             )
         return SurfacePlan(
@@ -129,8 +129,8 @@ def plan_instruction(
         )
 
     before, body, after = components
-    live_digest = digest_text(before + body + after)
-    desired_digest = digest_text(before + desired + after)
+    live_digest = digest_text(body)
+    desired_digest = digest_text(desired)
 
     if live_digest == desired_digest:
         return SurfacePlan(
@@ -221,7 +221,7 @@ def plan_instruction_removal(*, path: Path, state: dict[str, Any]) -> SurfacePla
         )
 
     before, body, after = components
-    live_digest = digest_text(before + body + after)
+    live_digest = digest_text(body)
     if owned_digest is not None and live_digest == owned_digest:
         if before.endswith("\n"):
             rendered = before[:-1] + after
