@@ -36,7 +36,9 @@ def test_user_scope_antigravity_writes_home(tmp_path, monkeypatch):
     mcp_cmd.sync(target=repo, write=True, json_output=True)
     assert not (home / ".gemini/config/mcp_config.json").exists()
     # With --user-scope it writes under $HOME using serverUrl-style mcpServers.
-    mcp_cmd.sync(target=repo, harness="antigravity", user_scope=True, write=True, json_output=True)
+    mcp_cmd.sync(
+        target=repo, harness="antigravity", user_scope=True, allow_global_stdio=True, write=True, json_output=True
+    )
     cfg = home / ".gemini/config/mcp_config.json"
     assert cfg.is_file()
     assert "github" in json.loads(cfg.read_text())["mcpServers"]
@@ -63,6 +65,7 @@ def test_cursor_user_scope_uses_home_config_and_reports_paths(tmp_path, monkeypa
             target=repo,
             harness="cursor",
             user_scope=True,
+            allow_global_stdio=True,
             write=True,
             json_output=True,
         )
@@ -152,6 +155,7 @@ def test_cursor_user_scope_normalizes_repo_graphtrail_pin_and_preserves_config(t
             target=repo,
             harness="cursor",
             user_scope=True,
+            allow_global_stdio=True,
             write=True,
             json_output=True,
         )
@@ -185,7 +189,12 @@ def test_cursor_user_scope_preserves_relative_graphtrail_pin(tmp_path, monkeypat
         json_output=True,
     )
 
-    assert mcp_cmd.sync(target=repo, harness="cursor", user_scope=True, write=True, json_output=True) == 0
+    assert (
+        mcp_cmd.sync(
+            target=repo, harness="cursor", user_scope=True, allow_global_stdio=True, write=True, json_output=True
+        )
+        == 0
+    )
     written = json.loads((home / ".cursor" / "mcp.json").read_text())
     assert written["mcpServers"]["graphtrail"]["args"] == ["mcp", "--db", ".graphtrail/custom.db"]
 
@@ -244,7 +253,12 @@ def test_cursor_user_scope_rejects_invalid_existing_config(tmp_path, monkeypatch
     _seed(repo)
 
     capsys.readouterr()
-    assert mcp_cmd.sync(target=repo, harness="cursor", user_scope=True, write=True, json_output=True) == 2
+    assert (
+        mcp_cmd.sync(
+            target=repo, harness="cursor", user_scope=True, allow_global_stdio=True, write=True, json_output=True
+        )
+        == 2
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["errors"] == [f"{cursor_config}: {error}"]
     assert cursor_config.read_text() == invalid
@@ -291,7 +305,12 @@ def test_user_scope_grok_writes_home(tmp_path, monkeypatch, capsys):
     plan_payload = json.loads(capsys.readouterr().out)
     assert any(item.get("harness") == "grok-user" for item in plan_payload.get("items", []))
     # With --user-scope it writes under $HOME using codex-shaped TOML mcp_servers.
-    assert mcp_cmd.sync(target=repo, harness="grok-user", user_scope=True, write=True, json_output=True) == 0
+    assert (
+        mcp_cmd.sync(
+            target=repo, harness="grok-user", user_scope=True, allow_global_stdio=True, write=True, json_output=True
+        )
+        == 0
+    )
     cfg = home / ".grok/config.toml"
     assert cfg.is_file()
     text = cfg.read_text()
@@ -330,7 +349,15 @@ def test_codex_user_stdio_no_args_never_stays_conflicted(tmp_path, monkeypatch, 
     mcp_cmd.add(target=repo, name="noargs", command="some-mcp-server", json_output=True)
 
     capsys.readouterr()
-    rc = mcp_cmd.sync(target=repo, harness="codex-user", user_scope=True, write=True, force=True, json_output=True)
+    rc = mcp_cmd.sync(
+        target=repo,
+        harness="codex-user",
+        user_scope=True,
+        allow_global_stdio=True,
+        write=True,
+        force=True,
+        json_output=True,
+    )
     assert rc == 0
     sync_payload = json.loads(capsys.readouterr().out)
     assert sync_payload["counts"]["conflict"] == 0
@@ -439,3 +466,116 @@ def test_mcp_station_doctor_info_when_uninitialized(tmp_path):
     ctx = doctor.build_context(tmp_path)
     results = doctor.mcp_station_checks(ctx)
     assert any(status == doctor.INFO for status, _, _ in results)
+
+
+# --- user-scoped stdio gate (#349): process-multiplication warning --------- #
+
+
+def _seed_user_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed(repo)
+    return home, repo
+
+
+def test_user_scope_stdio_sync_blocks_non_interactively(tmp_path, monkeypatch, capsys):
+    home, repo = _seed_user_home(tmp_path, monkeypatch)
+
+    capsys.readouterr()
+    rc = mcp_cmd.sync(target=repo, harness="cursor", user_scope=True, write=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 2
+    assert not (home / ".cursor" / "mcp.json").exists()
+    assert any("--allow-global-stdio" in e for e in payload["errors"])
+    assert payload["stdio_exposures"][0]["stdio_writes"] == 1
+    assert payload["stdio_exposures"][0]["harness"] == "cursor-user"
+
+
+def test_user_scope_stdio_sync_allow_flag_writes_and_warns(tmp_path, monkeypatch, capsys):
+    home, repo = _seed_user_home(tmp_path, monkeypatch)
+
+    capsys.readouterr()
+    rc = mcp_cmd.sync(
+        target=repo, harness="cursor", user_scope=True, allow_global_stdio=True, write=True, json_output=True
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert (home / ".cursor" / "mcp.json").is_file()
+    assert any("user-scope stdio warning" in n for n in payload["notes"])
+    assert any("x active sessions" in n for n in payload["notes"])
+
+
+def test_user_scope_stdio_sync_interactive_confirm_writes(tmp_path, monkeypatch, capsys):
+    home, repo = _seed_user_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    rc = mcp_cmd.sync(target=repo, harness="cursor", user_scope=True, write=True)
+
+    assert rc == 0
+    assert (home / ".cursor" / "mcp.json").is_file()
+    err = capsys.readouterr().err
+    assert "user-scope stdio warning" in err
+
+
+def test_user_scope_stdio_sync_interactive_decline_aborts(tmp_path, monkeypatch, capsys):
+    home, repo = _seed_user_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+
+    rc = mcp_cmd.sync(target=repo, harness="cursor", user_scope=True, write=True)
+
+    assert rc == 1
+    assert not (home / ".cursor" / "mcp.json").exists()
+    assert "aborted" in capsys.readouterr().out
+
+
+def test_user_scope_remote_only_sync_does_not_gate(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mcp_cmd.init(target=repo, json_output=True)
+    mcp_cmd.add(target=repo, name="remote", transport="http", url="https://example.test/mcp", json_output=True)
+
+    capsys.readouterr()
+    rc = mcp_cmd.sync(target=repo, harness="cursor", user_scope=True, write=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["stdio_exposures"] == []
+    assert (home / ".cursor" / "mcp.json").is_file()
+
+
+def test_project_scope_stdio_sync_does_not_gate(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed(repo)
+
+    capsys.readouterr()
+    rc = mcp_cmd.sync(target=repo, write=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["stdio_exposures"] == []
+
+
+def test_dry_run_items_carry_transport_and_scope(tmp_path, monkeypatch, capsys):
+    home, repo = _seed_user_home(tmp_path, monkeypatch)
+
+    capsys.readouterr()
+    rc = mcp_cmd.sync(target=repo, harness="cursor", user_scope=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    item = payload["items"][0]
+    assert item["transport"] == "stdio"
+    assert item["scope"] == "user"
+    assert payload["stdio_exposures"][0]["destination"] == item["file"]
+    assert not (home / ".cursor" / "mcp.json").exists()

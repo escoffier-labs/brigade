@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `brigade mcp sync --user-scope` (and `brigade operator sync-mcp --user-scope`) no longer writes stdio MCP servers into a user-wide client config silently: interactive runs show the destination, stdio count, and the servers-times-sessions process formula and ask for confirmation, non-interactive and `--json` runs require `--allow-global-stdio`, and plan/sync items now carry `transport` and `scope`. (#349)
+
 ## [0.25.1] - 2026-07-21
 
 ### Added

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -311,6 +312,11 @@ def _plan_for_harness(
                     harness, rel, name, "orphan", "skip", None, None, detail="removed from canonical; --prune to delete"
                 )
             )
+    adapter_scope = "user" if adapter.user_scope else "project"
+    for item in items:
+        item["scope"] = adapter_scope
+        server = servers.get(item["server"])
+        item["transport"] = server.transport if server is not None else None
     return items
 
 
@@ -337,6 +343,50 @@ def _counts(items: list[dict[str, Any]]) -> dict[str, int]:
 
 def _public_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{k: v for k, v in item.items() if not k.startswith("_")} for item in items]
+
+
+def _user_stdio_exposures(planned: list[tuple[str, list[dict[str, Any]]]]) -> list[dict[str, Any]]:
+    """Per user-scoped destination: stdio servers this sync writes and the total after.
+
+    Every stdio server in a user-scoped client config is one child process per
+    active client session, so writing them user-wide multiplies processes by
+    session count. Project-scoped destinations never gate.
+    """
+    exposures = []
+    for harness, items in planned:
+        if not ADAPTERS[harness].user_scope:
+            continue
+        writes = [i for i in items if i["action"] in ("create", "update") and i.get("transport") == "stdio"]
+        if not writes:
+            continue
+        remaining = {i["server"] for i in items if i.get("transport") == "stdio" and i["action"] != "remove"}
+        exposures.append(
+            {
+                "harness": harness,
+                "destination": items[0]["file"] if items else ADAPTERS[harness].path,
+                "stdio_writes": len(writes),
+                "stdio_total": len(remaining),
+            }
+        )
+    return exposures
+
+
+def _stdio_exposure_lines(exposures: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for e in exposures:
+        lines.append(
+            f"user-scope stdio warning: {e['destination']} gains {e['stdio_writes']} stdio MCP server(s) "
+            f"({e['stdio_total']} stdio total after sync)"
+        )
+        lines.append(
+            f"  each active {e['harness']} client session starts one child process per configured stdio "
+            f"server: {e['stdio_total']} stdio servers x active sessions"
+        )
+    lines.append(
+        "  prefer project-scoped config or a shared HTTP/SSE transport where the client supports it; "
+        "pass --allow-global-stdio to acknowledge"
+    )
+    return lines
 
 
 # --------------------------------------------------------------------------- #
@@ -659,6 +709,7 @@ def sync(
     prune: bool = False,
     adopt: bool = False,
     user_scope: bool = False,
+    allow_global_stdio: bool = False,
     verify_runtime: bool = False,
     verify_timeout: float | None = None,
     json_output: bool = False,
@@ -678,8 +729,33 @@ def sync(
     all_items: list[dict[str, Any]] = []
     files_written: list[str] = []
 
-    for h in harnesses:
-        items = _plan_for_harness(target, h, servers, state, force=force, prune=prune, adopt=adopt, name_filter=name)
+    planned = [
+        (h, _plan_for_harness(target, h, servers, state, force=force, prune=prune, adopt=adopt, name_filter=name))
+        for h in harnesses
+    ]
+    exposures = _user_stdio_exposures(planned)
+    if exposures:
+        warning_lines = _stdio_exposure_lines(exposures)
+        notes.extend(warning_lines)
+        if write and not allow_global_stdio:
+            # A user-scoped stdio sync never completes silently: interactive runs
+            # confirm at the prompt, non-interactive runs need the explicit flag.
+            if json_output or not sys.stdin.isatty():
+                message = (
+                    "user-scoped sync would write stdio MCP servers into a user-wide client config; "
+                    "re-run with --allow-global-stdio to acknowledge, or use project scope / an "
+                    "HTTP-SSE transport"
+                )
+                lines = warning_lines + [f"error: {message}"]
+                return _emit({"errors": [message], "stdio_exposures": exposures, "notes": notes}, json_output, lines, 2)
+            for line in warning_lines:
+                print(line, file=sys.stderr)
+            answer = input("Write stdio servers into the user-wide config? [y/N]: ").strip().lower()
+            if answer not in ("y", "yes"):
+                message = "aborted: user-scoped stdio sync not confirmed"
+                return _emit({"aborted": True, "stdio_exposures": exposures, "notes": notes}, json_output, [message], 1)
+
+    for h, items in planned:
         all_items.extend(items)
         adapter = ADAPTERS[h]
         path = mcp_adapters.resolve_path(adapter, target)
@@ -736,6 +812,7 @@ def sync(
         "wrote": write,
         "files_written": files_written,
         "notes": notes,
+        "stdio_exposures": exposures,
         "items": _public_items(all_items),
         "counts": counts,
     }
