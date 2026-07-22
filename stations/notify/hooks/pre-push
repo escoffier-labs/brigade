@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# pre-push: block push if content-guard finds blocking violations.
+# Scans the working tree against policies/public-repo.json.
+# Bypass only if you know what you're doing: git push --no-verify
+set -euo pipefail
+
+CONTENT_GUARD_DIR="${CONTENT_GUARD_DIR:-$HOME/repos/content-guard}"
+POLICY="${CONTENT_GUARD_POLICY:-$CONTENT_GUARD_DIR/policies/public-repo.json}"
+
+if [[ ! -d "$CONTENT_GUARD_DIR/src/content_guard" ]]; then
+  echo "pre-push: content-guard not found at $CONTENT_GUARD_DIR" >&2
+  echo "pre-push: clone https://github.com/solomonneas/content-guard or set CONTENT_GUARD_DIR" >&2
+  exit 1
+fi
+
+if [[ ! -f "$POLICY" ]]; then
+  echo "pre-push: policy file not found: $POLICY" >&2
+  exit 1
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+echo "pre-push: scanning $REPO_ROOT against $(basename "$POLICY")"
+
+if ! PYTHONPATH="$CONTENT_GUARD_DIR/src" python3 -m content_guard scan "$REPO_ROOT" --policy "$POLICY"; then
+  echo >&2
+  echo "pre-push: BLOCKED. content-guard found violations." >&2
+  echo "pre-push: fix the leak, or add an inline tag on the offending line:" >&2
+  echo "pre-push:   <!-- content-guard: allow <rule-id> -->" >&2
+  exit 1
+fi

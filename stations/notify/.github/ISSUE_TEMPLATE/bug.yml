@@ -1,0 +1,66 @@
+name: Bug report
+description: Something is broken in agent-notify itself, such as routing, a channel or hook adapter, doctor, status, or the docs.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run, and what did you expect versus what you got?
+      placeholder: |
+        I ran `agent-notify --profile error "5 alerts"` and the Discord channel got nothing.
+        I expected the message to reach both Telegram and Discord.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: agent-notify version
+      description: Output of `agent-notify version`.
+      placeholder: agent-notify 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Channel(s) involved
+      multiple: true
+      options:
+        - Discord
+        - Telegram
+        - Signal
+        - Routing / profiles (no specific channel)
+        - Hook adapter (Claude Code / Codex / custom)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: Ubuntu 24.04, macOS 14.5, Windows 11, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Paste `agent-notify doctor` (or `doctor --json`). Redact tokens, webhook URLs, chat IDs, and personal paths first.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Full output
+      description: Paste the full stdout + stderr from the failing command. Keep enough for us to reproduce, but remove any secrets.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: scrub
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I have removed any tokens, webhook URLs, chat IDs, hostnames, and personal paths from this report.
+          required: true

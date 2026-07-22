@@ -1,0 +1,51 @@
+// Package adapter converts heterogeneous input shapes into the canonical
+// message used by the router and channel adapters.
+package adapter
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/escoffier-labs/agent-notify/internal/canonical"
+)
+
+// FromString builds a canonical message from a plain string body.
+func FromString(s string) canonical.Message {
+	return canonical.Message{Body: s}
+}
+
+// AutoDetect inspects the reader content and returns a canonical message.
+//
+// Detection rules:
+//   - Empty input returns an error.
+//   - If the input is a JSON object (starts with "{") it is parsed as
+//     canonical: success requires a non-empty Body field. Malformed JSON
+//     and JSON missing Body produce distinct error messages.
+//   - JSON arrays, scalars, and other non-object inputs are treated as
+//     plain string bodies.
+func AutoDetect(r io.Reader) (canonical.Message, error) {
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return canonical.Message{}, fmt.Errorf("read input: %w", err)
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return canonical.Message{}, fmt.Errorf("input is empty")
+	}
+
+	// Try canonical JSON first if it looks like a JSON object.
+	if strings.HasPrefix(trimmed, "{") {
+		var m canonical.Message
+		if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
+			return canonical.Message{}, fmt.Errorf("input looks like JSON but failed to parse: %w", err)
+		}
+		if m.Body == "" {
+			return canonical.Message{}, fmt.Errorf("input parsed as JSON but missing required \"body\" field; pass plain string or canonical {title,body,level,source,tags} JSON")
+		}
+		return m, nil
+	}
+
+	return FromString(trimmed), nil
+}
