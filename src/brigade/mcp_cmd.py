@@ -345,27 +345,46 @@ def _public_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{k: v for k, v in item.items() if not k.startswith("_")} for item in items]
 
 
-def _user_stdio_exposures(planned: list[tuple[str, list[dict[str, Any]]]]) -> list[dict[str, Any]]:
+def _user_stdio_exposures(planned: list[tuple[str, list[dict[str, Any]]]], target: Path) -> list[dict[str, Any]]:
     """Per user-scoped destination: stdio servers this sync writes and the total after.
 
     Every stdio server in a user-scoped client config is one child process per
     active client session, so writing them user-wide multiplies processes by
-    session count. Project-scoped destinations never gate.
+    session count. The total counts the destination file's preserved stdio
+    servers too (foreign and unmanaged definitions the merge keeps), not just
+    planner items, so the acknowledged exposure matches the real post-sync
+    config. Project-scoped destinations never gate.
     """
     exposures = []
     for harness, items in planned:
-        if not ADAPTERS[harness].user_scope:
+        adapter = ADAPTERS[harness]
+        if not adapter.user_scope:
             continue
         writes = [i for i in items if i["action"] in ("create", "update") and i.get("transport") == "stdio"]
         if not writes:
             continue
-        remaining = {i["server"] for i in items if i.get("transport") == "stdio" and i["action"] != "remove"}
+        removed = {i["server"] for i in items if i["action"] == "remove"}
+        stdio_after = {i["server"] for i in items if i.get("transport") == "stdio" and i["action"] != "remove"}
+        path = mcp_adapters.resolve_path(adapter, target)
+        try:
+            live = adapter.read_file(path.read_text() if path.is_file() else None)
+        except (OSError, ValueError):
+            live = {}
+        for name, provider in live.items():
+            if name in removed or name in stdio_after:
+                continue
+            try:
+                server, _ = adapter.from_provider(name, provider)
+            except (TypeError, ValueError, KeyError):
+                continue
+            if server.transport == "stdio":
+                stdio_after.add(name)
         exposures.append(
             {
                 "harness": harness,
-                "destination": items[0]["file"] if items else ADAPTERS[harness].path,
+                "destination": items[0]["file"] if items else adapter.path,
                 "stdio_writes": len(writes),
-                "stdio_total": len(remaining),
+                "stdio_total": len(stdio_after),
             }
         )
     return exposures
@@ -710,6 +729,7 @@ def sync(
     adopt: bool = False,
     user_scope: bool = False,
     allow_global_stdio: bool = False,
+    interactive: bool | None = None,
     verify_runtime: bool = False,
     verify_timeout: float | None = None,
     json_output: bool = False,
@@ -733,14 +753,17 @@ def sync(
         (h, _plan_for_harness(target, h, servers, state, force=force, prune=prune, adopt=adopt, name_filter=name))
         for h in harnesses
     ]
-    exposures = _user_stdio_exposures(planned)
+    exposures = _user_stdio_exposures(planned, target)
     if exposures:
         warning_lines = _stdio_exposure_lines(exposures)
         notes.extend(warning_lines)
         if write and not allow_global_stdio:
             # A user-scoped stdio sync never completes silently: interactive runs
             # confirm at the prompt, non-interactive runs need the explicit flag.
-            if json_output or not sys.stdin.isatty():
+            # Callers that capture stdout (operator sync-mcp) pass `interactive`
+            # explicitly; the prompt stays on stderr so captured JSON is clean.
+            is_interactive = interactive if interactive is not None else (not json_output and sys.stdin.isatty())
+            if not is_interactive:
                 message = (
                     "user-scoped sync would write stdio MCP servers into a user-wide client config; "
                     "re-run with --allow-global-stdio to acknowledge, or use project scope / an "
@@ -750,7 +773,8 @@ def sync(
                 return _emit({"errors": [message], "stdio_exposures": exposures, "notes": notes}, json_output, lines, 2)
             for line in warning_lines:
                 print(line, file=sys.stderr)
-            answer = input("Write stdio servers into the user-wide config? [y/N]: ").strip().lower()
+            print("Write stdio servers into the user-wide config? [y/N]: ", end="", file=sys.stderr, flush=True)
+            answer = input().strip().lower()
             if answer not in ("y", "yes"):
                 message = "aborted: user-scoped stdio sync not confirmed"
                 return _emit({"aborted": True, "stdio_exposures": exposures, "notes": notes}, json_output, [message], 1)

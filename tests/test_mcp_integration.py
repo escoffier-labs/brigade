@@ -579,3 +579,46 @@ def test_dry_run_items_carry_transport_and_scope(tmp_path, monkeypatch, capsys):
     assert item["scope"] == "user"
     assert payload["stdio_exposures"][0]["destination"] == item["file"]
     assert not (home / ".cursor" / "mcp.json").exists()
+
+
+def test_stdio_total_counts_preserved_unmanaged_servers(tmp_path, monkeypatch, capsys):
+    home, repo = _seed_user_home(tmp_path, monkeypatch)
+    cursor_config = home / ".cursor" / "mcp.json"
+    cursor_config.parent.mkdir(parents=True)
+    cursor_config.write_text(json.dumps({"mcpServers": {"legacy": {"command": "legacy-mcp"}}}))
+
+    capsys.readouterr()
+    rc = mcp_cmd.sync(target=repo, harness="cursor", user_scope=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    exposure = payload["stdio_exposures"][0]
+    # github is the one write; the preserved unmanaged legacy server still
+    # counts toward the per-session process total being acknowledged.
+    assert exposure["stdio_writes"] == 1
+    assert exposure["stdio_total"] == 2
+
+
+def test_operator_sync_mcp_tty_prompts_despite_json_capture(tmp_path, monkeypatch, capsys):
+    home, repo = _seed_user_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    rc = operator_cmd.sync_mcp(target=repo, write=True, user_scope=True)
+
+    assert rc == 0
+    assert (home / ".cursor" / "mcp.json").is_file() or (home / ".gemini/config/mcp_config.json").is_file()
+    assert "user-scope stdio warning" in capsys.readouterr().err
+
+
+def test_operator_sync_mcp_non_tty_requires_allow_flag(tmp_path, monkeypatch, capsys):
+    home, repo = _seed_user_home(tmp_path, monkeypatch)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    capsys.readouterr()
+    rc = operator_cmd.sync_mcp(target=repo, write=True, user_scope=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    assert any("--allow-global-stdio" in e for e in payload["sync"]["errors"])
+    assert not (home / ".gemini/config/mcp_config.json").exists()

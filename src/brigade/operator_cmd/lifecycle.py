@@ -331,6 +331,9 @@ def sync_mcp(
         adopt=adopt,
         user_scope=user_scope,
         allow_global_stdio=allow_global_stdio,
+        # The JSON capture forces json_output; interactivity is decided by the
+        # operator invocation itself so a TTY run still gets the stdio prompt.
+        interactive=not json_output and sys.stdin.isatty(),
     )
     counts = sync_payload.get("counts") or {}
     ok = sync_rc == 0
