@@ -1,4 +1,4 @@
-from brigade import harness_profiles
+from brigade import harness_profile_cmd, harness_profiles
 
 
 def test_user_profile_paths_cover_all_eight_harnesses(tmp_path):
@@ -49,3 +49,99 @@ def test_kimi_profile_root_uses_single_probe_value(tmp_path, monkeypatch):
     assert legacy.user_root == home / ".kimi-code"
     assert legacy.capabilities == {"kimi_native_mcp": False}
     assert len(calls) == 1  # explicit value must not re-probe
+
+
+def test_managed_instruction_block_appends_updates_and_detects_invalid_markers(tmp_path):
+    path = tmp_path / "AGENTS.md"
+    start, end = harness_profiles.INSTRUCTION_START, harness_profiles.INSTRUCTION_END
+    desired = harness_profiles.managed_instruction_text()
+
+    # empty file -> missing/create, rendered carries exactly one bounded block
+    path.write_text("")
+    plan = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {}})
+    assert (plan.status, plan.action) == ("missing", "create")
+    assert plan.rendered is not None
+    assert plan.rendered.count(start) == 1 and plan.rendered.count(end) == 1
+
+    # non-empty foreign file with no markers -> missing/create with a blank line before the block
+    path.write_text("# my notes\n")
+    plan = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {}})
+    assert (plan.status, plan.action) == ("missing", "create")
+    assert plan.rendered.startswith("# my notes\n\n")
+
+    # write the owned block; live == desired -> current/none
+    path.write_text(plan.rendered)
+    plan = harness_profile_cmd.plan_instruction(
+        path=path, desired=desired, state={"instructions": {"digest": plan.desired_digest}}
+    )
+    assert (plan.status, plan.action) == ("current", "none")
+
+    # a prior owned block whose live digest matches the stored digest but desired changed -> stale/update
+    older = desired.replace("brigade run", "brigade dispatch")  # previous managed text
+    path.write_text(f"{start}\n{older}\n{end}\n")
+    stored = harness_profile_cmd.digest_text(older)
+    plan = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {"digest": stored}})
+    assert (plan.status, plan.action) == ("stale", "update")
+
+    # duplicate markers -> conflict/preserve
+    path.write_text(f"{start}\nbody\n{end}\n{start}\nbody\n{end}\n")
+    plan = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {}})
+    assert (plan.status, plan.action) == ("conflict", "preserve")
+
+    # nested markers -> conflict/preserve
+    path.write_text(f"{start}\n{start}\nbody\n{end}\n{end}\n")
+    plan = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {}})
+    assert (plan.status, plan.action) == ("conflict", "preserve")
+
+    # reversed markers -> conflict/preserve
+    path.write_text(f"{end}\nbody\n{start}\n")
+    plan = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {}})
+    assert (plan.status, plan.action) == ("conflict", "preserve")
+
+    # truncated (start without end) -> conflict/preserve
+    path.write_text(f"{start}\nbody\n")
+    plan = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {}})
+    assert (plan.status, plan.action) == ("conflict", "preserve")
+
+
+def test_managed_instruction_uninstall_preserves_surrounding_bytes(tmp_path):
+    path = tmp_path / "AGENTS.md"
+    start = harness_profiles.INSTRUCTION_START
+    desired = harness_profiles.managed_instruction_text()
+
+    foreign = "# top\nsome notes\n"
+    path.write_text(foreign)
+    create = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {}})
+    path.write_text(create.rendered)
+    owned_digest = create.desired_digest
+
+    removal = harness_profile_cmd.plan_instruction_removal(path=path, state={"instructions": {"digest": owned_digest}})
+    assert (removal.status, removal.action) == ("managed", "remove")
+    assert removal.rendered is not None
+    # the block and exactly the one newline install added are gone; foreign bytes survive
+    assert start not in removal.rendered
+    assert "some notes" in removal.rendered
+    assert removal.rendered == foreign
+
+    # a foreign-edited managed block is preserved, not removed
+    live = path.read_text()
+    edited_block = live.replace("some notes", "user-edit-inside-block")
+    path.write_text(edited_block)
+    edited = harness_profile_cmd.plan_instruction_removal(path=path, state={"instructions": {"digest": owned_digest}})
+    assert (edited.status, edited.action) == ("conflict", "preserve")
+
+
+def test_foreign_authored_block_is_conflict_with_recovery_command(tmp_path):
+    path = tmp_path / "AGENTS.md"
+    desired = harness_profiles.managed_instruction_text()
+    path.write_text(
+        f"{harness_profiles.INSTRUCTION_START}\nsomeone else wrote this\n{harness_profiles.INSTRUCTION_END}\n"
+    )
+    plan = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {}})
+    assert (plan.status, plan.action) == ("conflict", "preserve")
+    assert "brigade harness install" in plan.detail
+    assert "--adopt" in plan.detail
+
+    # --adopt reclassifies a well-formed foreign block as stale/update
+    adopted = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {}}, adopt=True)
+    assert (adopted.status, adopted.action) == ("stale", "update")

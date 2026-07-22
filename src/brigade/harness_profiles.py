@@ -150,3 +150,38 @@ def resolve_profiles(
             )
         )
     return tuple(result)
+
+
+def managed_instruction_text() -> str:
+    """Return the managed user-profile instruction body.
+
+    The returned text is the body bounded by ``INSTRUCTION_START`` and
+    ``INSTRUCTION_END`` when rendered into a Markdown surface. It carries
+    exactly five paragraphs: invoke ``using-skillet`` and each applicable
+    reviewed skill; run ``brigade work brief`` when Brigade is wired; route
+    worker-sized or parallelizable work through ``brigade run`` with the
+    frontier session on planning/dispatch/review/synthesis; run counting
+    checks through ``brigade work verify run`` with ``--capture brigade-work``
+    and capture failures as evidence; finish substantial work with a Memory
+    Handoff through the standard Rocinante flow and never edit canonical
+    memory directly.
+    """
+    return (
+        "## Brigade work loop\n"
+        "\n"
+        "Invoke the `using-skillet` skill and use each applicable reviewed skill "
+        "before substantive work in a Brigade-wired repository.\n"
+        "\n"
+        "Run `brigade work brief --target .` when a `.brigade/` directory exists or "
+        "`brigade status --target .` succeeds, and follow the brief before editing.\n"
+        "\n"
+        "Route worker-sized or parallelizable implementation through `brigade run` "
+        "and keep the frontier session on planning, dispatch, review, and synthesis.\n"
+        "\n"
+        "Run counting checks through `brigade work verify run --target . "
+        '--command "<command>" --capture brigade-work`, capturing failures as '
+        "evidence so the outcome ledger stays honest.\n"
+        "\n"
+        "After substantial work, create a Memory Handoff through the standard "
+        "Rocinante flow and never edit canonical memory directly.\n"
+    )
