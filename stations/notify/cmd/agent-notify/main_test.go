@@ -16,6 +16,7 @@ import (
 
 	"github.com/escoffier-labs/agent-notify/internal/canonical"
 	"github.com/escoffier-labs/agent-notify/internal/channels"
+	"github.com/escoffier-labs/agent-notify/internal/config"
 )
 
 type leakingErrorChannel struct {
@@ -439,6 +440,99 @@ func TestRun_DoctorJSONReportsMissingConfigAsUnconfigured(t *testing.T) {
 	}
 	if payload["fail_count"].(float64) == 0 {
 		t.Fatalf("expected failures, got %#v", payload)
+	}
+}
+
+func TestBuildRegistryRejectsNonPositiveTimeout(t *testing.T) {
+	// A non-positive timeout must never reach channel construction: the
+	// registry build fails with a config error naming the offending key.
+	// The webhook URL is required so the pre-fix RED state reaches channel
+	// construction instead of failing earlier with missing credentials.
+	t.Setenv("DISCORD_WEBHOOK_URL", "https://discord.test/webhook/123")
+	for _, timeout := range []int{-5, 0} {
+		cfg := &config.Config{
+			Channels: map[string]config.ChannelConfig{
+				"discord-main": {Type: "discord", WebhookURLEnv: "DISCORD_WEBHOOK_URL"},
+			},
+			Defaults: config.Defaults{TimeoutSeconds: timeout},
+		}
+		_, err := buildRegistry(cfg, []string{"discord-main"})
+		if err == nil {
+			t.Fatalf("timeout %d: expected buildRegistry error, got nil", timeout)
+		}
+		if !strings.Contains(err.Error(), "defaults.timeout_seconds") {
+			t.Errorf("timeout %d: error should name defaults.timeout_seconds, got %v", timeout, err)
+		}
+	}
+}
+
+func TestRun_DoctorJSONFailsOnNegativeTimeout(t *testing.T) {
+	// doctor must surface an invalid negative timeout as a FAIL check on
+	// defaults.timeout_seconds, not silently normalize it away.
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(`
+[defaults]
+timeout_seconds = -5
+
+[channels.discord-main]
+type = "discord"
+webhook_url_env = "DISCORD_WEBHOOK_URL"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runMain(t,
+		[]string{"agent-notify", "doctor", "--json", "--config", cfgPath},
+		"",
+		map[string]string{"DISCORD_WEBHOOK_URL": "https://discord.test/webhook/123"},
+	)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (stderr=%s)", code, stderr)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout)
+	}
+	found := false
+	for _, c := range payload["checks"].([]interface{}) {
+		check := c.(map[string]interface{})
+		if check["name"] == "defaults.timeout_seconds" {
+			found = true
+			if check["status"] != "FAIL" {
+				t.Fatalf("defaults.timeout_seconds status = %v, want FAIL", check["status"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a defaults.timeout_seconds check in %#v", payload["checks"])
+	}
+}
+
+func TestRun_SendRejectsNegativeTimeout(t *testing.T) {
+	// The send path must refuse a negative timeout with a config error
+	// instead of constructing channels with a non-positive deadline.
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(`
+[defaults]
+timeout_seconds = -5
+
+[channels.discord-main]
+type = "discord"
+webhook_url_env = "DISCORD_WEBHOOK_URL"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, stderr := runMain(t,
+		[]string{"agent-notify", "--config", cfgPath, "build done"},
+		"",
+		map[string]string{"DISCORD_WEBHOOK_URL": "https://discord.test/webhook/123"},
+	)
+	if code != exitConfig {
+		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitConfig, stderr)
+	}
+	if !strings.Contains(stderr, "defaults.timeout_seconds") {
+		t.Fatalf("stderr should name defaults.timeout_seconds, got %s", stderr)
 	}
 }
 

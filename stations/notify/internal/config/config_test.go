@@ -106,3 +106,46 @@ func TestLoad_DefaultTimeoutIs10s(t *testing.T) {
 		t.Errorf("expected default timeout 10s, got %d", cfg.Defaults.TimeoutSeconds)
 	}
 }
+
+func TestLoad_ZeroTimeoutNormalizesTo10s(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `
+[defaults]
+timeout_seconds = 0
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Defaults.TimeoutSeconds != 10 {
+		t.Errorf("expected zero timeout normalized to 10s, got %d", cfg.Defaults.TimeoutSeconds)
+	}
+}
+
+func TestLoad_NegativeTimeoutStaysObservable(t *testing.T) {
+	// A negative timeout is invalid configuration, not a request for the
+	// default. Load must surface it so doctor can FAIL on it and the send
+	// path can reject it, instead of silently substituting 10s.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `
+[defaults]
+timeout_seconds = -5
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Defaults.TimeoutSeconds != -5 {
+		t.Errorf("expected negative timeout preserved as -5, got %d", cfg.Defaults.TimeoutSeconds)
+	}
+}

@@ -30,6 +30,8 @@ cross: clean
 	GOOS=darwin  GOARCH=arm64 go build $(LDFLAGS) -o dist/$(BINARY)-darwin-arm64   $(PKG)
 
 install: build
+	$(if $(strip $(HOME)),,$(error HOME is not set; refusing to install into /bin))
+	mkdir -p $(HOME)/bin
 	install -m 0755 $(BINARY) $(HOME)/bin/$(BINARY)
 
 clean-dist:
@@ -38,6 +40,7 @@ clean-dist:
 # Build per-platform archives with checksums. Output to dist/.
 package: clean-dist
 	mkdir -p dist/tmp
+	set -eu; \
 	for platform in $(PLATFORMS); do \
 		os=$${platform%/*}; \
 		arch=$${platform#*/}; \

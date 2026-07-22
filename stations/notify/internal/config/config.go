@@ -66,6 +66,10 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
 
+	// Zero means "not set" (absent or explicit) and falls back to the
+	// default. A negative value is invalid configuration and stays
+	// observable: doctor reports it as FAIL and the send path rejects it
+	// rather than silently substituting the default.
 	if cfg.Defaults.TimeoutSeconds == 0 {
 		cfg.Defaults.TimeoutSeconds = 10
 	}

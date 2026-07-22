@@ -332,6 +332,9 @@ func sortedProfileNames(cfg *config.Config) []string {
 }
 
 func buildRegistry(cfg *config.Config, names []string) (*channels.Registry, error) {
+	if cfg.Defaults.TimeoutSeconds <= 0 {
+		return nil, fmt.Errorf("defaults.timeout_seconds must be greater than zero, got %d", cfg.Defaults.TimeoutSeconds)
+	}
 	reg := channels.NewRegistry()
 	timeout := time.Duration(cfg.Defaults.TimeoutSeconds) * time.Second
 
