@@ -18,7 +18,7 @@ Tracked rehearsal for Brigade issue #431. This document is a durable summary; th
   - `git log --follow stations/notify/go.mod` shows 2 commits across the rename.
   - `go test ./...` from the relocated module: first attempt failed (run `20260722-103147-work-verify-dfd559`, exit 1) because the test harness reads the invoking user's default config path and an existing user config with an env-incomplete channel made four tests exit 2. Re-run with an isolated environment passed (run `20260722-103226-work-verify-b0a49a`, exit 0). No code changed between the two runs.
   - `go vet ./...` from the relocated module passes (run `20260722-103242-work-verify-11a7e0`, exit 0).
-  - The repository gate `./scripts/verify` passes (run `20260722-103252-work-verify-c670ab`, exit 0).
+  - The repository gate `./scripts/verify` passed during the rehearsal (run `20260722-103252-work-verify-c670ab`, exit 0). The Phase 1 PR records the final post-edit receipt.
 - Go receipt caveat: the Go verify receipts wrapped a temporary wrapper script in a deleted temp directory, so those receipts do not attest the module path or environment used. Phase 2 must run the relocated module's Go checks from the tracked tree with explicit config isolation (isolated `HOME` or explicit `--config`).
 - Durable finding: public source tip `9035424` has non-hermetic CLI tests because they read the invoking user's default config file. Fix in the source repo or during import before CI runs the relocated module.
 - Context: #431, #366, #352, #379, #381.
