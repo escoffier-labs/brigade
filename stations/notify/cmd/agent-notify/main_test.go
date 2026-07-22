@@ -28,6 +28,47 @@ func (c leakingErrorChannel) Send(context.Context, canonical.Message) error {
 	return c.err
 }
 
+// configSubcommands are the run() subcommands whose flag sets define
+// --config, mirroring the dispatch in run(). version and hooks do not accept
+// --config, so injecting the flag there would be a parse error.
+var configSubcommands = map[string]bool{
+	"send":   true,
+	"init":   true,
+	"status": true,
+	"doctor": true,
+}
+
+// withIsolatedConfig injects --config pointing at a guaranteed-absent path
+// unless the test supplied --config itself. Without this, tests fall through
+// to defaultConfigPath() and read the real config of the invoking user from
+// ~/.config/agent-notify/config.toml, which makes results depend on the
+// developer machine. An explicit absent path (a file inside a fresh
+// t.TempDir()) works on Windows too, where overriding HOME alone does not
+// change os.UserHomeDir.
+func withIsolatedConfig(t *testing.T, args []string) []string {
+	t.Helper()
+	if len(args) == 0 {
+		return args
+	}
+	for _, a := range args {
+		if a == "--config" || strings.HasPrefix(a, "--config=") {
+			return args
+		}
+	}
+	insertAt := 1
+	if len(args) > 1 {
+		if configSubcommands[args[1]] {
+			insertAt = 2
+		} else if args[1] == "version" || args[1] == "hooks" {
+			return args
+		}
+	}
+	absent := filepath.Join(t.TempDir(), "agent-notify", "config.toml")
+	isolated := append([]string{}, args[:insertAt]...)
+	isolated = append(isolated, "--config", absent)
+	return append(isolated, args[insertAt:]...)
+}
+
 // runMain calls the main package's run() function with the given args,
 // stdin, and env vars, returning the exit code, stdout, and stderr.
 func runMain(t *testing.T, args []string, stdin string, env map[string]string) (int, string, string) {
@@ -37,7 +78,7 @@ func runMain(t *testing.T, args []string, stdin string, env map[string]string) (
 	}
 	stdinR := strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
-	code := run(args, stdinR, &stdout, &stderr)
+	code := run(withIsolatedConfig(t, args), stdinR, &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
 }
 
