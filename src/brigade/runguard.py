@@ -714,7 +714,13 @@ def snapshot_payload(snapshot: PreRunSnapshot | None) -> dict[str, object] | Non
         "branch": snapshot.branch,
         "head": snapshot.head,
         "tracked_dirty_files": list(snapshot.tracked_dirty_paths),
+        # Content-sensitive fingerprints per path so the persisted snapshot can
+        # audit and reproduce the worker-change comparison: a reviewer can re-run
+        # the baseline-vs-final fingerprint diff without recapturing the tree.
+        # Only one-way digests are stored; raw file contents are never persisted.
+        "tracked_dirty_fingerprints": dict(snapshot.tracked_dirty),
         "untracked_files": list(snapshot.untracked_paths),
+        "untracked_fingerprints": dict(snapshot.untracked),
     }
 
 
@@ -748,23 +754,31 @@ def changes_relative_to_snapshot(cwd: Path | None, snapshot: PreRunSnapshot | No
     further edit, deletion, or type/mode change to a file that was already
     dirty or untracked before the run is detected, while a baseline file the
     worker left alone is excluded. Newly dirtied tracked files and new
-    untracked files are attributed to the worker. Returns ([], []) when no
+    untracked files are attributed to the worker. The union of baseline and
+    final dirty/untracked paths is covered, so a baseline-dirty tracked file
+    the worker restored to HEAD (no longer listed by `git diff --name-only
+    HEAD`) is still detected as a content change. Returns ([], []) when no
     snapshot is available.
+
+    Fails closed: if a final git query fails, RunGuardError is raised with a
+    precise reason instead of returning an empty result the caller would treat
+    as an available clean run.
     """
     if snapshot is None or cwd is None:
         return [], []
     try:
         current_tracked = _tracked_dirty_paths(cwd)
-    except RunGuardError:
-        current_tracked = []
+    except RunGuardError as exc:
+        raise RunGuardError(f"could not re-read tracked dirty files after run: {exc}") from exc
     try:
         current_untracked = _untracked_files(cwd)
-    except RunGuardError:
-        current_untracked = []
+    except RunGuardError as exc:
+        raise RunGuardError(f"could not re-read untracked files after run: {exc}") from exc
     baseline_tracked = dict(snapshot.tracked_dirty)
     baseline_untracked = dict(snapshot.untracked)
 
     changed: list[str] = []
+    current_tracked_set = set(current_tracked)
     for path in current_tracked:
         baseline = baseline_tracked.get(path)
         if baseline is None:
@@ -775,8 +789,20 @@ def changes_relative_to_snapshot(cwd: Path | None, snapshot: PreRunSnapshot | No
         # (content, deletion, or type/mode change).
         if _path_fingerprint(cwd, path) != baseline:
             changed.append(path)
+    # A baseline-dirty tracked file the worker restored to HEAD is no longer
+    # listed by `git diff --name-only HEAD`, so it is absent from
+    # current_tracked. Compare its final fingerprint to the baseline and
+    # attribute the restore (a content change back to HEAD) to the worker. This
+    # covers the union of baseline and final dirty tracked paths, not just the
+    # final set.
+    for path, baseline in baseline_tracked.items():
+        if path in current_tracked_set:
+            continue
+        if _path_fingerprint(cwd, path) != baseline:
+            changed.append(path)
 
     untracked: list[str] = []
+    current_untracked_set = set(current_untracked)
     for path in current_untracked:
         baseline = baseline_untracked.get(path)
         if baseline is None:
@@ -790,7 +816,6 @@ def changes_relative_to_snapshot(cwd: Path | None, snapshot: PreRunSnapshot | No
     # A baseline untracked file the worker deleted is no longer listed by git,
     # so compare final state explicitly and report it as an untracked-path
     # change attributable to the worker.
-    current_untracked_set = set(current_untracked)
     for path, baseline in baseline_untracked.items():
         if path in current_untracked_set:
             continue

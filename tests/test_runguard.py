@@ -792,9 +792,34 @@ def test_snapshot_payload_shape(tmp_path):
         "branch": snapshot.branch,
         "head": snapshot.head,
         "tracked_dirty_files": [],
+        "tracked_dirty_fingerprints": {},
         "untracked_files": [],
+        "untracked_fingerprints": {},
     }
     assert runguard.snapshot_payload(None) is None
+
+
+def test_snapshot_payload_persists_content_sensitive_fingerprints(tmp_path):
+    # Regression for finding 4: the persisted pre-run snapshot must carry
+    # enough content-sensitive data to audit/reproduce the worker-change
+    # comparison, not just path lists. Fingerprints are one-way digests and
+    # never raw contents.
+    repo = _repo(tmp_path)
+    secret = "sk-super-secret-value-do-not-leak"
+    (repo / "tracked.txt").write_text(secret + "\n")
+    (repo / "new.txt").write_text("already here\n")
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    payload = runguard.snapshot_payload(snapshot)
+    assert payload is not None
+    assert payload["tracked_dirty_fingerprints"] == dict(snapshot.tracked_dirty)
+    assert payload["untracked_fingerprints"] == dict(snapshot.untracked)
+    assert payload["tracked_dirty_fingerprints"].keys() == {"tracked.txt"}
+    assert payload["untracked_fingerprints"].keys() == {"new.txt"}
+    # Persisted fingerprints are content-sensitive digests, not raw contents.
+    blob = json.dumps(payload)
+    assert secret not in blob
+    assert all(secret not in fp for fp in payload["tracked_dirty_fingerprints"].values())
 
 
 def test_changes_relative_to_snapshot_attributes_only_worker_changes(tmp_path):
@@ -929,6 +954,76 @@ def test_changes_relative_to_snapshot_detects_type_change_of_predirty_tracked(tm
 
     assert changed == ["tracked.txt"]
     assert untracked == []
+
+
+def test_changes_relative_to_snapshot_detects_predirty_tracked_restored_to_head(tmp_path):
+    # Regression for finding 2: a baseline-dirty tracked file the worker restores
+    # to HEAD is no longer listed by `git diff --name-only HEAD`, so it disappears
+    # from current_tracked. The restore is a content change (dirty baseline ->
+    # HEAD) and must be attributed to the worker by comparing the union of
+    # baseline and final dirty tracked paths with content fingerprints.
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("already dirty\n")  # baseline tracked dirt
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    # Worker restores the file to HEAD content (no longer dirty).
+    (repo / "tracked.txt").write_text("base\n")
+
+    changed, untracked = runguard.changes_relative_to_snapshot(repo, snapshot)
+
+    assert changed == ["tracked.txt"]
+    assert untracked == []
+
+
+def test_changes_relative_to_snapshot_excludes_predirty_tracked_unchanged(tmp_path):
+    # Companion to finding 2: a baseline-dirty tracked file the worker leaves
+    # dirty at the exact baseline content must NOT be attributed to the worker.
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("already dirty\n")
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    # Worker does not touch tracked.txt; only creates a new untracked file.
+    (repo / "worker_new.txt").write_text("worker created\n")
+
+    changed, untracked = runguard.changes_relative_to_snapshot(repo, snapshot)
+
+    assert changed == []
+    assert untracked == ["worker_new.txt"]
+
+
+def test_changes_relative_to_snapshot_fails_closed_when_tracked_query_fails(tmp_path, monkeypatch):
+    # Regression for finding 3: a final git query failure must not become an
+    # available clean result. Fail closed with RunGuardError and a precise reason.
+    repo = _repo(tmp_path)
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    def boom(cwd, *args, **kwargs):
+        return proc.Result(128, "", "fatal: not a git object")
+
+    monkeypatch.setattr(runguard, "_git", boom)
+
+    with pytest.raises(runguard.RunGuardError, match="could not re-read tracked dirty files after run"):
+        runguard.changes_relative_to_snapshot(repo, snapshot)
+
+
+def test_changes_relative_to_snapshot_fails_closed_when_untracked_query_fails(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    real_git = runguard._git
+    calls = {"n": 0}
+
+    def flaky(cwd, *args, **kwargs):
+        calls["n"] += 1
+        # First call (tracked dirty paths) succeeds; second (ls-files) fails.
+        if "ls-files" in args:
+            return proc.Result(128, "", "fatal: loose object")
+        return real_git(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(runguard, "_git", flaky)
+
+    with pytest.raises(runguard.RunGuardError, match="could not re-read untracked files after run"):
+        runguard.changes_relative_to_snapshot(repo, snapshot)
 
 
 def test_capture_pre_run_snapshot_fingerprint_excludes_raw_content(tmp_path):

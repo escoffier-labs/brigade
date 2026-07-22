@@ -74,7 +74,23 @@ class _GrokFinal:
 
 
 _CLAUDE_DISALLOWED_ALWAYS = "Task,Agent"
-_CLAUDE_DISALLOWED_READ_ONLY = "Task,Agent,Bash,Edit,Write,NotebookEdit"
+# `mcp__*` removes every MCP/plugin tool from Claude's context so configured
+# extension write tools cannot bypass read-only (the built-in tool names alone
+# leave them available). Read-only is also enforced by `--permission-mode plan`,
+# the actual permission/sandbox mechanism, so a buggy `--disallowedTools` for
+# MCP tools cannot let a write through.
+_CLAUDE_DISALLOWED_READ_ONLY = "Task,Agent,Bash,Edit,Write,NotebookEdit,mcp__*"
+
+
+class UnsupportedSandboxError(ValueError):
+    """A builder rejected the launch because the sandbox cannot be enforced.
+
+    Subclasses ``ValueError`` so direct ``build_argv`` callers that test for the
+    historical ``ValueError`` keep working, while ``run_agent`` can classify this
+    distinctly from unrelated ``ValueError`` raised by other builders (unknown
+    cli, unsupported model/reasoning pin, bad resume-session args, ...).
+    """
+
 
 # Claude Code has no native workspace-write sandbox: headless `-p` either waits
 # on a permission prompt (hang) or, with --dangerously-skip-permissions, grants
@@ -101,11 +117,27 @@ _CLAUDE_NO_SANDBOX_ERROR = (
 
 def _claude_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
     if read_only or sandbox == "read-only":
-        # --disallowedTools removes tools from the model's context entirely
-        # (a hard deny), so read-only is enforced by the CLI, not just the prompt.
-        return ["claude", "-p", "--disallowedTools", _CLAUDE_DISALLOWED_READ_ONLY, prompt]
+        # Read-only is enforced two ways:
+        # 1. `--permission-mode plan` is Claude's actual permission/sandbox
+        #    mechanism: file edits and shell-write tools route to the permission
+        #    callback and are never auto-approved, so writes fail closed. This
+        #    catches MCP/plugin write tools that `--disallowedTools` cannot reach
+        #    (issue anthropics/claude-code#12863: --disallowedTools is silently
+        #    ignored for MCP server tools).
+        # 2. `--disallowedTools` removes the built-in mutating tools and every
+        #    MCP/plugin tool (`mcp__*`) from the model's context (a hard deny),
+        #    so read-only is not a prompt-only claim.
+        return [
+            "claude",
+            "-p",
+            "--permission-mode",
+            "plan",
+            "--disallowedTools",
+            _CLAUDE_DISALLOWED_READ_ONLY,
+            prompt,
+        ]
     if sandbox == "workspace-write":
-        raise ValueError(_CLAUDE_WORKSPACE_WRITE_ERROR)
+        raise UnsupportedSandboxError(_CLAUDE_WORKSPACE_WRITE_ERROR)
     if sandbox == "danger-full-access":
         # Explicit full-access request: headless `-p` would stall on a permission
         # prompt without --dangerously-skip-permissions; the deny list still
@@ -119,7 +151,7 @@ def _claude_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | 
             prompt,
         ]
     # sandbox is None: refuse to guess between stalling and granting full access.
-    raise ValueError(_CLAUDE_NO_SANDBOX_ERROR)
+    raise UnsupportedSandboxError(_CLAUDE_NO_SANDBOX_ERROR)
 
 
 def _codex_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
@@ -917,16 +949,31 @@ def run_agent(
             cwd=cwd,
             resume_session_id=resume_session_id,
         )
-    except ValueError as exc:
-        # A builder rejected the launch before spawning (e.g. claude
-        # workspace-write, which this CLI version cannot enforce). Fail the
-        # seat cleanly instead of crashing the run or stalling on a prompt.
+    except UnsupportedSandboxError as exc:
+        # A builder rejected the launch before spawning because the requested
+        # sandbox cannot be enforced (e.g. claude workspace-write or a claude
+        # write run with no explicit sandbox). Fail the seat cleanly instead of
+        # crashing the run or stalling on a prompt.
         return AgentResult(
             text="",
             ok=False,
             detail=str(exc)[:200],
             failure_phase="dispatch",
             failure_kind="unsupported-sandbox",
+            requested_model=model,
+            reasoning=reasoning,
+        )
+    except ValueError as exc:
+        # An unrelated builder rejected the launch before spawning (unknown
+        # cli, unsupported model/reasoning pin, bad resume-session args, ...).
+        # These are not sandbox failures; classify them accurately instead of
+        # mislabeling them unsupported-sandbox.
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=str(exc)[:200],
+            failure_phase="dispatch",
+            failure_kind="invalid-dispatch-args",
             requested_model=model,
             reasoning=reasoning,
         )

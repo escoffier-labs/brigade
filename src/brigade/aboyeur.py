@@ -1464,7 +1464,14 @@ def build_ground_truth(
     # counts are left unavailable (they cannot be computed without baseline
     # contamination).
     if pre_run_snapshot is not None:
-        changed_names_list, untracked_files = runguard.changes_relative_to_snapshot(cwd, pre_run_snapshot)
+        try:
+            changed_names_list, untracked_files = runguard.changes_relative_to_snapshot(cwd, pre_run_snapshot)
+        except runguard.RunGuardError as exc:
+            # Fail closed: a final git query failure must not become an
+            # available clean result. Surface unavailable ground truth with a
+            # precise reason instead of charging (or clearing) the worker.
+            payload["reason"] = str(exc)
+            return payload
         changed_names = "\n".join(changed_names_list)
         baseline_dirty = bool(pre_run_snapshot.tracked_dirty_paths) or bool(pre_run_snapshot.untracked_paths)
         if baseline_dirty:

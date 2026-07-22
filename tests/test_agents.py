@@ -56,8 +56,10 @@ def test_build_argv_for_read_only_codex():
     assert agents.build_argv("claude", "hi", read_only=True) == [
         "claude",
         "-p",
+        "--permission-mode",
+        "plan",
         "--disallowedTools",
-        "Task,Agent,Bash,Edit,Write,NotebookEdit",
+        "Task,Agent,Bash,Edit,Write,NotebookEdit,mcp__*",
         "hi",
     ]
     assert agents.build_argv("opencode", "hi", read_only=True) == ["opencode", "run", "hi"]
@@ -109,13 +111,19 @@ def test_build_argv_for_read_only_codex():
 def test_claude_read_only_disallows_mutating_tools_and_subagents():
     # Contract: read-only must be enforced by the CLI (a hard deny), not just
     # the prompt. Subagents (Task, Agent) and every filesystem-mutating tool
-    # are removed from the model's context.
+    # are removed from the model's context, and every MCP/plugin tool is
+    # removed via `mcp__*` so configured extension write tools cannot bypass
+    # read-only. Read-only is also enforced by `--permission-mode plan`,
+    # Claude's actual permission/sandbox mechanism, so a buggy `--disallowedTools`
+    # for MCP tools (anthropics/claude-code#12863) cannot let a write through.
     argv = agents.build_argv("claude", "inspect it", read_only=True)
     assert argv == [
         "claude",
         "-p",
+        "--permission-mode",
+        "plan",
         "--disallowedTools",
-        "Task,Agent,Bash,Edit,Write,NotebookEdit",
+        "Task,Agent,Bash,Edit,Write,NotebookEdit,mcp__*",
         "inspect it",
     ]
 
@@ -124,8 +132,10 @@ def test_claude_read_only_sandbox_variant_matches_read_only_flag():
     assert agents.build_argv("claude", "inspect it", sandbox="read-only") == [
         "claude",
         "-p",
+        "--permission-mode",
+        "plan",
         "--disallowedTools",
-        "Task,Agent,Bash,Edit,Write,NotebookEdit",
+        "Task,Agent,Bash,Edit,Write,NotebookEdit,mcp__*",
         "inspect it",
     ]
 
@@ -209,6 +219,76 @@ def test_read_only_enforcement_claude_is_hard():
     assert agents.READ_ONLY_ENFORCEMENT["claude"] == "hard"
     assert agents.read_only_enforcement("claude") == "hard"
     assert agents.read_only_enforcement("claude", sandbox="read-only") == "hard"
+
+
+def test_run_agent_non_sandbox_value_error_is_not_unsupported_sandbox(monkeypatch):
+    # Regression for finding 1 (CodeRabbit r3632410930): a ValueError from
+    # build_argv that is NOT a sandbox rejection (here, an unsupported model pin
+    # on goose) must not be mislabeled unsupported-sandbox. Only the dedicated
+    # UnsupportedSandboxError maps to unsupported-sandbox; other ValueErrors map
+    # to invalid-dispatch-args.
+    spawned = []
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: spawned.append(argv))
+
+    result = agents.run_agent("goose", "hi", model="anything")
+
+    assert result.ok is False
+    assert result.failure_phase == "dispatch"
+    assert result.failure_kind == "invalid-dispatch-args"
+    assert "does not support model pinning" in result.detail
+    assert spawned == []
+
+
+def test_run_agent_unknown_cli_value_error_is_not_unsupported_sandbox(monkeypatch):
+    # A second non-sandbox ValueError class: an unknown cli must be
+    # invalid-dispatch-args, not unsupported-sandbox.
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, "answer", ""))
+
+    result = agents.run_agent("nope", "hi")
+
+    assert result.ok is False
+    assert result.failure_phase == "dispatch"
+    assert result.failure_kind == "invalid-dispatch-args"
+    assert "unknown agent cli" in result.detail
+
+
+def test_unsupported_sandbox_error_is_value_error_subclass():
+    # Contract: direct build_argv callers historically caught ValueError; the
+    # dedicated sandbox error stays a ValueError subclass so they keep working.
+    assert issubclass(agents.UnsupportedSandboxError, ValueError)
+    with pytest.raises(ValueError, match="workspace-write"):
+        agents.build_argv("claude", "implement it", sandbox="workspace-write")
+    with pytest.raises(ValueError, match="explicit sandbox"):
+        agents.build_argv("claude", "implement it")
+
+
+def test_claude_read_only_enforces_permission_mode_plan_not_prompt_only():
+    # Regression for finding 5 (Greptile security r3632423694): Claude read-only
+    # must be enforced by Claude's actual permission/sandbox mechanism
+    # (`--permission-mode plan`), not a prompt-only claim. Plan mode routes file
+    # edits and shell-write tools to the permission callback and never
+    # auto-approves them, so configured MCP/plugin write tools -- which
+    # `--disallowedTools` cannot reach (anthropics/claude-code#12863) -- cannot
+    # bypass read-only. The deny list also strips every MCP/plugin tool via
+    # `mcp__*` as defense in depth.
+    argv = agents.build_argv("claude", "Write the secret to disk.", read_only=True)
+
+    # The actual permission/sandbox mechanism is present in the argv.
+    assert "--permission-mode" in argv
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+
+    # Every MCP/plugin tool is removed from context so extension write tools
+    # cannot bypass the built-in-only deny list.
+    disallowed = argv[argv.index("--disallowedTools") + 1].split(",")
+    assert "mcp__*" in disallowed
+    assert {"Task", "Agent", "Bash", "Edit", "Write", "NotebookEdit"}.issubset(disallowed)
+
+    # Read-only is NOT a prompt-only claim: the user prompt is passed through
+    # verbatim with no "do not modify" instruction injected by the adapter.
+    assert argv[-1] == "Write the secret to disk."
+    assert "Read-only planning run." not in argv[-1]
 
 
 def test_build_argv_antigravity_writable_uses_cwd_write_approval(tmp_path):

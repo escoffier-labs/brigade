@@ -4667,3 +4667,28 @@ def test_build_ground_truth_clean_baseline_preserves_diffstat(tmp_path):
     assert ground_truth["untracked_files"] == ["worker_new.txt"]
     assert ground_truth["diffstat"] != ""
     assert "diffstat_unavailable" not in ground_truth
+
+
+def test_build_ground_truth_fails_closed_when_final_git_query_fails(tmp_path, monkeypatch):
+    # Regression for finding 3 (Greptile r3632423436): a final git query failure
+    # during snapshot comparison must not become an available clean result.
+    # Ground truth fails closed with available=False and a precise reason.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "tracked.txt").write_text("base\n")
+    _commit_all(repo)
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+    (repo / "tracked.txt").write_text("worker changed\n")
+
+    def boom(cwd, *args, **kwargs):
+        return proc.Result(128, "", "fatal: not a git object")
+
+    monkeypatch.setattr(runguard, "_git", boom)
+
+    ground_truth = aboyeur.build_ground_truth(repo, datetime.now(timezone.utc), pre_run_snapshot=snapshot)
+
+    assert ground_truth["available"] is False
+    assert "could not re-read tracked dirty files after run" in str(ground_truth["reason"])
+    assert ground_truth["changed_files"] == []
+    assert ground_truth["untracked_files"] == []
