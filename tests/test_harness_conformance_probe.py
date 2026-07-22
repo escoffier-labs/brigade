@@ -476,6 +476,70 @@ def test_antigravity_version_probe_records_version_and_platform_receipt(probe, s
     assert "agy 1.4.0" in version_probe["output"]
 
 
+def test_antigravity_version_probe_falls_back_to_declared_availability_candidates(probe, schema, fixtures) -> None:
+    # Greptile P1 on PR 450: an install with only the `antigravity` launcher
+    # must not report availability "available" alongside a blocked version
+    # probe; the probe resolves whichever declared candidate is present.
+    fixture = next(item for item in fixtures if item["harness"]["id"] == "antigravity")
+    with (
+        mock.patch.object(
+            probe.shutil,
+            "which",
+            side_effect=lambda name: "/fake/bin/antigravity" if name == "antigravity" else None,
+        ),
+        mock.patch.object(probe, "_popen_probe_process", return_value=_fake_version_process()),
+        mock.patch.object(
+            probe,
+            "_collect_bounded_output",
+            return_value=(b"antigravity 2.0.1\n", False, None),
+        ),
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
+    assert result["availability"]["state"] == "available"
+    version_probe = result["version_probe"]
+    assert version_probe["state"] == "observed"
+    assert version_probe["command"] == "antigravity"
+    assert version_probe["version"] == "antigravity 2.0.1"
+    assert version_probe["platform"] == sys.platform
+
+
+def test_version_receipt_skips_banner_lines_without_version_numbers(probe, schema, fixtures) -> None:
+    # Greptile P2 on PR 450: a warning or banner printed before the version
+    # must not be reported as the version evidence.
+    fixture = next(item for item in fixtures if item["harness"]["id"] == "hermes")
+    bannered_output = b"WARNING: deprecated config key detected\nBuild channel: stable\nhermes 0.3.1\n"
+    with (
+        mock.patch.object(probe.shutil, "which", return_value="/fake/bin/hermes"),
+        mock.patch.object(probe, "_popen_probe_process", return_value=_fake_version_process()),
+        mock.patch.object(
+            probe,
+            "_collect_bounded_output",
+            return_value=(bannered_output, False, None),
+        ),
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
+    version_probe = result["version_probe"]
+    assert version_probe["state"] == "observed"
+    assert version_probe["version"] == "hermes 0.3.1"
+
+
+def test_version_receipt_reports_none_when_no_version_line_present(probe, schema, fixtures) -> None:
+    fixture = next(item for item in fixtures if item["harness"]["id"] == "hermes")
+    with (
+        mock.patch.object(probe.shutil, "which", return_value="/fake/bin/hermes"),
+        mock.patch.object(probe, "_popen_probe_process", return_value=_fake_version_process()),
+        mock.patch.object(
+            probe,
+            "_collect_bounded_output",
+            return_value=(b"build channel: stable\n", False, None),
+        ),
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
+    version_probe = result["version_probe"]
+    assert version_probe["state"] == "observed"
+    assert version_probe["version"] is None
+
+
 def test_antigravity_missing_binary_stays_externally_blocked_binary_not_found(probe, schema, fixtures) -> None:
     fixture = next(item for item in fixtures if item["harness"]["id"] == "antigravity")
     with mock.patch.object(probe.shutil, "which", return_value=None):

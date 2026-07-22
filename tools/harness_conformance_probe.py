@@ -48,6 +48,7 @@ ASSIGNMENT_SECRET = re.compile(r"(?i)((?:api[_-]?key|token|secret|password)\s*[:
 AUTHORIZATION_HEADER = re.compile(r"(?i)(Authorization\s*:\s*).+")
 BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+([A-Za-z0-9._~+/=-]+)\b")
 JSON_QUOTED_CREDENTIAL = re.compile(r'(?i)("(?:api[_-]?key|token|secret|password)"\s*:\s*")[^"]+(")')
+VERSION_LINE = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[-+~][0-9A-Za-z][0-9A-Za-z.-]*)?")
 OUTPUT_CAP_BYTES = 65536
 DEFAULT_TIMEOUT_SECONDS = 10.0
 
@@ -81,6 +82,21 @@ def redact_text(value: str, *home_dirs: str | None) -> str:
     redacted = BEARER_TOKEN.sub("Bearer [REDACTED]", redacted)
     redacted = JSON_QUOTED_CREDENTIAL.sub(r"\1[REDACTED]\2", redacted)
     return redacted
+
+
+def _extract_version_line(output: str) -> str | None:
+    """Return the first output line carrying a dotted version number.
+
+    Vendors sometimes print warnings or banners before the version on
+    ``--version``; a bare first-nonblank-line parse would report that banner as
+    the version. Requiring a dotted numeric component skips banner lines while
+    still accepting common formats (``0.3.1``, ``1.4.0-rc.1``, ``2.0+build5``).
+    """
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped and VERSION_LINE.search(stripped):
+            return stripped
+    return None
 
 
 def load_schema(schema_path: Path) -> dict[str, Any]:
@@ -418,6 +434,20 @@ def run_version_probe(fixture: dict[str, Any], *, timeout_seconds: float = DEFAU
         }
 
     executable = shutil.which(command)
+    probed_command = command
+    if executable is None and surface != "cli":
+        # A desktop/GUI install may ship its CLI companion under one of the
+        # declared availability candidates instead of the primary binary
+        # command. Probe whichever candidate is present so the availability
+        # signal and the version receipt never disagree.
+        for candidate in _command_candidates(fixture):
+            if candidate == command or not _is_safe_command_name(candidate):
+                continue
+            resolved = shutil.which(candidate)
+            if resolved is not None:
+                executable = resolved
+                probed_command = candidate
+                break
     if executable is None:
         return {
             "harness_id": harness_id,
@@ -468,32 +498,31 @@ def run_version_probe(fixture: dict[str, Any], *, timeout_seconds: float = DEFAU
                 "harness_id": harness_id,
                 "state": "externally_blocked",
                 "reason": "TimeoutExpired",
-                "command": command,
+                "command": probed_command,
             }
         if overflow:
             return {
                 "harness_id": harness_id,
                 "state": "externally_blocked",
                 "reason": "output_overflow",
-                "command": command,
+                "command": probed_command,
             }
 
         output = redact_text(output_bytes.decode("utf-8", errors="replace"), str(home_dir))
         if return_code == 0:
-            version = next((line.strip() for line in output.splitlines() if line.strip()), None)
             return {
                 "harness_id": harness_id,
                 "state": "observed",
-                "command": command,
+                "command": probed_command,
                 "exit_code": return_code,
                 "platform": sys.platform,
-                "version": version,
+                "version": _extract_version_line(output),
                 "output": output,
             }
         return {
             "harness_id": harness_id,
             "state": "nonzero_exit",
-            "command": command,
+            "command": probed_command,
             "exit_code": return_code,
             "platform": sys.platform,
             "output": output,
