@@ -159,3 +159,45 @@ def test_partially_unknown_covers_falls_back_to_waves(dag_harness, capsys):
     )
     assert "falling back to wave scheduler" in capsys.readouterr().err
     assert len(results) == 1
+
+
+DEPS_REDUNDANT = {
+    "plan": (),
+    "implement": ("plan",),
+}
+
+
+def test_redundant_coverer_failure_does_not_skip_dependents(dag_harness):
+    # Two assignments cover "plan"; one fails but the other satisfies the
+    # stage, so "implement" must still run (a dependency stage is satisfied
+    # when ANY of its coverers succeeds).
+    results = dag_harness(
+        assignments=[
+            _a("p1", 1, ["plan"]),
+            _a("p2", 1, ["plan"]),
+            _a("i", 2, ["implement"]),
+        ],
+        dependencies=DEPS_REDUNDANT,
+        outcomes={"p1": WorkerResult(worker="p1", task="task-p1", text="", ok=False, detail="boom")},
+    )
+    by_worker = {r.worker: r for r in results}
+    assert by_worker["i"].ok is True
+    assert "i" in dag_harness.invocations_set
+
+
+def test_all_redundant_coverers_failed_skips_dependents(dag_harness):
+    results = dag_harness(
+        assignments=[
+            _a("p1", 1, ["plan"]),
+            _a("p2", 1, ["plan"]),
+            _a("i", 2, ["implement"]),
+        ],
+        dependencies=DEPS_REDUNDANT,
+        outcomes={
+            "p1": WorkerResult(worker="p1", task="task-p1", text="", ok=False, detail="boom"),
+            "p2": WorkerResult(worker="p2", task="task-p2", text="", ok=False, detail="boom"),
+        },
+    )
+    by_worker = {r.worker: r for r in results}
+    assert by_worker["i"].status == "skipped"
+    assert "i" not in dag_harness.invocations_set

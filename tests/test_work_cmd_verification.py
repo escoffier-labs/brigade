@@ -1575,3 +1575,44 @@ def test_work_verify_and_closeout_cli(tmp_path, monkeypatch):
         ("verify-show", {"target": tmp_path, "run_id": "latest", "json_output": True}),
         ("closeout", {"target": tmp_path, "session_id": "latest", "json_output": True}),
     ]
+
+
+def test_tree_fingerprint_distinguishes_tracked_binary_changes(tmp_path):
+    # `git diff HEAD` elides binary content ("Binary files differ"), so two
+    # different modifications of a tracked binary would collide without
+    # --binary. The fingerprint must include the binary delta.
+    from brigade.work_cmd import verification
+
+    target_a = tmp_path / "repo-a"
+    target_b = tmp_path / "repo-b"
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+    }
+    for target in (target_a, target_b):
+        target.mkdir()
+        _init_git_repo_with_fixed_head(target)
+        (target / "blob.bin").write_bytes(b"\x00\x01\x02base")
+        subprocess.run(["git", "add", "blob.bin"], cwd=target, check=True, stdout=subprocess.DEVNULL)
+        subprocess.run(
+            ["git", "commit", "-m", "add blob"],
+            cwd=target,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            env=env,
+        )
+
+    head_a = subprocess.check_output(["git", "-C", str(target_a), "rev-parse", "HEAD"], text=True).strip()
+    head_b = subprocess.check_output(["git", "-C", str(target_b), "rev-parse", "HEAD"], text=True).strip()
+    assert head_a == head_b, "test setup: HEAD commits must be identical to isolate the binary-diff collision"
+
+    (target_a / "blob.bin").write_bytes(b"\x00\x01\x02changed-one-way")
+    (target_b / "blob.bin").write_bytes(b"\x00\x01\x02changed-another")
+
+    fp_a = verification._tree_fingerprint(target_a)
+    fp_b = verification._tree_fingerprint(target_b)
+
+    assert fp_a is not None
+    assert fp_b is not None
+    assert fp_a != fp_b

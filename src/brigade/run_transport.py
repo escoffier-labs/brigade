@@ -731,19 +731,26 @@ def _dag_dispatch(
     dependents of a failed/timed-out/held prerequisite become ``skipped``.
     Result order matches the original ``assignments`` order.
     """
-    index_of = {id(a): i for i, a in enumerate(assignments)}
     coverers: dict[str, list[int]] = {}
     for i, a in enumerate(assignments):
         for stage_name in a.covers:
             coverers.setdefault(stage_name, []).append(i)
-    prereqs: list[set[int]] = []
-    for a in assignments:
-        wanted: set[int] = set()
+    # One group per depended-on stage: the stage is satisfied when ANY of its
+    # coverers succeeds, and dead only when ALL of them have failed. A single
+    # flat prerequisite set would let one failed redundant coverer doom
+    # dependents whose stage another coverer already satisfied.
+    prereq_groups: list[list[tuple[int, ...]]] = []
+    for i, a in enumerate(assignments):
+        groups: dict[str, tuple[int, ...]] = {}
         for stage_name in a.covers:
             for dep_stage in route_dependencies.get(stage_name, ()):
-                wanted.update(coverers.get(dep_stage, ()))
-        wanted.discard(index_of[id(a)])
-        prereqs.append(wanted)
+                others = tuple(idx for idx in coverers.get(dep_stage, ()) if idx != i)
+                if not others:
+                    # Nobody else covers it (or only this assignment does):
+                    # vacuously satisfied, same leniency as wave mode.
+                    continue
+                groups[dep_stage] = others
+        prereq_groups.append(list(groups.values()))
     held_indices = {i for i, a in enumerate(assignments) if set(a.covers) & set(route_held)}
     results: list[WorkerResult | None] = [None] * len(assignments)
     completed_ok: list[WorkerResult] = []
@@ -763,21 +770,19 @@ def _dag_dispatch(
     def terminal(i: int) -> bool:
         return results[i] is not None
 
+    def _group_satisfied(group: tuple[int, ...]) -> bool:
+        return any((rp := results[p]) is not None and rp.ok for p in group)
+
     def ready(i: int) -> bool:
         if terminal(i) or i in submitted:
             return False
-        for p in prereqs[i]:
-            rp = results[p]
-            if rp is None or not rp.ok:
-                return False
-        return True
+        return all(_group_satisfied(group) for group in prereq_groups[i])
 
     def doomed(i: int) -> bool:
         if terminal(i) or i in submitted:
             return False
-        for p in prereqs[i]:
-            rp = results[p]
-            if rp is not None and not rp.ok:
+        for group in prereq_groups[i]:
+            if all(results[p] is not None for p in group) and not _group_satisfied(group):
                 return True
         return False
 
