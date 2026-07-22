@@ -1,6 +1,7 @@
 {
   "schema": "harness-contract.v1",
   "harness": {"id": "antigravity", "surface": "gui"},
+  "binary": {"command": "agy", "version_args": ["--version"]},
   "availability": {"command_candidates": ["agy", "antigravity"]},
   "capabilities": [
     {"id": "instructions", "claim": "Skills codelab exists, but no local binary was available.", "provenance": "documented", "support_state": "externally_blocked", "implementation_layers": ["unknown"], "evidence": [{"kind": "vendor_documentation", "reference": "https://codelabs.developers.google.com/getting-started-with-antigravity-skills"}], "tested_version": null, "platform": "linux", "scope": "externally blocked"},
