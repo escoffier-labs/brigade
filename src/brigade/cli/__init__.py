@@ -233,7 +233,14 @@ def main(argv=None) -> int:
     if func is None:
         parser.error(f"unknown command: {args.command}")
         return 2
-    return func(args)
+    exit_code = func(args)
+    try:
+        from .. import update_notify
+
+        update_notify.maybe_notify(parse_argv, exit_code)
+    except Exception:  # never let the notice break a command
+        pass
+    return exit_code
 
 
 if __name__ == "__main__":  # pragma: no cover

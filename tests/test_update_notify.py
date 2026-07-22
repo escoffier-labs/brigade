@@ -202,3 +202,43 @@ def test_run_refresh_honors_optout(tmp_path, monkeypatch):
     rc = update_notify.run_refresh(env=_env(tmp_path, BRIGADE_NO_UPDATE_CHECK="1"), now=9.0)
     assert rc == 0
     assert not (tmp_path / "cache" / "brigade" / "update-notify.json").exists()
+
+
+def test_update_notify_refresh_flag_dispatches(monkeypatch):
+    import argparse
+
+    from brigade.cli import update as update_cli
+
+    called: list[bool] = []
+    monkeypatch.setattr(update_notify, "run_refresh", lambda: called.append(True) or 0)
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    update_cli.register(sub)
+    args = parser.parse_args(["update", "--notify-refresh"])
+    assert args.func(args) == 0
+    assert called == [True]
+
+
+def test_main_invokes_notify_after_command(monkeypatch):
+    from brigade import cli
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        update_notify,
+        "maybe_notify",
+        lambda argv, exit_code: seen.update(argv=argv, exit_code=exit_code),
+    )
+
+    real_build = cli._build_parser
+
+    def fake_build_parser():
+        parser = real_build()
+        sub = parser._subparsers._group_actions[0]  # the subparsers action
+        probe = sub.add_parser("notify-probe")
+        probe.set_defaults(func=lambda args: 7)
+        return parser
+
+    monkeypatch.setattr(cli, "_build_parser", fake_build_parser)
+    assert cli.main(["notify-probe"]) == 7
+    assert seen == {"argv": ["notify-probe"], "exit_code": 7}
