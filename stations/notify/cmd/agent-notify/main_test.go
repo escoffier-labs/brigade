@@ -73,6 +73,20 @@ func withIsolatedConfig(t *testing.T, args []string) []string {
 // stdin, and env vars, returning the exit code, stdout, and stderr.
 func runMain(t *testing.T, args []string, stdin string, env map[string]string) (int, string, string) {
 	t.Helper()
+	// Clear ambient notification env vars before applying the test's env
+	// map. config.Load discovers DISCORD_WEBHOOK_URL, TELEGRAM_BOT_TOKEN +
+	// TELEGRAM_CHAT_ID, and SIGNAL_CLI_URL + SIGNAL_FROM + SIGNAL_TO from
+	// the process env, so a developer's exported credentials would otherwise
+	// add channels to tests and could send real notifications. t.Setenv
+	// records the prior value and restores it automatically when the test
+	// ends.
+	for _, k := range []string{
+		"DISCORD_WEBHOOK_URL",
+		"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+		"SIGNAL_CLI_URL", "SIGNAL_FROM", "SIGNAL_TO",
+	} {
+		t.Setenv(k, "")
+	}
 	for k, v := range env {
 		t.Setenv(k, v)
 	}
@@ -101,6 +115,52 @@ func TestRun_PlainStringToDiscord_ExitsZero(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("Discord webhook never received the request")
+	}
+}
+
+// TestRunMainClearsAmbientChannelEnv verifies that runMain clears ambient
+// notification environment variables before applying the test's env map, so a
+// developer's exported credentials cannot add channels to a test run or send
+// real notifications. A complete Signal configuration is set as ambient
+// process env (outside the env map passed to runMain); only a local Discord
+// endpoint is passed through the env map. The ambient Signal server must
+// receive zero requests while the intended Discord send succeeds.
+func TestRunMainClearsAmbientChannelEnv(t *testing.T) {
+	var signalHits int
+	signalSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		signalHits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer signalSrv.Close()
+
+	var discordGot map[string]interface{}
+	discordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &discordGot)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer discordSrv.Close()
+
+	// Ambient Signal configuration lives in the process env, NOT in the env
+	// map handed to runMain. Without clearing, config.Load discovers it and
+	// the Signal channel sends to signalSrv.
+	t.Setenv("SIGNAL_CLI_URL", signalSrv.URL)
+	t.Setenv("SIGNAL_FROM", "+15551234567")
+	t.Setenv("SIGNAL_TO", "+15557654321")
+
+	code, _, stderr := runMain(t,
+		[]string{"agent-notify", "ambient clear check"},
+		"",
+		map[string]string{"DISCORD_WEBHOOK_URL": discordSrv.URL},
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	if discordGot == nil {
+		t.Fatal("Discord webhook never received the intended request")
+	}
+	if signalHits != 0 {
+		t.Fatalf("ambient Signal server received %d request(s); runMain did not clear ambient channel env", signalHits)
 	}
 }
 
