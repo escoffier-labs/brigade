@@ -103,7 +103,7 @@ Brigade has grown from a bootstrap kit into a local control plane for agent work
 - Portable tool catalog: tool discovery, contracts, call planning, approval queues, explicit script and local MCP execution, run receipts, replay candidates, checkpoints, runtimes, host-local policy, parity, packs, sync, and projection health.
 - Shared skills: reviewed `SKILL.md` packs with metadata, provenance, linting, fingerprints, trust score, changelog, install history, diffs, portable packs, publish proposals, and one-command installation across Codex, Claude, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, Grok, Amp, Crush, OpenClaw, Hermes, and MCP-resource targets.
 - Local producers: memory care, chat export sweeps, backup health, code review, context packs, project consolidation, learning candidates and replay, and security scans.
-- Operator notifications: optional `agent-notify` status and setup planning for private Discord, Telegram, or Signal notifications, with no sending from doctor/status flows.
+- Operator notifications: optional `agent-notify` status and setup planning for private Discord, Telegram, or Signal notifications. `brigade work brief` and related status surfaces may report readiness or suggest the station; no command sends unless the operator uses an explicit send action.
 - Security and publish guards: content-guard integration, template audit, SARIF output, suppressions, accepted-risk closeouts, policy presets, prompt and instruction checks, MCP checks, supply-chain checks, and redacted reports.
 
 The common rule is deliberate friction: Brigade writes local receipts and review queues, but it does not start daemons, mutate remotes, edit canonical memory, run arbitrary commands, publish releases, or auto-promote findings without an explicit operator command.
@@ -872,7 +872,7 @@ Operator notification commands:
 - `brigade notifications status --json` inspects the local `agent-notify` binary, config file, selected profile, and referenced environment variables without sending.
 - `brigade notifications setup plan --profile operator` prints reviewed Codex and Claude Code hook snippets.
 - `brigade doctor` includes advisory `agent-notify` health under the notifications station.
-- `brigade center status`, `brigade work brief`, and `brigade daily status/plan` surface notification readiness as local advisory health.
+- `brigade center status`, `brigade work brief`, and `brigade daily status/plan` surface notification readiness as local advisory health. They may suggest installing the notifications station; they never send.
 
 Brigade does not send notifications, edit harness hook files, run hook snippets, or store webhook URLs/tokens from these commands. Keep channel secrets in environment variables referenced by `~/.config/agent-notify/config.toml`.
 
@@ -1341,7 +1341,7 @@ See [QUICKSTART.md](QUICKSTART.md) for setup, verification, and the ingest flow.
 > **In plain terms:** "stations" group built-in capabilities and optional tools Brigade can install and wire for you. Managed tools run as separate command-line processes. Content Guard is embedded in Brigade, so `brigade add guard` only offers the optional Plating helper.
 
 Some stations can install and wire external tools for you.
-Run `brigade setup` first to install GraphTrail, `graphtrail-mcp`, MiseLedger, and SessionFind from the running CLI's exact release manifest. `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain one-release compatibility paths for independent installs; they are not required after setup. Use `brigade add <station>` for station-specific tools that setup does not manage, then wire their default config.
+Run `brigade setup` first to install GraphTrail, `graphtrail-mcp`, MiseLedger, SessionFind, and `agent-notify` (when published on the release manifest) from the running CLI's exact release manifest. `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain one-release compatibility paths for independent installs; they are not required after setup. Use `brigade add <station>` for station-specific tools that setup does not manage, then wire their default config.
 Tools are never imported in process; Brigade shells out to each CLI, so the boundary stays model-neutral and mixed-language.
 `brigade add <path>` also discovers a local `station.json` manifest from an external station repo. The manifest path reports the station name, install command, and machine surfaces. Install commands from a manifest are not executed unless `--install` is passed.
 
@@ -1351,6 +1351,7 @@ brigade add guard    # embedded scrub path + optional plating
 brigade add tokens   # token-glace (+ optional usage-tracker)
 brigade add skills   # built-in skills + optional Skillet roster
 brigade add pantry   # agentpantry (extras surface)
+brigade add notifications   # agent-notify (extras surface)
 brigade stations discover --root ~/repos
 brigade add ../agentpantry   # inspect an external station.json
 ```
@@ -1376,6 +1377,11 @@ Like the memory satellites, agentpantry inspects host-global state, so its check
 Use `brigade pantry status` and `brigade pantry doctor` for pantry-specific health with explicit `next` commands, `brigade pantry setup plan --role source|sink` to preview or write a reviewed setup plan, and `brigade pantry service plan --role source|sink` to preview or write service setup steps.
 Use `brigade pantry expiry-alert` to report near-expiry sessions and preview the `agent-notify` message Brigade would send. Add `--send` only after `brigade add notifications` if you want delivery.
 These plan commands do not generate or copy PSKs, start services, or mutate browser, GitHub, OpenClaw, or other auth files. Product page: https://brigade.tools/agentpantry.
+
+`notifications` is the operator notification station. `agent-notify` remains a process-boundary Go binary; Brigade never imports it. Source lives in `stations/notify/` in this repository. Released pipx installs resolve `agent-notify` from the pinned unified release manifest through `brigade setup` once stable publishes its assets. `go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest` is the explicit fallback when you are on a source checkout or the component is not yet published on the running manifest. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing at the monorepo; it is not archived until a containing Brigade release ships and published acceptance passes.
+`brigade add notifications` installs `agent-notify` when missing and prints manual wiring steps.
+Use `brigade notifications status` and `brigade notifications setup plan` for advisory health and reviewed hook snippets without sending.
+`brigade work brief`, `brigade center status`, and `brigade daily status/plan` may surface notification readiness or suggest installing the station; Brigade never sends unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`.
 
 `evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade never imports it.
 `brigade setup` installs MiseLedger and its SessionFind companion from the exact release manifest. `brigade add evidence` remains a one-release compatibility fallback for an independent install.

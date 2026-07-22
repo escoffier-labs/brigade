@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from brigade import managed
 from brigade import station_manifest
 from brigade import stations_cmd
@@ -79,6 +81,8 @@ def test_agentpantry_doctor_unwired(monkeypatch):
     assert t is not None and t.station == "pantry"
 
     def fake_run(args, **kw):
+        if args == ["agentpantry", "version", "--json"]:
+            return managed.proc.Result(code=0, stdout='{"version": "0.5.0"}', stderr="")
         assert args == ["agentpantry", "doctor", "--json", "--no-net"]
         return managed.proc.Result(
             code=2, stdout='{"configured": false, "fail_count": 1, "warn_count": 0, "checks": []}', stderr=""
@@ -113,6 +117,8 @@ def test_agentpantry_doctor_parses_status(monkeypatch):
     t = managed.resolve("agentpantry")
 
     def fake_run(args, **kw):
+        if args == ["agentpantry", "version", "--json"]:
+            return managed.proc.Result(code=0, stdout='{"version": "0.5.0"}', stderr="")
         assert args == ["agentpantry", "doctor", "--json", "--no-net"]
         return managed.proc.Result(
             code=0,
@@ -133,6 +139,8 @@ def test_agentpantry_never_fails_workspace(monkeypatch):
     t = managed.resolve("agentpantry")
 
     def fake_run(args, **kw):
+        if args == ["agentpantry", "version", "--json"]:
+            return managed.proc.Result(code=0, stdout='{"version": "0.5.0"}', stderr="")
         assert args == ["agentpantry", "doctor", "--json", "--no-net"]
         return managed.proc.Result(
             code=1,
@@ -158,6 +166,8 @@ def test_agentpantry_doctor_handles_garbage_output(monkeypatch):
 
     def fake_run(args, **kw):
         calls.append(args)
+        if args == ["agentpantry", "version", "--json"]:
+            return managed.proc.Result(code=0, stdout='{"version": "0.5.0"}', stderr="")
         if args == ["agentpantry", "status", "--json"]:
             return managed.proc.Result(code=1, stdout="boom", stderr="kaboom")
         return managed.proc.Result(code=1, stdout="boom", stderr="kaboom")
@@ -167,7 +177,11 @@ def test_agentpantry_doctor_handles_garbage_output(monkeypatch):
     results = t.doctor(ctx)
     assert any(status == "WARN" and "unexpected output" in detail for status, _, detail in results)
     assert all(status != "FAIL" for status, _, _ in results)
-    assert calls == [["agentpantry", "doctor", "--json", "--no-net"], ["agentpantry", "status", "--json"]]
+    assert calls == [
+        ["agentpantry", "version", "--json"],
+        ["agentpantry", "doctor", "--json", "--no-net"],
+        ["agentpantry", "status", "--json"],
+    ]
 
 
 def test_agentpantry_doctor_falls_back_to_status_for_old_binary(monkeypatch):
@@ -176,6 +190,8 @@ def test_agentpantry_doctor_falls_back_to_status_for_old_binary(monkeypatch):
 
     def fake_run(args, **kw):
         calls.append(args)
+        if args == ["agentpantry", "version", "--json"]:
+            return managed.proc.Result(code=0, stdout='{"version": "0.5.0"}', stderr="")
         if args == ["agentpantry", "doctor", "--json", "--no-net"]:
             return managed.proc.Result(code=2, stdout="", stderr="flag provided but not defined: -json")
         return managed.proc.Result(
@@ -190,7 +206,174 @@ def test_agentpantry_doctor_falls_back_to_status_for_old_binary(monkeypatch):
     ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
     results = t.doctor(ctx)
     assert any(status == "OK" and "role=sink" in detail for status, _, detail in results)
-    assert calls == [["agentpantry", "doctor", "--json", "--no-net"], ["agentpantry", "status", "--json"]]
+    assert calls == [
+        ["agentpantry", "version", "--json"],
+        ["agentpantry", "doctor", "--json", "--no-net"],
+        ["agentpantry", "status", "--json"],
+    ]
+
+
+def test_agentpantry_doctor_warns_on_below_floor_version(monkeypatch):
+    # v0.4.1 lacks inventory; the version probe must reject it as WARN and
+    # never invoke doctor/status afterwards.
+    t = managed.resolve("agentpantry")
+    calls = []
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        assert args == ["agentpantry", "version", "--json"]
+        return managed.proc.Result(code=0, stdout='{"version": "0.4.1"}', stderr="")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert all(status != "FAIL" and status != "OK" for status, _, _ in results)
+    assert any(
+        status == "WARN" and "expected >= 0.5.0" in detail and "0.4.1" in detail for status, _, detail in results
+    )
+    assert calls == [["agentpantry", "version", "--json"]]
+
+
+def test_agentpantry_doctor_warns_on_nonzero_version_probe(monkeypatch):
+    t = managed.resolve("agentpantry")
+    calls = []
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        assert args == ["agentpantry", "version", "--json"]
+        return managed.proc.Result(code=1, stdout="", stderr="version flag not defined")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert all(status != "FAIL" and status != "OK" for status, _, _ in results)
+    assert any(
+        status == "WARN" and "expected >= 0.5.0" in detail and "probe exit 1" in detail for status, _, detail in results
+    )
+    assert calls == [["agentpantry", "version", "--json"]]
+
+
+def test_agentpantry_doctor_warns_on_malformed_version_json(monkeypatch):
+    t = managed.resolve("agentpantry")
+    calls = []
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        assert args == ["agentpantry", "version", "--json"]
+        return managed.proc.Result(code=0, stdout="not-json-at-all", stderr="")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert all(status != "FAIL" and status != "OK" for status, _, _ in results)
+    assert any(status == "WARN" and "expected >= 0.5.0" in detail for status, _, detail in results)
+    assert calls == [["agentpantry", "version", "--json"]]
+
+
+@pytest.mark.parametrize(
+    "version_value, observed",
+    [
+        ("dev", "invalid-version"),
+        ("unknown", "invalid-version"),
+        ("0.5.0-dev", "invalid-version"),
+        ("0.5.0-rc.1", "invalid-version"),
+        (None, "missing"),
+        (42, "non-string"),
+        ("", "invalid-version"),
+    ],
+)
+def test_agentpantry_doctor_warns_on_unparsable_version(monkeypatch, version_value, observed):
+    t = managed.resolve("agentpantry")
+    calls = []
+    stdout = json.dumps({"version": version_value}) if version_value is not None else json.dumps({})
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        assert args == ["agentpantry", "version", "--json"]
+        return managed.proc.Result(code=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert all(status != "FAIL" and status != "OK" for status, _, _ in results)
+    assert any(
+        status == "WARN" and "expected >= 0.5.0" in detail and observed in detail for status, _, detail in results
+    ), (version_value, observed, results)
+    # The raw invalid version field must not leak into any surfaced doctor detail.
+    raw = "" if version_value is None else str(version_value)
+    if raw:
+        assert all(raw not in detail for _, _, detail in results), (version_value, raw, results)
+    assert calls == [["agentpantry", "version", "--json"]]
+
+
+def test_agentpantry_doctor_never_leaks_secret_version_field(monkeypatch):
+    # Obvious secret material placed in the version field must not reach any
+    # surfaced doctor detail (the managed doctor surfaces probe.detail).
+    t = managed.resolve("agentpantry")
+    secret = "AKIA-DEADFAKE-SECRET-KEY-DO-NOT-LEAK"
+
+    def fake_run(args, **kw):
+        assert args == ["agentpantry", "version", "--json"]
+        return managed.proc.Result(code=0, stdout=json.dumps({"version": secret}), stderr="")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert all(status != "FAIL" and status != "OK" for status, _, _ in results)
+    assert any(
+        status == "WARN" and "invalid-version" in detail and "expected >= 0.5.0" in detail
+        for status, _, detail in results
+    ), results
+    assert all(secret not in detail for _, _, detail in results), results
+
+
+def test_agentpantry_doctor_accepts_exact_floor_and_proceeds(monkeypatch):
+    # Exact floor 0.5.0 is compatible; downstream doctor is invoked.
+    t = managed.resolve("agentpantry")
+    calls = []
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        if args == ["agentpantry", "version", "--json"]:
+            return managed.proc.Result(code=0, stdout='{"version": "0.5.0"}', stderr="")
+        assert args == ["agentpantry", "doctor", "--json", "--no-net"]
+        return managed.proc.Result(
+            code=0,
+            stdout='{"role": "sink", "configured": true, "peer": "127.0.0.1:8787",'
+            ' "surfaces": ["sidecar"], "fail_count": 0, "warn_count": 0, "checks": []}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "OK" for status, _, _ in results)
+    assert calls[0] == ["agentpantry", "version", "--json"]
+    assert calls[1] == ["agentpantry", "doctor", "--json", "--no-net"]
+
+
+def test_agentpantry_doctor_accepts_multi_digit_above_floor(monkeypatch):
+    # Integer comparison: 0.10.3 must sort above 0.5.0 (lexical compare would fail).
+    t = managed.resolve("agentpantry")
+    calls = []
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        if args == ["agentpantry", "version", "--json"]:
+            return managed.proc.Result(code=0, stdout='{"version": "v0.10.3"}', stderr="")
+        assert args == ["agentpantry", "doctor", "--json", "--no-net"]
+        return managed.proc.Result(
+            code=0,
+            stdout='{"role": "sink", "configured": true, "peer": "127.0.0.1:8787",'
+            ' "surfaces": ["sidecar"], "fail_count": 0, "warn_count": 0, "checks": []}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "OK" for status, _, _ in results)
+    assert calls[1] == ["agentpantry", "doctor", "--json", "--no-net"]
 
 
 def test_evidence_tools_attach_to_evidence_station():

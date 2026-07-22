@@ -386,14 +386,30 @@ def _validate_manifest_coordinates(
     return manifest
 
 
-def validate_release_manifest(release: ResolvedRelease, path: Path) -> component_manifest.ComponentManifest:
-    return _validate_manifest_coordinates(release, component_manifest.load(path))
-
-
-def validate_release_manifest_bytes(release: ResolvedRelease) -> component_manifest.ComponentManifest:
+def validate_release_manifest(
+    release: ResolvedRelease,
+    path: Path,
+    *,
+    allow_compatible_stable_manifest: bool = False,
+) -> component_manifest.ComponentManifest:
     return _validate_manifest_coordinates(
         release,
-        component_manifest.load_bytes(release.manifest_bytes, source=Path(release.manifest_url)),
+        component_manifest.load(path, allow_compatible_stable_manifest=allow_compatible_stable_manifest),
+    )
+
+
+def validate_release_manifest_bytes(
+    release: ResolvedRelease,
+    *,
+    allow_compatible_stable_manifest: bool = False,
+) -> component_manifest.ComponentManifest:
+    return _validate_manifest_coordinates(
+        release,
+        component_manifest.load_bytes(
+            release.manifest_bytes,
+            source=Path(release.manifest_url),
+            allow_compatible_stable_manifest=allow_compatible_stable_manifest,
+        ),
     )
 
 
@@ -554,7 +570,10 @@ def run_update(
                 raise UpdateError(f"invalid update state: {state_path}")
             ensure_channel_ownership(current, channel, switch_channel=switch_channel)
             release = resolve_release(selected_http, latest=True)
-            manifest = validate_release_manifest_bytes(release)
+            manifest = validate_release_manifest_bytes(
+                release,
+                allow_compatible_stable_manifest=channel == "beta",
+            )
             coordinate = release.version if channel == "stable" else _check_beta(selected_http)
             compatible_manifest_version = manifest.brigade_version if channel == "beta" else None
             if compatible_manifest_version is not None and compatible_manifest_version != release.version:

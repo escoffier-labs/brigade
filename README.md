@@ -27,10 +27,22 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/brigade-demo.svg" alt="Recording: the code graph maps the repo and reports blast radius, a verify run writes a receipt with a real exit code, evidence search answers a question from the ledger, outcome rank scores skills and reconcile promotes one that earned it" width="800">
+  <img src="docs/assets/brigade-demo.svg" alt="Recording: an agent claims tests pass; a verify run writes a receipt with the real exit code, code impact shows what the change touched, evidence search finds the run in the ledger, and outcome rank scores the skill that did the work" width="800">
 </p>
 
-<p align="center"><em>The graph knows the blast radius. Every check leaves a receipt. The ledger answers questions. Skills promote only when receipts prove they helped.</em></p>
+<p align="center"><em>An agent said "tests pass." This is the claim becoming a record: receipt, graph, ledger, rank.</em></p>
+
+## The loop
+
+Every piece of work Brigade touches runs the same circuit:
+
+1. Intent and acceptance criteria go in.
+2. Prior evidence and code impact attach to the brief.
+3. Replaceable workers execute, bounded.
+4. Verification runs with a real exit code.
+5. The receipt, graph delta, and outcome land where the next run starts.
+
+Work enters as intent and leaves as evidence.
 
 ## Install
 
@@ -44,6 +56,11 @@ brigade operator quickstart --target ./my-repo --harnesses codex
 brigade prints a one-line notice when a new release is out (checked at most
 once a day via an anonymous request; set `BRIGADE_NO_UPDATE_CHECK=1` to
 disable - details in [docs/update-channels.md](docs/update-channels.md)).
+
+Stable pinners may deliberately install an exact release with
+`pipx install brigade-cli==X.Y.Z` or refresh through
+`brigade update --channel stable`. Channel ownership, beta rules, and when to
+use `brigade update` are in [docs/update-channels.md](docs/update-channels.md).
 
 `brigade operator doctor --target ./my-repo` prints `ready: yes` when the wiring is healthy. The default footprint is small: `AGENTS.md`, `SAFETY_RULES.md`, a handoff template, and `.brigade/` state. Add `--dry-run` to preview anything before it writes. Nothing leaves your machine.
 
@@ -165,6 +182,7 @@ Code intelligence, Evidence, and Content Guard (`brigade scrub`, a secrets and P
 | [Agent Pantry](https://github.com/escoffier-labs/agentpantry) | `brigade add pantry` | Encrypted browser-session and secret sync across machines |
 | [Token Glace](https://github.com/escoffier-labs/token-glace) | `brigade add tokens` | Compact noisy tool output before it burns context |
 | [Skillet](https://github.com/escoffier-labs/skillet) | optional roster | Portable skills that reconcile can promote or roll back |
+| Notifications | `brigade add notifications` | Optional `agent-notify` binary for Discord, Telegram, or Signal; status and setup planning only until you wire hooks or pass an explicit `--send` |
 
 Upgrading from the standalone GraphTrail or MiseLedger installs? `brigade setup` replaces both. The old `brigade add graphtrail` / `add evidence` paths remain as compatibility shims. Details: [wiring guide](docs/wiring-graphtrail-miseledger.md), [station contract](docs/station-contract.md).
 
@@ -188,7 +206,7 @@ Beyond the daily loop, the same review-and-receipt pattern covers cross-model ru
 
 ## What Brigade is not
 
-Brigade is not a hosted memory service, a daemon, or an automatic release bot. It does not run in the background or install schedulers (one scoped exception: `brigade tools runtime start` launches a local runtime process, only when you start it, until you stop it). It does not push to GitHub, publish packages, send notifications by default, save every note automatically, or skip review for ambiguous, risky, or failed notes. That pause is the point: agent memory should be useful, not noisy.
+Brigade is not a hosted memory service, a daemon, or an automatic release bot. It does not run in the background or install schedulers (one scoped exception: `brigade tools runtime start` launches a local runtime process, only when you start it, until you stop it). It does not push to GitHub, publish packages, save every note automatically, or skip review for ambiguous, risky, or failed notes. `brigade work brief` and related status surfaces may report notification readiness or suggest installing the notifications station, but Brigade never sends a message unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`. That pause is the point: agent memory should be useful, not noisy.
 
 And it is not the other projects that share the name. This Brigade is the AI-agent operator CLI from [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), installed with `pipx install brigade-cli`. It is not the CNCF/Microsoft Brigade for Kubernetes event scripting (archived 2022), the Spinabot Brigade agent crew, or the 2017 `brigade` Python package that became Nornir.
 

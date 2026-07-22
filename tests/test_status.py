@@ -24,6 +24,10 @@ from brigade.station import Station
         ("missing", True, "unchecked"),
         ("manual", False, "not-installed"),
         ("unknown", True, "unchecked"),
+        # A known-incompatible installed station reports ``unhealthy``; the
+        # aggregate must keep it red (``failed``) rather than collapsing an
+        # unrecognized value to ``unchecked``.
+        ("unhealthy", True, "failed"),
     ],
 )
 def test_normalize_payload_health(raw, installed, expected):
@@ -71,6 +75,31 @@ def test_status_warning_is_degraded(monkeypatch, tmp_target, capsys):
     row = json.loads(capsys.readouterr().out)["stations"][0]
     assert row["health"] == "degraded"
     assert row["warn"] == 1
+
+
+def test_status_pantry_incompatible_is_failed_not_unchecked(monkeypatch, tmp_target, capsys):
+    # Regression: pantry_cmd.status_payload reports health ``unhealthy`` for an
+    # installed-but-incompatible agentpantry. The shared aggregate normalizer
+    # must keep that known incompatibility red (``failed``) instead of mapping
+    # the unrecognized value to ``unchecked``.
+    pantry_station = Station(name="pantry", summary="agentpantry station", doctor=None)
+    monkeypatch.setattr(status_mod, "all_stations", lambda: (pantry_station,))
+    monkeypatch.setattr(
+        status_mod,
+        "_optional_station_payload",
+        lambda station, target: {
+            "installed": True,
+            "health": "unhealthy",
+            "summary": "agentpantry 0.4.1 below supported floor 0.5.0",
+        },
+    )
+
+    assert status_mod.run(tmp_target, json_output=True) == 0
+    row = json.loads(capsys.readouterr().out)["stations"][0]
+    assert row["health"] == "failed"
+    assert row["fail"] == 1
+    assert row["ok"] == 0
+    assert row["warn"] == 0
 
 
 def test_status_lists_stations_for_installed_workspace(tmp_target: Path, capsys):
