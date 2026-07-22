@@ -8,10 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Imported `stations/notify` Go module into the Brigade monorepo. Unified release
+  manifests now enumerate five native components (25 platform assets plus
+  `component-manifest-v1.json` and `checksums.txt`) with managed resolution
+  through `brigade setup`.
+- Beta pre-pin compatibility: beta installs the CI-green `main` Brigade wheel but
+  reuses the last verified stable component manifest; `agent-notify` is omitted
+  from setup until a stable manifest publishes its assets. Stable validation
+  stays strict.
+- Public update-channel and component-manifest policy docs.
+- Agent Pantry compatibility probe: `brigade pantry` requires `agentpantry
+  version --json` `>=0.5.0` before invoking doctor, status, or inventory
+  surfaces. Pantry remains an external Go binary.
 - Passive update notice: after a successful command, brigade prints a one-line
   stderr notice (at most once per 24h) when a newer release is on PyPI.
   Anonymous, TTY-only, skipped in CI; disable with `BRIGADE_NO_UPDATE_CHECK=1`.
 - `brigade mcp sync --user-scope` (and `brigade operator sync-mcp --user-scope`) no longer writes stdio MCP servers into a user-wide client config silently: interactive runs show the destination, stdio count, and the servers-times-sessions process formula and ask for confirmation, non-interactive and `--json` runs require `--allow-global-stdio`, and plan/sync items now carry `transport` and `scope`. (#349)
+
+### Fixed
+- Agent Pantry version parsing stays non-throwing and bounded for arbitrarily
+  long numeric segments: the parser accepts ASCII-numeric semver triples only,
+  enforces a conservative per-segment digit bound, catches `int()` conversion
+  `ValueError`, and surfaces the fixed `invalid-version` label for oversized or
+  non-ASCII-digit input without ever echoing raw content. Added huge-segment and
+  non-ASCII-digit regressions covering observed/detail and adjacent stdout.
+- `docs/component-manifest-policy.md` no longer presents the five-component /
+  25-asset contract as a current stable release. It is now stated as the future
+  first stable manifest contract after `agent-notify` publication, with current
+  bundled `agent-notify` assets empty/unpublished and no stable release claimed.
 
 ## [0.25.1] - 2026-07-21
 

@@ -193,6 +193,17 @@ def _code_search_mcp_doctor(ctx: DoctorContext) -> List[CheckResult]:
 # workspace doctor run.
 def _agentpantry_doctor(ctx: DoctorContext) -> List[CheckResult]:
     name = "agentpantry (session auth sync)"
+    # Before invoking any installed agentpantry surface, probe the version and
+    # enforce the evidence-backed floor (AGENTPANTRY_MIN_VERSION = 0.5.0). A
+    # failed probe, malformed version, or below-floor version is advisory WARN
+    # here: never OK and never a workspace FAIL. Do not invoke doctor/status
+    # after incompatibility - the installed binary may not expose those
+    # surfaces. See brigade.pantry_compat for the shared probe/parser.
+    from . import pantry_compat
+
+    probe = pantry_compat.probe_agentpantry_version()
+    if probe.incompatible:
+        return [(WARN, name, probe.detail)]
     r = proc.run(["agentpantry", "doctor", "--json", "--no-net"])
     data = r.json()
     if data is not None:

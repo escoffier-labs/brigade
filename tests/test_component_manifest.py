@@ -850,3 +850,86 @@ def test_platform_key_uses_go_names_and_rejects_unsupported_values():
 def test_platform_key_hard_failure_lists_supported_keys():
     with pytest.raises(ValueError, match="supported platform keys: linux-amd64"):
         component_manifest.platform_key(system="Plan9", machine="mips")
+
+
+def test_unpublished_component_ids_pinned_to_agent_notify_only():
+    # The compatibility handoff may tolerate only the component ids declared
+    # currently unpublished. At this commit that set is exactly agent-notify;
+    # pin the exact set so a future addition forces an explicit decision here.
+    assert component_manifest.UNPUBLISHED_COMPONENT_IDS == frozenset({"agent-notify"})
+    assert "agent-notify" in component_manifest.KNOWN_COMPONENT_IDS
+
+
+def _pre_agent_notify_manifest(tmp_path: Path) -> Path:
+    """Last-stable manifest that predates the agent-notify KNOWN_COMPONENT_IDS entry."""
+    base = json.loads(_write_manifest(tmp_path).read_text())
+    del base["components"]["agent-notify"]
+    path = tmp_path / "pre-agent-notify.json"
+    path.write_text(json.dumps(base))
+    return path
+
+
+def test_strict_manifest_rejects_pre_agent_notify_stable_manifest(tmp_path):
+    path = _pre_agent_notify_manifest(tmp_path)
+    with pytest.raises(ValueError, match="missing required components: agent-notify"):
+        component_manifest.load(path)
+
+
+def test_compatible_stable_manifest_tolerates_missing_unpublished_agent_notify(tmp_path):
+    path = _pre_agent_notify_manifest(tmp_path)
+
+    manifest = component_manifest.load(path, allow_compatible_stable_manifest=True)
+
+    assert "agent-notify" not in manifest.components
+    assert set(manifest.components) == set(component_manifest.KNOWN_COMPONENT_IDS) - {"agent-notify"}
+    assert component_manifest.published_component_ids(manifest) == (
+        "graphtrail",
+        "graphtrail-mcp",
+        "miseledger",
+        "sessionfind",
+    )
+    assert manifest.unknown_component_diagnostics == ()
+
+
+def test_compatible_stable_manifest_rejects_missing_published_component(tmp_path):
+    path = _pre_agent_notify_manifest(tmp_path)
+    base = json.loads(path.read_text())
+    del base["components"]["miseledger"]
+    path.write_text(json.dumps(base))
+
+    with pytest.raises(ValueError, match="missing required components: miseledger"):
+        component_manifest.load(path, allow_compatible_stable_manifest=True)
+
+
+def test_compatible_stable_manifest_still_rejects_malformed_assets(tmp_path):
+    path = _pre_agent_notify_manifest(tmp_path)
+    base = json.loads(path.read_text())
+    base["components"]["miseledger"]["assets"]["linux-amd64"]["sha256"] = "not-hex"
+    path.write_text(json.dumps(base))
+
+    with pytest.raises(ValueError, match="field 'sha256'"):
+        component_manifest.load(path, allow_compatible_stable_manifest=True)
+
+
+def test_compatible_stable_manifest_rejects_unknown_extras(tmp_path):
+    # Compatibility mode is the narrowly named beta handoff path. It must not
+    # accept component records the running Brigade does not know; an unknown
+    # id is rejected outright (preserving the diagnostic text) rather than
+    # ignored with a diagnostic. Strict mode still ignores unknowns (see
+    # test_manifest_ignores_unknown_components_with_deterministic_diagnostic).
+    path = _pre_agent_notify_manifest(tmp_path)
+    base = json.loads(path.read_text())
+    base["components"]["future-tool"] = {
+        "component_revision": "v9",
+        "source": {"repository": "example/future"},
+        "executable": "future-tool",
+        "assets": {},
+    }
+    path.write_text(json.dumps(base))
+
+    with pytest.raises(
+        ValueError,
+        match="component manifest lists unknown component 'future-tool'; known components: "
+        "agent-notify, graphtrail, graphtrail-mcp, miseledger, sessionfind",
+    ):
+        component_manifest.load(path, allow_compatible_stable_manifest=True)

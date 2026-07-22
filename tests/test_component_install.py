@@ -34,13 +34,17 @@ from brigade.component_install import (
 
 from tests.component_install_helpers import (
     FakeOpener,
+    FakeReleaseHttp,
     FIXTURE_REPOSITORY,
     all_fixture_payloads,
+    all_release_payloads,
     fixture_component_revision,
     fixture_payload,
     linux_env,
+    release_manifest_url,
     smoke_stub_script,
     test_manifest_asset as manifest_asset_fixture,
+    write_release_manifest,
     write_test_manifest,
     write_verified_cache,
 )
@@ -110,10 +114,96 @@ def _prepare_auto_release_setup(tmp_path, monkeypatch):
     monkeypatch.setattr(
         update_cmd,
         "validate_release_manifest_bytes",
-        lambda resolved: component_manifest.load_bytes(resolved.manifest_bytes, source=Path(resolved.manifest_url)),
+        lambda resolved, **_kwargs: component_manifest.load_bytes(
+            resolved.manifest_bytes, source=Path(resolved.manifest_url), **_kwargs
+        ),
     )
     monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
     return env, release
+
+
+def _prepare_auto_release_setup_real(tmp_path, monkeypatch):
+    """Route automatic setup through the real exact-tag release resolver.
+
+    Unlike :func:`_prepare_auto_release_setup`, this does NOT mock
+    ``resolve_release`` or ``validate_release_manifest_bytes``. A real-coordinate
+    manifest is bundled, ``update_cmd._DefaultHttp`` is replaced with a
+    :class:`FakeReleaseHttp` that serves the release JSON, tag ref, and manifest
+    bytes, so the real exact-tag resolver, digest/provenance validation, cache
+    rewrite, and state publication run end to end. Returns ``(env, http, tag,
+    target_commit, manifest_bytes)``.
+    """
+    env = linux_env(tmp_path)
+    target_commit = "a" * 40
+    tag = f"v{brigade.__version__}"
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True)
+    manifest_bytes = write_release_manifest(bundled, brigade_version=brigade.__version__, target_commit=target_commit)
+    http = FakeReleaseHttp(tag=tag, manifest_bytes=manifest_bytes, target_commit=target_commit)
+    monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    monkeypatch.setattr(update_cmd, "_DefaultHttp", lambda: http)
+    return env, http, tag, target_commit, manifest_bytes
+
+
+def _persist_beta_state_real(
+    tmp_path,
+    monkeypatch,
+    *,
+    stable_version: str,
+    cli_version: str,
+    manifest_bytes: bytes,
+    target_commit: str,
+):
+    """Persist a beta-handoff update state over a real-coordinate stable manifest.
+
+    The beta CLI reports ``cli_version`` (newer than ``stable_version``); the
+    update transaction persisted the verified last-stable release manifest
+    bytes at their digest path and recorded their real Brigade release
+    coordinates. A later ``brigade setup`` must reuse that cache rather than
+    resolving an unreleased ``v{cli_version}`` tag. The real
+    ``validate_release_manifest_bytes`` (compatibility mode) runs against the
+    cached bytes; ``resolve_release`` is replaced with a boom to assert the
+    beta path never re-resolves the release.
+    """
+    env = linux_env(tmp_path)
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True, exist_ok=True)
+    bundled.write_bytes(manifest_bytes)
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    monkeypatch.setattr("brigade.__version__", cli_version, raising=False)
+
+    def _boom_resolve(*_args, **_kwargs):
+        raise AssertionError("resolve_release must not be called when a verified beta cache is reused")
+
+    monkeypatch.setattr(update_cmd, "resolve_release", _boom_resolve)
+
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(manifest_bytes)
+    state_path = Path(component_paths.update_state_path(roots.data_root))
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    update_cmd.write_update_state(
+        state_path,
+        update_cmd.UpdateState(
+            1,
+            "beta",
+            "brigade update",
+            "b" * 40,
+            41,
+            f"v{stable_version}",
+            target_commit,
+            release_manifest_url(f"v{stable_version}"),
+            digest,
+            "2026-07-20T12:00:00+00:00",
+        ),
+    )
+    return env, digest
 
 
 def _managed_paths(env: dict[str, str]) -> dict[str, Path]:
@@ -791,7 +881,7 @@ def test_setup_auto_offline_validates_the_hashed_cached_bytes_after_path_replace
 
     monkeypatch.setattr(Path, "read_bytes", read_then_replace)
 
-    manifest, auto_release = component_install._load_setup_manifest(
+    manifest, auto_release, _auto_compatible = component_install._load_setup_manifest(
         manifest_path=None,
         manifest_source="auto",
         offline=True,
@@ -862,10 +952,347 @@ def test_setup_auto_failure_does_not_publish_release_state(tmp_path, monkeypatch
     assert not Path(component_paths.update_state_path(roots.data_root)).exists()
 
 
-def test_setup_auto_preserves_beta_channel_ownership_while_refreshing_components(tmp_path, monkeypatch):
-    env, release = _prepare_auto_release_setup(tmp_path, monkeypatch)
+def test_setup_auto_online_repairs_missing_stable_manifest_cache(tmp_path, monkeypatch):
+    # Greptile P1: online stable setup previously called
+    # load_verified_exact_release_manifest before online release resolution,
+    # so a matching stable state with a missing cache raised and prevented
+    # exact-release redownload/repair. Online stable must now fall through to
+    # exact-release resolution and repair the cache. This exercises the real
+    # exact-tag resolver, download, digest/provenance validation, cache rewrite,
+    # and state publication end to end (no resolve_release/validate mocks).
+    env, http, tag, _target_commit, manifest_bytes = _prepare_auto_release_setup_real(tmp_path, monkeypatch)
+    payloads = all_release_payloads(tag=tag)
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    assert setup_native_components(env=env, opener=FakeOpener(payloads)) == 0
+    first_resolution = list(http.urls)
+
     roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    cached.unlink()
+    assert not cached.is_file()
+
+    # Online stable: the missing cache falls through to exact-release resolution.
+    assert setup_native_components(env=env, opener=FakeOpener(payloads)) == 0
+    # The real resolver re-ran (release JSON, tag ref, manifest bytes) to repair.
+    assert http.urls == first_resolution + first_resolution
+    # The verified cache is repaired in place at the recorded digest path.
+    assert cached.is_file()
+    assert hashlib.sha256(cached.read_bytes()).hexdigest() == digest
+    state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
+    assert state is not None
+    assert state.channel == "stable"
+    assert state.component_tag == tag
+    assert state.component_manifest_sha256 == digest
+    assert state.component_manifest_url == release_manifest_url(tag)
+
+
+def test_setup_auto_online_repairs_corrupt_stable_manifest_cache(tmp_path, monkeypatch):
+    # A corrupt (digest-mismatched) stable cache must also fall through to
+    # exact-release resolution and be repaired, rather than fail closed. The
+    # real resolver, digest verification, and cache rewrite run end to end.
+    env, http, tag, _target_commit, manifest_bytes = _prepare_auto_release_setup_real(tmp_path, monkeypatch)
+    payloads = all_release_payloads(tag=tag)
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    assert setup_native_components(env=env, opener=FakeOpener(payloads)) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    corrupt = cached.read_bytes() + b"\n"
+    cached.write_bytes(corrupt)
+    assert hashlib.sha256(corrupt).hexdigest() != digest
+
+    assert setup_native_components(env=env, opener=FakeOpener(payloads)) == 0
+    # The repaired cache must match the verified digest again.
+    assert cached.is_file()
+    assert hashlib.sha256(cached.read_bytes()).hexdigest() == digest
+
+
+def test_setup_auto_online_repairs_unreadable_stable_manifest_cache(tmp_path, monkeypatch):
+    # An unreadable stable cache (read_bytes raises OSError) must fall through
+    # to exact-release resolution and be repaired online. The read failure is
+    # simulated by routing only the cached manifest path through a raising
+    # read_bytes; every other read (component assets, state) is unaffected, so
+    # the real repair path runs unchanged.
+    env, http, tag, _target_commit, manifest_bytes = _prepare_auto_release_setup_real(tmp_path, monkeypatch)
+    payloads = all_release_payloads(tag=tag)
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    assert setup_native_components(env=env, opener=FakeOpener(payloads)) == 0
+
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    original_read_bytes = Path.read_bytes
+
+    def read_then_raise(path: Path) -> bytes:
+        if Path(path) == cached:
+            raise OSError("simulated unreadable cache")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_then_raise)
+
+    assert setup_native_components(env=env, opener=FakeOpener(payloads)) == 0
+    # The corrupt entry was dropped and the verified cache was rewritten.
+    monkeypatch.setattr(Path, "read_bytes", original_read_bytes)
+    assert cached.is_file()
+    assert hashlib.sha256(cached.read_bytes()).hexdigest() == digest
+
+
+def test_setup_auto_online_repairs_invalid_stable_manifest_cache(tmp_path, monkeypatch):
+    # A digest-matching-but-invalid stable cache: the cached bytes hash to the
+    # digest the state records (content addressing holds), but the manifest
+    # content fails validate_release_manifest_bytes (a published component is
+    # missing). Online stable repair drops the invalid entry, re-resolves the
+    # exact release, and rewrites the cache at the good release's digest path.
+    env = linux_env(tmp_path)
+    stable_version = brigade.__version__
+    target_commit = "a" * 40
+    tag = f"v{stable_version}"
+
+    # Invalid manifest: missing a published component, but real coordinates
+    # otherwise. Its bytes hash to their own digest; the state records that
+    # digest so the digest check passes while load_bytes fails.
+    invalid_bundled = tmp_path / "templates-invalid" / "components" / "manifest-v1.json"
+    invalid_bundled.parent.mkdir(parents=True)
+    invalid_bytes = write_release_manifest(
+        invalid_bundled, brigade_version=stable_version, target_commit=target_commit, drop_component="miseledger"
+    )
+    invalid_digest = hashlib.sha256(invalid_bytes).hexdigest()
+
+    # Good manifest bundled at the real template root for the resolver to serve.
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True)
+    good_bytes = write_release_manifest(bundled, brigade_version=stable_version, target_commit=target_commit)
+    good_digest = hashlib.sha256(good_bytes).hexdigest()
+    http = FakeReleaseHttp(tag=tag, manifest_bytes=good_bytes, target_commit=target_commit)
+    monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    monkeypatch.setattr(update_cmd, "_DefaultHttp", lambda: http)
+
+    roots = resolve_roots(env=env, system="linux")
+    invalid_cache = Path(component_paths.verified_manifest_path(roots.cache_root, invalid_digest))
+    invalid_cache.parent.mkdir(parents=True, exist_ok=True)
+    invalid_cache.write_bytes(invalid_bytes)
     state_path = Path(component_paths.update_state_path(roots.data_root))
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    update_cmd.write_update_state(
+        state_path,
+        update_cmd.UpdateState(
+            1,
+            "stable",
+            "brigade setup",
+            stable_version,
+            42,
+            tag,
+            target_commit,
+            release_manifest_url(tag),
+            invalid_digest,
+            "2026-07-20T12:00:00+00:00",
+        ),
+    )
+
+    payloads = all_release_payloads(tag=tag)
+    assert setup_native_components(env=env, opener=FakeOpener(payloads)) == 0
+    # The invalid cache was dropped; the good cache was written at its digest.
+    assert not invalid_cache.is_file()
+    good_cache = Path(component_paths.verified_manifest_path(roots.cache_root, good_digest))
+    assert good_cache.is_file()
+    assert hashlib.sha256(good_cache.read_bytes()).hexdigest() == good_digest
+    state = update_cmd.load_update_state(state_path)
+    assert state is not None
+    assert state.component_manifest_sha256 == good_digest
+
+
+def test_setup_auto_offline_keeps_stable_missing_cache_fail_closed(tmp_path, monkeypatch, capsys):
+    # Offline strictness is unchanged: a missing stable cache cannot be
+    # repaired offline and must remain fail-closed. The real resolver is wired
+    # (so a quiet fall-through would surface), but offline setup must never
+    # reach it: the missing cache fails closed before any release resolution.
+    env, http, tag, _target_commit, manifest_bytes = _prepare_auto_release_setup_real(tmp_path, monkeypatch)
+    payloads = all_release_payloads(tag=tag)
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    assert setup_native_components(env=env, opener=FakeOpener(payloads)) == 0
+    assert http.urls  # the real resolver ran during the online publish
+
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    cached.unlink()
+    urls_before = list(http.urls)
+
+    assert setup_native_components(offline=True, env=env, opener=FakeOpener({})) == 1
+    # Offline setup must not re-resolve the release to repair the cache.
+    assert http.urls == urls_before
+    assert "cached exact-release manifest is missing" in capsys.readouterr().err
+
+
+def _beta_real_manifest_bytes(tmp_path, *, stable_version, target_commit):
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True, exist_ok=True)
+    return write_release_manifest(bundled, brigade_version=stable_version, target_commit=target_commit)
+
+
+def test_setup_auto_online_keeps_beta_missing_cache_fail_closed(tmp_path, monkeypatch, capsys):
+    # Beta strictness is unchanged: a missing beta cache must remain
+    # fail-closed even online, because a beta handoff cannot re-resolve an
+    # unreleased v{cli} tag. The real validate_release_manifest_bytes runs
+    # against the cached bytes; resolve_release is replaced with a boom so any
+    # fall-through surfaces as an AssertionError rather than a quiet repair.
+    stable_version = "0.25.0"
+    target_commit = "a" * 40
+    manifest_bytes = _beta_real_manifest_bytes(tmp_path, stable_version=stable_version, target_commit=target_commit)
+    env, digest = _persist_beta_state_real(
+        tmp_path,
+        monkeypatch,
+        stable_version=stable_version,
+        cli_version="0.25.1",
+        manifest_bytes=manifest_bytes,
+        target_commit=target_commit,
+    )
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    cached.unlink()
+    assert not cached.is_file()
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_release_payloads(tag=f"v{stable_version}"))) == 1
+    assert "cached exact-release manifest is missing" in capsys.readouterr().err
+
+
+def test_setup_auto_online_keeps_beta_corrupt_cache_fail_closed(tmp_path, monkeypatch, capsys):
+    # A corrupt (digest-mismatched) beta cache must remain fail-closed online;
+    # the beta path never tolerates cache repair and never re-resolves.
+    stable_version = "0.25.0"
+    target_commit = "a" * 40
+    manifest_bytes = _beta_real_manifest_bytes(tmp_path, stable_version=stable_version, target_commit=target_commit)
+    env, digest = _persist_beta_state_real(
+        tmp_path,
+        monkeypatch,
+        stable_version=stable_version,
+        cli_version="0.25.1",
+        manifest_bytes=manifest_bytes,
+        target_commit=target_commit,
+    )
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    corrupt = cached.read_bytes() + b"\n"
+    cached.write_bytes(corrupt)
+    assert hashlib.sha256(corrupt).hexdigest() != digest
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_release_payloads(tag=f"v{stable_version}"))) == 1
+    assert "cached exact-release manifest digest does not match update state" in capsys.readouterr().err
+    # The corrupt entry is not dropped on the fail-closed beta path.
+    assert cached.read_bytes() == corrupt
+
+
+def test_setup_auto_online_keeps_beta_unreadable_cache_fail_closed(tmp_path, monkeypatch, capsys):
+    # An unreadable beta cache must remain fail-closed online; the beta path
+    # never tolerates cache repair and never re-resolves. Only the cached
+    # manifest path routes through a raising read_bytes.
+    stable_version = "0.25.0"
+    target_commit = "a" * 40
+    manifest_bytes = _beta_real_manifest_bytes(tmp_path, stable_version=stable_version, target_commit=target_commit)
+    env, digest = _persist_beta_state_real(
+        tmp_path,
+        monkeypatch,
+        stable_version=stable_version,
+        cli_version="0.25.1",
+        manifest_bytes=manifest_bytes,
+        target_commit=target_commit,
+    )
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    original_read_bytes = Path.read_bytes
+
+    def read_then_raise(path: Path) -> bytes:
+        if Path(path) == cached:
+            raise OSError("simulated unreadable cache")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_then_raise)
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_release_payloads(tag=f"v{stable_version}"))) == 1
+    assert "cached exact-release manifest cannot be read" in capsys.readouterr().err
+
+
+def test_setup_auto_online_keeps_beta_invalid_cache_fail_closed(tmp_path, monkeypatch, capsys):
+    # A digest-matching-but-invalid beta cache: the cached bytes hash to the
+    # digest the state records (content addressing holds), but the manifest
+    # content fails validate_release_manifest_bytes (a published component is
+    # missing). The beta path never tolerates repair, so the invalid cache is
+    # rejected and resolve_release is never called.
+    stable_version = "0.25.0"
+    target_commit = "a" * 40
+    # Invalid manifest: missing a published component, real coordinates else.
+    invalid_bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    invalid_bundled.parent.mkdir(parents=True, exist_ok=True)
+    invalid_bytes = write_release_manifest(
+        invalid_bundled, brigade_version=stable_version, target_commit=target_commit, drop_component="miseledger"
+    )
+    env, _digest = _persist_beta_state_real(
+        tmp_path,
+        monkeypatch,
+        stable_version=stable_version,
+        cli_version="0.25.1",
+        manifest_bytes=invalid_bytes,
+        target_commit=target_commit,
+    )
+    # _persist_beta_state_real cached the (invalid) bytes at invalid_digest and
+    # recorded that digest in state, so the digest check passes while load_bytes
+    # fails. resolve_release is already boomed by the helper.
+
+    assert setup_native_components(env=env, opener=FakeOpener(all_release_payloads(tag=f"v{stable_version}"))) == 1
+    err = capsys.readouterr().err
+    assert "cached exact-release manifest is invalid" in err
+    assert "missing required components: miseledger" in err
+
+
+def _persist_beta_state(
+    tmp_path,
+    monkeypatch,
+    *,
+    stable_version: str,
+    manifest_bytes: bytes,
+    target_commit: str,
+    cli_version: str = "0.25.1",
+):
+    """Persist a beta-handoff update state pointing at a verified stable cache.
+
+    The beta CLI reports ``cli_version`` (newer than ``stable_version``); the
+    update transaction persisted the verified last-stable release manifest
+    bytes at their digest path and recorded its coordinates. A later
+    ``brigade setup`` must reuse that cache rather than resolving an unreleased
+    ``v{cli_version}`` tag. ``validate_release_manifest_bytes`` is mocked to
+    skip release-coordinate validation (the fixture manifest uses
+    ``example.invalid`` URLs) while still exercising the compatible
+    missing-unpublished handling, mirroring ``_prepare_auto_release_setup``.
+    """
+    env = linux_env(tmp_path)
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True, exist_ok=True)
+    bundled.write_bytes(manifest_bytes)
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    monkeypatch.setattr("brigade.__version__", cli_version, raising=False)
+    monkeypatch.setattr(
+        update_cmd,
+        "validate_release_manifest_bytes",
+        lambda resolved, **_kwargs: component_manifest.load_bytes(
+            resolved.manifest_bytes, source=Path(resolved.manifest_url), **_kwargs
+        ),
+    )
+
+    # If the verified cache is reused, the release must never be re-resolved.
+    def _boom_resolve(*_args, **_kwargs):
+        raise AssertionError("resolve_release must not be called when a verified beta cache is reused")
+
+    monkeypatch.setattr(update_cmd, "resolve_release", _boom_resolve)
+
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(manifest_bytes)
+    state_path = Path(component_paths.update_state_path(roots.data_root))
+    state_path.parent.mkdir(parents=True, exist_ok=True)
     update_cmd.write_update_state(
         state_path,
         update_cmd.UpdateState(
@@ -874,24 +1301,224 @@ def test_setup_auto_preserves_beta_channel_ownership_while_refreshing_components
             "brigade update",
             "b" * 40,
             41,
-            "v1.2.2",
-            "a" * 40,
-            "https://github.com/escoffier-labs/brigade/releases/download/v1.2.2/component-manifest-v1.json",
-            "c" * 64,
+            f"v{stable_version}",
+            target_commit,
+            f"https://github.com/escoffier-labs/brigade/releases/download/v{stable_version}/component-manifest-v1.json",
+            digest,
             "2026-07-20T12:00:00+00:00",
         ),
+    )
+    return env, digest
+
+
+def _precache_fixture_assets(env: dict[str, str], cached_manifest_path: Path) -> component_manifest.ComponentManifest:
+    """Pre-cache every published asset for an offline setup reuse.
+
+    The cached manifest may be a pre-agent-notify stable manifest (missing the
+    unpublished agent-notify id), so load it in compatible mode to tolerate
+    that missing id while pinning every published component.
+    """
+    roots = resolve_roots(env=env, system="linux")
+    manifest = component_manifest.load(cached_manifest_path, allow_compatible_stable_manifest=True)
+    for component_id in component_manifest.published_component_ids(manifest):
+        asset = manifest.components[component_id].assets["linux-amd64"]
+        cache_path = Path(component_paths.cached_asset_path(roots.cache_root, asset.sha256, asset.asset_name))
+        write_verified_cache(cache_path, payload=fixture_payload(component_id)[0])
+    return manifest
+
+
+def test_setup_online_reuses_persisted_beta_stable_manifest_when_cli_advances(tmp_path, monkeypatch):
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True, exist_ok=True)
+    write_test_manifest(bundled, brigade_version="0.25.0")
+    manifest_bytes = bundled.read_bytes()
+    env, digest = _persist_beta_state(
+        tmp_path,
+        monkeypatch,
+        stable_version="0.25.0",
+        manifest_bytes=manifest_bytes,
+        target_commit=fixture_component_revision("graphtrail"),
     )
 
     assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
 
-    state = update_cmd.load_update_state(state_path)
+    roots = resolve_roots(env=env, system="linux")
+    state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
+    assert state is not None
+    # Beta state coordinates are preserved exactly; setup reused the verified
+    # stable cache and did not re-resolve or republish state.
+    assert (state.channel, state.owner, state.cli_coordinate) == ("beta", "brigade update", "b" * 40)
+    assert (state.component_tag, state.component_manifest_sha256) == ("v0.25.0", digest)
+    installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
+    assert installed is not None
+    assert set(installed.components) == set(component_manifest.KNOWN_COMPONENT_IDS)
+
+
+def test_setup_offline_reuses_persisted_beta_stable_manifest_when_cli_advances(tmp_path, monkeypatch):
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True, exist_ok=True)
+    write_test_manifest(bundled, brigade_version="0.25.0")
+    manifest_bytes = bundled.read_bytes()
+    env, digest = _persist_beta_state(
+        tmp_path,
+        monkeypatch,
+        stable_version="0.25.0",
+        manifest_bytes=manifest_bytes,
+        target_commit=fixture_component_revision("graphtrail"),
+    )
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    _precache_fixture_assets(env, cached)
+
+    assert setup_native_components(offline=True, env=env, opener=FakeOpener({})) == 0
+
+    state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
     assert state is not None
     assert (state.channel, state.owner, state.cli_coordinate) == ("beta", "brigade update", "b" * 40)
-    assert (state.component_release_id, state.component_tag, state.component_manifest_sha256) == (
-        release.release_id,
-        release.tag,
-        release.manifest_sha256,
+    assert (state.component_tag, state.component_manifest_sha256) == ("v0.25.0", digest)
+    installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
+    assert installed is not None
+    assert set(installed.components) == set(component_manifest.KNOWN_COMPONENT_IDS)
+
+
+def test_setup_offline_reuses_persisted_beta_pre_agent_notify_stable_manifest(tmp_path, monkeypatch):
+    # The saved stable manifest predates agent-notify; compatible mode must
+    # tolerate the missing unpublished id while reusing the verified cache.
+    env, manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    _write_pre_agent_notify_manifest(manifest_path, brigade_version="0.25.0")
+    manifest_bytes = manifest_path.read_text().encode()
+    env, digest = _persist_beta_state(
+        tmp_path,
+        monkeypatch,
+        stable_version="0.25.0",
+        manifest_bytes=manifest_bytes,
+        target_commit=fixture_component_revision("graphtrail"),
     )
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    _precache_fixture_assets(env, cached)
+
+    assert setup_native_components(offline=True, env=env, opener=FakeOpener({})) == 0
+
+    installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
+    assert installed is not None
+    expected = {"graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"}
+    assert set(installed.components) == expected
+    assert "agent-notify" not in installed.components
+
+
+def test_setup_rejects_persisted_beta_state_with_tampered_manifest_cache(tmp_path, monkeypatch, capsys):
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True, exist_ok=True)
+    write_test_manifest(bundled, brigade_version="0.25.0")
+    manifest_bytes = bundled.read_bytes()
+    env, _digest = _persist_beta_state(
+        tmp_path,
+        monkeypatch,
+        stable_version="0.25.0",
+        manifest_bytes=manifest_bytes,
+        target_commit=fixture_component_revision("graphtrail"),
+    )
+    roots = resolve_roots(env=env, system="linux")
+    state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
+    assert state is not None
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, state.component_manifest_sha256))
+    cached.write_bytes(cached.read_bytes() + b"\n")
+
+    assert setup_native_components(offline=True, env=env, opener=FakeOpener({})) == 1
+    assert "cached exact-release manifest digest does not match update state" in capsys.readouterr().err
+
+
+def test_setup_rejects_persisted_beta_state_with_missing_manifest_cache(tmp_path, monkeypatch, capsys):
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True, exist_ok=True)
+    write_test_manifest(bundled, brigade_version="0.25.0")
+    manifest_bytes = bundled.read_bytes()
+    env, _digest = _persist_beta_state(
+        tmp_path,
+        monkeypatch,
+        stable_version="0.25.0",
+        manifest_bytes=manifest_bytes,
+        target_commit=fixture_component_revision("graphtrail"),
+    )
+    roots = resolve_roots(env=env, system="linux")
+    state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
+    assert state is not None
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, state.component_manifest_sha256))
+    cached.unlink()
+
+    assert setup_native_components(offline=True, env=env, opener=FakeOpener({})) == 1
+    assert "cached exact-release manifest is missing" in capsys.readouterr().err
+
+
+def test_setup_rejects_persisted_beta_state_with_mismatched_stable_version(tmp_path, monkeypatch, capsys):
+    # The cached manifest's brigade_version must match the state's recorded
+    # stable component_tag/version. Use real coordinate validation (no mock)
+    # with a manifest whose version disagrees with the persisted tag.
+    env = linux_env(tmp_path)
+    stable_version = "0.25.0"
+    mismatch_version = "0.24.0"
+    target_commit = "a" * 40
+    bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
+    bundled.parent.mkdir(parents=True, exist_ok=True)
+    write_test_manifest(bundled, brigade_version=mismatch_version)
+    # Rewrite asset URLs/repo/release_tag to real release coordinates so the
+    # only coordinate failure is the brigade_version mismatch.
+    payload = json.loads(bundled.read_text())
+    for _component_id, component in payload["components"].items():
+        component["component_revision"] = target_commit
+        component["source"] = {
+            "repository": "escoffier-labs/brigade",
+            "release_tag": f"v{stable_version}",
+        }
+        for _platform, asset in component["assets"].items():
+            asset_name = asset["asset_name"]
+            asset["download_url"] = (
+                f"https://github.com/escoffier-labs/brigade/releases/download/v{stable_version}/{asset_name}"
+            )
+    bundled.write_text(json.dumps(payload))
+    manifest_bytes = bundled.read_bytes()
+    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    monkeypatch.setattr("brigade.__version__", "0.25.1", raising=False)
+    roots = resolve_roots(env=env, system="linux")
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(manifest_bytes)
+    state_path = Path(component_paths.update_state_path(roots.data_root))
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    update_cmd.write_update_state(
+        state_path,
+        update_cmd.UpdateState(
+            1,
+            "beta",
+            "brigade update",
+            "b" * 40,
+            41,
+            f"v{stable_version}",
+            target_commit,
+            f"https://github.com/escoffier-labs/brigade/releases/download/v{stable_version}/component-manifest-v1.json",
+            digest,
+            "2026-07-20T12:00:00+00:00",
+        ),
+    )
+
+    assert setup_native_components(offline=True, env=env, opener=FakeOpener({})) == 1
+    assert "brigade_version" in capsys.readouterr().err
+
+
+def test_setup_strict_stable_state_still_rejects_advanced_cli_offline(tmp_path, monkeypatch, capsys):
+    # Stable state must retain exact current-version behavior: a stale stable
+    # state whose component_tag predates the running CLI version does NOT opt
+    # into the beta compatibility path; offline setup fails for a stale cache.
+    env, release = _prepare_auto_release_setup(tmp_path, monkeypatch)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+    monkeypatch.setattr("brigade.__version__", "0.25.2", raising=False)
+
+    assert setup_native_components(offline=True, env=env, opener=FakeOpener({})) == 1
+    assert "offline setup requires a verified exact-release manifest cache" in capsys.readouterr().err
 
 
 def test_explicit_setup_manifest_does_not_publish_unified_update_state(tmp_path, monkeypatch):
@@ -1393,6 +2020,122 @@ def test_setup_install_skips_unpublished_agent_notify_and_installs_four(tmp_path
     assert "agent-notify" not in state.components
     notify_path = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
     assert not notify_path.exists()
+
+
+def _write_pre_agent_notify_manifest(path: Path, *, brigade_version: str) -> None:
+    """Last-stable manifest predating the agent-notify KNOWN_COMPONENT_IDS entry.
+
+    Unlike ``_write_unpublished_notify_manifest``, this manifest has no
+    agent-notify entry at all, mirroring the real beta handoff that downloads
+    the most recent stable release published before agent-notify was added.
+    """
+    components: dict[str, object] = {}
+    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+        if component_id == "agent-notify":
+            continue
+        assets: dict[str, object] = {}
+        for platform in component_manifest.SUPPORTED_PLATFORMS:
+            _, byte_size, sha256 = fixture_payload(component_id, platform=platform)
+            asset = manifest_asset_fixture(component_id, platform=platform)
+            assets[platform] = {
+                "asset_name": asset.asset_name,
+                "byte_size": byte_size,
+                "sha256": sha256,
+                "download_url": asset.download_url,
+            }
+        components[component_id] = {
+            "component_revision": fixture_component_revision(component_id),
+            "source": {"repository": FIXTURE_REPOSITORY, "release_tag": "fixture"},
+            "executable": component_id,
+            "assets": assets,
+        }
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "brigade_version": brigade_version,
+                "manifest_revision": "fixture",
+                "supported_platforms": list(component_manifest.SUPPORTED_PLATFORMS),
+                "components": components,
+            }
+        )
+    )
+
+
+def test_setup_compatible_stable_manifest_skips_missing_unpublished_agent_notify(tmp_path, monkeypatch):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    _write_pre_agent_notify_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+    opener = FakeOpener(all_fixture_payloads())
+
+    # The beta handoff reuses the verified last-stable asset set and omits
+    # agent-notify, which the manifest predates. The compatibility flag must
+    # match the manifest's brigade_version or setup rejects the handoff.
+    assert (
+        setup_native_components(
+            env=env,
+            opener=opener,
+            manifest_path=manifest_path,
+            allow_compatible_stable_manifest=brigade.__version__,
+        )
+        == 0
+    )
+
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    state = component_state.load_installed_state(state_path)
+    assert state is not None
+    expected = {"graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"}
+    assert set(state.components) == expected
+    assert "agent-notify" not in state.components
+    notify_path = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+    assert not notify_path.exists()
+
+
+def test_setup_strict_manifest_rejects_pre_agent_notify_without_beta_handoff(tmp_path, monkeypatch, capsys):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    _write_pre_agent_notify_manifest(manifest_path, brigade_version=brigade.__version__)
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+
+    # Without the compatibility handoff, strict setup validation rejects the
+    # pre-agent-notify manifest for the missing required component.
+    assert (
+        setup_native_components(
+            env=env,
+            opener=FakeOpener(all_fixture_payloads()),
+            manifest_path=manifest_path,
+        )
+        == 1
+    )
+    assert "missing required components: agent-notify" in capsys.readouterr().err
+
+
+def test_setup_compatible_stable_manifest_rejects_missing_published_component(tmp_path, monkeypatch, capsys):
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "manifest-v1.json"
+    _write_pre_agent_notify_manifest(manifest_path, brigade_version=brigade.__version__)
+    payload = json.loads(manifest_path.read_text())
+    del payload["components"]["miseledger"]
+    manifest_path.write_text(json.dumps(payload))
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
+
+    # Compatibility mode tolerates only currently-unpublished missing ids; a
+    # missing published component (miseledger) still fails the handoff.
+    assert (
+        setup_native_components(
+            env=env,
+            opener=FakeOpener(all_fixture_payloads()),
+            manifest_path=manifest_path,
+            allow_compatible_stable_manifest=brigade.__version__,
+        )
+        == 1
+    )
+    assert "missing required components: miseledger" in capsys.readouterr().err
 
 
 def test_setup_state_is_absent_while_smoke_runs(tmp_path, monkeypatch):

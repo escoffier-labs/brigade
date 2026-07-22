@@ -45,6 +45,11 @@ brigade prints a one-line notice when a new release is out (checked at most
 once a day via an anonymous request; set `BRIGADE_NO_UPDATE_CHECK=1` to
 disable - details in [docs/update-channels.md](docs/update-channels.md)).
 
+Stable pinners may deliberately install an exact release with
+`pipx install brigade-cli==X.Y.Z` or refresh through
+`brigade update --channel stable`. Channel ownership, beta rules, and when to
+use `brigade update` are in [docs/update-channels.md](docs/update-channels.md).
+
 `brigade operator doctor --target ./my-repo` prints `ready: yes` when the wiring is healthy. The default footprint is small: `AGENTS.md`, `SAFETY_RULES.md`, a handoff template, and `.brigade/` state. Add `--dry-run` to preview anything before it writes. Nothing leaves your machine.
 
 Per-OS setup (apt, Homebrew, Scoop, PowerShell), workspace depth, and multi-harness installs: [install guide](https://brigade.tools/docs/getting-started/install), [QUICKSTART.md](QUICKSTART.md), [first 10 minutes](docs/first-10-minutes.md). Homegrown setup already? `brigade operator adopt plan`.
@@ -165,6 +170,7 @@ Code intelligence, Evidence, and Content Guard (`brigade scrub`, a secrets and P
 | [Agent Pantry](https://github.com/escoffier-labs/agentpantry) | `brigade add pantry` | Encrypted browser-session and secret sync across machines |
 | [Token Glace](https://github.com/escoffier-labs/token-glace) | `brigade add tokens` | Compact noisy tool output before it burns context |
 | [Skillet](https://github.com/escoffier-labs/skillet) | optional roster | Portable skills that reconcile can promote or roll back |
+| Notifications | `brigade add notifications` | Optional `agent-notify` binary for Discord, Telegram, or Signal; status and setup planning only until you wire hooks or pass an explicit `--send` |
 
 Upgrading from the standalone GraphTrail or MiseLedger installs? `brigade setup` replaces both. The old `brigade add graphtrail` / `add evidence` paths remain as compatibility shims. Details: [wiring guide](docs/wiring-graphtrail-miseledger.md), [station contract](docs/station-contract.md).
 
@@ -188,7 +194,7 @@ Beyond the daily loop, the same review-and-receipt pattern covers cross-model ru
 
 ## What Brigade is not
 
-Brigade is not a hosted memory service, a daemon, or an automatic release bot. It does not run in the background or install schedulers (one scoped exception: `brigade tools runtime start` launches a local runtime process, only when you start it, until you stop it). It does not push to GitHub, publish packages, send notifications by default, save every note automatically, or skip review for ambiguous, risky, or failed notes. That pause is the point: agent memory should be useful, not noisy.
+Brigade is not a hosted memory service, a daemon, or an automatic release bot. It does not run in the background or install schedulers (one scoped exception: `brigade tools runtime start` launches a local runtime process, only when you start it, until you stop it). It does not push to GitHub, publish packages, save every note automatically, or skip review for ambiguous, risky, or failed notes. `brigade work brief` and related status surfaces may report notification readiness or suggest installing the notifications station, but Brigade never sends a message unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`. That pause is the point: agent memory should be useful, not noisy.
 
 And it is not the other projects that share the name. This Brigade is the AI-agent operator CLI from [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), installed with `pipx install brigade-cli`. It is not the CNCF/Microsoft Brigade for Kubernetes event scripting (archived 2022), the Spinabot Brigade agent crew, or the 2017 `brigade` Python package that became Nornir.
 

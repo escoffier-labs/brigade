@@ -74,7 +74,12 @@ def manifest_path() -> Path:
     return templates.template_root() / "components" / "manifest-v1.json"
 
 
-def load(path: Path | None = None, *, allow_standalone_legacy_revisions: bool = False) -> ComponentManifest:
+def load(
+    path: Path | None = None,
+    *,
+    allow_standalone_legacy_revisions: bool = False,
+    allow_compatible_stable_manifest: bool = False,
+) -> ComponentManifest:
     source = path or manifest_path()
     try:
         raw = json.loads(source.read_text())
@@ -84,19 +89,37 @@ def load(path: Path | None = None, *, allow_standalone_legacy_revisions: bool = 
         source,
         raw,
         allow_standalone_legacy_revisions=allow_standalone_legacy_revisions or path is None,
+        allow_compatible_stable_manifest=allow_compatible_stable_manifest,
     )
 
 
-def load_bytes(content: bytes, *, source: Path, allow_standalone_legacy_revisions: bool = False) -> ComponentManifest:
+def load_bytes(
+    content: bytes,
+    *,
+    source: Path,
+    allow_standalone_legacy_revisions: bool = False,
+    allow_compatible_stable_manifest: bool = False,
+) -> ComponentManifest:
     """Parse an already verified manifest without writing it to disk."""
     try:
         raw = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"component manifest could not be loaded: {source}") from exc
-    return _load_raw(source, raw, allow_standalone_legacy_revisions=allow_standalone_legacy_revisions)
+    return _load_raw(
+        source,
+        raw,
+        allow_standalone_legacy_revisions=allow_standalone_legacy_revisions,
+        allow_compatible_stable_manifest=allow_compatible_stable_manifest,
+    )
 
 
-def _load_raw(source: Path, raw: Any, *, allow_standalone_legacy_revisions: bool) -> ComponentManifest:
+def _load_raw(
+    source: Path,
+    raw: Any,
+    *,
+    allow_standalone_legacy_revisions: bool,
+    allow_compatible_stable_manifest: bool = False,
+) -> ComponentManifest:
     if not isinstance(raw, dict):
         raise ValueError(
             f"unsupported component manifest schema version {None!r}; this Brigade supports {SCHEMA_VERSION}"
@@ -142,8 +165,30 @@ def _load_raw(source: Path, raw: Any, *, allow_standalone_legacy_revisions: bool
 
     missing = [component_id for component_id in KNOWN_COMPONENT_IDS if component_id not in components]
     if missing:
-        missing_list = ", ".join(missing)
-        raise ValueError(f"component manifest is missing required components: {missing_list}")
+        # The beta handoff downloads the last stable release manifest, which
+        # predates any component id added to KNOWN_COMPONENT_IDS on main but
+        # not yet shipped from a stable release. In that narrowly named
+        # compatibility mode we tolerate only component ids explicitly
+        # declared currently unpublished (UNPUBLISHED_COMPONENT_IDS); every
+        # published component must still be present. Strict stable/release
+        # validation never enters this mode and rejects any missing id.
+        rejected = missing
+        if allow_compatible_stable_manifest:
+            rejected = [component_id for component_id in missing if component_id not in UNPUBLISHED_COMPONENT_IDS]
+        if rejected:
+            rejected_list = ", ".join(rejected)
+            raise ValueError(f"component manifest is missing required components: {rejected_list}")
+
+    # Compatibility mode is the narrowly named beta handoff path that reuses a
+    # verified last-stable release manifest. It must not accept component
+    # records the running Brigade does not know: an unknown id could carry
+    # arbitrary asset coordinates that bypass the strict release invariants.
+    # Reject any unknown id outright while preserving the diagnostic text.
+    # Strict stable/release validation never enters this mode and continues
+    # to ignore unknown ids with a diagnostic (see tests above).
+    if allow_compatible_stable_manifest and unknown_ids:
+        diagnostics = _unknown_component_diagnostics(unknown_ids)
+        raise ValueError("; ".join(diagnostics))
 
     diagnostics = _unknown_component_diagnostics(unknown_ids)
     return ComponentManifest(

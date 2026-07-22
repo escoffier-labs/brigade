@@ -52,6 +52,50 @@ def _manifest() -> bytes:
     ).encode()
 
 
+def _pre_agent_notify_manifest() -> bytes:
+    """Last-stable manifest predating the agent-notify KNOWN_COMPONENT_IDS entry.
+
+    The beta handoff downloads the most recent stable release manifest, which
+    was published before agent-notify was added to KNOWN_COMPONENT_IDS on main
+    and therefore carries the four published native engines and no agent-notify
+    entry at all. Strict validation must reject this manifest; only the narrowly
+    named compatibility mode used by the beta handoff may accept it.
+    """
+    components = {}
+    for component in component_manifest.KNOWN_COMPONENT_IDS:
+        if component == "agent-notify":
+            continue
+        assets = {}
+        for platform in component_manifest.SUPPORTED_PLATFORMS:
+            name = f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
+            payload = name.encode()
+            assets[platform] = {
+                "asset_name": name,
+                "byte_size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "download_url": BASE + name,
+            }
+        components[component] = {
+            "component_revision": "a" * 40,
+            "source": {"repository": "escoffier-labs/brigade", "release_tag": TAG},
+            "executable": component,
+            "assets": assets,
+        }
+    return (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "brigade_version": VERSION,
+                "manifest_revision": "v1.2.3+" + "a" * 40,
+                "supported_platforms": list(component_manifest.SUPPORTED_PLATFORMS),
+                "components": components,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
+
+
 def _release(manifest: bytes) -> dict:
     digest = hashlib.sha256(manifest).hexdigest()
     return {
@@ -452,6 +496,91 @@ def test_beta_update_installs_full_main_sha_and_reuses_verified_stable_manifest(
     assert state.channel == "beta"
     assert state.cli_coordinate == sha
     assert (state.component_release_id, state.component_tag) == (42, TAG)
+
+
+def test_beta_update_accepts_pre_agent_notify_stable_manifest(tmp_path):
+    # The previous test is a false positive: its fixture gives every current
+    # component full assets. A real beta handoff right after agent-notify enters
+    # KNOWN_COMPONENT_IDS on main but before the first stable release publishing
+    # it downloads the last stable manifest, which has no agent-notify entry.
+    manifest = _pre_agent_notify_manifest()
+    sha = "b" * 40
+    commands = []
+    installed_binary = tmp_path / "bin" / "brigade"
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", installed_binary)
+
+    assert (
+        update_cmd.run_update(
+            channel="beta",
+            paths=paths,
+            http=_BetaHttp(_release(manifest), manifest, sha=sha),
+            runner=lambda argv: commands.append(argv) or 0,
+            now=lambda: "2026-07-20T12:00:00+00:00",
+        )
+        == 0
+    )
+    cache_path = paths.cache_root / "brigade" / "release-manifests" / f"{hashlib.sha256(manifest).hexdigest()}.json"
+    assert cache_path.read_bytes() == manifest
+    assert commands == [
+        ["pipx", "install", "--force", f"git+https://github.com/escoffier-labs/brigade@{sha}"],
+        [
+            str(installed_binary),
+            "setup",
+            "--manifest",
+            str(cache_path),
+            "--allow-compatible-stable-manifest",
+            VERSION,
+        ],
+    ]
+    state = update_cmd.load_update_state(paths.data_root / "brigade" / "update-state.json")
+    assert state is not None
+    assert state.channel == "beta"
+    assert state.cli_coordinate == sha
+    assert (state.component_release_id, state.component_tag) == (42, TAG)
+
+
+def test_release_manifest_still_rejects_missing_agent_notify_without_beta_handoff():
+    manifest = _pre_agent_notify_manifest()
+    release = update_cmd.ResolvedRelease(
+        42,
+        TAG,
+        VERSION,
+        "a" * 40,
+        BASE + "component-manifest-v1.json",
+        len(manifest),
+        hashlib.sha256(manifest).hexdigest(),
+        manifest,
+    )
+
+    # Strict validation (no compatibility handoff) rejects the missing
+    # agent-notify entry, preserving the stable/release invariant.
+    with pytest.raises(ValueError, match="missing required components: agent-notify"):
+        update_cmd.validate_release_manifest_bytes(release)
+
+    # The narrowly named compatibility mode is the only path that accepts it,
+    # and only because agent-notify is currently unpublished.
+    accepted = update_cmd.validate_release_manifest_bytes(release, allow_compatible_stable_manifest=True)
+    assert "agent-notify" not in accepted.components
+    assert set(accepted.components) == set(component_manifest.KNOWN_COMPONENT_IDS) - {"agent-notify"}
+
+
+def test_release_manifest_compatibility_mode_rejects_missing_published_component():
+    manifest = json.loads(_pre_agent_notify_manifest())
+    del manifest["components"]["miseledger"]
+    raw = (json.dumps(manifest, sort_keys=True) + "\n").encode()
+    release = update_cmd.ResolvedRelease(
+        42,
+        TAG,
+        VERSION,
+        "a" * 40,
+        BASE + "component-manifest-v1.json",
+        len(raw),
+        hashlib.sha256(raw).hexdigest(),
+        raw,
+    )
+
+    with pytest.raises(ValueError, match="missing required components: miseledger"):
+        update_cmd.validate_release_manifest_bytes(release, allow_compatible_stable_manifest=True)
 
 
 def test_beta_same_coordinates_are_a_noop(tmp_path):

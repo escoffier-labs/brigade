@@ -1,6 +1,11 @@
 # Brigade update channels
 
-`brigade update` is the only supported user-global mutation path for a pipx-managed Brigade installation. It resolves immutable coordinates before changing pipx or native components, then publishes its state only after both commands succeed.
+`stable` is the immutable release and pinner channel. `beta` is the development channel for
+CI-green `main`. `brigade update` is the supported user-global mutation path for a pipx-managed
+Brigade installation once you want channel-managed upgrades. Deliberate initial or manual exact
+pins such as `pipx install brigade-cli==X.Y.Z` are valid and do not require `brigade update`
+until you choose to move. It resolves immutable coordinates before changing pipx or native
+components, then publishes its state only after both commands succeed.
 
 | Machine profile | Channel | Use |
 | --- | --- | --- |
@@ -13,7 +18,7 @@ Run `brigade update` for the production default. `brigade update --channel beta`
 
 The user-global state is `<Brigade data root>/brigade/update-state.json`, separate from component `installed.json`. Its strict schema records the selected channel, owner, exact CLI version or beta SHA, release id and tag, manifest URL and digest, and timestamp. The shared sibling lock `update.lock` covers both channels. A live owner causes a clear failure. Stale metadata is removed only after its recorded process is confirmed dead.
 
-Stable resolves `releases/latest` once, verifies the exact `component-manifest-v1.json` release asset by GitHub digest and size, and accepts only exact `escoffier-labs/brigade` release URLs at the resolved tag. Beta pins the CLI to a checked full `main` SHA but uses the same verified stable component manifest, so beta and stable cannot install different native bytes.
+Stable resolves `releases/latest` once, verifies the exact `component-manifest-v1.json` release asset by GitHub digest and size, and accepts only exact `escoffier-labs/brigade` release URLs at the resolved tag. Beta pins the CLI to a checked full `main` SHA but uses the same verified stable component manifest, so beta and stable cannot install different native bytes. During the pre-pin window before a new component such as `agent-notify` first ships on stable, beta may run newer Brigade Python from `main` while native setup still follows the last verified stable manifest; components omitted there are skipped until stable publishes their assets.
 
 The updater runs `pipx install --force` with an exact requirement, then calls the newly installed absolute `brigade` executable with `setup --manifest <verified-cache-path>`. It does not use the prior executable for setup. This sequence is not an atomic installation transaction: pipx replacement happens before component setup. State publication is transactional, so a failed pipx install or setup leaves the prior update state untouched; rerun the same update to repair components.
 
