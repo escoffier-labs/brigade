@@ -151,6 +151,7 @@ role = "code"
         "read_only": True,
         "sandbox": None,
         "fail_fast": True,
+        "scheduler": "waves",
     }
     assert seen["fail_fast"] is True
 
@@ -203,6 +204,45 @@ role = "code"
     )
     assert rc == 0
     assert seen["fail_fast"] is False
+
+
+def test_run_cli_scheduler_dag_threads_to_aboyeur(tmp_path, monkeypatch):
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "ollama:llama3.3"
+role = "code"
+"""
+    )
+    seen = {}
+
+    def fake_run(task, loaded_roster, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    rc = cli.main(
+        [
+            "run",
+            "do something",
+            "--roster",
+            str(roster_path),
+            "--cwd",
+            str(tmp_path),
+            "--scheduler",
+            "dag",
+            "--no-artifacts",
+        ]
+    )
+    assert rc == 0
+    assert seen["scheduler"] == "dag"
 
 
 def test_run_cli_passes_no_code_graph_to_aboyeur(tmp_path, monkeypatch):
@@ -852,7 +892,7 @@ role = "code"
 
     captured = capsys.readouterr()
     assert rc == 2
-    assert seen == {"fail_fast": True, "output_dir": output_dir, "inspect_dir": output_dir}
+    assert seen == {"fail_fast": True, "scheduler": "waves", "output_dir": output_dir, "inspect_dir": output_dir}
     assert f"summary for {output_dir}" in captured.out
     assert f"artifacts: {output_dir}" in captured.err
 
@@ -2815,6 +2855,7 @@ def test_run_cli_forwards_worker_to_aboyeur(tmp_path, monkeypatch):
         "sandbox": None,
         "worker": "coder",
         "fail_fast": True,
+        "scheduler": "waves",
         "task": "do something",
     }
 

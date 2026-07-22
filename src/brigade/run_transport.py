@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
@@ -251,6 +252,9 @@ def dispatch(
     verbose: bool = False,
     authorized_writable_worktree: bool = False,
     fail_fast: bool = True,
+    scheduler: str = "waves",
+    route_dependencies: dict[str, tuple[str, ...]] | None = None,
+    route_held: dict[str, list[str]] | None = None,
     on_stage_start: Callable[[int, tuple[str, ...]], None] | None = None,
     on_interrupt: Callable[[], None] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
@@ -617,6 +621,24 @@ def dispatch(
     if not assignments:
         return []
 
+    if scheduler == "dag":
+        placement_error = _dag_placement_error(assignments, route_dependencies)
+        if placement_error is None:
+            return _dag_dispatch(
+                assignments,
+                roster,
+                run_one=run_one,
+                on_stage_start=on_stage_start,
+                on_interrupt=on_interrupt,
+                cancel_active_work=cancel_active_work,
+                route_dependencies=route_dependencies or {},
+                route_held=route_held or {},
+            )
+        print(
+            f"warning: dag scheduler: {placement_error}; falling back to wave scheduler",
+            file=sys.stderr,
+        )
+
     stage_order = sorted({assignment.stage for assignment in assignments})
     abort_after_stage: int | None = None
     all_results: list[WorkerResult] = []
@@ -676,3 +698,155 @@ def dispatch(
         if fail_fast and any(not result.ok for result in stage_results):
             abort_after_stage = stage
     return all_results
+
+
+def _dag_placement_error(
+    assignments: list[Assignment],
+    route_dependencies: dict[str, tuple[str, ...]] | None,
+) -> str | None:
+    """Reason the DAG scheduler cannot place the plan, or None when it can."""
+    if not route_dependencies:
+        return "no route dependencies available"
+    known = set(route_dependencies)
+    for assignment in assignments:
+        if not assignment.covers:
+            return "plan not fully covered"
+        if not set(assignment.covers) & known:
+            return "plan not fully covered"
+    return None
+
+
+def _dag_dispatch(
+    assignments: list[Assignment],
+    roster: Roster,
+    *,
+    run_one: Callable[[Assignment, list[WorkerResult]], WorkerResult],
+    on_stage_start: Callable[[int, tuple[str, ...]], None] | None,
+    on_interrupt: Callable[[], None] | None,
+    cancel_active_work: Callable[[dict[Any, int]], None],
+    route_dependencies: dict[str, tuple[str, ...]],
+    route_held: dict[str, list[str]],
+) -> list[WorkerResult]:
+    """Ready-queue scheduler keyed on Assignment.covers over the route DAG.
+
+    Independent branches keep running when a sibling branch fails; transitive
+    dependents of a failed/timed-out/held prerequisite become ``skipped``.
+    Result order matches the original ``assignments`` order.
+    """
+    index_of = {id(a): i for i, a in enumerate(assignments)}
+    coverers: dict[str, list[int]] = {}
+    for i, a in enumerate(assignments):
+        for stage_name in a.covers:
+            coverers.setdefault(stage_name, []).append(i)
+    prereqs: list[set[int]] = []
+    for a in assignments:
+        wanted: set[int] = set()
+        for stage_name in a.covers:
+            for dep_stage in route_dependencies.get(stage_name, ()):
+                wanted.update(coverers.get(dep_stage, ()))
+        wanted.discard(index_of[id(a)])
+        prereqs.append(wanted)
+    held_indices = {i for i, a in enumerate(assignments) if set(a.covers) & set(route_held)}
+    results: list[WorkerResult | None] = [None] * len(assignments)
+    completed_ok: list[WorkerResult] = []
+    submitted: set[int] = set()
+    for i in held_indices:
+        a = assignments[i]
+        stage_name = sorted(set(a.covers) & set(route_held))[0]
+        results[i] = WorkerResult(
+            worker=a.worker,
+            task=a.task,
+            text="",
+            ok=False,
+            status="held",
+            detail=f"held: stage {stage_name} awaits {', '.join(route_held[stage_name])}",
+        )
+
+    def terminal(i: int) -> bool:
+        return results[i] is not None
+
+    def ready(i: int) -> bool:
+        if terminal(i) or i in submitted:
+            return False
+        for p in prereqs[i]:
+            rp = results[p]
+            if rp is None or not rp.ok:
+                return False
+        return True
+
+    def doomed(i: int) -> bool:
+        if terminal(i) or i in submitted:
+            return False
+        for p in prereqs[i]:
+            rp = results[p]
+            if rp is not None and not rp.ok:
+                return True
+        return False
+
+    executor = ThreadPoolExecutor(max_workers=roster.max_workers)
+    future_to_index: dict[Any, int] = {}
+    try:
+        while any(r is None for r in results):
+            for i, a in enumerate(assignments):
+                if doomed(i):
+                    results[i] = WorkerResult(
+                        worker=a.worker,
+                        task=a.task,
+                        text="",
+                        ok=False,
+                        status="skipped",
+                        detail="skipped: prerequisite failed",
+                    )
+            progress = False
+            for i, a in enumerate(assignments):
+                if ready(i):
+                    if on_stage_start is not None:
+                        on_stage_start(a.stage, (a.worker,))
+                    future_to_index[executor.submit(run_one, a, list(completed_ok))] = i
+                    submitted.add(i)
+                    progress = True
+            pending = {f for f, i in future_to_index.items() if results[i] is None}
+            if not pending:
+                if not progress and any(r is None for r in results):
+                    for i, a in enumerate(assignments):
+                        if results[i] is None:
+                            results[i] = WorkerResult(
+                                worker=a.worker,
+                                task=a.task,
+                                text="",
+                                ok=False,
+                                status="skipped",
+                                detail="skipped: unresolvable dependency cycle in plan",
+                            )
+                continue
+            done = next(as_completed(pending))
+            i = future_to_index[done]
+            try:
+                finished = done.result()
+                results[i] = finished
+            except Exception as exc:
+                finished = WorkerResult(
+                    worker=assignments[i].worker,
+                    task=assignments[i].task,
+                    text="",
+                    ok=False,
+                    detail=str(exc)[:200],
+                )
+                results[i] = finished
+            if finished.ok:
+                completed_ok.append(finished)
+    except KeyboardInterrupt:
+        try:
+            if on_interrupt is not None:
+                on_interrupt()
+        finally:
+            cancel_active_work(future_to_index)
+            executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    except BaseException:
+        cancel_active_work(future_to_index)
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+    return [r for r in results if r is not None]
