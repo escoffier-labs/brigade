@@ -2915,10 +2915,18 @@ def run(
     drift_rc = _drift_failure_rc()
     if drift_rc is not None:
         return drift_rc
+    workers_ok = direct_worker or all(result.ok for result in worker_results)
+    failed_seats = [result.worker for result in worker_results if not result.ok]
     if output_dir is not None:
-        final_status = "artifact-collection" if defer_artifact_collection else "ok"
         pending_handoff = handoff_inbox is not None
-        finished_at = None if defer_artifact_collection or pending_handoff else datetime.now(timezone.utc)
+        if not workers_ok:
+            final_status = "incomplete"
+            finished_at = datetime.now(timezone.utc)
+            run_status = "incomplete"
+        else:
+            final_status = "artifact-collection" if defer_artifact_collection else "ok"
+            finished_at = None if defer_artifact_collection or pending_handoff else datetime.now(timezone.utc)
+            run_status = "handoff" if pending_handoff else final_status
         (output_dir / "final.txt").write_text(final.text + "\n")
         _write_json(
             output_dir / "run.json",
@@ -2928,10 +2936,18 @@ def run(
                 roster=roster,
                 dry_run=dry_run,
                 read_only=read_only,
-                status="handoff" if pending_handoff else final_status,
+                status=run_status,
                 started_at=started_at,
                 finished_at=finished_at,
                 output_dir=output_dir,
+                error=(
+                    f"{len(failed_seats)} worker(s) failed or were skipped: {', '.join(failed_seats)}"
+                    if not workers_ok
+                    else None
+                ),
+                failure_phase="workers" if not workers_ok else None,
+                failure_kind="worker-failure" if not workers_ok else None,
+                failure_seat=",".join(failed_seats) if not workers_ok else None,
                 code_graph=code_graph,
                 drift_impact=drift_impact,
                 evidence=evidence,
@@ -2947,7 +2963,7 @@ def run(
                 transport_warning=direct_result.transport_warning if direct_worker else None,
             ),
         )
-    if handoff_inbox is not None:
+    if handoff_inbox is not None and workers_ok:
         try:
             handoff = write_run_handoff(
                 handoff_inbox,
@@ -3026,5 +3042,12 @@ def run(
                     worker=worker,
                 ),
             )
+    if not workers_ok:
+        print(
+            f"warning: run incomplete: {len(failed_seats)} worker(s) failed; see worker-results.json",
+            file=sys.stderr,
+        )
+        print(final.text)
+        return 3
     print(final.text)
     return 0
