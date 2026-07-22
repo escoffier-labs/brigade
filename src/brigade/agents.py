@@ -73,8 +73,53 @@ class _GrokFinal:
     stop_reason: str | None = None
 
 
+_CLAUDE_DISALLOWED_ALWAYS = "Task,Agent"
+_CLAUDE_DISALLOWED_READ_ONLY = "Task,Agent,Bash,Edit,Write,NotebookEdit"
+
+# Claude Code has no native workspace-write sandbox: headless `-p` either waits
+# on a permission prompt (hang) or, with --dangerously-skip-permissions, grants
+# full access. There is no truthful middle ground, so workspace-write is rejected
+# before launch rather than silently degrading or stalling the worker.
+_CLAUDE_WORKSPACE_WRITE_ERROR = (
+    "claude cannot enforce a workspace-write sandbox in headless mode. "
+    "Use --sandbox danger-full-access (or --read-only) for claude seats, "
+    "or run in a linked git worktree with --worktree."
+)
+
+# A write run with no explicit sandbox must not silently grant full access.
+# Headless claude without --dangerously-skip-permissions stalls on a prompt, and
+# adding it unprompted grants danger-full-access the user never asked for. Refuse
+# to guess: require an explicit --sandbox danger-full-access (or --read-only).
+_CLAUDE_NO_SANDBOX_ERROR = (
+    "claude write run requested without an explicit sandbox. "
+    "Use --sandbox danger-full-access to grant --dangerously-skip-permissions, "
+    "--read-only for a read-only run, or run in a linked git worktree with --worktree. "
+    "Headless claude has no native workspace-write sandbox: it would stall on a "
+    "permission prompt or require full access."
+)
+
+
 def _claude_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
-    return ["claude", "-p", prompt]
+    if read_only or sandbox == "read-only":
+        # --disallowedTools removes tools from the model's context entirely
+        # (a hard deny), so read-only is enforced by the CLI, not just the prompt.
+        return ["claude", "-p", "--disallowedTools", _CLAUDE_DISALLOWED_READ_ONLY, prompt]
+    if sandbox == "workspace-write":
+        raise ValueError(_CLAUDE_WORKSPACE_WRITE_ERROR)
+    if sandbox == "danger-full-access":
+        # Explicit full-access request: headless `-p` would stall on a permission
+        # prompt without --dangerously-skip-permissions; the deny list still
+        # removes subagent spawning so the worker cannot delegate.
+        return [
+            "claude",
+            "-p",
+            "--dangerously-skip-permissions",
+            "--disallowedTools",
+            _CLAUDE_DISALLOWED_ALWAYS,
+            prompt,
+        ]
+    # sandbox is None: refuse to guess between stalling and granting full access.
+    raise ValueError(_CLAUDE_NO_SANDBOX_ERROR)
 
 
 def _codex_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
@@ -229,7 +274,7 @@ READ_ONLY_ENFORCEMENT: dict[str, str] = {
     "grok": "hard",
     "amp": "soft",
     "crush": "soft",
-    "claude": "none",
+    "claude": "hard",
     "opencode": "none",
 }
 
@@ -861,16 +906,30 @@ def run_agent(
                 requested_model=model,
             )
 
-    argv = build_argv(
-        cli_ref,
-        prompt,
-        read_only=read_only,
-        sandbox=sandbox,
-        model=model,
-        reasoning=reasoning,
-        cwd=cwd,
-        resume_session_id=resume_session_id,
-    )
+    try:
+        argv = build_argv(
+            cli_ref,
+            prompt,
+            read_only=read_only,
+            sandbox=sandbox,
+            model=model,
+            reasoning=reasoning,
+            cwd=cwd,
+            resume_session_id=resume_session_id,
+        )
+    except ValueError as exc:
+        # A builder rejected the launch before spawning (e.g. claude
+        # workspace-write, which this CLI version cannot enforce). Fail the
+        # seat cleanly instead of crashing the run or stalling on a prompt.
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=str(exc)[:200],
+            failure_phase="dispatch",
+            failure_kind="unsupported-sandbox",
+            requested_model=model,
+            reasoning=reasoning,
+        )
     structured_grok = cli_ref == "grok" and (read_only or sandbox == "read-only")
     if structured_grok:
         if argv[-2:] != ["--permission-mode", "plan"]:

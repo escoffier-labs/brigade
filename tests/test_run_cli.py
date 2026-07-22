@@ -946,9 +946,28 @@ def test_run_cli_dirty_guard_does_not_allocate_artifact_directory(tmp_path, monk
     assert not (repo / ".brigade" / "runs").exists()
 
 
-def test_run_cli_allow_dirty_passes_dirty_guard(tmp_path, monkeypatch):
+def test_run_cli_allow_dirty_rejected_in_dirty_primary_checkout(tmp_path, monkeypatch, capsys):
     repo = _git_repo_with_roster(tmp_path)
     (repo / "tracked.txt").write_text("dirty\n")
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("aboyeur.run should not be called")
+
+    monkeypatch.setattr(aboyeur, "run", fail_run)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--allow-dirty", "--no-artifacts"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--allow-dirty is not allowed in a primary checkout" in err
+    assert "linked git worktree" in err
+    assert "--worktree" in err
+
+
+def test_run_cli_allow_dirty_passes_in_clean_primary_checkout(tmp_path, monkeypatch):
+    # A clean primary checkout with --allow-dirty has no pre-existing work to
+    # misattribute, so the guard stays open and the run proceeds.
+    repo = _git_repo_with_roster(tmp_path)
     seen = {}
 
     def fake_run(
@@ -970,6 +989,35 @@ def test_run_cli_allow_dirty_passes_dirty_guard(tmp_path, monkeypatch):
 
     assert cli.main(["run", "x", "--cwd", str(repo), "--allow-dirty", "--no-artifacts"]) == 0
     assert seen["cwd"] == repo
+
+
+def test_run_cli_allow_dirty_passes_in_linked_worktree(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    (repo / "tracked.txt").write_text("dirty\n")
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", str(linked), "HEAD")
+    (linked / "tracked.txt").write_text("dirty-in-worktree\n")
+    seen = {}
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox=None,
+    ):
+        seen["cwd"] = cwd
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    assert cli.main(["run", "x", "--cwd", str(linked), "--allow-dirty", "--no-artifacts"]) == 0
+    assert seen["cwd"] == linked
 
 
 def test_run_cli_lock_conflict_errors(tmp_path, monkeypatch, capsys):
@@ -1167,13 +1215,19 @@ def test_run_cli_terminalizes_read_only_warning_write_failures(
     output_dir = repo / ".brigade" / "runs" / "warning-write"
     roster_path = repo / ".brigade" / "roster.toml"
     roster_path.write_text(
-        roster_path.read_text().replace('cli = "codex"\nrole = "code"', 'cli = "claude"\nrole = "code"')
+        roster_path.read_text().replace('cli = "codex"\nrole = "code"', 'cli = "ollama:llama3.3"\nrole = "code"')
     )
+    snapshot_calls = []
 
     def fail_warning_write(path, payload):
         raise error_type("warning write failed")
 
+    def snapshot_before_warning(_cwd):
+        snapshot_calls.append(_cwd)
+        raise AssertionError("snapshot must not run before the startup warning")
+
     monkeypatch.setattr(localio, "write_json", fail_warning_write)
+    monkeypatch.setattr(runguard, "capture_pre_run_snapshot", snapshot_before_warning)
 
     rc = cli.main(
         [
@@ -1194,6 +1248,7 @@ def test_run_cli_terminalizes_read_only_warning_write_failures(
     assert receipt["failure"]["phase"] == "startup"
     assert receipt["failure"]["kind"] == expected_kind
     assert not (output_dir / "read-only-enforcement.json").exists()
+    assert snapshot_calls == []
     assert not (repo / ".brigade" / "run.lock").exists()
 
 

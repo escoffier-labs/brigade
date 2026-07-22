@@ -721,3 +721,266 @@ def test_verify_changes_patch_accepts_empty_patch(tmp_path):
     runguard.collect_changes_patch(repo, patch_path)
 
     assert runguard.verify_changes_patch(repo, patch_path) is True
+
+
+def test_is_primary_checkout_true_for_main_repo(tmp_path):
+    repo = _repo(tmp_path)
+
+    assert runguard.is_primary_checkout(repo) is True
+
+
+def test_is_primary_checkout_false_for_linked_worktree(tmp_path):
+    repo = _repo(tmp_path)
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", str(linked), "HEAD")
+
+    assert runguard.is_primary_checkout(repo) is True
+    assert runguard.is_primary_checkout(linked) is False
+
+
+def test_is_primary_checkout_false_outside_git(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    assert runguard.is_primary_checkout(plain) is False
+
+
+def test_capture_pre_run_snapshot_records_clean_state(tmp_path):
+    repo = _repo(tmp_path)
+
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    assert snapshot is not None
+    assert snapshot.tracked_dirty == ()
+    assert snapshot.untracked == ()
+    assert len(snapshot.head) == 40
+    assert snapshot.branch in {"main", "master"}
+
+
+def test_capture_pre_run_snapshot_records_dirty_state(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("dirty\n")
+    (repo / "new.txt").write_text("new\n")
+
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    assert snapshot is not None
+    # Fingerprints are content-sensitive and not raw contents; only the path
+    # sets are exposed for attribution comparison.
+    assert snapshot.tracked_dirty_paths == ("tracked.txt",)
+    assert snapshot.untracked_paths == ("new.txt",)
+    assert all(isinstance(fp, str) for _, fp in snapshot.tracked_dirty)
+    assert all(isinstance(fp, str) for _, fp in snapshot.untracked)
+
+
+def test_capture_pre_run_snapshot_none_outside_git(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    assert runguard.capture_pre_run_snapshot(plain) is None
+    assert runguard.capture_pre_run_snapshot(None) is None
+
+
+def test_snapshot_payload_shape(tmp_path):
+    repo = _repo(tmp_path)
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    payload = runguard.snapshot_payload(snapshot)
+
+    assert payload == {
+        "schema": "brigade.pre_run_snapshot.v1",
+        "branch": snapshot.branch,
+        "head": snapshot.head,
+        "tracked_dirty_files": [],
+        "untracked_files": [],
+    }
+    assert runguard.snapshot_payload(None) is None
+
+
+def test_changes_relative_to_snapshot_attributes_only_worker_changes(tmp_path):
+    repo = _repo(tmp_path)
+    # Pre-existing dirty state (allowed only in a linked worktree in practice).
+    (repo / "preexisting.txt").write_text("already dirty\n")
+    (repo / "preexisting_untracked.txt").write_text("already here\n")
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    # Worker makes its own changes; leaves the pre-existing files alone.
+    (repo / "tracked.txt").write_text("worker changed\n")
+    (repo / "worker_new.txt").write_text("worker created\n")
+
+    changed, untracked = runguard.changes_relative_to_snapshot(repo, snapshot)
+
+    assert changed == ["tracked.txt"]
+    assert untracked == ["worker_new.txt"]
+
+
+def test_changes_relative_to_snapshot_clean_run_attributes_everything(tmp_path):
+    repo = _repo(tmp_path)
+    snapshot = runguard.capture_pre_run_snapshot(repo)  # clean
+
+    (repo / "tracked.txt").write_text("worker changed\n")
+    (repo / "worker_new.txt").write_text("worker created\n")
+
+    changed, untracked = runguard.changes_relative_to_snapshot(repo, snapshot)
+
+    assert changed == ["tracked.txt"]
+    assert untracked == ["worker_new.txt"]
+
+
+def test_changes_relative_to_snapshot_no_snapshot_returns_empty(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("changed\n")
+
+    changed, untracked = runguard.changes_relative_to_snapshot(repo, None)
+
+    assert changed == []
+    assert untracked == []
+
+
+def test_changes_relative_to_snapshot_detects_predirty_tracked_mutation(tmp_path):
+    # Regression for finding 1: path-set subtraction missed a further edit to a
+    # file already dirty before the run. The baseline fingerprint must differ
+    # from the final fingerprint so the worker's edit is detected.
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("already dirty\n")  # baseline tracked dirt
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    # Worker edits the already-dirty file further.
+    (repo / "tracked.txt").write_text("already dirty then worker changed\n")
+
+    changed, untracked = runguard.changes_relative_to_snapshot(repo, snapshot)
+
+    assert changed == ["tracked.txt"]
+    assert untracked == []
+
+
+def test_changes_relative_to_snapshot_detects_preexisting_untracked_mutation(tmp_path):
+    # Regression for finding 1: a pre-existing untracked file the worker
+    # mutates must be detected (path-set subtraction dropped it before).
+    repo = _repo(tmp_path)
+    (repo / "untracked.txt").write_text("already here\n")  # baseline untracked
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    (repo / "untracked.txt").write_text("already here then worker changed\n")
+
+    changed, untracked = runguard.changes_relative_to_snapshot(repo, snapshot)
+
+    assert changed == []
+    assert untracked == ["untracked.txt"]
+
+
+def test_changes_relative_to_snapshot_excludes_unchanged_baseline_dirt(tmp_path):
+    # Regression for finding 1: a baseline-dirty file the worker leaves alone
+    # must be excluded from attribution.
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("already dirty\n")
+    (repo / "untracked.txt").write_text("already here\n")
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    # Worker only creates a new file; leaves baseline dirt untouched.
+    (repo / "worker_new.txt").write_text("worker created\n")
+
+    changed, untracked = runguard.changes_relative_to_snapshot(repo, snapshot)
+
+    assert changed == []
+    assert untracked == ["worker_new.txt"]
+
+
+def test_changes_relative_to_snapshot_detects_deletion_of_predirty_tracked(tmp_path):
+    # Regression for finding 1: deleting a baseline-dirty tracked file is a
+    # worker edit (deletion) and must be detected.
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("already dirty\n")
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    (repo / "tracked.txt").unlink()
+
+    changed, untracked = runguard.changes_relative_to_snapshot(repo, snapshot)
+
+    assert changed == ["tracked.txt"]
+    assert untracked == []
+
+
+def test_changes_relative_to_snapshot_detects_deletion_of_preexisting_untracked(tmp_path):
+    # Regression for finding 1: deleting a baseline-untracked file is a worker
+    # edit and must be detected even though git no longer lists the path.
+    repo = _repo(tmp_path)
+    (repo / "untracked.txt").write_text("already here\n")
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    (repo / "untracked.txt").unlink()
+
+    changed, untracked = runguard.changes_relative_to_snapshot(repo, snapshot)
+
+    assert changed == []
+    assert untracked == ["untracked.txt"]
+
+
+def test_changes_relative_to_snapshot_detects_type_change_of_predirty_tracked(tmp_path):
+    # Regression for finding 1: a mode/type change (chmod +x) to a baseline-dirty
+    # tracked file is a worker edit and must be detected.
+    repo = _repo(tmp_path)
+    (repo / "tracked.txt").write_text("already dirty\n")
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    (repo / "tracked.txt").chmod(0o755)
+
+    changed, untracked = runguard.changes_relative_to_snapshot(repo, snapshot)
+
+    assert changed == ["tracked.txt"]
+    assert untracked == []
+
+
+def test_capture_pre_run_snapshot_fingerprint_excludes_raw_content(tmp_path):
+    # Contract: only a one-way digest is persisted, never raw file contents.
+    repo = _repo(tmp_path)
+    secret = "sk-super-secret-value-do-not-leak"
+    (repo / "tracked.txt").write_text(secret + "\n")
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    persisted = runguard.snapshot_payload(snapshot)
+    assert persisted is not None
+    assert "tracked_dirty_files" in persisted
+    assert secret not in json.dumps(persisted)
+    # The in-memory fingerprint is a digest, not the raw secret.
+    assert all(secret not in fp for _, fp in snapshot.tracked_dirty)
+
+
+def test_detect_branch_head_drift_clean_returns_none(tmp_path):
+    repo = _repo(tmp_path)
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    assert runguard.detect_branch_head_drift(repo, snapshot) is None
+
+
+def test_detect_branch_head_drift_on_head_move(tmp_path):
+    repo = _repo(tmp_path)
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    # A concurrent commit moves HEAD out from under the worker.
+    (repo / "concurrent.txt").write_text("x\n")
+    _git(repo, "add", "concurrent.txt")
+    _git(repo, "commit", "-m", "concurrent")
+
+    detail = runguard.detect_branch_head_drift(repo, snapshot)
+
+    assert detail is not None
+    assert "HEAD drifted" in detail
+
+
+def test_detect_branch_head_drift_on_branch_switch(tmp_path):
+    repo = _repo(tmp_path)
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+
+    _git(repo, "checkout", "-b", "other-branch")
+    detail = runguard.detect_branch_head_drift(repo, snapshot)
+
+    assert detail is not None
+    assert "branch drifted" in detail
+
+
+def test_detect_branch_head_drift_no_snapshot_returns_none(tmp_path):
+    repo = _repo(tmp_path)
+
+    assert runguard.detect_branch_head_drift(repo, None) is None
+    assert runguard.detect_branch_head_drift(None, None) is None

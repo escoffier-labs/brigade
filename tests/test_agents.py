@@ -8,7 +8,10 @@ from brigade import agents
 
 
 def test_build_argv_for_known_clis():
-    assert agents.build_argv("claude", "hi") == ["claude", "-p", "hi"]
+    # A claude write run with no explicit sandbox must fail safely rather than
+    # silently grant full access (or stall on a permission prompt).
+    with pytest.raises(ValueError, match="explicit sandbox"):
+        agents.build_argv("claude", "hi")
     assert agents.build_argv("codex", "hi") == ["codex", "exec", "-"]
     assert agents.build_argv("opencode", "hi") == ["opencode", "run", "hi"]
     assert agents.build_argv("antigravity", "hi") == [
@@ -50,7 +53,13 @@ def test_build_argv_for_read_only_codex():
         "read-only",
         "-",
     ]
-    assert agents.build_argv("claude", "hi", read_only=True) == ["claude", "-p", "hi"]
+    assert agents.build_argv("claude", "hi", read_only=True) == [
+        "claude",
+        "-p",
+        "--disallowedTools",
+        "Task,Agent,Bash,Edit,Write,NotebookEdit",
+        "hi",
+    ]
     assert agents.build_argv("opencode", "hi", read_only=True) == ["opencode", "run", "hi"]
     assert agents.build_argv("antigravity", "hi", read_only=True) == ["agy", "--sandbox", "--print", "hi"]
     assert agents.build_argv("pi", "hi", read_only=True) == ["pi", "--tools", "read,grep,find,ls", "-p", "hi"]
@@ -95,6 +104,111 @@ def test_build_argv_for_read_only_codex():
         "llama3.3",
         "hi",
     ]
+
+
+def test_claude_read_only_disallows_mutating_tools_and_subagents():
+    # Contract: read-only must be enforced by the CLI (a hard deny), not just
+    # the prompt. Subagents (Task, Agent) and every filesystem-mutating tool
+    # are removed from the model's context.
+    argv = agents.build_argv("claude", "inspect it", read_only=True)
+    assert argv == [
+        "claude",
+        "-p",
+        "--disallowedTools",
+        "Task,Agent,Bash,Edit,Write,NotebookEdit",
+        "inspect it",
+    ]
+
+
+def test_claude_read_only_sandbox_variant_matches_read_only_flag():
+    assert agents.build_argv("claude", "inspect it", sandbox="read-only") == [
+        "claude",
+        "-p",
+        "--disallowedTools",
+        "Task,Agent,Bash,Edit,Write,NotebookEdit",
+        "inspect it",
+    ]
+
+
+def test_claude_write_run_uses_skip_permissions_and_disallows_subagents():
+    # Contract: only an explicit --sandbox danger-full-access request may add
+    # --dangerously-skip-permissions. A write run with no explicit sandbox must
+    # fail safely with actionable guidance instead of silently granting full
+    # access (or stalling on a permission prompt). The deny list always removes
+    # subagent spawning so the worker cannot delegate out of the seat.
+    expected = [
+        "claude",
+        "-p",
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "Task,Agent",
+        "implement it",
+    ]
+    assert agents.build_argv("claude", "implement it", sandbox="danger-full-access") == expected
+    with pytest.raises(ValueError, match="explicit sandbox"):
+        agents.build_argv("claude", "implement it")
+
+
+def test_claude_workspace_write_rejected_before_launch():
+    # Contract: workspace-write cannot be truthfully enforced by this CLI
+    # version, so it is rejected before launch with an actionable error.
+    with pytest.raises(ValueError, match="workspace-write"):
+        agents.build_argv("claude", "implement it", sandbox="workspace-write")
+
+
+def test_run_agent_claude_workspace_write_fails_without_spawn(monkeypatch):
+    spawned = []
+
+    def fake_run(argv, **kw):
+        spawned.append(argv)
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    res = agents.run_agent("claude", "implement it", sandbox="workspace-write")
+
+    assert res.ok is False
+    assert res.failure_phase == "dispatch"
+    assert res.failure_kind == "unsupported-sandbox"
+    assert "workspace-write" in res.detail
+    assert "danger-full-access" in res.detail
+    assert spawned == []  # never launched the claude process
+
+
+def test_run_agent_claude_write_without_sandbox_fails_safely(monkeypatch):
+    # Regression for finding 4: a claude write run with no explicit sandbox
+    # must fail safely with actionable guidance instead of silently adding
+    # --dangerously-skip-permissions (or stalling on a permission prompt). Only
+    # an explicit danger-full-access request may add the skip-permissions flag.
+    spawned = []
+
+    def fake_run(argv, **kw):
+        spawned.append(argv)
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    res = agents.run_agent("claude", "implement it")  # sandbox=None
+
+    assert res.ok is False
+    assert res.failure_phase == "dispatch"
+    assert res.failure_kind == "unsupported-sandbox"
+    assert "explicit sandbox" in res.detail
+    assert "danger-full-access" in res.detail
+    assert spawned == []  # never launched the claude process
+    # And the dangerous flag is not present anywhere it could have been added.
+    assert not any("--dangerously-skip-permissions" in argv for argv in spawned)
+
+
+def test_read_only_enforcement_claude_is_hard():
+    # Contract: claude now hard-enforces read-only via --disallowedTools, so the
+    # advisory table must report 'hard' (not 'none') so --read-only stops warning
+    # that claude cannot be constrained.
+    assert agents.READ_ONLY_ENFORCEMENT["claude"] == "hard"
+    assert agents.read_only_enforcement("claude") == "hard"
+    assert agents.read_only_enforcement("claude", sandbox="read-only") == "hard"
 
 
 def test_build_argv_antigravity_writable_uses_cwd_write_approval(tmp_path):
@@ -217,11 +331,14 @@ def test_build_argv_unknown_raises():
 
 
 def test_build_argv_pins_model_for_claude_and_codex():
-    assert agents.build_argv("claude", "hi", model="claude-fable-5") == [
+    assert agents.build_argv("claude", "hi", sandbox="danger-full-access", model="claude-fable-5") == [
         "claude",
         "--model",
         "claude-fable-5",
         "-p",
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "Task,Agent",
         "hi",
     ]
     assert agents.build_argv("codex", "hi", model="gpt-5.5-codex") == [
@@ -252,7 +369,14 @@ def test_build_argv_pins_model_for_claude_and_codex():
 
 
 def test_build_argv_without_model_is_unchanged():
-    assert agents.build_argv("claude", "hi", model=None) == ["claude", "-p", "hi"]
+    assert agents.build_argv("claude", "hi", sandbox="danger-full-access", model=None) == [
+        "claude",
+        "-p",
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "Task,Agent",
+        "hi",
+    ]
     assert agents.build_argv("codex", "hi", model=None) == ["codex", "exec", "-"]
 
 
@@ -635,9 +759,18 @@ def test_run_agent_forwards_model_to_argv(monkeypatch):
 
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setattr(agents.proc, "run", fake_run)
-    res = agents.run_agent("claude", "hi", model="claude-fable-5")
+    res = agents.run_agent("claude", "hi", sandbox="danger-full-access", model="claude-fable-5")
     assert res.ok is True
-    assert captured["argv"] == ["/x/claude", "--model", "claude-fable-5", "-p", "hi"]
+    assert captured["argv"] == [
+        "/x/claude",
+        "--model",
+        "claude-fable-5",
+        "-p",
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "Task,Agent",
+        "hi",
+    ]
 
 
 def test_run_agent_codex_feeds_prompt_on_stdin(monkeypatch):
@@ -702,7 +835,7 @@ def test_build_argv_applies_reasoning(cli_ref, expected):
 
 def test_build_argv_rejects_reasoning_for_unsupported_adapter():
     with pytest.raises(ValueError, match="does not support reasoning"):
-        agents.build_argv("claude", "hi", reasoning="high")
+        agents.build_argv("claude", "hi", sandbox="danger-full-access", reasoning="high")
 
 
 def test_run_agent_threads_cwd_into_argv_builder(monkeypatch, tmp_path):
@@ -815,7 +948,7 @@ def test_run_agent_antigravity_with_no_cwd_allows_current_cwd(monkeypatch, tmp_p
 def test_run_agent_nonzero_is_not_ok(monkeypatch):
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(1, "", "boom"))
-    res = agents.run_agent("claude", "x")
+    res = agents.run_agent("claude", "x", sandbox="danger-full-access")
     assert res.ok is False
     assert "boom" in res.detail
     assert res.exit_code == 1
@@ -1197,6 +1330,7 @@ def test_run_agent_env_overrides_child_environment(monkeypatch):
     result = agents.run_agent(
         "claude",
         "hi",
+        sandbox="danger-full-access",
         env={"ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"},
     )
     assert result.ok
@@ -1216,7 +1350,9 @@ def test_run_agent_env_ref_resolves_from_parent(monkeypatch):
     monkeypatch.setattr(agents.proc, "run", fake_run)
     monkeypatch.setenv("KIMI_API_KEY", "sk-resolved-value")
 
-    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "KIMI_API_KEY"})
+    result = agents.run_agent(
+        "claude", "hi", sandbox="danger-full-access", env={"ANTHROPIC_AUTH_TOKEN_REF": "KIMI_API_KEY"}
+    )
     assert result.ok
     assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-resolved-value"
     assert "ANTHROPIC_AUTH_TOKEN_REF" not in captured["env"]
@@ -1239,6 +1375,7 @@ def test_run_agent_env_file_ref_uses_runtime_environment_file(tmp_path, monkeypa
     result = agents.run_agent(
         "claude",
         "hi",
+        sandbox="danger-full-access",
         env={"ANTHROPIC_AUTH_TOKEN_REF": f"env-file:{environment_file}#CLIPROXY_API_KEY"},
     )
 
@@ -1257,6 +1394,7 @@ def test_run_agent_env_file_ref_unavailable_fails_before_spawn(tmp_path, monkeyp
     result = agents.run_agent(
         "claude",
         "hi",
+        sandbox="danger-full-access",
         env={"ANTHROPIC_AUTH_TOKEN_REF": f"env-file:{environment_file}#CLIPROXY_API_KEY"},
     )
 
@@ -1276,6 +1414,7 @@ def test_run_agent_malformed_env_file_ref_never_reads_parent_environment(monkeyp
     result = agents.run_agent(
         "claude",
         "hi",
+        sandbox="danger-full-access",
         env={"ANTHROPIC_AUTH_TOKEN_REF": "env-file:relative/path#CLIPROXY_API_KEY"},
     )
 
@@ -1302,6 +1441,7 @@ def test_run_agent_env_file_prefixed_parent_variable_still_resolves(monkeypatch)
     result = agents.run_agent(
         "claude",
         "hi",
+        sandbox="danger-full-access",
         env={"ANTHROPIC_AUTH_TOKEN_REF": "env-filed"},
     )
 
@@ -1327,6 +1467,7 @@ def test_run_agent_scrubs_resolved_env_values_from_success_output(monkeypatch):
     result = agents.run_agent(
         "claude",
         "hi",
+        sandbox="danger-full-access",
         env={"ANTHROPIC_BASE_URL": endpoint, "ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"},
     )
 
@@ -1350,7 +1491,9 @@ def test_run_agent_scrubs_resolved_env_value_from_failure_detail(monkeypatch):
     )
     monkeypatch.setenv("LANE_KEY", token)
 
-    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"})
+    result = agents.run_agent(
+        "claude", "hi", sandbox="danger-full-access", env={"ANTHROPIC_AUTH_TOKEN_REF": "LANE_KEY"}
+    )
 
     assert not result.ok
     assert token not in result.text
@@ -1372,7 +1515,12 @@ def test_run_agent_scrubs_longer_overlapping_env_value_first(monkeypatch):
     monkeypatch.setenv("LANE_SECRET", secret)
     monkeypatch.setenv("LANE_FRAGMENT", fragment)
 
-    result = agents.run_agent("claude", "hi", env={"ENDPOINT_REF": "LANE_SECRET", "HOST_FRAGMENT_REF": "LANE_FRAGMENT"})
+    result = agents.run_agent(
+        "claude",
+        "hi",
+        sandbox="danger-full-access",
+        env={"ENDPOINT_REF": "LANE_SECRET", "HOST_FRAGMENT_REF": "LANE_FRAGMENT"},
+    )
 
     assert result.ok
     assert result.text == "connected to [ENDPOINT]"
@@ -1388,7 +1536,9 @@ def test_run_agent_scrubs_equal_env_values_with_stable_target(monkeypatch):
     )
     monkeypatch.setenv("LANE_SHARED", shared)
 
-    result = agents.run_agent("claude", "hi", env={"Z_MODE_REF": "LANE_SHARED", "A_MODE_REF": "LANE_SHARED"})
+    result = agents.run_agent(
+        "claude", "hi", sandbox="danger-full-access", env={"Z_MODE_REF": "LANE_SHARED", "A_MODE_REF": "LANE_SHARED"}
+    )
 
     assert result.ok
     assert result.text == "configured [A_MODE]"
@@ -1408,6 +1558,7 @@ def test_run_agent_never_scrubs_short_plain_flag_values(monkeypatch):
     result = agents.run_agent(
         "claude",
         "plan it",
+        sandbox="danger-full-access",
         env={
             "ANTHROPIC_BASE_URL": "https://proxy.local.test/anthropic",
             "ANTHROPIC_AUTH_TOKEN_REF": "CLIPROXY_API_KEY",
@@ -1428,7 +1579,7 @@ def test_run_agent_skips_short_secret_values(monkeypatch):
     )
     monkeypatch.setenv("LANE_SHORT", "1")
 
-    result = agents.run_agent("claude", "hi", env={"LANE_MODE_REF": "LANE_SHORT"})
+    result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"LANE_MODE_REF": "LANE_SHORT"})
 
     assert result.ok
     assert result.text == "stage 1 of 3 done"
@@ -1444,7 +1595,7 @@ def test_run_agent_scrubs_alnum_secret_only_on_word_boundaries(monkeypatch):
     )
     monkeypatch.setenv("LANE_ALNUM", secret)
 
-    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
+    result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
 
     assert result.ok
     assert result.text == "token [LANE_TOKEN] inside receiptabcd1234efghtail"
@@ -1461,7 +1612,7 @@ def test_run_agent_skips_alnum_secret_embedded_in_unicode_identifier(monkeypatch
     )
     monkeypatch.setenv("LANE_ALNUM", secret)
 
-    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
+    result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
 
     assert result.ok
     assert result.text == f"token {embedded}"
@@ -1514,7 +1665,7 @@ def test_run_agent_skips_alnum_secret_embedded_with_decomposed_left_combining_ma
     )
     monkeypatch.setenv("LANE_ALNUM", secret)
 
-    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
+    result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
 
     assert result.ok
     assert result.text == f"token {embedded}"
@@ -1531,7 +1682,7 @@ def test_run_agent_skips_alnum_secret_embedded_with_decomposed_right_combining_m
     )
     monkeypatch.setenv("LANE_ALNUM", secret)
 
-    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
+    result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
 
     assert result.ok
     assert result.text == f"token {embedded}"
@@ -1548,7 +1699,7 @@ def test_run_agent_scrubs_alnum_secret_delimited_by_unicode_punctuation(monkeypa
     )
     monkeypatch.setenv("LANE_ALNUM", secret)
 
-    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
+    result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"LANE_TOKEN_REF": "LANE_ALNUM"})
 
     assert result.ok
     assert result.text == "token 《[LANE_TOKEN]》"
@@ -1572,7 +1723,7 @@ def test_run_agent_scrubs_secret_only_on_identifier_edges(monkeypatch, secret, e
     )
     monkeypatch.setenv("LANE_SECRET", secret)
 
-    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LANE_SECRET"})
+    result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"LANE_TOKEN_REF": "LANE_SECRET"})
 
     assert result.ok
     assert result.text == f"token [LANE_TOKEN] done inside {embedded}"
@@ -1610,7 +1761,7 @@ def test_run_agent_classifies_output_before_scrubbing_env_values(monkeypatch):
     )
     monkeypatch.setenv("LANE_DIAGNOSTIC", diagnostic)
 
-    result = agents.run_agent("claude", "hi", env={"LANE_MODE_REF": "LANE_DIAGNOSTIC"})
+    result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"LANE_MODE_REF": "LANE_DIAGNOSTIC"})
 
     assert not result.ok
     assert result.failure_kind == "rate-limit-error"
@@ -1662,7 +1813,7 @@ def test_run_agent_scrubs_long_env_value_before_detail_truncation(monkeypatch):
     )
     monkeypatch.setenv("LONG_LANE_TOKEN", token)
 
-    result = agents.run_agent("claude", "hi", env={"LANE_TOKEN_REF": "LONG_LANE_TOKEN"})
+    result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"LANE_TOKEN_REF": "LONG_LANE_TOKEN"})
 
     assert not result.ok
     assert result.failure_kind == "rate-limit-error"
@@ -1708,7 +1859,7 @@ def test_run_agent_does_not_scrub_unrelated_parent_environment(monkeypatch):
     )
     monkeypatch.setenv("UNRELATED_VALUE", unrelated)
 
-    result = agents.run_agent("claude", "hi", env={"LANE_MODE": "test"})
+    result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"LANE_MODE": "test"})
 
     assert result.ok
     assert unrelated in result.text
@@ -1720,7 +1871,9 @@ def test_run_agent_env_ref_missing_fails_before_spawn(monkeypatch):
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: calls.append(argv))
     monkeypatch.delenv("MISSING_LANE_KEY", raising=False)
 
-    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "MISSING_LANE_KEY"})
+    result = agents.run_agent(
+        "claude", "hi", sandbox="danger-full-access", env={"ANTHROPIC_AUTH_TOKEN_REF": "MISSING_LANE_KEY"}
+    )
     assert not result.ok
     assert "MISSING_LANE_KEY" in result.detail
     assert "is not set" in result.detail
@@ -1737,14 +1890,16 @@ def test_run_agent_env_default_leaves_child_environment_alone(monkeypatch):
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setattr(agents.proc, "run", fake_run)
 
-    assert agents.run_agent("claude", "hi").ok
+    assert agents.run_agent("claude", "hi", sandbox="danger-full-access").ok
     assert captured["env"] is None
 
 
 def test_run_agent_env_ref_missing_is_typed_failure(monkeypatch):
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.delenv("MISSING_LANE_KEY", raising=False)
-    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "MISSING_LANE_KEY"})
+    result = agents.run_agent(
+        "claude", "hi", sandbox="danger-full-access", env={"ANTHROPIC_AUTH_TOKEN_REF": "MISSING_LANE_KEY"}
+    )
     assert not result.ok
     assert result.failure_kind == "env-ref-missing"
 
@@ -1752,7 +1907,7 @@ def test_run_agent_env_ref_missing_is_typed_failure(monkeypatch):
 def test_run_agent_env_rejects_bare_ref_suffix(monkeypatch):
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setenv("HOME_VAR", "value")
-    result = agents.run_agent("claude", "hi", env={"_REF": "HOME_VAR"})
+    result = agents.run_agent("claude", "hi", sandbox="danger-full-access", env={"_REF": "HOME_VAR"})
     assert not result.ok
     assert "empty" in result.detail
 
@@ -1760,7 +1915,9 @@ def test_run_agent_env_rejects_bare_ref_suffix(monkeypatch):
 def test_run_agent_env_ref_empty_value_is_typed_failure(monkeypatch):
     monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
     monkeypatch.setenv("EMPTY_LANE_KEY", "")
-    result = agents.run_agent("claude", "hi", env={"ANTHROPIC_AUTH_TOKEN_REF": "EMPTY_LANE_KEY"})
+    result = agents.run_agent(
+        "claude", "hi", sandbox="danger-full-access", env={"ANTHROPIC_AUTH_TOKEN_REF": "EMPTY_LANE_KEY"}
+    )
     assert not result.ok
     assert result.failure_kind == "env-ref-missing"
     assert "is not set or is empty" in result.detail

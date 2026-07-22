@@ -144,11 +144,14 @@ def test_ollama_cloud_ref_keeps_full_model_name():
 
 
 def test_claude_and_codex_argv_unchanged_by_registry():
-    assert agents.build_argv("claude", "P", model="claude-fable-5") == [
+    assert agents.build_argv("claude", "P", sandbox="danger-full-access", model="claude-fable-5") == [
         "claude",
         "--model",
         "claude-fable-5",
         "-p",
+        "--dangerously-skip-permissions",
+        "--disallowedTools",
+        "Task,Agent",
         "P",
     ]
     assert agents.build_argv("codex", "P", model="gpt-5.5-codex") == [

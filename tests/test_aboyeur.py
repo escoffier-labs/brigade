@@ -940,9 +940,14 @@ def test_run_json_records_disabled_code_graph(monkeypatch, tmp_path):
     db.parent.mkdir(parents=True)
     db.write_text("")
     monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
-    monkeypatch.setattr(
-        aboyeur.proc, "run", lambda *args, **kw: (_ for _ in ()).throw(AssertionError("no graphtrail run"))
-    )
+    real_run = aboyeur.proc.run
+
+    def forbid_graphtrail(command, **kwargs):
+        if command[0] == "/bin/graphtrail":
+            raise AssertionError("no graphtrail run")
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(aboyeur.proc, "run", forbid_graphtrail)
 
     def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
         assert "## Code graph context" not in prompt
@@ -4330,3 +4335,335 @@ def test_plan_codex_stdin_hang_names_seat_and_transport(monkeypatch):
     ) as exc:
         aboyeur.plan("build feature", roster, codex_transport="app-server")
     assert "Reading additional input from stdin" not in str(exc.value)
+
+
+def test_build_ground_truth_subtracts_pre_run_snapshot(tmp_path):
+    # Contract: ground truth attributes only state changes relative to the
+    # pre-run snapshot, so pre-existing dirty/untracked files are not charged
+    # to the worker.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "tracked.txt").write_text("base\n")
+    _commit_all(repo)
+    # Pre-existing work in progress (only possible in a linked worktree).
+    (repo / "preexisting.txt").write_text("already dirty\n")
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+    # Worker makes its own changes; leaves the pre-existing file alone.
+    (repo / "tracked.txt").write_text("worker changed\n")
+    (repo / "worker_new.txt").write_text("worker created\n")
+
+    ground_truth = aboyeur.build_ground_truth(repo, datetime.now(timezone.utc), pre_run_snapshot=snapshot)
+
+    assert ground_truth["available"] is True
+    assert ground_truth["changed_files"] == ["tracked.txt"]
+    assert ground_truth["untracked_files"] == ["worker_new.txt"]
+
+
+def test_build_ground_truth_without_snapshot_attributes_all(tmp_path):
+    # Backward-compat: callers without a snapshot get the full diff (the
+    # historical behavior), so clean-run attribution is unchanged.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "tracked.txt").write_text("base\n")
+    _commit_all(repo)
+    (repo / "tracked.txt").write_text("changed\n")
+    (repo / "new.txt").write_text("new\n")
+
+    ground_truth = aboyeur.build_ground_truth(repo, datetime.now(timezone.utc))
+
+    assert ground_truth["available"] is True
+    assert ground_truth["changed_files"] == ["tracked.txt"]
+    assert ground_truth["untracked_files"] == ["new.txt"]
+
+
+def test_run_persists_pre_run_snapshot(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        if "assignments" in prompt:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            (cwd / "tracked.txt").write_text("changed by worker\n")
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    run_cwd = tmp_path / "work"
+    run_cwd.mkdir()
+    _init_git_repo(run_cwd)
+    (run_cwd / "tracked.txt").write_text("initial\n")
+    _commit_all(run_cwd)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+
+    snapshot_file = output_dir / "pre-run-snapshot.json"
+    assert snapshot_file.is_file()
+    snapshot = json.loads(snapshot_file.read_text())
+    assert snapshot["schema"] == "brigade.pre_run_snapshot.v1"
+    assert snapshot["tracked_dirty_files"] == []
+    assert snapshot["untracked_files"] == []
+    assert len(snapshot["head"]) == 40
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["pre_run_snapshot"]["head"] == snapshot["head"]
+
+
+def test_run_fails_when_head_drifts_during_dispatch(monkeypatch, tmp_path, capsys):
+    # Contract: a concurrent commit (or branch switch) that moves HEAD during
+    # the run fails the run with a branch-head-drift failure instead of
+    # letting ground truth attribute the foreign state to the worker.
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            # A concurrent commit lands while the worker is running.
+            (cwd / "concurrent.txt").write_text("x\n")
+            subprocess.run(["git", "add", "concurrent.txt"], cwd=cwd, check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test User",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-m",
+                    "concurrent",
+                ],
+                cwd=cwd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    run_cwd = tmp_path / "work"
+    run_cwd.mkdir()
+    _init_git_repo(run_cwd)
+    (run_cwd / "tracked.txt").write_text("initial\n")
+    _commit_all(run_cwd)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    rc = aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir, code_graph_enabled=False)
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "drifted" in err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure"]["kind"] == "branch-head-drift"
+    assert run_meta["failure"]["phase"] == "run-isolation"
+    # The worker result must not have been written: the run failed before
+    # ground-truth attribution.
+    assert not (output_dir / "worker-results.json").exists()
+
+
+def _drift_repo(tmp_path):
+    run_cwd = tmp_path / "work"
+    run_cwd.mkdir()
+    _init_git_repo(run_cwd)
+    (run_cwd / "tracked.txt").write_text("initial\n")
+    _commit_all(run_cwd)
+    return run_cwd
+
+
+def _concurrent_commit(cwd):
+    (cwd / "concurrent.txt").write_text("x\n")
+    subprocess.run(["git", "add", "concurrent.txt"], cwd=cwd, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "concurrent",
+        ],
+        cwd=cwd,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def test_run_fails_when_head_drifts_during_planning_including_dry_run(monkeypatch, tmp_path, capsys):
+    # Contract: drift during planning must fail the run on every return path,
+    # including a dry-run that would otherwise return a plan built on stale
+    # state.
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if len(calls) == 1:
+            # A concurrent commit lands during planning.
+            _concurrent_commit(cwd)
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        return agents.AgentResult(text="final answer", ok=True)
+
+    run_cwd = _drift_repo(tmp_path)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    rc = aboyeur.run(
+        "build feature",
+        _roster(),
+        cwd=run_cwd,
+        output_dir=output_dir,
+        dry_run=True,
+        code_graph_enabled=False,
+    )
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "drifted" in err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure"]["kind"] == "branch-head-drift"
+    assert run_meta["failure"]["phase"] == "run-isolation"
+    # The dry-run plan must not have been printed as a success.
+    assert not (output_dir / "plan.json").exists()
+
+
+def test_run_fails_when_head_drifts_during_synthesis(monkeypatch, tmp_path, capsys):
+    # Contract: drift during synthesis must fail the run before the synthesized
+    # answer is finalized on top of drifted state.
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            (cwd / "tracked.txt").write_text("changed by worker\n")
+            return agents.AgentResult(text="worker output", ok=True)
+        # Synthesis call: a concurrent commit lands while synthesizing.
+        _concurrent_commit(cwd)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    run_cwd = _drift_repo(tmp_path)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    rc = aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir, code_graph_enabled=False)
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "drifted" in err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure"]["kind"] == "branch-head-drift"
+    assert run_meta["failure"]["phase"] == "run-isolation"
+    # The synthesized answer must not have been finalized as a success.
+    assert not (output_dir / "final.txt").exists()
+
+
+def test_run_fails_when_pre_run_snapshot_capture_fails(monkeypatch, tmp_path, capsys):
+    # Contract: a git work tree whose state cannot be read must fail preflight
+    # loudly instead of silently disabling run isolation.
+    run_cwd = _drift_repo(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def boom(_cwd):
+        raise runguard.RunGuardError("could not read git state")
+
+    monkeypatch.setattr(aboyeur.runguard, "capture_pre_run_snapshot", boom)
+
+    rc = aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir, code_graph_enabled=False)
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "pre-run snapshot failed" in err
+    assert "could not read git state" in err
+    # No run artifacts should have been written: preflight failed before start.
+    assert not (output_dir / "run.json").exists()
+    assert not (output_dir / "pre-run-snapshot.json").exists()
+
+
+def test_run_persists_pre_run_snapshot_before_worker_dispatch(monkeypatch, tmp_path):
+    # Contract: the pre-run snapshot is persisted immediately once the run
+    # artifact directory exists, before any worker is dispatched.
+    dispatched_with_snapshot = {"value": False}
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        if "assignments" in prompt:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            # The snapshot must already be on disk by the time the worker runs.
+            dispatched_with_snapshot["value"] = (output_dir / "pre-run-snapshot.json").exists()
+            (cwd / "tracked.txt").write_text("changed by worker\n")
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    run_cwd = _drift_repo(tmp_path)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+    assert dispatched_with_snapshot["value"] is True
+
+
+def test_build_ground_truth_dirty_baseline_leaves_diffstat_unavailable(tmp_path):
+    # Contract (finding 6): a dirty baseline must never reuse the full HEAD
+    # diffstat as the run delta. Only content-changed paths relative to
+    # baseline are reported and line counts are left unavailable.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "tracked.txt").write_text("base\n")
+    _commit_all(repo)
+    # Dirty baseline: a tracked file already dirty before the run.
+    (repo / "tracked.txt").write_text("already dirty\n")
+    snapshot = runguard.capture_pre_run_snapshot(repo)
+    # Worker edits the already-dirty file further and adds a new file.
+    (repo / "tracked.txt").write_text("already dirty then worker changed\n")
+    (repo / "worker_new.txt").write_text("worker created\n")
+
+    ground_truth = aboyeur.build_ground_truth(repo, datetime.now(timezone.utc), pre_run_snapshot=snapshot)
+
+    assert ground_truth["available"] is True
+    assert ground_truth["changed_files"] == ["tracked.txt"]
+    assert ground_truth["untracked_files"] == ["worker_new.txt"]
+    assert ground_truth["diffstat"] == ""
+    assert ground_truth["diffstat_unavailable"] is True
+    assert ground_truth["change_provenance"] == "observed-during-run-author-unknown"
+
+
+def test_build_ground_truth_clean_baseline_preserves_diffstat(tmp_path):
+    # Contract (finding 6): a clean baseline preserves the full HEAD diffstat
+    # (it equals the worker delta), so existing clean-run behavior is unchanged.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "tracked.txt").write_text("base\n")
+    _commit_all(repo)
+    snapshot = runguard.capture_pre_run_snapshot(repo)  # clean
+    (repo / "tracked.txt").write_text("worker changed\n")
+    (repo / "worker_new.txt").write_text("worker created\n")
+
+    ground_truth = aboyeur.build_ground_truth(repo, datetime.now(timezone.utc), pre_run_snapshot=snapshot)
+
+    assert ground_truth["available"] is True
+    assert ground_truth["changed_files"] == ["tracked.txt"]
+    assert ground_truth["untracked_files"] == ["worker_new.txt"]
+    assert ground_truth["diffstat"] != ""
+    assert "diffstat_unavailable" not in ground_truth

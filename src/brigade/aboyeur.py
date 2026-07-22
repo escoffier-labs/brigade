@@ -1429,7 +1429,11 @@ def _verify_receipts_since(cwd: Path, started_at: datetime) -> list[dict[str, ob
     return receipts
 
 
-def build_ground_truth(cwd: Path | None, started_at: datetime) -> dict[str, object]:
+def build_ground_truth(
+    cwd: Path | None,
+    started_at: datetime,
+    pre_run_snapshot: runguard.PreRunSnapshot | None = None,
+) -> dict[str, object]:
     verify_receipts = _verify_receipts_since(cwd, started_at) if cwd is not None else []
     payload: dict[str, object] = {
         "available": False,
@@ -1450,23 +1454,49 @@ def build_ground_truth(cwd: Path | None, started_at: datetime) -> dict[str, obje
         payload["reason"] = error or "not a git worktree"
         return payload
 
-    diffstat, error = _git_stdout(cwd, "diff", "--stat", "HEAD")
-    if error is not None:
-        payload["reason"] = error
-        return payload
-    changed_names, error = _git_stdout(cwd, "diff", "--name-only", "HEAD")
-    if error is not None:
-        payload["reason"] = error
-        return payload
-    try:
-        untracked_files = runguard._untracked_files(cwd)
-    except runguard.RunGuardError as exc:
-        payload["reason"] = str(exc)
-        return payload
+    # When a pre-run snapshot exists, attribute only state changes relative to
+    # it so pre-existing dirty or untracked files (possible only in a linked
+    # worktree; the primary checkout rejects --allow-dirty) are not charged to
+    # the worker. For a clean baseline the full HEAD diffstat equals the worker
+    # delta and is preserved. For a dirty baseline the full HEAD diffstat is
+    # contaminated by pre-existing dirt, so it is never reused as the run delta:
+    # only content-changed paths relative to baseline are reported and line
+    # counts are left unavailable (they cannot be computed without baseline
+    # contamination).
+    if pre_run_snapshot is not None:
+        changed_names_list, untracked_files = runguard.changes_relative_to_snapshot(cwd, pre_run_snapshot)
+        changed_names = "\n".join(changed_names_list)
+        baseline_dirty = bool(pre_run_snapshot.tracked_dirty_paths) or bool(pre_run_snapshot.untracked_paths)
+        if baseline_dirty:
+            diffstat = ""
+            payload["diffstat_unavailable"] = True
+        else:
+            diffstat, error = _git_stdout(cwd, "diff", "--stat", "HEAD")
+            if error is not None:
+                payload["reason"] = error
+                return payload
+    else:
+        diffstat, error = _git_stdout(cwd, "diff", "--stat", "HEAD")
+        if error is not None:
+            payload["reason"] = error
+            return payload
+        changed_names, error = _git_stdout(cwd, "diff", "--name-only", "HEAD")
+        if error is not None:
+            payload["reason"] = error
+            return payload
+        try:
+            untracked_files = runguard._untracked_files(cwd)
+        except runguard.RunGuardError as exc:
+            payload["reason"] = str(exc)
+            return payload
 
     payload.update(
         {
             "available": True,
+            # Changes are observed during the run; the author is unknown. Brigade
+            # does not assert the worker authored them (a concurrent commit,
+            # branch switch, or pre-existing edit could also be the source).
+            "change_provenance": "observed-during-run-author-unknown",
             "diffstat": diffstat.strip(),
             "changed_files": [line for line in changed_names.splitlines() if line.strip()],
             "untracked_files": untracked_files,
@@ -1493,17 +1523,26 @@ def _ground_truth_facts(ground_truth: dict[str, object] | None) -> str:
     else:
         changed_files = _ground_truth_str_list(ground_truth, "changed_files")
         untracked_files = _ground_truth_str_list(ground_truth, "untracked_files")
-        diffstat = _one_line(str(ground_truth.get("diffstat") or "none"))
-        if len(diffstat) > 240:
-            diffstat = diffstat[:237] + "..."
+        # Ground truth describes changes *observed during the run*; the author is
+        # unknown. Brigade does not assert the worker authored them (a concurrent
+        # commit, branch switch, or pre-existing edit could also have produced
+        # them). Drift checks narrow this, but the provenance stays "author
+        # unknown" so synthesis never claims the worker wrote concurrent edits.
         lines.append(
-            f"- changed_files: {len(changed_files)}" + (f" ({', '.join(changed_files[:6])})" if changed_files else "")
+            "- changed_files: observed during the run, author unknown "
+            f"({len(changed_files)})" + (f": {', '.join(changed_files[:6])}" if changed_files else "")
         )
         lines.append(
-            f"- untracked_files: {len(untracked_files)}"
-            + (f" ({', '.join(untracked_files[:6])})" if untracked_files else "")
+            "- untracked_files: observed during the run, author unknown "
+            f"({len(untracked_files)})" + (f": {', '.join(untracked_files[:6])}" if untracked_files else "")
         )
-        lines.append(f"- diffstat: {diffstat}")
+        if ground_truth.get("diffstat_unavailable") is True:
+            lines.append("- diffstat: unavailable (dirty baseline; line counts would include pre-existing changes)")
+        else:
+            diffstat = _one_line(str(ground_truth.get("diffstat") or "none"))
+            if len(diffstat) > 240:
+                diffstat = diffstat[:237] + "..."
+            lines.append(f"- diffstat: {diffstat}")
     patch_ref = ground_truth.get("patch_ref")
     if isinstance(patch_ref, str) and patch_ref:
         lines.append(f"- patch_ref: {patch_ref}")
@@ -1903,6 +1942,7 @@ def _run_payload(
     route: RouteBrief | None = None,
     worker: str | None = None,
     include_git: bool = True,
+    pre_run_snapshot: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": "brigade.run.v1",
@@ -1945,6 +1985,8 @@ def _run_payload(
         git = _receipt_git_snapshot(cwd)
         if git is not None:
             payload["git"] = git
+    if pre_run_snapshot is not None:
+        payload["pre_run_snapshot"] = pre_run_snapshot
     if code_graph_delta is not None:
         payload["code_graph_delta"] = code_graph_delta
     if context_eval_payload is not None:
@@ -2205,7 +2247,48 @@ def run(
     direct_worker = worker is not None
 
     def _payload(**kwargs: Any) -> dict[str, object]:
-        return _run_payload(lock_workspace=lock_workspace, **kwargs)
+        return _run_payload(
+            lock_workspace=lock_workspace,
+            pre_run_snapshot=pre_run_snapshot_payload,
+            **kwargs,
+        )
+
+    # Capture pre-run git state before any worker touches the tree so ground
+    # truth can attribute only the worker's changes and a drift check can fail
+    # the run if branch or HEAD moves out from under it. The in-memory snapshot
+    # is captured now (before dispatch); the persisted copy is written once
+    # output_dir exists. A git work tree whose state cannot be read is a
+    # preflight failure (not a silent downgrade): the run refuses to start
+    # rather than running without isolation attribution.
+    try:
+        pre_run_snapshot = runguard.capture_pre_run_snapshot(cwd)
+    except runguard.RunGuardError as exc:
+        print(f"error: pre-run snapshot failed: {exc}", file=sys.stderr)
+        return 2
+    pre_run_snapshot_payload = runguard.snapshot_payload(pre_run_snapshot)
+
+    def _drift_failure_rc() -> int | None:
+        """Centralized branch/HEAD drift check across every return path.
+
+        Returns 2 (and records a run-isolation failure) when branch or HEAD
+        moved since the pre-run snapshot, else None so the caller can proceed.
+        Call this after planning, before any dry-run return, after worker
+        dispatch, after synthesis, and immediately before finalization.
+        """
+        detail = runguard.detect_branch_head_drift(cwd, pre_run_snapshot)
+        if detail is None:
+            return None
+        if output_dir is not None:
+            record_run_termination(
+                output_dir,
+                status="failed",
+                failure_phase="run-isolation",
+                failure_kind="branch-head-drift",
+                detail=detail,
+                seat=roster.orchestrator,
+            )
+        print(f"error: {detail}", file=sys.stderr)
+        return 2
 
     if worker is not None:
         worker_error = _direct_worker_error(worker, roster, read_only=read_only)
@@ -2259,6 +2342,8 @@ def run(
     code_graph_delta_before: dict[str, object] | None = None
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
+        if pre_run_snapshot_payload is not None:
+            _write_json(output_dir / "pre-run-snapshot.json", pre_run_snapshot_payload)
         if code_graph_delta is None and cwd is not None:
             code_graph_delta_before = graphtrail_delta.capture_before(cwd, output_dir)
             code_graph_delta = code_graph_delta_before
@@ -2380,6 +2465,13 @@ def run(
                 )
             print(f"error: {exc}", file=sys.stderr)
             return 2
+
+    # Drift checkpoint: after planning (and before any dry-run return). A
+    # concurrent commit or branch switch during planning must fail the run
+    # instead of letting a dry-run return a plan built on stale state.
+    drift_rc = _drift_failure_rc()
+    if drift_rc is not None:
+        return drift_rc
 
     if output_dir is not None:
         attempts_payload: dict[str, object] = {"attempts": plan_attempts or []}
@@ -2629,12 +2721,18 @@ def run(
             raise
     finally:
         close_server_resources()
+    # Drift checkpoint: after worker dispatch. A concurrent commit or branch
+    # switch during dispatch must fail the run before ground truth attributes
+    # the foreign state to the worker.
+    drift_rc = _drift_failure_rc()
+    if drift_rc is not None:
+        return drift_rc
     if output_dir is not None:
         record_result_processing(output_dir, seat=roster.orchestrator)
     if output_dir is not None and code_graph_delta_before is not None and cwd is not None:
         code_graph_delta = graphtrail_delta.capture_after_and_diff(cwd, output_dir, code_graph_delta_before)
     context_eval_payload = _context_eval_for_run(code_graph, code_graph_delta)
-    ground_truth = build_ground_truth(cwd, started_at)
+    ground_truth = build_ground_truth(cwd, started_at, pre_run_snapshot=pre_run_snapshot)
     if code_graph_delta is not None:
         ground_truth["code_graph_delta"] = code_graph_delta
     if context_eval_payload is not None:
@@ -2724,6 +2822,12 @@ def run(
             process_registry=process_registry,
         )
         final = replace(final, duration_seconds=max(0.0, round(time.monotonic() - synthesis_started, 3)))
+    # Drift checkpoint: after synthesis. A concurrent commit or branch switch
+    # during synthesis must fail the run before the synthesized answer is
+    # finalized on top of drifted state.
+    drift_rc = _drift_failure_rc()
+    if drift_rc is not None:
+        return drift_rc
     if output_dir is not None:
         if not direct_worker:
             final = _write_agent_logs(output_dir, "synthesis", final)
@@ -2794,6 +2898,12 @@ def run(
         else:
             print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
         return 2
+    # Drift checkpoint: immediately before finalization. The final ok receipt
+    # must not be written on top of state a concurrent commit moved out from
+    # under the run.
+    drift_rc = _drift_failure_rc()
+    if drift_rc is not None:
+        return drift_rc
     if output_dir is not None:
         final_status = "artifact-collection" if defer_artifact_collection else "ok"
         pending_handoff = handoff_inbox is not None
