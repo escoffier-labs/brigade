@@ -543,6 +543,7 @@ def test_windows_native_acceptance_source_mode_skips_only_bundled_unpublished_co
     unpublished = [component_id for component_id, record in manifest["components"].items() if not record.get("assets")]
     published = [component_id for component_id, record in manifest["components"].items() if record.get("assets")]
     assert "agent-notify" in unpublished
+    assert set(unpublished) == {"agent-notify"}
     assert published, "at least one published component must remain strictly required"
 
     unpublished_fn = _extract_powershell_function(script, "Get-UnpublishedComponentIds")
