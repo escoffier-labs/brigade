@@ -1265,6 +1265,25 @@ def test_run_agent_env_file_ref_unavailable_fails_before_spawn(tmp_path, monkeyp
     assert calls == []
 
 
+def test_run_agent_malformed_env_file_ref_never_reads_parent_environment(monkeypatch):
+    # A malformed env-file reference must fail dispatch, not fall through to a
+    # parent-environment lookup under the malformed string's name.
+    calls = []
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: calls.append(argv))
+    monkeypatch.setenv("env-file:relative/path#CLIPROXY_API_KEY", "leaked-parent-value")
+
+    result = agents.run_agent(
+        "claude",
+        "hi",
+        env={"ANTHROPIC_AUTH_TOKEN_REF": "env-file:relative/path#CLIPROXY_API_KEY"},
+    )
+
+    assert not result.ok
+    assert result.failure_kind == "env-ref-missing"
+    assert calls == []
+
+
 def test_run_agent_scrubs_resolved_env_values_from_success_output(monkeypatch):
     token = "lane-token-value-for-test"
     endpoint = "https://lane.example.test/anthropic"

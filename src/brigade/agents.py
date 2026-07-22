@@ -24,7 +24,18 @@ _OLLAMA_PREFIX = "ollama:"
 _CODEX_CLOUD_PREFIX = "codex-cloud:"
 _CLOUDFLARE_AI_GATEWAY_PREFIX = "cloudflare-ai-gateway/"
 _CLOUDFLARE_AI_GATEWAY_REQUIRED_ENV = ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID")
-_ENV_FILE_REF_RE = re.compile(r"^env-file:(/[^#]+)#([A-Z][A-Z0-9_]*)$")
+ENV_FILE_REF_PREFIX = "env-file"
+ENV_FILE_REF_RE = re.compile(r"^env-file:(/[^#]+)#([A-Z][A-Z0-9_]*)$")
+
+
+def is_env_file_reference(value: str) -> bool:
+    """True when a _REF value is env-file-shaped (well-formed or not).
+
+    Validation and resolution share this classifier so a malformed env-file
+    reference can never fall through to a parent-environment lookup."""
+    return value.startswith(ENV_FILE_REF_PREFIX)
+
+
 _NONRECOVERABLE_GROK_OUTPUT_FAILURES = frozenset(
     {
         "provider-error",
@@ -555,7 +566,7 @@ def ollama_model_present(
 def _read_env_file_reference(reference: str) -> str | None:
     """Read one systemd-style KEY=VALUE entry without evaluating the file."""
 
-    match = _ENV_FILE_REF_RE.match(reference)
+    match = ENV_FILE_REF_RE.match(reference)
     if match is None:
         return None
     path = Path(match.group(1))
@@ -590,11 +601,14 @@ def resolve_env_overrides(env: dict[str, str]) -> tuple[dict[str, str] | None, s
             target = key[: -len("_REF")]
             if not target:
                 return None, f"env override {key}: resolved variable name is empty"
-            referenced = _read_env_file_reference(value) if value.startswith("env-file:") else os.environ.get(value)
-            if not referenced:
-                if value.startswith("env-file:"):
+            if is_env_file_reference(value):
+                referenced = _read_env_file_reference(value)
+                if not referenced:
                     return None, f"env override {key}: referenced environment file value is unavailable"
-                return None, f"env override {key}: referenced variable {value} is not set or is empty"
+            else:
+                referenced = os.environ.get(value)
+                if not referenced:
+                    return None, f"env override {key}: referenced variable {value} is not set or is empty"
             resolved[target] = referenced
         else:
             resolved[key] = value
