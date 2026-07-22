@@ -198,11 +198,17 @@ def test_smoke_uses_only_absolute_managed_executables(acceptance_module, tmp_pat
         if Path(argv[0]).name == "sessionfind":
             return subprocess.CompletedProcess(argv, 0, "usage: sessionfind", "")
         if Path(argv[0]).name == "agent-notify":
-            return subprocess.CompletedProcess(argv, 0, '{"version":"acceptance"}', "")
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                '{"version":"acceptance","commit":"abc123def456","build_date":"2026-07-22T13:29:00Z"}',
+                "",
+            )
         return subprocess.CompletedProcess(argv, 0, "ok", "")
 
     acceptance_module.smoke_managed_components(
         {component_id: managed_bin / component_id for component_id in acceptance_module.COMPONENT_IDS},
+        version="acceptance",
         runner=runner,
     )
 
@@ -219,11 +225,17 @@ def test_smoke_accepts_sessionfind_command_list_help(acceptance_module, tmp_path
         if Path(argv[0]).name == "sessionfind":
             return subprocess.CompletedProcess(argv, 0, "\n  sessionfind query [PATH]...\n", "")
         if Path(argv[0]).name == "agent-notify":
-            return subprocess.CompletedProcess(argv, 0, '{"version":"acceptance"}', "")
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                '{"version":"acceptance","commit":"abc123def456","build_date":"2026-07-22T13:29:00Z"}',
+                "",
+            )
         return subprocess.CompletedProcess(argv, 0, "ok", "")
 
     acceptance_module.smoke_managed_components(
         {component_id: managed_bin / component_id for component_id in acceptance_module.COMPONENT_IDS},
+        version="acceptance",
         runner=runner,
     )
 
@@ -238,12 +250,18 @@ def test_smoke_rejects_sessionfind_unrelated_success_output(acceptance_module, t
         if Path(argv[0]).name == "sessionfind":
             return subprocess.CompletedProcess(argv, 0, "commands available", "no help text")
         if Path(argv[0]).name == "agent-notify":
-            return subprocess.CompletedProcess(argv, 0, '{"version":"acceptance"}', "")
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                '{"version":"acceptance","commit":"abc123def456","build_date":"2026-07-22T13:29:00Z"}',
+                "",
+            )
         return subprocess.CompletedProcess(argv, 0, "ok", "")
 
     with pytest.raises(acceptance_module.AcceptanceError, match="sessionfind smoke produced no help text"):
         acceptance_module.smoke_managed_components(
             {component_id: managed_bin / component_id for component_id in acceptance_module.COMPONENT_IDS},
+            version="acceptance",
             runner=runner,
         )
 
@@ -372,3 +390,99 @@ def test_managed_digest_verification_rejects_binary_not_from_release_manifest(ac
         acceptance_module.verify_managed_component_digests(
             manifest, {name: managed / name for name in acceptance_module.COMPONENT_IDS}, "linux-amd64"
         )
+
+
+def _agent_notify_payload(version="1.2.3", commit="abc123def456", build_date="2026-07-22T13:29:00Z"):
+    return {"version": version, "commit": commit, "build_date": build_date}
+
+
+def test_validate_agent_notify_version_payload_accepts_full_sha_without_requiring_short(acceptance_module):
+    full_sha = "a" * 40
+    payload = _agent_notify_payload(commit=full_sha)
+    # Must not raise: the release build injects the full github.sha, so a short
+    # SHA must not be required.
+    acceptance_module.validate_agent_notify_version_payload(payload, "1.2.3")
+
+
+def test_validate_agent_notify_version_payload_accepts_short_sha(acceptance_module):
+    acceptance_module.validate_agent_notify_version_payload(_agent_notify_payload(commit="abc123d"), "1.2.3")
+
+
+def test_validate_agent_notify_version_payload_rejects_bare_build_dev_unknown_defaults(acceptance_module):
+    """A bare `go build` leaves dev/unknown/unknown; every placeholder field is rejected."""
+    for field, bad_value, matcher in (
+        ("version", "dev", "dev/unknown"),
+        ("version", "unknown", "dev/unknown"),
+        ("commit", "unknown", "commit"),
+        ("build_date", "unknown", "build_date"),
+    ):
+        payload = _agent_notify_payload()
+        payload[field] = bad_value
+        with pytest.raises(acceptance_module.AcceptanceError, match=matcher):
+            acceptance_module.validate_agent_notify_version_payload(payload, "1.2.3")
+
+
+def test_validate_agent_notify_version_payload_rejects_version_mismatch(acceptance_module):
+    payload = _agent_notify_payload(version="1.2.4")
+    with pytest.raises(acceptance_module.AcceptanceError, match="version mismatch"):
+        acceptance_module.validate_agent_notify_version_payload(payload, "1.2.3")
+
+
+def test_validate_agent_notify_version_payload_rejects_missing_version_field(acceptance_module):
+    payload = _agent_notify_payload()
+    del payload["version"]
+    with pytest.raises(acceptance_module.AcceptanceError, match="missing version field"):
+        acceptance_module.validate_agent_notify_version_payload(payload, "1.2.3")
+
+
+def test_validate_agent_notify_version_payload_rejects_non_hex_commit(acceptance_module):
+    payload = _agent_notify_payload(commit="not-a-sha")
+    with pytest.raises(acceptance_module.AcceptanceError, match="commit"):
+        acceptance_module.validate_agent_notify_version_payload(payload, "1.2.3")
+
+
+def test_validate_agent_notify_version_payload_rejects_non_utc_build_date(acceptance_module):
+    payload = _agent_notify_payload(build_date="2026-07-22 13:29:00")
+    with pytest.raises(acceptance_module.AcceptanceError, match="build_date"):
+        acceptance_module.validate_agent_notify_version_payload(payload, "1.2.3")
+
+
+def test_smoke_managed_components_rejects_agent_notify_bare_build_output(acceptance_module, tmp_path):
+    """The smoke would pass on the current bare build (dev/unknown/unknown); it must fail."""
+    managed_bin = tmp_path / "xdg-data" / "brigade" / "bin"
+    _write_managed_binaries(managed_bin)
+
+    def runner(argv, **kwargs):
+        if Path(argv[0]).name == "graphtrail-mcp":
+            return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
+        if Path(argv[0]).name == "sessionfind":
+            return subprocess.CompletedProcess(argv, 0, "usage: sessionfind", "")
+        if Path(argv[0]).name == "agent-notify":
+            # Bare `go build` reports the dev/unknown/unknown defaults.
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                '{"version":"dev","commit":"unknown","build_date":"unknown"}',
+                "",
+            )
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    with pytest.raises(acceptance_module.AcceptanceError):
+        acceptance_module.smoke_managed_components(
+            {component_id: managed_bin / component_id for component_id in acceptance_module.COMPONENT_IDS},
+            version="1.2.3",
+            runner=runner,
+        )
+
+
+def test_smoke_managed_components_requires_version_keyword(acceptance_module, tmp_path):
+    """smoke_managed_components must thread the release version through so a bare-build
+    agent-notify cannot slip past with a placeholder version."""
+    managed_bin = tmp_path / "xdg-data" / "brigade" / "bin"
+    _write_managed_binaries(managed_bin)
+
+    import inspect
+
+    signature = inspect.signature(acceptance_module.smoke_managed_components)
+    assert "version" in signature.parameters
+    assert signature.parameters["version"].kind == inspect.Parameter.KEYWORD_ONLY

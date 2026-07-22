@@ -154,13 +154,13 @@ def test_publish_release_reruns_compare_existing_assets_then_upload_only_missing
     assert "--clobber" not in section
 
 
-def test_publish_workflow_builds_five_bare_agent_notify_binaries_from_stations_notify():
+def test_publish_workflow_builds_five_agent_notify_binaries_with_release_metadata_ldflags():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     section = text[text.index("  build-agent-notify-native:") : text.index("  assemble-release:")]
 
     assert "needs: validate-release" in section
     assert "if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')" in section
-    # Exactly five platform targets, one bare binary each.
+    # Exactly five platform targets, one binary each.
     assert section.count("- platform: ") == 5
     for platform in (
         "linux-amd64",
@@ -174,9 +174,21 @@ def test_publish_workflow_builds_five_bare_agent_notify_binaries_from_stations_n
     assert "CGO_ENABLED: '0'" in section
     assert "go build -trimpath" in section
     assert "./cmd/agent-notify" in section
-    # Bare binaries: no version metadata injection, no ldflags.
-    assert "-ldflags" not in section
-    assert "-X " not in section
+    # Release metadata injection: ldflags with the three -X main.* fields plus
+    # the trimpath and size-stripping flags (-s -w) preserved. A bare `go build`
+    # would leave dev/unknown/unknown, so the workflow must inject ldflags.
+    assert "-ldflags" in section
+    assert "-X main.version=" in section
+    assert "-X main.commit=" in section
+    assert "-X main.buildDate=" in section
+    assert " -s -w" in section
+    # Version is the tag without the leading v; commit is the full release SHA;
+    # build date is one UTC timestamp computed via `date -u`.
+    assert "${{ github.ref_name }}" in section
+    assert "${AGENT_NOTIFY_TAG#v}" in section
+    assert "${{ github.sha }}" in section
+    assert "AGENT_NOTIFY_COMMIT" in section
+    assert "date -u +%Y-%m-%dT%H:%M:%SZ" in section
     assert "actions/upload-artifact@v4" in section
     assert "if-no-files-found: error" in section
 

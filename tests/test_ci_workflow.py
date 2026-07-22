@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import re
 import subprocess
 
@@ -523,3 +524,107 @@ def test_windows_native_acceptance_brigade_version_regex_matches_cli_output():
         match = re.match(pattern, line.strip())
         assert match is not None
         assert match.group(1).strip() == expected
+
+
+def test_windows_native_acceptance_source_mode_skips_only_bundled_unpublished_components():
+    """Source acceptance derives the skip set from the bundled compatibility
+    manifest's empty-asset entries, not from the component report's status, so a
+    component with declared assets that reports "unsupported" still fails."""
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    manifest = json.loads((ROOT / "src/brigade/templates/components/manifest-v1.json").read_text())
+
+    unpublished = [component_id for component_id, record in manifest["components"].items() if not record.get("assets")]
+    published = [component_id for component_id, record in manifest["components"].items() if record.get("assets")]
+    assert "agent-notify" in unpublished
+    assert published, "at least one published component must remain strictly required"
+
+    unpublished_fn = _extract_powershell_function(script, "Get-UnpublishedComponentIds")
+    assert "function Get-UnpublishedComponentIds" in unpublished_fn
+    assert "ConvertFrom-Json" in unpublished_fn
+    assert "PSObject.Properties.Count -eq 0" in unpublished_fn
+    # The skip set is read from the bundled manifest on disk, not from the
+    # component report, so an unsupported component with declared assets is
+    # never treated as skippable.
+    assert "$Report" not in unpublished_fn
+
+    main = script[script.index("$acceptRoot = $null") :]
+    source_block = main[main.index('if ($InstallMode -eq "source") {') : main.index("$report = Get-ComponentReport")]
+    assert 'Join-Path $RepoRoot "src\\brigade\\templates\\components\\manifest-v1.json"' in source_block
+    assert "$unpublishedIds = Get-UnpublishedComponentIds -ManifestPath $bundledManifestPath" in source_block
+    assert "$unpublishedIds = @" in main
+    assert "Assert-AllComponentsHealthy -Report $report -Skippable $unpublishedIds" in main
+
+    healthy_fn = _extract_powershell_function(script, "Assert-AllComponentsHealthy")
+    assert "[string[]]$Skippable = @()" in healthy_fn
+    assert "$skippableSet" in healthy_fn
+    assert 'if ($component.status -ne "unsupported")' in healthy_fn
+    assert 'if ($component.status -ne "healthy")' in healthy_fn
+
+    # The agent-notify absolute-path smoke is gated on the computed required set
+    # so source mode skips an unpublished agent-notify instead of invoking a
+    # missing managed binary.
+    assert '$requiredIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |' in main
+    assert "Where-Object { $unpublishedIds -notcontains $_ }" in main
+    assert 'if ($requiredIds -contains "agent-notify") {' in main
+    agent_block = main[main.index('if ($requiredIds -contains "agent-notify") {') :]
+    assert (
+        'Get-ManagedExecutablePath -Report $report -ComponentId "agent-notify" -ManagedBin $managedBin' in agent_block
+    )
+    assert "& $agentNotifyExe version --json" in agent_block
+
+
+def test_windows_native_acceptance_pypi_mode_never_skips_agent_notify():
+    """Published/release acceptance keeps the strict five-component contract:
+    no skip set, agent-notify must install, digest-check, and smoke by absolute
+    managed path."""
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    main = script[script.index("$acceptRoot = $null") :]
+
+    # The skip set is only populated in source mode; pypi mode leaves it empty.
+    source_block = main[main.index('if ($InstallMode -eq "source") {') : main.index("$report = Get-ComponentReport")]
+    assert "$unpublishedIds = @()" in source_block
+    assert "Get-UnpublishedComponentIds" in source_block
+
+    assert "Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin" in main
+    digest_fn = _extract_powershell_function(script, "Assert-ManagedComponentDigests")
+    assert '"agent-notify"' in digest_fn
+    assert '"graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"' in digest_fn
+
+    release_fn = _extract_powershell_function(script, "Assert-ReleaseManifestAndAssets")
+    for component_id in ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"):
+        assert component_id in release_fn
+    assert (
+        'foreach ($platform in @("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64"))'
+        in release_fn
+    )
+
+
+def test_windows_native_acceptance_pypi_mode_rejects_bare_agent_notify_metadata():
+    """Published acceptance must reject the dev/unknown/unknown defaults a bare
+    `go build` leaves behind and require the exact Brigade release version plus a
+    hex git SHA (full or short) and a UTC build timestamp. Source-mode skip
+    behavior is untouched: the validation only runs inside the required-ids
+    agent-notify block, which source mode never enters for an unpublished
+    agent-notify."""
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    validator = _extract_powershell_function(script, "Assert-AgentNotifyVersionMetadata")
+    assert "function Assert-AgentNotifyVersionMetadata" in validator
+    assert "[string]$Version" in validator
+    assert '$Payload.version -eq "dev"' in validator
+    assert '$Payload.version -eq "unknown"' in validator
+    assert "$Payload.version -ne $Version" in validator
+    assert "$Payload.commit -eq " in validator
+    assert "$Payload.commit -notmatch '^[0-9a-f]{7,40}$'" in validator
+    assert "$Payload.build_date -eq " in validator
+    assert r"$Payload.build_date -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'" in validator
+
+    main = script[script.index("$acceptRoot = $null") :]
+    agent_block = main[main.index('if ($requiredIds -contains "agent-notify") {') :]
+    assert "Assert-AgentNotifyVersionMetadata -Payload $agentNotifyPayload -Version $BrigadeVersion" in agent_block
+    # The old loose "version field exists" check is gone.
+    assert "if (-not $agentNotifyPayload.version)" not in agent_block
+    # Source-mode skip behavior is preserved: the unpublished-ids derivation and
+    # the required-ids gating are unchanged.
+    source_block = main[main.index('if ($InstallMode -eq "source") {') : main.index("$report = Get-ComponentReport")]
+    assert "$unpublishedIds = Get-UnpublishedComponentIds -ManifestPath $bundledManifestPath" in source_block
+    assert "Where-Object { $unpublishedIds -notcontains $_ }" in main

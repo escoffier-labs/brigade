@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -23,6 +24,14 @@ REPOSITORY = "escoffier-labs/brigade"
 PYPI_PROJECT_URL = "https://pypi.org/pypi/brigade-cli/json"
 PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
 PYPI_POLL_INTERVAL_SECONDS = 5
+# agent-notify ldflags inject main.version, main.commit, and main.buildDate.
+# A bare `go build` leaves "dev" / "unknown" / "unknown"; published release
+# assets must report the exact Brigade release version, a hex git SHA (the
+# release build injects the full github.sha, but a short SHA is also valid),
+# and a UTC build timestamp shaped like YYYY-MM-DDTHH:MM:SSZ.
+_PLACEHOLDER_METADATA = {"dev", "unknown"}
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+_BUILD_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 JsonFetcher = Callable[[str], Any]
 BytesFetcher = Callable[[str], bytes]
@@ -285,8 +294,38 @@ def validate_component_report(report: Any, managed_bin: Path) -> dict[str, Path]
     return managed_paths
 
 
+def validate_agent_notify_version_payload(payload: Any, version: str) -> None:
+    """Require agent-notify version JSON to carry the exact release metadata.
+
+    A bare `go build` leaves main.version/main.commit/main.buildDate at their
+    `dev`/`unknown`/`unknown` defaults. Published release assets must report the
+    requested Brigade release version, a hex git SHA (the release build injects
+    the full github.sha, but a short SHA is also accepted), and a UTC build
+    timestamp. `dev`/`unknown` placeholders are rejected for every field.
+    """
+    if not isinstance(payload, dict):
+        raise AcceptanceError("agent-notify smoke returned a non-object version payload")
+    actual_version = payload.get("version")
+    if not isinstance(actual_version, str) or not actual_version:
+        raise AcceptanceError("agent-notify smoke JSON missing version field")
+    if actual_version in _PLACEHOLDER_METADATA:
+        raise AcceptanceError(f"agent-notify version must not report dev/unknown metadata: {actual_version!r}")
+    if actual_version != version:
+        raise AcceptanceError(f"agent-notify version mismatch: expected {version!r}, got {actual_version!r}")
+    commit = payload.get("commit")
+    if not isinstance(commit, str) or commit in _PLACEHOLDER_METADATA or not _COMMIT_SHA_RE.match(commit):
+        raise AcceptanceError("agent-notify commit must be a hex git SHA (short or full SHA), not 'unknown'")
+    build_date = payload.get("build_date")
+    if not isinstance(build_date, str) or build_date in _PLACEHOLDER_METADATA or not _BUILD_DATE_RE.match(build_date):
+        raise AcceptanceError("agent-notify build_date must be a UTC timestamp (YYYY-MM-DDTHH:MM:SSZ), not 'unknown'")
+
+
 def smoke_managed_components(
-    managed_paths: Mapping[str, Path], *, runner: Runner = subprocess.run, env: Mapping[str, str] | None = None
+    managed_paths: Mapping[str, Path],
+    *,
+    version: str,
+    runner: Runner = subprocess.run,
+    env: Mapping[str, str] | None = None,
 ) -> None:
     graphtrail = run_checked([managed_paths["graphtrail"], "--version"], runner=runner, env=env)
     if not graphtrail.stdout.strip():
@@ -316,8 +355,7 @@ def smoke_managed_components(
         agent_notify_payload = json.loads(agent_notify.stdout)
     except json.JSONDecodeError as exc:
         raise AcceptanceError("agent-notify smoke returned malformed JSON") from exc
-    if not isinstance(agent_notify_payload, dict) or not agent_notify_payload.get("version"):
-        raise AcceptanceError("agent-notify smoke JSON missing version field")
+    validate_agent_notify_version_payload(agent_notify_payload, version)
 
 
 def smoke_rosetta_darwin_amd64(native_paths: Mapping[str, Mapping[str, Path]], *, runner: Runner) -> None:
@@ -406,7 +444,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
                 raise AcceptanceError("brigade version --components --json returned malformed JSON") from exc
             managed_paths = validate_component_report(report, managed_bin_path(data_home, profile))
             verify_managed_component_digests(release["manifest"], managed_paths, host_platform_key())
-            smoke_managed_components(managed_paths, runner=runner, env=env)
+            smoke_managed_components(managed_paths, version=version, runner=runner, env=env)
             if rosetta_darwin_amd64:
                 smoke_rosetta_darwin_amd64(release["native_paths"], runner=runner)
         finally:

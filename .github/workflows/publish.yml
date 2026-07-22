@@ -173,16 +173,24 @@ jobs:
         with:
           go-version: stable
           cache: false
-      - name: Build bare agent-notify binary
+      - name: Build agent-notify binary with exact release metadata
         env:
           CGO_ENABLED: '0'
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          AGENT_NOTIFY_TAG: ${{ github.ref_name }}
+          AGENT_NOTIFY_COMMIT: ${{ github.sha }}
         run: |
           mkdir -p "$GITHUB_WORKSPACE/release-assets"
           suffix=""
           if [ "$GOOS" = windows ]; then suffix=.exe; fi
-          go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/agent-notify-${{ matrix.platform }}$suffix" ./cmd/agent-notify
+          # Tag version without the leading v, the full release commit SHA, and
+          # one UTC build timestamp shared by every ldflags -X injection so the
+          # five platform assets report identical release metadata instead of
+          # the dev/unknown/unknown defaults a bare `go build` leaves behind.
+          VERSION="${AGENT_NOTIFY_TAG#v}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          go build -trimpath -ldflags "-X main.version=${VERSION} -X main.commit=${AGENT_NOTIFY_COMMIT} -X main.buildDate=${BUILD_DATE} -s -w" -o "$GITHUB_WORKSPACE/release-assets/agent-notify-${{ matrix.platform }}$suffix" ./cmd/agent-notify
       - uses: actions/upload-artifact@v4
         with:
           name: agent-notify-${{ matrix.platform }}
