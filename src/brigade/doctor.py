@@ -26,6 +26,12 @@ FAIL = "FAIL"
 MANUAL = "MANUAL"
 INFO = "INFO"
 DEFAULT_TEXT_CHECK_LIMIT = 50
+ADAPTER_CHECK_PREFIX = "adapter: "
+
+
+def _adapter_check_name(name: str) -> str:
+    """Label Brigade adapter/projection checks distinctly from native harness checks."""
+    return f"{ADAPTER_CHECK_PREFIX}{name}"
 
 
 def build_context(target: Path, harness: str = "generic") -> DoctorContext:
@@ -33,6 +39,7 @@ def build_context(target: Path, harness: str = "generic") -> DoctorContext:
     from .config import load_config
 
     sel = None
+    harnesses: list[str] = []
     try:
         cfg = load_config(target)
     except (ValueError, json.JSONDecodeError):
@@ -41,9 +48,7 @@ def build_context(target: Path, harness: str = "generic") -> DoctorContext:
         sel = cfg.selection
         harnesses = list(sel.harnesses)
     elif harness in ("openclaw", "hermes"):
-        harnesses = ["claude", harness]
-    else:
-        harnesses = ["claude"]
+        harnesses = [harness]
     return DoctorContext(target=target, selection=sel, harnesses=harnesses)
 
 
@@ -232,7 +237,10 @@ def run(target: Path, harness: str = "generic", *, json_output: bool = False, fu
         sel = ctx.selection
         print(f"  harnesses: {', '.join(sel.harnesses) or '(none)'} (owner={sel.owner}, depth={sel.depth})")
     else:
-        print(f"  harnesses: (legacy target, no config; assuming {', '.join(ctx.harnesses)})")
+        if ctx.harnesses:
+            print(f"  harnesses: (legacy target, no config; declared {', '.join(ctx.harnesses)})")
+        else:
+            print("  harnesses: (unspecified; no Brigade config and no explicit --harness)")
     return _report(checks, full=full)
 
 
@@ -363,7 +371,7 @@ def _check_default_wired_skills(target: Path, selected_harnesses: List[str]) -> 
                 missing.append((skill_id, str(rel_file)))
         if not present and not missing:
             continue
-        name = f"skills: {harness} default wired"
+        name = _adapter_check_name(f"skills: {harness} default wired")
         if missing:
             for skill_id, rel_file in missing:
                 results.append(
@@ -427,19 +435,19 @@ def _check_handoff_inboxes(target: Path, sel, selected_harnesses: List[str]) -> 
             continue  # reader harness, no inbox
         inbox = target / rel
         if inbox.is_dir():
-            results.append((OK, f"handoff: {h} inbox", str(inbox)))
+            results.append((OK, _adapter_check_name(f"handoff: {h} inbox"), str(inbox)))
         else:
-            results.append((FAIL, f"handoff: {h} inbox", f"missing at {inbox}"))
+            results.append((FAIL, _adapter_check_name(f"handoff: {h} inbox"), f"missing at {inbox}"))
         tmpl = inbox / "TEMPLATE.md"
         if tmpl.is_file():
-            results.append((OK, f"handoff: {h} TEMPLATE.md", str(tmpl)))
+            results.append((OK, _adapter_check_name(f"handoff: {h} TEMPLATE.md"), str(tmpl)))
         else:
-            results.append((WARN, f"handoff: {h} TEMPLATE.md", f"missing at {tmpl}"))
+            results.append((WARN, _adapter_check_name(f"handoff: {h} TEMPLATE.md"), f"missing at {tmpl}"))
         processed = inbox / "processed"
         if processed.is_dir():
-            results.append((OK, f"handoff: {h} processed/", str(processed)))
+            results.append((OK, _adapter_check_name(f"handoff: {h} processed/"), str(processed)))
         else:
-            results.append((WARN, f"handoff: {h} processed/", f"missing at {processed}"))
+            results.append((WARN, _adapter_check_name(f"handoff: {h} processed/"), f"missing at {processed}"))
     cards = target / "memory" / "cards"
     if cards.is_dir():
         card_count = len([path for path in cards.rglob("*.md") if path.is_file()])
@@ -569,7 +577,7 @@ def _check_orphan_inboxes(target: Path, selected_harnesses: List[str]) -> List[C
             results.append(
                 (
                     WARN,
-                    f"orphan: {h} inbox",
+                    _adapter_check_name(f"orphan: {h} inbox"),
                     f"{inbox} exists but {h} is not in config; remove or add to config (unselected harness)",
                 )
             )
