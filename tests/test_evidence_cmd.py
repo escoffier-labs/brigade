@@ -19,7 +19,7 @@ def test_evidence_status_reports_uninstalled(monkeypatch, tmp_path):
     assert payload["health"] == "missing"
     assert "brigade setup" in payload["summary"]
     assert "brigade evidence crawl plan" in payload["next_commands"]
-    assert payload["pipeline"][0].startswith("miseledger crawl")
+    assert payload["pipeline"][0].startswith("evidence crawl")
 
 
 def test_evidence_status_distinguishes_explicit_execution_from_review_only_plans(monkeypatch, tmp_path):
@@ -29,11 +29,11 @@ def test_evidence_status_distinguishes_explicit_execution_from_review_only_plans
     boundaries = payload["boundaries"]
 
     assert (
-        "Explicit user-invoked `brigade evidence crawl` and `brigade evidence search` execute MiseLedger across a process boundary."
+        "Explicit user-invoked `brigade evidence crawl` and `brigade evidence search` execute the evidence engine across a process boundary."
         in boundaries
     )
     assert (
-        "Review-only `brigade evidence crawl plan` and `brigade evidence export plan` never execute MiseLedger."
+        "Review-only `brigade evidence crawl plan` and `brigade evidence export plan` never execute the engine."
         in boundaries
     )
     assert "Brigade does not start daemons or upload data; receipt export remains local." in boundaries
@@ -149,7 +149,7 @@ def test_crawl_plan_is_review_only(tmp_path):
     rendered = evidence_cmd._render_plan_md(payload)
 
     assert ["miseledger", "crawl", "sessions"] in payload["commands"]
-    assert "review-only crawl plan never executes MiseLedger" in payload["boundaries"][0]
+    assert "review-only crawl plan never executes the evidence engine" in payload["boundaries"][0]
     assert "miseledger crawl sessions" in rendered
 
 

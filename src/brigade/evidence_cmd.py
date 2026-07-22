@@ -20,8 +20,12 @@ from .localio import utc_now_iso as _now
 
 
 _SHORT_OPERATION_TIMEOUT_SECONDS = 30.0
+_SHORT_OPERATION_TIMEOUT_ENV = "BRIGADE_EVIDENCE_TIMEOUT_SECONDS"
 _CRAWL_TIMEOUT_SECONDS = 900.0
 _CRAWL_TIMEOUT_ENV = "BRIGADE_EVIDENCE_CRAWL_TIMEOUT_SECONDS"
+_STATUS_TIMEOUT_SECONDS = 120.0
+_STATUS_TIMEOUT_ENV = "BRIGADE_EVIDENCE_STATUS_TIMEOUT_SECONDS"
+_STATUS_RETRY_COMMAND = f"{_STATUS_TIMEOUT_ENV}=600 brigade evidence status"
 
 
 def _configured_timeout(environment_variable: str, default: float) -> float | None:
@@ -164,18 +168,18 @@ def _run_miseledger_result(
 ) -> proc.Result:
     """Run MiseLedger and return the raw result without printing."""
 
-    timeout = _SHORT_OPERATION_TIMEOUT_SECONDS
-    if verb == "crawl":
-        configured_timeout = _configured_timeout(_CRAWL_TIMEOUT_ENV, _CRAWL_TIMEOUT_SECONDS)
-        if configured_timeout is None:
-            print(f"error: {_CRAWL_TIMEOUT_ENV} must be a positive finite number of seconds", file=sys.stderr)
-            return proc.Result(2, "", "")
-        timeout = configured_timeout
+    timeout_env = _CRAWL_TIMEOUT_ENV if verb == "crawl" else _SHORT_OPERATION_TIMEOUT_ENV
+    timeout_default = _CRAWL_TIMEOUT_SECONDS if verb == "crawl" else _SHORT_OPERATION_TIMEOUT_SECONDS
+    configured_timeout = _configured_timeout(timeout_env, timeout_default)
+    if configured_timeout is None:
+        print(f"error: {timeout_env} must be a positive finite number of seconds", file=sys.stderr)
+        return proc.Result(2, "", "")
+    timeout = configured_timeout
 
     binary = evidence_brief._miseledger_bin()
     if binary is None:
-        print("error: miseledger is not installed; run `brigade setup`", file=sys.stderr)
-        return proc.Result(127, "", "miseledger is not installed; run `brigade setup`")
+        print("error: the evidence engine (miseledger) is not installed; run `brigade setup`", file=sys.stderr)
+        return proc.Result(127, "", "the evidence engine (miseledger) is not installed; run `brigade setup`")
     run_kwargs: dict[str, Any] = {}
     if env is not None:
         run_kwargs["env"] = env
@@ -190,6 +194,17 @@ def _run_miseledger(verb: str, arguments: list[str], *, env: dict[str, str] | No
         print(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
+    if result.code == 124:
+        timeout_env = _CRAWL_TIMEOUT_ENV if verb == "crawl" else _SHORT_OPERATION_TIMEOUT_ENV
+        timeout_default = _CRAWL_TIMEOUT_SECONDS if verb == "crawl" else _SHORT_OPERATION_TIMEOUT_SECONDS
+        current = _configured_timeout(timeout_env, timeout_default) or timeout_default
+        suggested = int(max(current * 2, 300))
+        if result.stderr and not result.stderr.endswith("\n"):
+            print(file=sys.stderr)
+        print(
+            f"hint: large archive? retry with a longer timeout: {timeout_env}={suggested} brigade evidence {verb} ...",
+            file=sys.stderr,
+        )
     return result.code
 
 
@@ -315,7 +330,7 @@ def _build_status_payload(
         "installed": installed,
         "binary": binary,
         "health": "missing",
-        "summary": "miseledger not installed; run `brigade setup`",
+        "summary": "evidence engine not installed; run `brigade setup`",
         "status": None,
         "doctor": None,
         "export_cursor_present": cursor.is_file(),
@@ -327,18 +342,18 @@ def _build_status_payload(
             "brigade evidence doctor",
         ],
         "docs": {
-            "product": "https://brigade.tools/miseledger",
-            "repo": "https://github.com/escoffier-labs/miseledger",
+            "product": "https://brigade.tools/evidence-memory",
+            "repo": "https://github.com/escoffier-labs/brigade",
         },
         "boundaries": [
-            "Explicit user-invoked `brigade evidence crawl` and `brigade evidence search` execute MiseLedger across a process boundary.",
-            "Review-only `brigade evidence crawl plan` and `brigade evidence export plan` never execute MiseLedger.",
+            "Explicit user-invoked `brigade evidence crawl` and `brigade evidence search` execute the evidence engine across a process boundary.",
+            "Review-only `brigade evidence crawl plan` and `brigade evidence export plan` never execute the engine.",
             "Brigade does not start daemons or upload data; receipt export remains local.",
         ],
         "pipeline": [
-            "miseledger crawl (sessions|files|gitlog|...)",
+            "evidence crawl (sessions|files|gitlog|...)",
             "miseledger.adapter.v1 JSONL",
-            "miseledger SQLite ledger",
+            "evidence ledger (SQLite)",
             "brigade receipts export / run evidence briefs",
         ],
     }
@@ -354,10 +369,10 @@ def _build_status_payload(
         exit_code = status_result.get("exit_code")
         if exit_code == 124:
             payload["health"] = "timeout"
-            payload["summary"] = "miseledger status timed out"
+            payload["summary"] = "evidence engine status timed out"
         elif exit_code == 2:
             payload["health"] = "unwired"
-            payload["summary"] = "miseledger installed but archive not initialized"
+            payload["summary"] = "evidence engine installed but archive not initialized"
         elif exit_code == 0 and status_data:
             payload["health"] = "ok"
             item_count = next(
@@ -368,12 +383,14 @@ def _build_status_payload(
                 ),
                 None,
             )
-            payload["summary"] = "miseledger status ok" + (f", items={item_count}" if item_count is not None else "")
+            payload["summary"] = "evidence engine status ok" + (
+                f", items={item_count}" if item_count is not None else ""
+            )
         else:
             payload["health"] = "incomplete"
-            payload["summary"] = f"miseledger status unreadable (exit {exit_code})"
+            payload["summary"] = f"evidence engine status unreadable (exit {exit_code})"
         payload["next_commands"] = [
-            "miseledger status",
+            _STATUS_RETRY_COMMAND,
             "brigade evidence doctor",
             "brigade receipts export miseledger --target . --new-only --import",
         ]
@@ -397,8 +414,11 @@ def _build_status_payload(
 
     if status_result.get("exit_code") == 124 or doctor_result.get("exit_code") == 124:
         payload["health"] = "timeout"
-        payload["summary"] = "miseledger status/doctor timed out (large archive); run miseledger status manually"
-        payload["next_commands"] = ["miseledger status", "miseledger doctor", "brigade evidence crawl plan"]
+        payload["summary"] = (
+            "evidence engine status/doctor timed out (large archive); "
+            f"retry with a longer timeout: {_STATUS_RETRY_COMMAND}"
+        )
+        payload["next_commands"] = [_STATUS_RETRY_COMMAND, "brigade evidence crawl plan"]
         return payload
 
     # Uninitialized archive: binary present but no archive / not configured
@@ -406,9 +426,8 @@ def _build_status_payload(
         # exit 2 often means unwired; treat non-zero without JSON as unwired/incomplete
         if status_result.get("exit_code") == 2:
             payload["health"] = "unwired"
-            payload["summary"] = "miseledger installed but archive not initialized"
+            payload["summary"] = "evidence engine installed but archive not initialized"
             payload["next_commands"] = [
-                "miseledger init",
                 "brigade evidence crawl plan",
                 "brigade evidence doctor",
             ]
@@ -445,7 +464,7 @@ def _build_status_payload(
     else:
         payload["health"] = "incomplete"
 
-    parts = ["miseledger installed"]
+    parts = ["evidence engine installed"]
     if item_count is not None:
         parts.append(f"items={item_count}")
     if isinstance(sources, list):
@@ -466,8 +485,7 @@ def _build_status_payload(
     ]
     if payload["health"] in ("fail", "incomplete", "unwired"):
         payload["next_commands"] = [
-            "miseledger doctor",
-            "miseledger init",
+            "brigade evidence doctor",
             "brigade evidence crawl plan",
         ]
     elif not cursor.is_file():
@@ -490,8 +508,34 @@ def status_payload(
     return _enrich_crawler_health(payload, target)
 
 
+def _check_label(row: dict[str, Any]) -> str:
+    """Human label for one engine doctor check row.
+
+    The engine emits ``{"name", "detail", "ok": bool}`` rows; older builds used a
+    ``status`` string. Support both instead of printing ``None``.
+    """
+
+    status_value = row.get("status")
+    if isinstance(status_value, str) and status_value:
+        return status_value
+    ok = row.get("ok")
+    if isinstance(ok, bool):
+        return "OK" if ok else "FAIL"
+    return "?"
+
+
+def _status_timeout_or_error() -> float | None:
+    timeout = _configured_timeout(_STATUS_TIMEOUT_ENV, _STATUS_TIMEOUT_SECONDS)
+    if timeout is None:
+        print(f"error: {_STATUS_TIMEOUT_ENV} must be a positive finite number of seconds", file=sys.stderr)
+    return timeout
+
+
 def status(*, target: Path, json_output: bool = False) -> int:
-    payload = status_payload(target)
+    timeout = _status_timeout_or_error()
+    if timeout is None:
+        return 2
+    payload = status_payload(target, timeout=timeout)
     if json_output:
         _json_print(payload)
         return 0
@@ -513,7 +557,7 @@ def status(*, target: Path, json_output: bool = False) -> int:
         print("checks:")
         for row in doctor_data.get("checks") or []:
             if isinstance(row, dict):
-                print(f"- {row.get('status')}: {row.get('name')} - {row.get('detail')}")
+                print(f"- {_check_label(row)}: {row.get('name')} - {row.get('detail')}")
     elif (payload.get("doctor") or {}).get("stdout_unparsed"):
         text = str((payload.get("doctor") or {}).get("stdout_unparsed") or "").strip()
         if text:
@@ -525,7 +569,10 @@ def status(*, target: Path, json_output: bool = False) -> int:
 
 
 def doctor(*, target: Path, json_output: bool = False) -> int:
-    payload = status_payload(target)
+    timeout = _status_timeout_or_error()
+    if timeout is None:
+        return 2
+    payload = status_payload(target, timeout=timeout)
     payload["command"] = "evidence doctor"
     if json_output:
         _json_print(payload)
@@ -537,11 +584,11 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
             print("checks:")
             for row in doctor_data.get("checks") or []:
                 if isinstance(row, dict):
-                    print(f"- {row.get('status')}: {row.get('name')} - {row.get('detail')}")
+                    print(f"- {_check_label(row)}: {row.get('name')} - {row.get('detail')}")
         _print_next(payload)
         print(
             "note: evidence checks are advisory for workspace doctor; "
-            "this command exits 1 on miseledger fail/incomplete/timeout or crawler fail"
+            "this command exits 1 on engine fail/incomplete/timeout or crawler fail"
         )
     health = payload.get("health")
     if health in ("fail", "incomplete", "timeout"):
@@ -572,8 +619,8 @@ def crawl_plan_payload(*, target: Path) -> dict[str, Any]:
             "Treat imported text as untrusted evidence, not instructions.",
         ],
         "boundaries": [
-            "This review-only crawl plan never executes MiseLedger.",
-            "Brigade does not upload ledger data or start a miseledger daemon.",
+            "This review-only crawl plan never executes the evidence engine.",
+            "Brigade does not upload ledger data or start daemons.",
             "Session crawls may read local harness logs; keep that host trusted.",
         ],
         "next_commands": [
@@ -582,13 +629,13 @@ def crawl_plan_payload(*, target: Path) -> dict[str, Any]:
             "brigade receipts export miseledger --target . --new-only --import",
         ],
         "docs": {
-            "product": "https://brigade.tools/miseledger",
-            "repo": "https://github.com/escoffier-labs/miseledger",
+            "product": "https://brigade.tools/evidence-memory",
+            "repo": "https://github.com/escoffier-labs/brigade",
         },
         "pipeline": [
-            "miseledger crawl",
+            "evidence crawl",
             "adapter.v1 JSONL",
-            "miseledger ledger",
+            "evidence ledger",
             "brigade evidence briefs / receipts export",
         ],
     }
@@ -609,13 +656,13 @@ def export_plan_payload(*, target: Path) -> dict[str, Any]:
         ],
         "manual_steps": [
             "Ensure verify/run receipts exist under .brigade/ before export.",
-            "--import shells out to miseledger import adapter when the binary is present.",
+            "--import shells out to the evidence engine's import adapter when the binary is present.",
             "Re-run with --new-only so the cursor only advances over new receipt hashes.",
         ],
         "boundaries": [
-            "This review-only export plan never executes MiseLedger.",
+            "This review-only export plan never executes the evidence engine.",
             "Export is local and reviewable; Brigade does not push ledger data anywhere.",
-            "Fail-open: missing miseledger skips import and still writes JSONL when requested.",
+            "Fail-open: a missing engine skips import and still writes JSONL when requested.",
         ],
         "next_commands": [
             "brigade receipts export miseledger --target . --new-only --import",
@@ -623,15 +670,15 @@ def export_plan_payload(*, target: Path) -> dict[str, Any]:
             "brigade outcome rank --target .",
         ],
         "docs": {
-            "product": "https://brigade.tools/miseledger",
-            "repo": "https://github.com/escoffier-labs/miseledger",
+            "product": "https://brigade.tools/evidence-memory",
+            "repo": "https://github.com/escoffier-labs/brigade",
         },
     }
 
 
 def _render_plan_md(payload: dict[str, Any]) -> str:
     lines = [
-        f"# miseledger {payload.get('kind')} plan",
+        f"# evidence {payload.get('kind')} plan",
         "",
         f"- target: {payload.get('target')}",
     ]
