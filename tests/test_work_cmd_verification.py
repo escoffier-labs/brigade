@@ -604,6 +604,30 @@ _GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS = 0.25
 _GRAPHTRAIL_SLOW_STAGE_DELAY_SECONDS = 0.6
 
 
+def _derace_graphtrail_sync_timing(monkeypatch, graphtrail_bin: Path, *, time_out_sync_call: int | None = None) -> None:
+    """Make fake-graphtrail sync timing deterministic instead of racing wall clock.
+
+    A sync call the test needs to succeed must never lose a wall-clock race
+    against the tight subprocess timeout on a loaded CI runner (interpreter
+    startup alone can exceed it), so sync invocations of the fake binary run
+    with no timeout. The ``time_out_sync_call``-th sync instead raises
+    ``TimeoutExpired`` without starting a process, driving the real timeout
+    handling in ``graphtrail_delta._run_graphtrail`` deterministically.
+    """
+    real_run = subprocess.run
+    sync_calls = {"count": 0}
+
+    def patched_run(argv, *args, **kwargs):
+        if isinstance(argv, list) and argv and argv[0] == str(graphtrail_bin) and "sync" in argv:
+            sync_calls["count"] += 1
+            if time_out_sync_call is not None and sync_calls["count"] >= time_out_sync_call:
+                raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout") or 0.0)
+            kwargs["timeout"] = None
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", patched_run)
+
+
 def _write_fake_graphtrail(
     tmp_path,
     *,
@@ -611,7 +635,6 @@ def _write_fake_graphtrail(
     sync_delay_seconds: float = 0.0,
     diff_delay_seconds: float = 0.0,
     create_db_before_delay: bool = False,
-    sync_delay_from_call: int = 1,
 ) -> Path:
     script = tmp_path / "fake-graphtrail.py"
     script.write_text(
@@ -631,7 +654,6 @@ mode = os.environ.get("FAKE_GRAPHTRAIL_MODE", "ok")
 sync_delay_seconds = float(os.environ.get("FAKE_GRAPHTRAIL_SYNC_SECONDS", "0"))
 diff_delay_seconds = float(os.environ.get("FAKE_GRAPHTRAIL_DIFF_SECONDS", "0"))
 create_db_before_delay = os.environ.get("FAKE_GRAPHTRAIL_CREATE_DB_BEFORE_DELAY", "") == "1"
-sync_delay_from_call = int(os.environ.get("FAKE_GRAPHTRAIL_SYNC_DELAY_FROM_CALL", "1"))
 
 # Mirror the real clap CLI strictly: `sync` rejects --json, `diff` requires
 # --before/--after/--json. JSON shape follows graphtrail's diff golden fixture.
@@ -639,16 +661,11 @@ if command == "sync":
     if "--json" in args:
         print("error: unexpected argument '--json' found", file=sys.stderr)
         raise SystemExit(2)
-    counter_path = db.parent / ".fake-graphtrail-sync-count"
-    sync_call = int(counter_path.read_text()) if counter_path.is_file() else 0
-    sync_call += 1
-    counter_path.parent.mkdir(parents=True, exist_ok=True)
-    counter_path.write_text(str(sync_call))
     if create_db_before_delay:
         db.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(db) as con:
             con.execute("create table if not exists symbols (name text)")
-    if sync_delay_seconds > 0 and sync_call >= sync_delay_from_call:
+    if sync_delay_seconds > 0:
         time.sleep(sync_delay_seconds)
     if mode == "sync-fail":
         print("sync failed", file=sys.stderr)
@@ -724,9 +741,8 @@ raise SystemExit(9)
         f"FAKE_GRAPHTRAIL_SYNC_SECONDS={sync_delay_seconds}\n"
         f"FAKE_GRAPHTRAIL_DIFF_SECONDS={diff_delay_seconds}\n"
         f"FAKE_GRAPHTRAIL_CREATE_DB_BEFORE_DELAY={'1' if create_db_before_delay else '0'}\n"
-        f"FAKE_GRAPHTRAIL_SYNC_DELAY_FROM_CALL={sync_delay_from_call}\n"
         "export FAKE_GRAPHTRAIL_MODE FAKE_GRAPHTRAIL_SYNC_SECONDS FAKE_GRAPHTRAIL_DIFF_SECONDS "
-        "FAKE_GRAPHTRAIL_CREATE_DB_BEFORE_DELAY FAKE_GRAPHTRAIL_SYNC_DELAY_FROM_CALL\n"
+        "FAKE_GRAPHTRAIL_CREATE_DB_BEFORE_DELAY\n"
         "export PYTHONDONTWRITEBYTECODE=1\n"
         f'exec {os.environ.get("PYTHON", "python3")} -S {script} "$@"\n'
     )
@@ -1156,12 +1172,9 @@ def test_work_verify_graphtrail_delta_invalid_config_timeout_returns_2_without_o
 
 def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_sync(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    graphtrail = _write_fake_graphtrail(
-        tmp_path,
-        sync_delay_seconds=_GRAPHTRAIL_SLOW_STAGE_DELAY_SECONDS,
-        sync_delay_from_call=2,
-    )
+    graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    _derace_graphtrail_sync_timing(monkeypatch, graphtrail, time_out_sync_call=2)
 
     assert (
         work_cmd.verify_run(
@@ -1242,6 +1255,7 @@ def test_work_verify_graphtrail_delta_diff_timeout_is_distinct_from_sync_timeout
         diff_delay_seconds=_GRAPHTRAIL_SLOW_STAGE_DELAY_SECONDS,
     )
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    _derace_graphtrail_sync_timing(monkeypatch, graphtrail)
 
     assert (
         work_cmd.verify_run(

@@ -59,6 +59,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_sync.add_argument("--adopt", action="store_true", help="Take ownership of same-named foreign servers.")
     p_sync.add_argument("--user-scope", action="store_true", help="Include user-scoped targets (e.g. antigravity).")
     p_sync.add_argument(
+        "--allow-global-stdio",
+        action="store_true",
+        help="Acknowledge writing stdio MCP servers into a user-wide client config (one child process per stdio server per active client session).",
+    )
+    p_sync.add_argument(
         "--verify", action="store_true", help="After --write, verify runtime health for selected servers."
     )
     p_sync.add_argument(
@@ -136,6 +141,7 @@ def dispatch(args) -> int:
             prune=args.prune,
             adopt=args.adopt,
             user_scope=args.user_scope,
+            allow_global_stdio=args.allow_global_stdio,
             verify_runtime=args.verify,
             verify_timeout=args.verify_timeout,
             json_output=args.json,

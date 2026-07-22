@@ -85,7 +85,7 @@ brigade mcp plan                       # preview what a sync would do (read-only
 brigade mcp sync                       # dry-run across every configured tool
 brigade mcp sync --write               # actually merge into each tool's config
 brigade mcp sync --write --verify      # write, then verify the selected runtimes
-brigade mcp sync --write --user-scope  # also write configured user-global targets
+brigade mcp sync --write --user-scope  # also write configured user-global targets (stdio servers gate; see below)
 brigade mcp sync --harness cursor --user-scope --write  # write ~/.cursor/mcp.json
 brigade mcp verify --harness cursor --name github  # bounded runtime handshake
 brigade mcp doctor                     # validate the catalog, report unsupported tools
@@ -97,6 +97,22 @@ Cursor stays project-scoped unless both `--harness cursor` and `--user-scope`
 are present. A user-scoped Cursor projection drops a GraphTrail `--db` argument
 when that database resolves inside the source repository, so the global client
 does not pin every workspace to one repository.
+
+## User-scoped stdio servers multiply processes
+
+A stdio MCP server is not a shared daemon. Every active client session starts
+its own child process for every stdio server in its configuration, so a
+user-wide config with `S` stdio servers costs `S x active sessions` processes.
+A desktop client holding nine sessions over a 20-server user catalog runs 180
+server processes before doing any work.
+
+Because of that, a user-scoped sync that would write one or more stdio servers
+never completes silently. Interactive runs print the destination, the stdio
+count, and the process formula, then ask for confirmation. Non-interactive and
+`--json` runs fail with exit 2 unless `--allow-global-stdio` is passed. Dry-run
+and plan output carry `transport` and `scope` on every item so the exposure is
+visible before writing. Prefer project-scoped configuration, or a shared
+HTTP/SSE transport where the client supports one; remote servers never gate.
 
 ## Runtime verification
 
