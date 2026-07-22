@@ -106,20 +106,31 @@ def _drop_unsatisfiable(stages: dict, triggered: dict[str, str], available: set[
             del kept[name]
 
 
-def _toposort(stages: dict, names) -> tuple[list[str], list[list[str]]]:
+def stage_dependencies(catalog: dict, names) -> dict[str, set[str]]:
+    """Direct prerequisite stages for each named stage: producers of its inputs."""
+    stages = catalog["stages"]
     names = set(names)
     producers: dict[str, set[str]] = {}
     for name in names:
         for art in stages[name]["data"]["output"]:
             producers.setdefault(art, set()).add(name)
-    edges: dict[str, set[str]] = {n: set() for n in names}
-    indegree = {n: 0 for n in names}
+    deps: dict[str, set[str]] = {}
     for name in names:
         preds: set[str] = set()
         for art in _inputs(stages[name]):
             preds |= producers.get(art, set())
         preds.discard(name)
-        for pred in preds:
+        deps[name] = preds
+    return deps
+
+
+def _toposort(stages: dict, names) -> tuple[list[str], list[list[str]]]:
+    names = set(names)
+    edges: dict[str, set[str]] = {n: set() for n in names}
+    indegree = {n: 0 for n in names}
+    preds_of = stage_dependencies({"stages": stages}, names)
+    for name in names:
+        for pred in preds_of[name]:
             if name not in edges[pred]:
                 edges[pred].add(name)
                 indegree[name] += 1

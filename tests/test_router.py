@@ -180,6 +180,18 @@ def test_dependency_cycle_raises() -> None:
         raise AssertionError("expected ValueError on catalog cycle")
 
 
+def test_stage_dependencies_edges() -> None:
+    catalog = _catalog(
+        {
+            "plan": _stage(["big"], output=["plan"]),
+            "implement": _stage(["code"], required=["plan"], output=["diff"]),
+            "review": _stage(["code"], required=["diff"], output=["findings"]),
+        }
+    )
+    deps = router.stage_dependencies(catalog, ["plan", "implement", "review"])
+    assert deps == {"plan": set(), "implement": {"plan"}, "review": {"implement"}}
+
+
 def test_size_labels() -> None:
     assert router.size_label(0) == "empty"
     assert router.size_label(1) == "XS"
