@@ -97,6 +97,14 @@ def test_attempt_number_counts_running_marker_without_attempt_dir(tmp_path):
     assert model_trials._attempt_number(tmp_path) == 2
 
 
+def test_attempt_number_ignores_nonpositive_recorded_attempt(tmp_path):
+    # Corrupt-but-valid-JSON markers must not produce attempt-000.
+    (tmp_path / "cell.json").write_text(json.dumps({"state": "running", "attempt": -1}))
+    assert model_trials._attempt_number(tmp_path) == 1
+    (tmp_path / "cell.json").write_text(json.dumps({"state": "running", "attempt": 0}))
+    assert model_trials._attempt_number(tmp_path) == 1
+
+
 def test_expand_cells_is_stable_and_conditions_change_identity():
     first = model_trials.expand_cells(_manifest(), _roster())
     second = model_trials.expand_cells(_manifest(), _roster())

@@ -342,7 +342,7 @@ def _attempt_number(cell_dir: Path) -> int:
     )
     recorded = _load_json(cell_dir / "cell.json") or {}
     prior = recorded.get("attempt")
-    if isinstance(prior, int) and not isinstance(prior, bool):
+    if isinstance(prior, int) and not isinstance(prior, bool) and prior > 0:
         numbers.append(prior)
     return max(numbers, default=0) + 1
 
