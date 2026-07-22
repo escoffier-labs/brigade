@@ -913,4 +913,233 @@ def test_cursor_user_install_then_uninstall_removes_owned_surfaces_and_state_and
     assert again["results"][0]["conflicts"] == []
     assert again["results"][0]["ready"] is True
     assert again["reload_required"] is False
+<<<<<<< HEAD
 >>>>>>> 7d7fab5 (feat(harness): add aggregate user profile CLI)
+=======
+
+
+# --- Issue #438 Task 8: Cursor --adopt and migration TOCTOU revalidation ---
+
+
+def test_cursor_generated_foreign_file_conflicts_without_adopt(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    _use_home(monkeypatch, tmp_path)
+    cursor = tmp_path / ".cursor"
+    rule = cursor / "plugins" / "local" / "brigade-loop" / "rules" / "brigade-loop.mdc"
+    rule.parent.mkdir(parents=True)
+    rule.write_text("# someone else's rule\n")
+
+    # without --adopt: foreign generated file is a conflict, no write
+    assert cli.main(["harness", "install", "cursor", "--scope", "user", "--write", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert any(item["path"] == str(rule) and item["status"] == "conflict" for item in _row(payload)["conflicts"])
+    assert rule.read_text() == "# someone else's rule\n"
+
+
+def test_cursor_generated_adopt_claims_file_preserves_unrelated_and_uninstall_removes_if_unchanged(
+    tmp_path, monkeypatch, capsys
+):
+    from brigade import cli
+
+    _use_home(monkeypatch, tmp_path)
+    cursor = tmp_path / ".cursor"
+    rule = cursor / "plugins" / "local" / "brigade-loop" / "rules" / "brigade-loop.mdc"
+    rule.parent.mkdir(parents=True)
+    rule.write_text("# someone else's rule\n")
+    # unrelated hooks/config must survive
+    (cursor / "hooks.json").write_text(
+        json.dumps({"version": 1, "hooks": {"beforeSubmitPrompt": [{"command": "keep-hook"}]}})
+    )
+    (cursor / "mcp.json").write_text(json.dumps({"mcpServers": {"foreign": {"command": "keep-server"}}}))
+
+    # --adopt --write replaces/claims the foreign generated file
+    assert cli.main(["harness", "install", "cursor", "--scope", "user", "--adopt", "--write", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert _row(payload)["ready"] is True
+    assert str(rule) in _row(payload)["files_written"]
+    assert rule.read_text() == cursor_user_cmd._rule_text()
+    # unrelated hooks/config preserved
+    assert json.loads((cursor / "hooks.json").read_text())["hooks"]["beforeSubmitPrompt"] == [{"command": "keep-hook"}]
+    assert json.loads((cursor / "mcp.json").read_text())["mcpServers"]["foreign"] == {"command": "keep-server"}
+
+    # subsequent doctor is ready
+    assert cli.main(["harness", "doctor", "cursor", "--scope", "user", "--json"]) == 0
+    capsys.readouterr()
+
+    # uninstall removes the claimed file only because it is unchanged
+    assert cli.main(["harness", "uninstall", "cursor", "--scope", "user", "--write", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert _row(out)["conflicts"] == []
+    assert not rule.exists()
+    # unrelated hooks/config still preserved
+    assert json.loads((cursor / "hooks.json").read_text())["hooks"]["beforeSubmitPrompt"] == [{"command": "keep-hook"}]
+    assert json.loads((cursor / "mcp.json").read_text())["mcpServers"]["foreign"] == {"command": "keep-server"}
+
+
+def test_cursor_generated_adopt_then_edit_blocks_uninstall(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    _use_home(monkeypatch, tmp_path)
+    cursor = tmp_path / ".cursor"
+    rule = cursor / "plugins" / "local" / "brigade-loop" / "rules" / "brigade-loop.mdc"
+    rule.parent.mkdir(parents=True)
+    rule.write_text("# foreign\n")
+    assert cli.main(["harness", "install", "cursor", "--scope", "user", "--adopt", "--write", "--json"]) == 0
+    capsys.readouterr()
+
+    # user edits the claimed rule after adoption
+    rule.write_text("# user edit after adopt\n")
+    assert cli.main(["harness", "uninstall", "cursor", "--scope", "user", "--write", "--json"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert any(item["path"] == str(rule) and item["status"] == "conflict" for item in _row(out)["conflicts"])
+    assert rule.read_text() == "# user edit after adopt\n"
+
+
+def test_cursor_v1_migration_carries_retirement_ownership_maps(tmp_path, monkeypatch):
+    from brigade import harness_profile_cmd
+
+    _use_home(monkeypatch, tmp_path)
+    root = _seed_cursor_v1(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = root / "brigade" / "install-state.json"
+    legacy_state = json.loads(state_path.read_text())
+
+    migration = cursor_user_cmd.migrate_v1_state(root=root, workspace=workspace, state=legacy_state)
+    assert migration.error is None
+    # new ownership-map fields are present, immutable, and digest-shaped
+    assert isinstance(migration.retire_file_ownership, tuple)
+    assert isinstance(migration.retire_mcp_ownership, tuple)
+    assert migration.retire_file_ownership
+    assert migration.retire_mcp_ownership
+    for path, digest in migration.retire_file_ownership:
+        assert isinstance(path, Path)
+        assert isinstance(digest, str) and len(digest) == 64
+    for name, digest in migration.retire_mcp_ownership:
+        assert isinstance(name, str) and isinstance(digest, str) and len(digest) == 64
+    # existing tuple fields remain for compatibility
+    assert migration.retire_file_paths and migration.retire_mcp_names
+
+    # the loader propagates the ownership maps too
+    loaded = harness_profile_cmd.load_cursor_profile_state(state_path=state_path, workspace=workspace, root=root)
+    assert loaded.error is None
+    assert loaded.migration == "cursor-state-v1"
+    assert isinstance(loaded.retire_file_ownership, tuple)
+    assert isinstance(loaded.retire_mcp_ownership, tuple)
+    assert loaded.retire_file_ownership and loaded.retire_mcp_ownership
+
+
+def test_cursor_retire_legacy_revalidates_files_and_reports_conflict_on_toctou_change(tmp_path, monkeypatch):
+    from brigade import harness_profile_cmd
+
+    _use_home(monkeypatch, tmp_path)
+    root = _seed_cursor_v1(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = root / "brigade" / "install-state.json"
+    mcp_path = root / "mcp.json"
+    legacy_state = json.loads(state_path.read_text())
+    mcp_before = mcp_path.read_text()
+
+    migration = cursor_user_cmd.migrate_v1_state(root=root, workspace=workspace, state=legacy_state)
+    assert migration.error is None
+
+    # TOCTOU: change a retirement file after planning, before apply
+    target_path, _stored = migration.retire_file_ownership[0]
+    target_path.write_text("tampered at apply time\n")
+
+    removed, conflicts = harness_profile_cmd._retire_cursor_legacy(
+        root, migration.retire_file_ownership, migration.retire_mcp_ownership
+    )
+    # zero retirement mutations for the batch
+    assert removed == []
+    assert conflicts
+    assert any(str(target_path) in (c.get("detail") or "") or c.get("path") == str(target_path) for c in conflicts)
+    # changed target preserved
+    assert target_path.read_text() == "tampered at apply time\n"
+    # foreign + managed MCP keys all kept (no partial pop)
+    servers = json.loads(mcp_path.read_text())["mcpServers"]
+    assert "foreign" in servers
+    assert "brigade" in servers
+    assert mcp_path.read_text() == mcp_before
+
+
+def test_cursor_retire_legacy_revalidates_mcp_and_reports_conflict_on_toctou_change(tmp_path, monkeypatch):
+    from brigade import harness_profile_cmd
+
+    _use_home(monkeypatch, tmp_path)
+    root = _seed_cursor_v1(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state_path = root / "brigade" / "install-state.json"
+    mcp_path = root / "mcp.json"
+    legacy_state = json.loads(state_path.read_text())
+
+    migration = cursor_user_cmd.migrate_v1_state(root=root, workspace=workspace, state=legacy_state)
+    assert migration.error is None
+
+    # TOCTOU: edit a managed MCP server value after planning, before apply
+    name, _stored = migration.retire_mcp_ownership[0]
+    live = json.loads(mcp_path.read_text())
+    live["mcpServers"][name] = {"command": "user-rewrote-" + name}
+    mcp_path.write_text(json.dumps(live))
+
+    removed, conflicts = harness_profile_cmd._retire_cursor_legacy(
+        root, migration.retire_file_ownership, migration.retire_mcp_ownership
+    )
+    assert removed == []
+    assert conflicts
+    # foreign + edited managed key all kept (no partial pop)
+    servers = json.loads(mcp_path.read_text())["mcpServers"]
+    assert "foreign" in servers
+    assert servers[name] == {"command": "user-rewrote-" + name}
+    # legacy skill/mcp-catalog files are also preserved (zero mutations for the batch)
+    desired = cursor_user_cmd._desired_files(root)
+    for path, (_t, _e, surface) in desired.items():
+        if surface in {"skill", "mcp-catalog"}:
+            assert path.exists()
+
+
+def test_cursor_v1_migration_toctou_does_not_persist_v2_on_retirement_conflict(tmp_path, monkeypatch, capsys):
+    from brigade import cli, harness_profile_cmd
+
+    _use_home(monkeypatch, tmp_path)
+    root = _seed_cursor_v1(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _seed_brigade_work_registry(workspace)
+    capsys.readouterr()
+    state_path = root / "brigade" / "install-state.json"
+    mcp_path = root / "mcp.json"
+    v1_before = state_path.read_text()
+
+    desired = cursor_user_cmd._desired_files(root)
+    retire_target = next(p for p, (_t, _e, s) in desired.items() if s == "mcp-catalog")
+    real_retire = harness_profile_cmd._retire_cursor_legacy
+
+    def tampering(root_arg, file_own, mcp_own):
+        # TOCTOU: change the retirement file after planning but before deletion
+        retire_target.write_text("tampered at apply time\n")
+        return real_retire(root_arg, file_own, mcp_own)
+
+    monkeypatch.setattr(harness_profile_cmd, "_retire_cursor_legacy", tampering)
+
+    assert (
+        cli.main(
+            ["harness", "install", "cursor", "--scope", "user", "--workspace", str(workspace), "--write", "--json"]
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    row = _row(payload)
+    assert row["status"] == "conflict"
+    # v1 state remains on disk (schema v2 NOT persisted as if successful)
+    assert state_path.read_text() == v1_before
+    # foreign MCP keys kept; tampered retirement file preserved
+    assert json.loads(mcp_path.read_text())["mcpServers"]["foreign"] == {"command": "keep"}
+    assert retire_target.read_text() == "tampered at apply time\n"
+    # no private digest/fingerprint leaks
+    text = json.dumps(payload)
+    assert "digest" not in text and "fingerprint" not in text
+>>>>>>> ba8e21f (test(harness): cover user profile lifecycle)

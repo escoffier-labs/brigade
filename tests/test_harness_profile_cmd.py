@@ -958,3 +958,184 @@ def test_harness_openclaw_doctor_does_not_conflict_solely_due_to_tracked_file(tm
     assert rrow["ready"] is True
     assert rrow["instruction_ready"] is True
     assert rrow["status"] in {"current", "ready"}
+
+
+# --- Issue #438 Task 8: end-to-end lifecycle and final hardening ---
+
+
+def _seed_nested_reviewed_skill(workspace: Path, name="reviewed"):
+    skill_dir = workspace / "sources" / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(f"# {name}\n\nDo the work.\n")
+    (skill_dir / "assets").mkdir()
+    (skill_dir / "assets" / "guide.txt").write_text("guide\n")
+    (skill_dir / "skill.json").write_text(
+        json.dumps(
+            {
+                "id": name,
+                "title": name.title(),
+                "version": "1.0.0",
+                "required_tools": [],
+                "required_mcp_servers": [],
+                "supported_harnesses": list(harness_profiles.HARNESS_IDS),
+                "trust_level": "workspace",
+                "enabled": True,
+                "tests": [],
+            }
+        )
+    )
+    assert skills_cmd.import_skill(target=workspace, source=skill_dir, json_output=True) == 0
+    return skill_dir
+
+
+def _assert_no_private_keys(value, path=""):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            assert k not in {"digest", "fingerprint", "desired_digest", "desired_fingerprint"}, f"{path}.{k}"
+            assert not any(p in k for p in ("digest", "fingerprint")), f"{path}.{k}"
+            assert k not in {"env", "headers", "args", "command"}, f"{path}.{k}"
+            _assert_no_private_keys(v, f"{path}.{k}")
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _assert_no_private_keys(v, f"{path}[{i}]")
+    elif isinstance(value, str):
+        # no hex sha256-looking digest values (64 hex chars) leak into public text
+        assert len(value) != 64 or not all(c in "0123456789abcdef" for c in value), f"{path}={value!r}"
+
+
+def test_user_profile_end_to_end_dry_run_install_doctor_and_uninstall(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    home, workspace = tmp_path / "home", tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(harness_profiles, "probe_kimi_native_mcp", lambda: True)
+    _seed_nested_reviewed_skill(workspace)
+    capsys.readouterr()  # drop import_skill JSON
+
+    base = ["harness", "install", "all", "--scope", "user", "--workspace", str(workspace), "--json"]
+
+    # dry run creates no home directory
+    assert cli.main(base) == 0
+    dry = json.loads(capsys.readouterr().out)
+    assert dry["write"] is False
+    assert not home.exists()
+
+    # first write succeeds and results are ordered all 8
+    assert cli.main(base + ["--write"]) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert [r["harness"] for r in first["results"]] == list(harness_profiles.HARNESS_IDS)
+    assert all(r["status"] in {"current", "updated"} for r in first["results"])
+
+    # second write is idempotent
+    assert cli.main(base + ["--write"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert all(r["files_written"] == [] and r["files_removed"] == [] for r in second["results"])
+    assert second["reload_required"] is False
+
+    # doctor succeeds with independent instruction_ready/skills_ready
+    assert cli.main(["harness", "doctor", "all", "--scope", "user", "--workspace", str(workspace), "--json"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert all(r["instruction_ready"] is True and r["skills_ready"] is True for r in doctor["results"])
+
+    # whole package exists in Codex and Pi
+    for root in (home / ".codex" / "skills", home / ".pi" / "agent" / "skills"):
+        pkg = root / "reviewed"
+        assert (pkg / "SKILL.md").is_file()
+        assert (pkg / "skill.json").is_file()
+        assert (pkg / "assets" / "guide.txt").read_text() == "guide\n"
+
+    # foreign-edit one Codex nested file
+    edited = home / ".codex" / "skills" / "reviewed" / "assets" / "guide.txt"
+    edited.write_text("user edit\n")
+
+    # uninstall all --write returns 1; preserves the edited file/conflict while
+    # still removing safe owned surfaces in the same Codex profile and all others
+    assert (
+        cli.main(["harness", "uninstall", "all", "--scope", "user", "--workspace", str(workspace), "--write", "--json"])
+        == 1
+    )
+    uninstall = json.loads(capsys.readouterr().out)
+    codex = next(r for r in uninstall["results"] if r["harness"] == "codex")
+    assert any(item["path"] == str(edited) for item in codex["conflicts"])
+    assert edited.read_text() == "user edit\n"
+    # safe owned surfaces removed in the conflicted Codex profile
+    assert not (home / ".codex" / "skills" / "reviewed" / "SKILL.md").exists()
+    assert not (home / ".codex" / "skills" / "reviewed" / "skill.json").exists()
+    # all other profiles removed their whole owned package
+    for hid in harness_profiles.HARNESS_IDS:
+        if hid == "codex":
+            continue
+        root_dir = home / (".pi/agent" if hid == "pi" else f".{hid}")
+        assert not (root_dir / "skills" / "reviewed").exists(), f"{hid} skills/reviewed still exists"
+    assert not (home / ".claude" / "skills" / "reviewed").exists()
+    assert not (home / ".pi" / "agent" / "skills" / "reviewed").exists()
+
+    # public payload strips private keys/values recursively
+    _assert_no_private_keys(uninstall)
+
+    # a repeat uninstall remains convergent (still 1, edited file preserved)
+    assert (
+        cli.main(["harness", "uninstall", "all", "--scope", "user", "--workspace", str(workspace), "--write", "--json"])
+        == 1
+    )
+    again = json.loads(capsys.readouterr().out)
+    codex2 = next(r for r in again["results"] if r["harness"] == "codex")
+    assert any(item["path"] == str(edited) for item in codex2["conflicts"])
+    assert edited.read_text() == "user edit\n"
+    _assert_no_private_keys(again)
+
+
+def test_package_version_only_refresh_reports_no_write_or_reload(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    home, workspace = tmp_path / "home", tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(harness_profiles, "probe_kimi_native_mcp", lambda: True)
+    _seed_nested_reviewed_skill(workspace)
+    capsys.readouterr()
+
+    install = ["harness", "install", "all", "--scope", "user", "--workspace", str(workspace), "--write", "--json"]
+    assert cli.main(install) == 0
+    capsys.readouterr()
+
+    # manually stale every profile's package_version
+    for hid in harness_profiles.HARNESS_IDS:
+        root = home / (".pi/agent" if hid == "pi" else f".{hid}")
+        state_path = root / "brigade" / "install-state.json"
+        if state_path.is_file():
+            st = json.loads(state_path.read_text())
+            st["package_version"] = "0.0.0-stale"
+            state_path.write_text(json.dumps(st))
+
+    # install refreshes state but reports no file write/reload
+    assert cli.main(install) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert all(r["files_written"] == [] and r["files_removed"] == [] for r in payload["results"])
+    assert payload["reload_required"] is False
+    # state files now carry the current package version
+    for hid in harness_profiles.HARNESS_IDS:
+        root = home / (".pi/agent" if hid == "pi" else f".{hid}")
+        state_path = root / "brigade" / "install-state.json"
+        if state_path.is_file():
+            assert json.loads(state_path.read_text())["package_version"] == BRIGADE_VERSION
+
+    # doctor also refreshes state and reports no reload
+    assert cli.main(["harness", "doctor", "all", "--scope", "user", "--workspace", str(workspace), "--json"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["reload_required"] is False
+    assert all(r["instruction_ready"] is True and r["skills_ready"] is True for r in doctor["results"])
+
+
+def test_doctor_does_not_create_home_on_missing_profiles(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    home, workspace = tmp_path / "home", tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(harness_profiles, "probe_kimi_native_mcp", lambda: True)
+
+    assert cli.main(["harness", "doctor", "all", "--scope", "user", "--workspace", str(workspace), "--json"]) == 1
+    json.loads(capsys.readouterr().out)
+    assert not home.exists()

@@ -124,6 +124,172 @@ def _desired_files(root: Path) -> dict[Path, tuple[str, bool, str]]:
     return desired
 
 
+<<<<<<< HEAD
+=======
+def cursor_generated_files(root: Path) -> dict[Path, tuple[str, bool, str]]:
+    """Return only the Brigade-generated Cursor surfaces: plugin, rule, hook.
+
+    The bundled ``brigade-work`` skill copy is intentionally excluded: the
+    registry projection from the shared profile layer is its single owner, so
+    migration retires the legacy copy rather than double-owning it. The
+    Brigade-internal MCP catalog and the co-owned ``hooks.json``/``mcp.json``
+    configs are owned by other stages and are not generated surfaces here.
+    """
+    desired = _desired_files(root)
+    return {path: record for path, record in desired.items() if record[2] in {"plugin", "rule", "hook"}}
+
+
+@dataclass(frozen=True)
+class CursorV1Migration:
+    """Result of migrating a Cursor ownership state from schema version 1 to 2.
+
+    ``state`` is the schema-v2 ownership state with legacy file/hook ownership
+    moved into ``generated`` and ``instructions``/``skills``/``mcp`` left empty
+    for the shared profile stages to own. ``retire_mcp_names`` is the sorted
+    tuple of legacy ``~/.cursor/mcp.json`` server names whose live value still
+    digest-matches the recorded v1 entry, so the caller can delete exactly
+    those before persisting v2 state. ``retire_file_paths`` is the sorted tuple
+    of absolute ``Path`` objects for legacy ``_desired_files`` surfaces
+    ``"skill"`` and ``"mcp-catalog"`` whose live bytes still digest-match the
+    recorded v1 entry, so Task 7 can retire them instead of double-owning them
+    under schema-v2 generated ownership. ``error`` is a stable, concise
+    conflict reason; when it is set ``state`` is empty, ``retire_mcp_names``
+    is empty, and ``retire_file_paths`` is empty. The migration is pure: it
+    never writes state or mutates MCP config.
+    """
+
+    state: dict[str, Any]
+    retire_mcp_names: tuple[str, ...]
+    retire_file_paths: tuple[Path, ...]
+    error: str | None
+    retire_file_ownership: tuple[tuple[Path, str], ...] = ()
+    retire_mcp_ownership: tuple[tuple[str, str], ...] = ()
+
+
+def migrate_v1_state(*, root: Path, workspace: Path, state: dict[str, Any]) -> CursorV1Migration:
+    """Migrate an exact Cursor ownership state version 1 into schema version 2.
+
+    Accepts only ``state["version"] == 1`` with no ``schema_version`` and
+    object-valued ``files``, ``hooks``, and ``mcp`` sections whose entries are
+    string keys and string digests. Reads ``root / mcp.json`` via
+    ``_read_json_object``; when legacy MCP ownership is nonempty, the live
+    ``mcpServers`` must be an object and every recorded name must still exist
+    with a value whose digest matches the stored one. Any deviation is a
+    migration conflict: ``error`` is set and no state/config writes occur.
+    """
+    if state.get("version") != STATE_VERSION or "schema_version" in state:
+        return CursorV1Migration({}, (), (), "legacy cursor state must be version 1 without schema_version")
+    files = state.get("files")
+    hooks = state.get("hooks")
+    mcp = state.get("mcp")
+    if not isinstance(files, dict) or not isinstance(hooks, dict) or not isinstance(mcp, dict):
+        return CursorV1Migration({}, (), (), "legacy cursor state sections must be objects")
+    for rel, digest in files.items():
+        if not isinstance(rel, str) or not isinstance(digest, str):
+            return CursorV1Migration({}, (), (), "legacy cursor file ownership is malformed")
+    for name, digest in hooks.items():
+        if not isinstance(name, str) or not isinstance(digest, str):
+            return CursorV1Migration({}, (), (), "legacy cursor hook ownership is malformed")
+    for name, digest in mcp.items():
+        if not isinstance(name, str) or not isinstance(digest, str):
+            return CursorV1Migration({}, (), (), "legacy cursor mcp ownership is malformed")
+
+    live_doc, read_error = _read_json_object(root / "mcp.json")
+    if live_doc is None:
+        return CursorV1Migration({}, (), (), read_error or "cursor mcp config is unreadable")
+    live_servers = live_doc.get("mcpServers")
+    if mcp and not isinstance(live_servers, dict):
+        return CursorV1Migration({}, (), (), "cursor mcp config mcpServers must be an object")
+
+    retire_mcp: list[str] = []
+    retire_mcp_own: list[tuple[str, str]] = []
+    for name, stored in mcp.items():
+        if not isinstance(live_servers, dict) or name not in live_servers:
+            return CursorV1Migration({}, (), (), f"legacy cursor mcp entry is missing: {name}")
+        if _digest_value(live_servers[name]) != stored:
+            return CursorV1Migration({}, (), (), f"legacy cursor mcp entry was edited: {name}")
+        retire_mcp.append(name)
+        retire_mcp_own.append((name, stored))
+
+    # Classify every legacy file entry against the exact current _desired_files
+    # shape. plugin/rule/hook become schema-v2 generated ownership; skill and
+    # mcp-catalog become retirement candidates for Task 7; any other key is a
+    # conflict because "exact v1 shape" forbids guessing. The recorded file keys
+    # must be exactly the set of relative keys _desired_files emits: a missing
+    # expected key or an extra unexpected key is a conflict, checked before any
+    # live read. Each entry must be a regular file under root with no symlink at
+    # the leaf or in any intermediate component under root, and its live bytes
+    # must digest-match the recorded digest. Retirement paths are the original
+    # absolute leaf paths (never a symlink-resolved target) so Task 7 retires
+    # exactly the recorded surface.
+    root_resolved = root.resolve()
+    desired = _desired_files(root)
+    rel_to_surface = {_relative(root, path): surface for path, (_t, _e, surface) in desired.items()}
+    expected_rels = set(rel_to_surface)
+    recorded_rels = set(files)
+    if recorded_rels != expected_rels:
+        missing = sorted(expected_rels - recorded_rels)
+        unexpected = sorted(recorded_rels - expected_rels)
+        shape_parts: list[str] = []
+        if missing:
+            shape_parts.append("missing: " + ", ".join(missing))
+        if unexpected:
+            shape_parts.append("unexpected: " + ", ".join(unexpected))
+        return CursorV1Migration({}, (), (), "legacy cursor file shape mismatch: " + "; ".join(shape_parts))
+    generated_files: dict[str, str] = {}
+    retire_paths: list[Path] = []
+    retire_file_own: list[tuple[Path, str]] = []
+    for rel, stored in files.items():
+        if not _is_contained_rel(rel):
+            return CursorV1Migration({}, (), (), f"legacy cursor file path escapes root: {rel}")
+        surface = rel_to_surface[rel]
+        raw_path = root / rel
+        # Reject any symlink at the leaf or in an intermediate component under
+        # root so a retirement path can never resolve to a different target.
+        if raw_path.is_symlink():
+            return CursorV1Migration({}, (), (), f"legacy cursor file path is a symlink: {rel}")
+        intermediate = root
+        for component in Path(rel).parts[:-1]:
+            intermediate = intermediate / component
+            if intermediate.is_symlink():
+                return CursorV1Migration({}, (), (), f"legacy cursor file path crosses a symlink: {rel}")
+        resolved = raw_path.resolve()
+        if not resolved.is_relative_to(root_resolved) or not resolved.is_file():
+            return CursorV1Migration({}, (), (), f"legacy cursor file is missing: {rel}")
+        try:
+            live_text = resolved.read_text()
+        except (OSError, UnicodeError) as exc:
+            return CursorV1Migration({}, (), (), f"legacy cursor file is unreadable: {rel}: {exc}")
+        if _digest_text(live_text) != stored:
+            return CursorV1Migration({}, (), (), f"legacy cursor file was edited: {rel}")
+        if surface in {"plugin", "rule", "hook"}:
+            generated_files[rel] = stored
+        elif surface in {"skill", "mcp-catalog"}:
+            # retire the original absolute leaf path, never a resolved target
+            retire_paths.append(raw_path.absolute())
+            retire_file_own.append((raw_path.absolute(), stored))
+        else:  # defensive: rel_to_surface only holds known surfaces
+            return CursorV1Migration({}, (), (), f"legacy cursor file surface is unexpected: {rel}")
+
+    from . import harness_profile_cmd  # local import avoids a module-level cycle
+
+    new_state = harness_profile_cmd.empty_profile_state(workspace=workspace, harness="cursor")
+    new_state["generated"] = {
+        "files": generated_files,
+        "hooks": dict(hooks),
+        "created_directories": [],
+    }
+    return CursorV1Migration(
+        new_state,
+        tuple(sorted(retire_mcp)),
+        tuple(sorted(retire_paths)),
+        None,
+        tuple(sorted(retire_file_own)),
+        tuple(retire_mcp_own),
+    )
+
+
+>>>>>>> ba8e21f (test(harness): cover user profile lifecycle)
 def _state_path(root: Path) -> Path:
     return root / "brigade" / "install-state.json"
 

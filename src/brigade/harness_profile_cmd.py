@@ -358,6 +358,83 @@ def load_profile_state(*, state_path: Path, workspace: Path, harness: str) -> Lo
     return LoadedProfileState(state, None)
 
 
+<<<<<<< HEAD
+=======
+@dataclass(frozen=True)
+class LoadedCursorProfileState:
+    """Result of loading a Cursor profile ownership state, with optional migration.
+
+    ``migration`` is ``"cursor-state-v1"`` when a legacy v1 state was migrated
+    in memory, otherwise ``None``. ``retire_mcp_names`` names the live
+    ``~/.cursor/mcp.json`` entries the caller may retire after a v1 migration;
+    it is empty otherwise. ``retire_file_paths`` is the sorted tuple of absolute
+    ``Path`` objects for legacy ``skill``/``mcp-catalog`` surfaces the caller
+    may retire after a v1 migration; it is empty otherwise. The loader never
+    persists migrated state and never edits MCP config: Task 7 owns the
+    retirement + artifact-apply transaction.
+    """
+
+    state: dict[str, Any]
+    error: str | None
+    migration: str | None
+    retire_mcp_names: tuple[str, ...]
+    retire_file_paths: tuple[Path, ...]
+    retire_file_ownership: tuple[tuple[Path, str], ...] = ()
+    retire_mcp_ownership: tuple[tuple[str, str], ...] = ()
+
+
+def load_cursor_profile_state(
+    *, state_path: Path, workspace: Path, root: Path | None = None
+) -> LoadedCursorProfileState:
+    """Load a Cursor profile ownership state, migrating legacy v1 in memory.
+
+    A missing state path or an existing schema-v2 state delegates to
+    ``load_profile_state`` with ``harness="cursor"`` and reports no migration.
+    A legacy v1 state (``"version": 1`` with no ``"schema_version"``) is
+    migrated in memory by ``cursor_user_cmd.migrate_v1_state``: the returned
+    state is schema-v2 with legacy file/hook ownership moved into ``generated``
+    and ``skills``/``mcp`` left empty for the shared stages to own, and
+    ``retire_mcp_names`` names the live ``~/.cursor/mcp.json`` entries the
+    caller may retire. This loader never persists migrated state and never
+    edits MCP config.
+    """
+    if not state_path.exists():
+        loaded = load_profile_state(state_path=state_path, workspace=workspace, harness="cursor")
+        return LoadedCursorProfileState(loaded.state, loaded.error, None, (), ())
+
+    try:
+        raw = state_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return LoadedCursorProfileState({}, "ownership state is unreadable", None, (), ())
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return LoadedCursorProfileState({}, "ownership state is unreadable", None, (), ())
+    if not isinstance(payload, dict):
+        return LoadedCursorProfileState({}, "ownership state is not an object", None, (), ())
+
+    if payload.get("version") == 1 and "schema_version" not in payload:
+        from . import cursor_user_cmd  # local import avoids a module-level cycle
+
+        cursor_root = root if root is not None else cursor_user_cmd._cursor_root()
+        migration = cursor_user_cmd.migrate_v1_state(root=cursor_root, workspace=workspace, state=payload)
+        if migration.error is not None:
+            return LoadedCursorProfileState({}, migration.error, None, (), ())
+        return LoadedCursorProfileState(
+            migration.state,
+            None,
+            "cursor-state-v1",
+            migration.retire_mcp_names,
+            migration.retire_file_paths,
+            migration.retire_file_ownership,
+            migration.retire_mcp_ownership,
+        )
+
+    loaded = load_profile_state(state_path=state_path, workspace=workspace, harness="cursor")
+    return LoadedCursorProfileState(loaded.state, loaded.error, None, (), ())
+
+
+>>>>>>> ba8e21f (test(harness): cover user profile lifecycle)
 def _validate_skill_id(skill_id: str) -> None:
     if not skill_id or skill_id == "." or skill_id.startswith("/"):
         raise ValueError(_SKILLS_OUTSIDE_ROOT)
@@ -849,12 +926,21 @@ def _git_tracks(workspace: Path, rel: str) -> bool | None:
 
 
 def _load_state_for_profile(profile, workspace):
-    """Return (state, error, migration, retire_mcp_names, retire_file_paths)."""
+    """Return (state, error, migration, retire_mcp_names, retire_file_paths,
+    retire_file_ownership, retire_mcp_ownership)."""
     if profile.harness == "cursor":
         loaded = load_cursor_profile_state(state_path=profile.state_path, workspace=workspace, root=profile.user_root)
-        return loaded.state, loaded.error, loaded.migration, loaded.retire_mcp_names, loaded.retire_file_paths
+        return (
+            loaded.state,
+            loaded.error,
+            loaded.migration,
+            loaded.retire_mcp_names,
+            loaded.retire_file_paths,
+            loaded.retire_file_ownership,
+            loaded.retire_mcp_ownership,
+        )
     loaded = load_profile_state(state_path=profile.state_path, workspace=workspace, harness=profile.harness)
-    return loaded.state, loaded.error, None, (), ()
+    return loaded.state, loaded.error, None, (), (), (), ()
 
 
 def _plan_instruction_for_profile(profile, state, adopt, workspace, *, guard_tracked_write=True):
@@ -947,8 +1033,14 @@ def _plan_skills_for_profile(profile, state, workspace):
     return plans, conflicts, None
 
 
-def _plan_cursor_generated(profile, state):
-    """Plan plugin/rule/hook generated files against v2 ``generated`` ownership."""
+def _plan_cursor_generated(profile, state, adopt=False):
+    """Plan plugin/rule/hook generated files against v2 ``generated`` ownership.
+
+    ``adopt`` reclassifies a foreign, well-formed (regular, readable) generated
+    file as ``stale/update`` so an explicit ``--adopt --write`` claims it. There
+    is no implicit adoption: without ``adopt`` a foreign generated file remains a
+    conflict.
+    """
     root = profile.user_root
     generated = cursor_user_cmd.cursor_generated_files(root)
     gen_state = state.get("generated", {}) if isinstance(state, dict) else {}
@@ -983,6 +1075,8 @@ def _plan_cursor_generated(profile, state):
             elif live_digest == desired_digest:
                 status, action = "stale", "update"
             elif owned_files.get(rel) == live_digest:
+                status, action = "stale", "update"
+            elif adopt:
                 status, action = "stale", "update"
             else:
                 status, action = "conflict", "preserve"
@@ -1112,31 +1206,129 @@ def _apply_cursor_hook(hook_plan, state, root):
     return str(hook_path)
 
 
-def _retire_cursor_legacy(root, retire_file_paths, retire_mcp_names):
+def _retire_cursor_legacy(root, retire_file_ownership, retire_mcp_ownership):
+    """Revalidate then retire legacy Cursor surfaces as one atomic batch.
+
+    For every ``(path, stored_digest)``: reject symlink / non-regular / missing
+    / changed digest before unlink. For every ``(name, stored_digest)``: reread
+    ``root/mcp.json`` and digest-match the current live value before pop. If any
+    candidate mismatches, perform zero retirement mutations for the whole batch
+    and return its conflicts. No partial retirement after revalidation failure.
+
+    Returns ``(removed_paths, conflict_items)``.
+    """
+    conflicts: list[dict] = []
+
+    for path, stored in retire_file_ownership:
+        if path.is_symlink() or not path.is_file():
+            conflicts.append(
+                {
+                    "surface": "retire-file",
+                    "path": str(path),
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": f"retirement target is missing or not a regular file: {path}",
+                }
+            )
+            continue
+        try:
+            live = path.read_text()
+        except (OSError, UnicodeError) as exc:
+            conflicts.append(
+                {
+                    "surface": "retire-file",
+                    "path": str(path),
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": f"retirement target is unreadable: {path}: {exc}",
+                }
+            )
+            continue
+        if digest_text(live) != stored:
+            conflicts.append(
+                {
+                    "surface": "retire-file",
+                    "path": str(path),
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": f"retirement target was edited: {path}",
+                }
+            )
+
+    mcp_path = root / "mcp.json"
+    live_doc, read_error = cursor_user_cmd._read_json_object(mcp_path)
+    live_servers = live_doc.get("mcpServers") if isinstance(live_doc, dict) else None
+    if retire_mcp_ownership:
+        if live_doc is None:
+            conflicts.append(
+                {
+                    "surface": "retire-mcp",
+                    "path": str(mcp_path),
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": read_error or "cursor mcp config is unreadable",
+                }
+            )
+        elif not isinstance(live_servers, dict):
+            conflicts.append(
+                {
+                    "surface": "retire-mcp",
+                    "path": str(mcp_path),
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": "cursor mcp config mcpServers must be an object",
+                }
+            )
+        else:
+            for name, stored in retire_mcp_ownership:
+                if name not in live_servers:
+                    conflicts.append(
+                        {
+                            "surface": "retire-mcp",
+                            "path": str(mcp_path),
+                            "name": name,
+                            "status": "conflict",
+                            "action": "preserve",
+                            "detail": f"retirement mcp entry is missing: {name}",
+                        }
+                    )
+                    continue
+                if cursor_user_cmd._digest_value(live_servers[name]) != stored:
+                    conflicts.append(
+                        {
+                            "surface": "retire-mcp",
+                            "path": str(mcp_path),
+                            "name": name,
+                            "status": "conflict",
+                            "action": "preserve",
+                            "detail": f"retirement mcp entry was edited: {name}",
+                        }
+                    )
+
+    if conflicts:
+        return [], conflicts
+
     removed: list[str] = []
-    for path in retire_file_paths:
+    root_resolved = root.resolve()
+    for path, _stored in retire_file_ownership:
         try:
             path.unlink()
             removed.append(str(path))
         except FileNotFoundError:
             continue
         cur = path.parent
-        root_resolved = root.resolve()
         while cur != root_resolved and root_resolved in cur.parents:
             try:
                 cur.rmdir()
             except OSError:
                 break
             cur = cur.parent
-    mcp_path = root / "mcp.json"
-    doc, _ = cursor_user_cmd._read_json_object(mcp_path)
-    if doc is not None:
-        servers = doc.get("mcpServers")
-        if isinstance(servers, dict):
-            for name in retire_mcp_names:
-                servers.pop(name, None)
-            localio.write_text_atomic(mcp_path, cursor_user_cmd._coowned_json_text(doc))
-    return removed
+
+    if retire_mcp_ownership and isinstance(live_doc, dict) and isinstance(live_servers, dict):
+        for name, _stored in retire_mcp_ownership:
+            live_servers.pop(name, None)
+        localio.write_text_atomic(mcp_path, cursor_user_cmd._coowned_json_text(live_doc))
+    return removed, []
 
 
 def _replan_skills_after_retire(profile, state, workspace):
@@ -1189,7 +1381,9 @@ def _replan_skills_after_retire(profile, state, workspace):
 
 
 def _install_profile(profile, workspace, write, adopt):
-    state, error, migration, retire_mcp, retire_paths = _load_state_for_profile(profile, workspace)
+    state, error, migration, retire_mcp, retire_paths, retire_file_own, retire_mcp_own = _load_state_for_profile(
+        profile, workspace
+    )
     items: list[dict] = []
     conflicts: list[dict] = []
     files_written: list[str] = []
@@ -1257,7 +1451,7 @@ def _install_profile(profile, workspace, write, adopt):
     gen_items, gen_conflicts, gen_writes = [], [], []
     hook_item, hook_conflict, hook_plan, hook_fp = None, [], None, None
     if profile.harness == "cursor":
-        gen_items, gen_conflicts, gen_writes = _plan_cursor_generated(profile, state)
+        gen_items, gen_conflicts, gen_writes = _plan_cursor_generated(profile, state, adopt=adopt)
         items.extend(gen_items)
         conflicts.extend(gen_conflicts)
         hook_item, hook_conflict, hook_plan, hook_fp = _plan_cursor_hook(profile, state)
@@ -1269,23 +1463,42 @@ def _install_profile(profile, workspace, write, adopt):
     files_removed: list[str] = []
 
     if write and ready:
+        if is_migration and profile.harness == "cursor":
+            # Revalidate + retire legacy surfaces BEFORE any new-surface write so
+            # a TOCTOU retirement conflict leaves no partial schema-v2 state and
+            # never persists v2 as if successful. Zero mutations on any mismatch.
+            removed, retire_conflicts = _retire_cursor_legacy(profile.user_root, retire_file_own, retire_mcp_own)
+            if retire_conflicts:
+                conflicts.extend(retire_conflicts)
+                return _result(
+                    profile.harness,
+                    status="conflict",
+                    ready=False,
+                    instruction_ready=instruction_ready,
+                    skills_ready=False,
+                    reload_hint=profile.reload_hint,
+                    items=items,
+                    conflicts=conflicts,
+                    files_written=[],
+                    files_removed=[],
+                    migration=migration,
+                    capabilities=profile.capabilities,
+                ), False
+            files_removed.extend(removed)
         wf = _apply_instruction(instr_plan, state)
         if wf:
             files_written.append(wf)
         if profile.harness == "cursor":
-            # 2. apply generated/hook repairs before any legacy retirement
+            # 2. apply generated/hook repairs
             gw = _apply_cursor_generated(gen_writes, state, profile.user_root)
             files_written.extend(gw)
             hw = _apply_cursor_hook(hook_plan, state, profile.user_root)
             if hw:
                 files_written.append(hw)
             if is_migration:
-                # 3. retire only validated legacy MCP names and file paths;
-                #    report retirements in files_removed, never files_written
-                removed = _retire_cursor_legacy(profile.user_root, retire_paths, retire_mcp)
-                files_removed.extend(removed)
-                # 4. recompute packages + plan_skills against the post-retirement
-                #    filesystem, then apply and own registry skill files
+                # 3. legacy retirement already completed above; recompute packages
+                #    + plan_skills against the post-retirement filesystem, then
+                #    apply and own registry skill files
                 skill_plans, skill_conflicts = _replan_skills_after_retire(profile, state, workspace)
                 conflicts.extend(skill_conflicts)
                 skills_ready = not skill_conflicts
@@ -1443,7 +1656,9 @@ def _plan_cursor_hook_removal(profile, state):
 
 
 def _uninstall_profile(profile, workspace, write):
-    state, error, migration, _retire_mcp, _retire_paths = _load_state_for_profile(profile, workspace)
+    state, error, migration, _retire_mcp, _retire_paths, _retire_file_own, _retire_mcp_own = _load_state_for_profile(
+        profile, workspace
+    )
     items: list[dict] = []
     conflicts: list[dict] = []
     files_removed: list[str] = []
@@ -1634,7 +1849,7 @@ def _uninstall_profile(profile, workspace, write):
 
 
 def _doctor_profile(profile, workspace, verify_mcp):
-    state, error, migration, _rm, _rf = _load_state_for_profile(profile, workspace)
+    state, error, migration, _rm, _rf, _rfo, _rmo = _load_state_for_profile(profile, workspace)
     checks: list[dict] = []
     conflicts: list[dict] = []
     ready = True
