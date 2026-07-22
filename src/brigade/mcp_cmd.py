@@ -754,32 +754,48 @@ def sync(
         for h in harnesses
     ]
     exposures = _user_stdio_exposures(planned, target)
+    gated: set[str] = set()
+    gate_error: str | None = None
+    gate_declined = False
     if exposures:
         warning_lines = _stdio_exposure_lines(exposures)
         notes.extend(warning_lines)
         if write and not allow_global_stdio:
             # A user-scoped stdio sync never completes silently: interactive runs
             # confirm at the prompt, non-interactive runs need the explicit flag.
-            # Callers that capture stdout (operator sync-mcp) pass `interactive`
-            # explicitly; the prompt stays on stderr so captured JSON is clean.
+            # Only the exposed user-scoped destinations gate; project-scoped
+            # harnesses in the same invocation still write. Callers that capture
+            # stdout (operator sync-mcp) pass `interactive` explicitly; the
+            # prompt stays on stderr so captured JSON is clean.
             is_interactive = interactive if interactive is not None else (not json_output and sys.stdin.isatty())
             if not is_interactive:
-                message = (
+                gated = {e["harness"] for e in exposures}
+                gate_error = (
                     "user-scoped sync would write stdio MCP servers into a user-wide client config; "
                     "re-run with --allow-global-stdio to acknowledge, or use project scope / an "
                     "HTTP-SSE transport"
                 )
-                lines = warning_lines + [f"error: {message}"]
-                return _emit({"errors": [message], "stdio_exposures": exposures, "notes": notes}, json_output, lines, 2)
-            for line in warning_lines:
-                print(line, file=sys.stderr)
-            print("Write stdio servers into the user-wide config? [y/N]: ", end="", file=sys.stderr, flush=True)
-            answer = input().strip().lower()
-            if answer not in ("y", "yes"):
-                message = "aborted: user-scoped stdio sync not confirmed"
-                return _emit({"aborted": True, "stdio_exposures": exposures, "notes": notes}, json_output, [message], 1)
+            else:
+                for line in warning_lines:
+                    print(line, file=sys.stderr)
+                print("Write stdio servers into the user-wide config? [y/N]: ", end="", file=sys.stderr, flush=True)
+                answer = input().strip().lower()
+                if answer not in ("y", "yes"):
+                    gated = {e["harness"] for e in exposures}
+                    gate_declined = True
+                    notes.append("user-scoped stdio destinations skipped: not confirmed at the prompt")
 
     for h, items in planned:
+        if h in gated:
+            # Preserve the plan for visibility, but nothing in this destination
+            # is written and no ownership state changes.
+            for item in items:
+                if item["action"] in ("create", "update", "remove"):
+                    item["action"] = "skip"
+                    suffix = "not written: user-scoped stdio not acknowledged"
+                    item["detail"] = f"{item['detail']}; {suffix}" if item["detail"] else suffix
+            all_items.extend(items)
+            continue
         all_items.extend(items)
         adapter = ADAPTERS[h]
         path = mcp_adapters.resolve_path(adapter, target)
@@ -871,6 +887,14 @@ def sync(
         lines.append(f"verification receipt: {payload['verification']['receipt_path']}")
     lines += notes
     rc = 1 if counts["conflict"] else 0
+    if gate_error:
+        payload["errors"] = [gate_error]
+        payload["stdio_gated"] = sorted(gated)
+        lines.append(f"error: {gate_error}")
+        rc = 2
+    elif gate_declined:
+        payload["stdio_gated"] = sorted(gated)
+        rc = 1
     if verify_rc != 0:
         rc = verify_rc
     return _emit(payload, json_output, lines, rc)

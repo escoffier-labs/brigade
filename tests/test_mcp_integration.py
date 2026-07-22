@@ -532,7 +532,7 @@ def test_user_scope_stdio_sync_interactive_decline_aborts(tmp_path, monkeypatch,
 
     assert rc == 1
     assert not (home / ".cursor" / "mcp.json").exists()
-    assert "aborted" in capsys.readouterr().out
+    assert "skipped" in capsys.readouterr().out
 
 
 def test_user_scope_remote_only_sync_does_not_gate(tmp_path, monkeypatch, capsys):
@@ -622,3 +622,22 @@ def test_operator_sync_mcp_non_tty_requires_allow_flag(tmp_path, monkeypatch, ca
     assert rc == 1
     assert any("--allow-global-stdio" in e for e in payload["sync"]["errors"])
     assert not (home / ".gemini/config/mcp_config.json").exists()
+
+
+def test_combined_sync_gates_only_user_scoped_destinations(tmp_path, monkeypatch, capsys):
+    home, repo = _seed_user_home(tmp_path, monkeypatch)
+
+    capsys.readouterr()
+    rc = mcp_cmd.sync(target=repo, user_scope=True, write=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    # The exposed user-scoped destinations gate with exit 2, but project-scoped
+    # harnesses in the same invocation still write.
+    assert rc == 2
+    assert payload["stdio_gated"]
+    assert payload["files_written"]
+    assert all(f.startswith(str(repo)) for f in payload["files_written"])
+    assert not (home / ".gemini/config/mcp_config.json").exists()
+    assert not (home / ".claude.json").exists()
+    gated_items = [i for i in payload["items"] if i["harness"] in payload["stdio_gated"]]
+    assert gated_items and all(i["action"] == "skip" for i in gated_items)
