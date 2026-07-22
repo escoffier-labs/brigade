@@ -144,6 +144,13 @@ def _decode_verify_child_output(stdout: str | bytes | None, stderr: str | bytes 
     return stdout_text, stderr_text
 
 
+def _terminate_verify_child(process: subprocess.Popen[bytes]) -> None:
+    try:
+        proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
+    except KeyboardInterrupt:
+        proc._terminate_processes((process,), terminate_grace=0.0, kill_grace=0.0)
+
+
 def _run_verify_child_process(
     execution_argv: list[str],
     *,
@@ -173,18 +180,18 @@ def _run_verify_child_process(
             return "completed", 0, stdout_text, stderr_text
         return "failed", process.returncode, stdout_text, stderr_text
     except KeyboardInterrupt:
-        proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
+        _terminate_verify_child(process)
         stdout_text, stderr_text = "", ""
         try:
             stdout, stderr = process.communicate(timeout=proc._TIMED_OUT_DRAIN_SECONDS)
             stdout_text, stderr_text = _decode_verify_child_output(stdout, stderr)
         except KeyboardInterrupt:
-            pass
+            _terminate_verify_child(process)
         except subprocess.TimeoutExpired as exc:
             stdout_text, stderr_text = _decode_verify_child_output(exc.output, exc.stderr)
         return _VERIFY_INTERRUPTED_COMMAND_STATUS, None, stdout_text, stderr_text
     except subprocess.TimeoutExpired as exc:
-        proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
+        _terminate_verify_child(process)
         stdout_text, stderr_text = _decode_verify_child_output(exc.stdout, exc.stderr)
         try:
             process.communicate(timeout=proc._TIMED_OUT_DRAIN_SECONDS)
