@@ -25,7 +25,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood` (extras): 1 command path(s)
-- `brigade evidence`: 6 command path(s)
+- `brigade evidence`: 9 command path(s)
 - `brigade extras`: 3 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -169,8 +169,11 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade evidence crawl`
 - `brigade evidence crawl plan`
 - `brigade evidence doctor`
+- `brigade evidence explain`
 - `brigade evidence export plan`
 - `brigade evidence search`
+- `brigade evidence show`
+- `brigade evidence stats`
 - `brigade evidence status`
 - `brigade extras off`
 - `brigade extras on`
