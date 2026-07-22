@@ -283,7 +283,7 @@ For safety:
 - import Content Guard findings into the work inbox for review
 - keep generated state ignored by default
 - avoid publishing, pushing, or mutating remotes automatically
-- keep notification sending opt-in
+- keep notification sending opt-in; `brigade work brief` may report readiness or suggest the station, but Brigade never sends unless the operator uses an explicit send action
 - make risky actions visible as operator decisions
 
 ## Ecosystem
@@ -337,7 +337,7 @@ Safety and operations tools:
 
 - Content Guard is embedded in Brigade and powers `brigade scrub`, publish checks, and the seeded pre-push hook. `CONTENT_GUARD_DIR` remains an explicit compatibility override for older standalone checkouts.
 - [Agent Pantry](https://github.com/escoffier-labs/agentpantry): encrypted browser session, cookie, and secret sync for agent machines.
-- [agent-notify](https://github.com/escoffier-labs/agent-notify): optional notification hooks for long-running agent work.
+- [agent-notify](https://github.com/escoffier-labs/agent-notify) (`stations/notify/` in this monorepo): optional notification hooks for long-running agent work. Released installs resolve the pinned managed `agent-notify` binary through `brigade setup` once a stable manifest publishes its assets. The standalone repository carries a migration notice and is not archived until a containing Brigade release ships and published acceptance passes.
 - [Token Glace](https://github.com/escoffier-labs/token-glace): output compaction for terminal-heavy agent workflows.
 - Built-in Scout skills: Brigade wires `brigade-work` and `ultra-work-scout` during `brigade init`; use Skillet when you want the full optional skill roster.
 
@@ -345,7 +345,7 @@ Evidence ledger tools:
 
 - [MiseLedger](https://github.com/escoffier-labs/miseledger): local-first evidence ledger. One binary crawls sessions, files, git history, and chat sources (`miseledger crawl ...`), stores `miseledger.adapter.v1` JSONL in SQLite with FTS5, and emits Brigade-ready evidence bundles. No separate exporter install.
 - Brigade station CLI (process boundary):
-  - `brigade setup` installs MiseLedger and SessionFind with GraphTrail and `graphtrail-mcp` from the exact release manifest
+  - `brigade setup` installs GraphTrail, `graphtrail-mcp`, MiseLedger, SessionFind, and `agent-notify` (when published on the release manifest) from the exact release manifest
   - `brigade add evidence` is a one-release compatibility fallback for an independent MiseLedger install
   - `brigade evidence status` / `doctor` — advisory health + next commands
   - `brigade evidence crawl <args...>` / `search <args...>` - transparent MiseLedger execution; engine output and exit code pass through
@@ -504,6 +504,24 @@ brigade pantry expiry-alert --send   # optional agent-notify (install notificati
 - `brigade pantry status` / `brigade pantry doctor` — advisory health with next commands.
 - `brigade pantry setup plan` / `service plan` — review-only plans under `.brigade/pantry/plans/`.
 - Pantry checks are advisory for workspace `doctor`. An unwired install warns but never fails a workspace run.
+
+## Notifications
+
+The `notifications` station wires optional `agent-notify` into the same operator workflow: private Discord, Telegram, or Signal delivery for long-running agent work. Source lives in [`stations/notify/`](../stations/notify/) in this repository. `agent-notify` stays a **separate Go binary** (process boundary). Brigade installs it, plans setup, and health-checks it; it does not send messages from doctor, status, or brief flows.
+
+Released pipx installs resolve `agent-notify` from the pinned unified release manifest through `brigade setup` once stable publishes its assets. `go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest` is the explicit fallback when you are on a source checkout or the component is not yet published on the running manifest. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing here; it is not archived until a containing Brigade release ships and published acceptance passes.
+
+```bash
+brigade add notifications
+brigade notifications status --json
+brigade notifications setup plan --profile operator
+# optional delivery after wiring:
+brigade pantry expiry-alert --send
+```
+
+- `brigade notifications status` / `brigade notifications setup plan` inspect wiring without sending.
+- `brigade work brief`, `brigade center status`, and `brigade daily status/plan` may surface notification readiness or suggest installing the station.
+- Brigade never sends unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`.
 
 ## For OpenClaw Users
 

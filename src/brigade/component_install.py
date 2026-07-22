@@ -108,12 +108,49 @@ def uses_bundled_compatibility_manifest() -> bool:
 def load_verified_exact_release_manifest(
     roots: SetupRoots,
 ) -> tuple[component_manifest.ComponentManifest, Path] | None:
-    """Read the current release manifest recorded in update state without mutating it."""
+    """Read the current release manifest recorded in update state without mutating it.
+
+    For ``stable`` state the cached manifest must pin the exact running
+    Brigade version (``state.component_tag == v{brigade.__version__}``); any
+    other stable state is treated as stale and returns ``None`` so the caller
+    re-resolves the release (online) or fails (offline).
+
+    For ``beta`` state the update transaction persisted the verified
+    last-stable release manifest coordinates. A later ``brigade setup``
+    reuses that stable cache instead of resolving an unreleased
+    ``v{brigade.__version__}`` tag (which fails online) or rejecting the
+    state as stale (which fails offline). The beta path validates the cached
+    manifest against its recorded stable ``component_tag``/version with
+    compatible missing-unpublished handling enabled, so a pre-agent-notify
+    stable manifest is accepted while every published component still pins.
+
+    Arbitrary state cannot opt in: :func:`update_cmd.load_update_state`
+    already validates the channel/state coordinates (channel in
+    {stable, beta}, semver ``component_tag``, 40-hex ``component_target_commit``,
+    exact release ``component_manifest_url`` matching ``component_tag``,
+    64-hex ``component_manifest_sha256``, ISO ``updated_at``); the digest
+    check below validates provenance, and ``validate_release_manifest_bytes``
+    validates the stable tag/version against the cached manifest.
+    """
     from brigade import update_cmd
 
     state_path = Path(component_paths.update_state_path(roots.data_root))
     state = update_cmd.load_update_state(state_path)
-    if state is None or state.component_tag != f"v{brigade.__version__}":
+    if state is None:
+        return None
+
+    if state.channel == "stable":
+        if state.component_tag != f"v{brigade.__version__}":
+            return None
+        compatible = False
+        release_version = brigade.__version__
+    elif state.channel == "beta":
+        stable_version = update_cmd._parse_tag(state.component_tag)
+        if stable_version is None:
+            return None
+        compatible = True
+        release_version = stable_version
+    else:
         return None
 
     cached = Path(component_paths.verified_manifest_path(roots.cache_root, state.component_manifest_sha256))
@@ -129,7 +166,7 @@ def load_verified_exact_release_manifest(
     release = update_cmd.ResolvedRelease(
         state.component_release_id,
         state.component_tag,
-        brigade.__version__,
+        release_version,
         state.component_target_commit,
         state.component_manifest_url,
         len(cached_bytes),
@@ -137,11 +174,15 @@ def load_verified_exact_release_manifest(
         cached_bytes,
     )
     try:
-        return update_cmd.validate_release_manifest_bytes(release), cached
+        if compatible:
+            manifest = update_cmd.validate_release_manifest_bytes(release, allow_compatible_stable_manifest=True)
+        else:
+            manifest = update_cmd.validate_release_manifest_bytes(release)
     except update_cmd.UpdateError as exc:
         raise ExactReleaseManifestError(str(exc), cached) from exc
     except ValueError as exc:
         raise ExactReleaseManifestError(f"cached exact-release manifest is invalid: {exc}", cached) from exc
+    return manifest, cached
 
 
 def build_setup_plan(
@@ -862,33 +903,82 @@ def _load_setup_manifest(
     offline: bool,
     opener: Callable[..., Any] | None,
     env: Mapping[str, str] | None,
-) -> tuple[component_manifest.ComponentManifest, Any | None]:
-    """Load an exact release manifest, with one standalone compatibility fallback."""
+    allow_compatible_stable_manifest: bool = False,
+) -> tuple[component_manifest.ComponentManifest, Any | None, str | None]:
+    """Load an exact release manifest, with one standalone compatibility fallback.
+
+    Returns ``(manifest, auto_release, auto_compatible_stable_version)``.
+    ``auto_release`` is the resolved release when the auto branch re-resolved
+    it online (used to publish state); ``None`` when a persisted verified
+    cache was reused or an explicit/standalone manifest was loaded.
+    ``auto_compatible_stable_version`` is the manifest's ``brigade_version``
+    when the auto branch reused a persisted beta-handoff cache whose stable
+    version predates the running Brigade version, so the caller can treat that
+    reuse as the narrowly named compatible-stable-manifest path; ``None``
+    otherwise (exact-release stable path stays strict).
+
+    The narrowly named ``allow_compatible_stable_manifest`` mode only applies
+    to the ``--manifest`` branch used by the beta handoff, which reuses the
+    verified last-stable release manifest. The auto branch resolves the exact
+    release for the installed Brigade version and stays strict, except that a
+    persisted beta-handoff state is the explicit compatible-stable-manifest
+    path and is reused rather than re-resolved.
+    """
     if manifest_path is not None:
-        return component_manifest.load(manifest_path), None
+        return (
+            component_manifest.load(
+                manifest_path,
+                allow_compatible_stable_manifest=allow_compatible_stable_manifest,
+            ),
+            None,
+            None,
+        )
     if manifest_source == "standalone":
-        return component_manifest.load(allow_standalone_legacy_revisions=True), None
+        return component_manifest.load(allow_standalone_legacy_revisions=True), None, None
     if manifest_source != "auto":
         raise ComponentInstallError("manifest source must be auto or standalone")
 
     if not uses_bundled_compatibility_manifest():
-        return component_manifest.load(), None
+        return component_manifest.load(), None, None
 
     from brigade import update_cmd
 
     roots = resolve_roots(env=env)
     try:
+        # Persisted update state supplies a verified manifest cache that
+        # ``brigade setup`` reuses instead of re-resolving the release.
+        cached_manifest = load_verified_exact_release_manifest(roots)
         if offline:
-            cached_manifest = load_verified_exact_release_manifest(roots)
+            # Offline setup must reuse any verified cache: the exact-release
+            # stable cache (state.component_tag == v{brigade.__version__}) or
+            # the beta handoff cache, which persists the verified last-stable
+            # release manifest coordinates and would otherwise fail offline.
             if cached_manifest is not None:
-                return cached_manifest[0], None
+                cached_manifest_obj, _cached_path = cached_manifest
+                auto_compatible = (
+                    cached_manifest_obj.brigade_version
+                    if cached_manifest_obj.brigade_version != brigade.__version__
+                    else None
+                )
+                return cached_manifest_obj, None, auto_compatible
             raise ComponentInstallError("offline setup requires a verified exact-release manifest cache")
+
+        # Online setup reuses the cache only for a persisted beta handoff,
+        # whose stable manifest tag predates the running Brigade version and
+        # would otherwise re-resolve an unreleased v{brigade.__version__} tag.
+        # Stable state retains exact current-version behavior: it re-resolves
+        # the exact current release as before.
+        if cached_manifest is not None:
+            state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
+            if state is not None and state.channel == "beta":
+                cached_manifest_obj, _cached_path = cached_manifest
+                return cached_manifest_obj, None, cached_manifest_obj.brigade_version
 
         release = update_cmd.resolve_release(update_cmd._DefaultHttp(), latest=False, tag=f"v{brigade.__version__}")
         update_cmd._cache_manifest(
             update_cmd.UpdatePaths(Path(roots.data_root), Path(roots.cache_root), Path("unused")), release
         )
-        return update_cmd.validate_release_manifest_bytes(release), release
+        return update_cmd.validate_release_manifest_bytes(release), release, None
     except (update_cmd.UpdateError, ExactReleaseManifestError, ValueError) as exc:
         raise ComponentInstallError(f"exact release manifest setup failed: {exc}") from exc
 
@@ -944,16 +1034,25 @@ def setup_native_components(
             raise ComponentInstallError("--allow-compatible-stable-manifest requires --manifest")
         if rollback:
             return _setup_rollback(env=env, runner=runner)
-        manifest, auto_release = _load_setup_manifest(
+        compatible_stable_manifest_requested = allow_compatible_stable_manifest is not None
+        manifest, auto_release, auto_compatible_stable_version = _load_setup_manifest(
             manifest_path=manifest_path,
             manifest_source=manifest_source,
             offline=offline,
             opener=opener,
             env=env,
+            allow_compatible_stable_manifest=compatible_stable_manifest_requested,
         )
+        # The explicit --allow-compatible-stable-manifest flag (beta handoff
+        # via --manifest) and the auto branch's reuse of a persisted beta
+        # cache both count as the narrowly named compatible-stable-manifest
+        # path; either way the manifest's brigade_version must match the
+        # recorded stable version, not the running Brigade version.
+        compatible_stable_version = allow_compatible_stable_manifest
+        if auto_compatible_stable_version is not None:
+            compatible_stable_version = auto_compatible_stable_version
         compatible_stable_manifest = (
-            allow_compatible_stable_manifest is not None
-            and allow_compatible_stable_manifest == manifest.brigade_version
+            compatible_stable_version is not None and compatible_stable_version == manifest.brigade_version
         )
         if manifest.brigade_version != brigade.__version__ and not compatible_stable_manifest:
             raise ComponentInstallError(

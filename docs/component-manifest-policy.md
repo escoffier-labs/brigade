@@ -5,12 +5,22 @@ from `brigade.station.v1` and `station_manifest.load`.
 
 ## Unified-release components
 
+The five-component / 25-asset contract below is the **future first stable manifest
+contract**, landing after `agent-notify` publication. No stable release yet contains
+this five-component / 25-asset `agent-notify` contract: the bundled compatibility
+manifest on `main` lists `agent-notify` as a known component with **empty/unpublished**
+assets, and the other four components have not yet shipped a stable manifest under
+this contract. Stable validation
+stays strict and will require every published component to carry the full
+five-platform matrix with matching digests and provenance.
+
 | Component id | Executable | Native release status |
 | --- | --- | --- |
 | `graphtrail` | `graphtrail` | built from the tagged Brigade commit |
 | `graphtrail-mcp` | `graphtrail-mcp` | built from the tagged Brigade commit |
 | `miseledger` | `miseledger` | built from the tagged Brigade commit |
 | `sessionfind` | `sessionfind` | built from the tagged Brigade commit |
+| `agent-notify` | `agent-notify` | bundled empty/unpublished on main; first stable manifest contract after `agent-notify` publication |
 
 Every component records the immutable 40-character tagged Brigade commit in `component_revision`.
 Every `source.repository` is `escoffier-labs/brigade`, and every `source.release_tag` is the same
@@ -50,16 +60,38 @@ download URL invariants, and a 40-character lowercase `component_revision` for e
 The revision must equal the immutable target commit of the resolved Brigade release. Unknown
 component ids remain a soft diagnostic; malformed known components are a hard failure.
 
-`scripts/generate_component_manifest.py` derives the final manifest in deterministic order from the
-tag, commit, exact 20 filenames, byte sizes, and SHA-256 values. It also writes `checksums.txt`,
-which contains exactly those 20 assets and `component-manifest-v1.json`.
+`scripts/generate_component_manifest.py` derives the future first stable
+manifest in deterministic order from the tag, commit, exact 25 filenames, byte
+sizes, and SHA-256 values. That 25-asset set is the contract the first stable
+manifest will publish after `agent-notify` publication; until then the bundled
+compatibility manifest on `main` carries empty/unpublished `agent-notify`
+assets and no stable release is claimed. The script also writes
+`checksums.txt`, which contains exactly those 25 assets and
+`component-manifest-v1.json`.
 
 The release gate runs `scripts/verify_component_manifest_provenance.py` after creating the release.
-It requires exactly one `escoffier-labs/brigade` tag for all four components, the complete five-platform
-matrix, exactly 20 native assets plus the manifest and checksum file, matching release API digests,
+It requires exactly one `escoffier-labs/brigade` tag for all five components, the complete five-platform
+matrix, exactly 25 native assets plus the manifest and checksum file, matching release API digests,
 the complete checksum map, matching fetched `checksums.txt` bytes, and a release-page manifest
-byte-for-byte equal to the packaged manifest. It uses injected fetchers in unit tests. Attestation verification is deliberately performed by `gh
+byte-for-byte equal to the packaged manifest. This is the future first stable manifest contract;
+it does not apply to the current bundled compatibility manifest, whose `agent-notify` assets remain
+empty/unpublished. It uses injected fetchers in unit tests. Attestation verification is deliberately performed by `gh
 attestation verify` in the release workflow rather than represented by an API boolean.
+
+## Pre-pin beta window
+
+Stable validation remains strict: every published component on a stable manifest must carry the full
+five-platform matrix with matching digests and provenance.
+
+Beta is the development channel for CI-green `main`. It installs the checked `main` Brigade wheel
+but reuses the last verified stable component manifest for native bytes, so beta and stable cannot
+install different native assets from two manifests at once.
+
+During the pre-pin window before `agent-notify` first appears on a stable manifest, main may list
+`agent-notify` as a known component with empty assets in the bundled compatibility manifest.
+`brigade setup` on beta skips a component explicitly unpublished on main until a stable manifest
+publishes real assets for it. Stable releases never ship with empty asset sets for a listed
+component.
 
 ## User-local path invariants
 

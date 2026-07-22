@@ -73,6 +73,27 @@ def status_payload(target: Path) -> dict[str, Any]:
     if not installed:
         return payload
 
+    # Before invoking any installed agentpantry status/doctor surface, probe
+    # the version and enforce the evidence-backed floor
+    # (AGENTPANTRY_MIN_VERSION = 0.5.0). v0.5.0 is the first release exposing
+    # every Brigade-invoked surface; v0.4.1 lacks inventory. On
+    # incompatibility Brigade must not invoke status/doctor and must report
+    # unhealthy rather than ``pantry: ok``. See brigade.pantry_compat.
+    from . import pantry_compat
+
+    probe = pantry_compat.probe_agentpantry_version()
+    payload["version"] = probe.observed
+    payload["version_compatible"] = probe.compatible
+    if probe.incompatible:
+        payload["health"] = "unhealthy"
+        payload["summary"] = probe.detail
+        payload["next_commands"] = [
+            "brigade add pantry",
+            "agentpantry version",
+            "brigade pantry doctor",
+        ]
+        return payload
+
     status_result = _run_json(["agentpantry", "status", "--json"])
     doctor_result = _run_json(["agentpantry", "doctor", "--json"])
     payload["status"] = status_result
@@ -181,6 +202,8 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
         return 1
     if health == "incomplete":
         return 1
+    if health == "unhealthy":
+        return 1
     return 0
 
 
@@ -211,6 +234,20 @@ def expiry_alert_payload(*, expiry_days: int = 14, profile: str = "agent-stop", 
     if not payload["agentpantry_installed"]:
         payload["error"] = "agentpantry is not installed"
         payload["next_commands"] = ["brigade add pantry", "brigade pantry doctor"]
+        return payload
+
+    # Before invoking the installed agentpantry inventory surface, probe the
+    # version and enforce the evidence-backed floor. On incompatibility do not
+    # invoke inventory; return this command's structured failure path with a
+    # precise version compatibility error. See brigade.pantry_compat.
+    from . import pantry_compat
+
+    probe = pantry_compat.probe_agentpantry_version()
+    payload["version"] = probe.observed
+    payload["version_compatible"] = probe.compatible
+    if probe.incompatible:
+        payload["error"] = probe.detail
+        payload["next_commands"] = ["brigade add pantry", "agentpantry version", "brigade pantry doctor"]
         return payload
 
     inventory = _run_json(["agentpantry", "inventory", "--json", "--expiry-days", str(expiry_days)])
