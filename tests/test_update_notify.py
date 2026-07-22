@@ -50,9 +50,7 @@ def test_gates_skip_everything(tmp_path):
 
     base = dict(env=_env(tmp_path), now=1000.0, stderr=err, spawn=spawn)
 
-    update_notify.maybe_notify(
-        ["work"], 0, **{**base, "env": _env(tmp_path, BRIGADE_NO_UPDATE_CHECK="1")}
-    )
+    update_notify.maybe_notify(["work"], 0, **{**base, "env": _env(tmp_path, BRIGADE_NO_UPDATE_CHECK="1")})
     update_notify.maybe_notify(["work"], 0, **{**base, "env": _env(tmp_path, CI="true")})
     update_notify.maybe_notify(["work"], 1, **base)
     update_notify.maybe_notify(["update"], 0, **base)
@@ -80,9 +78,7 @@ def test_notifies_from_cache_and_throttles(tmp_path):
 
     # after 24h: notifies again
     err3 = _Tty()
-    update_notify.maybe_notify(
-        ["work"], 0, env=env, now=1000.0 + 86401.0, stderr=err3, spawn=_no_spawn
-    )
+    update_notify.maybe_notify(["work"], 0, env=env, now=1000.0 + 86401.0, stderr=err3, spawn=_no_spawn)
     assert "99.0.0" in err3.getvalue()
 
 
@@ -104,9 +100,7 @@ def test_stale_cache_spawns_refresh_and_older_latest_is_silent(tmp_path):
 
 def test_fresh_cache_does_not_spawn(tmp_path):
     _write_state(tmp_path, checked_at=999_999.0, latest="0.0.1")
-    update_notify.maybe_notify(
-        ["work"], 0, env=_env(tmp_path), now=1_000_000.0, stderr=_Tty(), spawn=_no_spawn
-    )
+    update_notify.maybe_notify(["work"], 0, env=_env(tmp_path), now=1_000_000.0, stderr=_Tty(), spawn=_no_spawn)
 
 
 def test_missing_and_malformed_cache_spawns(tmp_path):
@@ -115,14 +109,10 @@ def test_missing_and_malformed_cache_spawns(tmp_path):
     def spawn() -> None:
         calls.append("x")
 
-    update_notify.maybe_notify(
-        ["work"], 0, env=_env(tmp_path), now=1.0, stderr=_Tty(), spawn=spawn
-    )
+    update_notify.maybe_notify(["work"], 0, env=_env(tmp_path), now=1.0, stderr=_Tty(), spawn=spawn)
     path = _write_state(tmp_path, checked_at="soon")
     path.write_text("{not json")
-    update_notify.maybe_notify(
-        ["work"], 0, env=_env(tmp_path), now=1.0, stderr=_Tty(), spawn=spawn
-    )
+    update_notify.maybe_notify(["work"], 0, env=_env(tmp_path), now=1.0, stderr=_Tty(), spawn=spawn)
     assert calls == ["x", "x"]
 
 
@@ -131,9 +121,7 @@ def test_maybe_notify_swallows_exceptions(tmp_path, monkeypatch):
         raise RuntimeError("disk on fire")
 
     monkeypatch.setattr(update_notify, "cache_path", boom)
-    update_notify.maybe_notify(
-        ["work"], 0, env=_env(tmp_path), now=1.0, stderr=_Tty(), spawn=_no_spawn
-    )
+    update_notify.maybe_notify(["work"], 0, env=_env(tmp_path), now=1.0, stderr=_Tty(), spawn=_no_spawn)
 
 
 def test_run_refresh_success_writes_latest(tmp_path, monkeypatch):

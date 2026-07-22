@@ -64,9 +64,7 @@ def _gated(argv: list[str], exit_code: int, env: Mapping[str, str], stderr: Any)
 
 def _spawn_refresh() -> None:
     detach: dict[str, Any] = (
-        {"start_new_session": True}
-        if os.name == "posix"
-        else {"creationflags": 0x00000008}  # DETACHED_PROCESS
+        {"start_new_session": True} if os.name == "posix" else {"creationflags": 0x00000008}  # DETACHED_PROCESS
     )
     subprocess.Popen(
         [sys.executable, "-m", "brigade", "update", "--notify-refresh"],
@@ -105,23 +103,18 @@ def maybe_notify(
         if isinstance(latest, str) and is_newer(latest, __version__):
             notified_at = state.get("notified_at")
             notified_recently = (
-                isinstance(notified_at, (int, float))
-                and current_time - float(notified_at) < NOTIFY_INTERVAL_SECONDS
+                isinstance(notified_at, (int, float)) and current_time - float(notified_at) < NOTIFY_INTERVAL_SECONDS
             )
             if not notified_recently:
                 err.write(
-                    f"A new brigade release is available: {latest} "
-                    f'(installed {__version__}). Run "brigade update".\n'
+                    f'A new brigade release is available: {latest} (installed {__version__}). Run "brigade update".\n'
                 )
                 state["notified_at"] = current_time
                 state["notified_version"] = latest
                 localio.write_json(path, state)
 
         checked_at = state.get("checked_at")
-        stale = (
-            not isinstance(checked_at, (int, float))
-            or current_time - float(checked_at) >= CHECK_INTERVAL_SECONDS
-        )
+        stale = not isinstance(checked_at, (int, float)) or current_time - float(checked_at) >= CHECK_INTERVAL_SECONDS
         if stale:
             spawn_refresh()
     except Exception:
