@@ -857,9 +857,13 @@ def sync(
         "counts": counts,
     }
     if write and verify_runtime:
-        selected = _servers_for_verification(servers, harnesses, name_filter=name)
+        # Gated destinations were not written and their stdio servers were not
+        # acknowledged; never select them for verification (which would spawn
+        # the very processes the gate refused to configure).
+        verifiable = [h for h in harnesses if h not in gated]
+        selected = _servers_for_verification(servers, verifiable, name_filter=name) if verifiable else {}
         if selected:
-            config_current = _config_current_by_name(target, servers, harnesses, state, name_filter=name)
+            config_current = _config_current_by_name(target, servers, verifiable, state, name_filter=name)
             verification_payload, verify_rc = mcp_runtime.run_verification(
                 target,
                 selected,
@@ -887,6 +891,10 @@ def sync(
         lines.append(f"verification receipt: {payload['verification']['receipt_path']}")
     lines += notes
     rc = 1 if counts["conflict"] else 0
+    if verify_rc != 0:
+        rc = verify_rc
+    # The gate outcome wins over conflict and verification codes: an
+    # unacknowledged user-scoped stdio write is the error being reported.
     if gate_error:
         payload["errors"] = [gate_error]
         payload["stdio_gated"] = sorted(gated)
@@ -895,8 +903,6 @@ def sync(
     elif gate_declined:
         payload["stdio_gated"] = sorted(gated)
         rc = 1
-    if verify_rc != 0:
-        rc = verify_rc
     return _emit(payload, json_output, lines, rc)
 
 

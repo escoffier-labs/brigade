@@ -641,3 +641,25 @@ def test_combined_sync_gates_only_user_scoped_destinations(tmp_path, monkeypatch
     assert not (home / ".claude.json").exists()
     gated_items = [i for i in payload["items"] if i["harness"] in payload["stdio_gated"]]
     assert gated_items and all(i["action"] == "skip" for i in gated_items)
+
+
+def test_gated_sync_with_verify_never_spawns_gated_servers(tmp_path, monkeypatch, capsys):
+    home, repo = _seed_user_home(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_run_verification(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"receipt_path": "unused", "results": []}, 0
+
+    monkeypatch.setattr(mcp_cmd.mcp_runtime, "run_verification", fake_run_verification)
+
+    capsys.readouterr()
+    rc = mcp_cmd.sync(target=repo, harness="cursor", user_scope=True, write=True, verify_runtime=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    # The gate exit status survives the verification step, and no verification
+    # runs for a destination whose stdio servers were never acknowledged.
+    assert rc == 2
+    assert payload["stdio_gated"] == ["cursor-user"]
+    assert calls == []
+    assert not (home / ".cursor" / "mcp.json").exists()
