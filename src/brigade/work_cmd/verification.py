@@ -41,6 +41,22 @@ def _receipt_git_snapshot(target: Path) -> dict[str, Any] | None:
     return {"head": head, "branch": branch, "dirty_files": len(status.stdout.splitlines())}
 
 
+def _high_risk_command_message(executable: str) -> str:
+    """Rejection message for a shell/remote executable used as a verify command.
+
+    Mirrors the shell-metacharacter branch by naming the remedy: verify runs the
+    command directly with no shell, so a shell interpreter is never a valid
+    executable. ``--argv-json`` is deliberately not suggested here because that
+    path applies the same high-risk block, so the fix is a resolvable non-shell
+    executable, e.g. a chmod +x script invoked by its path.
+    """
+    return (
+        f"high-risk verification command: {executable} "
+        "(verify runs with no shell; use a resolvable executable, e.g. a "
+        "chmod +x script run by its path like ./scripts/check.sh)"
+    )
+
+
 def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None, dict[str, str], str | None]:
     try:
         parts = shlex.split(command)
@@ -57,7 +73,7 @@ def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None,
         return None, env, "command contains only environment assignments"
     executable = Path(argv[0]).name
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
-        return None, env, f"high-risk verification command: {executable}"
+        return None, env, _high_risk_command_message(executable)
     if any(constants.SCANNER_SHELL_META_RE.search(part) for part in argv):
         return (
             None,
@@ -89,7 +105,7 @@ def _verify_parse_argv(argv: list[str], target: Path) -> tuple[list[str] | None,
         return None, {}, "empty command"
     executable = Path(argv[0]).name
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
-        return None, {}, f"high-risk verification command: {executable}"
+        return None, {}, _high_risk_command_message(executable)
     if "/" in argv[0]:
         executable_path = Path(argv[0]).expanduser()
         if not executable_path.is_absolute():
