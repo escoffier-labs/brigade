@@ -16,10 +16,15 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Explicitly transfer user-global update ownership to the selected channel.",
     )
+    parser.add_argument("--notify-refresh", action="store_true", help=argparse.SUPPRESS)
     parser.set_defaults(func=dispatch)
 
 
 def dispatch(args) -> int:
+    if args.notify_refresh:
+        from ..update_notify import run_refresh
+
+        return run_refresh()
     from ..update_cmd import run_update
 
     return run_update(channel=args.channel, dry_run=args.dry_run, switch_channel=args.switch_channel)

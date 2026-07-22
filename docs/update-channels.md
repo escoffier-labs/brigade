@@ -24,3 +24,22 @@ When the external development timer is migrated, replace its direct pipx script 
 ## Compatibility window
 
 `brigade setup` normally resolves the running CLI's exact `vX.Y.Z` release manifest, never `latest`. Before the first unified release is available, only an absent exact release or manifest can select the bundled standalone manifest. Digest failures, malformed release metadata, manifest parse failures, and component download failures never fall back. `brigade setup --manifest-source standalone` is the explicit one-unified-release compatibility path. Offline setup uses a verified exact-manifest cache when present or that explicit standalone compatibility path.
+
+## Update notifications
+
+After a successful command, brigade may print one stderr line (at most once
+per 24 hours) when a newer release exists:
+
+    A new brigade release is available: X.Y.Z (installed A.B.C). Run "brigade update".
+
+How it learns about new releases: at most once per 24 hours, a detached
+background process sends one HTTPS GET to
+`https://check.brigade.tools/v1/version`. The request has no query
+parameters, no body, and no install id. The User-Agent carries the brigade
+version and OS name. Raw IPs are never stored server-side (a weekly-salted
+hash backs an aggregate weekly-active count). The notice is skipped entirely
+when stderr is not a TTY, when `CI` is set, or when the command failed.
+
+Opt out completely (no notice, no network, ever):
+
+    export BRIGADE_NO_UPDATE_CHECK=1
