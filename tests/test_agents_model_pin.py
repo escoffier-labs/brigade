@@ -152,6 +152,7 @@ def test_claude_and_codex_argv_unchanged_by_registry():
         "--dangerously-skip-permissions",
         "--disallowedTools",
         "Task,Agent",
+        "--",
         "P",
     ]
     assert agents.build_argv("codex", "P", model="gpt-5.5-codex") == [

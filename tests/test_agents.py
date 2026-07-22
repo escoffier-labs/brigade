@@ -60,6 +60,7 @@ def test_build_argv_for_read_only_codex():
         "plan",
         "--disallowedTools",
         "Task,Agent,Bash,Edit,Write,NotebookEdit,mcp__*",
+        "--",
         "hi",
     ]
     assert agents.build_argv("opencode", "hi", read_only=True) == ["opencode", "run", "hi"]
@@ -124,6 +125,7 @@ def test_claude_read_only_disallows_mutating_tools_and_subagents():
         "plan",
         "--disallowedTools",
         "Task,Agent,Bash,Edit,Write,NotebookEdit,mcp__*",
+        "--",
         "inspect it",
     ]
 
@@ -136,6 +138,7 @@ def test_claude_read_only_sandbox_variant_matches_read_only_flag():
         "plan",
         "--disallowedTools",
         "Task,Agent,Bash,Edit,Write,NotebookEdit,mcp__*",
+        "--",
         "inspect it",
     ]
 
@@ -152,11 +155,48 @@ def test_claude_write_run_uses_skip_permissions_and_disallows_subagents():
         "--dangerously-skip-permissions",
         "--disallowedTools",
         "Task,Agent",
+        "--",
         "implement it",
     ]
     assert agents.build_argv("claude", "implement it", sandbox="danger-full-access") == expected
     with pytest.raises(ValueError, match="explicit sandbox"):
         agents.build_argv("claude", "implement it")
+
+
+def test_claude_read_only_prompt_is_not_consumed_by_disallowed_tools():
+    # Regression for #446: `--disallowedTools` is variadic and greedily consumes
+    # every following non-flag argv element, splitting each on whitespace, so a
+    # multi-word prompt placed right after the deny list was shredded into deny
+    # rules ("##", "Code", "graph", ...). The `--` end-of-options separator must
+    # sit between the deny list and the prompt so the prompt survives intact.
+    prompt = "## Code graph of src/brigade/router.py"
+    argv = agents.build_argv("claude", prompt, read_only=True)
+
+    # The prompt survives intact as the final positional.
+    assert argv[-1] == prompt
+    # The deny list is a single unsplit argument equal to the constant.
+    disallowed_index = argv.index("--disallowedTools")
+    assert argv[disallowed_index + 1] == agents._CLAUDE_DISALLOWED_READ_ONLY
+    # Ordering invariant: `--` separates the variadic deny list from the prompt,
+    # so nothing else (including any prompt word) can leak into deny values.
+    assert argv[disallowed_index + 2] == "--"
+    assert argv[disallowed_index + 1 : argv.index("--")] == [agents._CLAUDE_DISALLOWED_READ_ONLY]
+    # Read-only enforcement stays intact.
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+
+
+def test_claude_danger_full_access_prompt_is_not_consumed_by_disallowed_tools():
+    # Regression for #446, danger-full-access branch: same variadic
+    # `--disallowedTools` pitfall, same `--` separator guarantee.
+    prompt = "## Code graph of src/brigade/router.py"
+    argv = agents.build_argv("claude", prompt, sandbox="danger-full-access")
+
+    assert argv[-1] == prompt
+    disallowed_index = argv.index("--disallowedTools")
+    assert argv[disallowed_index + 1] == agents._CLAUDE_DISALLOWED_ALWAYS
+    assert argv[disallowed_index + 2] == "--"
+    assert argv[disallowed_index + 1 : argv.index("--")] == [agents._CLAUDE_DISALLOWED_ALWAYS]
+    assert "--dangerously-skip-permissions" in argv
 
 
 def test_claude_workspace_write_rejected_before_launch():
@@ -419,6 +459,7 @@ def test_build_argv_pins_model_for_claude_and_codex():
         "--dangerously-skip-permissions",
         "--disallowedTools",
         "Task,Agent",
+        "--",
         "hi",
     ]
     assert agents.build_argv("codex", "hi", model="gpt-5.5-codex") == [
@@ -455,6 +496,7 @@ def test_build_argv_without_model_is_unchanged():
         "--dangerously-skip-permissions",
         "--disallowedTools",
         "Task,Agent",
+        "--",
         "hi",
     ]
     assert agents.build_argv("codex", "hi", model=None) == ["codex", "exec", "-"]
@@ -849,6 +891,7 @@ def test_run_agent_forwards_model_to_argv(monkeypatch):
         "--dangerously-skip-permissions",
         "--disallowedTools",
         "Task,Agent",
+        "--",
         "hi",
     ]
 

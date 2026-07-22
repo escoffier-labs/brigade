@@ -127,6 +127,10 @@ def _claude_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | 
         # 2. `--disallowedTools` removes the built-in mutating tools and every
         #    MCP/plugin tool (`mcp__*`) from the model's context (a hard deny),
         #    so read-only is not a prompt-only claim.
+        # `--disallowedTools` is variadic: it greedily consumes every following
+        # non-flag argv element and splits each on whitespace, so a bare prompt
+        # placed right after it is shredded into deny rules (#446). The `--`
+        # end-of-options separator stops option parsing before the prompt.
         return [
             "claude",
             "-p",
@@ -134,6 +138,7 @@ def _claude_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | 
             "plan",
             "--disallowedTools",
             _CLAUDE_DISALLOWED_READ_ONLY,
+            "--",
             prompt,
         ]
     if sandbox == "workspace-write":
@@ -141,13 +146,16 @@ def _claude_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | 
     if sandbox == "danger-full-access":
         # Explicit full-access request: headless `-p` would stall on a permission
         # prompt without --dangerously-skip-permissions; the deny list still
-        # removes subagent spawning so the worker cannot delegate.
+        # removes subagent spawning so the worker cannot delegate. The variadic
+        # `--disallowedTools` would otherwise consume the trailing prompt as
+        # deny values (#446), so `--` ends option parsing first.
         return [
             "claude",
             "-p",
             "--dangerously-skip-permissions",
             "--disallowedTools",
             _CLAUDE_DISALLOWED_ALWAYS,
+            "--",
             prompt,
         ]
     # sandbox is None: refuse to guess between stalling and granting full access.
