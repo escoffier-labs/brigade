@@ -305,6 +305,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_operator_sync_mcp.add_argument(
         "--user-scope", action="store_true", help="Include user-scoped targets (e.g. antigravity)."
     )
+    p_operator_sync_mcp.add_argument(
+        "--allow-global-stdio",
+        action="store_true",
+        help="Acknowledge writing stdio MCP servers into a user-wide client config.",
+    )
     p_operator_sync_mcp.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_quickstart = operator_sub.add_parser(
         "quickstart", help="Prepare a new user workspace with Brigade configs, portable tools, and harness checks."
@@ -449,6 +454,7 @@ def dispatch(args) -> int:
             prune=args.prune,
             adopt=args.adopt,
             user_scope=args.user_scope,
+            allow_global_stdio=args.allow_global_stdio,
             json_output=args.json,
         )
     if args.operator_command == "quickstart":

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -311,6 +312,11 @@ def _plan_for_harness(
                     harness, rel, name, "orphan", "skip", None, None, detail="removed from canonical; --prune to delete"
                 )
             )
+    adapter_scope = "user" if adapter.user_scope else "project"
+    for item in items:
+        item["scope"] = adapter_scope
+        server = servers.get(item["server"])
+        item["transport"] = server.transport if server is not None else None
     return items
 
 
@@ -337,6 +343,69 @@ def _counts(items: list[dict[str, Any]]) -> dict[str, int]:
 
 def _public_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{k: v for k, v in item.items() if not k.startswith("_")} for item in items]
+
+
+def _user_stdio_exposures(planned: list[tuple[str, list[dict[str, Any]]]], target: Path) -> list[dict[str, Any]]:
+    """Per user-scoped destination: stdio servers this sync writes and the total after.
+
+    Every stdio server in a user-scoped client config is one child process per
+    active client session, so writing them user-wide multiplies processes by
+    session count. The total counts the destination file's preserved stdio
+    servers too (foreign and unmanaged definitions the merge keeps), not just
+    planner items, so the acknowledged exposure matches the real post-sync
+    config. Project-scoped destinations never gate.
+    """
+    exposures = []
+    for harness, items in planned:
+        adapter = ADAPTERS[harness]
+        if not adapter.user_scope:
+            continue
+        writes = [i for i in items if i["action"] in ("create", "update") and i.get("transport") == "stdio"]
+        if not writes:
+            continue
+        removed = {i["server"] for i in items if i["action"] == "remove"}
+        stdio_after = {i["server"] for i in items if i.get("transport") == "stdio" and i["action"] != "remove"}
+        path = mcp_adapters.resolve_path(adapter, target)
+        try:
+            live = adapter.read_file(path.read_text() if path.is_file() else None)
+        except (OSError, ValueError):
+            live = {}
+        for name, provider in live.items():
+            if name in removed or name in stdio_after:
+                continue
+            try:
+                server, _ = adapter.from_provider(name, provider)
+            except (TypeError, ValueError, KeyError):
+                continue
+            if server.transport == "stdio":
+                stdio_after.add(name)
+        exposures.append(
+            {
+                "harness": harness,
+                "destination": items[0]["file"] if items else adapter.path,
+                "stdio_writes": len(writes),
+                "stdio_total": len(stdio_after),
+            }
+        )
+    return exposures
+
+
+def _stdio_exposure_lines(exposures: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for e in exposures:
+        lines.append(
+            f"user-scope stdio warning: {e['destination']} gains {e['stdio_writes']} stdio MCP server(s) "
+            f"({e['stdio_total']} stdio total after sync)"
+        )
+        lines.append(
+            f"  each active {e['harness']} client session starts one child process per configured stdio "
+            f"server: {e['stdio_total']} stdio servers x active sessions"
+        )
+    lines.append(
+        "  prefer project-scoped config or a shared HTTP/SSE transport where the client supports it; "
+        "pass --allow-global-stdio to acknowledge"
+    )
+    return lines
 
 
 # --------------------------------------------------------------------------- #
@@ -659,6 +728,8 @@ def sync(
     prune: bool = False,
     adopt: bool = False,
     user_scope: bool = False,
+    allow_global_stdio: bool = False,
+    interactive: bool | None = None,
     verify_runtime: bool = False,
     verify_timeout: float | None = None,
     json_output: bool = False,
@@ -678,8 +749,53 @@ def sync(
     all_items: list[dict[str, Any]] = []
     files_written: list[str] = []
 
-    for h in harnesses:
-        items = _plan_for_harness(target, h, servers, state, force=force, prune=prune, adopt=adopt, name_filter=name)
+    planned = [
+        (h, _plan_for_harness(target, h, servers, state, force=force, prune=prune, adopt=adopt, name_filter=name))
+        for h in harnesses
+    ]
+    exposures = _user_stdio_exposures(planned, target)
+    gated: set[str] = set()
+    gate_error: str | None = None
+    gate_declined = False
+    if exposures:
+        warning_lines = _stdio_exposure_lines(exposures)
+        notes.extend(warning_lines)
+        if write and not allow_global_stdio:
+            # A user-scoped stdio sync never completes silently: interactive runs
+            # confirm at the prompt, non-interactive runs need the explicit flag.
+            # Only the exposed user-scoped destinations gate; project-scoped
+            # harnesses in the same invocation still write. Callers that capture
+            # stdout (operator sync-mcp) pass `interactive` explicitly; the
+            # prompt stays on stderr so captured JSON is clean.
+            is_interactive = interactive if interactive is not None else (not json_output and sys.stdin.isatty())
+            if not is_interactive:
+                gated = {e["harness"] for e in exposures}
+                gate_error = (
+                    "user-scoped sync would write stdio MCP servers into a user-wide client config; "
+                    "re-run with --allow-global-stdio to acknowledge, or use project scope / an "
+                    "HTTP-SSE transport"
+                )
+            else:
+                for line in warning_lines:
+                    print(line, file=sys.stderr)
+                print("Write stdio servers into the user-wide config? [y/N]: ", end="", file=sys.stderr, flush=True)
+                answer = input().strip().lower()
+                if answer not in ("y", "yes"):
+                    gated = {e["harness"] for e in exposures}
+                    gate_declined = True
+                    notes.append("user-scoped stdio destinations skipped: not confirmed at the prompt")
+
+    for h, items in planned:
+        if h in gated:
+            # Preserve the plan for visibility, but nothing in this destination
+            # is written and no ownership state changes.
+            for item in items:
+                if item["action"] in ("create", "update", "remove"):
+                    item["action"] = "skip"
+                    suffix = "not written: user-scoped stdio not acknowledged"
+                    item["detail"] = f"{item['detail']}; {suffix}" if item["detail"] else suffix
+            all_items.extend(items)
+            continue
         all_items.extend(items)
         adapter = ADAPTERS[h]
         path = mcp_adapters.resolve_path(adapter, target)
@@ -736,13 +852,18 @@ def sync(
         "wrote": write,
         "files_written": files_written,
         "notes": notes,
+        "stdio_exposures": exposures,
         "items": _public_items(all_items),
         "counts": counts,
     }
     if write and verify_runtime:
-        selected = _servers_for_verification(servers, harnesses, name_filter=name)
+        # Gated destinations were not written and their stdio servers were not
+        # acknowledged; never select them for verification (which would spawn
+        # the very processes the gate refused to configure).
+        verifiable = [h for h in harnesses if h not in gated]
+        selected = _servers_for_verification(servers, verifiable, name_filter=name) if verifiable else {}
         if selected:
-            config_current = _config_current_by_name(target, servers, harnesses, state, name_filter=name)
+            config_current = _config_current_by_name(target, servers, verifiable, state, name_filter=name)
             verification_payload, verify_rc = mcp_runtime.run_verification(
                 target,
                 selected,
@@ -772,6 +893,16 @@ def sync(
     rc = 1 if counts["conflict"] else 0
     if verify_rc != 0:
         rc = verify_rc
+    # The gate outcome wins over conflict and verification codes: an
+    # unacknowledged user-scoped stdio write is the error being reported.
+    if gate_error:
+        payload["errors"] = [gate_error]
+        payload["stdio_gated"] = sorted(gated)
+        lines.append(f"error: {gate_error}")
+        rc = 2
+    elif gate_declined:
+        payload["stdio_gated"] = sorted(gated)
+        rc = 1
     return _emit(payload, json_output, lines, rc)
 
 

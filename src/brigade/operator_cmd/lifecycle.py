@@ -289,6 +289,7 @@ def sync_mcp(
     prune: bool = False,
     adopt: bool = False,
     user_scope: bool = False,
+    allow_global_stdio: bool = False,
     json_output: bool = False,
 ) -> int:
     """Validate the canonical MCP catalog, then sync it into each tool's config.
@@ -322,7 +323,17 @@ def sync_mcp(
                     print(f"error: {issue.get('message')}")
         return 1
     sync_rc, sync_payload = _capture_json_call(
-        mcp_cmd.sync, target=target, write=write, force=force, prune=prune, adopt=adopt, user_scope=user_scope
+        mcp_cmd.sync,
+        target=target,
+        write=write,
+        force=force,
+        prune=prune,
+        adopt=adopt,
+        user_scope=user_scope,
+        allow_global_stdio=allow_global_stdio,
+        # The JSON capture forces json_output; interactivity is decided by the
+        # operator invocation itself so a TTY run still gets the stdio prompt.
+        interactive=not json_output and sys.stdin.isatty(),
     )
     counts = sync_payload.get("counts") or {}
     ok = sync_rc == 0
