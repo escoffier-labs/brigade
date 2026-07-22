@@ -142,6 +142,16 @@ env = { ANTHROPIC_BASE_URL = "https://api.moonshot.ai/anthropic", ANTHROPIC_AUTH
 This proxy example opts out of read-only dispatch. Set the value to `true` only after
 the validation smoke below returns a usable worker result in read-only mode.
 
+When the proxy credential is rendered into a runtime systemd environment file, point the
+reference at that file rather than the parent process environment:
+
+```toml
+env = { ANTHROPIC_AUTH_TOKEN_REF = "env-file:/run/brigade/k3.env#CLIPROXY_API_KEY" }
+```
+
+The path must be absolute. Brigade reads only `KEY=VALUE` entries from the file and does not
+evaluate shell syntax.
+
 Overrides apply to the spawned CLI process only, `run.json` records the override names and endpoint host (never values), and a missing referenced variable fails the worker before dispatch. If the CLI echoes any resolved override value, Brigade replaces the exact value with its target name in brackets before worker text, detail, stdout, or stderr can be stored. Direct CLI seats only: acpx and codex-cloud seats manage their own environment.
 
 The isolated `CLAUDE_CONFIG_DIR` is load-bearing: with the default config directory, the `claude` CLI prefers its subscription OAuth over env auth, the upstream returns 401, and the CLI retries silently, which presents as an indefinite hang.

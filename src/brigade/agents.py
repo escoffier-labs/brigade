@@ -24,6 +24,21 @@ _OLLAMA_PREFIX = "ollama:"
 _CODEX_CLOUD_PREFIX = "codex-cloud:"
 _CLOUDFLARE_AI_GATEWAY_PREFIX = "cloudflare-ai-gateway/"
 _CLOUDFLARE_AI_GATEWAY_REQUIRED_ENV = ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID")
+ENV_FILE_REF_PREFIX = "env-file:"
+ENV_FILE_REF_RE = re.compile(r"^env-file:(/[^#]+)#([A-Z][A-Z0-9_]*)$")
+
+
+def is_env_file_reference(value: str) -> bool:
+    """True when a _REF value uses the env-file reference syntax.
+
+    Validation and resolution share this classifier so a malformed
+    ``env-file:`` reference can never fall through to a parent-environment
+    lookup. The discriminator is the exact ``env-file:`` prefix: a parent
+    variable that merely starts with ``env-file`` (no colon) stays an
+    ordinary environment reference."""
+    return value.startswith(ENV_FILE_REF_PREFIX)
+
+
 _NONRECOVERABLE_GROK_OUTPUT_FAILURES = frozenset(
     {
         "provider-error",
@@ -551,13 +566,36 @@ def ollama_model_present(
     )
 
 
+def _read_env_file_reference(reference: str) -> str | None:
+    """Read one systemd-style KEY=VALUE entry without evaluating the file."""
+
+    match = ENV_FILE_REF_RE.match(reference)
+    if match is None:
+        return None
+    path = Path(match.group(1))
+    variable = match.group(2)
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    for line in contents.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        name, separator, value = stripped.partition("=")
+        if separator and name == variable:
+            return value
+    return None
+
+
 def resolve_env_overrides(env: dict[str, str]) -> tuple[dict[str, str] | None, str]:
     """Resolve a seat env table into concrete child overrides.
 
-    Keys ending in _REF name a parent environment variable holding the value;
-    the override is injected under the key minus the suffix so secrets never
-    live in the roster. Returns (overrides, error): error is non-empty when a
-    referenced variable is not set, and never contains a secret value.
+    Keys ending in _REF name a parent environment variable or an
+    env-file:/absolute/path#VARIABLE reference. The override is injected under
+    the key minus the suffix so secrets never live in the roster. Returns
+    (overrides, error): error is non-empty when a reference is unavailable and
+    never contains a secret value.
     """
 
     resolved: dict[str, str] = {}
@@ -566,9 +604,14 @@ def resolve_env_overrides(env: dict[str, str]) -> tuple[dict[str, str] | None, s
             target = key[: -len("_REF")]
             if not target:
                 return None, f"env override {key}: resolved variable name is empty"
-            referenced = os.environ.get(value)
-            if not referenced:
-                return None, f"env override {key}: referenced variable {value} is not set or is empty"
+            if is_env_file_reference(value):
+                referenced = _read_env_file_reference(value)
+                if not referenced:
+                    return None, f"env override {key}: referenced environment file value is unavailable"
+            else:
+                referenced = os.environ.get(value)
+                if not referenced:
+                    return None, f"env override {key}: referenced variable {value} is not set or is empty"
             resolved[target] = referenced
         else:
             resolved[key] = value

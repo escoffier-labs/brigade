@@ -383,7 +383,10 @@ the selected worker output, `final.txt` is that worker's text, and
 
 Direct CLI seats may declare per-seat environment overrides in their roster entry. Values
 whose keys end in `_REF` are read from the named parent environment variable and injected
-under the key without `_REF`. After execution, Brigade replaces every exact nonempty
+under the key without `_REF`. To read a systemd-style generated environment file instead,
+use `env-file:/absolute/path#VARIABLE`; Brigade reads only `VARIABLE=VALUE` records, ignores
+blank and comment lines, and never evaluates file contents. An unavailable file or variable
+fails dispatch with `env-ref-missing`. After execution, Brigade replaces every exact nonempty
 resolved override value in returned text, detail, stdout, and stderr with `[TARGET_NAME]`
 before run logs or receipts are written. This bounded replacement covers only values
 resolved for that seat; it is not a heuristic scan of the parent environment or historical
