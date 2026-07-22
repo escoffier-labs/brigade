@@ -17,6 +17,7 @@ jobs:
     outputs:
       code_graph: ${{ steps.filter.outputs.code_graph }}
       evidence_ledger: ${{ steps.filter.outputs.evidence_ledger }}
+      notify: ${{ steps.filter.outputs.notify }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -29,6 +30,10 @@ jobs:
               - '.github/workflows/ci.yml'
             evidence_ledger:
               - 'engines/evidence-ledger/**'
+              - 'src/brigade/templates/components/manifest-v1.json'
+              - '.github/workflows/ci.yml'
+            notify:
+              - 'stations/notify/**'
               - 'src/brigade/templates/components/manifest-v1.json'
               - '.github/workflows/ci.yml'
 
@@ -146,6 +151,61 @@ jobs:
       - run: scripts/smoke_archive.sh
       - run: scripts/smoke_mcp.sh
       - run: scripts/smoke_http.sh
+
+  notify-build-and-test:
+    name: notify-build-and-test (ubuntu-latest)
+    needs: changes
+    if: ${{ needs.changes.outputs.notify == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: stations/notify
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: stations/notify/go.sum
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race ./...
+      - name: Setup stable Go for govulncheck
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: stations/notify/go.sum
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+      - name: Vulncheck
+        run: govulncheck ./...
+
+  notify-windows:
+    name: notify-build-and-test (windows-latest)
+    needs: changes
+    if: ${{ needs.changes.outputs.notify == 'true' }}
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: stations/notify
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: stations/notify/go.sum
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race ./...
 
   lint:
     runs-on: ubuntu-latest

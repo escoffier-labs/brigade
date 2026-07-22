@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Website and docs
+    url: https://agent-notify.escoffierlabs.dev
+    about: Project overview, install, and usage. Read here before filing a question.
+  - name: Security report
+    url: https://github.com/escoffier-labs/agent-notify/security/policy
+    about: Do not file security issues publicly. See SECURITY.md for how to report privately.

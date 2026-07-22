@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# pre-push: block push if content-guard finds blocking violations.
+# Scans the working tree against policies/public-repo.json.
+# Bypass only if you know what you're doing: git push --no-verify
+set -euo pipefail
+
+CONTENT_GUARD_DIR="${CONTENT_GUARD_DIR:-$HOME/repos/content-guard}"
+POLICY="${CONTENT_GUARD_POLICY:-$CONTENT_GUARD_DIR/policies/public-repo.json}"
+
+if [[ ! -d "$CONTENT_GUARD_DIR/src/content_guard" ]]; then
+  echo "pre-push: content-guard not found at $CONTENT_GUARD_DIR" >&2
+  echo "pre-push: clone https://github.com/solomonneas/content-guard or set CONTENT_GUARD_DIR" >&2
+  exit 1
+fi
+
+if [[ ! -f "$POLICY" ]]; then
+  echo "pre-push: policy file not found: $POLICY" >&2
+  exit 1
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+echo "pre-push: scanning $REPO_ROOT against $(basename "$POLICY")"
+
+rc=0
+PYTHONPATH="$CONTENT_GUARD_DIR/src" python3 -m content_guard scan "$REPO_ROOT" --policy "$POLICY" || rc=$?
+
+if [[ "$rc" -eq 0 ]]; then
+  exit 0
+fi
+
+if [[ "$rc" -eq 1 ]]; then
+  echo >&2
+  echo "pre-push: BLOCKED. content-guard found violations." >&2
+  echo "pre-push: fix the leak, or add an inline tag on the offending line:" >&2
+  echo "pre-push:   <!-- content-guard: allow <rule-id> -->" >&2
+  exit 1
+fi
+
+# Any other exit code is the scanner failing to run (missing deps, bad policy,
+# crash), not a leak verdict. Preserve the original status.
+echo >&2
+echo "pre-push: content-guard failed to run (exit code $rc); this is a scanner error, not a leak verdict." >&2
+echo "pre-push: re-run it directly to see the error, then push again once the scanner works." >&2
+exit "$rc"

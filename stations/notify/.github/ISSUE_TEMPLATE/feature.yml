@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose a new channel, hook adapter, routing capability, or other enhancement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve
+      description: Describe the user story. What are you doing today, and where does agent-notify fall short?
+      placeholder: |
+        I run an agent stack and want notifications to also reach a Slack channel, but agent-notify only supports Discord/Telegram/Signal.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What would you like agent-notify to do? A new channel adapter, a new hook adapter, a routing flag, something else?
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of request
+      options:
+        - New channel adapter
+        - New hook adapter (a different agent's event JSON)
+        - Routing / profile capability
+        - Doctor / status check
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: A shell wrapper piping JSON to agent-notify, a different tool, etc.
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      description: agent-notify is deliberately narrow (no telemetry, no persistence, no runtime deps beyond a TOML parser, no hosted service). See CONTRIBUTING.md.
+      options:
+        - label: This request keeps the no-telemetry / no-persistence / single-binary posture, or I have explained why it should not.
+          required: true

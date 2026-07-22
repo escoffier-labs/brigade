@@ -1,0 +1,86 @@
+{
+  "title": "From agent event to private notification",
+  "eyebrow": "AGENT-NOTIFY WORKFLOW",
+  "description": "Hook sources choose a route; channel adapters send only where you configured them.",
+  "meta": "local routing · explicit send",
+  "columns": [
+    {
+      "title": "SOURCES",
+      "nodes": [
+        {
+          "id": "hooks",
+          "label": "agent hooks",
+          "detail": "Claude · Codex · OpenClaw"
+        },
+        {
+          "id": "cli",
+          "label": "direct CLI",
+          "detail": "send · status · doctor"
+        }
+      ]
+    },
+    {
+      "title": "ROUTING",
+      "nodes": [
+        {
+          "id": "precedence",
+          "label": "route precedence",
+          "detail": "--to · profile · default",
+          "kind": "focus",
+          "badge": "gate"
+        },
+        {
+          "id": "skip",
+          "label": "skip filter",
+          "detail": "remove named channels"
+        }
+      ]
+    },
+    {
+      "title": "CHANNELS",
+      "nodes": [
+        {
+          "id": "discord",
+          "label": "Discord",
+          "detail": "webhook env"
+        },
+        {
+          "id": "telegram",
+          "label": "Telegram",
+          "detail": "bot token + chat"
+        },
+        {
+          "id": "signal",
+          "label": "Signal",
+          "detail": "self-hosted relay"
+        }
+      ]
+    },
+    {
+      "title": "DELIVERY",
+      "nodes": [
+        {
+          "id": "notify",
+          "label": "notification",
+          "detail": "sent from your machine",
+          "kind": "success"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {"from": "hooks", "to": "precedence"},
+    {"from": "cli", "to": "precedence"},
+    {"from": "precedence", "to": "discord"},
+    {"from": "precedence", "to": "telegram"},
+    {"from": "skip", "to": "signal"},
+    {"from": "discord", "to": "notify"},
+    {"from": "telegram", "to": "notify"},
+    {"from": "signal", "to": "notify"}
+  ],
+  "context": {
+    "title": "PRIVACY CONTRACT",
+    "body": "No telemetry endpoints, no state file, no update checks.",
+    "detail": "Secrets stay in environment variables; config names the variables to read."
+  }
+}

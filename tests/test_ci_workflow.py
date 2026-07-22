@@ -22,12 +22,15 @@ def test_ci_workflow_path_filter_has_valid_structure_and_engine_paths():
     assert "uses: dorny/paths-filter@v3" in changes
     assert "code_graph: ${{ steps.filter.outputs.code_graph }}" in changes
     assert "evidence_ledger: ${{ steps.filter.outputs.evidence_ledger }}" in changes
+    assert "notify: ${{ steps.filter.outputs.notify }}" in changes
     assert "code-graph:" not in changes
     assert "evidence-ledger:" not in changes
+    assert "stations/notify:" not in changes
 
     for path in (
         "engines/code-graph/**",
         "engines/evidence-ledger/**",
+        "stations/notify/**",
         "src/brigade/templates/components/manifest-v1.json",
         ".github/workflows/ci.yml",
     ):
@@ -55,6 +58,23 @@ def test_ci_workflow_gates_native_engine_jobs_with_valid_expressions():
 
     job_names = re.findall(r"^  ([a-z0-9][a-z0-9-]*):$", text, re.MULTILINE)
     assert {name for name in job_names if name.startswith(("code-graph-", "evidence-ledger-"))} == set(expected_jobs)
+
+    for job_name, output_name in expected_jobs.items():
+        section = _workflow_job_section(text, job_name)
+        assert "needs: changes" in section
+        assert f"if: ${{{{ needs.changes.outputs.{output_name} == 'true' }}}}" in section
+        assert "self-hosted" not in section
+
+
+def test_ci_workflow_gates_notify_jobs_with_valid_expressions():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    expected_jobs = {
+        "notify-build-and-test": "notify",
+        "notify-windows": "notify",
+    }
+
+    job_names = re.findall(r"^  ([a-z0-9][a-z0-9-]*):$", text, re.MULTILINE)
+    assert {name for name in job_names if name.startswith("notify-")} == set(expected_jobs)
 
     for job_name, output_name in expected_jobs.items():
         section = _workflow_job_section(text, job_name)
@@ -104,6 +124,53 @@ def test_ci_workflow_runs_embedded_engine_commands_from_engine_directories():
         "scripts/smoke_http.sh",
     ):
         assert command in evidence_ledger
+
+
+def test_ci_workflow_runs_notify_go_commands_from_notify_directory():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+
+    ubuntu = _workflow_job_section(text, "notify-build-and-test")
+    assert "runs-on: ubuntu-latest" in ubuntu
+    assert "working-directory: stations/notify" in ubuntu
+    # Two setup-go v5 steps: Go 1.22 for build parity, then stable for the scanner.
+    assert ubuntu.count("uses: actions/setup-go@v5") == 2
+    # Both Go setup steps pin the notify go.sum so the root cache warning clears.
+    assert ubuntu.count("cache-dependency-path: stations/notify/go.sum") == 2
+    # Checkout must not persist credentials (CodeRabbit review comment 3630426956).
+    assert "persist-credentials: false" in ubuntu
+    # Go 1.22 lane runs build, vet, and race tests before the stable scanner lane.
+    go122 = ubuntu.index("go-version: '1.22'")
+    build = ubuntu.index("go build ./...")
+    assert go122 < build
+    race = ubuntu.index("go test -race ./...")
+    # Stable Go lands after the race test and before govulncheck installation.
+    stable = ubuntu.index("go-version: stable")
+    assert race < stable
+    govulncheck_install = ubuntu.index("go install golang.org/x/vuln/cmd/govulncheck@v1.3.0")
+    assert stable < govulncheck_install
+    for command in (
+        "go build ./...",
+        "go vet ./...",
+        "go test -race ./...",
+        "go install golang.org/x/vuln/cmd/govulncheck@v1.3.0",
+        "govulncheck ./...",
+    ):
+        assert command in ubuntu
+
+    windows = _workflow_job_section(text, "notify-windows")
+    assert "runs-on: windows-latest" in windows
+    assert "working-directory: stations/notify" in windows
+    assert "uses: actions/setup-go@v5" in windows
+    assert "go-version: '1.22'" in windows
+    assert "persist-credentials: false" in windows
+    assert "cache-dependency-path: stations/notify/go.sum" in windows
+    for command in (
+        "go build ./...",
+        "go vet ./...",
+        "go test -race ./...",
+    ):
+        assert command in windows
+    assert "govulncheck" not in windows
 
 
 def test_ci_workflow_does_not_skip_docs_only_content_guard():
