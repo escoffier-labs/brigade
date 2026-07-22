@@ -369,7 +369,15 @@ def _collect_bounded_output(
 
 
 def run_version_probe(fixture: dict[str, Any], *, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> dict[str, Any]:
-    """Execute only ``<bare-command> --version`` inside an isolated sandbox."""
+    """Execute only ``<bare-command> --version`` inside an isolated sandbox.
+
+    CLI surfaces execute their declared ``binary.command``. Desktop/GUI surfaces
+    may declare a CLI-companion ``binary`` block (for example Antigravity's
+    ``agy``); when present, the same sandboxed version probe runs so runtime
+    conformance comes from direct vendor-binary evidence rather than an
+    installation proxy. Non-CLI fixtures without a ``binary`` block stay
+    limited to availability-only evidence.
+    """
     timeout_seconds = _positive_finite_timeout(timeout_seconds)
     harness = fixture.get("harness", {})
     harness_id = harness.get("id", "unknown")
@@ -382,16 +390,18 @@ def run_version_probe(fixture: dict[str, Any], *, timeout_seconds: float = DEFAU
             "reason": "desktop_or_gui_surface",
         }
 
-    if surface != "cli":
+    binary = fixture.get("binary", {})
+    if not isinstance(binary, dict):
+        binary = {}
+    command = binary.get("command")
+    version_args = binary.get("version_args")
+    if surface != "cli" and not isinstance(command, str):
         return {
             "harness_id": harness_id,
             "state": "externally_blocked",
             "reason": "version_execution_limited_to_cli_surface",
         }
 
-    binary = fixture.get("binary", {})
-    command = binary.get("command")
-    version_args = binary.get("version_args")
     if not isinstance(command, str) or not _is_safe_command_name(command):
         return {
             "harness_id": harness_id,
@@ -470,11 +480,14 @@ def run_version_probe(fixture: dict[str, Any], *, timeout_seconds: float = DEFAU
 
         output = redact_text(output_bytes.decode("utf-8", errors="replace"), str(home_dir))
         if return_code == 0:
+            version = next((line.strip() for line in output.splitlines() if line.strip()), None)
             return {
                 "harness_id": harness_id,
                 "state": "observed",
                 "command": command,
                 "exit_code": return_code,
+                "platform": sys.platform,
+                "version": version,
                 "output": output,
             }
         return {
@@ -482,6 +495,7 @@ def run_version_probe(fixture: dict[str, Any], *, timeout_seconds: float = DEFAU
             "state": "nonzero_exit",
             "command": command,
             "exit_code": return_code,
+            "platform": sys.platform,
             "output": output,
         }
 

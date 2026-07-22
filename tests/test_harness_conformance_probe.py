@@ -399,6 +399,133 @@ def test_antigravity_is_gui_surface_with_availability_only_candidates(probe, sch
     assert result["version_probe"]["state"] == "skipped"
 
 
+def _fake_version_process(exit_code: int = 0) -> mock.Mock:
+    process = mock.Mock()
+    process.poll.return_value = exit_code
+    process.pid = 6161
+    return process
+
+
+def test_hermes_version_probe_records_version_and_platform_receipt(probe, schema, fixtures) -> None:
+    fixture = next(item for item in fixtures if item["harness"]["id"] == "hermes")
+    with (
+        mock.patch.object(probe.shutil, "which", return_value="/fake/bin/hermes"),
+        mock.patch.object(probe, "_popen_probe_process", return_value=_fake_version_process()),
+        mock.patch.object(
+            probe,
+            "_collect_bounded_output",
+            return_value=(b"hermes 0.3.1\n", False, None),
+        ),
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
+    version_probe = result["version_probe"]
+    assert version_probe["state"] == "observed"
+    assert version_probe["command"] == "hermes"
+    assert version_probe["version"] == "hermes 0.3.1"
+    assert version_probe["platform"] == sys.platform
+    assert "hermes 0.3.1" in version_probe["output"]
+
+
+def test_hermes_missing_binary_stays_externally_blocked_binary_not_found(probe, schema, fixtures) -> None:
+    fixture = next(item for item in fixtures if item["harness"]["id"] == "hermes")
+    with mock.patch.object(probe.shutil, "which", return_value=None):
+        result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
+    assert result["availability"]["state"] == "externally_blocked"
+    assert result["availability"]["reason"] == "binary_not_found"
+    assert result["version_probe"]["state"] == "externally_blocked"
+    assert result["version_probe"]["reason"] == "binary_not_found"
+
+
+def test_hermes_home_directory_only_never_counts_as_runtime_conformance(
+    probe, schema, fixtures, monkeypatch, tmp_path: Path
+) -> None:
+    fixture = next(item for item in fixtures if item["harness"]["id"] == "hermes")
+    home = tmp_path / "home"
+    (home / ".hermes").mkdir(parents=True)
+    (home / ".config" / "hermes").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    with mock.patch.object(probe.shutil, "which", return_value=None):
+        result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
+    for section in (result["availability"], result["version_probe"]):
+        assert section["state"] == "externally_blocked"
+        assert section["reason"] == "binary_not_found"
+
+
+def test_antigravity_version_probe_records_version_and_platform_receipt(probe, schema, fixtures) -> None:
+    fixture = next(item for item in fixtures if item["harness"]["id"] == "antigravity")
+    assert fixture["binary"] == {"command": "agy", "version_args": ["--version"]}
+    with (
+        mock.patch.object(
+            probe.shutil,
+            "which",
+            side_effect=lambda name: "/fake/bin/agy" if name == "agy" else None,
+        ),
+        mock.patch.object(probe, "_popen_probe_process", return_value=_fake_version_process()),
+        mock.patch.object(
+            probe,
+            "_collect_bounded_output",
+            return_value=(b"agy 1.4.0\n", False, None),
+        ),
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
+    version_probe = result["version_probe"]
+    assert version_probe["state"] == "observed"
+    assert version_probe["command"] == "agy"
+    assert version_probe["version"] == "agy 1.4.0"
+    assert version_probe["platform"] == sys.platform
+    assert "agy 1.4.0" in version_probe["output"]
+
+
+def test_antigravity_missing_binary_stays_externally_blocked_binary_not_found(probe, schema, fixtures) -> None:
+    fixture = next(item for item in fixtures if item["harness"]["id"] == "antigravity")
+    with mock.patch.object(probe.shutil, "which", return_value=None):
+        result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
+    assert result["availability"]["state"] == "externally_blocked"
+    assert result["availability"]["reason"] == "binary_not_found"
+    assert result["version_probe"]["state"] == "externally_blocked"
+    assert result["version_probe"]["reason"] == "binary_not_found"
+
+
+def test_antigravity_home_directory_only_never_counts_as_runtime_conformance(
+    probe, schema, fixtures, monkeypatch, tmp_path: Path
+) -> None:
+    fixture = next(item for item in fixtures if item["harness"]["id"] == "antigravity")
+    home = tmp_path / "home"
+    (home / ".antigravity").mkdir(parents=True)
+    (home / ".config" / "antigravity").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    with mock.patch.object(probe.shutil, "which", return_value=None):
+        result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
+    for section in (result["availability"], result["version_probe"]):
+        assert section["state"] == "externally_blocked"
+        assert section["reason"] == "binary_not_found"
+
+
+def test_antigravity_version_args_gate_still_blocks_unsafe_args(probe, fixtures) -> None:
+    fixture = json.loads(json.dumps(next(item for item in fixtures if item["harness"]["id"] == "antigravity")))
+    fixture["binary"]["version_args"] = ["--full"]
+    with mock.patch.object(probe, "_popen_probe_process") as popen:
+        result = probe.run_version_probe(fixture, timeout_seconds=1.0)
+    assert result["state"] == "externally_blocked"
+    assert result["reason"] == "unsafe_version_arguments"
+    popen.assert_not_called()
+
+
+def test_gui_surface_without_binary_declaration_remains_version_limited(probe, schema) -> None:
+    fixture = {
+        "schema": "harness-contract.v1",
+        "harness": {"id": "gui-without-binary", "surface": "gui"},
+        "availability": {"command_candidates": ["example-gui"]},
+        "capabilities": _minimal_capabilities(),
+        "deep_probes": _minimal_deep_probes(),
+    }
+    with mock.patch.object(probe, "_popen_probe_process") as popen:
+        result = probe.probe_fixture(fixture, schema, run_version=True, timeout_seconds=1.0)
+    assert result["version_probe"]["state"] == "externally_blocked"
+    assert result["version_probe"]["reason"] == "version_execution_limited_to_cli_surface"
+    popen.assert_not_called()
+
+
 def test_deep_probes_are_returned_not_executed(probe, schema, fixtures) -> None:
     result = probe.probe_fixture(fixtures[0], schema, run_version=False, timeout_seconds=1.0)
     assert result["deep_probes"] == fixtures[0]["deep_probes"]
