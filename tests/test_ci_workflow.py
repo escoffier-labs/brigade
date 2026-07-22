@@ -132,8 +132,22 @@ def test_ci_workflow_runs_notify_go_commands_from_notify_directory():
     ubuntu = _workflow_job_section(text, "notify-build-and-test")
     assert "runs-on: ubuntu-latest" in ubuntu
     assert "working-directory: stations/notify" in ubuntu
-    assert "uses: actions/setup-go@v5" in ubuntu
-    assert "go-version: '1.22'" in ubuntu
+    # Two setup-go v5 steps: Go 1.22 for build parity, then stable for the scanner.
+    assert ubuntu.count("uses: actions/setup-go@v5") == 2
+    # Both Go setup steps pin the notify go.sum so the root cache warning clears.
+    assert ubuntu.count("cache-dependency-path: stations/notify/go.sum") == 2
+    # Checkout must not persist credentials (CodeRabbit review comment 3630426956).
+    assert "persist-credentials: false" in ubuntu
+    # Go 1.22 lane runs build, vet, and race tests before the stable scanner lane.
+    go122 = ubuntu.index("go-version: '1.22'")
+    build = ubuntu.index("go build ./...")
+    assert go122 < build
+    race = ubuntu.index("go test -race ./...")
+    # Stable Go lands after the race test and before govulncheck installation.
+    stable = ubuntu.index("go-version: stable")
+    assert race < stable
+    govulncheck_install = ubuntu.index("go install golang.org/x/vuln/cmd/govulncheck@v1.3.0")
+    assert stable < govulncheck_install
     for command in (
         "go build ./...",
         "go vet ./...",
@@ -148,6 +162,8 @@ def test_ci_workflow_runs_notify_go_commands_from_notify_directory():
     assert "working-directory: stations/notify" in windows
     assert "uses: actions/setup-go@v5" in windows
     assert "go-version: '1.22'" in windows
+    assert "persist-credentials: false" in windows
+    assert "cache-dependency-path: stations/notify/go.sum" in windows
     for command in (
         "go build ./...",
         "go vet ./...",
