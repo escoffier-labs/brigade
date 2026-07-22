@@ -619,9 +619,11 @@ def test_doctor_checks_codex_inbox_when_selected(tmp_target: Path, capsys):
     # or on check ordering, which the managed-tool additions can shift.
     doctor_mod.run(tmp_target, json_output=True)
     payload = json.loads(capsys.readouterr().out)
-    inbox_checks = {check["name"]: check for check in payload["checks"] if check["name"].startswith("handoff: codex")}
-    assert "handoff: codex inbox" in inbox_checks
-    codex_inbox = inbox_checks["handoff: codex inbox"]
+    inbox_checks = {
+        check["name"]: check for check in payload["checks"] if check["name"].startswith("adapter: handoff: codex")
+    }
+    assert "adapter: handoff: codex inbox" in inbox_checks
+    codex_inbox = inbox_checks["adapter: handoff: codex inbox"]
     assert codex_inbox["status"] == doctor_mod.OK
     assert ".codex/memory-handoffs" in codex_inbox["detail"]
 
@@ -641,10 +643,10 @@ def test_doctor_reports_default_wired_skills_for_selected_harnesses(tmp_target: 
     checks = {item["name"]: item for item in payload["checks"]}
 
     assert rc == 0
-    assert checks["skills: claude default wired"]["status"] == "OK"
-    assert "brigade-work" in checks["skills: claude default wired"]["detail"]
-    assert checks["skills: codex default wired"]["status"] == "OK"
-    assert ".codex/skills" in checks["skills: codex default wired"]["detail"]
+    assert checks["adapter: skills: claude default wired"]["status"] == "OK"
+    assert "brigade-work" in checks["adapter: skills: claude default wired"]["detail"]
+    assert checks["adapter: skills: codex default wired"]["status"] == "OK"
+    assert ".codex/skills" in checks["adapter: skills: codex default wired"]["detail"]
 
 
 def test_doctor_warns_when_default_wired_skill_is_missing(tmp_target: Path, capsys):
@@ -661,7 +663,7 @@ def test_doctor_warns_when_default_wired_skill_is_missing(tmp_target: Path, caps
     rc = doctor_mod.run(tmp_target, json_output=True)
     payload = json.loads(capsys.readouterr().out)
     checks = {item["name"]: item for item in payload["checks"]}
-    skill_check = checks["skills: codex default wired: ultra-work-scout"]
+    skill_check = checks["adapter: skills: codex default wired: ultra-work-scout"]
 
     assert rc == 0
     assert skill_check["status"] == "WARN"
@@ -711,6 +713,72 @@ def test_doctor_falls_back_to_v0_2_behavior_when_no_config(tmp_target: Path, cap
     doctor_mod.run(tmp_target)
     out = capsys.readouterr().out
     assert "doctor" in out
+
+
+def test_build_context_unspecified_harness_without_config(tmp_target: Path, capsys):
+    """Unconfigured targets must not inherit Claude harness checks by default."""
+    tmp_target.mkdir()
+    (tmp_target / "AGENTS.md").write_text("# Agents")
+
+    ctx = doctor_mod.build_context(tmp_target)
+    assert ctx.harnesses == []
+    assert ctx.selection is None
+
+    doctor_mod.run(target=tmp_target, harness="generic", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["harnesses"] == []
+
+    names = {check["name"] for check in payload["checks"]}
+    assert "claude work loop" not in names
+    assert not any(name.startswith("adapter: handoff:") for name in names)
+    assert not any(name.startswith("adapter: skills:") for name in names)
+
+    capsys.readouterr()
+    doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert "unspecified" in out.lower()
+    assert "assuming claude" not in out.lower()
+
+
+def test_build_context_claude_declared_labels_adapter_checks(tmp_target: Path, capsys):
+    """Explicit Claude selection keeps native checks and labels adapter projections."""
+    install_selection(
+        tmp_target,
+        Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    capsys.readouterr()
+
+    ctx = doctor_mod.build_context(tmp_target)
+    assert ctx.harnesses == ["claude"]
+
+    doctor_mod.run(target=tmp_target, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    names = {check["name"] for check in payload["checks"]}
+
+    assert "adapter: handoff: claude inbox" in names
+    assert "adapter: skills: claude default wired" in names
+    assert not any(name.startswith("adapter: handoff: codex") for name in names)
+
+
+def test_build_context_non_claude_harness_labels_adapter_checks_only(tmp_target: Path, capsys):
+    """Non-Claude harness selection must not run Claude-native doctor checks."""
+    install_selection(
+        tmp_target,
+        Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[]),
+    )
+    capsys.readouterr()
+
+    ctx = doctor_mod.build_context(tmp_target)
+    assert ctx.harnesses == ["codex"]
+
+    doctor_mod.run(target=tmp_target, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    names = {check["name"] for check in payload["checks"]}
+
+    assert "claude work loop" not in names
+    assert "adapter: handoff: codex inbox" in names
+    assert "adapter: skills: codex default wired" in names
+    assert not any(name.startswith("adapter: handoff: claude") for name in names)
 
 
 def test_doctor_includes_embedded_content_guard_without_external_binary(monkeypatch, tmp_target, capsys):
