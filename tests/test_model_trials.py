@@ -28,6 +28,61 @@ def _roster() -> Roster:
     )
 
 
+def test_cell_identity_payload_is_locked():
+    # Snapshot of the frozen identity contract (docs/phase-eval-cell-identity.md).
+    # Any change to the field set below must come with a CELL_SCHEMA bump.
+    manifest = {
+        "schema": "brigade.eval_manifest.v1",
+        "name": "identity-lock",
+        "trials": 1,
+        "seats": ["cursor"],
+        "cases": [{"id": "hello", "prompt": "Say hello"}],
+        "graders": [{"type": "exact_output", "expected": "hello"}],
+    }
+    cell = model_trials.expand_cells(manifest, _roster())[0]
+    expected_identity = {
+        "schema": "brigade.eval_cell.v1",
+        "case": {"id": "hello", "prompt": "Say hello"},
+        "seat": {
+            "seat": "cursor",
+            "cli": "cursor",
+            "model": "composer-2.5",
+            "reasoning": None,
+            "transport": "direct",
+            "transport_version": None,
+            "env": None,
+            "codex_transport": None,
+        },
+        "trial": 1,
+        "graders": [{"type": "exact_output", "expected": "hello"}],
+        "execution_mode": "read-only",
+    }
+    assert model_trials._canonical_digest(expected_identity) == cell.cell_id
+    assert cell.cell_id == "55c07e87f401b5aa49f956b2cec1bfee87986088702bc0b1762cc722ff2638c1"
+
+
+def test_prompt_line_endings_do_not_change_identity():
+    crlf = _manifest()
+    crlf["cases"][0]["prompt"] = "Say hello\r\nagain\rnow"
+    unix = _manifest()
+    unix["cases"][0]["prompt"] = "Say hello\nagain\nnow"
+    crlf_cells = model_trials.expand_cells(crlf, _roster())
+    unix_cells = model_trials.expand_cells(unix, _roster())
+    assert [cell.cell_id for cell in crlf_cells] == [cell.cell_id for cell in unix_cells]
+    assert crlf_cells[0].prompt == "Say hello\nagain\nnow"
+
+
+def test_attempt_number_uses_max_plus_one_and_tolerates_gaps(tmp_path):
+    assert model_trials._attempt_number(tmp_path) == 1
+    attempts = tmp_path / "attempts"
+    attempts.mkdir()
+    (attempts / "attempt-001").mkdir()
+    (attempts / "attempt-003").mkdir()
+    (attempts / "scratch").mkdir()
+    (attempts / "attempt-002-partial").mkdir()
+    assert model_trials._attempt_number(tmp_path) == 4
+
+
 def test_expand_cells_is_stable_and_conditions_change_identity():
     first = model_trials.expand_cells(_manifest(), _roster())
     second = model_trials.expand_cells(_manifest(), _roster())
@@ -226,6 +281,92 @@ def test_resume_reports_stale_cells_when_conditions_change(tmp_path, monkeypatch
     summary = model_trials.summarize(root)
     assert summary["counts"] == {"rejected": 2}
     assert summary["stale_counts"] == {"accepted": 2}
+
+
+def test_resume_after_manifest_edit_reruns_only_changed_cells(tmp_path, monkeypatch, capsys):
+    manifest = _manifest()
+    manifest["trials"] = 1
+    manifest["cases"] = [
+        {"id": "alpha", "prompt": "Say alpha"},
+        {"id": "beta", "prompt": "Say beta"},
+    ]
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+    tasks: list[str] = []
+
+    def fake_run(task, roster, **kwargs):
+        tasks.append(task)
+        out = kwargs["output_dir"]
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "final.txt").write_text("hello\n")
+        (out / "run.json").write_text(json.dumps({"status": "ok", "duration_seconds": 0.5}))
+        return 0
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    root = tmp_path / "results"
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 0
+    assert sorted(tasks) == ["Say alpha", "Say beta"]
+
+    original_ids = {cell.case_id: cell.cell_id for cell in model_trials.expand_cells(manifest, _roster())}
+    alpha_path = root / "cells" / original_ids["alpha"] / "cell.json"
+
+    edited = json.loads(manifest_path.read_text())
+    edited["cases"][1]["prompt"] = "Say beta differently"
+    manifest_path.write_text(json.dumps(edited))
+    tasks.clear()
+    capsys.readouterr()
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True) == 0
+
+    # The unchanged cell is skipped; the edited cell re-runs under a new cell_id.
+    assert tasks == ["Say beta differently"]
+    alpha = json.loads(alpha_path.read_text())
+    assert alpha["state"] == "accepted"
+    assert alpha["attempt"] == 1
+    edited_ids = {cell.case_id: cell.cell_id for cell in model_trials.expand_cells(edited, _roster())}
+    assert edited_ids["alpha"] == original_ids["alpha"]
+    assert edited_ids["beta"] != original_ids["beta"]
+    new_beta = json.loads((root / "cells" / edited_ids["beta"] / "cell.json").read_text())
+    assert new_beta["state"] == "accepted"
+    plan = json.loads((root / "plan.json").read_text())
+    assert new_beta["manifest_digest"] == plan["manifest_digest"]
+
+    # The old cell is kept and reported, not pruned; resume warns on stderr.
+    assert (root / "cells" / original_ids["beta"] / "cell.json").is_file()
+    summary = json.loads((root / "summary.json").read_text())
+    assert summary["counts"] == {"accepted": 2}
+    assert summary["stale_counts"] == {"accepted": 1}
+    assert "1 stale cell(s)" in capsys.readouterr().err
+
+
+def test_resume_reruns_killed_running_cell_as_new_attempt(tmp_path, monkeypatch):
+    manifest = _manifest()
+    manifest["trials"] = 1
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    def fake_run(task, roster, **kwargs):
+        out = kwargs["output_dir"]
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "final.txt").write_text("hello\n")
+        (out / "run.json").write_text(json.dumps({"status": "ok", "duration_seconds": 0.5}))
+        return 0
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    root = tmp_path / "results"
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 0
+    cell_path = next((root / "cells").glob("*/cell.json"))
+
+    # Simulate a kill mid-run: the last durable state is "running".
+    killed = json.loads(cell_path.read_text())
+    killed["state"] = "running"
+    cell_path.write_text(json.dumps(killed))
+
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True) == 0
+    final = json.loads(cell_path.read_text())
+    assert final["state"] == "accepted"
+    assert final["attempt"] == 2
+    attempts = sorted(p.name for p in (cell_path.parent / "attempts").iterdir())
+    assert attempts == ["attempt-001", "attempt-002"]
 
 
 def test_grader_envelope_links_digested_output(tmp_path, monkeypatch):

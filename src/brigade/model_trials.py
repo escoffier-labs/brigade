@@ -73,17 +73,21 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return data
 
 
+def _normalize_prompt(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _case_prompt(case: dict[str, Any], base_dir: Path) -> str:
     prompt = case.get("prompt")
     prompt_file = case.get("prompt_file")
     if isinstance(prompt, str) and prompt:
-        return prompt
+        return _normalize_prompt(prompt)
     if isinstance(prompt_file, str) and prompt_file:
         candidate = (base_dir / prompt_file).resolve()
         if base_dir.resolve() not in candidate.parents and candidate != base_dir.resolve():
             raise ValueError(f"case {case.get('id')!r} prompt_file escapes the manifest directory")
         try:
-            return candidate.read_text()
+            return _normalize_prompt(candidate.read_text())
         except OSError as exc:
             raise ValueError(f"case {case.get('id')!r} prompt_file unreadable: {exc}") from exc
     raise ValueError(f"case {case.get('id')!r} needs prompt or prompt_file")
@@ -322,10 +326,19 @@ def _trial_worktree_path(
     )
 
 
+_ATTEMPT_DIR = re.compile(r"attempt-(\d+)")
+
+
 def _attempt_number(cell_dir: Path) -> int:
     attempts = cell_dir / "attempts"
-    existing = [p for p in attempts.iterdir() if p.is_dir()] if attempts.is_dir() else []
-    return len(existing) + 1
+    if not attempts.is_dir():
+        return 1
+    numbers = [
+        int(match.group(1))
+        for entry in attempts.iterdir()
+        if entry.is_dir() and (match := _ATTEMPT_DIR.fullmatch(entry.name)) is not None
+    ]
+    return max(numbers, default=0) + 1
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -385,6 +398,11 @@ def execute(
         print("error: writable-worktree trials require a git worktree target", file=sys.stderr)
         return 2
     localio.write_json(output_dir / "plan.json", plan)
+    if resume and plan["stale_cells"]:
+        print(
+            f"note: {len(plan['stale_cells'])} stale cell(s) from the previous plan kept and counted in summary",
+            file=sys.stderr,
+        )
     failures = 0
     for cell in cells:
         cell_dir = output_dir / "cells" / cell.cell_id
@@ -406,6 +424,7 @@ def execute(
                 "state": "running",
                 "attempt": attempt,
                 "started_at": started_at,
+                "manifest_digest": plan["manifest_digest"],
             },
         )
         run_dir = cell_dir / "attempts" / f"attempt-{attempt:03d}" / "run"
@@ -456,6 +475,7 @@ def execute(
             "state": state,
             "attempt": attempt,
             "started_at": started_at,
+            "manifest_digest": plan["manifest_digest"],
             "exit_code": rc,
             "duration_seconds": run_meta.get("duration_seconds"),
             "run_dir": str(run_dir),
