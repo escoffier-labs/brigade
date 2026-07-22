@@ -1284,6 +1284,31 @@ def test_run_agent_malformed_env_file_ref_never_reads_parent_environment(monkeyp
     assert calls == []
 
 
+def test_run_agent_env_file_prefixed_parent_variable_still_resolves(monkeypatch):
+    # Only the exact "env-file:" syntax is an env-file reference; a parent
+    # variable that merely starts with "env-file" resolves from the
+    # environment like any other reference.
+    captured = {}
+    token = "parent-token-value-for-test"
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return agents.proc.Result(0, "ok\n", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    monkeypatch.setenv("env-filed", token)
+
+    result = agents.run_agent(
+        "claude",
+        "hi",
+        env={"ANTHROPIC_AUTH_TOKEN_REF": "env-filed"},
+    )
+
+    assert result.ok
+    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == token
+
+
 def test_run_agent_scrubs_resolved_env_values_from_success_output(monkeypatch):
     token = "lane-token-value-for-test"
     endpoint = "https://lane.example.test/anthropic"

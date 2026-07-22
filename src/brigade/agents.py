@@ -24,15 +24,18 @@ _OLLAMA_PREFIX = "ollama:"
 _CODEX_CLOUD_PREFIX = "codex-cloud:"
 _CLOUDFLARE_AI_GATEWAY_PREFIX = "cloudflare-ai-gateway/"
 _CLOUDFLARE_AI_GATEWAY_REQUIRED_ENV = ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID")
-ENV_FILE_REF_PREFIX = "env-file"
+ENV_FILE_REF_PREFIX = "env-file:"
 ENV_FILE_REF_RE = re.compile(r"^env-file:(/[^#]+)#([A-Z][A-Z0-9_]*)$")
 
 
 def is_env_file_reference(value: str) -> bool:
-    """True when a _REF value is env-file-shaped (well-formed or not).
+    """True when a _REF value uses the env-file reference syntax.
 
-    Validation and resolution share this classifier so a malformed env-file
-    reference can never fall through to a parent-environment lookup."""
+    Validation and resolution share this classifier so a malformed
+    ``env-file:`` reference can never fall through to a parent-environment
+    lookup. The discriminator is the exact ``env-file:`` prefix: a parent
+    variable that merely starts with ``env-file`` (no colon) stays an
+    ordinary environment reference."""
     return value.startswith(ENV_FILE_REF_PREFIX)
 
 
