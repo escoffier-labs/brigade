@@ -400,18 +400,26 @@ function Get-UnpublishedComponentIds {
     # pins real native assets. Those entries are the only components source
     # acceptance may skip: a component with declared assets must still install
     # and smoke, even if the report labels it "unsupported".
+    #
+    # Windows PowerShell 5.1 treats an empty JSON object as a truthy
+    # PSCustomObject whose .PSObject.Properties.Count is unreliable unless the
+    # Properties collection is forced through @(). Without that wrapper,
+    # agent-notify's empty assets map is never classified as unpublished and the
+    # post-setup health assertion fails with unsupported-component-platform.
     if (-not (Test-Path -LiteralPath $ManifestPath)) {
         throw "bundled compatibility manifest not found at $ManifestPath"
     }
     $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
-    $unpublished = @()
+    $unpublished = [System.Collections.Generic.List[string]]::new()
     foreach ($property in $manifest.components.PSObject.Properties) {
         $assets = $property.Value.assets
-        if (-not $assets -or $assets.PSObject.Properties.Count -eq 0) {
-            $unpublished += $property.Name
+        if ($null -eq $assets -or @($assets.PSObject.Properties).Count -eq 0) {
+            $unpublished.Add([string]$property.Name)
         }
     }
-    return $unpublished
+    # Write-Output -NoEnumerate keeps a single empty-asset id as a one-element
+    # string[] instead of unrolling to a scalar that foreach would iterate by char.
+    Write-Output -NoEnumerate $unpublished.ToArray()
 }
 
 function Assert-AllComponentsHealthy {
@@ -575,8 +583,20 @@ try {
     & brigade --version
     if ($LASTEXITCODE -ne 0) { throw "brigade --version failed" }
 
+    # Source-mode acceptance runs against the bundled compatibility manifest,
+    # which carries not-yet-released components with empty assets. Compute that
+    # empty-asset set before both setup invocations so online and offline setup
+    # are only expected to install published components; post-setup health and
+    # smoke assertions reuse the same set. Published/release acceptance never
+    # skips anything and keeps bare setup (every published component).
+    [string[]]$unpublishedIds = @()
     if ($InstallMode -eq "source") {
+        $bundledManifestPath = Join-Path $RepoRoot "src\brigade\templates\components\manifest-v1.json"
+        [string[]]$unpublishedIds = @(Get-UnpublishedComponentIds -ManifestPath $bundledManifestPath)
+
         Write-Step "brigade setup (online)"
+        # Standalone manifest + published_component_ids omits empty-asset entries
+        # such as agent-notify; do not add flags that would request them.
         & brigade setup --manifest-source standalone
         if ($LASTEXITCODE -ne 0) { throw "brigade setup failed" }
 
@@ -592,16 +612,6 @@ try {
         Write-Step "brigade setup --offline"
         & brigade setup --offline
         if ($LASTEXITCODE -ne 0) { throw "brigade setup --offline failed" }
-    }
-
-    # Source-mode acceptance runs against the bundled compatibility manifest,
-    # which carries not-yet-released components with empty assets. Only those
-    # entries may be skipped; published components (declared assets) must still
-    # install and smoke. Published/release acceptance never skips anything.
-    $unpublishedIds = @()
-    if ($InstallMode -eq "source") {
-        $bundledManifestPath = Join-Path $RepoRoot "src\brigade\templates\components\manifest-v1.json"
-        $unpublishedIds = Get-UnpublishedComponentIds -ManifestPath $bundledManifestPath
     }
 
     $report = Get-ComponentReport -StderrRoot $acceptRoot
