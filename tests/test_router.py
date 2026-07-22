@@ -339,6 +339,26 @@ def test_route_brief_ship_released_by_approval() -> None:
     assert brief.held == {}
 
 
+def test_route_brief_dependencies_include_held_stage() -> None:
+    # Held stages must still be placeable in the DAG: their key appears in
+    # brief.dependencies so run_transport can schedule around the hold.
+    catalog = _catalog(
+        {
+            "execute": _stage(
+                ["system"],
+                routes=["system"],
+                required=["task"],
+                output=["state"],
+                lock=[{"while": "destructive-op", "until": "destructive-approved"}],
+            ),
+            "verify": _stage(["system"], routes=["system"], required=["state"]),
+        }
+    )
+    brief = route_brief("wipe the server config", catalog=catalog)
+    assert "execute" in brief.held
+    assert "execute" in brief.dependencies
+
+
 def test_route_brief_reviews_run_in_one_wave() -> None:
     brief = route_brief("implement rate limiting for the login endpoint")
     wave_of = {name: i for i, wave in enumerate(brief.waves) for name in wave}

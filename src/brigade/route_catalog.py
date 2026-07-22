@@ -466,6 +466,7 @@ def route_brief(
         "naming the stages it satisfies. One assignment may cover several stages; every "
         "listed stage must be covered by at least one assignment."
     )
+    deps = router.stage_dependencies(catalog, [*result["route"], *result["held"]])
     return RouteBrief(
         attached=True,
         text="\n".join(lines) + "\n",
@@ -477,9 +478,7 @@ def route_brief(
         held=result["held"],
         size=result["size"],
         triggered_by=result["triggered_by"],
-        dependencies={
-            name: tuple(sorted(preds)) for name, preds in router.stage_dependencies(catalog, result["route"]).items()
-        },
+        dependencies={name: tuple(sorted(preds)) for name, preds in deps.items()},
     )
 
 

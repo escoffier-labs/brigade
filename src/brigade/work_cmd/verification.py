@@ -1,6 +1,7 @@
 """Verify, acceptance, and closeout operations."""
 
 from __future__ import annotations
+import copy
 import hashlib
 import json
 import os
@@ -309,6 +310,12 @@ def _write_verify_markdown(run_dir: Path, receipt: dict[str, Any]) -> None:
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
 
+def _fingerprint_segment(hasher, label: str, data: bytes) -> None:
+    encoded_label = label.encode()
+    hasher.update(str(len(encoded_label)).encode() + b":" + encoded_label)
+    hasher.update(str(len(data)).encode() + b":" + data)
+
+
 def _tree_fingerprint(target: Path) -> str | None:
     """Content hash of HEAD + tracked diff + untracked files. None outside git."""
     try:
@@ -324,15 +331,15 @@ def _tree_fingerprint(target: Path) -> str | None:
         # test that restricts PATH) raises FileNotFoundError, an OSError subclass.
         return None
     hasher = hashlib.sha256()
-    hasher.update(head.stdout.encode())
-    hasher.update(diff.stdout.encode())
+    _fingerprint_segment(hasher, "head", head.stdout.encode())
+    _fingerprint_segment(hasher, "diff", diff.stdout.encode())
     for name in sorted(untracked.stdout.splitlines()):
         path = target / name
-        hasher.update(name.encode())
         try:
-            hasher.update(path.read_bytes())
+            data = path.read_bytes()
         except OSError:
             return None
+        _fingerprint_segment(hasher, f"untracked:{name}", data)
     return hasher.hexdigest()
 
 
@@ -559,7 +566,7 @@ def _write_reused_receipt(
         "duration_seconds": (completed_at - started).total_seconds(),
         "timeout": timeout,
         "path": str(run_dir),
-        "commands": [],
+        "commands": copy.deepcopy(latest.get("commands", [])),
         "reused_from": latest.get("run_id"),
         "tree_fingerprint": fingerprint,
         "planned_commands": planned_display,

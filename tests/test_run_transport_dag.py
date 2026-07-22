@@ -128,7 +128,7 @@ def test_ready_dispatch_no_stage_barrier(dag_harness):
     assert order.index("d") < order.index("i")
 
 
-def test_held_stage_never_dispatched(dag_harness):
+def test_held_stage_never_dispatched(dag_harness, capsys):
     results = dag_harness(
         assignments=[_a("p", 1, ["plan"]), _a("i", 2, ["implement"])],
         dependencies=DEPS,
@@ -138,6 +138,7 @@ def test_held_stage_never_dispatched(dag_harness):
     assert by_worker["p"].status == "held"
     assert by_worker["i"].status == "skipped"
     assert dag_harness.invocations_set == set()
+    assert "falling back" not in capsys.readouterr().err
 
 
 def test_uncovered_assignment_falls_back_to_waves(dag_harness, capsys):
@@ -147,3 +148,14 @@ def test_uncovered_assignment_falls_back_to_waves(dag_harness, capsys):
     )
     assert "falling back to wave scheduler" in capsys.readouterr().err
     assert len(results) == 2
+
+
+def test_partially_unknown_covers_falls_back_to_waves(dag_harness, capsys):
+    # Task 8c: an assignment that covers a known stage plus a made-up stage
+    # must still trigger the wave fallback and emit the fallback warning.
+    results = dag_harness(
+        assignments=[_a("p", 1, ["plan", "made-up-stage"])],
+        dependencies=DEPS,
+    )
+    assert "falling back to wave scheduler" in capsys.readouterr().err
+    assert len(results) == 1

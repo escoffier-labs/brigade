@@ -709,9 +709,7 @@ def _dag_placement_error(
         return "no route dependencies available"
     known = set(route_dependencies)
     for assignment in assignments:
-        if not assignment.covers:
-            return "plan not fully covered"
-        if not set(assignment.covers) & known:
+        if not assignment.covers or not set(assignment.covers) <= known:
             return "plan not fully covered"
     return None
 
@@ -802,6 +800,7 @@ def _dag_dispatch(
                 if ready(i):
                     if on_stage_start is not None:
                         on_stage_start(a.stage, (a.worker,))
+                    # prior_results is a submission-time snapshot in completion order, matching wave-mode semantics; later completions are intentionally not visible to already-submitted workers.
                     future_to_index[executor.submit(run_one, a, list(completed_ok))] = i
                     submitted.add(i)
                     progress = True
