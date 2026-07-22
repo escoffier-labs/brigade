@@ -52,7 +52,7 @@ def test_pantry_status_combines_status_and_doctor(monkeypatch, tmp_path):
     assert any("expiry-alert" in cmd for cmd in payload["next_commands"])
 
 
-def test_pantry_doctor_exits_nonzero_on_fail(monkeypatch, tmp_path):
+def test_pantry_doctor_exits_nonzero_on_fail(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(pantry_cmd.proc, "which", lambda cmd: "/x/agentpantry")
 
     def fake_run(args, **kw):
@@ -88,6 +88,10 @@ def test_pantry_doctor_exits_nonzero_on_fail(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pantry_cmd.proc, "run", fake_run)
     assert pantry_cmd.doctor(target=tmp_path) == 1
+    assert (
+        "note: pantry checks are advisory for workspace doctor; "
+        "status 1 occurs for unhealthy, incomplete, or nonzero agentpantry fail_count" in capsys.readouterr().out
+    )
 
 
 def test_setup_plan_is_review_only(tmp_path):

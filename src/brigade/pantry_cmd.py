@@ -195,7 +195,8 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
                     print(f"- {row.get('status')}: {row.get('name')} - {row.get('detail')}")
         _print_next_commands(payload)
         print(
-            "note: pantry checks are advisory for workspace doctor; this command exits 1 only on agentpantry fail_count"
+            "note: pantry checks are advisory for workspace doctor; "
+            "status 1 occurs for unhealthy, incomplete, or nonzero agentpantry fail_count"
         )
     health = payload.get("health")
     if health == "fail":
