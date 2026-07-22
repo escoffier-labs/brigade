@@ -104,6 +104,7 @@ role = "code"
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        **kwargs,
     ):
         seen["task"] = task
         seen["orchestrator"] = loaded_roster.orchestrator
@@ -115,6 +116,7 @@ role = "code"
         seen["handoff_inbox"] = handoff_inbox
         seen["read_only"] = read_only
         seen["sandbox"] = sandbox
+        seen.update(kwargs)
         return 0
 
     monkeypatch.setattr(aboyeur, "run", fake_run)
@@ -148,7 +150,59 @@ role = "code"
         "handoff_inbox": tmp_path / "handoffs",
         "read_only": True,
         "sandbox": None,
+        "fail_fast": True,
     }
+    assert seen["fail_fast"] is True
+
+
+def test_run_cli_keep_going_sets_fail_fast_false(tmp_path, monkeypatch):
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "ollama:llama3.3"
+role = "code"
+"""
+    )
+    seen = {}
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox=None,
+        **kwargs,
+    ):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    rc = cli.main(
+        [
+            "run",
+            "do something",
+            "--roster",
+            str(roster_path),
+            "--cwd",
+            str(tmp_path),
+            "--keep-going",
+            "--no-artifacts",
+        ]
+    )
+    assert rc == 0
+    assert seen["fail_fast"] is False
 
 
 def test_run_cli_passes_no_code_graph_to_aboyeur(tmp_path, monkeypatch):
@@ -181,8 +235,10 @@ role = "code"
         read_only=False,
         sandbox=None,
         code_graph_enabled=True,
+        **kwargs,
     ):
         seen["code_graph_enabled"] = code_graph_enabled
+        seen.update(kwargs)
         return 0
 
     monkeypatch.chdir(tmp_path)
@@ -222,8 +278,10 @@ role = "code"
         read_only=False,
         sandbox=None,
         evidence_enabled=True,
+        **kwargs,
     ):
         seen["evidence_enabled"] = evidence_enabled
+        seen.update(kwargs)
         return 0
 
     monkeypatch.chdir(tmp_path)
@@ -262,8 +320,10 @@ role = "code"
         handoff_inbox=None,
         read_only=False,
         sandbox="unset",
+        **kwargs,
     ):
         seen["sandbox"] = sandbox
+        seen.update(kwargs)
         return 0
 
     monkeypatch.chdir(tmp_path)
@@ -301,8 +361,10 @@ role = "code"
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        **kwargs,
     ):
         seen["sandbox"] = sandbox
+        seen.update(kwargs)
         return 0
 
     monkeypatch.chdir(tmp_path)
@@ -343,8 +405,10 @@ sandbox = "workspace-write"
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        **kwargs,
     ):
         seen["sandbox"] = sandbox
+        seen.update(kwargs)
         return 0
 
     monkeypatch.chdir(tmp_path)
@@ -385,8 +449,10 @@ sandbox = "workspace-write"
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        **kwargs,
     ):
         seen["sandbox"] = sandbox
+        seen.update(kwargs)
         return 0
 
     monkeypatch.chdir(tmp_path)
@@ -423,9 +489,7 @@ role = "code"
     monkeypatch.setattr(
         aboyeur,
         "run",
-        lambda task, loaded_roster, dry_run=False, show_plan=False, verbose=False, cwd=None, output_dir=None, handoff_inbox=None, read_only=False, sandbox=None: (
-            0
-        ),
+        lambda *args, **kwargs: 0,
     )
     assert cli.main(["run", json.dumps({"task": "x"}), "--dry-run"]) == 0
 
@@ -460,8 +524,10 @@ role = "code"
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        **kwargs,
     ):
         seen["orchestrator"] = loaded_roster.orchestrator
+        seen.update(kwargs)
         return 0
 
     monkeypatch.chdir(tmp_path)
@@ -709,8 +775,10 @@ role = "code"
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        **kwargs,
     ):
         seen["output_dir"] = output_dir
+        seen.update(kwargs)
         return 0
 
     monkeypatch.chdir(tmp_path)
@@ -754,7 +822,9 @@ role = "code"
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        **kwargs,
     ):
+        seen.update(kwargs)
         seen["output_dir"] = output_dir
         return 2
 
@@ -782,7 +852,7 @@ role = "code"
 
     captured = capsys.readouterr()
     assert rc == 2
-    assert seen == {"output_dir": output_dir, "inspect_dir": output_dir}
+    assert seen == {"fail_fast": True, "output_dir": output_dir, "inspect_dir": output_dir}
     assert f"summary for {output_dir}" in captured.out
     assert f"artifacts: {output_dir}" in captured.err
 
@@ -981,8 +1051,10 @@ def test_run_cli_allow_dirty_passes_in_clean_primary_checkout(tmp_path, monkeypa
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        **kwargs,
     ):
         seen["cwd"] = cwd
+        seen.update(kwargs)
         return 0
 
     monkeypatch.setattr(aboyeur, "run", fake_run)
@@ -1010,8 +1082,10 @@ def test_run_cli_allow_dirty_passes_in_linked_worktree(tmp_path, monkeypatch):
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        **kwargs,
     ):
         seen["cwd"] = cwd
+        seen.update(kwargs)
         return 0
 
     monkeypatch.setattr(aboyeur, "run", fake_run)
@@ -2104,11 +2178,13 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
         read_only=False,
         sandbox=None,
         defer_artifact_collection=False,
+        **kwargs,
     ):
         seen["cwd"] = cwd
         seen["lock_workspace"] = lock_workspace
         seen["output_dir"] = output_dir
         seen["defer_artifact_collection"] = defer_artifact_collection
+        seen.update(kwargs)
         assert cwd != repo
         assert (cwd / "tracked.txt").read_text() == "base\n"
         assert proc.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=cwd).code == 1
@@ -2608,6 +2684,7 @@ def test_run_cli_dirty_guard_skips_dry_and_read_only_runs(tmp_path, monkeypatch)
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        **kwargs,
     ):
         calls.append({"dry_run": dry_run, "read_only": read_only})
         return 0
@@ -2635,6 +2712,7 @@ def test_run_cli_normal_runs_write_no_changes_patch(tmp_path, monkeypatch):
         handoff_inbox=None,
         read_only=False,
         sandbox=None,
+        **kwargs,
     ):
         return 0
 
@@ -2706,6 +2784,7 @@ def test_run_cli_forwards_worker_to_aboyeur(tmp_path, monkeypatch):
     seen = {}
 
     def fake_run(task, loaded_roster, **kwargs):
+        seen.update(kwargs)
         seen["task"] = task
         seen["worker"] = kwargs.get("worker")
         return 0
@@ -2725,7 +2804,19 @@ def test_run_cli_forwards_worker_to_aboyeur(tmp_path, monkeypatch):
         ]
     )
     assert rc == 0
-    assert seen == {"task": "do something", "worker": "coder"}
+    assert seen == {
+        "dry_run": False,
+        "show_plan": False,
+        "verbose": False,
+        "cwd": tmp_path,
+        "output_dir": None,
+        "handoff_inbox": None,
+        "read_only": False,
+        "sandbox": None,
+        "worker": "coder",
+        "fail_fast": True,
+        "task": "do something",
+    }
 
 
 def test_run_cli_rejects_unknown_worker(tmp_path, monkeypatch, capsys):
