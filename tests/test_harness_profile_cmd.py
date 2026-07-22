@@ -1,4 +1,8 @@
-from brigade import harness_profile_cmd, harness_profiles
+import json
+
+import pytest
+
+from brigade import harness_profile_cmd, harness_profiles, skills_cmd
 
 
 def test_user_profile_paths_cover_all_eight_harnesses(tmp_path):
@@ -182,3 +186,177 @@ def test_foreign_authored_block_is_conflict_with_recovery_command(tmp_path):
     # --adopt reclassifies a well-formed foreign block as stale/update
     adopted = harness_profile_cmd.plan_instruction(path=path, desired=desired, state={"instructions": {}}, adopt=True)
     assert (adopted.status, adopted.action) == ("stale", "update")
+
+
+def _reviewed_package(*, skill_id="reviewed", files=None):
+    return skills_cmd.UserProfileSkillPackage(
+        skill_id=skill_id,
+        source_identity=f"registry://skills/{skill_id}",
+        source_fingerprint="s",
+        metadata_fingerprint="m",
+        files={} if files is None else files,
+    )
+
+
+def test_user_profile_skills_create_update_conflict_and_safe_uninstall(tmp_path):
+    root = tmp_path / "skills"
+    package = _reviewed_package(files={"SKILL.md": b"# a\n", "scripts/check.py": b"print(1)\n"})
+    state = harness_profile_cmd.empty_profile_state(workspace=tmp_path, harness="codex")
+
+    plans = harness_profile_cmd.plan_skills(skills_root=root, packages=(package,), state=state)
+    by_rel = {(p.skill_id, p.relative_path): p for p in plans}
+    assert by_rel[("reviewed", "SKILL.md")].status == "missing"
+    assert by_rel[("reviewed", "SKILL.md")].action == "create"
+    assert by_rel[("reviewed", "scripts/check.py")].status == "missing"
+    assert by_rel[("reviewed", "scripts/check.py")].action == "create"
+    for plan in plans:
+        assert plan.desired_digest is not None
+
+    new_state, written = harness_profile_cmd.apply_skill_plan(
+        skills_root=root,
+        packages=(package,),
+        plans=plans,
+        prior_state=state,
+        state_path=tmp_path / "state.json",
+    )
+    assert sorted(written) == [
+        str(root / "reviewed" / "SKILL.md"),
+        str(root / "reviewed" / "scripts" / "check.py"),
+    ]
+    assert (root / "reviewed" / "SKILL.md").read_bytes() == b"# a\n"
+    assert (root / "reviewed" / "scripts" / "check.py").read_bytes() == b"print(1)\n"
+    assert new_state is not state
+    assert new_state["skills"]["reviewed"]["files"] == {
+        "SKILL.md": harness_profile_cmd.digest_bytes(b"# a\n"),
+        "scripts/check.py": harness_profile_cmd.digest_bytes(b"print(1)\n"),
+    }
+    assert new_state["skills"]["reviewed"]["source_identity"] == "registry://skills/reviewed"
+    assert sorted(new_state["skills"]["reviewed"]["created_directories"]) == [
+        "reviewed",
+        "reviewed/scripts",
+    ]
+    # prior_state supplied by caller is not mutated
+    assert state["skills"] == {}
+
+    # re-plan -> current/none for both files
+    plans = harness_profile_cmd.plan_skills(skills_root=root, packages=(package,), state=new_state)
+    assert all(p.status == "current" and p.action == "none" for p in plans)
+
+    # desired content change with live equal to owned digest becomes stale/update
+    package_v2 = _reviewed_package(files={"SKILL.md": b"# b\n", "scripts/check.py": b"print(1)\n"})
+    plans = harness_profile_cmd.plan_skills(skills_root=root, packages=(package_v2,), state=new_state)
+    by_rel = {(p.skill_id, p.relative_path): p for p in plans}
+    assert by_rel[("reviewed", "SKILL.md")].status == "stale"
+    assert by_rel[("reviewed", "SKILL.md")].action == "update"
+    assert by_rel[("reviewed", "scripts/check.py")].status == "current"
+
+    # foreign edit -> conflict/preserve, other file still reconcilable/current
+    (root / "reviewed" / "scripts" / "check.py").write_bytes(b"user\n")
+    plans = harness_profile_cmd.plan_skills(skills_root=root, packages=(package,), state=new_state)
+    edited = next(p for p in plans if p.relative_path == "scripts/check.py")
+    assert (edited.status, edited.action) == ("conflict", "preserve")
+    top = next(p for p in plans if p.relative_path == "SKILL.md")
+    assert (top.status, top.action) == ("current", "none")
+
+    # uninstall removes only digest-matching owned files, preserves the foreign edit,
+    # and only removes empty recorded directories
+    removals = harness_profile_cmd.plan_skill_removals(skills_root=root, state=new_state)
+    removed = harness_profile_cmd.apply_skill_removals(
+        skills_root=root,
+        plans=removals,
+        state=new_state,
+        state_path=tmp_path / "state.json",
+    )
+    assert sorted(removed) == [str(root / "reviewed" / "SKILL.md")]
+    assert not (root / "reviewed" / "SKILL.md").exists()
+    assert (root / "reviewed" / "scripts" / "check.py").read_bytes() == b"user\n"
+    # only empty recorded directories are removed; the foreign-edited file keeps
+    # its parent directories alive (rmdir, never recursive unlink)
+    assert (root / "reviewed" / "scripts").is_dir()
+    assert (root / "reviewed").is_dir()
+
+
+def test_skill_paths_must_stay_inside_the_profile_skills_root(tmp_path):
+    root = tmp_path / "skills"
+    escape = _reviewed_package(skill_id="evil", files={"../../escape.txt": b"nope\n"})
+    with pytest.raises(ValueError, match="outside the profile skills root"):
+        harness_profile_cmd.plan_skills(skills_root=root, packages=(escape,), state={"skills": {}})
+
+    absolute = _reviewed_package(skill_id="evil", files={"/etc/passwd": b"nope\n"})
+    with pytest.raises(ValueError, match="outside the profile skills root"):
+        harness_profile_cmd.plan_skills(skills_root=root, packages=(absolute,), state={"skills": {}})
+
+
+def test_skill_uninstall_removes_empty_recorded_directories(tmp_path):
+    root = tmp_path / "skills"
+    package = _reviewed_package(files={"SKILL.md": b"# a\n", "scripts/check.py": b"print(1)\n"})
+    state = harness_profile_cmd.empty_profile_state(workspace=tmp_path, harness="codex")
+    plans = harness_profile_cmd.plan_skills(skills_root=root, packages=(package,), state=state)
+    new_state, _ = harness_profile_cmd.apply_skill_plan(
+        skills_root=root,
+        packages=(package,),
+        plans=plans,
+        prior_state=state,
+        state_path=tmp_path / "state.json",
+    )
+    assert (root / "reviewed" / "scripts" / "check.py").exists()
+
+    removals = harness_profile_cmd.plan_skill_removals(skills_root=root, state=new_state)
+    removed = harness_profile_cmd.apply_skill_removals(
+        skills_root=root,
+        plans=removals,
+        state=new_state,
+        state_path=tmp_path / "state.json",
+    )
+    assert sorted(removed) == [
+        str(root / "reviewed" / "SKILL.md"),
+        str(root / "reviewed" / "scripts" / "check.py"),
+    ]
+    # all recorded directories became empty and are removed; the skills root stays
+    assert not (root / "reviewed").exists()
+    assert root.exists()
+    persisted = json.loads((tmp_path / "state.json").read_text())
+    assert persisted["skills"] == {}
+
+
+def test_skill_symlinked_intermediate_directory_resolving_outside_is_rejected(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "evil").symlink_to(outside)
+    package = _reviewed_package(skill_id="evil", files={"x.txt": b"x\n"})
+    with pytest.raises(ValueError, match="outside the profile skills root"):
+        harness_profile_cmd.plan_skills(skills_root=root, packages=(package,), state={"skills": {}})
+
+
+def test_skill_ownership_is_persisted_per_file_not_per_command(tmp_path, monkeypatch):
+    root = tmp_path / "skills"
+    state_path = tmp_path / "brigade" / "install-state.json"
+    package = _reviewed_package(files={"SKILL.md": b"# a\n", "scripts/check.py": b"print(1)\n"})
+    real = harness_profile_cmd.write_profile_state
+    saves = []
+
+    def counting(*, state_path, state):
+        saves.append(sorted(state["skills"].get("reviewed", {}).get("files", {})))
+        if len(saves) == 2:
+            raise KeyboardInterrupt
+        real(state_path=state_path, state=state)
+
+    monkeypatch.setattr(harness_profile_cmd, "write_profile_state", counting)
+    state = harness_profile_cmd.empty_profile_state(workspace=tmp_path, harness="codex")
+    plans = harness_profile_cmd.plan_skills(skills_root=root, packages=(package,), state=state)
+    with pytest.raises(KeyboardInterrupt):
+        harness_profile_cmd.apply_skill_plan(
+            skills_root=root,
+            packages=(package,),
+            plans=plans,
+            prior_state=state,
+            state_path=state_path,
+        )
+    # first file and first ownership record already exist on disk after the crash
+    assert (root / "reviewed" / "SKILL.md").exists()
+    assert saves[0] == ["SKILL.md"]
+    assert json.loads(state_path.read_text())["skills"]["reviewed"]["files"] == {
+        "SKILL.md": harness_profile_cmd.digest_bytes(b"# a\n")
+    }
