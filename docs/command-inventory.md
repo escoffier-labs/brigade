@@ -19,7 +19,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade budgets` (extras): 2 command path(s)
 - `brigade center` (extras): 29 command path(s)
 - `brigade chat` (extras): 7 command path(s)
-- `brigade code`: 3 command path(s)
+- `brigade code`: 16 command path(s)
 - `brigade completions`: 1 command path(s)
 - `brigade context` (extras): 8 command path(s)
 - `brigade daily`: 26 command path(s)
@@ -113,8 +113,21 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade chat sweep import-issues` (extras)
 - `brigade chat sweep ingest` (extras)
 - `brigade chat sweep validate` (extras)
+- `brigade code affected`
+- `brigade code callees`
+- `brigade code callers`
 - `brigade code context`
+- `brigade code cycles`
+- `brigade code dead-code`
+- `brigade code diff`
+- `brigade code doctor`
+- `brigade code evaluate`
+- `brigade code explain`
+- `brigade code export`
 - `brigade code impact`
+- `brigade code neighbors`
+- `brigade code search`
+- `brigade code stats`
 - `brigade code sync`
 - `brigade completions`
 - `brigade context archive` (extras)
