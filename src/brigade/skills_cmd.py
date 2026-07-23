@@ -16,6 +16,7 @@ import os
 import shlex
 import shutil
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1153,6 +1154,161 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
                 item["reason"] = "installed copy has no valid provenance receipt"
             items.append(item)
     return items, None
+
+
+@dataclass(frozen=True)
+class UserProfileSkillPackage:
+    """A reviewed, supported skill package materialized as in-memory bytes.
+
+    ``files`` maps POSIX relative paths to file bytes. ``SKILL.md`` is replaced
+    with harness-rendered UTF-8 bytes; every other file is copied byte-for-byte
+    from the registry skill directory. No directories are created.
+    """
+
+    skill_id: str
+    source_identity: str
+    source_fingerprint: str
+    metadata_fingerprint: str
+    files: dict[str, bytes]
+
+
+_USER_PROFILE_MAX_FILES = 512
+_USER_PROFILE_MAX_BYTES = 8 * 1024 * 1024
+_USER_PROFILE_HARNESSES = {"claude", "codex"}
+
+
+def _user_profile_read_package_files(skill_dir: Path) -> dict[str, bytes] | None:
+    """Read every regular, contained file under ``skill_dir`` as bytes.
+
+    Returns ``None`` if the package would exceed the file-count or byte cap, so
+    the caller excludes the whole package rather than truncating it.
+    """
+    files: dict[str, bytes] = {}
+    total = 0
+    root_resolved = skill_dir.resolve()
+    for dirpath, dirnames, filenames in os.walk(skill_dir, followlinks=False):
+        # Prune symlinked directories (never followed) and ``.git`` so neither
+        # os.walk nor the file loop descends into them.
+        kept: list[str] = []
+        for name in dirnames:
+            if name == ".git":
+                continue
+            if (Path(dirpath) / name).is_symlink():
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        for name in filenames:
+            file_path = Path(dirpath) / name
+            if file_path.is_symlink():
+                continue
+            if not file_path.is_file():
+                continue
+            rel = file_path.relative_to(skill_dir).as_posix()
+            parts = Path(rel).parts
+            # lexical containment: reject absolute-looking keys and ".." components
+            if rel.startswith("/") or ".." in parts:
+                continue
+            if rel == ".git" or rel.startswith(".git/"):
+                continue
+            # resolved-path containment: reject symlinks/hardlinks escaping the dir
+            try:
+                file_path.resolve().relative_to(root_resolved)
+            except ValueError:
+                continue
+            if len(files) >= _USER_PROFILE_MAX_FILES:
+                return None
+            data = file_path.read_bytes()
+            if total + len(data) > _USER_PROFILE_MAX_BYTES:
+                return None
+            files[rel] = data
+            total += len(data)
+    return dict(sorted(files.items()))
+
+
+def _user_profile_package(
+    *,
+    workspace: Path,
+    harness: str,
+    registry_row: dict[str, Any],
+    minimum_trust: str,
+) -> UserProfileSkillPackage | None:
+    registry_metadata = registry_row["metadata"]
+    skill_id = _slug(str(registry_metadata.get("id") or Path(str(registry_row["skill_dir"])).name))
+    lint_payload = _lint_payload(workspace, f"registry:{skill_id}", harness=harness)
+    if not lint_payload.get("valid"):
+        return None
+    metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else registry_metadata
+    if metadata.get("enabled", True) is False:
+        return None
+    trust_score = lint_payload.get("trust_score") if isinstance(lint_payload.get("trust_score"), dict) else {}
+    actual_trust = str(trust_score.get("trust_level") or "unreviewed")
+    if not _trust_at_least(actual_trust, minimum_trust):
+        return None
+    supported = metadata.get("supported_harnesses")
+    supported_harnesses = set(supported) if isinstance(supported, list) else set()
+    if supported_harnesses and harness not in supported_harnesses:
+        return None
+    source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
+    source_identity = source.get("identity")
+    if not (isinstance(source_identity, str) and source_identity):
+        return None
+    source_fingerprint = lint_payload.get("fingerprint")
+    if not (isinstance(source_fingerprint, str) and source_fingerprint):
+        return None
+    metadata_fingerprint = source.get("metadata_fingerprint")
+    if not (isinstance(metadata_fingerprint, str) and metadata_fingerprint):
+        return None
+    skill_dir = Path(str(lint_payload["skill_dir"]))
+    files = _user_profile_read_package_files(skill_dir)
+    if files is None:
+        return None
+    skill_md_path = _skill_md_path(skill_dir)
+    if "SKILL.md" in files and skill_md_path.is_file():
+        source_text = skill_md_path.read_text(errors="replace")
+        rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, harness)
+        if _rendered_skill_validation(rendered, harness):
+            return None
+        files = {**files, "SKILL.md": rendered.encode("utf-8")}
+        files = dict(sorted(files.items()))
+    return UserProfileSkillPackage(
+        skill_id=skill_id,
+        source_identity=source_identity,
+        source_fingerprint=source_fingerprint,
+        metadata_fingerprint=metadata_fingerprint,
+        files=files,
+    )
+
+
+def user_profile_skill_packages(
+    *,
+    workspace: Path,
+    harness: str,
+    minimum_trust: str = "workspace",
+) -> tuple[UserProfileSkillPackage, ...]:
+    """Reviewed, supported skill packages for a native user-profile harness.
+
+    Iterates the registry, runs lint + render validation through the existing
+    helpers, and returns whole in-memory packages (regular files only, SKILL.md
+    rendered for the harness). Excludes disabled, untrusted, unsupported,
+    lint-invalid, render-invalid, and over-cap packages. Creates no directories
+    and never calls ``_install_dir()``.
+    """
+    workspace = workspace.expanduser().resolve()
+    if harness not in _USER_PROFILE_HARNESSES:
+        raise ValueError(f"unknown harness adapter: {harness}")
+    if minimum_trust not in TRUST_LEVELS:
+        raise ValueError(f"unknown skill trust level: {minimum_trust}")
+    packages: list[UserProfileSkillPackage] = []
+    for registry_row in _iter_registry(workspace):
+        package = _user_profile_package(
+            workspace=workspace,
+            harness=harness,
+            registry_row=registry_row,
+            minimum_trust=minimum_trust,
+        )
+        if package is not None:
+            packages.append(package)
+    return tuple(sorted(packages, key=lambda package: package.skill_id))
 
 
 def sync(
