@@ -37,7 +37,7 @@ execution_error), no measurement failures. 3 = any measurement failure; dominate
 brigade run exit-3).
 
 ## Regrade
-brigade model trials regrade <output-dir> re-runs graders against stored run/final.txt (verified
+brigade model trial regrade <output-dir> re-runs graders against stored run/final.txt (verified
 against output_digest) without re-running seats. Resume treats grader_error as regradeable.
 
 ## grader_result.v1: exit_code removed
