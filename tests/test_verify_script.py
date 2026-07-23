@@ -1,4 +1,4 @@
-import tomllib
+import ast
 from pathlib import Path
 
 
@@ -19,8 +19,11 @@ def test_verify_script_documents_same_fast_gate_as_ci():
 
 
 def test_root_ruff_configuration_excludes_non_python_trees():
-    config = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["ruff"]
+    text = (ROOT / "pyproject.toml").read_text()
+    ruff_config = text.split("[tool.ruff]\n", maxsplit=1)[1].split("\n[tool.ruff.", maxsplit=1)[0]
+    exclude_line = next(line for line in ruff_config.splitlines() if line.startswith("extend-exclude = "))
+    exclusions = ast.literal_eval(exclude_line.partition("=")[2].strip())
 
-    assert "engines" in config["extend-exclude"]
-    assert "*.md" in config["extend-exclude"]
-    assert config["force-exclude"] is True
+    assert "engines" in exclusions
+    assert "*.md" in exclusions
+    assert "force-exclude = true" in ruff_config
