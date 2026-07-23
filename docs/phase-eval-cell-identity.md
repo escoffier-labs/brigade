@@ -51,9 +51,13 @@ exact payload keys and the resulting digest, so an accidental change fails CI.
 `execute --resume` rebuilds the plan from the current manifest and decides per
 cell from the recorded `cell.json`:
 
-- `accepted`, `rejected`, `unscored`, `execution_error`, `adapter_error`,
-  `grader_error` (the terminal states): the cell is **skipped**; the existing
-  receipt stands.
+- `accepted`, `rejected`, `unscored`, `execution_error`, `adapter_error`
+  (terminal, non-regradeable): the cell is **skipped**; the existing receipt
+  stands.
+- `grader_error` (terminal, regradeable): graders are **re-run** against the
+  stored `run/final.txt` (verified against `output_digest`); the seat is not
+  re-executed. Use `brigade model trial regrade` for the same path outside
+  resume.
 - `running`: the cell **re-runs as a new attempt**. `running` means the
   previous process died mid-run (or, without a lock, is still executing in
   another process). Resume treats it as a crash and starts the next attempt,

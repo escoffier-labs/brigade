@@ -61,6 +61,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         parser.add_argument("output_dir", type=Path, help="Trial artifact directory.")
         parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
         parser.set_defaults(func=_dispatch_trial)
+    p_regrade = trial_sub.add_parser(
+        "regrade", help="Re-run graders from stored trial output without re-running seats."
+    )
+    p_regrade.add_argument("output_dir", type=Path, help="Trial artifact directory.")
+    p_regrade.set_defaults(func=_dispatch_trial)
 
 
 def _dispatch_scorecard(args) -> int:
@@ -92,6 +97,8 @@ def _dispatch_trial(args) -> int:
             for state, count in payload["counts"].items():
                 print(f"{state}: {count}")
         return 0
+    if args.trial_command == "regrade":
+        return model_trials.regrade(args.output_dir)
 
     target = args.target.expanduser().resolve()
     try:
