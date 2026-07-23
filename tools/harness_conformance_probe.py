@@ -7,8 +7,9 @@ Even with those guards, executing a third-party binary can still read ambient
 environment data, perform network I/O, or run vendor-defined side effects.
 Treat ``--run-version`` as an explicit operator opt-in.
 
-Fixture-declared deep probes are never executed. Their declarations are echoed
-in probe output for harness-specific follow-up work.
+Fixture-declared deep probes are not executed unless ``--run-deep-probes`` is
+passed. Without that flag their declarations are echoed in probe output for
+harness-specific follow-up work.
 """
 
 from __future__ import annotations
@@ -44,12 +45,38 @@ CAPABILITY_IDS = {
     "platform",
 }
 BARE_COMMAND = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-ASSIGNMENT_SECRET = re.compile(r"(?i)((?:api[_-]?key|token|secret|password)\s*[:=]\s*)[^\s]+")
+DISCOVERY_ARGS_ALLOWLIST = frozenset({("--help",), ("-h",)})
+DEEP_PROBE_IDS = (
+    "instruction",
+    "skill",
+    "hook",
+    "mcp",
+    "workspace",
+    "session",
+    "verification",
+    "handoff",
+    "reload",
+    "telemetry",
+    "platform",
+)
+CREDENTIAL_NAME = (
+    r"(?:api[_-]?key|token|secret|password|credential|private[_-]?key|"
+    r"secret[_-]?access[_-]?key|access[_-]?key|(?<![A-Za-z0-9_])key(?![A-Za-z0-9_]))"
+)
+ASSIGNMENT_SECRET = re.compile(
+    rf"(?i)((?:{CREDENTIAL_NAME})\s*[:=]\s*)(?!\[REDACTED\])(?:\"(?:\\.|[^\"\\])*(?:\"|\Z)|'(?:\\.|[^'\\])*(?:'|\Z)|[^\s]+)"
+)
 AUTHORIZATION_HEADER = re.compile(r"(?i)(Authorization\s*:\s*).+")
 BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+([A-Za-z0-9._~+/=-]+)\b")
-JSON_QUOTED_CREDENTIAL = re.compile(r'(?i)("(?:api[_-]?key|token|secret|password)"\s*:\s*")[^"]+(")')
+JSON_QUOTED_CREDENTIAL = re.compile(rf'(?i)("[^"\r\n]*(?:{CREDENTIAL_NAME})[^"\r\n]*"\s*:\s*")((?:\\.|[^"\\])*)(")')
+JSON_UNTERMINATED_CREDENTIAL = re.compile(
+    rf'(?i)("[^"\r\n]*(?:{CREDENTIAL_NAME})[^"\r\n]*"\s*:\s*")((?:\\.|[^"\\])*)\\?\Z'
+)
+WINDOWS_HOME_PATH = re.compile(r"(?i)\b[A-Z]:(?:[\\/]+Users[\\/]+)[^\\/\"'\r\n]+")
+REDACTION_CONTEXT = re.compile(rb"(?i)(?:[A-Z_][A-Z0-9_-]*\s*[:=]\s*[\"']?)$")
 VERSION_LINE = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[-+~][0-9A-Za-z][0-9A-Za-z.-]*)?")
 OUTPUT_CAP_BYTES = 65536
+REDACTION_CONTEXT_TAIL_BYTES = 256
 DEFAULT_TIMEOUT_SECONDS = 10.0
 
 
@@ -77,11 +104,31 @@ def redact_text(value: str, *home_dirs: str | None) -> str:
                 redacted = redacted.replace(segment, "[PATH]")
     for home in homes:
         redacted = redacted.replace(home, "[HOME]")
+    redacted = WINDOWS_HOME_PATH.sub("[HOME]", redacted)
     redacted = ASSIGNMENT_SECRET.sub(r"\1[REDACTED]", redacted)
     redacted = AUTHORIZATION_HEADER.sub(r"\1[REDACTED]", redacted)
     redacted = BEARER_TOKEN.sub("Bearer [REDACTED]", redacted)
-    redacted = JSON_QUOTED_CREDENTIAL.sub(r"\1[REDACTED]\2", redacted)
+    redacted = JSON_QUOTED_CREDENTIAL.sub(r"\1[REDACTED]\3", redacted)
+    redacted = JSON_UNTERMINATED_CREDENTIAL.sub(r'\1[REDACTED]"', redacted)
     return redacted
+
+
+def _redact_bounded_output(output_bytes: bytes, *private_paths: str | None) -> str:
+    output = redact_text(output_bytes.decode("utf-8", errors="replace"), *private_paths)
+    encoded = output.encode("utf-8")
+    if len(encoded) <= OUTPUT_CAP_BYTES:
+        return output
+    marker = b"[REDACTED]"
+    marker_start = encoded.rfind(marker)
+    if marker_start >= 0:
+        line_start = encoded.rfind(b"\n", 0, marker_start) + 1
+        context_start = max(line_start, marker_start - REDACTION_CONTEXT_TAIL_BYTES)
+        context = REDACTION_CONTEXT.search(encoded[context_start:marker_start])
+        suffix = encoded[context_start + context.start() if context else marker_start :]
+        prefix_end = OUTPUT_CAP_BYTES - len(suffix)
+        if prefix_end >= 0:
+            return (encoded[:prefix_end] + suffix).decode("utf-8", errors="ignore")
+    return encoded[:OUTPUT_CAP_BYTES].decode("utf-8", errors="ignore")
 
 
 def _extract_version_line(output: str) -> str | None:
@@ -123,11 +170,298 @@ def validate_fixture(fixture: dict[str, Any], schema: dict[str, Any]) -> list[st
         unknown = set(identifiers) - CAPABILITY_IDS
         if unknown:
             errors.append(f"fixture.capabilities: unknown capability ids {sorted(unknown)!r}")
+    deep_probes = fixture.get("deep_probes")
+    if isinstance(deep_probes, dict):
+        for probe_id in DEEP_PROBE_IDS:
+            if probe_id in deep_probes:
+                errors.extend(_validate_deep_probe_entry(probe_id, deep_probes[probe_id]))
+    return errors
+
+
+def _validate_deep_probe_entry(probe_id: str, entry: Any) -> list[str]:
+    """Mirror the schema's deep-probe ``oneOf``/``$ref`` contract locally."""
+    path = f"fixture.deep_probes.{probe_id}"
+    if entry == "declared":
+        return []
+    if not isinstance(entry, dict):
+        return [f"{path}: expected 'declared' or a declared probe object"]
+
+    errors: list[str] = []
+    for key in entry:
+        if key not in {"state", "discovery"}:
+            errors.append(f"{path}.{key}: additional property is not allowed")
+    if "state" not in entry:
+        errors.append(f"{path}: missing required property 'state'")
+    elif entry["state"] != "declared":
+        errors.append(f"{path}.state: expected const 'declared'")
+
+    if "discovery" not in entry:
+        return errors
+    discovery = entry["discovery"]
+    discovery_path = f"{path}.discovery"
+    if not isinstance(discovery, dict):
+        return [*errors, f"{discovery_path}: expected type 'object'"]
+    for key in discovery:
+        if key not in {"command", "args"}:
+            errors.append(f"{discovery_path}.{key}: additional property is not allowed")
+    for key in ("command", "args"):
+        if key not in discovery:
+            errors.append(f"{discovery_path}: missing required property '{key}'")
+
+    if "command" in discovery:
+        command = discovery["command"]
+        if not isinstance(command, str):
+            errors.append(f"{discovery_path}.command: expected type 'string'")
+        elif not _is_safe_command_name(command):
+            errors.append(f"{discovery_path}.command: string does not match bare-command pattern")
+    if "args" in discovery:
+        args = discovery["args"]
+        if not isinstance(args, list):
+            errors.append(f"{discovery_path}.args: expected type 'array'")
+        else:
+            for index, arg in enumerate(args):
+                if not isinstance(arg, str):
+                    errors.append(f"{discovery_path}.args[{index}]: expected type 'string'")
     return errors
 
 
 def _is_safe_command_name(command: str) -> bool:
     return BARE_COMMAND.fullmatch(command) is not None
+
+
+def _is_safe_discovery_args(args: list[str]) -> bool:
+    return tuple(args) in DISCOVERY_ARGS_ALLOWLIST
+
+
+def _normalize_deep_probe_entry(value: Any) -> dict[str, Any]:
+    if value == "declared":
+        return {"state": "declared"}
+    if isinstance(value, dict) and value.get("state") == "declared":
+        return value
+    return {"state": "unknown"}
+
+
+def _availability_blocks_deep_probe_execution(availability: dict[str, Any]) -> bool:
+    return availability.get("state") in {"externally_blocked", "external_only", "not_executable"}
+
+
+def _declared_only_receipt(probe_id: str, *, reason: str) -> dict[str, Any]:
+    return {
+        "probe_id": probe_id,
+        "state": "declared_only",
+        "reason": reason,
+        "platform": sys.platform,
+    }
+
+
+def _redact_fixture_value(value: Any, *, secret_value: bool = False) -> Any:
+    if isinstance(value, str):
+        return "[REDACTED]" if secret_value else redact_text(value)
+    if isinstance(value, list):
+        return [_redact_fixture_value(item, secret_value=secret_value) for item in value]
+    if isinstance(value, dict):
+        return {
+            redact_text(key) if isinstance(key, str) else key: _redact_fixture_value(
+                item,
+                secret_value=secret_value
+                or (isinstance(key, str) and re.search(CREDENTIAL_NAME, key, flags=re.IGNORECASE) is not None),
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
+def _sanitize_probe_payload(value: Any, *, validation_error: bool = False) -> Any:
+    """Apply the final redaction boundary without changing payload keys."""
+    if isinstance(value, str):
+        redacted = redact_text(value)
+        if validation_error:
+            return re.sub(CREDENTIAL_NAME, "[REDACTED]", redacted, flags=re.IGNORECASE)
+        return redacted
+    if isinstance(value, list):
+        return [_sanitize_probe_payload(item, validation_error=validation_error) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_probe_payload(item, validation_error=validation_error or key == "validation_errors")
+            for key, item in value.items()
+        }
+    return value
+
+
+def _discovery_refusal_reason(discovery: dict[str, Any]) -> str | None:
+    command = discovery.get("command")
+    if not isinstance(command, str) or not _is_safe_command_name(command):
+        return "unsafe_command_name"
+    args = discovery.get("args")
+    if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+        return "unsafe_discovery_arguments"
+    if not _is_safe_discovery_args(args):
+        return "unsafe_discovery_arguments"
+    return None
+
+
+def _refused_discovery_receipt(probe_id: str, command: Any, reason: str) -> dict[str, Any]:
+    return {
+        "probe_id": probe_id,
+        "state": "refused",
+        "reason": reason,
+        "command": _redact_fixture_value(command),
+        "platform": sys.platform,
+    }
+
+
+def _invalid_fixture_unsafe_discovery_receipt(probe_id: str, entry: dict[str, Any]) -> dict[str, Any] | None:
+    """Refuse unsafe declared discovery without executing an invalid fixture."""
+    discovery = entry.get("discovery")
+    if not isinstance(discovery, dict):
+        return None
+    reason = _discovery_refusal_reason(discovery)
+    if reason is None:
+        return None
+    return _refused_discovery_receipt(probe_id, discovery.get("command"), reason)
+
+
+def run_deep_probe_discovery(
+    probe_id: str,
+    discovery: dict[str, Any],
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    timeout_seconds = _positive_finite_timeout(timeout_seconds)
+    command = discovery.get("command")
+    refusal_reason = _discovery_refusal_reason(discovery)
+    if refusal_reason is not None:
+        return _refused_discovery_receipt(probe_id, command, refusal_reason)
+    args = discovery["args"]
+
+    executable = shutil.which(command)
+    if executable is None:
+        return {
+            "probe_id": probe_id,
+            "state": "externally_blocked",
+            "reason": "binary_not_found",
+            "command": command,
+            "platform": sys.platform,
+        }
+
+    with tempfile.TemporaryDirectory(prefix="harness-probe-") as tmpdir:
+        home_dir = Path(tmpdir) / "home"
+        home_dir.mkdir()
+        (home_dir / ".config").mkdir(parents=True, exist_ok=True)
+        environment = _minimal_environment(home_dir, executable)
+        process: subprocess.Popen[bytes] | None = None
+        output_bytes = b""
+        overflow = False
+        failure_reason: str | None = None
+        return_code: int | None = None
+        try:
+            try:
+                process = _popen_probe_process(
+                    [executable, *args],
+                    cwd=tmpdir,
+                    env=environment,
+                )
+            except OSError as error:
+                return {
+                    "probe_id": probe_id,
+                    "state": "externally_blocked",
+                    "reason": "OSError",
+                    "command": command,
+                    "exit_code": None,
+                    "platform": sys.platform,
+                    "output": _redact_bounded_output(str(error).encode(), str(home_dir), tmpdir),
+                }
+            output_bytes, overflow, failure_reason = _collect_bounded_output(
+                process,
+                cap_bytes=OUTPUT_CAP_BYTES,
+                timeout_seconds=timeout_seconds,
+            )
+            return_code = process.poll()
+            if return_code is None:
+                try:
+                    return_code = process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    _terminate_process_group(process)
+                    return_code = process.wait(timeout=1)
+        finally:
+            if process is not None and process.poll() is None:
+                _terminate_process_group(process)
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+
+        output = _redact_bounded_output(output_bytes, str(home_dir), tmpdir)
+        if failure_reason == "TimeoutExpired":
+            return {
+                "probe_id": probe_id,
+                "state": "externally_blocked",
+                "reason": "TimeoutExpired",
+                "command": command,
+                "exit_code": return_code,
+                "platform": sys.platform,
+                "output": output,
+            }
+        if overflow or failure_reason == "output_overflow":
+            return {
+                "probe_id": probe_id,
+                "state": "externally_blocked",
+                "reason": "output_overflow",
+                "command": command,
+                "exit_code": return_code,
+                "platform": sys.platform,
+                "output": output,
+            }
+        if return_code == 0:
+            return {
+                "probe_id": probe_id,
+                "state": "observed",
+                "command": command,
+                "exit_code": return_code,
+                "platform": sys.platform,
+                "output": output,
+            }
+        return {
+            "probe_id": probe_id,
+            "state": "nonzero_exit",
+            "reason": "nonzero_exit",
+            "command": command,
+            "exit_code": return_code,
+            "platform": sys.platform,
+            "output": output,
+        }
+
+
+def collect_deep_probe_receipts(
+    fixture: dict[str, Any],
+    availability: dict[str, Any],
+    *,
+    timeout_seconds: float,
+) -> dict[str, dict[str, Any]]:
+    timeout_seconds = _positive_finite_timeout(timeout_seconds)
+    blocked = _availability_blocks_deep_probe_execution(availability)
+    invalid_fixture = availability.get("state") == "not_executable" and availability.get("reason") == "invalid_fixture"
+    blocked_reason = "invalid_fixture" if invalid_fixture else "externally_blocked_fixture"
+    declared_probes = fixture.get("deep_probes", {})
+    deep_probes = declared_probes if isinstance(declared_probes, dict) else {}
+    receipts: dict[str, dict[str, Any]] = {}
+    for probe_id in DEEP_PROBE_IDS:
+        raw_entry = deep_probes.get(probe_id)
+        entry = _normalize_deep_probe_entry(raw_entry)
+        if blocked:
+            if invalid_fixture and isinstance(raw_entry, dict):
+                receipt = _invalid_fixture_unsafe_discovery_receipt(probe_id, raw_entry)
+                if receipt is not None:
+                    receipts[probe_id] = receipt
+                    continue
+            receipts[probe_id] = _declared_only_receipt(probe_id, reason=blocked_reason)
+            continue
+        discovery = entry.get("discovery")
+        if not isinstance(discovery, dict):
+            receipts[probe_id] = _declared_only_receipt(probe_id, reason="no_discovery_spec")
+            continue
+        receipts[probe_id] = run_deep_probe_discovery(probe_id, discovery, timeout_seconds=timeout_seconds)
+    return receipts
 
 
 def _command_candidates(fixture: dict[str, Any]) -> list[str]:
@@ -508,7 +842,7 @@ def run_version_probe(fixture: dict[str, Any], *, timeout_seconds: float = DEFAU
                 "command": probed_command,
             }
 
-        output = redact_text(output_bytes.decode("utf-8", errors="replace"), str(home_dir))
+        output = _redact_bounded_output(output_bytes, str(home_dir), tmpdir)
         if return_code == 0:
             return {
                 "harness_id": harness_id,
@@ -534,6 +868,7 @@ def probe_fixture(
     schema: dict[str, Any],
     *,
     run_version: bool,
+    run_deep_probes: bool = False,
     timeout_seconds: float,
 ) -> dict[str, Any]:
     timeout_seconds = _positive_finite_timeout(timeout_seconds)
@@ -543,7 +878,7 @@ def probe_fixture(
     payload: dict[str, Any] = {
         "harness_id": harness_id,
         "validation_errors": errors,
-        "deep_probes": fixture.get("deep_probes", {}),
+        "deep_probes": _redact_fixture_value(fixture.get("deep_probes", {})),
     }
     if errors:
         payload["availability"] = {
@@ -554,7 +889,13 @@ def probe_fixture(
             "state": "not_executable",
             "reason": "invalid_fixture",
         }
-        return payload
+        if run_deep_probes:
+            payload["deep_probe_receipts"] = collect_deep_probe_receipts(
+                fixture,
+                payload["availability"],
+                timeout_seconds=timeout_seconds,
+            )
+        return _sanitize_probe_payload(payload)
 
     payload["availability"] = check_availability(fixture)
     if run_version:
@@ -564,7 +905,13 @@ def probe_fixture(
             "state": "skipped",
             "reason": "availability_only_unless_run_version",
         }
-    return payload
+    if run_deep_probes and not errors:
+        payload["deep_probe_receipts"] = collect_deep_probe_receipts(
+            fixture,
+            payload["availability"],
+            timeout_seconds=timeout_seconds,
+        )
+    return _sanitize_probe_payload(payload)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -580,6 +927,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Execute validated CLI fixtures with --version in an isolated sandbox.",
     )
+    parser.add_argument(
+        "--run-deep-probes",
+        action="store_true",
+        help="Execute fixture-declared deep probe discovery commands in an isolated sandbox.",
+    )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args(argv)
 
@@ -591,6 +943,7 @@ def main(argv: list[str] | None = None) -> int:
             fixture,
             schema,
             run_version=args.run_version,
+            run_deep_probes=args.run_deep_probes,
             timeout_seconds=timeout_seconds,
         )
         for fixture in fixtures
@@ -599,7 +952,8 @@ def main(argv: list[str] | None = None) -> int:
         "schema": "harness-conformance-probe.v1",
         "fixtures": [fixture["harness"]["id"] for fixture in fixtures],
         "run_version": args.run_version,
-        "deep_probe_policy": "declared_only_not_executed",
+        "run_deep_probes": args.run_deep_probes,
+        "deep_probe_policy": ("executed_when_specified" if args.run_deep_probes else "declared_only_not_executed"),
         "results": results,
     }
     json.dump(payload, sys.stdout, indent=2, sort_keys=True)
