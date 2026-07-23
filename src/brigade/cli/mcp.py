@@ -11,6 +11,12 @@ def _target(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to operate on.")
 
 
+def _write_mode(parser: argparse.ArgumentParser) -> None:
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="Preview changes without writing (default).")
+    mode.add_argument("--write", action="store_true", help="Apply the planned changes.")
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     p_mcp = sub.add_parser("mcp", help="Sync one canonical MCP server catalog into each tool's native config.")
     mcp_sub = p_mcp.add_subparsers(dest="mcp_command", metavar="<mcp-command>")
@@ -98,11 +104,59 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    p_pi_bridge = mcp_sub.add_parser(
+        "pi-bridge",
+        help="Bridge the canonical MCP catalog into Pi tools (discover, call, install, uninstall).",
+    )
+    pi_bridge_sub = p_pi_bridge.add_subparsers(dest="pi_bridge_command", metavar="<pi-bridge-command>")
+    pi_bridge_sub.required = True
+
+    p_pi_discover = pi_bridge_sub.add_parser("discover", help="List namespaced MCP tools from the canonical catalog.")
+    _target(p_pi_discover)
+    p_pi_discover.add_argument("--timeout", type=float, default=None, help="Per-server timeout in seconds.")
+    p_pi_discover.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    p_pi_call = pi_bridge_sub.add_parser("call", help="Call one namespaced MCP tool.")
+    _target(p_pi_call)
+    p_pi_call.add_argument("--tool", required=True, help="Qualified tool name (server__tool).")
+    p_pi_call.add_argument("--args-json", default="{}", help="JSON object of tool arguments.")
+    p_pi_call.add_argument("--timeout", type=float, default=None, help="Per-call timeout in seconds.")
+    p_pi_call.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    p_pi_install = pi_bridge_sub.add_parser(
+        "install", help="Install the generated Pi extension and catalog projection."
+    )
+    _target(p_pi_install)
+    _write_mode(p_pi_install)
+    p_pi_install.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    p_pi_uninstall = pi_bridge_sub.add_parser("uninstall", help="Remove Brigade-owned Pi MCP bridge artifacts.")
+    _write_mode(p_pi_uninstall)
+    p_pi_uninstall.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     p_mcp.set_defaults(func=dispatch)
 
 
 def dispatch(args) -> int:
-    from .. import mcp_cmd
+    from .. import mcp_cmd, pi_mcp_cmd
+
+    if args.mcp_command == "pi-bridge":
+        if args.pi_bridge_command == "discover":
+            return pi_mcp_cmd.discover(target=args.target, timeout=args.timeout, json_output=args.json)
+        if args.pi_bridge_command == "call":
+            return pi_mcp_cmd.call(
+                target=args.target,
+                tool=args.tool,
+                args_json=args.args_json,
+                timeout=args.timeout,
+                json_output=args.json,
+            )
+        if args.pi_bridge_command == "install":
+            return pi_mcp_cmd.install(target=args.target, write=args.write, json_output=args.json)
+        if args.pi_bridge_command == "uninstall":
+            return pi_mcp_cmd.uninstall(write=args.write, json_output=args.json)
+        args._brigade_parser.error(f"unknown pi-bridge command: {args.pi_bridge_command}")
+        return 2
 
     if args.mcp_command == "init":
         return mcp_cmd.init(
