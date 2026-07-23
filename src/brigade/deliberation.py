@@ -547,6 +547,13 @@ def _parse_challenger_output(text: str) -> dict[str, Any]:
     }
 
 
+def _non_empty_string(value: object) -> str:
+    text = _one_line(value)
+    if not text:
+        raise ValueError("expected a non-empty string")
+    return text
+
+
 def assemble_artifact(
     plan: DeliberationPlan,
     worker_results: list[WorkerResult],
@@ -583,12 +590,23 @@ def assemble_artifact(
     challenger_lens = next((lens for lens in plan.lenses if lens.role == "challenger"), None)
     if challenger_lens is not None:
         result = by_worker_stage.get((challenger_lens.worker, challenger_lens.task))
-        parsed = _parse_challenger_output(result.text if result is not None else "")
-        challenger_payload = {
-            "worker": challenger_lens.worker,
-            "stage": challenger_lens.stage,
-            **parsed,
-        }
+        if result is None or not result.ok:
+            detail = result.detail if result is not None else "challenger did not run"
+            challenger_payload = {
+                "worker": challenger_lens.worker,
+                "stage": challenger_lens.stage,
+                "status": "unavailable",
+                "detail": _one_line(detail) or "challenger unavailable",
+                "raw_output": result.text if result is not None else "",
+            }
+        else:
+            parsed = _parse_challenger_output(result.text)
+            challenger_payload = {
+                "worker": challenger_lens.worker,
+                "stage": challenger_lens.stage,
+                "status": "completed",
+                **parsed,
+            }
 
     agreements: list[str] = []
     conflicts: list[str] = []
@@ -603,7 +621,7 @@ def assemble_artifact(
     minority_report = ""
     recommendation = ""
     confidence = "medium"
-    if challenger_payload is not None:
+    if challenger_payload is not None and challenger_payload.get("status") == "completed":
         agreements.extend(_string_list(challenger_payload.get("agreements")))
         conflicts.extend(_string_list(challenger_payload.get("unresolved_conflicts")))
         minority_report = _one_line(challenger_payload.get("minority_report"))
@@ -652,6 +670,7 @@ def validate_schema(payload: dict[str, object]) -> None:
     for item in perspectives:
         if not isinstance(item, dict):
             raise ValueError("each perspective must be an object")
+        _non_empty_string(item.get("worker"))
         if item.get("stage") != PERSPECTIVE_STAGE:
             raise ValueError("each perspective must be stage 1")
         scope = item.get("evidence_scope")
@@ -660,6 +679,8 @@ def validate_schema(payload: dict[str, object]) -> None:
         for key in ("kind", "reference", "query", "grounded", "status"):
             if key not in scope:
                 raise ValueError(f"evidence_scope missing {key!r}")
+        _non_empty_string(scope.get("reference"))
+        _non_empty_string(scope.get("query"))
         if scope.get("grounded") is not True or scope.get("status") != "valid":
             raise ValueError("each perspective evidence_scope must be grounded and valid")
         kind = scope.get("kind")
@@ -669,16 +690,26 @@ def validate_schema(payload: dict[str, object]) -> None:
         if fingerprint in fingerprints:
             raise ValueError("perspective evidence scopes must be distinct")
         fingerprints.add(fingerprint)
-        if "position" not in item:
-            raise ValueError("each perspective must include position")
+        _non_empty_string(item.get("position"))
     challenger = payload.get("challenger")
     if not isinstance(challenger, dict):
         raise ValueError("challenger must be an object")
     if challenger.get("stage") != CHALLENGER_STAGE:
         raise ValueError("challenger must be stage 2")
-    for key in ("worker", "stage", "minority_report", "recommendation", "confidence"):
-        if key not in challenger:
-            raise ValueError(f"challenger missing {key!r}")
+    _non_empty_string(challenger.get("worker"))
+    status = challenger.get("status")
+    if status not in {"completed", "unavailable"}:
+        raise ValueError("challenger status must be completed or unavailable")
+    if status == "completed":
+        for key in ("minority_report", "recommendation", "confidence"):
+            if key not in challenger:
+                raise ValueError(f"challenger missing {key!r}")
+        _non_empty_string(challenger.get("minority_report"))
+        _non_empty_string(challenger.get("recommendation"))
+        if challenger.get("confidence") not in _CONFIDENCE_VALUES:
+            raise ValueError("challenger confidence must be low, medium, or high")
+    else:
+        _non_empty_string(challenger.get("detail"))
     if payload.get("confidence") not in _CONFIDENCE_VALUES:
         raise ValueError("confidence must be low, medium, or high")
     if "minority_report" not in payload:

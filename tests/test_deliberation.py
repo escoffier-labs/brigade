@@ -266,6 +266,7 @@ def test_validate_schema_requires_two_grounded_graphtrail_perspectives():
         "challenger": {
             "worker": "reviewer",
             "stage": 2,
+            "status": "completed",
             "attacks": [],
             "minority_report": "minority",
             "recommendation": "ship",
@@ -310,6 +311,28 @@ def test_deliberation_run_resume_unavailable(tmp_path):
     (run_dir / "run.json").write_text(json.dumps({"deliberation": True, "status": "failed"}))
     (run_dir / "plan.json").write_text(json.dumps({"mode": "deliberation"}))
     assert runs_cmd._resume_available(run_dir) is False
+
+
+def test_assemble_artifact_marks_unavailable_challenger(monkeypatch, tmp_path):
+    scopes = [_scope("graphtrail-context", "a"), _scope("graphtrail-callers", "b")]
+    monkeypatch.setattr(deliberation, "derive_evidence_scopes", lambda cwd, task, count=3: scopes)
+    plan = deliberation.build_plan(_roster(), "decide", cwd=tmp_path)
+    results = []
+    for assignment in plan.assignments:
+        ok = assignment.stage == 1
+        results.append(
+            WorkerResult(
+                worker=assignment.worker,
+                task=assignment.task,
+                text='{"position":"ok"}' if ok else "",
+                ok=ok,
+                detail=None if ok else "skipped after stage failure",
+            )
+        )
+    artifact = deliberation.assemble_artifact(plan, results)
+    assert artifact["challenger"]["status"] == "unavailable"
+    assert artifact["recommendation"] == ""
+    deliberation.validate_schema(artifact)
 
 
 def test_deliberation_dispatch_passes_prior_results_to_challenger(monkeypatch, tmp_path):
@@ -398,6 +421,7 @@ def test_runs_show_and_watch_surface_deliberation(tmp_path, capsys):
                 "challenger": {
                     "worker": "reviewer",
                     "stage": 2,
+                    "status": "completed",
                     "attacks": [],
                     "minority_report": "session cookies still required",
                     "recommendation": "oauth with cookie fallback",
