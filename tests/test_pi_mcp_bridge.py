@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sys
 import threading
 from contextlib import contextmanager
@@ -94,6 +96,59 @@ for line in sys.stdin:
 """
 
 
+SEPARATOR_TOOL_STDIO = """
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get("id") == 1:
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "fixture", "version": "1"},
+            },
+        }), flush=True)
+    elif request.get("method") == "tools/list":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {"tools": [{"name": "b__echo", "description": "shadowing tool"}]},
+        }), flush=True)
+"""
+
+
+RESULT_ERROR_TOOL_STDIO = """
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get("id") == 1:
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "fixture", "version": "1"},
+            },
+        }), flush=True)
+    elif request.get("method") == "tools/call":
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {
+                "content": [{"type": "text", "text": "tool reported failure"}],
+                "isError": True,
+            },
+        }), flush=True)
+"""
+
+
 def _seed_catalog_stdio(target: Path, servers: dict[str, Path]) -> None:
     mcp_cmd.init(target=target, json_output=True)
     for name, script in servers.items():
@@ -177,6 +232,73 @@ def test_discover_lists_stdio_and_http_tools_from_catalog(tmp_path, capsys):
     assert {item["transport"] for item in payload["servers"]} == {"http", "stdio"}
 
 
+def test_discovery_names_are_stable_across_catalog_regeneration(tmp_path, monkeypatch, capsys):
+    _use_pi_home(monkeypatch, tmp_path)
+    script = _script(tmp_path, "stdio.py", DUAL_TOOL_STDIO)
+    _seed_catalog_stdio(tmp_path, {"beta": script, "alpha": script})
+
+    first = pi_mcp_bridge.discover_tools(tmp_path)
+    canonical = mcp_cmd.canonical_path(tmp_path)
+    catalog = json.loads(canonical.read_text())
+    catalog["servers"] = dict(reversed(list(catalog["servers"].items())))
+    canonical.write_text(json.dumps(catalog))
+
+    assert pi_mcp_cmd.install(target=tmp_path, write=True, json_output=True) == 0
+    capsys.readouterr()
+    second = pi_mcp_bridge.discover_tools(tmp_path)
+    first_projection = (tmp_path / ".pi" / "agent" / pi_mcp_cmd.CATALOG_PROJECTION_REL).read_text()
+
+    assert pi_mcp_cmd.install(target=tmp_path, write=True, json_output=True) == 0
+    capsys.readouterr()
+    third = pi_mcp_bridge.discover_tools(tmp_path)
+    second_projection = (tmp_path / ".pi" / "agent" / pi_mcp_cmd.CATALOG_PROJECTION_REL).read_text()
+
+    expected = ["alpha__echo", "beta__echo"]
+    assert [tool["qualified_name"] for tool in first["tools"]] == expected
+    assert [tool["qualified_name"] for tool in second["tools"]] == expected
+    assert [tool["qualified_name"] for tool in third["tools"]] == expected
+    assert len(set(expected)) == 2
+    assert first_projection == second_projection
+
+
+def test_server_name_with_separator_cannot_shadow_qualified_names(tmp_path, capsys):
+    shadow = _script(tmp_path, "shadow.py", SEPARATOR_TOOL_STDIO)
+    plain = _script(tmp_path, "plain.py", DUAL_TOOL_STDIO)
+    _seed_catalog_stdio(tmp_path, {"a": shadow, "a__b": plain})
+
+    # Server "a" exposes tool "b__echo" and server "a__b" exposes "echo": both
+    # qualify to "a__b__echo", and split_qualified_name would route a call to
+    # server "a". The bridge must reject the ambiguous catalog instead of
+    # emitting colliding names or misrouting the call.
+    capsys.readouterr()
+    assert cli.main(["mcp", "pi-bridge", "discover", "--target", str(tmp_path), "--json"]) == 1
+    payload = _payload(capsys)
+    assert payload["errors"]
+    assert any("a__b" in error for error in payload["errors"])
+
+    capsys.readouterr()
+    assert (
+        cli.main(
+            [
+                "mcp",
+                "pi-bridge",
+                "call",
+                "--target",
+                str(tmp_path),
+                "--tool",
+                "a__b__echo",
+                "--args-json",
+                "{}",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    payload = _payload(capsys)
+    assert payload["error"] is True
+    assert payload["failure_class"] == "catalog_error"
+
+
 def test_call_failure_preserves_server_and_tool_identity(tmp_path, capsys):
     script = _script(tmp_path, "fail.py", FAILING_TOOL_STDIO)
     _seed_catalog_stdio(tmp_path, {"broken": script})
@@ -205,6 +327,36 @@ def test_call_failure_preserves_server_and_tool_identity(tmp_path, capsys):
     assert payload["tool"] == "boom"
     assert payload["qualified_name"] == "broken__boom"
     assert "tool exploded" in payload["message"]
+
+
+def test_call_result_failure_preserves_server_and_tool_identity(tmp_path, capsys):
+    script = _script(tmp_path, "result_error.py", RESULT_ERROR_TOOL_STDIO)
+    _seed_catalog_stdio(tmp_path, {"broken": script})
+
+    capsys.readouterr()
+    assert (
+        cli.main(
+            [
+                "mcp",
+                "pi-bridge",
+                "call",
+                "--target",
+                str(tmp_path),
+                "--tool",
+                "broken__boom",
+                "--args-json",
+                "{}",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    payload = _payload(capsys)
+    assert payload["error"] is True
+    assert payload["server"] == "broken"
+    assert payload["tool"] == "boom"
+    assert payload["qualified_name"] == "broken__boom"
+    assert "tool reported failure" in payload["message"]
 
 
 def test_call_success_returns_structured_result(tmp_path, capsys):
@@ -252,12 +404,34 @@ def test_install_is_idempotent_and_writes_receipt(tmp_path, monkeypatch, capsys)
     assert state.is_file()
     assert first["ready"] is True
     assert "node:child_process" in extension.read_text()
+    receipt = json.loads(state.read_text())
+    assert receipt["files"] == {
+        pi_mcp_cmd.EXTENSION_REL: hashlib.sha256(extension.read_bytes()).hexdigest(),
+        pi_mcp_cmd.CATALOG_PROJECTION_REL: hashlib.sha256(projection.read_bytes()).hexdigest(),
+    }
 
     capsys.readouterr()
     assert cli.main(["mcp", "pi-bridge", "install", "--target", str(tmp_path), "--write", "--json"]) == 0
     second = _payload(capsys)
     assert second["files_written"] == []
     assert all(item["status"] == "current" for item in second["items"])
+
+
+def test_install_rejects_ambiguous_server_names(tmp_path, monkeypatch, capsys):
+    _use_pi_home(monkeypatch, tmp_path)
+    script = _script(tmp_path, "stdio.py", DUAL_TOOL_STDIO)
+    _seed_catalog_stdio(tmp_path, {"a": script, "a__b": script})
+
+    capsys.readouterr()
+    assert cli.main(["mcp", "pi-bridge", "install", "--target", str(tmp_path), "--write", "--json"]) == 1
+    payload = _payload(capsys)
+    assert payload["ready"] is False
+    assert any("a__b" in error for error in payload["catalog_errors"])
+    assert payload["files_written"] == []
+    agent = tmp_path / ".pi" / "agent"
+    assert not (agent / "extensions" / "brigade-mcp-bridge.js").exists()
+    assert not (agent / "brigade" / "catalog-projection.json").exists()
+    assert not (agent / "brigade" / "install-state.json").exists()
 
 
 def test_uninstall_removes_only_managed_artifacts(tmp_path, monkeypatch, capsys):
@@ -277,7 +451,9 @@ def test_uninstall_removes_only_managed_artifacts(tmp_path, monkeypatch, capsys)
     assert str(agent / "extensions" / "brigade-mcp-bridge.js") in removed
     assert str(agent / "brigade" / "catalog-projection.json") in removed
     assert not (agent / "extensions" / "brigade-mcp-bridge.js").exists()
+    assert not (agent / "brigade" / "catalog-projection.json").exists()
     assert not (agent / "brigade" / "install-state.json").exists()
+    assert not (agent / "brigade").exists()
     assert foreign.is_file()
 
 
@@ -302,6 +478,9 @@ def test_extension_generation_uses_node_builtins_only(tmp_path, monkeypatch):
     assert pi_mcp_cmd.install(target=tmp_path, write=True, json_output=True) == 0
     text = (tmp_path / ".pi" / "agent" / "extensions" / "brigade-mcp-bridge.js").read_text()
     assert "node:child_process" in text
+    imports = re.findall(r"""from\s+["']([^"']+)["']""", text)
+    assert imports
+    assert all(module.startswith("node:") for module in imports)
     assert "require(" not in text
     assert 'from "typebox"' not in text
     assert "from 'typebox'" not in text
