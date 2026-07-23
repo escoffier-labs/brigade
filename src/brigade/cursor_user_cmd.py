@@ -124,8 +124,6 @@ def _desired_files(root: Path) -> dict[Path, tuple[str, bool, str]]:
     return desired
 
 
-<<<<<<< HEAD
-=======
 def cursor_generated_files(root: Path) -> dict[Path, tuple[str, bool, str]]:
     """Return only the Brigade-generated Cursor surfaces: plugin, rule, hook.
 
@@ -289,7 +287,6 @@ def migrate_v1_state(*, root: Path, workspace: Path, state: dict[str, Any]) -> C
     )
 
 
->>>>>>> ba8e21f (test(harness): cover user profile lifecycle)
 def _state_path(root: Path) -> Path:
     return root / "brigade" / "install-state.json"
 

@@ -358,8 +358,6 @@ def load_profile_state(*, state_path: Path, workspace: Path, harness: str) -> Lo
     return LoadedProfileState(state, None)
 
 
-<<<<<<< HEAD
-=======
 @dataclass(frozen=True)
 class LoadedCursorProfileState:
     """Result of loading a Cursor profile ownership state, with optional migration.
@@ -434,7 +432,6 @@ def load_cursor_profile_state(
     return LoadedCursorProfileState(loaded.state, loaded.error, None, (), ())
 
 
->>>>>>> ba8e21f (test(harness): cover user profile lifecycle)
 def _validate_skill_id(skill_id: str) -> None:
     if not skill_id or skill_id == "." or skill_id.startswith("/"):
         raise ValueError(_SKILLS_OUTSIDE_ROOT)

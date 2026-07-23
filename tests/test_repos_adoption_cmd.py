@@ -153,8 +153,6 @@ def test_adoption_report_distinguishes_all_fleet_states(tmp_path, monkeypatch, c
     assert cursor_user_cmd.install(write=True, json_output=True) == 0
     capsys.readouterr()
 
-<<<<<<< HEAD
-=======
     # Cursor readiness requires schema-v2 generated ownership and a separately
     # registry-projected brigade-work package.
     from brigade import harness_profile_cmd
@@ -177,7 +175,6 @@ def test_adoption_report_distinguishes_all_fleet_states(tmp_path, monkeypatch, c
     for name in ("SKILL.md", "skill.json", "CHANGELOG.md"):
         (skill_root / name).write_bytes((skill_source / name).read_bytes())
 
->>>>>>> 7d7fab5 (feat(harness): add aggregate user profile CLI)
     repos = [
         ("active", active),
         ("bypassed", bypassed),
