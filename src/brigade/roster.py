@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
+import statistics
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, Protocol
@@ -90,6 +92,13 @@ class RosterCapabilityResolution:
     @property
     def usable(self) -> bool:
         return self.roster.orchestrator in self.roster.agents
+
+
+@dataclass(frozen=True)
+class SeatReceiptStats:
+    sample_count: int
+    median_duration_seconds: float
+    failure_rate: float
 
 
 @dataclass(frozen=True)
@@ -695,3 +704,76 @@ def resolve_capabilities(
         roster=replace(roster, agents=resolved_agents),
         report=tuple(report),
     )
+
+
+def _worker_result_failed(row: dict[str, object]) -> bool:
+    ok = row.get("ok")
+    if ok is False:
+        return True
+    if ok is True:
+        return False
+    status = row.get("status")
+    if isinstance(status, str):
+        normalized = status.strip().lower()
+        if normalized in {"failed", "error", "fail", "failure"}:
+            return True
+        if normalized in {"ok", "success", "passed", "complete", "completed"}:
+            return False
+    exit_code = row.get("exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
+        return True
+    return False
+
+
+def collect_seat_receipt_stats(runs_root: Path) -> dict[str, SeatReceiptStats]:
+    """Aggregate per-seat worker receipt durations and failure rates from local runs."""
+
+    runs_root = runs_root.expanduser()
+    if not runs_root.is_dir():
+        return {}
+
+    durations: dict[str, list[float]] = {}
+    samples: dict[str, int] = {}
+    failures: dict[str, int] = {}
+
+    for run_dir in sorted(runs_root.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        path = run_dir / "worker-results.json"
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        results = payload.get("results")
+        if not isinstance(results, list):
+            continue
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+            seat = row.get("worker")
+            if not isinstance(seat, str) or not seat.strip():
+                continue
+            seat_name = seat.strip()
+            samples[seat_name] = samples.get(seat_name, 0) + 1
+            if _worker_result_failed(row):
+                failures[seat_name] = failures.get(seat_name, 0) + 1
+            duration = row.get("duration_seconds")
+            if not isinstance(duration, (int, float)) or isinstance(duration, bool):
+                continue
+            durations.setdefault(seat_name, []).append(float(duration))
+
+    stats: dict[str, SeatReceiptStats] = {}
+    for seat_name, seat_durations in durations.items():
+        sample_count = samples[seat_name]
+        if sample_count <= 0:
+            continue
+        stats[seat_name] = SeatReceiptStats(
+            sample_count=sample_count,
+            median_duration_seconds=float(statistics.median(seat_durations)),
+            failure_rate=failures.get(seat_name, 0) / sample_count,
+        )
+    return stats
