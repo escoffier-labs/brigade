@@ -350,11 +350,24 @@ def _exchange(
     return _exchange_stdio(server, messages, timeout=timeout)
 
 
+def qualified_name_errors(servers: dict[str, CanonicalServer]) -> list[str]:
+    ambiguous = [name for name in sorted(servers) if QUALIFIED_SEPARATOR in name]
+    return [
+        f"MCP server name {name!r} contains reserved separator {QUALIFIED_SEPARATOR!r}: "
+        "the Pi bridge cannot qualify its tools unambiguously"
+        for name in ambiguous
+    ]
+
+
 def enabled_servers(target: Path) -> tuple[dict[str, CanonicalServer], list[str]]:
     servers, errors, _warnings = mcp_cmd.load_canonical(target)
     if errors:
         return {}, errors
-    return {name: server for name, server in servers.items() if server.enabled}, []
+    enabled = {name: server for name, server in servers.items() if server.enabled}
+    errors = qualified_name_errors(enabled)
+    if errors:
+        return {}, errors
+    return enabled, []
 
 
 def list_server_tools(
@@ -429,6 +442,23 @@ def call_server_tool(
             tool_name,
             message="missing JSON-RPC result object",
             failure_class="protocol_failure",
+        )
+    if result.get("isError") is True:
+        content = result.get("content")
+        messages = (
+            [
+                str(item["text"])
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text" and item.get("text")
+            ]
+            if isinstance(content, list)
+            else []
+        )
+        return None, _tool_error(
+            server,
+            tool_name,
+            message="\n".join(messages) or "MCP tool reported an error",
+            failure_class="tool_failure",
         )
     return result, None
 

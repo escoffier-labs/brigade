@@ -45,6 +45,7 @@ def _extension_source() -> str:
 def _catalog_projection(target: Path) -> dict[str, Any]:
     servers, errors, warnings = mcp_cmd.load_canonical(target)
     enabled = {name: server for name, server in servers.items() if server.enabled}
+    errors.extend(pi_mcp_bridge.qualified_name_errors(enabled))
     return {
         "target": str(target.resolve()),
         "catalog_fingerprint": _digest_value(
@@ -187,6 +188,7 @@ def install(*, target: Path, write: bool = False, json_output: bool = False) -> 
     state = _load_state(root)
     desired_files = _desired_files(root, target)
     items = [_file_item(root, path, text, surface, state) for path, (text, surface) in desired_files.items()]
+    catalog_errors = _catalog_projection(target).get("errors") or []
     state_error = state.get("_read_error")
     if state_error:
         items.append(
@@ -199,7 +201,7 @@ def install(*, target: Path, write: bool = False, json_output: bool = False) -> 
             }
         )
     files_written: list[str] = []
-    if write and not state_error:
+    if write and not state_error and not catalog_errors:
         next_state: dict[str, Any] = {
             "version": STATE_VERSION,
             "package_version": __version__,
@@ -219,7 +221,6 @@ def install(*, target: Path, write: bool = False, json_output: bool = False) -> 
             files_written.append(str(state_path))
 
     conflicts = [item for item in items if item["status"] == "conflict"]
-    catalog_errors = _catalog_projection(target).get("errors") or []
     payload = {
         "schema_version": 1,
         "operation": "install",
