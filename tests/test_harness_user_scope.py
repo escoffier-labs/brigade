@@ -297,8 +297,9 @@ def test_target_all_preflights_both_profiles_before_any_write(tmp_path, monkeypa
 
     assert cli.main(command + ["--write", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
-    assert [result["harness"] for result in payload["results"]] == ["claude", "codex"]
-    assert payload["results"][1]["status"] == "conflict"
+    assert [result["harness"] for result in payload["results"]] == list(harness_profiles.USER_SCOPE_HARNESS_IDS)
+    codex = next(result for result in payload["results"] if result["harness"] == "codex")
+    assert codex["status"] == "conflict"
     assert _file_snapshot(home) == before
 
 

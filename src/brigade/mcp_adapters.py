@@ -1010,6 +1010,27 @@ ADAPTERS: dict[str, McpAdapter] = {
         user_scope=True,
         reject_invalid_existing=True,
     ),
+    # Kimi Code: mcpServers JSON. The static path is the legacy root; the user
+    # profile layer overrides it when the capability probe selects ~/.kimi.
+    "kimi-user": _make_json_mcpservers(
+        "kimi-user",
+        "~/.kimi-code/mcp.json",
+        user_scope=True,
+        reject_invalid_existing=True,
+    ),
+    "opencode-user": McpAdapter(
+        harness="opencode-user",
+        path="~/.config/opencode/opencode.json",
+        fmt="json",
+        top_key="mcp",
+        user_scope=True,
+        supports_remote=True,
+        env_style="expand",
+        to_provider=_opencode_to_provider,
+        from_provider=_opencode_from_provider,
+        read_file=lambda t: _json_read_file(t, "mcp"),
+        write_file=lambda t, o, r: _json_write_file(t, o, r, "mcp"),
+    ),
     "codex-user": McpAdapter(
         harness="codex-user",
         path="~/.codex/config.toml",

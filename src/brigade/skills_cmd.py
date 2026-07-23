@@ -1174,7 +1174,7 @@ class UserProfileSkillPackage:
 
 _USER_PROFILE_MAX_FILES = 512
 _USER_PROFILE_MAX_BYTES = 8 * 1024 * 1024
-_USER_PROFILE_HARNESSES = {"claude", "codex"}
+_USER_PROFILE_HARNESSES = {"claude", "codex", "openclaw", "kimi", "grok", "cursor", "opencode"}
 
 
 def _user_profile_read_package_files(skill_dir: Path) -> dict[str, bytes] | None:

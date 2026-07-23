@@ -15,8 +15,9 @@ from . import harness_profiles, localio, mcp_adapters, mcp_cmd, skills_cmd
 from .toml_compat import TOMLDecodeError as _TOMLDecodeError
 from .toml_compat import loads as _toml_loads
 
-_RECOVERY_COMMAND = "brigade harness sync --target <claude|codex> --scope user --adopt --write"
+_RECOVERY_COMMAND = "brigade harness sync --target <harness> --scope user --adopt --write"
 _SECTIONS = ("instructions", "skills", "generated", "mcp")
+_HOOK_STATE_KEY = "hooks.json#sessionStart"
 
 
 @dataclass(frozen=True)
@@ -191,6 +192,68 @@ def plan_instruction_removal(*, path: Path, state: dict[str, Any]) -> SurfacePla
     return SurfacePlan("instruction", path, "conflict", "preserve", detail="owned instruction block was edited")
 
 
+def plan_managed_instruction(*, path: Path, desired: str, state: dict[str, Any], adopt: bool = False) -> SurfacePlan:
+    """Whole-file owned instruction surface (no marked block, e.g. a managed rule file)."""
+    instruction_state = state.get("instructions", {}) if isinstance(state.get("instructions"), dict) else {}
+    owned = instruction_state.get("digest")
+    desired_digest = digest_text(desired)
+    if not path.exists():
+        return SurfacePlan("instruction", path, "missing", "create", desired_digest, desired)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return SurfacePlan("instruction", path, "conflict", "preserve", detail=str(exc))
+    live_digest = digest_text(text)
+    if live_digest == desired_digest:
+        if owned == live_digest:
+            return SurfacePlan("instruction", path, "current", "none", desired_digest)
+        if adopt:
+            return SurfacePlan("instruction", path, "adopted", "none", desired_digest)
+        return SurfacePlan(
+            "instruction",
+            path,
+            "conflict",
+            "preserve",
+            desired_digest,
+            detail=f"matching managed instruction file is unowned; recover with: {_RECOVERY_COMMAND}",
+        )
+    if owned == live_digest or adopt:
+        return SurfacePlan("instruction", path, "stale", "update", desired_digest, desired)
+    return SurfacePlan(
+        "instruction",
+        path,
+        "conflict",
+        "preserve",
+        detail=f"foreign managed instruction file; recover with: {_RECOVERY_COMMAND}",
+    )
+
+
+def plan_managed_instruction_removal(*, path: Path, state: dict[str, Any]) -> SurfacePlan:
+    if not path.exists():
+        return SurfacePlan("instruction", path, "absent", "none")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return SurfacePlan("instruction", path, "conflict", "preserve", detail=str(exc))
+    instruction_state = state.get("instructions", {}) if isinstance(state.get("instructions"), dict) else {}
+    if instruction_state.get("digest") == digest_text(text):
+        return SurfacePlan("instruction", path, "managed", "remove")
+    return SurfacePlan("instruction", path, "conflict", "preserve", detail="owned instruction file was edited")
+
+
+def _instruction_plan(profile, state: dict[str, Any], *, adopt: bool) -> SurfacePlan:
+    desired = profile.instruction_text or harness_profiles.managed_instruction_text()
+    if profile.instruction_mode == "managed-file":
+        return plan_managed_instruction(path=profile.instruction_path, desired=desired, state=state, adopt=adopt)
+    return plan_instruction(path=profile.instruction_path, desired=desired, state=state, adopt=adopt)
+
+
+def _instruction_removal_plan(profile, state: dict[str, Any]) -> SurfacePlan:
+    if profile.instruction_mode == "managed-file":
+        return plan_managed_instruction_removal(path=profile.instruction_path, state=state)
+    return plan_instruction_removal(path=profile.instruction_path, state=state)
+
+
 def _lstat_conflict(path: Path, *, directory: bool) -> str | None:
     """Reject symlinks and non-directories before native skill writes.
 
@@ -213,17 +276,26 @@ def _lstat_conflict(path: Path, *, directory: bool) -> str | None:
     return None
 
 
+def _mcp_config_path(profile, workspace: Path) -> Path:
+    if profile.mcp_path is not None:
+        return profile.mcp_path
+    return mcp_adapters.resolve_path(mcp_adapters.ADAPTERS[profile.mcp_harness], workspace)
+
+
 def _native_surface_conflicts(profile, workspace: Path) -> list[dict[str, Any]]:
     """Reject symlinked profile surfaces before reading or mutating them."""
-    mcp_path = mcp_adapters.resolve_path(mcp_adapters.ADAPTERS[profile.mcp_harness], workspace)
-    surfaces = (
+    mcp_path = _mcp_config_path(profile, workspace)
+    surfaces = [
         ("profile-root", profile.user_root, True),
         ("instruction", profile.instruction_path, False),
         ("profile-directory", profile.state_path.parent, True),
         ("ownership-state", profile.state_path, False),
         ("profile-receipt", profile.receipt_path, False),
         ("mcp", mcp_path, False),
-    )
+    ]
+    surfaces.extend(("generated", profile.user_root / generated.relative, False) for generated in profile.generated)
+    if profile.hook is not None:
+        surfaces.append(("hook", profile.hook.path, False))
     conflicts: list[dict[str, Any]] = []
     for surface, path, directory in surfaces:
         error = _lstat_conflict(path, directory=directory)
@@ -434,6 +506,235 @@ def _skill_uninstall_plan(profile, state: dict[str, Any]) -> dict[str, Any]:
     return {"items": items, "conflicts": conflicts, "removes": removes, "prune": sorted(set(prune), reverse=True)}
 
 
+def _missing_directories(root: Path, path: Path) -> list[str]:
+    missing: list[str] = []
+    cursor = path.parent
+    while cursor != root and not cursor.exists():
+        missing.append(str(cursor))
+        cursor = cursor.parent
+    return list(reversed(missing))
+
+
+def _generated_destination(profile, relative: str) -> tuple[Path | None, str | None]:
+    parts = Path(relative).parts
+    if not relative or relative.startswith("/") or ".." in parts:
+        return None, "unsafe generated file path"
+    destination = profile.user_root / relative
+    candidates = [profile.user_root]
+    cursor = profile.user_root
+    for component in destination.relative_to(profile.user_root).parts[:-1]:
+        cursor = cursor / component
+        candidates.append(cursor)
+    for ancestor in candidates:
+        error = _lstat_conflict(ancestor, directory=True)
+        if error:
+            return None, error
+    error = _lstat_conflict(destination, directory=False)
+    return (None, error) if error else (destination, None)
+
+
+def _generated_plans(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
+    """Plan whole-file Brigade-owned generated artifacts (plugin manifests, hook scripts)."""
+    items: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    writes: list[tuple[Path, str, bool, str]] = []
+    removes: list[Path] = []
+    prune: list[Path] = []
+    records = state["generated"]
+    desired = {generated.relative: generated for generated in profile.generated}
+    next_records: dict[str, dict[str, Any]] = {}
+    for generated in profile.generated:
+        record = records.get(generated.relative)
+        record = record if isinstance(record, dict) else {}
+        desired_digest = digest_text(generated.text)
+        path, error = _generated_destination(profile, generated.relative)
+        item = {"surface": "generated", "path": str(path or (profile.user_root / generated.relative))}
+        if error or path is None:
+            item.update(status="conflict", action="preserve", detail=error or "unsafe generated destination")
+            conflicts.append(item)
+        elif not path.exists():
+            item.update(status="missing", action="create")
+            writes.append((path, generated.text, generated.executable, generated.relative))
+        else:
+            try:
+                live_digest = digest_text(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as exc:
+                item.update(status="conflict", action="preserve", detail=str(exc))
+                conflicts.append(item)
+                items.append(item)
+                next_records[generated.relative] = record
+                continue
+            if live_digest == desired_digest:
+                if record.get("digest") == live_digest:
+                    item.update(status="current", action="none")
+                elif adopt:
+                    item.update(status="adopted", action="none")
+                else:
+                    item.update(status="conflict", action="preserve", detail="matching generated file is unowned")
+                    conflicts.append(item)
+            elif record.get("digest") == live_digest or adopt:
+                item.update(status="stale", action="update")
+                writes.append((path, generated.text, generated.executable, generated.relative))
+            else:
+                item.update(status="conflict", action="preserve", detail="owned generated file was edited")
+                conflicts.append(item)
+        items.append(item)
+        next_records[generated.relative] = {
+            "digest": desired_digest,
+            "created_directories": list(record.get("created_directories", [])),
+        }
+    for relative, record in sorted(records.items()):
+        if relative == _HOOK_STATE_KEY or relative in desired:
+            continue
+        item = {"surface": "generated", "path": str(profile.user_root / relative)}
+        if not isinstance(record, dict) or not isinstance(record.get("digest"), str):
+            item.update(status="conflict", action="preserve", detail="generated ownership record is malformed")
+            conflicts.append(item)
+        else:
+            path, error = _generated_destination(profile, relative)
+            if error or path is None:
+                item.update(status="conflict", action="preserve", detail=error or "unsafe generated destination")
+                conflicts.append(item)
+            elif not path.exists():
+                item.update(status="absent", action="remove")
+            elif digest_text(path.read_text(encoding="utf-8")) == record["digest"]:
+                item.update(status="removed-profile", action="remove")
+                removes.append(path)
+            else:
+                item.update(status="conflict", action="preserve", detail="removed-profile generated file was edited")
+                conflicts.append(item)
+        if isinstance(record, dict):
+            prune.extend(Path(path) for path in record.get("created_directories", []) if isinstance(path, str))
+        items.append(item)
+    return {
+        "items": items,
+        "conflicts": conflicts,
+        "writes": writes,
+        "removes": removes,
+        "next": next_records,
+        "prune": sorted(set(prune), reverse=True),
+    }
+
+
+def _generated_uninstall_plan(profile, state: dict[str, Any]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    removes: list[Path] = []
+    prune: list[Path] = []
+    for relative, record in sorted(state["generated"].items()):
+        if relative == _HOOK_STATE_KEY:
+            continue
+        item = {"surface": "generated", "path": str(profile.user_root / relative)}
+        if not isinstance(record, dict) or not isinstance(record.get("digest"), str):
+            item.update(status="conflict", action="preserve", detail="generated ownership record is malformed")
+            conflicts.append(item)
+        else:
+            path, error = _generated_destination(profile, relative)
+            if error or path is None:
+                item.update(status="conflict", action="preserve", detail=error or "unsafe generated destination")
+                conflicts.append(item)
+            elif not path.exists():
+                item.update(status="absent", action="remove")
+            elif digest_text(path.read_text(encoding="utf-8")) == record["digest"]:
+                item.update(status="managed", action="remove")
+                removes.append(path)
+            else:
+                item.update(status="conflict", action="preserve", detail="owned generated file was edited")
+                conflicts.append(item)
+        if isinstance(record, dict):
+            prune.extend(Path(path) for path in record.get("created_directories", []) if isinstance(path, str))
+        items.append(item)
+    return {"items": items, "conflicts": conflicts, "removes": removes, "prune": sorted(set(prune), reverse=True)}
+
+
+def _hook_plan(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
+    """Plan one Brigade-managed entry inside a co-owned JSON hook config."""
+    from . import cursor_user_cmd
+
+    hook = profile.hook
+    path = hook.path
+    record = state["generated"].get(_HOOK_STATE_KEY)
+    record = record if isinstance(record, dict) else {}
+    desired_fp = cursor_user_cmd._digest_value(hook.entry)
+    empty: dict[str, Any] = {"items": [], "conflicts": [], "doc": None, "next": record}
+    doc, error = cursor_user_cmd._read_json_object(path)
+    item: dict[str, Any] = {"surface": "hook", "path": str(path), "name": "sessionStart"}
+    if doc is None:
+        item.update(status="conflict", action="preserve", detail=error or "could not read hook configuration")
+        return {**empty, "items": [item], "conflicts": [item]}
+    hooks = doc.get("hooks")
+    if hooks is not None and not isinstance(hooks, dict):
+        item.update(status="conflict", action="preserve", detail="existing hooks field must be an object")
+        return {**empty, "items": [item], "conflicts": [item]}
+    entries = hooks.get("sessionStart") if isinstance(hooks, dict) else None
+    if entries is not None and not isinstance(entries, list):
+        item.update(status="conflict", action="preserve", detail="existing sessionStart hooks must be a list")
+        return {**empty, "items": [item], "conflicts": [item]}
+    entries = entries if isinstance(entries, list) else []
+    conflicts: list[dict[str, Any]] = []
+    if hook.entry in entries:
+        if record.get("entry_fingerprint") == desired_fp:
+            item.update(status="current", action="none")
+        elif adopt:
+            item.update(status="adopted", action="none")
+        else:
+            item.update(
+                status="conflict",
+                action="preserve",
+                detail="matching hook entry is unowned; rerun with --adopt",
+            )
+            conflicts.append(item)
+    else:
+        prior_fp = record.get("entry_fingerprint")
+        prior_index = next(
+            (
+                index
+                for index, entry in enumerate(entries)
+                if prior_fp and cursor_user_cmd._digest_value(entry) == prior_fp
+            ),
+            None,
+        )
+        if prior_index is not None:
+            item.update(status="stale", action="update", prior_index=prior_index)
+        else:
+            item.update(status="missing", action="create")
+    return {
+        "items": [item],
+        "conflicts": conflicts,
+        "doc": doc,
+        "next": {"entry_fingerprint": desired_fp},
+    }
+
+
+def _hook_uninstall_plan(profile, state: dict[str, Any]) -> dict[str, Any]:
+    from . import cursor_user_cmd
+
+    hook = profile.hook
+    path = hook.path
+    record = state["generated"].get(_HOOK_STATE_KEY)
+    fingerprint = record.get("entry_fingerprint") if isinstance(record, dict) else None
+    if not fingerprint:
+        return {"items": [], "conflicts": [], "doc": None, "index": None}
+    doc, error = cursor_user_cmd._read_json_object(path)
+    item: dict[str, Any] = {"surface": "hook", "path": str(path), "name": "sessionStart"}
+    entries: Any = None
+    if doc is not None and isinstance(doc.get("hooks"), dict):
+        entries = doc["hooks"].get("sessionStart")
+    index = (
+        next((i for i, entry in enumerate(entries) if cursor_user_cmd._digest_value(entry) == fingerprint), None)
+        if isinstance(entries, list)
+        else None
+    )
+    if index is not None:
+        item.update(status="managed", action="remove")
+        return {"items": [item], "conflicts": [], "doc": doc, "index": index}
+    if not path.exists():
+        item.update(status="absent", action="none")
+        return {"items": [item], "conflicts": [], "doc": None, "index": None}
+    item.update(status="conflict", action="preserve", detail=error or "managed hook entry was edited or removed")
+    return {"items": [item], "conflicts": [item], "doc": None, "index": None}
+
+
 def _malformed_native_config(adapter, text: str | None) -> str | None:
     if text is None:
         return None
@@ -457,7 +758,7 @@ def _mcp_plan(
     profile, state: dict[str, Any], workspace: Path, *, allow_global_stdio: bool, adopt: bool
 ) -> dict[str, Any]:
     adapter = mcp_adapters.ADAPTERS[profile.mcp_harness]
-    path = mcp_adapters.resolve_path(adapter, workspace)
+    path = profile.mcp_path or mcp_adapters.resolve_path(adapter, workspace)
     servers, errors, _warnings = mcp_cmd.load_canonical(workspace)
     if errors:
         # A workspace need not opt into project MCP at all.  Existing owned
@@ -608,7 +909,7 @@ def _mcp_plan(
 
 def _mcp_uninstall_plan(profile, state: dict[str, Any], workspace: Path) -> dict[str, Any]:
     adapter = mcp_adapters.ADAPTERS[profile.mcp_harness]
-    path = mcp_adapters.resolve_path(adapter, workspace)
+    path = profile.mcp_path or mcp_adapters.resolve_path(adapter, workspace)
     items: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
     if not state["mcp"]:
@@ -645,7 +946,7 @@ def _mcp_uninstall_plan(profile, state: dict[str, Any], workspace: Path) -> dict
 
 def _verify_mcp(profile, state: dict[str, Any], workspace: Path) -> tuple[dict[str, Any], bool]:
     adapter = mcp_adapters.ADAPTERS[profile.mcp_harness]
-    path = mcp_adapters.resolve_path(adapter, workspace)
+    path = profile.mcp_path or mcp_adapters.resolve_path(adapter, workspace)
     items: list[dict[str, Any]] = []
     if not state["mcp"]:
         return {"status": "ready", "items": items}, True
@@ -726,6 +1027,11 @@ def _receipt_ownership(state: dict[str, Any]) -> dict[str, Any]:
     return {
         "instruction_fingerprint": state.get("instructions", {}).get("digest"),
         "skills": state.get("skills", {}),
+        "generated_fingerprints": {
+            name: record.get("digest") or record.get("entry_fingerprint")
+            for name, record in sorted(state.get("generated", {}).items())
+            if isinstance(record, dict)
+        },
         "mcp_fingerprints": {
             name: record.get("projected_fingerprint")
             for name, record in sorted(state["mcp"].items())
@@ -853,9 +1159,7 @@ def _sync_profile(
         ), False
     state = json.loads(json.dumps(loaded.state))
     instruction_existed = profile.instruction_path.exists()
-    instruction = plan_instruction(
-        path=profile.instruction_path, desired=harness_profiles.managed_instruction_text(), state=state, adopt=adopt
-    )
+    instruction = _instruction_plan(profile, state, adopt=adopt)
     items = [
         {
             "surface": "instruction",
@@ -872,6 +1176,13 @@ def _sync_profile(
     skill_plan = _skill_plans(profile, state, workspace)
     items.extend(skill_plan["items"])
     conflicts.extend(skill_plan["conflicts"])
+    generated_plan = _generated_plans(profile, state, adopt=adopt)
+    items.extend(generated_plan["items"])
+    conflicts.extend(generated_plan["conflicts"])
+    hook_plan = _hook_plan(profile, state, adopt=adopt) if profile.hook is not None else None
+    if hook_plan is not None:
+        items.extend(hook_plan["items"])
+        conflicts.extend(hook_plan["conflicts"])
     mcp_plan = _mcp_plan(profile, state, workspace, allow_global_stdio=allow_global_stdio, adopt=adopt)
     items.extend(mcp_plan["items"])
     conflicts.extend(mcp_plan["conflicts"])
@@ -883,10 +1194,20 @@ def _sync_profile(
             if isinstance(old_instruction, dict)
             else not instruction_existed
         )
-        proposed["instructions"] = (
-            {"digest": instruction.desired_digest, "created_file": created_file} if instruction.desired_digest else {}
-        )
+        if instruction.desired_digest:
+            instruction_record: dict[str, Any] = {
+                "digest": instruction.desired_digest,
+                "created_file": created_file,
+            }
+            if isinstance(old_instruction, dict) and old_instruction.get("created_directories"):
+                instruction_record["created_directories"] = list(old_instruction["created_directories"])
+            proposed["instructions"] = instruction_record
+        else:
+            proposed["instructions"] = {}
     proposed["skills"] = skill_plan["next"]
+    proposed["generated"] = generated_plan["next"]
+    if hook_plan is not None:
+        proposed["generated"][_HOOK_STATE_KEY] = hook_plan["next"]
     proposed["mcp"] = mcp_plan["next"]
     proposed["package_version"] = BRIGADE_VERSION
     state_item = _state_item(profile.state_path, before=state, after=proposed)
@@ -898,9 +1219,17 @@ def _sync_profile(
     if write and ready:
         changed = False
         if instruction.action in {"create", "update"}:
+            instruction_dirs = (
+                _missing_directories(profile.user_root, instruction.path)
+                if profile.instruction_mode == "managed-file"
+                else []
+            )
             localio.write_text_atomic(instruction.path, instruction.rendered or "")
             files_written.append(str(instruction.path))
             changed = True
+            if profile.instruction_mode == "managed-file":
+                existing_dirs = proposed["instructions"].get("created_directories", [])
+                proposed["instructions"]["created_directories"] = sorted(set(existing_dirs) | set(instruction_dirs))
         created_dirs: dict[str, list[str]] = {}
         for path, data, skill_id, _relative in skill_plan["writes"]:
             created_dirs.setdefault(skill_id, []).extend(_missing_skill_directories(profile, path))
@@ -914,6 +1243,36 @@ def _sync_profile(
             path.unlink()
             files_removed.append(str(path))
             changed = True
+        generated_dirs: dict[str, list[str]] = {}
+        for path, text, executable, relative in generated_plan["writes"]:
+            generated_dirs.setdefault(relative, []).extend(_missing_directories(profile.user_root, path))
+            localio.write_text_atomic(path, text)
+            if executable:
+                path.chmod(path.stat().st_mode | 0o755)
+            files_written.append(str(path))
+            changed = True
+        for relative, directories in generated_dirs.items():
+            existing = proposed["generated"][relative].setdefault("created_directories", [])
+            proposed["generated"][relative]["created_directories"] = sorted(set(existing) | set(directories))
+        for path in generated_plan["removes"]:
+            path.unlink()
+            files_removed.append(str(path))
+            changed = True
+        files_removed.extend(_prune_created_directories(generated_plan["prune"], profile.user_root))
+        if hook_plan is not None:
+            hook_item = hook_plan["items"][0]
+            if hook_item["action"] in {"create", "update"}:
+                from . import cursor_user_cmd
+
+                hook_doc = hook_plan["doc"] if hook_plan["doc"] is not None else {}
+                entries = hook_doc.setdefault("hooks", {}).setdefault("sessionStart", [])
+                if hook_item["action"] == "create":
+                    entries.append(profile.hook.entry)
+                else:
+                    entries[hook_item["prior_index"]] = profile.hook.entry
+                localio.write_text_atomic(profile.hook.path, cursor_user_cmd._coowned_json_text(hook_doc))
+                files_written.append(str(profile.hook.path))
+                changed = True
         if mcp_plan["updates"] or mcp_plan["remove"]:
             localio.write_text_atomic(
                 mcp_plan["path"],
@@ -996,18 +1355,26 @@ def _uninstall_profile(profile, workspace: Path, *, write: bool) -> tuple[dict[s
             receipt_path=profile.receipt_path,
             receipt_state="present" if profile.receipt_path.exists() else "missing",
         ), False
-    plan = plan_instruction_removal(path=profile.instruction_path, state=state)
+    plan = _instruction_removal_plan(profile, state)
     items = [{"surface": "instruction", "path": str(plan.path), "status": plan.status, "action": plan.action}]
     conflicts = [] if plan.status != "conflict" else [items[0] | {"detail": plan.detail or "instruction conflict"}]
     skill_plan = _skill_uninstall_plan(profile, state)
     items.extend(skill_plan["items"])
     conflicts.extend(skill_plan["conflicts"])
+    generated_plan = _generated_uninstall_plan(profile, state)
+    items.extend(generated_plan["items"])
+    conflicts.extend(generated_plan["conflicts"])
+    hook_plan = _hook_uninstall_plan(profile, state) if profile.hook is not None else None
+    if hook_plan is not None:
+        items.extend(hook_plan["items"])
+        conflicts.extend(hook_plan["conflicts"])
     mcp_plan = _mcp_uninstall_plan(profile, state, workspace)
     items.extend(mcp_plan["items"])
     conflicts.extend(mcp_plan["conflicts"])
     proposed = json.loads(json.dumps(state))
     proposed["instructions"] = {}
     proposed["skills"] = {}
+    proposed["generated"] = {}
     proposed["mcp"] = {}
     state_item = _state_item(profile.state_path, before=state, after=proposed, remove=True)
     receipt_item = _receipt_item(profile.receipt_path, state_action=state_item["action"], remove=True)
@@ -1021,10 +1388,30 @@ def _uninstall_profile(profile, workspace: Path, *, write: bool) -> tuple[dict[s
             else:
                 localio.write_text_atomic(plan.path, plan.rendered)
             files_removed.append(str(plan.path))
+        instruction_dirs = state.get("instructions", {})
+        instruction_dirs = (
+            [Path(path) for path in instruction_dirs.get("created_directories", []) if isinstance(path, str)]
+            if isinstance(instruction_dirs, dict)
+            else []
+        )
         for path in skill_plan["removes"]:
             path.unlink(missing_ok=True)
             files_removed.append(str(path))
         files_removed.extend(_prune_created_directories(skill_plan["prune"], profile.skills_root))
+        for path in generated_plan["removes"]:
+            path.unlink(missing_ok=True)
+            files_removed.append(str(path))
+        files_removed.extend(_prune_created_directories(instruction_dirs + generated_plan["prune"], profile.user_root))
+        if hook_plan is not None and hook_plan["doc"] is not None and hook_plan["index"] is not None:
+            from . import cursor_user_cmd
+
+            hook_doc = hook_plan["doc"]
+            entries = hook_doc["hooks"]["sessionStart"]
+            entries.pop(hook_plan["index"])
+            if not entries:
+                hook_doc["hooks"].pop("sessionStart", None)
+            localio.write_text_atomic(profile.hook.path, cursor_user_cmd._coowned_json_text(hook_doc))
+            files_removed.append(str(profile.hook.path))
         if mcp_plan["remove"]:
             localio.write_text_atomic(
                 mcp_plan["path"], mcp_plan["adapter"].write_file(mcp_plan["text"], {}, mcp_plan["remove"])
@@ -1077,9 +1464,7 @@ def _doctor_profile(profile, workspace: Path, *, verify_mcp: bool) -> tuple[dict
             receipt_state="missing",
         ), False
     state = loaded.state
-    instruction = plan_instruction(
-        path=profile.instruction_path, desired=harness_profiles.managed_instruction_text(), state=state
-    )
+    instruction = _instruction_plan(profile, state, adopt=False)
     item = {
         "surface": "instruction",
         "path": str(instruction.path),
@@ -1090,13 +1475,21 @@ def _doctor_profile(profile, workspace: Path, *, verify_mcp: bool) -> tuple[dict
     skill_plan = _skill_plans(profile, state, workspace)
     skill_issues = [entry for entry in skill_plan["items"] if entry["status"] != "current"]
     conflicts.extend(skill_issues)
+    generated_plan = _generated_plans(profile, state, adopt=False)
+    generated_issues = [entry for entry in generated_plan["items"] if entry["status"] != "current"]
+    conflicts.extend(generated_issues)
+    hook_items: list[dict[str, Any]] = []
+    if profile.hook is not None:
+        hook_plan = _hook_plan(profile, state, adopt=False)
+        hook_items = hook_plan["items"]
+        conflicts.extend(entry for entry in hook_items if entry["status"] != "current")
     mcp, mcp_ok = _verify_mcp(profile, state, workspace) if verify_mcp else ({"status": "pending", "items": []}, True)
     ready = not conflicts and mcp_ok
     return _result(
         profile,
         status="current" if ready else "conflict",
         ready=ready,
-        items=[item, *skill_plan["items"]],
+        items=[item, *skill_plan["items"], *generated_plan["items"], *hook_items],
         conflicts=conflicts,
         files_written=[],
         files_removed=[],
@@ -1118,7 +1511,7 @@ def _run(
     json_output: bool = False,
     home: Path | None = None,
 ) -> int:
-    profiles = harness_profiles.resolve_slice1_profiles(harness=harness, home=home or Path.home(), workspace=workspace)
+    profiles = harness_profiles.resolve_user_profiles(harness=harness, home=home or Path.home(), workspace=workspace)
 
     def run_profile(profile, *, profile_write: bool) -> tuple[dict[str, Any], bool]:
         if operation == "sync":
