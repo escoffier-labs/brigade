@@ -64,6 +64,8 @@ def test_default_run_does_not_write_deliberation_artifact(monkeypatch, tmp_path)
     assert not (output_dir / "deliberation.json").exists()
     plan = json.loads((output_dir / "plan.json").read_text())
     assert plan.get("mode") is None
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert "deliberation" not in run_meta
 
 
 def test_cli_passes_deliberation_flag_to_aboyeur(tmp_path, monkeypatch):
@@ -108,6 +110,55 @@ def test_mark_duplicate_scopes_flags_later_entries():
     assert marked[0].status == "valid"
     assert marked[1].status == "duplicate"
     assert marked[2].status == "valid"
+
+
+def test_perspective_prompts_embed_distinct_recorded_scopes(monkeypatch, tmp_path):
+    scopes = [
+        _scope("graphtrail-context", "migration"),
+        _scope("graphtrail-callers", "migrate.run"),
+    ]
+    monkeypatch.setattr(deliberation, "derive_evidence_scopes", lambda cwd, task, count=3: scopes)
+    plan = deliberation.build_plan(_roster(), "choose migration", cwd=tmp_path)
+    roster = _roster()
+    prompt_by_worker: dict[str, str] = {}
+    for lens in plan.lenses:
+        if lens.role != "perspective":
+            continue
+        prompt_by_worker[lens.worker] = deliberation.build_worker_prompt(
+            roster.agents[lens.worker],
+            Assignment(worker=lens.worker, task=lens.task, stage=lens.stage),
+            plan=plan,
+            prior_results=None,
+            read_only=False,
+        )
+    assert len(prompt_by_worker) == 2
+    assert len(set(prompt_by_worker.values())) == 2
+    for lens in plan.lenses:
+        if lens.role != "perspective":
+            continue
+        prompt = prompt_by_worker[lens.worker]
+        assert lens.scope.text in prompt
+        for other in plan.lenses:
+            if other.role != "perspective" or other.worker == lens.worker or not other.scope.text:
+                continue
+            assert other.scope.text not in prompt
+
+
+def test_plan_payload_lists_distinct_evidence_scopes(monkeypatch, tmp_path):
+    scopes = [
+        _scope("graphtrail-context", "migration"),
+        _scope("graphtrail-callers", "migrate.run"),
+    ]
+    monkeypatch.setattr(deliberation, "derive_evidence_scopes", lambda cwd, task, count=3: scopes)
+    plan = deliberation.build_plan(_roster(), "choose migration", cwd=tmp_path)
+    payload = deliberation.plan_payload(plan)
+    assert payload["mode"] == "deliberation"
+    evidence_scopes = payload["evidence_scopes"]
+    fingerprints = {(item["kind"], item["reference"]) for item in evidence_scopes}
+    assert len(fingerprints) == len(evidence_scopes) == 2
+    assigned_stage_one = {assignment.worker for assignment in plan.assignments if assignment.stage == 1}
+    invalid_workers = {lens.worker for lens in plan.invalid_lenses}
+    assert not assigned_stage_one & invalid_workers
 
 
 def test_build_plan_records_invalid_role_label_lens(monkeypatch, tmp_path):
@@ -334,6 +385,129 @@ def test_assemble_artifact_marks_unavailable_challenger(monkeypatch, tmp_path):
     assert artifact["challenger"]["status"] == "unavailable"
     assert artifact["recommendation"] == ""
     deliberation.validate_schema(artifact)
+
+
+def test_stage_one_dispatch_prompts_exclude_prior_perspectives(monkeypatch, tmp_path):
+    scopes = [
+        _scope("graphtrail-context", "migration"),
+        _scope("graphtrail-callers", "migrate.run"),
+    ]
+    monkeypatch.setattr(deliberation, "derive_evidence_scopes", lambda cwd, task, count=3: scopes)
+    plan = deliberation.build_plan(_roster(), "choose migration strategy", cwd=tmp_path)
+    captured: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        captured.append(prompt)
+        return agents.AgentResult(
+            text=json.dumps(
+                {
+                    "position": "ok",
+                    "assumptions": [],
+                    "evidence_references": [],
+                    "agreements": [],
+                    "conflicts": [],
+                }
+            ),
+            ok=True,
+        )
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    aboyeur.dispatch(
+        list(plan.assignments),
+        _roster(),
+        build_prompt=deliberation.make_prompt_builder(plan),
+        cwd=tmp_path,
+    )
+    stage_one = [prompt for prompt in captured if "Independent perspectives" not in prompt]
+    stage_two = [prompt for prompt in captured if "Independent perspectives" in prompt]
+    assert len(stage_one) == 2
+    assert len(stage_two) == 1
+
+
+def test_synthesis_context_preserves_dissenting_perspective_positions():
+    artifact = {
+        "recommendation": "pick redis",
+        "confidence": "medium",
+        "minority_report": "sessions remain safer for rollback",
+        "unresolved_conflicts": [],
+        "perspectives": [
+            {
+                "worker": "coder",
+                "position": "use redis",
+                "evidence_scope": {"kind": "graphtrail-context"},
+            },
+            {
+                "worker": "reviewer",
+                "position": "use sessions",
+                "evidence_scope": {"kind": "graphtrail-callers"},
+            },
+        ],
+        "challenger": {"worker": "analyst", "minority_report": "sessions remain safer for rollback"},
+    }
+    context = deliberation.synthesis_context(artifact)
+    assert "use redis" in context
+    assert "use sessions" in context
+    assert "sessions remain safer for rollback" in context
+
+
+def test_deliberation_run_leaves_outcome_ledger_unchanged(monkeypatch, tmp_path):
+    output_dir = tmp_path / "run"
+    memory_dir = tmp_path / "memory" / "outcome"
+    memory_dir.mkdir(parents=True)
+    records_path = memory_dir / "records.jsonl"
+    records_path.write_text('{"artifact_id":"existing"}\n', encoding="utf-8")
+    scopes = [
+        _scope("graphtrail-context", "migration"),
+        _scope("graphtrail-callers", "migrate.run"),
+    ]
+    monkeypatch.setattr(deliberation, "derive_evidence_scopes", lambda cwd, task, count=3: scopes)
+    monkeypatch.setattr(
+        aboyeur,
+        "dispatch",
+        lambda assignments, roster, **kwargs: [
+            WorkerResult(
+                worker=assignment.worker,
+                task=assignment.task,
+                text=json.dumps(
+                    {
+                        "position": f"{assignment.worker} position",
+                        "assumptions": [],
+                        "evidence_references": [],
+                        "agreements": [],
+                        "conflicts": [],
+                    }
+                    if assignment.stage == 1
+                    else {
+                        "attacks": [],
+                        "minority_report": "minority",
+                        "recommendation": "ship",
+                        "confidence": "medium",
+                        "unresolved_conflicts": [],
+                        "agreements": [],
+                    }
+                ),
+                ok=True,
+            )
+            for assignment in assignments
+        ],
+    )
+    monkeypatch.setattr(
+        aboyeur,
+        "_run_orchestrator",
+        lambda roster, prompt, **kwargs: agents.AgentResult(text="final", ok=True),
+    )
+
+    rc = aboyeur.run(
+        "choose migration strategy",
+        _roster(),
+        output_dir=output_dir,
+        cwd=tmp_path,
+        code_graph_enabled=False,
+        route_enabled=False,
+        deliberation=True,
+    )
+    assert rc == 0
+    assert records_path.read_text(encoding="utf-8") == '{"artifact_id":"existing"}\n'
 
 
 def test_deliberation_dispatch_passes_prior_results_to_challenger(monkeypatch, tmp_path):
