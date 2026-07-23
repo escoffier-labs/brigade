@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 
@@ -17,9 +18,12 @@ def test_verify_script_documents_same_fast_gate_as_ci():
     assert "ruff lint, ruff format, mypy, version sync, pytest with coverage" in text
 
 
-def test_root_ruff_configuration_excludes_imported_engines_tree():
+def test_root_ruff_configuration_excludes_non_python_trees():
     text = (ROOT / "pyproject.toml").read_text()
     ruff_config = text.split("[tool.ruff]\n", maxsplit=1)[1].split("\n[tool.ruff.", maxsplit=1)[0]
+    exclude_line = next(line for line in ruff_config.splitlines() if line.startswith("extend-exclude = "))
+    exclusions = ast.literal_eval(exclude_line.partition("=")[2].strip())
 
-    assert 'extend-exclude = ["engines"]' in ruff_config
+    assert "engines" in exclusions
+    assert "*.md" in exclusions
     assert "force-exclude = true" in ruff_config

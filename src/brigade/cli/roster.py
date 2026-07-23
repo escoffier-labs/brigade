@@ -35,6 +35,18 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Path to roster.toml. Defaults to .brigade/roster.toml under --target.",
     )
+    p_roster_suggest = roster_sub.add_parser(
+        "suggest",
+        help="Assemble a preset roster from installed host capabilities.",
+    )
+    p_roster_suggest.add_argument(
+        "--preset",
+        required=True,
+        help="Packaged preset name or path (with or without .toml).",
+    )
+    p_roster_suggest.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_roster_stats = roster_sub.add_parser("stats", help="Summarize per-seat stats from local worker receipts.")
+    p_roster_stats.add_argument("--target", "-t", type=Path, default=Path("."))
     p_roster.set_defaults(func=dispatch)
 
 
@@ -51,5 +63,9 @@ def dispatch(args) -> int:
         )
     if args.roster_command == "doctor":
         return roster_cmd.doctor(target=args.target, roster_path=args.roster)
+    if args.roster_command == "suggest":
+        return roster_cmd.suggest(target=args.target, preset=args.preset)
+    if args.roster_command == "stats":
+        return roster_cmd.stats(target=args.target)
     args._brigade_parser.error(f"unknown roster command: {args.roster_command}")
     return 2

@@ -1,3 +1,5 @@
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -547,3 +549,336 @@ def test_roster_init_without_review_model_has_no_reviewer_seat(tmp_path):
 def test_roster_init_rejects_blank_review_model(tmp_path, capsys):
     assert roster_cmd.init(tmp_path, review_model="  ") == 2
     assert "review-model" in capsys.readouterr().err
+
+
+class FakeProbe:
+    def __init__(self, capabilities: dict[str, roster.Capability]):
+        self._capabilities = capabilities
+
+    def lookup(self, cli_ref: str) -> roster.Capability:
+        return self._capabilities.get(
+            cli_ref,
+            roster.Capability(installed=False, authenticated=None, detail=f"{cli_ref} missing"),
+        )
+
+
+def _preset_path(preset_name: str) -> Path:
+    return next(path for path in roster_cmd.preset_roster_paths() if path.name == preset_name)
+
+
+def _installed_probe(*cli_refs: str, authenticated: bool = True) -> FakeProbe:
+    return FakeProbe(
+        {
+            ref: roster.Capability(installed=True, authenticated=authenticated, detail=f"{ref} available")
+            for ref in cli_refs
+        }
+    )
+
+
+def _write_worker_run(
+    runs_root: Path,
+    run_id: str,
+    *,
+    results: list[dict],
+) -> Path:
+    run_dir = runs_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "results": results,
+        "ground_truth": {
+            "available": False,
+            "cwd": "/repo",
+            "diffstat": "",
+            "changed_files": [],
+            "untracked_files": [],
+            "patch_ref": None,
+        },
+    }
+    (run_dir / "worker-results.json").write_text(json.dumps(payload, indent=2) + "\n")
+    return run_dir
+
+
+def _runs_root(target: Path) -> Path:
+    root = target / ".brigade" / "runs"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _seat_resolution_fields_present(out: str, seat: str) -> None:
+    pattern = rf"requested={re.escape(seat)}\b.*outcome=\w+.*resolved=.*reason="
+    assert re.search(pattern, out, flags=re.DOTALL), out
+
+
+def test_roster_suggest_prints_every_seat_resolution_when_roots_satisfiable(tmp_target, capsys):
+    preset = _preset_path("review-heavy.toml")
+    probe = _installed_probe("codex", "grok", "antigravity")
+
+    assert roster_cmd.suggest(tmp_target, preset=preset, probe=probe) == 0
+    out = capsys.readouterr().out
+
+    for seat in ("chef", "reviewer", "reviewer_flash"):
+        _seat_resolution_fields_present(out, seat)
+        assert f"resolved={seat}" in out
+    assert out.count("outcome=self") == 3
+    assert "orchestrator =" in out
+    assert "adoptable roster" in out.lower()
+    emitted = out.split("# Adoptable roster\n", maxsplit=1)[1]
+    resolved_path = tmp_target / "resolved-roster.toml"
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path.write_text(emitted)
+    assert roster.load_roster(resolved_path).orchestrator == "chef"
+
+
+def test_roster_cli_registers_suggest_and_stats_commands(tmp_target):
+    parser = cli._build_parser()
+
+    suggest_args = parser.parse_args(
+        ["roster", "suggest", "--preset", "minimal-single-cli", "--target", str(tmp_target)]
+    )
+    stats_args = parser.parse_args(["roster", "stats", "--target", str(tmp_target)])
+
+    assert suggest_args.roster_command == "suggest"
+    assert suggest_args.preset == "minimal-single-cli"
+    assert suggest_args.target == tmp_target
+    assert stats_args.roster_command == "stats"
+    assert stats_args.target == tmp_target
+
+
+def test_roster_suggest_reports_first_satisfiable_fallback_when_primary_cli_missing(tmp_target, capsys):
+    preset = _preset_path("budget-open-weight.toml")
+    probe = FakeProbe(
+        {
+            "codex": roster.Capability(installed=False, detail="codex missing"),
+            "ollama": roster.Capability(installed=True, detail="ollama available"),
+        }
+    )
+
+    assert roster_cmd.suggest(tmp_target, preset=preset, probe=probe) == 0
+    out = capsys.readouterr().out
+
+    _seat_resolution_fields_present(out, "chef")
+    assert "outcome=fallback" in out
+    assert "resolved=chef_oss" in out
+    assert "codex missing" in out
+    _seat_resolution_fields_present(out, "coder")
+    assert "resolved=coder" in out
+    assert "outcome=self" in out
+
+
+def test_roster_suggest_reports_dropped_seat_when_no_fallback_satisfies(tmp_target, capsys):
+    preset = _preset_path("budget-open-weight.toml")
+    probe = FakeProbe(
+        {
+            "codex": roster.Capability(installed=False, detail="codex missing"),
+            "ollama": roster.Capability(installed=False, detail="ollama missing"),
+        }
+    )
+
+    rc = roster_cmd.suggest(tmp_target, preset=preset, probe=probe)
+    out = capsys.readouterr().out
+
+    _seat_resolution_fields_present(out, "chef")
+    assert "outcome=dropped" in out
+    assert "resolved=-" in out or "resolved=none" in out.lower()
+    assert "codex missing" in out
+    assert "ollama missing" in out
+    assert rc != 0 or "not adoptable" in out.lower()
+
+
+def test_roster_suggest_refuses_adoptable_roster_when_orchestrator_dropped(tmp_target, capsys):
+    preset = _preset_path("budget-open-weight.toml")
+    probe = FakeProbe({})
+
+    rc = roster_cmd.suggest(tmp_target, preset=preset, probe=probe)
+    out = capsys.readouterr().out
+
+    assert "not adoptable" in out.lower()
+    assert "[agents.chef]" not in out
+    assert rc != 0
+
+
+def test_roster_doctor_warns_when_declared_requirements_lapse(monkeypatch, tmp_target, capsys):
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n'
+        "[agents.chef]\n"
+        'cli = "codex"\n'
+        'role = "plan"\n'
+        'requires = { cli = "codex" }\n'
+        'fallback = ["chef_oss"]\n'
+        "[agents.chef_oss]\n"
+        'cli = "ollama:llama3.2:3b"\n'
+        'role = "local plan"\n'
+        'requires = { cli = "ollama" }\n',
+    )
+    probe = FakeProbe(
+        {
+            "codex": roster.Capability(installed=False, detail="codex missing"),
+            "ollama": roster.Capability(installed=True),
+        }
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/bin/" + cmd)
+
+    rc = roster_cmd.doctor(tmp_target, probe=probe)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "[warn]" in out
+    assert "chef" in out
+    assert "codex missing" in out
+
+
+def test_roster_doctor_warns_when_declared_seat_is_dropped(monkeypatch, tmp_target, capsys):
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n[agents.chef]\ncli = "codex"\nrole = "plan"\nrequires = { cli = "codex" }\n',
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/bin/" + cmd)
+
+    rc = roster_cmd.doctor(tmp_target, probe=FakeProbe({}))
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "[warn] roster: capability chef" in out
+    assert "codex missing" in out
+
+
+def test_roster_stats_reports_per_seat_median_and_failure_rate(tmp_target, capsys):
+    runs = _runs_root(tmp_target)
+    _write_worker_run(
+        runs,
+        "run-a",
+        results=[
+            {"worker": "coder", "task": "a", "ok": True, "detail": "", "text": "ok", "duration_seconds": 10.0},
+            {"worker": "coder", "task": "b", "ok": False, "detail": "err", "text": "", "duration_seconds": 30.0},
+        ],
+    )
+    _write_worker_run(
+        runs,
+        "run-b",
+        results=[
+            {"worker": "coder", "task": "c", "ok": True, "detail": "", "text": "ok", "duration_seconds": 20.0},
+        ],
+    )
+
+    assert roster_cmd.stats(tmp_target) == 0
+    out = capsys.readouterr().out
+
+    assert "coder" in out
+    assert "median_duration" in out
+    assert "failure_rate" in out
+    assert "0.333" in out or "33.3" in out or "1/3" in out
+
+
+def test_roster_suggest_labels_author_default_stats_without_local_receipts(tmp_target, capsys):
+    preset = _preset_path("minimal-single-cli.toml")
+    probe = _installed_probe("codex")
+
+    assert roster_cmd.suggest(tmp_target, preset=preset, probe=probe) == 0
+    out = capsys.readouterr().out
+
+    assert "source=author-default" in out
+    assert "source=local-receipts" not in out
+
+
+def test_roster_suggest_overlays_local_receipt_stats(tmp_target, capsys):
+    preset = _preset_path("minimal-single-cli.toml")
+    probe = _installed_probe("codex")
+    runs = _runs_root(tmp_target)
+    _write_worker_run(
+        runs,
+        "run-a",
+        results=[
+            {"worker": "coder", "task": "a", "ok": True, "detail": "", "text": "ok", "duration_seconds": 12.0},
+        ],
+    )
+
+    assert roster_cmd.suggest(tmp_target, preset=preset, probe=probe) == 0
+    out = capsys.readouterr().out
+
+    assert "source=local-receipts" in out
+    assert "coder" in out
+    assert "median_duration" in out
+
+
+def test_roster_suggest_does_not_relabel_author_stats_as_local(tmp_target, capsys):
+    preset = _preset_path("minimal-single-cli.toml")
+    probe = _installed_probe("codex")
+    runs = _runs_root(tmp_target)
+    _write_worker_run(
+        runs,
+        "run-a",
+        results=[
+            {"worker": "coder", "ok": True, "duration_seconds": 12.0},
+        ],
+    )
+
+    assert roster_cmd.suggest(tmp_target, preset=preset, probe=probe) == 0
+    out = capsys.readouterr().out
+    emitted = out.split("# Adoptable roster\n", maxsplit=1)[1]
+    resolved_path = tmp_target / "resolved-roster.toml"
+    resolved_path.write_text(emitted)
+
+    resolved = roster.load_roster(resolved_path)
+
+    assert resolved.agents["coder"].stats == {
+        "source": "local-receipts",
+        "median_duration_seconds": "12",
+        "failure_rate": "0.000",
+        "sample_count": "1",
+    }
+
+
+def test_roster_doctor_labels_author_default_stats_without_local_receipts(tmp_target, capsys):
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n'
+        "[agents.chef]\n"
+        'cli = "codex"\n'
+        'role = "plan"\n'
+        'stats = { speed = "medium", source = "author-receipts-2026-07" }\n',
+    )
+
+    assert roster_cmd.doctor(tmp_target) == 0
+    out = capsys.readouterr().out
+
+    assert "source=author-default" in out
+    assert "source=local-receipts" not in out
+
+
+def test_roster_doctor_overlays_local_receipt_stats(tmp_target, capsys):
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n'
+        "[agents.chef]\n"
+        'cli = "codex"\n'
+        'role = "plan"\n'
+        'stats = { speed = "medium", source = "author-receipts-2026-07" }\n',
+    )
+    runs = _runs_root(tmp_target)
+    _write_worker_run(
+        runs,
+        "run-a",
+        results=[
+            {"worker": "chef", "task": "a", "ok": True, "detail": "", "text": "ok", "duration_seconds": 8.0},
+        ],
+    )
+
+    assert roster_cmd.doctor(tmp_target) == 0
+    out = capsys.readouterr().out
+
+    assert "source=local-receipts" in out
+    assert "chef" in out
+    assert "median_duration" in out
+
+
+@pytest.mark.parametrize("preset_name", EXPECTED_PRESET_NAMES)
+def test_packaged_presets_remain_byte_identical_after_suggest_and_stats(tmp_target, preset_name):
+    preset = _preset_path(preset_name)
+    original = preset.read_bytes()
+    probe = _installed_probe("codex", "claude", "cursor", "grok", "ollama", "antigravity")
+
+    roster_cmd.suggest(tmp_target, preset=preset, probe=probe)
+    roster_cmd.stats(tmp_target)
+
+    assert preset.read_bytes() == original

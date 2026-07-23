@@ -10,6 +10,7 @@ from . import doctor as doctor_mod
 from . import model_inventory
 from . import roster as roster_mod
 from . import templates
+from . import toml_compat
 
 DEFAULT_ROSTER_REL = ".brigade/roster.toml"
 
@@ -94,6 +95,193 @@ def preset_roster_paths() -> tuple[Path, ...]:
     return tuple(sorted(rosters_dir.glob("*.toml")))
 
 
+def _resolve_preset_path(preset: Path | str) -> Path:
+    if isinstance(preset, Path):
+        path = preset.expanduser().resolve()
+    else:
+        name = str(preset).strip()
+        if not name:
+            raise ValueError("preset name must be non-empty")
+        if not name.endswith(".toml"):
+            name = f"{name}.toml"
+        path = (templates.template_root() / "rosters" / name).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"preset not found: {path}")
+    return path
+
+
+def _local_receipt_stats(target: Path) -> dict[str, roster_mod.SeatReceiptStats]:
+    return roster_mod.collect_seat_receipt_stats(target / ".brigade" / "runs")
+
+
+def _format_resolved_seat(resolved: str | None) -> str:
+    return "-" if resolved is None else resolved
+
+
+def _print_seat_resolutions(report: tuple[roster_mod.SeatResolution, ...]) -> None:
+    for entry in report:
+        print(
+            f"requested={entry.requested} outcome={entry.outcome} "
+            f"resolved={_format_resolved_seat(entry.resolved)} reason={entry.reason}"
+        )
+
+
+def _stats_detail(
+    agent_name: str,
+    agent: roster_mod.Agent,
+    local_stats: dict[str, roster_mod.SeatReceiptStats],
+) -> str:
+    receipt = local_stats.get(agent_name)
+    if receipt is not None:
+        return (
+            f"source=local-receipts sample_count={receipt.sample_count} "
+            f"median_duration={receipt.median_duration_seconds:g} "
+            f"failure_rate={receipt.failure_rate:.3f}"
+        )
+    parts = ["source=author-default"]
+    if agent.stats:
+        for key, value in sorted(agent.stats.items()):
+            if key == "source":
+                continue
+            parts.append(f"{key}={value}")
+    return " ".join(parts)
+
+
+def _format_inline_table(values: dict[str, str]) -> str:
+    inner = ", ".join(f"{key} = {toml_compat.format_toml_value(value)}" for key, value in values.items())
+    return "{" + inner + "}"
+
+
+def _format_string_list(values: tuple[str, ...]) -> str:
+    return "[" + ", ".join(toml_compat.format_toml_value(item) for item in values) + "]"
+
+
+def _render_agent_stats(
+    agent: roster_mod.Agent,
+    agent_name: str,
+    local_stats: dict[str, roster_mod.SeatReceiptStats],
+) -> dict[str, str]:
+    receipt = local_stats.get(agent_name)
+    if receipt is not None:
+        rendered: dict[str, str] = {}
+        rendered["source"] = "local-receipts"
+        rendered["median_duration_seconds"] = f"{receipt.median_duration_seconds:g}"
+        rendered["failure_rate"] = f"{receipt.failure_rate:.3f}"
+        rendered["sample_count"] = str(receipt.sample_count)
+        return rendered
+    rendered = dict(agent.stats or {})
+    rendered["source"] = "author-default"
+    return rendered
+
+
+def _render_roster_toml(
+    roster: roster_mod.Roster,
+    local_stats: dict[str, roster_mod.SeatReceiptStats],
+) -> str:
+    lines: list[str] = [f"orchestrator = {toml_compat.format_toml_value(roster.orchestrator)}"]
+    if roster.codex_transport != "exec":
+        lines.append(f"codex_transport = {toml_compat.format_toml_value(roster.codex_transport)}")
+    lines.append("")
+
+    agent_names = [roster.orchestrator] + sorted(name for name in roster.agents if name != roster.orchestrator)
+    for name in agent_names:
+        agent = roster.agents[name]
+        lines.append(f"[agents.{name}]")
+        if agent.cli is not None:
+            lines.append(f"cli = {toml_compat.format_toml_value(agent.cli)}")
+        if agent.endpoint is not None:
+            lines.append(f"endpoint = {toml_compat.format_toml_value(agent.endpoint)}")
+        if agent.model is not None:
+            lines.append(f"model = {toml_compat.format_toml_value(agent.model)}")
+        if agent.reasoning is not None:
+            lines.append(f"reasoning = {toml_compat.format_toml_value(agent.reasoning)}")
+        lines.append(f"role = {toml_compat.format_toml_value(agent.role)}")
+        if agent.purpose is not None:
+            lines.append(f"purpose = {toml_compat.format_toml_value(agent.purpose)}")
+        if agent.requires is not None:
+            lines.append(f"requires = {_format_inline_table(agent.requires)}")
+        if agent.fallback:
+            lines.append(f"fallback = {_format_string_list(agent.fallback)}")
+        stats = _render_agent_stats(agent, name, local_stats)
+        if stats:
+            lines.append(f"stats = {_format_inline_table(stats)}")
+        if agent.caveats:
+            lines.append(f"caveats = {_format_string_list(agent.caveats)}")
+        if agent.transport != "direct":
+            lines.append(f"transport = {toml_compat.format_toml_value(agent.transport)}")
+        if agent.transport_version is not None:
+            lines.append(f"transport_version = {toml_compat.format_toml_value(agent.transport_version)}")
+        if agent.timeout_seconds is not None:
+            lines.append(f"timeout_seconds = {toml_compat.format_toml_value(agent.timeout_seconds)}")
+        if not agent.read_only_capable:
+            lines.append("read_only_capable = false")
+        if agent.invalid_final_fallback is not None:
+            lines.append(f"invalid_final_fallback = {toml_compat.format_toml_value(agent.invalid_final_fallback)}")
+        if agent.env is not None:
+            lines.append(f"env = {_format_inline_table(agent.env)}")
+        lines.append("")
+
+    lines.append("[limits]")
+    lines.append(f"max_workers = {toml_compat.format_toml_value(roster.max_workers)}")
+    lines.append(f"timeout_seconds = {toml_compat.format_toml_value(roster.timeout_seconds)}")
+    if roster.allow_models:
+        lines.append(f"allow_models = {_format_string_list(roster.allow_models)}")
+    if roster.sandbox is not None:
+        lines.append(f"sandbox = {toml_compat.format_toml_value(roster.sandbox)}")
+    return "\n".join(lines) + "\n"
+
+
+def suggest(
+    target: Path,
+    *,
+    preset: Path | str,
+    probe: roster_mod.CapabilityProbe | None = None,
+) -> int:
+    target = target.expanduser()
+    try:
+        preset_path = _resolve_preset_path(preset)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        loaded = roster_mod.load_roster(preset_path)
+    except ValueError as exc:
+        print(f"error: invalid preset {preset_path}: {exc}", file=sys.stderr)
+        return 2
+
+    active_probe = probe if probe is not None else roster_mod.HostCapabilityProbe()
+    result = roster_mod.resolve_capabilities(loaded, active_probe)
+    local_stats = _local_receipt_stats(target)
+
+    _print_seat_resolutions(result.report)
+    for name, agent in result.roster.agents.items():
+        print(f"stats seat={name} {_stats_detail(name, agent, local_stats)}")
+
+    if not result.usable:
+        print("roster is not adoptable: orchestrator seat is unavailable")
+        return 1
+
+    print("\n# Adoptable roster")
+    print(_render_roster_toml(result.roster, local_stats), end="")
+    return 0
+
+
+def stats(target: Path) -> int:
+    target = target.expanduser()
+    local_stats = _local_receipt_stats(target)
+    if not local_stats:
+        print("no local worker receipt stats found")
+        return 0
+    for seat_name in sorted(local_stats):
+        receipt = local_stats[seat_name]
+        print(
+            f"seat={seat_name} source=local-receipts sample_count={receipt.sample_count} "
+            f"median_duration={receipt.median_duration_seconds:g} "
+            f"failure_rate={receipt.failure_rate:.3f}"
+        )
+    return 0
+
+
 def init(
     target: Path,
     *,
@@ -130,7 +318,12 @@ def init(
     return 0
 
 
-def doctor(target: Path, *, roster_path: Path | None = None) -> int:
+def doctor(
+    target: Path,
+    *,
+    roster_path: Path | None = None,
+    probe: roster_mod.CapabilityProbe | None = None,
+) -> int:
     target = target.expanduser()
 
     checks: list[doctor_mod.CheckResult] = []
@@ -144,6 +337,14 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
         checks.append((doctor_mod.FAIL, "roster: file", f"invalid {path}: {exc}"))
         return doctor_mod._report(checks)
 
+    local_stats = _local_receipt_stats(target)
+    active_probe = probe if probe is not None else roster_mod.HostCapabilityProbe()
+    capability = roster_mod.resolve_capabilities(loaded, active_probe)
+    for entry in capability.report:
+        if entry.outcome == "self":
+            continue
+        checks.append((doctor_mod.WARN, f"roster: capability {entry.requested}", entry.reason))
+
     checks.append((doctor_mod.OK, "roster: file", str(path)))
     checks.append((doctor_mod.OK, "roster: orchestrator", loaded.orchestrator))
     checks.append((doctor_mod.OK, "roster: max_workers", str(loaded.max_workers)))
@@ -154,6 +355,10 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
         checks.append((doctor_mod.OK, "roster: allow_models", ", ".join(loaded.allow_models)))
     else:
         checks.append((doctor_mod.WARN, "roster: allow_models", "not set; explicit model allow-list recommended"))
+
+    for name, agent in loaded.agents.items():
+        if agent.stats is not None or name in local_stats:
+            checks.append((doctor_mod.INFO, f"roster: stats {name}", _stats_detail(name, agent, local_stats)))
 
     inventory_inspector = model_inventory.ModelInventoryInspector()
     for name, agent in loaded.agents.items():

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -1317,3 +1318,74 @@ def test_requirements_satisfied_reports_unknown_auth_separately_from_installatio
 
     assert ok is False
     assert reason == "codex authentication is unknown"
+
+
+def _write_worker_results(run_dir: Path, results: list[dict]) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "results": results,
+        "ground_truth": {
+            "available": False,
+            "cwd": "/repo",
+            "diffstat": "",
+            "changed_files": [],
+            "untracked_files": [],
+            "patch_ref": None,
+        },
+    }
+    (run_dir / "worker-results.json").write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def test_collect_seat_receipt_stats_computes_median_duration_and_failure_rate(tmp_path):
+    runs = tmp_path / ".brigade" / "runs"
+    _write_worker_results(
+        runs / "run-a",
+        [
+            {"worker": "coder", "task": "a", "ok": True, "detail": "", "text": "ok", "duration_seconds": 10.0},
+            {"worker": "coder", "task": "b", "ok": False, "detail": "err", "text": "", "duration_seconds": 30.0},
+        ],
+    )
+    _write_worker_results(
+        runs / "run-b",
+        [
+            {"worker": "coder", "task": "c", "ok": True, "detail": "", "text": "ok", "duration_seconds": 20.0},
+            {"worker": "reviewer", "task": "d", "ok": True, "detail": "", "text": "ok", "duration_seconds": 5.0},
+        ],
+    )
+
+    stats = roster_mod.collect_seat_receipt_stats(runs)
+
+    coder = stats["coder"]
+    assert coder.sample_count == 3
+    assert coder.median_duration_seconds == pytest.approx(20.0)
+    assert coder.failure_rate == pytest.approx(1 / 3)
+    reviewer = stats["reviewer"]
+    assert reviewer.sample_count == 1
+    assert reviewer.median_duration_seconds == pytest.approx(5.0)
+    assert reviewer.failure_rate == pytest.approx(0.0)
+
+
+def test_collect_seat_receipt_stats_ignores_missing_worker_results(tmp_path):
+    runs = tmp_path / ".brigade" / "runs"
+    (runs / "empty-run").mkdir(parents=True)
+
+    stats = roster_mod.collect_seat_receipt_stats(runs)
+
+    assert stats == {}
+
+
+def test_collect_seat_receipt_stats_counts_failures_without_durations(tmp_path):
+    runs = tmp_path / ".brigade" / "runs"
+    _write_worker_results(
+        runs / "run-a",
+        [
+            {"worker": "coder", "ok": True, "duration_seconds": 10.0},
+            {"worker": "coder", "ok": False},
+        ],
+    )
+
+    coder = roster_mod.collect_seat_receipt_stats(runs)["coder"]
+
+    assert coder.sample_count == 2
+    assert coder.median_duration_seconds == pytest.approx(10.0)
+    assert coder.failure_rate == pytest.approx(0.5)
