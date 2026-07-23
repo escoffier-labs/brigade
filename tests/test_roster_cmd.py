@@ -7,6 +7,7 @@ from brigade import cli
 from brigade import model_inventory
 from brigade import roster
 from brigade import roster_cmd
+from brigade import toml_compat
 
 
 def test_roster_init_writes_default_roster(tmp_target, capsys):
@@ -21,6 +22,35 @@ def test_roster_init_writes_default_roster(tmp_target, capsys):
     assert 'cli = "ollama:llama3.2:3b"' in text
     assert "timeout_seconds = 600" in text
     assert str(path) in out
+
+
+EXPECTED_PRESET_NAMES = (
+    "budget-open-weight.toml",
+    "full-multi-lane.toml",
+    "minimal-single-cli.toml",
+    "review-heavy.toml",
+)
+
+
+def test_preset_roster_paths_returns_four_packaged_presets():
+    paths = roster_cmd.preset_roster_paths()
+    assert tuple(path.name for path in paths) == EXPECTED_PRESET_NAMES
+    assert all(path.is_file() for path in paths)
+
+
+@pytest.mark.parametrize("preset_name", EXPECTED_PRESET_NAMES)
+def test_packaged_presets_parse(preset_name):
+    path = next(item for item in roster_cmd.preset_roster_paths() if item.name == preset_name)
+    raw = toml_compat.loads(path.read_text())
+    loaded = roster.load_roster(path)
+    assert loaded.orchestrator in loaded.agents
+    for name, agent in loaded.agents.items():
+        assert agent.purpose
+        assert agent.requires is not None
+        assert agent.stats is not None
+        assert "speed" in agent.stats
+        assert "source" in agent.stats
+        assert "caveats" in raw["agents"][name]
 
 
 def test_default_roster_ollama_model_is_small_and_documented():

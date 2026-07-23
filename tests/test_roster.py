@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from brigade import agents
 from brigade import cli
 from brigade import roster as roster_mod
 
@@ -605,3 +606,714 @@ def test_grok_invalid_final_fallback_names_reviewed_acpx_seat(tmp_path):
 def test_grok_invalid_final_fallback_rejects_unreviewed_routes(tmp_path, roster_text, match):
     with pytest.raises(ValueError, match=match):
         roster_mod.load_roster(_write(tmp_path, roster_text))
+
+
+METADATA_ROSTER = """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+purpose = "Orchestrate the run."
+requires = { cli = "codex" }
+fallback = ["coder"]
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = ["Needs a Codex subscription."]
+
+[agents.coder]
+cli = "ollama:llama3.2:3b"
+role = "build"
+purpose = "Fallback builder."
+requires = { cli = "ollama" }
+stats = { speed = "slow", source = "author-receipts-2026-07" }
+caveats = []
+"""
+
+
+def test_legacy_roster_gets_empty_metadata_defaults(tmp_path):
+    loaded = roster_mod.load_roster(_write(tmp_path, VALID))
+
+    agent = loaded.agents["chef"]
+    assert agent.purpose is None
+    assert agent.requires is None
+    assert agent.fallback == ()
+    assert agent.stats is None
+    assert agent.caveats == ()
+
+
+def test_metadata_roster_parses_preset_fields(tmp_path):
+    loaded = roster_mod.load_roster(_write(tmp_path, METADATA_ROSTER))
+    chef = loaded.agents["chef"]
+
+    assert chef.purpose == "Orchestrate the run."
+    assert chef.requires == {"cli": "codex"}
+    assert chef.fallback == ("coder",)
+    assert chef.stats == {"speed": "fast", "source": "author-receipts-2026-07"}
+    assert chef.caveats == ("Needs a Codex subscription.",)
+
+
+def test_metadata_roster_rejects_unknown_requirement_keys(tmp_path):
+    invalid = METADATA_ROSTER.replace('requires = { cli = "codex" }', 'requires = { cli = "codex", lane = "fast" }')
+    with pytest.raises(ValueError, match=r"agents\.chef\.requires"):
+        roster_mod.load_roster(_write(tmp_path, invalid))
+
+
+def test_metadata_roster_rejects_unknown_auth_requirement(tmp_path):
+    invalid = METADATA_ROSTER.replace(
+        'requires = { cli = "codex" }',
+        'requires = { cli = "codex", auth = "api-key" }',
+    )
+    with pytest.raises(ValueError, match=r'auth must be "logged-in"'):
+        roster_mod.load_roster(_write(tmp_path, invalid))
+
+
+def test_metadata_roster_rejects_missing_fallback_target(tmp_path):
+    invalid = METADATA_ROSTER.replace('fallback = ["coder"]', 'fallback = ["missing"]')
+    with pytest.raises(ValueError, match="missing"):
+        roster_mod.load_roster(_write(tmp_path, invalid))
+
+
+def test_metadata_roster_rejects_fallback_cycle(tmp_path):
+    invalid = METADATA_ROSTER.replace(
+        'requires = { cli = "ollama" }\nstats',
+        'requires = { cli = "ollama" }\nfallback = ["coder"]\nstats',
+    )
+
+    with pytest.raises(ValueError, match="must not define its own fallback"):
+        roster_mod.load_roster(_write(tmp_path, invalid))
+
+
+def test_metadata_roster_rejects_nested_fallback_chain(tmp_path):
+    invalid = METADATA_ROSTER.replace(
+        'requires = { cli = "ollama" }\nstats',
+        'requires = { cli = "ollama" }\nfallback = ["local"]\nstats',
+    )
+    invalid += """
+
+[agents.local]
+cli = "ollama:llama3.2:3b"
+role = "last resort"
+requires = { cli = "ollama" }
+"""
+
+    with pytest.raises(ValueError, match="must not define its own fallback"):
+        roster_mod.load_roster(_write(tmp_path, invalid))
+
+
+def test_grok_invalid_final_fallback_still_validates_with_metadata_fields(tmp_path):
+    text = GROK_FALLBACK_ROSTER.replace(
+        'role = "review"',
+        'role = "review"\npurpose = "Review changes."\n'
+        'requires = { cli = "grok" }\n'
+        'stats = { speed = "fast", source = "author-receipts-2026-07" }\n'
+        "caveats = []\n",
+    )
+    loaded = roster_mod.load_roster(_write(tmp_path, text))
+    assert loaded.agents["grok-review"].invalid_final_fallback == "cursor-grok"
+
+
+class FakeProbe:
+    def __init__(self, capabilities: dict[str, roster_mod.Capability]):
+        self._capabilities = capabilities
+
+    def lookup(self, cli_ref: str) -> roster_mod.Capability:
+        return self._capabilities.get(
+            cli_ref,
+            roster_mod.Capability(installed=False, authenticated=None, detail=f"{cli_ref} missing"),
+        )
+
+
+def _metadata_roster_from_text(text: str, tmp_path) -> roster_mod.Roster:
+    return roster_mod.load_roster(_write(tmp_path, text))
+
+
+def test_resolve_capabilities_selects_self_when_requirements_pass(tmp_path):
+    roster = _metadata_roster_from_text(METADATA_ROSTER, tmp_path)
+    probe = FakeProbe(
+        {
+            "codex": roster_mod.Capability(installed=True),
+            "ollama": roster_mod.Capability(installed=True),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    assert "chef" in result.roster.agents
+    assert result.roster.agents["chef"].cli == "codex"
+    assert result.roster.agents["chef"].fallback == ()
+    assert len(result.report) == 1
+    chef_report = next(item for item in result.report if item.requested == "chef")
+    assert chef_report.outcome == "self"
+    assert chef_report.resolved == "chef"
+
+
+def test_resolve_capabilities_uses_first_satisfiable_fallback(tmp_path):
+    roster = _metadata_roster_from_text(METADATA_ROSTER, tmp_path)
+    probe = FakeProbe(
+        {
+            "codex": roster_mod.Capability(installed=False, detail="codex missing"),
+            "ollama": roster_mod.Capability(installed=True),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    chef = result.roster.agents["chef"]
+    assert chef.cli == "ollama:llama3.2:3b"
+    assert chef.role == "plan"
+    assert chef.purpose == "Orchestrate the run."
+    assert chef.requires == {"cli": "ollama"}
+    assert chef.stats == {"speed": "slow", "source": "author-receipts-2026-07"}
+    assert chef.caveats == ()
+    assert chef.fallback == ()
+    chef_report = next(item for item in result.report if item.requested == "chef")
+    assert chef_report.outcome == "fallback"
+    assert chef_report.resolved == "coder"
+    assert "codex missing" in chef_report.reason
+
+
+def test_resolve_capabilities_drops_unsatisfied_seat_with_reason(tmp_path):
+    roster = _metadata_roster_from_text(METADATA_ROSTER, tmp_path)
+    probe = FakeProbe(
+        {
+            "codex": roster_mod.Capability(installed=False, detail="codex missing"),
+            "ollama": roster_mod.Capability(installed=False, detail="ollama missing"),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    assert "chef" not in result.roster.agents
+    chef_report = next(item for item in result.report if item.requested == "chef")
+    assert chef_report.outcome == "dropped"
+    assert chef_report.resolved is None
+    assert "codex missing" in chef_report.reason
+    assert "ollama missing" in chef_report.reason
+
+
+def test_resolve_capabilities_emits_one_report_entry_per_requested_root(tmp_path):
+    roster = _metadata_roster_from_text(METADATA_ROSTER, tmp_path)
+    probe = FakeProbe({"codex": roster_mod.Capability(installed=True), "ollama": roster_mod.Capability(installed=True)})
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    assert len(result.report) == 1
+    assert {item.requested for item in result.report} == {"chef"}
+
+
+def test_resolve_capabilities_keeps_no_requirement_endpoint_seats(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.api]\nrole = "researcher"\nendpoint = "http://example.test/v1"\nmodel = "m"\n'
+    )
+    roster = _metadata_roster_from_text(text, tmp_path)
+    probe = FakeProbe({"codex": roster_mod.Capability(installed=False)})
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    assert "api" in result.roster.agents
+    api_report = next(item for item in result.report if item.requested == "api")
+    assert api_report.outcome == "self"
+
+
+TWO_FALLBACK_ROSTER = """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+purpose = "Primary orchestrator."
+requires = { cli = "codex" }
+fallback = ["fallback_a", "fallback_b"]
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = ["Primary seat caveat."]
+
+[agents.fallback_a]
+cli = "grok"
+model = "grok-4.5"
+role = "first fallback"
+purpose = "First fallback seat."
+requires = { cli = "grok" }
+fallback = []
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = ["First fallback caveat."]
+
+[agents.fallback_b]
+cli = "ollama:llama3.2:3b"
+role = "second fallback"
+purpose = "Second fallback seat."
+requires = { cli = "ollama" }
+fallback = []
+stats = { speed = "slow", source = "author-receipts-2026-07" }
+caveats = ["Second fallback caveat."]
+"""
+
+
+def test_resolve_capabilities_selects_first_of_two_satisfiable_fallbacks(tmp_path):
+    roster = _metadata_roster_from_text(TWO_FALLBACK_ROSTER, tmp_path)
+    probe = FakeProbe(
+        {
+            "codex": roster_mod.Capability(installed=False, detail="codex missing"),
+            "grok": roster_mod.Capability(installed=True),
+            "ollama": roster_mod.Capability(installed=True),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    chef = result.roster.agents["chef"]
+    assert chef.cli == "grok"
+    assert chef.stats == {"speed": "medium", "source": "author-receipts-2026-07"}
+    assert chef.caveats == ("First fallback caveat.",)
+    assert chef.fallback == ()
+    chef_report = next(item for item in result.report if item.requested == "chef")
+    assert chef_report.outcome == "fallback"
+    assert chef_report.resolved == "fallback_a"
+    assert "codex missing" in chef_report.reason
+    assert "fallback_a" in chef_report.reason
+
+
+def test_resolve_capabilities_skips_failed_fallback_for_later_satisfiable_one(tmp_path):
+    roster = _metadata_roster_from_text(TWO_FALLBACK_ROSTER, tmp_path)
+    probe = FakeProbe(
+        {
+            "codex": roster_mod.Capability(installed=False, detail="codex missing"),
+            "grok": roster_mod.Capability(installed=False, detail="grok missing"),
+            "ollama": roster_mod.Capability(installed=True),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    chef = result.roster.agents["chef"]
+    assert chef.cli == "ollama:llama3.2:3b"
+    chef_report = next(item for item in result.report if item.requested == "chef")
+    assert chef_report.outcome == "fallback"
+    assert chef_report.resolved == "fallback_b"
+    assert "grok missing" in chef_report.reason
+
+
+AUTH_FALLBACK_ROSTER = """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "cursor"
+model = "composer-2.5"
+role = "plan"
+purpose = "Primary orchestrator."
+requires = { cli = "cursor", auth = "logged-in" }
+fallback = ["chef_codex"]
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.chef_codex]
+cli = "codex"
+role = "codex fallback"
+purpose = "Codex fallback orchestrator."
+requires = { cli = "codex" }
+fallback = []
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = ["Codex fallback caveat."]
+"""
+
+
+def test_resolve_capabilities_auth_failure_falls_back_with_detailed_reason(tmp_path):
+    roster = _metadata_roster_from_text(AUTH_FALLBACK_ROSTER, tmp_path)
+    probe = FakeProbe(
+        {
+            "cursor": roster_mod.Capability(
+                installed=True,
+                authenticated=False,
+                detail="cursor-agent CLI is not logged in; run cursor-agent login",
+            ),
+            "codex": roster_mod.Capability(installed=True, authenticated=True),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    chef = result.roster.agents["chef"]
+    assert chef.cli == "codex"
+    assert chef.caveats == ("Codex fallback caveat.",)
+    assert chef.fallback == ()
+    chef_report = next(item for item in result.report if item.requested == "chef")
+    assert chef_report.outcome == "fallback"
+    assert "cursor-agent CLI is not logged in" in chef_report.reason
+    assert "chef_codex" in chef_report.reason
+
+
+def test_resolve_capabilities_fallback_definitions_are_not_independent_report_entries(tmp_path):
+    roster = _metadata_roster_from_text(METADATA_ROSTER, tmp_path)
+    probe = FakeProbe(
+        {
+            "codex": roster_mod.Capability(installed=True),
+            "ollama": roster_mod.Capability(installed=True),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    assert {item.requested for item in result.report} == {"chef"}
+    assert "coder" not in result.roster.agents
+    assert "coder" not in {item.requested for item in result.report}
+
+
+def test_resolve_capabilities_self_selected_roots_clear_fallback_chain(tmp_path):
+    roster = _metadata_roster_from_text(METADATA_ROSTER, tmp_path)
+    probe = FakeProbe(
+        {
+            "codex": roster_mod.Capability(installed=True),
+            "ollama": roster_mod.Capability(installed=True),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    assert result.roster.agents["chef"].fallback == ()
+
+
+def test_resolve_capabilities_legacy_roster_is_unchanged_with_self_reports(tmp_path):
+    roster = roster_mod.load_roster(_write(tmp_path, VALID))
+    probe = FakeProbe({})
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    assert result.roster == roster
+    assert result.usable is True
+    assert len(result.report) == len(roster.agents)
+    assert all(item.outcome == "self" for item in result.report)
+    assert {item.requested for item in result.report} == set(roster.agents)
+
+
+def test_resolve_capabilities_dropped_orchestrator_sets_usable_false(tmp_path):
+    roster = _metadata_roster_from_text(METADATA_ROSTER, tmp_path)
+    probe = FakeProbe(
+        {
+            "codex": roster_mod.Capability(installed=False, detail="codex missing"),
+            "ollama": roster_mod.Capability(installed=False, detail="ollama missing"),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    assert result.usable is False
+    assert "chef" not in result.roster.agents
+    chef_report = next(item for item in result.report if item.requested == "chef")
+    assert chef_report.outcome == "dropped"
+
+
+def test_load_rejects_orchestrator_fallback_to_acpx_worker(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        'requires = { cli = "codex" }\nfallback = ["cursor_worker"]\n'
+        '[agents.cursor_worker]\ncli = "cursor"\nmodel = "composer-2.5"\n'
+        'transport = "acpx"\ntransport_version = "0.12.0"\nrole = "worker"\n'
+        'requires = { cli = "cursor" }\n'
+    )
+    with pytest.raises(ValueError, match="acpx"):
+        roster_mod.load_roster(_write(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    "fallback_definition",
+    [
+        (
+            '[agents.cloud_worker]\ncli = "codex-cloud:env"\nrole = "worker"\n'
+            'requires = { cli = "codex" }\n'
+            '[limits]\nallow_models = ["claude", "codex-cloud:*"]\n'
+        ),
+        ('[agents.endpoint_worker]\nrole = "worker"\nendpoint = "http://example.test/v1"\nmodel = "m"\n'),
+    ],
+)
+def test_load_rejects_orchestrator_fallback_to_other_worker_only_seats(tmp_path, fallback_definition):
+    fallback_name = "cloud_worker" if "cloud_worker" in fallback_definition else "endpoint_worker"
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "claude"\nrole = "plan"\n'
+        'requires = { cli = "claude" }\n'
+        f'fallback = ["{fallback_name}"]\n'
+        f"{fallback_definition}"
+    )
+
+    with pytest.raises(ValueError, match="worker-only"):
+        roster_mod.load_roster(_write(tmp_path, text))
+
+
+def test_load_rejects_non_orchestrator_fallback_naming_orchestrator(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        'requires = { cli = "codex" }\n'
+        '[agents.reviewer]\ncli = "grok"\nmodel = "grok-4.5"\nrole = "review"\n'
+        'requires = { cli = "grok" }\nfallback = ["chef"]\n'
+    )
+    with pytest.raises(ValueError, match="orchestrator"):
+        roster_mod.load_roster(_write(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    ("requires_cli", "seat_cli", "should_load"),
+    [
+        ("ollama", "ollama:llama3.2:3b", True),
+        ("codex", "codex-cloud:brigade", True),
+        ("claude", "claude", True),
+        ("codex", "claude", False),
+    ],
+)
+def test_load_validates_requires_cli_against_seat_adapter(tmp_path, requires_cli, seat_cli, should_load):
+    text = (
+        'orchestrator = "chef"\n'
+        f'[agents.chef]\ncli = "{seat_cli}"\nrole = "plan"\n'
+        f'requires = {{ cli = "{requires_cli}" }}\n'
+    )
+    if seat_cli.startswith("codex-cloud"):
+        text += '\n[limits]\nallow_models = ["codex-cloud:*"]\n'
+    if should_load:
+        loaded = roster_mod.load_roster(_write(tmp_path, text))
+        assert loaded.agents["chef"].requires == {"cli": requires_cli}
+    else:
+        with pytest.raises(ValueError, match=r"requires\.cli"):
+            roster_mod.load_roster(_write(tmp_path, text))
+
+
+def test_load_rejects_requires_cli_on_endpoint_seat(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.api]\nrole = "researcher"\nendpoint = "http://example.test/v1"\nmodel = "m"\n'
+        'requires = { cli = "codex" }\n'
+    )
+    with pytest.raises(ValueError, match=r"requires\.cli"):
+        roster_mod.load_roster(_write(tmp_path, text))
+
+
+INVALID_FINAL_RESOLUTION_ROSTER = """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+purpose = "Orchestrator."
+
+[agents.grok-review]
+cli = "grok"
+model = "grok-4.5"
+role = "review"
+purpose = "Review lane."
+requires = { cli = "grok" }
+invalid_final_fallback = "cursor-grok"
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.cursor-grok]
+cli = "cursor"
+model = "grok-4.5"
+transport = "acpx"
+transport_version = "0.12.0"
+role = "fallback review"
+purpose = "ACP fallback."
+requires = { cli = "cursor", auth = "logged-in" }
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = []
+"""
+
+
+def test_resolve_capabilities_includes_invalid_final_fallback_dependency(tmp_path):
+    roster = _metadata_roster_from_text(INVALID_FINAL_RESOLUTION_ROSTER, tmp_path)
+    probe = FakeProbe(
+        {
+            "codex": roster_mod.Capability(installed=True),
+            "grok": roster_mod.Capability(installed=True),
+            "cursor": roster_mod.Capability(installed=True, authenticated=True),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    assert "grok-review" in result.roster.agents
+    assert result.roster.agents["grok-review"].invalid_final_fallback == "cursor-grok"
+    assert "cursor-grok" in result.roster.agents
+
+
+def test_resolve_capabilities_clears_invalid_final_fallback_when_dependency_unsatisfied(tmp_path):
+    roster = _metadata_roster_from_text(INVALID_FINAL_RESOLUTION_ROSTER, tmp_path)
+    probe = FakeProbe(
+        {
+            "codex": roster_mod.Capability(installed=True),
+            "grok": roster_mod.Capability(installed=True),
+            "cursor": roster_mod.Capability(installed=False, detail="cursor missing"),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    grok = result.roster.agents["grok-review"]
+    assert grok.invalid_final_fallback is None
+    assert "cursor-grok" not in result.roster.agents
+
+
+def test_resolve_capabilities_clears_invalid_final_fallback_when_target_resolves_to_incompatible_seat(tmp_path):
+    text = INVALID_FINAL_RESOLUTION_ROSTER.replace(
+        'requires = { cli = "cursor", auth = "logged-in" }\nstats',
+        'requires = { cli = "cursor", auth = "logged-in" }\nfallback = ["cursor-grok-codex"]\nstats',
+    )
+    text += """
+
+[agents.cursor-grok-codex]
+cli = "codex"
+model = "gpt-5.6-terra"
+role = "fallback review"
+requires = { cli = "codex" }
+"""
+    roster = _metadata_roster_from_text(text, tmp_path)
+    probe = FakeProbe(
+        {
+            "codex": roster_mod.Capability(installed=True),
+            "grok": roster_mod.Capability(installed=True),
+            "cursor": roster_mod.Capability(installed=False, detail="cursor missing"),
+        }
+    )
+
+    result = roster_mod.resolve_capabilities(roster, probe=probe)
+
+    assert result.roster.agents["cursor-grok"].cli == "codex"
+    assert result.roster.agents["grok-review"].invalid_final_fallback is None
+
+
+def test_host_capability_probe_uses_detect_and_command_for(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    def fake_command_for(cli_ref: str) -> str:
+        calls.append(("command_for", cli_ref))
+        return f"bin-{cli_ref}"
+
+    def fake_detect(cli_ref: str) -> bool:
+        calls.append(("detect", cli_ref))
+        return cli_ref == "codex"
+
+    monkeypatch.setattr(agents, "command_for", fake_command_for)
+    monkeypatch.setattr(agents, "detect", fake_detect)
+
+    capability = roster_mod.HostCapabilityProbe().lookup("codex")
+
+    assert ("command_for", "codex") in calls
+    assert ("detect", "codex") in calls
+    assert capability.installed is True
+    assert capability.detail == "codex via bin-codex"
+
+
+def test_host_capability_probe_missing_cli_matches_doctor_style(monkeypatch):
+    monkeypatch.setattr(agents, "command_for", lambda cli_ref: "missing-bin")
+    monkeypatch.setattr(agents, "detect", lambda cli_ref: False)
+
+    capability = roster_mod.HostCapabilityProbe().lookup("codex")
+
+    assert capability.installed is False
+    assert capability.detail == "codex needs `missing-bin` on PATH"
+
+
+def test_host_capability_probe_cursor_auth_states(monkeypatch):
+    from brigade import acpx_adapter
+
+    monkeypatch.setattr(agents, "command_for", lambda cli_ref: "cursor-agent")
+    monkeypatch.setattr(agents, "detect", lambda cli_ref: True)
+    auth_calls: list[str] = []
+
+    def fake_auth_status():
+        auth_calls.append("called")
+        return acpx_adapter.CursorAuthStatus("authenticated", "logged in", "", "", 0)
+
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", fake_auth_status)
+    authenticated = roster_mod.HostCapabilityProbe().lookup("cursor")
+    assert authenticated.authenticated is True
+    assert auth_calls == ["called"]
+
+    monkeypatch.setattr(
+        acpx_adapter,
+        "cursor_auth_status",
+        lambda: acpx_adapter.CursorAuthStatus("unauthenticated", "not logged in", "", "", 1),
+    )
+    unauthenticated = roster_mod.HostCapabilityProbe().lookup("cursor")
+    assert unauthenticated.authenticated is False
+
+    monkeypatch.setattr(
+        acpx_adapter,
+        "cursor_auth_status",
+        lambda: acpx_adapter.CursorAuthStatus("unavailable", "cursor-agent is not installed", "", "", 127),
+    )
+    unavailable = roster_mod.HostCapabilityProbe().lookup("cursor")
+    assert unavailable.authenticated is None
+    assert unavailable.detail == "cursor-agent is not installed"
+    assert unavailable.auth_detail == "cursor-agent is not installed"
+
+    monkeypatch.setattr(
+        acpx_adapter,
+        "cursor_auth_status",
+        lambda: acpx_adapter.CursorAuthStatus("unrecognized", "unexpected status payload", "", "", 0),
+    )
+    unrecognized = roster_mod.HostCapabilityProbe().lookup("cursor")
+    assert unrecognized.authenticated is None
+    assert unrecognized.detail == "unexpected status payload"
+    assert unrecognized.auth_detail == "unexpected status payload"
+
+
+def test_host_capability_probe_skips_cursor_auth_when_cursor_not_installed(monkeypatch):
+    from brigade import acpx_adapter
+
+    monkeypatch.setattr(agents, "command_for", lambda cli_ref: "cursor-agent")
+    monkeypatch.setattr(agents, "detect", lambda cli_ref: False)
+
+    def fail_auth():
+        raise AssertionError("cursor_auth_status must not run when cursor is not installed")
+
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", fail_auth)
+
+    capability = roster_mod.HostCapabilityProbe().lookup("cursor")
+
+    assert capability.installed is False
+    assert capability.authenticated is None
+
+
+def test_resolve_capabilities_fake_probe_never_calls_host_functions(monkeypatch, tmp_path):
+    roster = _metadata_roster_from_text(METADATA_ROSTER, tmp_path)
+    probe = FakeProbe({"codex": roster_mod.Capability(installed=True), "ollama": roster_mod.Capability(installed=True)})
+
+    def fail_detect(cli_ref: str) -> bool:
+        raise AssertionError("detect must not run when a probe is injected")
+
+    monkeypatch.setattr(agents, "detect", fail_detect)
+
+    roster_mod.resolve_capabilities(roster, probe=probe)
+
+
+def test_requirements_satisfied_skips_redundant_auth_when_cli_missing():
+    probe = FakeProbe({"cursor": roster_mod.Capability(installed=False, detail="cursor missing")})
+    agent = roster_mod.Agent(
+        name="worker",
+        cli="cursor",
+        role="build",
+        requires={"cli": "cursor", "auth": "logged-in"},
+    )
+
+    ok, reason = roster_mod._requirements_satisfied(agent, probe)
+
+    assert ok is False
+    assert reason == "cursor missing"
+    assert "authenticated" not in reason.lower()
+
+
+def test_requirements_satisfied_reports_unknown_auth_separately_from_installation():
+    probe = FakeProbe({"codex": roster_mod.Capability(installed=True, detail="codex via codex")})
+    agent = roster_mod.Agent(
+        name="worker",
+        cli="codex",
+        role="build",
+        requires={"cli": "codex", "auth": "logged-in"},
+    )
+
+    ok, reason = roster_mod._requirements_satisfied(agent, probe)
+
+    assert ok is False
+    assert reason == "codex authentication is unknown"

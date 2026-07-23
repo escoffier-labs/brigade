@@ -1,0 +1,59 @@
+orchestrator = "architect"
+
+[agents.architect]
+cli = "claude"
+model = "claude-opus-4-8"
+role = "Plan the work and route tasks across lanes."
+purpose = "High-context planning seat with Codex fallback."
+requires = { cli = "claude" }
+fallback = ["architect_codex"]
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = ["Claude is optional on many machines."]
+
+[agents.architect_codex]
+cli = "codex"
+model = "gpt-5.6-terra"
+reasoning = "high"
+role = "Codex planning fallback."
+purpose = "Subscription-backed planner when Claude is unavailable."
+requires = { cli = "codex" }
+fallback = []
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.builder]
+cli = "cursor"
+model = "composer-2.5"
+transport = "acpx"
+transport_version = "0.12.0"
+role = "Fast implementation lane."
+purpose = "Primary builder using Cursor subscription capacity."
+requires = { cli = "cursor", auth = "logged-in" }
+fallback = ["builder_codex", "builder_oss"]
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = ["ACP transport is version-pinned."]
+
+[agents.builder_codex]
+cli = "codex"
+model = "gpt-5.6-terra"
+reasoning = "high"
+role = "Codex implementation fallback."
+purpose = "Builder fallback for Codex subscribers."
+requires = { cli = "codex" }
+fallback = []
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.builder_oss]
+cli = "ollama:llama3.2:3b"
+role = "Local open-weight builder."
+purpose = "Last-resort local implementation seat."
+requires = { cli = "ollama" }
+fallback = []
+stats = { speed = "slow", source = "author-receipts-2026-07" }
+caveats = ["Requires a pulled ollama model."]
+
+[limits]
+max_workers = 4
+timeout_seconds = 900
+allow_models = ["claude", "codex", "cursor", "ollama:*"]

@@ -1,0 +1,42 @@
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "Plan the work and route to affordable workers."
+purpose = "Subscription-backed planner with an open-weight fallback."
+requires = { cli = "codex" }
+fallback = ["chef_oss"]
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = ["Codex seat drops when the subscription is unavailable."]
+
+[agents.chef_oss]
+cli = "ollama:llama3.2:3b"
+role = "Plan locally with open-weight models."
+purpose = "Local planner when Codex is unavailable."
+requires = { cli = "ollama" }
+fallback = []
+stats = { speed = "slow", source = "author-receipts-2026-07" }
+caveats = ["Requires a pulled ollama model."]
+
+[agents.coder]
+cli = "ollama:llama3.2:3b"
+role = "Implement changes with local open-weight models."
+purpose = "Budget coding seat that prefers local inference."
+requires = { cli = "ollama" }
+fallback = ["coder_codex"]
+stats = { speed = "slow", source = "author-receipts-2026-07" }
+caveats = ["Local latency varies with hardware."]
+
+[agents.coder_codex]
+cli = "codex"
+role = "Implement changes when Codex is available."
+purpose = "Subscription-backed coding fallback."
+requires = { cli = "codex" }
+fallback = []
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[limits]
+max_workers = 3
+timeout_seconds = 900
+allow_models = ["codex", "ollama:*"]

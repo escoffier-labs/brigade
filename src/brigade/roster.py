@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import fnmatch
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from . import agents as agent_adapters
 from . import toml_compat
@@ -40,6 +40,11 @@ class Agent:
     env: dict[str, str] | None = None
     invalid_final_fallback: str | None = None
     read_only_capable: bool = True
+    purpose: str | None = None
+    requires: dict[str, str] | None = None
+    fallback: tuple[str, ...] = ()
+    stats: dict[str, str] | None = None
+    caveats: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,66 @@ class Roster:
 
     def find_role(self, role: str) -> Agent | None:
         return next((a for a in self.agents.values() if a.role == role), None)
+
+
+@dataclass(frozen=True)
+class Capability:
+    installed: bool
+    authenticated: bool | None = None
+    detail: str = ""
+    auth_detail: str = ""
+
+
+class CapabilityProbe(Protocol):
+    def lookup(self, cli_ref: str) -> Capability: ...
+
+
+@dataclass(frozen=True)
+class SeatResolution:
+    requested: str
+    resolved: str | None
+    outcome: Literal["self", "fallback", "dropped"]
+    reason: str
+
+
+@dataclass(frozen=True)
+class RosterCapabilityResolution:
+    roster: Roster
+    report: tuple[SeatResolution, ...]
+
+    @property
+    def usable(self) -> bool:
+        return self.roster.orchestrator in self.roster.agents
+
+
+@dataclass(frozen=True)
+class HostCapabilityProbe:
+    def lookup(self, cli_ref: str) -> Capability:
+        binary = agent_adapters.command_for(cli_ref)
+        installed = agent_adapters.detect(cli_ref)
+        authenticated: bool | None = None
+        detail = ""
+        auth_detail = ""
+        if cli_ref == "cursor" and installed:
+            from . import acpx_adapter
+
+            auth = acpx_adapter.cursor_auth_status()
+            detail = auth.detail
+            auth_detail = auth.detail
+            if auth.state == "authenticated":
+                authenticated = True
+            elif auth.state == "unauthenticated":
+                authenticated = False
+        elif installed:
+            detail = f"{cli_ref} via {binary}"
+        else:
+            detail = f"{cli_ref} needs `{binary}` on PATH"
+        return Capability(
+            installed=installed,
+            authenticated=authenticated,
+            detail=detail,
+            auth_detail=auth_detail,
+        )
 
 
 def _as_str(value: object, field: str) -> str:
@@ -73,6 +138,49 @@ def _as_bool(value: object, field: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{field} must be a boolean")
     return value
+
+
+def _as_optional_str(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    return _as_str(value, field)
+
+
+def _as_requires(value: object, agent_name: str) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"agents.{agent_name}.requires must be a TOML table")
+    allowed = frozenset({"cli", "auth"})
+    parsed: dict[str, str] = {}
+    for key, raw in value.items():
+        if key not in allowed:
+            raise ValueError(f"agents.{agent_name}.requires keys must be cli and/or auth")
+        parsed[key] = _as_str(raw, f"agents.{agent_name}.requires.{key}")
+    if "auth" in parsed and parsed["auth"] != "logged-in":
+        raise ValueError(f'agents.{agent_name}.requires.auth must be "logged-in"')
+    return parsed or None
+
+
+def _as_stats(value: object, agent_name: str) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"agents.{agent_name}.stats must be a TOML table")
+    parsed: dict[str, str] = {}
+    for key, raw in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"agents.{agent_name}.stats keys must be non-empty strings")
+        parsed[key.strip()] = _as_str(raw, f"agents.{agent_name}.stats.{key}")
+    return parsed or None
+
+
+def _as_string_list(value: object, field: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field} must be a list of strings")
+    return tuple(_as_str(item, field) for item in value)
 
 
 def _as_sandbox(value: object) -> str | None:
@@ -260,6 +368,11 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             raw_agent.get("read_only_capable", True),
             f"agents.{agent_name}.read_only_capable",
         )
+        purpose = _as_optional_str(raw_agent.get("purpose"), f"agents.{agent_name}.purpose")
+        requires = _as_requires(raw_agent.get("requires"), agent_name)
+        fallback = _as_string_list(raw_agent.get("fallback"), f"agents.{agent_name}.fallback")
+        stats = _as_stats(raw_agent.get("stats"), agent_name)
+        caveats = _as_string_list(raw_agent.get("caveats"), f"agents.{agent_name}.caveats")
 
         cli_raw = raw_agent.get("cli")
         has_endpoint = endpoint is not None and model is not None
@@ -316,27 +429,61 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
             env=env,
             invalid_final_fallback=invalid_final_fallback,
             read_only_capable=read_only_capable,
+            purpose=purpose,
+            requires=requires,
+            fallback=fallback,
+            stats=stats,
+            caveats=caveats,
         )
 
     if orchestrator not in parsed_agents:
         raise ValueError(f"orchestrator {orchestrator!r} is not defined in [agents]")
 
     for agent_name, agent in parsed_agents.items():
-        fallback_name = agent.invalid_final_fallback
-        if fallback_name is None:
+        for fallback_name in agent.fallback:
+            if fallback_name not in parsed_agents:
+                raise ValueError(f"agents.{agent_name}.fallback references {fallback_name!r}, which is not defined")
+            fallback_agent = parsed_agents[fallback_name]
+            if fallback_agent.fallback:
+                raise ValueError(
+                    f"agents.{agent_name}.fallback target {fallback_name!r} must not define its own fallback"
+                )
+            if agent_name == orchestrator and fallback_agent.transport == "acpx":
+                raise ValueError(f"agents.{agent_name}.fallback cannot alias an acpx worker into the orchestrator slot")
+            if agent_name == orchestrator and (
+                fallback_agent.cli is None or fallback_agent.cli.startswith("codex-cloud:")
+            ):
+                raise ValueError(
+                    f"agents.{agent_name}.fallback cannot alias worker-only seat {fallback_name!r} "
+                    "into the orchestrator slot"
+                )
+            if agent_name != orchestrator and fallback_name == orchestrator:
+                raise ValueError(f"agents.{agent_name}.fallback cannot name the orchestrator {orchestrator!r}")
+
+    for agent_name, agent in parsed_agents.items():
+        if agent.requires is not None and "cli" in agent.requires:
+            _validate_requires_cli(agent_name, agent)
+
+    for agent_name, agent in parsed_agents.items():
+        invalid_final_name = agent.invalid_final_fallback
+        if invalid_final_name is None:
             continue
         if agent.cli != "grok" or agent.transport != "direct":
             raise ValueError(f"agents.{agent_name}.invalid_final_fallback requires a direct grok seat")
-        fallback = parsed_agents.get(fallback_name)
-        if fallback is None:
+        invalid_final_agent = parsed_agents.get(invalid_final_name)
+        if invalid_final_agent is None:
             raise ValueError(
-                f"agents.{agent_name}.invalid_final_fallback references {fallback_name!r}, which is not defined"
+                f"agents.{agent_name}.invalid_final_fallback references {invalid_final_name!r}, which is not defined"
             )
-        if fallback_name == orchestrator or fallback.cli != "cursor" or fallback.transport != "acpx":
+        if (
+            invalid_final_name == orchestrator
+            or invalid_final_agent.cli != "cursor"
+            or invalid_final_agent.transport != "acpx"
+        ):
             raise ValueError(f"agents.{agent_name}.invalid_final_fallback must name a reviewed cursor-grok acpx seat")
-        if fallback.model is None or not fallback.model.lower().startswith("grok-"):
+        if invalid_final_agent.model is None or not invalid_final_agent.model.lower().startswith("grok-"):
             raise ValueError(f"agents.{agent_name}.invalid_final_fallback target must use a grok model")
-        if fallback.transport_version != ACPX_TRANSPORT_VERSION:
+        if invalid_final_agent.transport_version != ACPX_TRANSPORT_VERSION:
             raise ValueError(
                 f"agents.{agent_name}.invalid_final_fallback target requires reviewed acpx version "
                 f"{ACPX_TRANSPORT_VERSION}"
@@ -362,3 +509,189 @@ def read_only_capability_error(agent: Agent) -> str | None:
     if agent.read_only_capable:
         return None
     return f"worker {agent.name!r} cannot run in read-only mode: agents.{agent.name}.read_only_capable is false"
+
+
+def _seat_adapter_ref(agent: Agent) -> str | None:
+    if agent.cli is None:
+        return None
+    if agent.cli.startswith("ollama:"):
+        return "ollama"
+    if agent.cli.startswith("codex-cloud:"):
+        return "codex"
+    return agent.cli
+
+
+def _validate_requires_cli(agent_name: str, agent: Agent) -> None:
+    required = agent.requires["cli"] if agent.requires is not None else None
+    if required is None:
+        return
+    if agent.cli is None:
+        raise ValueError(f"agents.{agent_name}.requires.cli is not supported on endpoint seats")
+    adapter = _seat_adapter_ref(agent)
+    if adapter != required:
+        raise ValueError(f"agents.{agent_name}.requires.cli must match the seat adapter {adapter!r}, got {required!r}")
+
+
+def _referenced_fallback_names(agents: dict[str, Agent]) -> frozenset[str]:
+    referenced: set[str] = set()
+    for agent in agents.values():
+        referenced.update(agent.fallback)
+    return frozenset(referenced)
+
+
+def _requested_roots(roster: Roster) -> tuple[str, ...]:
+    referenced = _referenced_fallback_names(roster.agents)
+    return tuple(name for name in roster.agents if name == roster.orchestrator or name not in referenced)
+
+
+def _probe_lookup_ref(agent: Agent) -> str | None:
+    if agent.requires is None:
+        return None
+    if "cli" in agent.requires:
+        return agent.requires["cli"]
+    if agent.requires.get("auth") == "logged-in":
+        return agent.cli
+    return None
+
+
+def _requirements_satisfied(agent: Agent, probe: CapabilityProbe) -> tuple[bool, str]:
+    if agent.requires is None:
+        return True, ""
+    lookup_ref = _probe_lookup_ref(agent)
+    if lookup_ref is None:
+        return False, "logged-in auth requires a cli seat"
+    capability = probe.lookup(lookup_ref)
+    reasons: list[str] = []
+    if "cli" in agent.requires:
+        if not capability.installed:
+            reasons.append(capability.detail or f"{lookup_ref} is not installed")
+    if agent.requires.get("auth") == "logged-in" and not reasons:
+        if capability.authenticated is not True:
+            if capability.authenticated is False:
+                reasons.append(capability.auth_detail or capability.detail or f"{lookup_ref} is not authenticated")
+            elif capability.auth_detail:
+                reasons.append(capability.auth_detail)
+            else:
+                reasons.append(f"{lookup_ref} authentication is unknown")
+    return (not reasons, "; ".join(reasons))
+
+
+def _resolved_self_agent(agent: Agent) -> Agent:
+    return replace(agent, fallback=())
+
+
+def _resolved_fallback_agent(requested_agent: Agent, fallback_agent: Agent, requested_name: str) -> Agent:
+    return replace(
+        fallback_agent,
+        name=requested_name,
+        role=requested_agent.role,
+        purpose=requested_agent.purpose,
+        fallback=(),
+    )
+
+
+def _is_reviewed_invalid_final_fallback(agent: Agent) -> bool:
+    return (
+        agent.cli == "cursor"
+        and agent.transport == "acpx"
+        and agent.model is not None
+        and agent.model.lower().startswith("grok-")
+        and agent.transport_version == ACPX_TRANSPORT_VERSION
+    )
+
+
+def _ensure_invalid_final_fallback_deps(
+    roster: Roster,
+    resolved_agents: dict[str, Agent],
+    probe: CapabilityProbe,
+) -> dict[str, Agent]:
+    updated = dict(resolved_agents)
+    for name, agent in list(updated.items()):
+        dep_name = agent.invalid_final_fallback
+        if dep_name is None:
+            continue
+        if dep_name in updated:
+            if not _is_reviewed_invalid_final_fallback(updated[dep_name]):
+                updated[name] = replace(agent, invalid_final_fallback=None)
+            continue
+        dep_agent = roster.agents.get(dep_name)
+        if dep_agent is None:
+            continue
+        dep_ok, _ = _requirements_satisfied(dep_agent, probe)
+        if dep_ok:
+            updated[dep_name] = _resolved_self_agent(dep_agent)
+        else:
+            updated[name] = replace(agent, invalid_final_fallback=None)
+    return updated
+
+
+def resolve_capabilities(
+    roster: Roster,
+    probe: CapabilityProbe | None = None,
+) -> RosterCapabilityResolution:
+    active_probe = probe if probe is not None else HostCapabilityProbe()
+    resolved_agents: dict[str, Agent] = {}
+    report: list[SeatResolution] = []
+
+    for requested_name in _requested_roots(roster):
+        requested_agent = roster.agents[requested_name]
+        satisfied, self_reason = _requirements_satisfied(requested_agent, active_probe)
+        if satisfied:
+            resolved_agents[requested_name] = _resolved_self_agent(requested_agent)
+            report.append(
+                SeatResolution(
+                    requested=requested_name,
+                    resolved=requested_name,
+                    outcome="self",
+                    reason="requirements satisfied",
+                )
+            )
+            continue
+
+        fallback_reasons: list[str] = []
+        selected_fallback: str | None = None
+        for fallback_name in requested_agent.fallback:
+            fallback_agent = roster.agents.get(fallback_name)
+            if fallback_agent is None:
+                fallback_reasons.append(f"{fallback_name} is not defined")
+                continue
+            fallback_ok, fallback_reason = _requirements_satisfied(fallback_agent, active_probe)
+            if fallback_ok:
+                selected_fallback = fallback_name
+                resolved_agents[requested_name] = _resolved_fallback_agent(
+                    requested_agent,
+                    fallback_agent,
+                    requested_name,
+                )
+                reason_parts = [self_reason] if self_reason else []
+                reason_parts.extend(fallback_reasons)
+                reason_parts.append(f"selected fallback {fallback_name}")
+                report.append(
+                    SeatResolution(
+                        requested=requested_name,
+                        resolved=fallback_name,
+                        outcome="fallback",
+                        reason="; ".join(part for part in reason_parts if part),
+                    )
+                )
+                break
+            fallback_reasons.append(f"{fallback_name}: {fallback_reason}")
+
+        if selected_fallback is None:
+            reason_parts = [self_reason] if self_reason else []
+            reason_parts.extend(fallback_reasons)
+            report.append(
+                SeatResolution(
+                    requested=requested_name,
+                    resolved=None,
+                    outcome="dropped",
+                    reason="; ".join(part for part in reason_parts if part),
+                )
+            )
+
+    resolved_agents = _ensure_invalid_final_fallback_deps(roster, resolved_agents, active_probe)
+
+    return RosterCapabilityResolution(
+        roster=replace(roster, agents=resolved_agents),
+        report=tuple(report),
+    )
