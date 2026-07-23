@@ -121,18 +121,46 @@
         "platform"
       ],
       "properties": {
-        "instruction": {"const": "declared"},
-        "skill": {"const": "declared"},
-        "hook": {"const": "declared"},
-        "mcp": {"const": "declared"},
-        "workspace": {"const": "declared"},
-        "session": {"const": "declared"},
-        "verification": {"const": "declared"},
-        "handoff": {"const": "declared"},
-        "reload": {"const": "declared"},
-        "telemetry": {"const": "declared"},
-        "platform": {"const": "declared"}
+        "instruction": {"$ref": "#/definitions/deep_probe_entry"},
+        "skill": {"$ref": "#/definitions/deep_probe_entry"},
+        "hook": {"$ref": "#/definitions/deep_probe_entry"},
+        "mcp": {"$ref": "#/definitions/deep_probe_entry"},
+        "workspace": {"$ref": "#/definitions/deep_probe_entry"},
+        "session": {"$ref": "#/definitions/deep_probe_entry"},
+        "verification": {"$ref": "#/definitions/deep_probe_entry"},
+        "handoff": {"$ref": "#/definitions/deep_probe_entry"},
+        "reload": {"$ref": "#/definitions/deep_probe_entry"},
+        "telemetry": {"$ref": "#/definitions/deep_probe_entry"},
+        "platform": {"$ref": "#/definitions/deep_probe_entry"}
       }
+    }
+  },
+  "definitions": {
+    "deep_probe_discovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "args"],
+      "properties": {
+        "command": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+        "args": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "deep_probe_entry": {
+      "oneOf": [
+        {"const": "declared"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": {"const": "declared"},
+            "discovery": {"$ref": "#/definitions/deep_probe_discovery"}
+          }
+        }
+      ]
     }
   },
   "allOf": [

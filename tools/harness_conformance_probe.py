@@ -7,8 +7,9 @@ Even with those guards, executing a third-party binary can still read ambient
 environment data, perform network I/O, or run vendor-defined side effects.
 Treat ``--run-version`` as an explicit operator opt-in.
 
-Fixture-declared deep probes are never executed. Their declarations are echoed
-in probe output for harness-specific follow-up work.
+Fixture-declared deep probes are not executed unless ``--run-deep-probes`` is
+passed. Without that flag their declarations are echoed in probe output for
+harness-specific follow-up work.
 """
 
 from __future__ import annotations
@@ -44,10 +45,31 @@ CAPABILITY_IDS = {
     "platform",
 }
 BARE_COMMAND = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-ASSIGNMENT_SECRET = re.compile(r"(?i)((?:api[_-]?key|token|secret|password)\s*[:=]\s*)[^\s]+")
+DISCOVERY_ARGS_ALLOWLIST = frozenset({("--help",), ("-h",)})
+DEEP_PROBE_IDS = (
+    "instruction",
+    "skill",
+    "hook",
+    "mcp",
+    "workspace",
+    "session",
+    "verification",
+    "handoff",
+    "reload",
+    "telemetry",
+    "platform",
+)
+CREDENTIAL_NAME = (
+    r"(?:api[_-]?key|token|secret|password|credential|private[_-]?key|"
+    r"secret[_-]?access[_-]?key|access[_-]?key)"
+)
+ASSIGNMENT_SECRET = re.compile(rf"(?i)((?:{CREDENTIAL_NAME})\s*[:=]\s*)[^\s]+")
 AUTHORIZATION_HEADER = re.compile(r"(?i)(Authorization\s*:\s*).+")
 BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+([A-Za-z0-9._~+/=-]+)\b")
-JSON_QUOTED_CREDENTIAL = re.compile(r'(?i)("(?:api[_-]?key|token|secret|password)"\s*:\s*")[^"]+(")')
+JSON_QUOTED_CREDENTIAL = re.compile(rf'(?i)("[^"\r\n]*(?:{CREDENTIAL_NAME})[^"\r\n]*"\s*:\s*")((?:\\.|[^"\\])*)(")')
+JSON_UNTERMINATED_CREDENTIAL = re.compile(
+    rf'(?i)("[^"\r\n]*(?:{CREDENTIAL_NAME})[^"\r\n]*"\s*:\s*")((?:\\.|[^"\\])*)\\?\Z'
+)
 VERSION_LINE = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[-+~][0-9A-Za-z][0-9A-Za-z.-]*)?")
 OUTPUT_CAP_BYTES = 65536
 DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -80,8 +102,17 @@ def redact_text(value: str, *home_dirs: str | None) -> str:
     redacted = ASSIGNMENT_SECRET.sub(r"\1[REDACTED]", redacted)
     redacted = AUTHORIZATION_HEADER.sub(r"\1[REDACTED]", redacted)
     redacted = BEARER_TOKEN.sub("Bearer [REDACTED]", redacted)
-    redacted = JSON_QUOTED_CREDENTIAL.sub(r"\1[REDACTED]\2", redacted)
+    redacted = JSON_QUOTED_CREDENTIAL.sub(r"\1[REDACTED]\3", redacted)
+    redacted = JSON_UNTERMINATED_CREDENTIAL.sub(r'\1[REDACTED]"', redacted)
     return redacted
+
+
+def _redact_bounded_output(output_bytes: bytes, *private_paths: str | None) -> str:
+    output = redact_text(output_bytes.decode("utf-8", errors="replace"), *private_paths)
+    encoded = output.encode("utf-8")
+    if len(encoded) <= OUTPUT_CAP_BYTES:
+        return output
+    return encoded[:OUTPUT_CAP_BYTES].decode("utf-8", errors="ignore")
 
 
 def _extract_version_line(output: str) -> str | None:
@@ -128,6 +159,179 @@ def validate_fixture(fixture: dict[str, Any], schema: dict[str, Any]) -> list[st
 
 def _is_safe_command_name(command: str) -> bool:
     return BARE_COMMAND.fullmatch(command) is not None
+
+
+def _is_safe_discovery_args(args: list[str]) -> bool:
+    return tuple(args) in DISCOVERY_ARGS_ALLOWLIST
+
+
+def _normalize_deep_probe_entry(value: Any) -> dict[str, Any]:
+    if value == "declared":
+        return {"state": "declared"}
+    if isinstance(value, dict) and value.get("state") == "declared":
+        return value
+    return {"state": "unknown"}
+
+
+def _availability_blocks_deep_probe_execution(availability: dict[str, Any]) -> bool:
+    return availability.get("state") in {"externally_blocked", "external_only", "not_executable"}
+
+
+def _declared_only_receipt(probe_id: str, *, reason: str) -> dict[str, Any]:
+    return {
+        "probe_id": probe_id,
+        "state": "declared_only",
+        "reason": reason,
+        "platform": sys.platform,
+    }
+
+
+def run_deep_probe_discovery(
+    probe_id: str,
+    discovery: dict[str, Any],
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    timeout_seconds = _positive_finite_timeout(timeout_seconds)
+    command = discovery.get("command")
+    args = discovery.get("args")
+    if not isinstance(command, str) or not _is_safe_command_name(command):
+        return {
+            "probe_id": probe_id,
+            "state": "refused",
+            "reason": "unsafe_command_name",
+            "command": command,
+            "platform": sys.platform,
+        }
+    if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+        return {
+            "probe_id": probe_id,
+            "state": "refused",
+            "reason": "unsafe_discovery_arguments",
+            "command": command,
+            "platform": sys.platform,
+        }
+    if not _is_safe_discovery_args(args):
+        return {
+            "probe_id": probe_id,
+            "state": "refused",
+            "reason": "unsafe_discovery_arguments",
+            "command": command,
+            "platform": sys.platform,
+        }
+
+    executable = shutil.which(command)
+    if executable is None:
+        return {
+            "probe_id": probe_id,
+            "state": "externally_blocked",
+            "reason": "binary_not_found",
+            "command": command,
+            "platform": sys.platform,
+        }
+
+    with tempfile.TemporaryDirectory(prefix="harness-probe-") as tmpdir:
+        home_dir = Path(tmpdir) / "home"
+        home_dir.mkdir()
+        (home_dir / ".config").mkdir(parents=True, exist_ok=True)
+        environment = _minimal_environment(home_dir, executable)
+        process: subprocess.Popen[bytes] | None = None
+        output_bytes = b""
+        overflow = False
+        failure_reason: str | None = None
+        return_code: int | None = None
+        try:
+            process = _popen_probe_process(
+                [executable, *args],
+                cwd=tmpdir,
+                env=environment,
+            )
+            output_bytes, overflow, failure_reason = _collect_bounded_output(
+                process,
+                cap_bytes=OUTPUT_CAP_BYTES,
+                timeout_seconds=timeout_seconds,
+            )
+            return_code = process.poll()
+            if return_code is None:
+                try:
+                    return_code = process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    _terminate_process_group(process)
+                    return_code = process.wait(timeout=1)
+        finally:
+            if process is not None and process.poll() is None:
+                _terminate_process_group(process)
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+
+        output = _redact_bounded_output(output_bytes, str(home_dir), tmpdir)
+        if failure_reason == "TimeoutExpired":
+            return {
+                "probe_id": probe_id,
+                "state": "externally_blocked",
+                "reason": "TimeoutExpired",
+                "command": command,
+                "exit_code": return_code,
+                "platform": sys.platform,
+                "output": output,
+            }
+        if overflow or failure_reason == "output_overflow":
+            return {
+                "probe_id": probe_id,
+                "state": "externally_blocked",
+                "reason": "output_overflow",
+                "command": command,
+                "exit_code": return_code,
+                "platform": sys.platform,
+                "output": output,
+            }
+        if return_code == 0:
+            return {
+                "probe_id": probe_id,
+                "state": "observed",
+                "command": command,
+                "exit_code": return_code,
+                "platform": sys.platform,
+                "output": output,
+            }
+        return {
+            "probe_id": probe_id,
+            "state": "nonzero_exit",
+            "reason": "nonzero_exit",
+            "command": command,
+            "exit_code": return_code,
+            "platform": sys.platform,
+            "output": output,
+        }
+
+
+def collect_deep_probe_receipts(
+    fixture: dict[str, Any],
+    availability: dict[str, Any],
+    *,
+    timeout_seconds: float,
+) -> dict[str, dict[str, Any]]:
+    timeout_seconds = _positive_finite_timeout(timeout_seconds)
+    blocked = _availability_blocks_deep_probe_execution(availability)
+    blocked_reason = (
+        "invalid_fixture" if availability.get("state") == "not_executable" else "externally_blocked_fixture"
+    )
+    declared_probes = fixture.get("deep_probes", {})
+    deep_probes = declared_probes if isinstance(declared_probes, dict) else {}
+    receipts: dict[str, dict[str, Any]] = {}
+    for probe_id in DEEP_PROBE_IDS:
+        entry = _normalize_deep_probe_entry(deep_probes.get(probe_id))
+        if blocked:
+            receipts[probe_id] = _declared_only_receipt(probe_id, reason=blocked_reason)
+            continue
+        discovery = entry.get("discovery")
+        if not isinstance(discovery, dict):
+            receipts[probe_id] = _declared_only_receipt(probe_id, reason="no_discovery_spec")
+            continue
+        receipts[probe_id] = run_deep_probe_discovery(probe_id, discovery, timeout_seconds=timeout_seconds)
+    return receipts
 
 
 def _command_candidates(fixture: dict[str, Any]) -> list[str]:
@@ -508,7 +712,7 @@ def run_version_probe(fixture: dict[str, Any], *, timeout_seconds: float = DEFAU
                 "command": probed_command,
             }
 
-        output = redact_text(output_bytes.decode("utf-8", errors="replace"), str(home_dir))
+        output = _redact_bounded_output(output_bytes, str(home_dir), tmpdir)
         if return_code == 0:
             return {
                 "harness_id": harness_id,
@@ -534,6 +738,7 @@ def probe_fixture(
     schema: dict[str, Any],
     *,
     run_version: bool,
+    run_deep_probes: bool = False,
     timeout_seconds: float,
 ) -> dict[str, Any]:
     timeout_seconds = _positive_finite_timeout(timeout_seconds)
@@ -554,6 +759,12 @@ def probe_fixture(
             "state": "not_executable",
             "reason": "invalid_fixture",
         }
+        if run_deep_probes:
+            payload["deep_probe_receipts"] = collect_deep_probe_receipts(
+                fixture,
+                payload["availability"],
+                timeout_seconds=timeout_seconds,
+            )
         return payload
 
     payload["availability"] = check_availability(fixture)
@@ -564,6 +775,12 @@ def probe_fixture(
             "state": "skipped",
             "reason": "availability_only_unless_run_version",
         }
+    if run_deep_probes and not errors:
+        payload["deep_probe_receipts"] = collect_deep_probe_receipts(
+            fixture,
+            payload["availability"],
+            timeout_seconds=timeout_seconds,
+        )
     return payload
 
 
@@ -580,6 +797,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Execute validated CLI fixtures with --version in an isolated sandbox.",
     )
+    parser.add_argument(
+        "--run-deep-probes",
+        action="store_true",
+        help="Execute fixture-declared deep probe discovery commands in an isolated sandbox.",
+    )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     args = parser.parse_args(argv)
 
@@ -591,6 +813,7 @@ def main(argv: list[str] | None = None) -> int:
             fixture,
             schema,
             run_version=args.run_version,
+            run_deep_probes=args.run_deep_probes,
             timeout_seconds=timeout_seconds,
         )
         for fixture in fixtures
@@ -599,7 +822,8 @@ def main(argv: list[str] | None = None) -> int:
         "schema": "harness-conformance-probe.v1",
         "fixtures": [fixture["harness"]["id"] for fixture in fixtures],
         "run_version": args.run_version,
-        "deep_probe_policy": "declared_only_not_executed",
+        "run_deep_probes": args.run_deep_probes,
+        "deep_probe_policy": ("executed_when_specified" if args.run_deep_probes else "declared_only_not_executed"),
         "results": results,
     }
     json.dump(payload, sys.stdout, indent=2, sort_keys=True)

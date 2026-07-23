@@ -606,6 +606,410 @@ def test_deep_probes_are_returned_not_executed(probe, schema, fixtures) -> None:
         "telemetry",
         "platform",
     }
+    assert "deep_probe_receipts" not in result
+
+
+def test_schema_accepts_inline_discovery_spec(probe, schema, fixtures) -> None:
+    fixture = next(item for item in fixtures if item["harness"]["id"] == "codex-cli")
+    assert probe.validate_fixture(fixture, schema) == []
+    assert fixture["deep_probes"]["instruction"]["discovery"] == {
+        "command": "codex",
+        "args": ["--help"],
+    }
+
+
+def test_run_deep_probes_default_policy_stays_declared_only_not_executed(probe, schema, fixtures) -> None:
+    result = probe.probe_fixture(fixtures[0], schema, run_version=False, run_deep_probes=False, timeout_seconds=1.0)
+    assert "deep_probe_receipts" not in result
+
+
+def test_run_deep_probes_emits_one_receipt_per_declared_probe(probe, schema) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="receipt-count-cli",
+        deep_probes=_deep_probes_with_instruction_discovery(),
+    )
+    with (
+        mock.patch.object(probe.shutil, "which", return_value="/fake/bin/codex"),
+        mock.patch.object(probe, "_popen_probe_process", return_value=_fake_version_process()),
+        mock.patch.object(
+            probe,
+            "_collect_bounded_output",
+            return_value=(b"codex help output\n", False, None),
+        ),
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    receipts = result["deep_probe_receipts"]
+    assert set(receipts) == set(_minimal_deep_probes())
+    assert len(receipts) == 11
+
+
+def test_run_deep_probes_declared_only_without_discovery_spec(probe, schema) -> None:
+    fixture = _fixture_with_deep_probes(harness_id="declared-only-cli", deep_probes=_minimal_deep_probes())
+    result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    receipt = result["deep_probe_receipts"]["skill"]
+    assert receipt["probe_id"] == "skill"
+    assert receipt["state"] == "declared_only"
+    assert receipt["reason"] == "no_discovery_spec"
+    assert receipt["platform"] == sys.platform
+
+
+def test_run_deep_probes_executes_safe_discovery_spec(probe, schema, monkeypatch, tmp_path: Path) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="discovery-cli",
+        deep_probes=_deep_probes_with_instruction_discovery(),
+    )
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv("USERPROFILE", str(real_home))
+    process = _fake_version_process()
+    with (
+        mock.patch.object(probe.shutil, "which", return_value="/fake/bin/codex"),
+        mock.patch.object(probe, "_popen_probe_process", return_value=process) as popen,
+        mock.patch.object(
+            probe,
+            "_collect_bounded_output",
+            return_value=(
+                (
+                    f"codex help output\nhome={real_home}\n"
+                    "credential=fake-credential\n"
+                    "AWS_SECRET_ACCESS_KEY=fake-access-key\n"
+                    "private_key=fake-private-key\n"
+                    '{"AWS_SECRET_ACCESS_KEY":"fake-json-access-key",'
+                    '"apiKey":"fake-json-api-key",'
+                    '"private_key":"fake-escaped-\\"private-key"}\n'
+                ).encode(),
+                False,
+                None,
+            ),
+        ),
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    popen.assert_called_once()
+    argv = popen.call_args[0][0]
+    kwargs = popen.call_args[1]
+    assert argv == ["/fake/bin/codex", "--help"]
+    sandbox_root = Path(kwargs["cwd"])
+    environment = kwargs["env"]
+    for variable in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+        assert Path(environment[variable]).is_relative_to(sandbox_root)
+        assert str(real_home) not in environment[variable]
+    receipt = result["deep_probe_receipts"]["instruction"]
+    assert receipt["state"] == "observed"
+    assert receipt["probe_id"] == "instruction"
+    assert receipt["command"] == "codex"
+    assert receipt["exit_code"] == 0
+    assert receipt["platform"] == sys.platform
+    assert "codex help output" in receipt["output"]
+    assert str(real_home) not in receipt["output"]
+    assert "fake-credential" not in receipt["output"]
+    assert "fake-access-key" not in receipt["output"]
+    assert "fake-private-key" not in receipt["output"]
+    assert "fake-json-access-key" not in receipt["output"]
+    assert "fake-json-api-key" not in receipt["output"]
+    assert "fake-escaped" not in receipt["output"]
+    assert receipt["output"].count("[REDACTED]") == 6
+    assert ('{"AWS_SECRET_ACCESS_KEY":"[REDACTED]","apiKey":"[REDACTED]","private_key":"[REDACTED]"}\n') in receipt[
+        "output"
+    ]
+
+
+def test_run_deep_probes_blocked_fixture_stays_declared_only(probe, schema) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="blocked-cli",
+        deep_probes=_deep_probes_with_instruction_discovery(),
+        command="missing-binary",
+    )
+    with (
+        mock.patch.object(probe.shutil, "which", return_value=None),
+        mock.patch.object(probe, "_popen_probe_process") as popen,
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    popen.assert_not_called()
+    assert result["availability"]["state"] == "externally_blocked"
+    receipt = result["deep_probe_receipts"]["instruction"]
+    assert receipt["state"] == "declared_only"
+    assert receipt["reason"] == "externally_blocked_fixture"
+
+
+def test_run_deep_probes_invalid_fixture_emits_declared_only_receipts_without_launch(probe, schema) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="invalid-cli",
+        deep_probes=_deep_probes_with_instruction_discovery(),
+    )
+    fixture["unexpected"] = True
+    with mock.patch.object(probe, "_popen_probe_process") as popen:
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    popen.assert_not_called()
+    assert result["availability"]["state"] == "not_executable"
+    receipts = result["deep_probe_receipts"]
+    assert len(receipts) == len(_minimal_deep_probes())
+    assert {receipt["reason"] for receipt in receipts.values()} == {"invalid_fixture"}
+    assert {receipt["state"] for receipt in receipts.values()} == {"declared_only"}
+
+
+def test_run_deep_probes_invalid_nonobject_declarations_emit_receipts_without_launch(probe, schema) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="invalid-deep-probes-cli",
+        deep_probes=_minimal_deep_probes(),
+    )
+    fixture["deep_probes"] = "invalid"
+    with mock.patch.object(probe, "_popen_probe_process") as popen:
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    popen.assert_not_called()
+    assert result["availability"]["state"] == "not_executable"
+    receipts = result["deep_probe_receipts"]
+    assert len(receipts) == len(_minimal_deep_probes())
+    assert {receipt["reason"] for receipt in receipts.values()} == {"invalid_fixture"}
+    assert {receipt["state"] for receipt in receipts.values()} == {"declared_only"}
+
+
+def test_run_deep_probes_refuses_unsafe_command_before_launch(probe, schema) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="unsafe-command-cli",
+        deep_probes={
+            **_minimal_deep_probes(),
+            "instruction": {
+                "state": "declared",
+                "discovery": {"command": "/bin/sh", "args": ["--help"]},
+            },
+        },
+    )
+    with mock.patch.object(probe, "_popen_probe_process") as popen:
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    popen.assert_not_called()
+    receipt = result["deep_probe_receipts"]["instruction"]
+    assert receipt["state"] == "refused"
+    assert receipt["reason"] == "unsafe_command_name"
+
+
+def test_run_deep_probes_refuses_unsafe_args_before_launch(probe, schema) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="unsafe-args-cli",
+        deep_probes={
+            **_minimal_deep_probes(),
+            "instruction": {
+                "state": "declared",
+                "discovery": {"command": "codex", "args": ["-c", "print('x')"]},
+            },
+        },
+    )
+    with mock.patch.object(probe, "_popen_probe_process") as popen:
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    popen.assert_not_called()
+    receipt = result["deep_probe_receipts"]["instruction"]
+    assert receipt["state"] == "refused"
+    assert receipt["reason"] == "unsafe_discovery_arguments"
+
+
+def test_run_deep_probes_refuses_args_outside_exact_allowlist(probe, schema) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="unallowlisted-args-cli",
+        deep_probes={
+            **_minimal_deep_probes(),
+            "instruction": {
+                "state": "declared",
+                "discovery": {"command": "codex", "args": ["config", "--help"]},
+            },
+        },
+    )
+    with mock.patch.object(probe, "_popen_probe_process") as popen:
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    popen.assert_not_called()
+    receipt = result["deep_probe_receipts"]["instruction"]
+    assert receipt["state"] == "refused"
+    assert receipt["reason"] == "unsafe_discovery_arguments"
+
+
+def test_run_deep_probes_nonzero_exit_preserves_bounded_output(probe, schema, monkeypatch, tmp_path: Path) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="nonzero-discovery-cli",
+        deep_probes=_deep_probes_with_instruction_discovery(),
+    )
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    monkeypatch.setenv("HOME", str(real_home))
+    process = _fake_version_process(exit_code=2)
+    with (
+        mock.patch.object(probe.shutil, "which", return_value="/fake/bin/codex"),
+        mock.patch.object(probe, "_popen_probe_process", return_value=process),
+        mock.patch.object(
+            probe,
+            "_collect_bounded_output",
+            return_value=(
+                (f'token=abc123\nconfig={real_home}/.config/codex\n{{"apiKey":"fake-nonzero-json-key"}}\n').encode(),
+                False,
+                None,
+            ),
+        ),
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    receipt = result["deep_probe_receipts"]["instruction"]
+    assert receipt["state"] == "nonzero_exit"
+    assert receipt["reason"] == "nonzero_exit"
+    assert receipt["exit_code"] == 2
+    assert "abc123" not in receipt["output"]
+    assert "fake-nonzero-json-key" not in receipt["output"]
+    assert str(real_home) not in receipt["output"]
+    assert "[REDACTED]" in receipt["output"]
+    assert "[HOME]/.config/codex" in receipt["output"]
+
+
+def test_run_deep_probes_timeout_preserves_bounded_output(probe, schema) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="timeout-discovery-cli",
+        deep_probes=_deep_probes_with_instruction_discovery(),
+    )
+    process = mock.Mock()
+    process.poll.return_value = None
+    process.pid = 5151
+    with (
+        mock.patch.object(probe.shutil, "which", return_value="/fake/bin/codex"),
+        mock.patch.object(probe, "_popen_probe_process", return_value=process),
+        mock.patch.object(
+            probe,
+            "_collect_bounded_output",
+            return_value=(
+                (
+                    "partial output\n"
+                    "credential=fake-timeout-credential\n"
+                    '{"AWS_SECRET_ACCESS_KEY":"fake-timeout-json-key"}\n'
+                ).encode(),
+                False,
+                "TimeoutExpired",
+            ),
+        ),
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=0.01)
+    receipt = result["deep_probe_receipts"]["instruction"]
+    assert receipt["state"] == "externally_blocked"
+    assert receipt["reason"] == "TimeoutExpired"
+    assert receipt["output"] == ('partial output\ncredential=[REDACTED]\n{"AWS_SECRET_ACCESS_KEY":"[REDACTED]"}\n')
+    assert "fake-timeout-credential" not in receipt["output"]
+    assert "fake-timeout-json-key" not in receipt["output"]
+
+
+def test_run_deep_probes_output_overflow_preserves_bounded_output(probe, schema) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="overflow-discovery-cli",
+        deep_probes=_deep_probes_with_instruction_discovery(),
+    )
+    process = mock.Mock()
+    process.poll.return_value = 0
+    process.pid = 5152
+    json_secret_line = '{"token":"x"}\n'
+    overflow_output = json_secret_line * (probe.OUTPUT_CAP_BYTES // len(json_secret_line))
+    overflow_output += "x" * (probe.OUTPUT_CAP_BYTES % len(json_secret_line))
+    assert len(overflow_output.encode()) == probe.OUTPUT_CAP_BYTES
+    with (
+        mock.patch.object(probe.shutil, "which", return_value="/fake/bin/codex"),
+        mock.patch.object(probe, "_popen_probe_process", return_value=process),
+        mock.patch.object(
+            probe,
+            "_collect_bounded_output",
+            return_value=(overflow_output.encode(), True, "output_overflow"),
+        ),
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    receipt = result["deep_probe_receipts"]["instruction"]
+    assert receipt["state"] == "externally_blocked"
+    assert receipt["reason"] == "output_overflow"
+    assert json_secret_line not in receipt["output"]
+    assert receipt["output"].startswith('{"token":"[REDACTED]"}\n')
+    assert len(receipt["output"].encode()) <= probe.OUTPUT_CAP_BYTES
+
+
+def test_run_deep_probes_output_overflow_redacts_unterminated_json_at_boundary(probe, schema) -> None:
+    fixture = _fixture_with_deep_probes(
+        harness_id="overflow-partial-json-cli",
+        deep_probes=_deep_probes_with_instruction_discovery(),
+    )
+    process = mock.Mock()
+    process.poll.return_value = 0
+    process.pid = 5153
+    partial_secret = '{"apiKey":"partial-secret'
+    overflow_output = ("x" * (probe.OUTPUT_CAP_BYTES - len(partial_secret))) + partial_secret
+    with (
+        mock.patch.object(probe.shutil, "which", return_value="/fake/bin/codex"),
+        mock.patch.object(probe, "_popen_probe_process", return_value=process),
+        mock.patch.object(
+            probe,
+            "_collect_bounded_output",
+            return_value=(overflow_output.encode(), True, "output_overflow"),
+        ),
+    ):
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=1.0)
+    receipt = result["deep_probe_receipts"]["instruction"]
+    assert receipt["state"] == "externally_blocked"
+    assert receipt["reason"] == "output_overflow"
+    assert "partial-secret" not in receipt["output"]
+    assert len(receipt["output"].encode()) <= probe.OUTPUT_CAP_BYTES
+
+
+def test_run_deep_probes_sandbox_routes_writes_away_from_real_home(probe, schema, monkeypatch, tmp_path: Path) -> None:
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv("USERPROFILE", str(real_home))
+    helper = tmp_path / "probe-home-check"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os\n"
+        "from pathlib import Path\n"
+        'target = Path(os.environ["HOME"]) / ".probe-config" / "receipt"\n'
+        "target.parent.mkdir(parents=True)\n"
+        'target.write_text("sandboxed")\n'
+        "print(json.dumps({\n"
+        '    "target": str(target),\n'
+        '    "cwd": os.getcwd(),\n'
+        '    "exists": target.is_file(),\n'
+        "}))\n"
+    )
+    helper.chmod(0o755)
+    fixture = _fixture_with_deep_probes(
+        harness_id="sandbox-home-cli",
+        deep_probes={
+            **_minimal_deep_probes(),
+            "instruction": {
+                "state": "declared",
+                "discovery": {"command": "probe-home-check", "args": ["--help"]},
+            },
+        },
+    )
+    with mock.patch.object(probe.shutil, "which", return_value=str(helper)):
+        result = probe.probe_fixture(fixture, schema, run_version=False, run_deep_probes=True, timeout_seconds=2.0)
+    receipt = result["deep_probe_receipts"]["instruction"]
+    assert receipt["state"] == "observed"
+    assert '"exists": true' in receipt["output"]
+    assert "[HOME]/.probe-config/receipt" in receipt["output"]
+    assert '"cwd": "[HOME]"' in receipt["output"]
+    assert str(tmp_path) not in receipt["output"]
+    assert list(real_home.iterdir()) == []
+    assert not (real_home / ".probe-session").exists()
+
+
+def test_probe_script_reports_deep_probe_policy_and_opt_in_flag(probe) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(PROBE_PATH),
+            "--fixtures-dir",
+            str(FIXTURES_DIR),
+            "--schema",
+            str(SCHEMA_PATH),
+            "--run-deep-probes",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": ""},
+    )
+    assert completed.returncode == 0
+    payload = json.loads(completed.stdout)
+    assert payload["deep_probe_policy"] == "executed_when_specified"
+    assert payload["run_deep_probes"] is True
+    codex = next(item for item in payload["results"] if item["harness_id"] == "codex-cli")
+    assert len(codex["deep_probe_receipts"]) == 11
 
 
 def test_probe_script_is_tracked_under_tools() -> None:
@@ -626,7 +1030,33 @@ def test_probe_script_is_tracked_under_tools() -> None:
     assert completed.returncode == 0
     payload = json.loads(completed.stdout)
     assert payload["deep_probe_policy"] == "declared_only_not_executed"
+    assert payload["run_deep_probes"] is False
     assert len(payload["results"]) == 11
+
+
+def _fixture_with_deep_probes(
+    *,
+    harness_id: str,
+    deep_probes: dict[str, object],
+    command: str = "python3",
+) -> dict[str, object]:
+    return {
+        "schema": "harness-contract.v1",
+        "harness": {"id": harness_id, "surface": "cli"},
+        "binary": {"command": command, "version_args": ["--version"]},
+        "capabilities": _minimal_capabilities(),
+        "deep_probes": deep_probes,
+    }
+
+
+def _deep_probes_with_instruction_discovery() -> dict[str, object]:
+    return {
+        **_minimal_deep_probes(),
+        "instruction": {
+            "state": "declared",
+            "discovery": {"command": "codex", "args": ["--help"]},
+        },
+    }
 
 
 def _minimal_capabilities() -> list[dict[str, object]]:

@@ -15,5 +15,17 @@
     {"id": "telemetry", "claim": "Telemetry behavior was not probed.", "provenance": "unknown", "support_state": "unsupported", "implementation_layers": ["unknown"], "evidence": [{"kind": "probe_receipt", "reference": "probe_codex/.brigade/runs/20260718-044429-114cf3b9"}], "tested_version": "0.144.5", "platform": "linux", "scope": "unprobed"},
     {"id": "platform", "claim": "Codex CLI is documented for local desktop platforms.", "provenance": "documented", "support_state": "native", "implementation_layers": ["native"], "evidence": [{"kind": "vendor_documentation", "reference": "https://learn.chatgpt.com/docs/codex/cli"}], "tested_version": "0.144.5", "platform": "linux", "scope": "local"}
   ],
-  "deep_probes": {"instruction": "declared", "skill": "declared", "hook": "declared", "mcp": "declared", "workspace": "declared", "session": "declared", "verification": "declared", "handoff": "declared", "reload": "declared", "telemetry": "declared", "platform": "declared"}
+  "deep_probes": {
+    "instruction": {"state": "declared", "discovery": {"command": "codex", "args": ["--help"]}},
+    "skill": "declared",
+    "hook": "declared",
+    "mcp": "declared",
+    "workspace": "declared",
+    "session": "declared",
+    "verification": "declared",
+    "handoff": "declared",
+    "reload": "declared",
+    "telemetry": "declared",
+    "platform": "declared"
+  }
 }
