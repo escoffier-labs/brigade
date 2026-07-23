@@ -21,6 +21,8 @@ CELL_SCHEMA = "brigade.eval_cell.v1"
 SUMMARY_SCHEMA = "brigade.eval_summary.v1"
 GRADER_SCHEMA = "brigade.grader_result.v1"
 TERMINAL_STATES = frozenset({"accepted", "rejected", "unscored", "execution_error", "adapter_error", "grader_error"})
+REGRADEABLE_STATES = frozenset({"grader_error"})
+MEASUREMENT_STATES = frozenset({"adapter_error", "grader_error"})
 
 
 @dataclass(frozen=True)
@@ -172,7 +174,6 @@ def _grader_result(kind: str, index: int, started: float, *, status: str, score:
         "grader_type": kind,
         "version": 1,
         "status": status,
-        "exit_code": 0 if status == "scored" else None,
         "score": score,
         "score_min": 0.0,
         "score_max": 1.0,
@@ -296,8 +297,18 @@ def _worker_result(run_dir: Path) -> dict[str, Any] | None:
     return results[0]
 
 
-def _state(exit_code: int, graders: list[dict[str, Any]], worker_result: dict[str, Any] | None = None) -> str:
+def _state(
+    exit_code: int,
+    graders: list[dict[str, Any]],
+    worker_result: dict[str, Any] | None = None,
+    *,
+    run_meta: dict[str, Any] | None = None,
+) -> str:
     if exit_code != 0:
+        if isinstance(run_meta, dict) and run_meta.get("failure_kind") == "timeout":
+            return "execution_error"
+        if worker_result is not None and worker_result.get("timed_out") is True:
+            return "execution_error"
         if worker_result is not None and worker_result.get("ok") is False:
             adapter_exit = worker_result.get("exit_code")
             if adapter_exit is None or adapter_exit == 0:
@@ -308,6 +319,234 @@ def _state(exit_code: int, graders: list[dict[str, Any]], worker_result: dict[st
     if any(item["status"] == "grader_error" for item in graders):
         return "grader_error"
     return "accepted" if all(item["score"] == item["score_max"] for item in graders) else "rejected"
+
+
+def _resume_skip_state(state: str) -> bool:
+    return state in TERMINAL_STATES and state not in REGRADEABLE_STATES
+
+
+def _output_digest(text: str) -> str:
+    return f"sha256:{hashlib.sha256(text.encode()).hexdigest()}"
+
+
+def _failure_reason(
+    *,
+    run_meta: dict[str, Any] | None,
+    worker_result: dict[str, Any] | None,
+    state: str,
+) -> str | None:
+    if isinstance(run_meta, dict) and run_meta.get("failure_kind") == "timeout":
+        return "timeout"
+    if isinstance(worker_result, dict) and worker_result.get("timed_out") is True:
+        return "timeout"
+    if state != "adapter_error":
+        return None
+    if not isinstance(worker_result, dict):
+        return "transport_drop"
+    failure_kind = str(worker_result.get("failure_kind") or "").lower()
+    detail = str(worker_result.get("detail") or "").lower()
+    if "5xx" in failure_kind or "5xx" in detail or "server error" in detail:
+        return "provider_5xx"
+    return "transport_drop"
+
+
+def _cell_is_measurement_failure(cell: dict[str, Any]) -> bool:
+    state = cell.get("state")
+    if state in MEASUREMENT_STATES:
+        return True
+    return state == "execution_error" and cell.get("failure_reason") == "timeout"
+
+
+def _attach_grader_output_refs(graders: list[dict[str, Any]], *, cell_id: str, output_digest: str) -> None:
+    for grader in graders:
+        grader["cell_id"] = cell_id
+        grader["output_digest"] = output_digest
+        grader["output_refs"] = [{"path": "run/final.txt", "sha256": output_digest}]
+
+
+def _finalize_cell_payload(
+    cell: CellSpec,
+    *,
+    plan: dict[str, Any],
+    attempt: int,
+    started_at: str,
+    exit_code: int,
+    run_dir: Path,
+    graders: list[dict[str, Any]],
+    text: str,
+    failure_reason: str | None,
+) -> dict[str, Any]:
+    output_digest = _output_digest(text)
+    _attach_grader_output_refs(graders, cell_id=cell.cell_id, output_digest=output_digest)
+    run_meta = _load_json(run_dir / "run.json") or {}
+    worker_result = _worker_result(run_dir)
+    state = _state(exit_code, graders, worker_result, run_meta=run_meta)
+    if failure_reason is None:
+        failure_reason = _failure_reason(run_meta=run_meta, worker_result=worker_result, state=state)
+    payload: dict[str, Any] = {
+        "schema": CELL_SCHEMA,
+        **cell.payload(),
+        "state": state,
+        "attempt": attempt,
+        "started_at": started_at,
+        "manifest_digest": plan["manifest_digest"],
+        "exit_code": exit_code,
+        "duration_seconds": run_meta.get("duration_seconds"),
+        "run_dir": str(run_dir),
+        "graders": graders,
+        "acceptance": {"state": "accepted" if state == "accepted" else "not-accepted"},
+    }
+    if failure_reason is not None:
+        payload["failure_reason"] = failure_reason
+    return payload
+
+
+def _write_cell_payload(cell_dir: Path, run_parent: Path, payload: dict[str, Any]) -> None:
+    cell_dir.mkdir(parents=True, exist_ok=True)
+    localio.write_json(cell_dir / "cell.json", payload)
+    localio.write_json(run_parent / "cell.json", payload)
+
+
+def _expected_output_digest(cell: dict[str, Any]) -> str | None:
+    graders = cell.get("graders")
+    if not isinstance(graders, list):
+        return None
+    for grader in graders:
+        if isinstance(grader, dict) and isinstance(grader.get("output_digest"), str):
+            return grader["output_digest"]
+    return None
+
+
+def _regrade_cell_from_disk(cell_dir: Path, cell: CellSpec, plan: dict[str, Any]) -> bool:
+    current = _load_json(cell_dir / "cell.json")
+    if current is None:
+        return False
+    run_dir_value = current.get("run_dir")
+    if not isinstance(run_dir_value, str) or not run_dir_value:
+        return False
+    run_dir = Path(run_dir_value)
+    try:
+        text = (run_dir / "final.txt").read_text()
+    except OSError:
+        return False
+    output_digest = _output_digest(text)
+    expected = _expected_output_digest(current)
+    if expected is not None and expected != output_digest:
+        raise ValueError(f"cell {cell.cell_id}: stored output digest mismatch for {run_dir / 'final.txt'}")
+    exit_code = current.get("exit_code")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        exit_code = 0
+    run_meta = _load_json(run_dir / "run.json") or {}
+    cwd_value = run_meta.get("cwd")
+    workspace = Path(cwd_value).expanduser().resolve() if isinstance(cwd_value, str) else run_dir
+    graders = grade_output(
+        graders=cell.graders,
+        text=text,
+        exit_code=exit_code,
+        workspace=workspace,
+        run_dir=run_dir,
+    )
+    attempt = current.get("attempt")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        attempt = 1
+    started_at = current.get("started_at")
+    if not isinstance(started_at, str):
+        started_at = datetime.now(timezone.utc).isoformat()
+    payload = _finalize_cell_payload(
+        cell,
+        plan=plan,
+        attempt=attempt,
+        started_at=started_at,
+        exit_code=exit_code,
+        run_dir=run_dir,
+        graders=graders,
+        text=text,
+        failure_reason=None,
+    )
+    _write_cell_payload(cell_dir, run_dir.parent, payload)
+    return True
+
+
+def regrade(output_dir: Path) -> int:
+    output_dir = output_dir.expanduser().resolve()
+    plan = _load_json(output_dir / "plan.json")
+    if plan is None:
+        print("error: no trial plan found", file=sys.stderr)
+        return 2
+    current_ids = {
+        item["cell_id"]
+        for item in plan.get("cells", [])
+        if isinstance(item, dict) and isinstance(item.get("cell_id"), str)
+    }
+    cells_by_id = {cell.cell_id: cell for cell in _cells_from_plan(plan)}
+    regraded = 0
+    for cell_id in sorted(current_ids):
+        cell = cells_by_id.get(cell_id)
+        if cell is None:
+            continue
+        cell_dir = output_dir / "cells" / cell_id
+        try:
+            if _regrade_cell_from_disk(cell_dir, cell, plan):
+                regraded += 1
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    localio.write_json(output_dir / "summary.json", summarize(output_dir))
+    return process_exit(summarize(output_dir))
+
+
+def _cells_from_plan(plan: dict[str, Any]) -> list[CellSpec]:
+    cells: list[CellSpec] = []
+    for raw in plan.get("cells", []):
+        if not isinstance(raw, dict):
+            continue
+        graders = raw.get("graders", [])
+        if not isinstance(graders, list):
+            graders = []
+        cells.append(
+            CellSpec(
+                cell_id=str(raw["cell_id"]),
+                coordinate=str(raw.get("coordinate", "")),
+                case_id=str(raw.get("case_id", "")),
+                prompt=str(raw.get("prompt", "")),
+                seat=str(raw.get("seat", "")),
+                trial=int(raw.get("trial", 1)),
+                graders=tuple(dict(item) for item in graders if isinstance(item, dict)),
+                execution_mode=str(raw.get("execution_mode", "read-only")),
+            )
+        )
+    return cells
+
+
+def project_cell(cell: dict[str, Any], *, base_dir: Path) -> dict[str, Any]:
+    projected = dict(cell)
+    prompt = projected.pop("prompt", None)
+    if isinstance(prompt, str):
+        projected["prompt_digest"] = _output_digest(prompt)
+    case = projected.get("case")
+    if isinstance(case, dict) and isinstance(case.get("prompt"), str):
+        case = dict(case)
+        case["prompt_digest"] = _output_digest(case["prompt"])
+        case.pop("prompt", None)
+        projected["case"] = case
+    run_dir = projected.get("run_dir")
+    if isinstance(run_dir, str):
+        try:
+            projected["run_dir"] = str(Path(run_dir).resolve().relative_to(base_dir.resolve()))
+        except ValueError:
+            projected["run_dir"] = Path(run_dir).name
+    return projected
+
+
+def process_exit(summary: dict[str, Any]) -> int:
+    if int(summary.get("measurement_failures", 0) or 0) > 0:
+        return 3
+    counts = summary.get("counts")
+    if not isinstance(counts, dict):
+        return 0
+    if counts.get("rejected", 0) > 0 or counts.get("execution_error", 0) > 0:
+        return 1
+    return 0
 
 
 def _trial_worktree_path(
@@ -409,18 +648,23 @@ def execute(
             f"note: {len(plan['stale_cells'])} stale cell(s) from the previous plan kept and counted in summary",
             file=sys.stderr,
         )
-    failures = 0
     for cell in cells:
         cell_dir = output_dir / "cells" / cell.cell_id
         current = _load_json(cell_dir / "cell.json")
-        if resume and current is not None and current.get("state") in TERMINAL_STATES:
+        if resume and current is not None and _resume_skip_state(str(current.get("state", ""))):
+            continue
+        if resume and current is not None and current.get("state") in REGRADEABLE_STATES:
+            try:
+                _regrade_cell_from_disk(cell_dir, cell, plan)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
             continue
         attempt = _attempt_number(cell_dir)
-        started_at = (
-            current.get("started_at")
-            if isinstance(current, dict) and isinstance(current.get("started_at"), str)
-            else datetime.now(timezone.utc).isoformat()
-        )
+        if isinstance(current, dict) and isinstance(current.get("started_at"), str):
+            started_at = current["started_at"]
+        else:
+            started_at = datetime.now(timezone.utc).isoformat()
         cell_dir.mkdir(parents=True, exist_ok=True)
         localio.write_json(
             cell_dir / "cell.json",
@@ -468,33 +712,21 @@ def execute(
         finally:
             if worktree_path is not None:
                 runguard.remove_worktree(workspace, worktree_path)
-        output_digest = hashlib.sha256(text.encode()).hexdigest()
-        for grader in graders:
-            grader["cell_id"] = cell.cell_id
-            grader["output_digest"] = f"sha256:{output_digest}"
-            grader["output_refs"] = [{"path": "run/final.txt", "sha256": grader["output_digest"]}]
-        state = _state(rc, graders, _worker_result(run_dir))
-        run_meta = _load_json(run_dir / "run.json") or {}
-        payload = {
-            "schema": CELL_SCHEMA,
-            **cell.payload(),
-            "state": state,
-            "attempt": attempt,
-            "started_at": started_at,
-            "manifest_digest": plan["manifest_digest"],
-            "exit_code": rc,
-            "duration_seconds": run_meta.get("duration_seconds"),
-            "run_dir": str(run_dir),
-            "graders": graders,
-            "acceptance": {"state": "accepted" if state == "accepted" else "not-accepted"},
-        }
-        cell_dir.mkdir(parents=True, exist_ok=True)
-        localio.write_json(cell_dir / "cell.json", payload)
-        localio.write_json(run_dir.parent / "cell.json", payload)
-        if state not in {"accepted", "unscored"}:
-            failures += 1
-    localio.write_json(output_dir / "summary.json", summarize(output_dir))
-    return 1 if failures else 0
+        payload = _finalize_cell_payload(
+            cell,
+            plan=plan,
+            attempt=attempt,
+            started_at=started_at,
+            exit_code=rc,
+            run_dir=run_dir,
+            graders=graders,
+            text=text,
+            failure_reason=None,
+        )
+        _write_cell_payload(cell_dir, run_dir.parent, payload)
+    summary = summarize(output_dir)
+    localio.write_json(output_dir / "summary.json", summary)
+    return process_exit(summary)
 
 
 def _stats(values: list[float]) -> dict[str, Any]:
@@ -515,7 +747,9 @@ def summarize(output_dir: Path) -> dict[str, Any]:
     counts: dict[str, int] = {}
     stale_counts: dict[str, int] = {}
     scores: list[float] = []
+    partial_scores: list[float] = []
     durations: list[float] = []
+    measurement_failures = 0
     cells_dir = output_dir / "cells"
     paths = sorted(cells_dir.glob("*/cell.json")) if cells_dir.is_dir() else []
     plan = _load_json(output_dir / "plan.json")
@@ -534,16 +768,28 @@ def summarize(output_dir: Path) -> dict[str, Any]:
             stale_counts[state] = stale_counts.get(state, 0) + 1
             continue
         counts[state] = counts.get(state, 0) + 1
+        if _cell_is_measurement_failure(cell):
+            measurement_failures += 1
         if isinstance(cell.get("duration_seconds"), (int, float)):
             durations.append(float(cell["duration_seconds"]))
+        cell_state = cell.get("state")
         for grader in cell.get("graders", []):
-            if isinstance(grader, dict) and isinstance(grader.get("score"), (int, float)):
-                scores.append(float(grader["score"]))
+            if not isinstance(grader, dict) or not isinstance(grader.get("score"), (int, float)):
+                continue
+            if grader.get("status") != "scored":
+                continue
+            value = float(grader["score"])
+            if cell_state == "grader_error":
+                partial_scores.append(value)
+            else:
+                scores.append(value)
     return {
         "schema": SUMMARY_SCHEMA,
         "counts": dict(sorted(counts.items())),
         "stale_counts": dict(sorted(stale_counts.items())),
+        "measurement_failures": measurement_failures,
         "scores": _stats(scores),
+        "partial_scores": _stats(partial_scores),
         "durations": _stats(durations),
     }
 

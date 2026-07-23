@@ -185,11 +185,11 @@ def test_graders_distinguish_zero_score_from_error(tmp_path):
     assert results[0]["score"] == 0.0
     assert results[1]["status"] == "grader_error"
     assert results[1]["score"] is None
-    assert results[0]["exit_code"] == 0
+    assert "exit_code" not in results[0]
     assert results[0]["component_checks"] == [
         {"name": "exact_output", "passed": False, "detail": "output did not match"}
     ]
-    assert results[1]["exit_code"] is None
+    assert "exit_code" not in results[1]
 
 
 def test_execute_writes_running_marker_before_aboyeur_run(tmp_path, monkeypatch):
@@ -435,9 +435,10 @@ def test_adapter_failure_is_distinct_from_execution_failure(tmp_path, monkeypatc
 
     monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
     root = tmp_path / "results"
-    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 1
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 3
     cell = json.loads(next((root / "cells").glob("*/cell.json")).read_text())
     assert cell["state"] == "adapter_error"
+    assert cell["failure_reason"] == "transport_drop"
 
 
 def test_writable_trials_use_fresh_isolated_worktrees(tmp_path, monkeypatch):
@@ -514,3 +515,173 @@ def test_cli_trial_plan_uses_explicit_roster(tmp_path, capsys):
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["cells"]) == 2
+
+
+def test_timeout_sets_failure_reason_and_measurement_exit(tmp_path, monkeypatch):
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(_manifest()))
+
+    def fake_run(task, roster, **kwargs):
+        out = kwargs["output_dir"]
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "final.txt").write_text("partial\n")
+        (out / "run.json").write_text(
+            json.dumps({"status": "timeout", "failure_kind": "timeout", "duration_seconds": 30.0})
+        )
+        (out / "worker-results.json").write_text(
+            json.dumps({"results": [{"worker": "cursor", "ok": False, "timed_out": True, "transport": "cli"}]})
+        )
+        return 124
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    root = tmp_path / "results"
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 3
+    cell = json.loads(next((root / "cells").glob("*/cell.json")).read_text())
+    assert cell["state"] == "execution_error"
+    assert cell["failure_reason"] == "timeout"
+    summary = model_trials.summarize(root)
+    assert summary["measurement_failures"] == 2
+
+
+def test_process_exit_measurement_dominates_deterministic_failure():
+    summary = {
+        "measurement_failures": 1,
+        "counts": {"rejected": 2, "adapter_error": 1},
+    }
+    assert model_trials.process_exit(summary) == 3
+    summary = {"measurement_failures": 0, "counts": {"rejected": 1}}
+    assert model_trials.process_exit(summary) == 1
+    summary = {"measurement_failures": 0, "counts": {"accepted": 2}}
+    assert model_trials.process_exit(summary) == 0
+
+
+def test_summarize_splits_partial_scores_from_headline_scores(tmp_path):
+    root = tmp_path / "results"
+    cell_dir = root / "cells" / "cell-a"
+    cell_dir.mkdir(parents=True)
+    localio = model_trials.localio
+    localio.write_json(
+        root / "plan.json",
+        {
+            "schema": model_trials.MANIFEST_SCHEMA,
+            "name": "partial",
+            "manifest_digest": "abc",
+            "cells": [{"cell_id": "cell-a", "coordinate": "x:cursor:1"}],
+        },
+    )
+    localio.write_json(
+        cell_dir / "cell.json",
+        {
+            "schema": model_trials.CELL_SCHEMA,
+            "cell_id": "cell-a",
+            "state": "grader_error",
+            "graders": [
+                {"status": "scored", "score": 1.0},
+                {"status": "grader_error", "score": None},
+            ],
+        },
+    )
+    summary = model_trials.summarize(root)
+    assert summary["measurement_failures"] == 1
+    assert summary["partial_scores"]["count"] == 1
+    assert summary["partial_scores"]["mean"] == 1.0
+    assert summary["scores"]["count"] == 0
+
+
+def test_regrade_rescores_grader_error_without_seat_rerun(tmp_path, monkeypatch):
+    manifest = _manifest()
+    manifest["trials"] = 1
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+    root = tmp_path / "results"
+    cell = model_trials.expand_cells(manifest, _roster())[0]
+    run_dir = root / "cells" / cell.cell_id / "attempts" / "attempt-001" / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "final.txt").write_text("hello\n")
+    (run_dir / "run.json").write_text(json.dumps({"status": "ok", "cwd": str(tmp_path), "duration_seconds": 0.1}))
+    digest = model_trials._output_digest("hello\n")
+    plan, _ = model_trials.build_plan(manifest_path, _roster(), root)
+    model_trials.localio.write_json(root / "plan.json", plan)
+    broken_graders = model_trials.grade_output(
+        graders=[{"type": "regex_output", "pattern": "["}],
+        text="hello\n",
+        exit_code=0,
+        workspace=tmp_path,
+        run_dir=run_dir,
+    )
+    payload = model_trials._finalize_cell_payload(
+        cell,
+        plan=plan,
+        attempt=1,
+        started_at="2026-01-01T00:00:00+00:00",
+        exit_code=0,
+        run_dir=run_dir,
+        graders=broken_graders,
+        text="hello\n",
+        failure_reason=None,
+    )
+    model_trials._write_cell_payload(root / "cells" / cell.cell_id, run_dir.parent, payload)
+    assert payload["state"] == "grader_error"
+
+    monkeypatch.setattr(
+        model_trials.aboyeur, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("seat rerun"))
+    )
+    assert model_trials.regrade(root) == 0
+    regressed = json.loads((root / "cells" / cell.cell_id / "cell.json").read_text())
+    assert regressed["state"] == "accepted"
+    assert regressed["graders"][0]["output_digest"] == digest
+
+
+def test_resume_regrades_grader_error_cells(tmp_path, monkeypatch):
+    manifest = _manifest()
+    manifest["trials"] = 1
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+    root = tmp_path / "results"
+    cell = model_trials.expand_cells(manifest, _roster())[0]
+    run_dir = root / "cells" / cell.cell_id / "attempts" / "attempt-001" / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "final.txt").write_text("hello\n")
+    (run_dir / "run.json").write_text(json.dumps({"status": "ok", "cwd": str(tmp_path)}))
+    plan, _ = model_trials.build_plan(manifest_path, _roster(), root)
+    model_trials.localio.write_json(root / "plan.json", plan)
+    broken = model_trials.grade_output(
+        graders=[{"type": "regex_output", "pattern": "["}],
+        text="hello\n",
+        exit_code=0,
+        workspace=tmp_path,
+        run_dir=run_dir,
+    )
+    payload = model_trials._finalize_cell_payload(
+        cell,
+        plan=plan,
+        attempt=1,
+        started_at="2026-01-01T00:00:00+00:00",
+        exit_code=0,
+        run_dir=run_dir,
+        graders=broken,
+        text="hello\n",
+        failure_reason=None,
+    )
+    model_trials._write_cell_payload(root / "cells" / cell.cell_id, run_dir.parent, payload)
+    monkeypatch.setattr(
+        model_trials.aboyeur, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("seat rerun"))
+    )
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True) == 0
+
+
+def test_project_cell_strips_prompt_and_relativizes_run_dir(tmp_path):
+    run_dir = tmp_path / "results" / "cells" / "abc" / "attempts" / "attempt-001" / "run"
+    cell = {
+        "schema": model_trials.CELL_SCHEMA,
+        "cell_id": "abc",
+        "prompt": "secret prompt",
+        "case": {"id": "hello", "prompt": "nested secret"},
+        "run_dir": str(run_dir),
+    }
+    projected = model_trials.project_cell(cell, base_dir=tmp_path / "results")
+    assert "prompt" not in projected
+    assert projected["prompt_digest"].startswith("sha256:")
+    assert projected["case"]["prompt_digest"].startswith("sha256:")
+    assert "prompt" not in projected["case"]
+    assert projected["run_dir"] == "cells/abc/attempts/attempt-001/run"
