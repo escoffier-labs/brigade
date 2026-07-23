@@ -1959,6 +1959,7 @@ def _run_payload(
     worker: str | None = None,
     include_git: bool = True,
     pre_run_snapshot: dict[str, object] | None = None,
+    deliberation: bool = False,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": "brigade.run.v1",
@@ -1989,6 +1990,8 @@ def _run_payload(
             "attached": list(brief_set.attached) if brief_set is not None else [],
         },
     }
+    if deliberation:
+        payload["deliberation"] = True
     if resolution := _roster_resolution_payload(roster):
         payload["roster"] = resolution
     if lock_workspace is not None:
@@ -2269,6 +2272,7 @@ def run(
         return _run_payload(
             lock_workspace=lock_workspace,
             pre_run_snapshot=pre_run_snapshot_payload,
+            deliberation=deliberation,
             **kwargs,
         )
 

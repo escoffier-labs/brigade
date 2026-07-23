@@ -142,7 +142,7 @@ def test_build_plan_requires_two_grounded_scopes(monkeypatch, tmp_path):
         "derive_evidence_scopes",
         lambda cwd, task, count=3: [_scope("role-label", "only-role", grounded=False, status="invalid")],
     )
-    with pytest.raises(ValueError, match="grounded"):
+    with pytest.raises(ValueError, match="GraphTrail"):
         deliberation.build_plan(_roster(), "choose auth model", cwd=tmp_path)
 
 
@@ -259,6 +259,86 @@ def test_deliberation_run_orders_challenger_last_and_writes_artifact(monkeypatch
     assert artifact["challenger"]["worker"] == "analyst"
 
 
+def test_validate_schema_requires_two_grounded_graphtrail_perspectives():
+    base = {
+        "schema": deliberation.SCHEMA,
+        "decision": "pick queue",
+        "challenger": {
+            "worker": "reviewer",
+            "stage": 2,
+            "attacks": [],
+            "minority_report": "minority",
+            "recommendation": "ship",
+            "confidence": "medium",
+            "unresolved_conflicts": [],
+            "agreements": [],
+            "raw_output": "",
+        },
+        "agreements": [],
+        "unresolved_conflicts": [],
+        "assumptions": [],
+        "evidence_references": [],
+        "minority_report": "minority",
+        "recommendation": "ship",
+        "confidence": "medium",
+        "invalid_lenses": [],
+    }
+    perspective = {
+        "worker": "coder",
+        "stage": 1,
+        "evidence_scope": {
+            "kind": "graphtrail-context",
+            "reference": "queue",
+            "query": "queue",
+            "grounded": True,
+            "status": "valid",
+        },
+        "position": "redis",
+        "assumptions": [],
+        "evidence_references": [],
+        "agreements": [],
+        "conflicts": [],
+        "raw_output": "",
+    }
+    with pytest.raises(ValueError, match="2 to 3"):
+        deliberation.validate_schema({**base, "perspectives": [perspective]})
+
+
+def test_deliberation_run_resume_unavailable(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(json.dumps({"deliberation": True, "status": "failed"}))
+    (run_dir / "plan.json").write_text(json.dumps({"mode": "deliberation"}))
+    assert runs_cmd._resume_available(run_dir) is False
+
+
+def test_deliberation_dispatch_passes_prior_results_to_challenger(monkeypatch, tmp_path):
+    scopes = [
+        _scope("graphtrail-context", "migration"),
+        _scope("graphtrail-callers", "migrate.run"),
+    ]
+    monkeypatch.setattr(deliberation, "derive_evidence_scopes", lambda cwd, task, count=3: scopes)
+    plan = deliberation.build_plan(_roster(), "choose migration strategy", cwd=tmp_path)
+    prompts: list[tuple[int, str, str]] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        if "Independent perspectives" in prompt:
+            prompts.append((2, cli_ref, prompt))
+        return agents.AgentResult(text='{"position":"ok"}', ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+
+    aboyeur.dispatch(
+        list(plan.assignments),
+        _roster(),
+        build_prompt=deliberation.make_prompt_builder(plan),
+        cwd=tmp_path,
+    )
+    assert prompts
+    assert "Independent perspectives" in prompts[0][2]
+    assert "ok" in prompts[0][2]
+
+
 def test_runs_show_and_watch_surface_deliberation(tmp_path, capsys):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -296,7 +376,24 @@ def test_runs_show_and_watch_surface_deliberation(tmp_path, capsys):
                         "agreements": [],
                         "conflicts": [],
                         "raw_output": "",
-                    }
+                    },
+                    {
+                        "worker": "reviewer",
+                        "stage": 1,
+                        "evidence_scope": {
+                            "kind": "graphtrail-callers",
+                            "reference": "auth.login",
+                            "query": "callers auth.login",
+                            "grounded": True,
+                            "status": "valid",
+                        },
+                        "position": "use sessions",
+                        "assumptions": [],
+                        "evidence_references": [],
+                        "agreements": [],
+                        "conflicts": [],
+                        "raw_output": "",
+                    },
                 ],
                 "challenger": {
                     "worker": "reviewer",

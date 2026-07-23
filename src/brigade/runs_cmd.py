@@ -630,6 +630,10 @@ def show_latest(*, cwd: Path, runs_dir: Path | None = None) -> int:
 
 
 def _resume_available(run_dir: Path) -> bool:
+    from .deliberation import is_deliberation_run
+
+    if is_deliberation_run(run_dir):
+        return False
     try:
         worker_results = _read_json(run_dir / "worker-results.json")
     except ValueError:

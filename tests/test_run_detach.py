@@ -478,6 +478,9 @@ def test_run_detach_child_argv_preserves_worker(tmp_path):
         handoff_inbox=None,
         worker="coder",
         wait=2.5,
+        deliberate=False,
+        keep_going=False,
+        scheduler="waves",
     )
     roster_resolution = roster_mod.RosterResolution(
         path=(tmp_path / "roster.toml").resolve(),

@@ -54,13 +54,11 @@ Prompt-only role labels without a recorded evidence trace are ``ungrounded`` (``
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from json import JSONDecoder
 from pathlib import Path
 from typing import Any, Callable
 
-from . import evidence_brief as evidence_brief_mod
 from . import proc
 from .roster import Agent, Roster, workers
 from .run_transport import Assignment, WorkerResult
@@ -194,20 +192,6 @@ def _entry_point_symbol(context: dict[str, Any]) -> str | None:
     return None
 
 
-def _miseledger_scope(cwd: Path, query: str) -> EvidenceScope:
-    bundle = evidence_brief_mod.fetch_evidence_bundle(cwd, query, limit=3)
-    text = evidence_brief_mod.render_evidence_bundle(bundle, limit=3) if bundle else ""
-    grounded = bool(text)
-    return EvidenceScope(
-        kind="miseledger-query",
-        reference=query,
-        query=query,
-        text=text,
-        grounded=grounded,
-        status="valid" if grounded else "invalid",
-    )
-
-
 def _role_label_scope(agent: Agent) -> EvidenceScope:
     return EvidenceScope(
         kind="role-label",
@@ -260,24 +244,8 @@ def _candidate_graphtrail_scopes(cwd: Path, task: str) -> list[EvidenceScope]:
     return candidates
 
 
-def _task_query_variants(cwd: Path, task: str) -> list[str]:
-    words: list[str] = []
-    for raw in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]*", task.lower()):
-        if len(raw) < 3 or raw in evidence_brief_mod._STOPWORDS or raw in words:
-            continue
-        words.append(raw)
-        if len(words) >= 6:
-            break
-    if not words:
-        return [cwd.name]
-    variants = [f"{cwd.name} {word}" for word in words[:3]]
-    if len(words) >= 2:
-        variants.append(f"{cwd.name} {' '.join(words[:2])}")
-    return variants
-
-
 def derive_evidence_scopes(cwd: Path | None, task: str, *, count: int = MAX_PERSPECTIVES) -> list[EvidenceScope]:
-    """Derive up to ``count`` distinct evidence scopes for stage-one perspectives."""
+    """Derive up to ``count`` distinct GraphTrail evidence scopes for stage-one perspectives."""
     if cwd is None:
         return []
     count = max(MIN_PERSPECTIVES, min(count, MAX_PERSPECTIVES))
@@ -293,13 +261,6 @@ def derive_evidence_scopes(cwd: Path | None, task: str, *, count: int = MAX_PERS
 
     for scope in _candidate_graphtrail_scopes(cwd, task):
         add(scope)
-        if len(scopes) >= count:
-            return scopes[:count]
-
-    for query in _task_query_variants(cwd, task):
-        scope = _miseledger_scope(cwd, query)
-        if scope.grounded:
-            add(scope)
         if len(scopes) >= count:
             return scopes[:count]
     return scopes
@@ -419,8 +380,8 @@ def build_plan(
 
     if len(lenses) < MIN_PERSPECTIVES:
         raise ValueError(
-            "deliberation could not assemble enough grounded, distinct evidence scopes; "
-            "need GraphTrail dependency traces or MiseLedger evidence"
+            "deliberation could not assemble enough grounded GraphTrail evidence scopes; "
+            "need distinct dependency traces from .graphtrail/graphtrail.db"
         )
 
     challenger_task = _challenger_task(decision)
@@ -685,22 +646,36 @@ def validate_schema(payload: dict[str, object]) -> None:
     if not isinstance(payload.get("decision"), str) or not str(payload["decision"]).strip():
         raise ValueError("decision must be a non-empty string")
     perspectives = payload.get("perspectives")
-    if not isinstance(perspectives, list) or not perspectives:
-        raise ValueError("perspectives must be a non-empty list")
+    if not isinstance(perspectives, list) or not MIN_PERSPECTIVES <= len(perspectives) <= MAX_PERSPECTIVES:
+        raise ValueError("perspectives must contain 2 to 3 entries")
+    fingerprints: set[tuple[str, str]] = set()
     for item in perspectives:
         if not isinstance(item, dict):
             raise ValueError("each perspective must be an object")
+        if item.get("stage") != PERSPECTIVE_STAGE:
+            raise ValueError("each perspective must be stage 1")
         scope = item.get("evidence_scope")
         if not isinstance(scope, dict):
             raise ValueError("each perspective must include evidence_scope")
         for key in ("kind", "reference", "query", "grounded", "status"):
             if key not in scope:
                 raise ValueError(f"evidence_scope missing {key!r}")
+        if scope.get("grounded") is not True or scope.get("status") != "valid":
+            raise ValueError("each perspective evidence_scope must be grounded and valid")
+        kind = scope.get("kind")
+        if not isinstance(kind, str) or not kind.startswith("graphtrail-"):
+            raise ValueError("each perspective evidence_scope must use a GraphTrail trace")
+        fingerprint = (kind, str(scope.get("reference") or ""))
+        if fingerprint in fingerprints:
+            raise ValueError("perspective evidence scopes must be distinct")
+        fingerprints.add(fingerprint)
         if "position" not in item:
             raise ValueError("each perspective must include position")
     challenger = payload.get("challenger")
     if not isinstance(challenger, dict):
         raise ValueError("challenger must be an object")
+    if challenger.get("stage") != CHALLENGER_STAGE:
+        raise ValueError("challenger must be stage 2")
     for key in ("worker", "stage", "minority_report", "recommendation", "confidence"):
         if key not in challenger:
             raise ValueError(f"challenger missing {key!r}")
@@ -741,6 +716,26 @@ def plan_payload(plan: DeliberationPlan) -> dict[str, object]:
             for lens in plan.invalid_lenses
         ],
     }
+
+
+def is_deliberation_run(run_dir: Path) -> bool:
+    run_json = run_dir / "run.json"
+    if run_json.is_file():
+        try:
+            run_meta = json.loads(run_json.read_text())
+        except json.JSONDecodeError:
+            run_meta = None
+        if isinstance(run_meta, dict) and run_meta.get("deliberation") is True:
+            return True
+    plan_json = run_dir / "plan.json"
+    if plan_json.is_file():
+        try:
+            plan = json.loads(plan_json.read_text())
+        except json.JSONDecodeError:
+            plan = None
+        if isinstance(plan, dict) and plan.get("mode") == "deliberation":
+            return True
+    return (run_dir / "deliberation.json").is_file()
 
 
 def synthesis_context(artifact: dict[str, object]) -> str:
