@@ -594,6 +594,7 @@ _CHALLENGER_KEYS = frozenset(
         "raw_output",
     }
 )
+_INVALID_LENS_KEYS = frozenset({"worker", "reason", "evidence_scope"})
 
 
 def _reject_unknown_keys(payload: dict[str, object], *, allowed: frozenset[str], label: str) -> None:
@@ -820,6 +821,16 @@ def validate_schema(payload: dict[str, object]) -> None:
     invalid_lenses = payload.get("invalid_lenses")
     if not isinstance(invalid_lenses, list):
         raise ValueError("invalid_lenses must be a list")
+    for index, item in enumerate(invalid_lenses):
+        if not isinstance(item, dict):
+            raise ValueError(f"invalid_lenses[{index}] must be an object")
+        _reject_unknown_keys(item, allowed=_INVALID_LENS_KEYS, label=f"invalid_lenses[{index}]")
+        _non_empty_string(item.get("worker"))
+        _non_empty_string(item.get("reason"))
+        scope = item.get("evidence_scope")
+        if not isinstance(scope, dict):
+            raise ValueError(f"invalid_lenses[{index}] must include evidence_scope")
+        _reject_unknown_keys(scope, allowed=_SCOPE_KEYS, label=f"invalid_lenses[{index}].evidence_scope")
 
 
 def plan_payload(plan: DeliberationPlan) -> dict[str, object]:
