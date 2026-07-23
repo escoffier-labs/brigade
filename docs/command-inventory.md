@@ -38,7 +38,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 12 command path(s)
 - `brigade memory`: 14 command path(s)
-- `brigade model`: 6 command path(s)
+- `brigade model`: 7 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade openclaw-fragments` (extras): 1 command path(s)
 - `brigade operator`: 24 command path(s)
@@ -247,6 +247,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory status`
 - `brigade model scorecard`
 - `brigade model trial plan`
+- `brigade model trial regrade`
 - `brigade model trial resume`
 - `brigade model trial run`
 - `brigade model trial show`
