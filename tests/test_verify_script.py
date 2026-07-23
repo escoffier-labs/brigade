@@ -1,3 +1,4 @@
+import tomllib
 from pathlib import Path
 
 
@@ -17,9 +18,9 @@ def test_verify_script_documents_same_fast_gate_as_ci():
     assert "ruff lint, ruff format, mypy, version sync, pytest with coverage" in text
 
 
-def test_root_ruff_configuration_excludes_imported_engines_tree():
-    text = (ROOT / "pyproject.toml").read_text()
-    ruff_config = text.split("[tool.ruff]\n", maxsplit=1)[1].split("\n[tool.ruff.", maxsplit=1)[0]
+def test_root_ruff_configuration_excludes_non_python_trees():
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["ruff"]
 
-    assert 'extend-exclude = ["engines"]' in ruff_config
-    assert "force-exclude = true" in ruff_config
+    assert "engines" in config["extend-exclude"]
+    assert "*.md" in config["extend-exclude"]
+    assert config["force-exclude"] is True
