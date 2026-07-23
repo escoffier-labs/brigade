@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -125,121 +124,6 @@ def _desired_files(root: Path) -> dict[Path, tuple[str, bool, str]]:
     return desired
 
 
-def cursor_generated_files(root: Path) -> dict[Path, tuple[str, bool, str]]:
-    """Return only the Brigade-generated Cursor surfaces: plugin, rule, hook."""
-    desired = _desired_files(root)
-    return {path: record for path, record in desired.items() if record[2] in {"plugin", "rule", "hook"}}
-
-
-@dataclass(frozen=True)
-class CursorV1Migration:
-    state: dict[str, Any]
-    retire_mcp_names: tuple[str, ...]
-    retire_file_paths: tuple[Path, ...]
-    error: str | None
-    retire_file_ownership: tuple[tuple[Path, str], ...] = ()
-    retire_mcp_ownership: tuple[tuple[str, str], ...] = ()
-
-
-def migrate_v1_state(*, root: Path, workspace: Path, state: dict[str, Any]) -> CursorV1Migration:
-    if state.get("version") != STATE_VERSION or "schema_version" in state:
-        return CursorV1Migration({}, (), (), "legacy cursor state must be version 1 without schema_version")
-    files = state.get("files")
-    hooks = state.get("hooks")
-    mcp = state.get("mcp")
-    if not isinstance(files, dict) or not isinstance(hooks, dict) or not isinstance(mcp, dict):
-        return CursorV1Migration({}, (), (), "legacy cursor state sections must be objects")
-    for rel, digest in files.items():
-        if not isinstance(rel, str) or not isinstance(digest, str):
-            return CursorV1Migration({}, (), (), "legacy cursor file ownership is malformed")
-    for name, digest in hooks.items():
-        if not isinstance(name, str) or not isinstance(digest, str):
-            return CursorV1Migration({}, (), (), "legacy cursor hook ownership is malformed")
-    for name, digest in mcp.items():
-        if not isinstance(name, str) or not isinstance(digest, str):
-            return CursorV1Migration({}, (), (), "legacy cursor mcp ownership is malformed")
-
-    live_doc, read_error = _read_json_object(root / "mcp.json")
-    if live_doc is None:
-        return CursorV1Migration({}, (), (), read_error or "cursor mcp config is unreadable")
-    live_servers = live_doc.get("mcpServers")
-    if mcp and not isinstance(live_servers, dict):
-        return CursorV1Migration({}, (), (), "cursor mcp config mcpServers must be an object")
-
-    retire_mcp: list[str] = []
-    retire_mcp_own: list[tuple[str, str]] = []
-    for name, stored in mcp.items():
-        if not isinstance(live_servers, dict) or name not in live_servers:
-            return CursorV1Migration({}, (), (), f"legacy cursor mcp entry is missing: {name}")
-        if _digest_value(live_servers[name]) != stored:
-            return CursorV1Migration({}, (), (), f"legacy cursor mcp entry was edited: {name}")
-        retire_mcp.append(name)
-        retire_mcp_own.append((name, stored))
-
-    root_resolved = root.resolve()
-    desired = _desired_files(root)
-    rel_to_surface = {_relative(root, path): surface for path, (_t, _e, surface) in desired.items()}
-    expected_rels = set(rel_to_surface)
-    recorded_rels = set(files)
-    if recorded_rels != expected_rels:
-        missing = sorted(expected_rels - recorded_rels)
-        unexpected = sorted(recorded_rels - expected_rels)
-        shape_parts: list[str] = []
-        if missing:
-            shape_parts.append("missing: " + ", ".join(missing))
-        if unexpected:
-            shape_parts.append("unexpected: " + ", ".join(unexpected))
-        return CursorV1Migration({}, (), (), "legacy cursor file shape mismatch: " + "; ".join(shape_parts))
-    generated_files: dict[str, str] = {}
-    retire_paths: list[Path] = []
-    retire_file_own: list[tuple[Path, str]] = []
-    for rel, stored in files.items():
-        if not _is_contained_rel(rel):
-            return CursorV1Migration({}, (), (), f"legacy cursor file path escapes root: {rel}")
-        surface = rel_to_surface[rel]
-        raw_path = root / rel
-        if raw_path.is_symlink():
-            return CursorV1Migration({}, (), (), f"legacy cursor file path is a symlink: {rel}")
-        intermediate = root
-        for component in Path(rel).parts[:-1]:
-            intermediate = intermediate / component
-            if intermediate.is_symlink():
-                return CursorV1Migration({}, (), (), f"legacy cursor file path crosses a symlink: {rel}")
-        resolved = raw_path.resolve()
-        if not resolved.is_relative_to(root_resolved) or not resolved.is_file():
-            return CursorV1Migration({}, (), (), f"legacy cursor file is missing: {rel}")
-        try:
-            live_text = resolved.read_text()
-        except (OSError, UnicodeError) as exc:
-            return CursorV1Migration({}, (), (), f"legacy cursor file is unreadable: {rel}: {exc}")
-        if _digest_text(live_text) != stored:
-            return CursorV1Migration({}, (), (), f"legacy cursor file was edited: {rel}")
-        if surface in {"plugin", "rule", "hook"}:
-            generated_files[rel] = stored
-        elif surface in {"skill", "mcp-catalog"}:
-            retire_paths.append(raw_path.absolute())
-            retire_file_own.append((raw_path.absolute(), stored))
-        else:
-            return CursorV1Migration({}, (), (), f"legacy cursor file surface is unexpected: {rel}")
-
-    from . import harness_profile_cmd
-
-    new_state = harness_profile_cmd.empty_profile_state(workspace=workspace, harness="cursor")
-    new_state["generated"] = {
-        "files": generated_files,
-        "hooks": dict(hooks),
-        "created_directories": [],
-    }
-    return CursorV1Migration(
-        new_state,
-        tuple(sorted(retire_mcp)),
-        tuple(sorted(retire_paths)),
-        None,
-        tuple(sorted(retire_file_own)),
-        tuple(retire_mcp_own),
-    )
-
-
 def _state_path(root: Path) -> Path:
     return root / "brigade" / "install-state.json"
 
@@ -264,12 +148,6 @@ def _load_state(root: Path) -> dict[str, Any]:
 
 def _relative(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
-
-
-def _is_contained_rel(rel: str) -> bool:
-    if not rel or rel == "." or rel.startswith("/"):
-        return False
-    return ".." not in Path(rel).parts
 
 
 def _file_item(

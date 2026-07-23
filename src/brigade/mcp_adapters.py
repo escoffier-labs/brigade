@@ -228,7 +228,6 @@ class McpAdapter:
     from_provider: Callable[[str, dict[str, Any]], tuple[CanonicalServer, list[str]]]
     read_file: Callable[[str | None], dict[str, dict[str, Any]]]
     write_file: Callable[[str | None, dict[str, dict[str, Any]], set[str]], str]
-    path_resolver: Callable[..., Path] | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -1074,10 +1073,8 @@ def adapter_for(harness: str) -> McpAdapter | None:
     return ADAPTERS.get(harness)
 
 
-def resolve_path(adapter: McpAdapter, target: Path, *, kimi_root: Path | None = None) -> Path:
+def resolve_path(adapter: McpAdapter, target: Path) -> Path:
     """Resolve an adapter's config path against a repo target (or $HOME for user-scope)."""
-    if adapter.path_resolver is not None:
-        return adapter.path_resolver(target, kimi_root=kimi_root)
     if adapter.user_scope:
         return Path(adapter.path).expanduser()
     return target / adapter.path

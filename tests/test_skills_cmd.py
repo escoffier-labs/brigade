@@ -1405,16 +1405,7 @@ def test_skills_mcp_stdio_serves_read_only_resources(tmp_path, capsys, monkeypat
 
 # --- user_profile_skill_packages (Task 3 of issue #438) -----------------------
 
-_EIGHT_HARNESSES = [
-    "codex",
-    "claude",
-    "cursor",
-    "pi",
-    "openclaw",
-    "grok",
-    "opencode",
-    "kimi",
-]
+_USER_PROFILE_HARNESSES = ["codex", "claude"]
 
 
 def _write_reviewed_skill(root, name="reviewed", *, supported_harnesses=None, trust_level="workspace", enabled=True):
@@ -1433,7 +1424,7 @@ def _write_reviewed_skill(root, name="reviewed", *, supported_harnesses=None, tr
                 "required_mcp_servers": [],
                 "supported_harnesses": supported_harnesses
                 if supported_harnesses is not None
-                else list(_EIGHT_HARNESSES),
+                else list(_USER_PROFILE_HARNESSES),
                 "trust_level": trust_level,
                 "enabled": enabled,
                 "tests": [],
@@ -1559,7 +1550,7 @@ def test_user_profile_skill_packages_caps_exclude_whole_package(tmp_path, capsys
                 "version": "1.0.0",
                 "required_tools": [],
                 "required_mcp_servers": [],
-                "supported_harnesses": list(_EIGHT_HARNESSES),
+                "supported_harnesses": list(_USER_PROFILE_HARNESSES),
                 "trust_level": "workspace",
                 "tests": [],
             }
@@ -1584,7 +1575,7 @@ def test_user_profile_skill_packages_caps_exclude_whole_package(tmp_path, capsys
                 "version": "1.0.0",
                 "required_tools": [],
                 "required_mcp_servers": [],
-                "supported_harnesses": list(_EIGHT_HARNESSES),
+                "supported_harnesses": list(_USER_PROFILE_HARNESSES),
                 "trust_level": "workspace",
                 "tests": [],
             }

@@ -1174,6 +1174,7 @@ class UserProfileSkillPackage:
 
 _USER_PROFILE_MAX_FILES = 512
 _USER_PROFILE_MAX_BYTES = 8 * 1024 * 1024
+_USER_PROFILE_HARNESSES = {"claude", "codex"}
 
 
 def _user_profile_read_package_files(skill_dir: Path) -> dict[str, bytes] | None:
@@ -1293,7 +1294,7 @@ def user_profile_skill_packages(
     and never calls ``_install_dir()``.
     """
     workspace = workspace.expanduser().resolve()
-    if harness not in HARNESS_TARGETS:
+    if harness not in _USER_PROFILE_HARNESSES:
         raise ValueError(f"unknown harness adapter: {harness}")
     if minimum_trust not in TRUST_LEVELS:
         raise ValueError(f"unknown skill trust level: {minimum_trust}")

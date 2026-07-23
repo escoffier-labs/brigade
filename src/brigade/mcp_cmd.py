@@ -992,20 +992,3 @@ def import_servers(
     if not merge:
         lines.append("(preview only; pass --merge to write into .brigade/mcp.json)")
     return _emit(payload, json_output, lines, 0)
-
-
-def catalog_digest(target: Path) -> str:
-    """Canonical catalog digest: ``sha256:<fingerprint>`` of the sorted server catalog."""
-    target = target.expanduser().resolve()
-    servers, _errors, _warnings = load_canonical(target)
-    payload = {name: mcp_adapters.server_to_dict(server) for name, server in sorted(servers.items())}
-    return f"sha256:{localio.stable_hash(payload)}"
-
-
-def _servers_for_bridge(target: Path) -> dict[str, CanonicalServer]:
-    """Enabled canonical servers targeted at the ``pi`` harness (Pi bridge follow-up)."""
-    target = target.expanduser().resolve()
-    servers, _errors, _warnings = load_canonical(target)
-    return {
-        name: server for name, server in servers.items() if server.enabled and _server_targets_harness(server, "pi")
-    }
