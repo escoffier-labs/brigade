@@ -179,6 +179,14 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Do not compute the deterministic route brief or check plan coverage against it.",
     )
     p_run.add_argument(
+        "--deliberate",
+        action="store_true",
+        help=(
+            "Run grounded deliberation: fan the same decision to 2-3 evidence-scoped "
+            "perspectives, then a challenger stage, and write deliberation.json."
+        ),
+    )
+    p_run.add_argument(
         "--approve-ship",
         action="store_true",
         help="Release a ship stage the route would otherwise hold for approval.",
@@ -268,6 +276,9 @@ def dispatch(args) -> int:
         return 2
     if args.detach and args.inspect:
         print("error: --detach cannot be used with --inspect", file=sys.stderr)
+        return 2
+    if args.deliberate and args.worker is not None:
+        print("error: --deliberate cannot be used with --worker", file=sys.stderr)
         return 2
     if args.handoff and args.dry_run:
         print("error: --handoff cannot be used with --dry-run", file=sys.stderr)
@@ -462,6 +473,8 @@ def dispatch(args) -> int:
                 run_kwargs["route_template"] = args.route_template
             if args.route_signals:
                 run_kwargs["route_overrides"] = tuple(args.route_signals)
+            if args.deliberate:
+                run_kwargs["deliberation"] = True
             try:
                 rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
             except runguard.RetainRunLockError:
@@ -792,6 +805,8 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         argv.append("--no-code-graph")
     if args.no_evidence:
         argv.append("--no-evidence")
+    if args.deliberate:
+        argv.append("--deliberate")
     if args.sandbox is not None:
         argv.extend(["--sandbox", args.sandbox])
     if args.codex_transport is not None:
