@@ -180,6 +180,18 @@ def test_dependency_cycle_raises() -> None:
         raise AssertionError("expected ValueError on catalog cycle")
 
 
+def test_stage_dependencies_edges() -> None:
+    catalog = _catalog(
+        {
+            "plan": _stage(["big"], output=["plan"]),
+            "implement": _stage(["code"], required=["plan"], output=["diff"]),
+            "review": _stage(["code"], required=["diff"], output=["findings"]),
+        }
+    )
+    deps = router.stage_dependencies(catalog, ["plan", "implement", "review"])
+    assert deps == {"plan": set(), "implement": {"plan"}, "review": {"implement"}}
+
+
 def test_size_labels() -> None:
     assert router.size_label(0) == "empty"
     assert router.size_label(1) == "XS"
@@ -325,6 +337,26 @@ def test_route_brief_ship_released_by_approval() -> None:
     brief = route_brief("implement the export module and open a PR", approvals=["ship-approved"])
     assert "ship" in brief.route
     assert brief.held == {}
+
+
+def test_route_brief_dependencies_include_held_stage() -> None:
+    # Held stages must still be placeable in the DAG: their key appears in
+    # brief.dependencies so run_transport can schedule around the hold.
+    catalog = _catalog(
+        {
+            "execute": _stage(
+                ["system"],
+                routes=["system"],
+                required=["task"],
+                output=["state"],
+                lock=[{"while": "destructive-op", "until": "destructive-approved"}],
+            ),
+            "verify": _stage(["system"], routes=["system"], required=["state"]),
+        }
+    )
+    brief = route_brief("wipe the server config", catalog=catalog)
+    assert "execute" in brief.held
+    assert "execute" in brief.dependencies
 
 
 def test_route_brief_reviews_run_in_one_wave() -> None:

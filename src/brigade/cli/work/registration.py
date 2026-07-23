@@ -175,6 +175,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_verify_run.add_argument(
         "--capture-kind", default="skill", choices=["skill", "card"], help="Artifact kind for --capture."
     )
+    p_work_verify_run.add_argument(
+        "--no-reuse",
+        action="store_true",
+        help="Always execute; do not reuse the latest identical-tree passing receipt.",
+    )
     p_work_verify_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_verify_runs = verify_sub.add_parser("runs", help="List local work verification receipts.")
     p_work_verify_runs.add_argument(
