@@ -291,6 +291,7 @@ class CliTests(unittest.TestCase):
                     "-m",
                     "feat: example",
                     "-m",
+                    # content-guard: allow email
                     "Co-authored-by: Codex <codex@openai.com>",
                 ],
                 cwd=repo,
