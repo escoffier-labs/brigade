@@ -9,6 +9,7 @@ from . import agents
 from . import doctor as doctor_mod
 from . import model_inventory
 from . import roster as roster_mod
+from . import templates
 
 DEFAULT_ROSTER_REL = ".brigade/roster.toml"
 
@@ -86,6 +87,11 @@ cli = "codex"
 model = "{review_model}"
 role = "Inspect code and reports, verify claims against the actual diff, and flag problems."
 """
+
+
+def preset_roster_paths() -> tuple[Path, ...]:
+    rosters_dir = templates.template_root() / "rosters"
+    return tuple(sorted(rosters_dir.glob("*.toml")))
 
 
 def init(

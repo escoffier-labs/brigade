@@ -1,0 +1,59 @@
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "Plan the work and synthesize reviewed output."
+purpose = "Orchestrator for review-heavy workflows."
+requires = { cli = "codex" }
+fallback = []
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[agents.reviewer]
+cli = "grok"
+model = "grok-4.5"
+reasoning = "high"
+role = "Inspect code and reports before merge."
+purpose = "Independent review lane with explicit fallbacks."
+requires = { cli = "grok" }
+fallback = ["reviewer_cursor", "reviewer_codex"]
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = ["Grok review quality varies by task complexity."]
+
+[agents.reviewer_flash]
+cli = "antigravity"
+model = "Gemini 3.5 Flash (Low)"
+role = "Fast non-security review and summary lane."
+purpose = "Low-cost review and summary when premium lanes are saturated."
+requires = { cli = "antigravity" }
+fallback = []
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = ["Refuses security-audit work; use grok or codex lanes for security review."]
+
+[agents.reviewer_cursor]
+cli = "cursor"
+model = "grok-4.5"
+transport = "acpx"
+transport_version = "0.12.0"
+role = "ACP-backed review fallback."
+purpose = "Review through Cursor when the Grok CLI is unavailable."
+requires = { cli = "cursor", auth = "logged-in" }
+fallback = []
+stats = { speed = "fast", source = "author-receipts-2026-07" }
+caveats = ["Requires cursor-agent login."]
+
+[agents.reviewer_codex]
+cli = "codex"
+model = "gpt-5.6-terra"
+reasoning = "high"
+role = "Codex review fallback."
+purpose = "Same-vendor review when premium lanes are unavailable."
+requires = { cli = "codex" }
+fallback = []
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[limits]
+max_workers = 3
+timeout_seconds = 900
+allow_models = ["codex", "grok", "cursor", "antigravity"]

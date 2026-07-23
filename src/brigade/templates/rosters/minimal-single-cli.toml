@@ -1,0 +1,24 @@
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "Plan the work, choose useful workers, and synthesize the final answer."
+purpose = "Single-lane orchestration when only Codex is installed."
+requires = { cli = "codex" }
+fallback = []
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = ["No review lane; quality depends on one model."]
+
+[agents.coder]
+cli = "codex"
+role = "Make precise code changes and report what changed."
+purpose = "Primary implementation seat for Codex-only setups."
+requires = { cli = "codex" }
+fallback = []
+stats = { speed = "medium", source = "author-receipts-2026-07" }
+caveats = []
+
+[limits]
+max_workers = 2
+timeout_seconds = 600
+allow_models = ["codex"]
