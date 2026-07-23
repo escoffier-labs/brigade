@@ -1142,13 +1142,14 @@ def dispatch(
     on_stage_start: Callable[[int, tuple[str, ...]], None] | None = None,
     on_interrupt: Callable[[], None] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
+    build_prompt: Callable[..., str] | None = None,
 ) -> list[WorkerResult]:
     from . import run_transport
 
     return run_transport.dispatch(
         assignments,
         roster,
-        build_prompt=_worker_prompt,
+        build_prompt=build_prompt or _worker_prompt,
         run_appserver_worker=_run_codex_appserver_worker,
         event_writer=_worker_event_writer,
         cwd=cwd,
@@ -1958,6 +1959,7 @@ def _run_payload(
     worker: str | None = None,
     include_git: bool = True,
     pre_run_snapshot: dict[str, object] | None = None,
+    deliberation: bool = False,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": "brigade.run.v1",
@@ -1988,6 +1990,8 @@ def _run_payload(
             "attached": list(brief_set.attached) if brief_set is not None else [],
         },
     }
+    if deliberation:
+        payload["deliberation"] = True
     if resolution := _roster_resolution_payload(roster):
         payload["roster"] = resolution
     if lock_workspace is not None:
@@ -2253,6 +2257,7 @@ def run(
     fail_fast: bool = True,
     scheduler: str = "waves",
     defer_artifact_collection: bool = False,
+    deliberation: bool = False,
 ) -> int:
     started_at = datetime.now(timezone.utc)
     process_registry = proc.ProcessRegistry()
@@ -2267,6 +2272,7 @@ def run(
         return _run_payload(
             lock_workspace=lock_workspace,
             pre_run_snapshot=pre_run_snapshot_payload,
+            deliberation=deliberation,
             **kwargs,
         )
 
@@ -2312,6 +2318,12 @@ def run(
         if worker_error is not None:
             print(f"error: {worker_error}", file=sys.stderr)
             return 2
+    if deliberation and worker is not None:
+        print("error: --deliberate cannot be used with --worker", file=sys.stderr)
+        return 2
+    deliberation_plan = None
+    deliberation_artifact: dict[str, object] | None = None
+    deliberation_prompt_builder = None
     if output_dir is not None:
         record_run_start(
             output_dir,
@@ -2390,7 +2402,51 @@ def run(
     control_socket = None
     control_transport = None
     plan_attempts: list[dict[str, object]] | None = [] if output_dir is not None else None
-    if worker is not None:
+    if deliberation:
+        from . import deliberation as deliberation_mod
+
+        try:
+            deliberation_plan = deliberation_mod.build_plan(roster, task, cwd=cwd)
+        except ValueError as exc:
+            if output_dir is not None:
+                finished_at = datetime.now(timezone.utc)
+                _write_json(output_dir / "plan-attempts.json", {"attempts": [], "mode": "deliberation"})
+                _write_json(
+                    output_dir / "run.json",
+                    _payload(
+                        task=task,
+                        cwd=cwd,
+                        roster=roster,
+                        dry_run=dry_run,
+                        read_only=read_only,
+                        status="failed",
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        output_dir=output_dir,
+                        error=str(exc),
+                        failure_phase="planning",
+                        failure_kind="invalid-plan",
+                        failure_seat=roster.orchestrator,
+                        code_graph=code_graph,
+                        drift_impact=drift_impact,
+                        evidence=evidence,
+                        brief_set=brief_set,
+                        codex_transport=transport_for_payload,
+                        route=route,
+                        code_graph_delta=code_graph_delta,
+                        worker=worker,
+                    ),
+                )
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        assignments = list(deliberation_plan.assignments)
+        deliberation_prompt_builder = deliberation_mod.make_prompt_builder(
+            deliberation_plan,
+            read_only_policy=_read_only_rules() if read_only else "",
+        )
+        if plan_attempts is not None:
+            plan_attempts.append({"stage": "deliberation", "ok": True, "mode": "deliberation"})
+    elif worker is not None:
         assignments = [Assignment(worker=worker, task=task, stage=1)]
     else:
         if output_dir is not None:
@@ -2494,11 +2550,16 @@ def run(
         attempts_payload: dict[str, object] = {"attempts": plan_attempts or []}
         if direct_worker:
             attempts_payload["mode"] = "direct-worker"
+        elif deliberation:
+            attempts_payload["mode"] = "deliberation"
         _write_json(output_dir / "plan-attempts.json", attempts_payload)
-        _write_json(
-            output_dir / "plan.json",
-            {"schema": "brigade.run_plan.v1", "assignments": _assignment_payload(assignments)},
-        )
+        if deliberation and deliberation_plan is not None:
+            _write_json(output_dir / "plan.json", deliberation_mod.plan_payload(deliberation_plan))
+        else:
+            _write_json(
+                output_dir / "plan.json",
+                {"schema": "brigade.run_plan.v1", "assignments": _assignment_payload(assignments)},
+            )
 
     if dry_run:
         payload = {"assignments": _assignment_payload(assignments)}
@@ -2696,6 +2757,7 @@ def run(
                 on_stage_start=stage_started,
                 on_interrupt=dispatch_interrupted,
                 process_registry=process_registry,
+                build_prompt=deliberation_prompt_builder,
             )
         except runguard.RetainRunLockError:
             raise
@@ -2768,6 +2830,11 @@ def run(
     )
     ground_truth["suspected_noop"] = suspected_noop
     worker_results = _mark_noop_worker_results(worker_results, suspected_noop)
+    if deliberation and deliberation_plan is not None and output_dir is not None:
+        from . import deliberation as deliberation_mod
+
+        deliberation_artifact = deliberation_mod.assemble_artifact(deliberation_plan, worker_results)
+        _write_json(output_dir / "deliberation.json", deliberation_artifact)
     if output_dir is not None:
         worker_results = _write_worker_logs(output_dir, worker_results)
         _write_json(
@@ -2823,18 +2890,23 @@ def run(
                 ),
             )
         synthesis_started = time.monotonic()
+        synth_prompt = build_synth_prompt(
+            task,
+            worker_results,
+            read_only=read_only,
+            ground_truth=ground_truth,
+            code_graph=code_graph,
+            drift_impact=drift_impact,
+            evidence=evidence,
+        )
+        if deliberation_artifact is not None:
+            from . import deliberation as deliberation_mod
+
+            synth_prompt = f"{deliberation_mod.synthesis_context(deliberation_artifact)}\n\n{synth_prompt}"
         final = _call_with_process_registry(
             _run_orchestrator,
             roster,
-            build_synth_prompt(
-                task,
-                worker_results,
-                read_only=read_only,
-                ground_truth=ground_truth,
-                code_graph=code_graph,
-                drift_impact=drift_impact,
-                evidence=evidence,
-            ),
+            synth_prompt,
             cwd=cwd,
             read_only=read_only,
             sandbox_read_only=sandbox_read_only,
