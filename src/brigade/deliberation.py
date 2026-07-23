@@ -597,6 +597,14 @@ _CHALLENGER_KEYS = frozenset(
 _INVALID_LENS_KEYS = frozenset({"worker", "reason", "evidence_scope"})
 
 
+_INVALID_LENS_REASONS = frozenset({"duplicate", "ungrounded", "invalid"})
+
+
+def _boolean_field(value: object, *, label: str) -> None:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be a boolean")
+
+
 def _reject_unknown_keys(payload: dict[str, object], *, allowed: frozenset[str], label: str) -> None:
     unknown = set(payload) - allowed
     if unknown:
@@ -768,6 +776,7 @@ def validate_schema(payload: dict[str, object]) -> None:
                 raise ValueError(f"evidence_scope missing {key!r}")
         _non_empty_string(scope.get("reference"))
         _non_empty_string(scope.get("query"))
+        _boolean_field(scope.get("grounded"), label="evidence_scope.grounded")
         if scope.get("grounded") is not True or scope.get("status") != "valid":
             raise ValueError("each perspective evidence_scope must be grounded and valid")
         kind = scope.get("kind")
@@ -826,7 +835,9 @@ def validate_schema(payload: dict[str, object]) -> None:
             raise ValueError(f"invalid_lenses[{index}] must be an object")
         _reject_unknown_keys(item, allowed=_INVALID_LENS_KEYS, label=f"invalid_lenses[{index}]")
         _non_empty_string(item.get("worker"))
-        _non_empty_string(item.get("reason"))
+        reason = _non_empty_string(item.get("reason"))
+        if reason not in _INVALID_LENS_REASONS:
+            raise ValueError(f"invalid_lenses[{index}].reason is invalid")
         scope = item.get("evidence_scope")
         if not isinstance(scope, dict):
             raise ValueError(f"invalid_lenses[{index}] must include evidence_scope")
@@ -836,6 +847,7 @@ def validate_schema(payload: dict[str, object]) -> None:
                 raise ValueError(f"invalid_lenses[{index}].evidence_scope missing {key!r}")
         _non_empty_string(scope.get("reference"))
         _non_empty_string(scope.get("query"))
+        _boolean_field(scope.get("grounded"), label=f"invalid_lenses[{index}].evidence_scope.grounded")
         if scope.get("status") not in {"valid", "invalid", "duplicate"}:
             raise ValueError(f"invalid_lenses[{index}].evidence_scope status is invalid")
 
