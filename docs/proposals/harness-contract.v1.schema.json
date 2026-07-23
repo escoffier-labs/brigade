@@ -137,6 +137,7 @@
   },
   "definitions": {
     "deep_probe_discovery": {
+      "$comment": "validate_fixture mirrors this contract because the bundled validator does not resolve $ref or oneOf.",
       "type": "object",
       "additionalProperties": false,
       "required": ["command", "args"],
@@ -149,6 +150,7 @@
       }
     },
     "deep_probe_entry": {
+      "$comment": "validate_fixture mirrors this contract because the bundled validator does not resolve $ref or oneOf.",
       "oneOf": [
         {"const": "declared"},
         {
