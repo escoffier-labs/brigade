@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import __version__, component_bins
+from . import __version__, component_bins, localio
 
 STATE_VERSION = 1
 MANAGED_MCP_NAMES = ("brigade", "graphtrail", "miseledger")
@@ -125,37 +126,13 @@ def _desired_files(root: Path) -> dict[Path, tuple[str, bool, str]]:
 
 
 def cursor_generated_files(root: Path) -> dict[Path, tuple[str, bool, str]]:
-    """Return only the Brigade-generated Cursor surfaces: plugin, rule, hook.
-
-    The bundled ``brigade-work`` skill copy is intentionally excluded: the
-    registry projection from the shared profile layer is its single owner, so
-    migration retires the legacy copy rather than double-owning it. The
-    Brigade-internal MCP catalog and the co-owned ``hooks.json``/``mcp.json``
-    configs are owned by other stages and are not generated surfaces here.
-    """
+    """Return only the Brigade-generated Cursor surfaces: plugin, rule, hook."""
     desired = _desired_files(root)
     return {path: record for path, record in desired.items() if record[2] in {"plugin", "rule", "hook"}}
 
 
 @dataclass(frozen=True)
 class CursorV1Migration:
-    """Result of migrating a Cursor ownership state from schema version 1 to 2.
-
-    ``state`` is the schema-v2 ownership state with legacy file/hook ownership
-    moved into ``generated`` and ``instructions``/``skills``/``mcp`` left empty
-    for the shared profile stages to own. ``retire_mcp_names`` is the sorted
-    tuple of legacy ``~/.cursor/mcp.json`` server names whose live value still
-    digest-matches the recorded v1 entry, so the caller can delete exactly
-    those before persisting v2 state. ``retire_file_paths`` is the sorted tuple
-    of absolute ``Path`` objects for legacy ``_desired_files`` surfaces
-    ``"skill"`` and ``"mcp-catalog"`` whose live bytes still digest-match the
-    recorded v1 entry, so Task 7 can retire them instead of double-owning them
-    under schema-v2 generated ownership. ``error`` is a stable, concise
-    conflict reason; when it is set ``state`` is empty, ``retire_mcp_names``
-    is empty, and ``retire_file_paths`` is empty. The migration is pure: it
-    never writes state or mutates MCP config.
-    """
-
     state: dict[str, Any]
     retire_mcp_names: tuple[str, ...]
     retire_file_paths: tuple[Path, ...]
@@ -165,16 +142,6 @@ class CursorV1Migration:
 
 
 def migrate_v1_state(*, root: Path, workspace: Path, state: dict[str, Any]) -> CursorV1Migration:
-    """Migrate an exact Cursor ownership state version 1 into schema version 2.
-
-    Accepts only ``state["version"] == 1`` with no ``schema_version`` and
-    object-valued ``files``, ``hooks``, and ``mcp`` sections whose entries are
-    string keys and string digests. Reads ``root / mcp.json`` via
-    ``_read_json_object``; when legacy MCP ownership is nonempty, the live
-    ``mcpServers`` must be an object and every recorded name must still exist
-    with a value whose digest matches the stored one. Any deviation is a
-    migration conflict: ``error`` is set and no state/config writes occur.
-    """
     if state.get("version") != STATE_VERSION or "schema_version" in state:
         return CursorV1Migration({}, (), (), "legacy cursor state must be version 1 without schema_version")
     files = state.get("files")
@@ -209,17 +176,6 @@ def migrate_v1_state(*, root: Path, workspace: Path, state: dict[str, Any]) -> C
         retire_mcp.append(name)
         retire_mcp_own.append((name, stored))
 
-    # Classify every legacy file entry against the exact current _desired_files
-    # shape. plugin/rule/hook become schema-v2 generated ownership; skill and
-    # mcp-catalog become retirement candidates for Task 7; any other key is a
-    # conflict because "exact v1 shape" forbids guessing. The recorded file keys
-    # must be exactly the set of relative keys _desired_files emits: a missing
-    # expected key or an extra unexpected key is a conflict, checked before any
-    # live read. Each entry must be a regular file under root with no symlink at
-    # the leaf or in any intermediate component under root, and its live bytes
-    # must digest-match the recorded digest. Retirement paths are the original
-    # absolute leaf paths (never a symlink-resolved target) so Task 7 retires
-    # exactly the recorded surface.
     root_resolved = root.resolve()
     desired = _desired_files(root)
     rel_to_surface = {_relative(root, path): surface for path, (_t, _e, surface) in desired.items()}
@@ -242,8 +198,6 @@ def migrate_v1_state(*, root: Path, workspace: Path, state: dict[str, Any]) -> C
             return CursorV1Migration({}, (), (), f"legacy cursor file path escapes root: {rel}")
         surface = rel_to_surface[rel]
         raw_path = root / rel
-        # Reject any symlink at the leaf or in an intermediate component under
-        # root so a retirement path can never resolve to a different target.
         if raw_path.is_symlink():
             return CursorV1Migration({}, (), (), f"legacy cursor file path is a symlink: {rel}")
         intermediate = root
@@ -263,13 +217,12 @@ def migrate_v1_state(*, root: Path, workspace: Path, state: dict[str, Any]) -> C
         if surface in {"plugin", "rule", "hook"}:
             generated_files[rel] = stored
         elif surface in {"skill", "mcp-catalog"}:
-            # retire the original absolute leaf path, never a resolved target
             retire_paths.append(raw_path.absolute())
             retire_file_own.append((raw_path.absolute(), stored))
-        else:  # defensive: rel_to_surface only holds known surfaces
+        else:
             return CursorV1Migration({}, (), (), f"legacy cursor file surface is unexpected: {rel}")
 
-    from . import harness_profile_cmd  # local import avoids a module-level cycle
+    from . import harness_profile_cmd
 
     new_state = harness_profile_cmd.empty_profile_state(workspace=workspace, harness="cursor")
     new_state["generated"] = {
@@ -311,6 +264,12 @@ def _load_state(root: Path) -> dict[str, Any]:
 
 def _relative(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
+
+
+def _is_contained_rel(rel: str) -> bool:
+    if not rel or rel == "." or rel.startswith("/"):
+        return False
+    return ".." not in Path(rel).parts
 
 
 def _file_item(
@@ -465,24 +424,109 @@ def _emit(payload: dict[str, Any], *, json_output: bool, rc: int) -> int:
 
 
 def install(*, write: bool = False, json_output: bool = False) -> int:
-    """Legacy wrapper over the aggregate ``harness_profile_cmd.install`` for Cursor.
+    root = _cursor_root()
+    state = _load_state(root)
+    desired_files = _desired_files(root)
+    items = [
+        _file_item(root, path, text, executable, surface, state)
+        for path, (text, executable, surface) in desired_files.items()
+    ]
+    hook_item, hooks_doc, _ = _plan_hook(root, state)
+    mcp_items, mcp_doc, _ = _plan_mcp(root, state)
+    items.extend([hook_item, *mcp_items])
+    state_error = state.get("_read_error")
+    if state_error:
+        items.append(
+            {
+                "surface": "ownership-state",
+                "path": str(_state_path(root)),
+                "status": "conflict",
+                "action": "skip",
+                "detail": str(state_error),
+            }
+        )
+    files_written: list[str] = []
 
-    Delegates with ``harness="cursor"`` and ``workspace=Path.cwd()`` so the
-    shared instruction/skill/generated orchestration owns every surface. The
-    aggregate payload (``results`` list, top-level ``reload_required``) is
-    printed by the aggregate emitter; this wrapper only forwards the exit code.
-    """
-    from . import harness_profile_cmd
+    if write and not state_error:
+        next_state: dict[str, Any] = {
+            "version": STATE_VERSION,
+            "package_version": __version__,
+            "files": {},
+            "hooks": {},
+            "mcp": {},
+        }
+        for item in items:
+            if item["surface"] in {"hook-config", "mcp-config"}:
+                continue
+            path = Path(item["path"])
+            if item["action"] in {"create", "update"}:
+                text, executable, _ = desired_files[path]
+                localio.write_text_atomic(path, text)
+                if executable:
+                    path.chmod(path.stat().st_mode | 0o755)
+                files_written.append(str(path))
+            if item["status"] != "conflict":
+                next_state["files"][_relative(root, path)] = item["desired_fingerprint"]
+            elif _relative(root, path) in state["files"]:
+                next_state["files"][_relative(root, path)] = state["files"][_relative(root, path)]
 
-    return harness_profile_cmd.install(
-        harness="cursor",
-        workspace=Path.cwd(),
-        write=write,
-        allow_global_stdio=False,
-        adopt=False,
-        json_output=json_output,
-        home=_home_dir(),
-    )
+        if hooks_doc is not None and hook_item["status"] != "conflict":
+            hooks = hooks_doc.setdefault("hooks", {})
+            entries = hooks.setdefault("sessionStart", [])
+            desired_hook = _hook_entry(root)
+            if hook_item["action"] == "create":
+                entries.append(desired_hook)
+            elif hook_item["action"] == "update":
+                entries[hook_item["prior_index"]] = desired_hook
+            if hook_item["action"] != "none":
+                path = root / "hooks.json"
+                localio.write_text_atomic(path, _coowned_json_text(hooks_doc))
+                files_written.append(str(path))
+            next_state["hooks"]["sessionStart"] = hook_item["desired_fingerprint"]
+        elif "sessionStart" in state["hooks"]:
+            next_state["hooks"]["sessionStart"] = state["hooks"]["sessionStart"]
+
+        if mcp_doc is not None:
+            servers = mcp_doc.setdefault("mcpServers", {})
+            changed = False
+            desired_servers = _mcp_servers()
+            for item in mcp_items:
+                if item["status"] == "conflict":
+                    if item.get("name") in state["mcp"]:
+                        next_state["mcp"][item["name"]] = state["mcp"][item["name"]]
+                    continue
+                name = item["name"]
+                if item["action"] in {"create", "update"}:
+                    servers[name] = desired_servers[name]
+                    changed = True
+                next_state["mcp"][name] = item["desired_fingerprint"]
+            if changed:
+                path = root / "mcp.json"
+                localio.write_text_atomic(path, _coowned_json_text(mcp_doc))
+                files_written.append(str(path))
+        else:
+            next_state["mcp"].update(state["mcp"])
+
+        state_path = _state_path(root)
+        if next_state != state:
+            localio.write_json(state_path, next_state)
+            files_written.append(str(state_path))
+
+    conflicts = [item for item in items if item["status"] == "conflict"]
+    payload = {
+        "schema_version": 1,
+        "operation": "install",
+        "harness": "cursor",
+        "scope": "user",
+        "home": str(_home_dir().expanduser().resolve()),
+        "write": write,
+        "ready": not conflicts,
+        "reload_required": bool(write and files_written) or not write,
+        "files_written": files_written,
+        "items": _public(items),
+        "conflicts": _public(conflicts),
+    }
+    return _emit(payload, json_output=json_output, rc=1 if conflicts else 0)
 
 
 def _remove_owned_leaf_dirs(root: Path) -> None:
@@ -503,16 +547,116 @@ def _remove_owned_leaf_dirs(root: Path) -> None:
 
 
 def uninstall(*, write: bool = False, json_output: bool = False) -> int:
-    """Legacy wrapper over the aggregate ``harness_profile_cmd.uninstall`` for Cursor."""
-    from . import harness_profile_cmd
+    root = _cursor_root()
+    state = _load_state(root)
+    items: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    files_removed: list[str] = []
+    state_error = state.get("_read_error")
+    if state_error:
+        state_item = {
+            "surface": "ownership-state",
+            "path": str(_state_path(root)),
+            "status": "conflict",
+            "action": "preserve",
+            "detail": str(state_error),
+        }
+        items.append(state_item)
+        conflicts.append(state_item)
 
-    return harness_profile_cmd.uninstall(
-        harness="cursor",
-        workspace=Path.cwd(),
-        write=write,
-        json_output=json_output,
-        home=_home_dir(),
-    )
+    for rel, fingerprint in sorted(state["files"].items()):
+        path = root / rel
+        item = {"surface": "owned-file", "path": str(path)}
+        if not path.exists():
+            item.update(status="absent", action="none")
+        elif path.is_file():
+            try:
+                live_fingerprint = _digest_text(path.read_text())
+            except (OSError, UnicodeError) as exc:
+                item.update(status="conflict", action="preserve", detail=str(exc))
+                conflicts.append(item)
+            else:
+                if live_fingerprint == fingerprint:
+                    item.update(status="managed", action="remove")
+                    if write:
+                        path.unlink()
+                        files_removed.append(str(path))
+                else:
+                    item.update(status="conflict", action="preserve")
+                    conflicts.append(item)
+        else:
+            item.update(status="conflict", action="preserve")
+            conflicts.append(item)
+        items.append(item)
+
+    hook_path = root / "hooks.json"
+    hook_fp = state["hooks"].get("sessionStart")
+    hook_removed = False
+    if hook_fp:
+        doc, error = _read_json_object(hook_path)
+        hook_item: dict[str, Any] = {"surface": "hook-config", "path": str(hook_path), "name": "sessionStart"}
+        entries = None
+        if doc is not None and isinstance(doc.get("hooks"), dict):
+            entries = doc["hooks"].get("sessionStart", [])
+        index = (
+            next((i for i, entry in enumerate(entries) if _digest_value(entry) == hook_fp), None)
+            if isinstance(entries, list)
+            else None
+        )
+        if index is not None:
+            hook_item.update(status="managed", action="remove")
+            if write:
+                assert doc is not None and isinstance(entries, list)
+                entries.pop(index)
+                if not entries:
+                    doc["hooks"].pop("sessionStart", None)
+                localio.write_text_atomic(hook_path, _coowned_json_text(doc))
+                hook_removed = True
+        elif not hook_path.exists():
+            hook_item.update(status="absent", action="none")
+        else:
+            hook_item.update(status="conflict", action="preserve", detail=error or "managed hook was edited or removed")
+            conflicts.append(hook_item)
+        items.append(hook_item)
+
+    mcp_path = root / "mcp.json"
+    mcp_doc, mcp_error = _read_json_object(mcp_path)
+    mcp_servers = mcp_doc.get("mcpServers") if mcp_doc is not None else None
+    mcp_config_absent = not mcp_path.exists() or (mcp_doc is not None and "mcpServers" not in mcp_doc)
+    mcp_changed = False
+    for name, fingerprint in sorted(state["mcp"].items()):
+        item = {"surface": "mcp-config", "path": str(mcp_path), "name": name}
+        if isinstance(mcp_servers, dict) and name in mcp_servers and _digest_value(mcp_servers[name]) == fingerprint:
+            item.update(status="managed", action="remove")
+            if write:
+                mcp_servers.pop(name)
+                mcp_changed = True
+        elif mcp_config_absent or (isinstance(mcp_servers, dict) and name not in mcp_servers):
+            item.update(status="absent", action="none")
+        else:
+            item.update(status="conflict", action="preserve", detail=mcp_error or "managed server was edited")
+            conflicts.append(item)
+        items.append(item)
+    if write and mcp_changed and mcp_doc is not None:
+        localio.write_text_atomic(mcp_path, _coowned_json_text(mcp_doc))
+
+    if write and not conflicts:
+        state_path = _state_path(root)
+        state_path.unlink(missing_ok=True)
+        _remove_owned_leaf_dirs(root)
+
+    payload = {
+        "schema_version": 1,
+        "operation": "uninstall",
+        "harness": "cursor",
+        "scope": "user",
+        "write": write,
+        "files_removed": files_removed,
+        "items": items,
+        "conflicts": conflicts,
+        "reload_required": bool(write and (files_removed or mcp_changed or hook_removed)),
+    }
+    return _emit(payload, json_output=json_output, rc=1 if conflicts else 0)
 
 
 def _check(check_id: str, ok: bool, detail: str) -> dict[str, str]:
@@ -520,16 +664,63 @@ def _check(check_id: str, ok: bool, detail: str) -> dict[str, str]:
 
 
 def doctor(*, json_output: bool = False) -> int:
-    """Legacy wrapper over the aggregate ``harness_profile_cmd.doctor`` for Cursor."""
-    from . import harness_profile_cmd
-
-    return harness_profile_cmd.doctor(
-        harness="cursor",
-        workspace=Path.cwd(),
-        verify_mcp=False,
-        json_output=json_output,
-        home=_home_dir(),
-    )
+    root = _cursor_root()
+    desired = _desired_files(root)
+    rule = root / "plugins" / "local" / "brigade-loop" / "rules" / "brigade-loop.mdc"
+    manifest = root / "plugins" / "local" / "brigade-loop" / ".cursor-plugin" / "plugin.json"
+    skill_dir = root / "skills" / "brigade-work"
+    hook_script = root / "hooks" / "brigade-session-start"
+    hooks_doc, _ = _read_json_object(root / "hooks.json")
+    hook_entries: object = None
+    if hooks_doc is not None and isinstance(hooks_doc.get("hooks"), dict):
+        hook_entries = hooks_doc["hooks"].get("sessionStart")
+    mcp_doc, _ = _read_json_object(root / "mcp.json")
+    live_servers = mcp_doc.get("mcpServers") if mcp_doc is not None else None
+    checks = [
+        _check(
+            "plugin-current",
+            _file_matches(manifest, desired[manifest][0]),
+            str(manifest),
+        ),
+        _check(
+            "rule-always-applied",
+            _file_matches(rule, desired[rule][0]) and "alwaysApply: true" in _read_text(rule),
+            str(rule),
+        ),
+        _check(
+            "skill-current",
+            all(_file_matches(path, desired[path][0]) for path in desired if path.parent == skill_dir),
+            str(skill_dir),
+        ),
+        _check(
+            "session-hook",
+            _file_matches(hook_script, desired[hook_script][0])
+            and bool(hook_script.stat().st_mode & 0o111)
+            and isinstance(hook_entries, list)
+            and _hook_entry(root) in hook_entries,
+            str(root / "hooks.json"),
+        ),
+    ]
+    expected_servers = _mcp_servers()
+    for name in MANAGED_MCP_NAMES:
+        checks.append(
+            _check(
+                f"mcp-{name}",
+                isinstance(live_servers, dict) and live_servers.get(name) == expected_servers[name],
+                str(root / "mcp.json"),
+            )
+        )
+    ready = all(item["status"] == "OK" for item in checks)
+    payload = {
+        "schema_version": 1,
+        "operation": "doctor",
+        "harness": "cursor",
+        "scope": "user",
+        "ready": ready,
+        "checks": checks,
+        "next": "reload Cursor windows" if ready else "run brigade harness install cursor --scope user --write",
+    }
+    return _emit(payload, json_output=json_output, rc=0 if ready else 1)
 
 
 def _read_text(path: Path) -> str:

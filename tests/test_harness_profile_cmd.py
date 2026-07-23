@@ -539,128 +539,6 @@ def test_load_profile_state_refreshes_stale_package_version_atomically(tmp_path)
     assert persisted["skills"] == stale["skills"]
 
 
-# --- Issue #438 Task 7: aggregate brigade harness CLI ---
-
-
-def test_harness_cli_parser_and_dispatch_exact_contract(tmp_path, monkeypatch):
-    from brigade import cli
-
-    calls: dict[str, dict] = {}
-
-    def recorder(name):
-        def _f(**kwargs):
-            calls[name] = kwargs
-            return 0
-
-        return _f
-
-    monkeypatch.setattr(harness_profile_cmd, "install", recorder("install"), raising=False)
-    monkeypatch.setattr(harness_profile_cmd, "uninstall", recorder("uninstall"), raising=False)
-    monkeypatch.setattr(harness_profile_cmd, "doctor", recorder("doctor"), raising=False)
-    monkeypatch.setattr(Path, "cwd", lambda: tmp_path)
-
-    # choices cover all eight harness ids plus all
-    for harness in (*harness_profiles.HARNESS_IDS, "all"):
-        cli.main(["harness", "install", harness, "--scope", "user", "--json"])
-        assert calls["install"]["harness"] == harness
-        assert calls["install"]["workspace"] == tmp_path  # default Path.cwd()
-        assert calls["install"]["write"] is False
-        assert calls["install"]["allow_global_stdio"] is False
-        assert calls["install"]["adopt"] is False
-        assert calls["install"]["json_output"] is True
-
-    # install flags pass through exactly
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    cli.main(
-        [
-            "harness",
-            "install",
-            "all",
-            "--scope",
-            "user",
-            "--workspace",
-            str(ws),
-            "--write",
-            "--allow-global-stdio",
-            "--adopt",
-            "--json",
-        ]
-    )
-    assert calls["install"] == {
-        "harness": "all",
-        "workspace": ws,
-        "write": True,
-        "allow_global_stdio": True,
-        "adopt": True,
-        "json_output": True,
-    }
-
-    # uninstall: mutually exclusive --dry-run/--write, default dry-run
-    cli.main(["harness", "uninstall", "codex", "--scope", "user", "--json"])
-    assert calls["uninstall"] == {
-        "harness": "codex",
-        "workspace": tmp_path,
-        "write": False,
-        "json_output": True,
-    }
-    cli.main(
-        [
-            "harness",
-            "uninstall",
-            "codex",
-            "--scope",
-            "user",
-            "--workspace",
-            str(ws),
-            "--write",
-            "--json",
-        ]
-    )
-    assert calls["uninstall"] == {
-        "harness": "codex",
-        "workspace": ws,
-        "write": True,
-        "json_output": True,
-    }
-
-    # doctor: --verify-mcp
-    cli.main(["harness", "doctor", "kimi", "--scope", "user", "--json"])
-    assert calls["doctor"] == {
-        "harness": "kimi",
-        "workspace": tmp_path,
-        "verify_mcp": False,
-        "json_output": True,
-    }
-    cli.main(
-        [
-            "harness",
-            "doctor",
-            "kimi",
-            "--scope",
-            "user",
-            "--workspace",
-            str(ws),
-            "--verify-mcp",
-            "--json",
-        ]
-    )
-    assert calls["doctor"] == {
-        "harness": "kimi",
-        "workspace": ws,
-        "verify_mcp": True,
-        "json_output": True,
-    }
-
-    # --scope is required
-    with pytest.raises(SystemExit):
-        cli.main(["harness", "install", "cursor", "--json"])
-
-    # no sync verb
-    with pytest.raises(SystemExit):
-        cli.main(["harness", "sync", "cursor", "--scope", "user", "--json"])
-
-
 def test_harness_all_reports_partial_failure_without_rollback(tmp_path, monkeypatch, capsys):
     from brigade import cli
 
@@ -677,7 +555,8 @@ def test_harness_all_reports_partial_failure_without_rollback(tmp_path, monkeypa
         cli.main(
             [
                 "harness",
-                "install",
+                "sync",
+                "--target",
                 "all",
                 "--scope",
                 "user",
@@ -693,8 +572,8 @@ def test_harness_all_reports_partial_failure_without_rollback(tmp_path, monkeypa
     by_id = {row["harness"]: row for row in payload["results"]}
 
     assert payload["schema_version"] == 1
-    assert payload["operation"] == "install"
-    assert tuple(by_id) == harness_profiles.HARNESS_IDS
+    assert payload["operation"] == "sync"
+    assert tuple(by_id) == harness_profiles.SLICE1_HARNESS_IDS
     assert by_id["claude"]["status"] == "updated"
     assert by_id["codex"]["status"] == "conflict"
     assert (home / ".claude" / "CLAUDE.md").is_file()
@@ -703,71 +582,6 @@ def test_harness_all_reports_partial_failure_without_rollback(tmp_path, monkeypa
     # private digests are stripped from public output recursively
     text = json.dumps(payload)
     assert "digest" not in text and "fingerprint" not in text
-
-
-def test_harness_openclaw_tracked_agents_md_is_conflict_untracked_can_receive(tmp_path, monkeypatch, capsys):
-    from brigade import cli
-
-    home = tmp_path / "home"
-    home.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setattr(harness_profiles, "probe_kimi_native_mcp", lambda: True)
-
-    # initialize a git repo at the workspace and track AGENTS.md
-    import subprocess
-
-    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
-    (workspace / "AGENTS.md").write_text("# tracked\n")
-    subprocess.run(["git", "add", "AGENTS.md"], cwd=workspace, check=True, capture_output=True)
-
-    assert (
-        cli.main(
-            [
-                "harness",
-                "install",
-                "openclaw",
-                "--scope",
-                "user",
-                "--workspace",
-                str(workspace),
-                "--write",
-                "--json",
-            ]
-        )
-        == 1
-    )
-    payload = json.loads(capsys.readouterr().out)
-    row = payload["results"][0]
-    assert row["status"] == "conflict"
-    # tracked file bytes are unchanged
-    assert (workspace / "AGENTS.md").read_text() == "# tracked\n"
-
-    # an untracked workspace AGENTS.md can receive the bounded block
-    untracked = tmp_path / "untracked-ws"
-    untracked.mkdir()
-    subprocess.run(["git", "init"], cwd=untracked, check=True, capture_output=True)
-    (untracked / "AGENTS.md").write_text("# my notes\n")
-    assert (
-        cli.main(
-            [
-                "harness",
-                "install",
-                "openclaw",
-                "--scope",
-                "user",
-                "--workspace",
-                str(untracked),
-                "--write",
-                "--json",
-            ]
-        )
-        == 0
-    )
-    out = json.loads(capsys.readouterr().out)
-    assert out["results"][0]["status"] == "updated"
-    assert harness_profiles.INSTRUCTION_START in (untracked / "AGENTS.md").read_text()
 
 
 def test_harness_doctor_reports_ready_and_uninstall_removes_owned_instruction(tmp_path, monkeypatch, capsys):
@@ -780,7 +594,7 @@ def test_harness_doctor_reports_ready_and_uninstall_removes_owned_instruction(tm
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(harness_profiles, "probe_kimi_native_mcp", lambda: True)
 
-    base = ["harness", "install", "codex", "--scope", "user", "--workspace", str(workspace)]
+    base = ["harness", "sync", "--target", "codex", "--scope", "user", "--workspace", str(workspace)]
     assert cli.main(base + ["--write", "--json"]) == 0
     capsys.readouterr()
 
@@ -809,7 +623,18 @@ def test_harness_doctor_reports_ready_and_uninstall_removes_owned_instruction(tm
     # corrupt the owned block so uninstall must conflict, not remove
     assert (
         cli.main(
-            ["harness", "uninstall", "codex", "--scope", "user", "--workspace", str(workspace), "--write", "--json"]
+            [
+                "harness",
+                "uninstall",
+                "--target",
+                "codex",
+                "--scope",
+                "user",
+                "--workspace",
+                str(workspace),
+                "--write",
+                "--json",
+            ]
         )
         == 1
     )
@@ -855,8 +680,30 @@ def test_harness_uninstall_removes_safe_surfaces_and_preserves_conflicts_partial
     monkeypatch.setattr(harness_profiles, "probe_kimi_native_mcp", lambda: True)
     _seed_two_file_reviewed_skill(workspace)
 
-    install = ["harness", "install", "codex", "--scope", "user", "--workspace", str(workspace), "--write", "--json"]
-    uninstall = ["harness", "uninstall", "codex", "--scope", "user", "--workspace", str(workspace), "--write", "--json"]
+    install = [
+        "harness",
+        "sync",
+        "--target",
+        "codex",
+        "--scope",
+        "user",
+        "--workspace",
+        str(workspace),
+        "--write",
+        "--json",
+    ]
+    uninstall = [
+        "harness",
+        "uninstall",
+        "--target",
+        "codex",
+        "--scope",
+        "user",
+        "--workspace",
+        str(workspace),
+        "--write",
+        "--json",
+    ]
 
     assert cli.main(install) == 0
     capsys.readouterr()
@@ -898,69 +745,7 @@ def test_harness_uninstall_removes_safe_surfaces_and_preserves_conflicts_partial
     assert not state_path.exists()
 
 
-def test_harness_openclaw_doctor_does_not_conflict_solely_due_to_tracked_file(tmp_path, monkeypatch, capsys):
-    from brigade import cli
-    import subprocess
-
-    home = tmp_path / "home"
-    home.mkdir()
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setattr(harness_profiles, "probe_kimi_native_mcp", lambda: True)
-
-    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
-    agents = workspace / "AGENTS.md"
-    agents.write_text("# tracked\n")
-    subprocess.run(["git", "add", "AGENTS.md"], cwd=workspace, check=True, capture_output=True)
-
-    # install --write still refuses to mutate the tracked file (conflict/preserve)
-    assert (
-        cli.main(
-            ["harness", "install", "openclaw", "--scope", "user", "--workspace", str(workspace), "--write", "--json"]
-        )
-        == 1
-    )
-    install_payload = json.loads(capsys.readouterr().out)
-    assert install_payload["results"][0]["status"] == "conflict"
-    assert agents.read_text() == "# tracked\n"
-
-    # doctor only checks current content; a tracked file is not a conflict by itself
-    assert cli.main(["harness", "doctor", "openclaw", "--scope", "user", "--workspace", str(workspace), "--json"]) == 1
-    doctor = json.loads(capsys.readouterr().out)
-    row = doctor["results"][0]
-    assert row["status"] == "conflict"
-    # the conflict is the foreign content, not the tracked-ness
-    assert not any("tracked by git" in (c.get("detail") or "") for c in row["conflicts"])
-
-    # when the tracked file holds the current managed block, doctor is ready
-    desired = harness_profiles.managed_instruction_text()
-    agents.write_text(f"{harness_profiles.INSTRUCTION_START}\n{desired}\n{harness_profiles.INSTRUCTION_END}\n")
-    state = home / ".openclaw" / "brigade" / "install-state.json"
-    state.parent.mkdir(parents=True)
-    state.write_text(
-        json.dumps(
-            {
-                "schema_version": harness_profiles.PROFILE_STATE_VERSION,
-                "package_version": BRIGADE_VERSION,
-                "harness": "openclaw",
-                "workspace": str(workspace.resolve()),
-                "instructions": {"digest": harness_profile_cmd.digest_text(desired)},
-                "skills": {},
-                "generated": {},
-                "mcp": {},
-            }
-        )
-    )
-    assert cli.main(["harness", "doctor", "openclaw", "--scope", "user", "--workspace", str(workspace), "--json"]) == 0
-    ready = json.loads(capsys.readouterr().out)
-    rrow = ready["results"][0]
-    assert rrow["ready"] is True
-    assert rrow["instruction_ready"] is True
-    assert rrow["status"] in {"current", "ready"}
-
-
-# --- Issue #438 Task 8: end-to-end lifecycle and final hardening ---
+# --- Issue #438: end-to-end lifecycle (shared profile layer unit tests) ---
 
 
 def _seed_nested_reviewed_skill(workspace: Path, name="reviewed"):
@@ -1013,7 +798,17 @@ def test_user_profile_end_to_end_dry_run_install_doctor_and_uninstall(tmp_path, 
     _seed_nested_reviewed_skill(workspace)
     capsys.readouterr()  # drop import_skill JSON
 
-    base = ["harness", "install", "all", "--scope", "user", "--workspace", str(workspace), "--json"]
+    base = [
+        "harness",
+        "sync",
+        "--target",
+        "all",
+        "--scope",
+        "user",
+        "--workspace",
+        str(workspace),
+        "--json",
+    ]
 
     # dry run creates no home directory
     assert cli.main(base) == 0
@@ -1021,10 +816,10 @@ def test_user_profile_end_to_end_dry_run_install_doctor_and_uninstall(tmp_path, 
     assert dry["write"] is False
     assert not home.exists()
 
-    # first write succeeds and results are ordered all 8
+    # first write succeeds for slice-1 targets
     assert cli.main(base + ["--write"]) == 0
     first = json.loads(capsys.readouterr().out)
-    assert [r["harness"] for r in first["results"]] == list(harness_profiles.HARNESS_IDS)
+    assert [r["harness"] for r in first["results"]] == list(harness_profiles.SLICE1_HARNESS_IDS)
     assert all(r["status"] in {"current", "updated"} for r in first["results"])
 
     # second write is idempotent
@@ -1034,12 +829,15 @@ def test_user_profile_end_to_end_dry_run_install_doctor_and_uninstall(tmp_path, 
     assert second["reload_required"] is False
 
     # doctor succeeds with independent instruction_ready/skills_ready
-    assert cli.main(["harness", "doctor", "all", "--scope", "user", "--workspace", str(workspace), "--json"]) == 0
+    assert (
+        cli.main(["harness", "doctor", "--target", "all", "--scope", "user", "--workspace", str(workspace), "--json"])
+        == 0
+    )
     doctor = json.loads(capsys.readouterr().out)
     assert all(r["instruction_ready"] is True and r["skills_ready"] is True for r in doctor["results"])
 
-    # whole package exists in Codex and Pi
-    for root in (home / ".codex" / "skills", home / ".pi" / "agent" / "skills"):
+    # whole package exists in Codex and Claude
+    for root in (home / ".codex" / "skills", home / ".claude" / "skills"):
         pkg = root / "reviewed"
         assert (pkg / "SKILL.md").is_file()
         assert (pkg / "skill.json").is_file()
@@ -1050,9 +848,22 @@ def test_user_profile_end_to_end_dry_run_install_doctor_and_uninstall(tmp_path, 
     edited.write_text("user edit\n")
 
     # uninstall all --write returns 1; preserves the edited file/conflict while
-    # still removing safe owned surfaces in the same Codex profile and all others
+    # still removing safe owned surfaces in the same Codex profile and Claude
     assert (
-        cli.main(["harness", "uninstall", "all", "--scope", "user", "--workspace", str(workspace), "--write", "--json"])
+        cli.main(
+            [
+                "harness",
+                "uninstall",
+                "--target",
+                "all",
+                "--scope",
+                "user",
+                "--workspace",
+                str(workspace),
+                "--write",
+                "--json",
+            ]
+        )
         == 1
     )
     uninstall = json.loads(capsys.readouterr().out)
@@ -1062,21 +873,28 @@ def test_user_profile_end_to_end_dry_run_install_doctor_and_uninstall(tmp_path, 
     # safe owned surfaces removed in the conflicted Codex profile
     assert not (home / ".codex" / "skills" / "reviewed" / "SKILL.md").exists()
     assert not (home / ".codex" / "skills" / "reviewed" / "skill.json").exists()
-    # all other profiles removed their whole owned package
-    for hid in harness_profiles.HARNESS_IDS:
-        if hid == "codex":
-            continue
-        root_dir = home / (".pi/agent" if hid == "pi" else f".{hid}")
-        assert not (root_dir / "skills" / "reviewed").exists(), f"{hid} skills/reviewed still exists"
+    # Claude profile removed its whole owned package
     assert not (home / ".claude" / "skills" / "reviewed").exists()
-    assert not (home / ".pi" / "agent" / "skills" / "reviewed").exists()
 
     # public payload strips private keys/values recursively
     _assert_no_private_keys(uninstall)
 
     # a repeat uninstall remains convergent (still 1, edited file preserved)
     assert (
-        cli.main(["harness", "uninstall", "all", "--scope", "user", "--workspace", str(workspace), "--write", "--json"])
+        cli.main(
+            [
+                "harness",
+                "uninstall",
+                "--target",
+                "all",
+                "--scope",
+                "user",
+                "--workspace",
+                str(workspace),
+                "--write",
+                "--json",
+            ]
+        )
         == 1
     )
     again = json.loads(capsys.readouterr().out)
@@ -1096,33 +914,47 @@ def test_package_version_only_refresh_reports_no_write_or_reload(tmp_path, monke
     _seed_nested_reviewed_skill(workspace)
     capsys.readouterr()
 
-    install = ["harness", "install", "all", "--scope", "user", "--workspace", str(workspace), "--write", "--json"]
+    install = [
+        "harness",
+        "sync",
+        "--target",
+        "all",
+        "--scope",
+        "user",
+        "--workspace",
+        str(workspace),
+        "--write",
+        "--json",
+    ]
     assert cli.main(install) == 0
     capsys.readouterr()
 
-    # manually stale every profile's package_version
-    for hid in harness_profiles.HARNESS_IDS:
-        root = home / (".pi/agent" if hid == "pi" else f".{hid}")
+    # manually stale every slice-1 profile's package_version
+    for hid in harness_profiles.SLICE1_HARNESS_IDS:
+        root = home / f".{hid}"
         state_path = root / "brigade" / "install-state.json"
         if state_path.is_file():
             st = json.loads(state_path.read_text())
             st["package_version"] = "0.0.0-stale"
             state_path.write_text(json.dumps(st))
 
-    # install refreshes state but reports no file write/reload
+    # sync refreshes state but reports no file write/reload
     assert cli.main(install) == 0
     payload = json.loads(capsys.readouterr().out)
     assert all(r["files_written"] == [] and r["files_removed"] == [] for r in payload["results"])
     assert payload["reload_required"] is False
     # state files now carry the current package version
-    for hid in harness_profiles.HARNESS_IDS:
-        root = home / (".pi/agent" if hid == "pi" else f".{hid}")
+    for hid in harness_profiles.SLICE1_HARNESS_IDS:
+        root = home / f".{hid}"
         state_path = root / "brigade" / "install-state.json"
         if state_path.is_file():
             assert json.loads(state_path.read_text())["package_version"] == BRIGADE_VERSION
 
     # doctor also refreshes state and reports no reload
-    assert cli.main(["harness", "doctor", "all", "--scope", "user", "--workspace", str(workspace), "--json"]) == 0
+    assert (
+        cli.main(["harness", "doctor", "--target", "all", "--scope", "user", "--workspace", str(workspace), "--json"])
+        == 0
+    )
     doctor = json.loads(capsys.readouterr().out)
     assert doctor["reload_required"] is False
     assert all(r["instruction_ready"] is True and r["skills_ready"] is True for r in doctor["results"])
@@ -1136,6 +968,9 @@ def test_doctor_does_not_create_home_on_missing_profiles(tmp_path, monkeypatch, 
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(harness_profiles, "probe_kimi_native_mcp", lambda: True)
 
-    assert cli.main(["harness", "doctor", "all", "--scope", "user", "--workspace", str(workspace), "--json"]) == 1
+    assert (
+        cli.main(["harness", "doctor", "--target", "all", "--scope", "user", "--workspace", str(workspace), "--json"])
+        == 1
+    )
     json.loads(capsys.readouterr().out)
     assert not home.exists()

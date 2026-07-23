@@ -25,6 +25,8 @@ HARNESS_IDS = (
     "opencode",
     "pi",
 )
+USER_SCOPE_SLICE1_TARGETS = ("claude", "codex", "all")
+SLICE1_HARNESS_IDS = ("claude", "codex")
 PROFILE_STATE_VERSION = 2
 INSTRUCTION_START = "<!-- brigade:user-profile:start -->"
 INSTRUCTION_END = "<!-- brigade:user-profile:end -->"
@@ -150,6 +152,22 @@ def resolve_profiles(
             )
         )
     return tuple(result)
+
+
+def resolve_slice1_profiles(
+    *,
+    harness: str,
+    home: Path,
+    workspace: Path,
+) -> tuple[HarnessProfile, ...]:
+    """Resolve Claude/Codex user-scope profiles for issue #438 slice 1."""
+    if harness not in USER_SCOPE_SLICE1_TARGETS:
+        raise ValueError(f"unknown harness: {harness}")
+    selected = SLICE1_HARNESS_IDS if harness == "all" else (harness,)
+    profiles: list[HarnessProfile] = []
+    for profile_id in selected:
+        profiles.extend(resolve_profiles(harness=profile_id, home=home, workspace=workspace))
+    return tuple(profiles)
 
 
 def managed_instruction_text() -> str:

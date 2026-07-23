@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import __version__ as BRIGADE_VERSION
-from . import cursor_user_cmd, harness_profiles, localio, skills_cmd
+from . import cursor_user_cmd, harness_profiles, localio, mcp_adapters, mcp_cmd, skills_cmd, templates
+from .toml_compat import loads as _toml_loads, TOMLDecodeError as _TOMLDecodeError
 
 _RECOVERY_COMMAND = "brigade harness install <harness> --scope user --adopt --write"
 
@@ -841,7 +844,7 @@ def apply_skill_removals(
 # --- Issue #438 Task 7: aggregate orchestration ---
 
 _MCP_PENDING = {"status": "pending", "items": []}
-_PRIVATE_KEYS = ("digest", "fingerprint", "desired_digest", "desired_fingerprint", "prior_index")
+_PRIVATE_KEYS = ("digest", "fingerprint", "desired_digest", "desired_fingerprint", "prior_index", "_rel")
 
 
 def _strip_private(value):
@@ -868,6 +871,7 @@ def _result(
     files_removed,
     migration,
     capabilities,
+    mcp=None,
 ):
     return {
         "harness": harness,
@@ -882,7 +886,7 @@ def _result(
         "files_removed": sorted(files_removed),
         "migration": migration,
         "capabilities": capabilities,
-        "mcp": dict(_MCP_PENDING),
+        "mcp": dict(mcp) if mcp is not None else dict(_MCP_PENDING),
     }
 
 
@@ -1377,7 +1381,624 @@ def _replan_skills_after_retire(profile, state, workspace):
     return plans, conflicts
 
 
-def _install_profile(profile, workspace, write, adopt):
+# --- Issue #438 Task 4: Pi generated MCP extension + redacted bridge descriptor ---
+
+
+def render_pi_extension() -> str:
+    """Return the packaged Pi MCP extension source.
+
+    The template lives at ``templates/pi/brigade-mcp/index.ts`` (already packaged
+    via ``pyproject.toml``'s ``templates/**/*`` glob) and uses Node built-ins
+    only. It carries no baked workspace placeholder: it reads its bridge
+    descriptor from its own ``~/.pi/agent/brigade/mcp-profile.json`` path at
+    runtime.
+    """
+    path = templates.template_root() / "pi" / "brigade-mcp" / "index.ts"
+    return path.read_text(encoding="utf-8")
+
+
+def _resolve_brigade_entrypoint() -> str | None:
+    """Resolve the ``brigade`` CLI to an absolute path for the bridge descriptor.
+
+    Mirrors ``cursor_user_cmd._mcp_servers()``'s ``component_bins.resolve``
+    comment: the generated descriptor must not depend on Pi's spawn-time PATH, so
+    the bridge command's first element is resolved to an absolute path at
+    generation time. ``shutil.which`` is preferred; the venv sibling of the
+    running interpreter is a fallback for unactivated-venv test runs.
+    """
+    found = shutil.which("brigade")
+    candidates = [Path(found).expanduser() if found else None]
+    candidates.append(Path(sys.executable).expanduser().resolve().parent / "brigade")
+    for candidate in candidates:
+        if candidate is not None and candidate.is_file():
+            return str(candidate.resolve())
+    return None
+
+
+def _pi_mcp_artifact_paths(profile) -> tuple[Path, Path]:
+    """Return ``(extension_path, descriptor_path)`` for the Pi MCP profile."""
+    root = profile.user_root
+    return (
+        root / "extensions" / "brigade-mcp" / "index.ts",
+        root / "brigade" / "mcp-profile.json",
+    )
+
+
+def _pi_bridge_descriptor(profile, workspace) -> dict[str, Any]:
+    """Build the redacted Pi bridge descriptor for ``workspace``.
+
+    Carries the resolved workspace, the bridge command with the Brigade
+    entrypoint resolved to an absolute path and the canonical catalog digest
+    repeated as the required ``--catalog-digest`` argument, and the enabled
+    server names and descriptions only: no env values, headers, downstream argv,
+    or secrets.
+    """
+    del profile  # paths are derived from the workspace, not the profile record
+    workspace = workspace.expanduser().resolve()
+    digest = mcp_cmd.catalog_digest(workspace)
+    entrypoint = _resolve_brigade_entrypoint()
+    if entrypoint is None:
+        raise ValueError("cannot resolve an absolute Brigade CLI path for the Pi bridge")
+    workspace_str = str(workspace)
+    bridge_command = [
+        entrypoint,
+        "mcp",
+        "bridge",
+        "--stdio",
+        "--target",
+        workspace_str,
+        "--catalog-digest",
+        digest,
+    ]
+    servers = mcp_cmd._servers_for_bridge(workspace)
+    server_list = [{"name": name, "description": server.description} for name, server in sorted(servers.items())]
+    return {
+        "workspace": workspace_str,
+        "bridge_command": bridge_command,
+        "catalog_digest": digest,
+        "servers": server_list,
+    }
+
+
+def _plan_pi_mcp(profile, state, workspace, allow_global_stdio):
+    """Plan the two owned Pi MCP artifacts against v2 ``generated`` ownership.
+
+    Returns ``(items, conflicts, writes)`` where ``writes`` is a list of
+    ``(path, text, rel, desired_digest)`` for ``create``/``update`` actions. The
+    extension is generated from the packaged template; the descriptor is the
+    redacted bridge descriptor. A foreign (externally edited) artifact is a
+    conflict and is never overwritten. A stdio-bearing catalog requires
+    ``--allow-global-stdio`` before the bridge descriptor is written, matching
+    the user-scope stdio gate the native adapters use.
+    """
+    items: list[dict] = []
+    conflicts: list[dict] = []
+    writes: list[tuple[Path, str, str, str]] = []
+    extension_path, descriptor_path = _pi_mcp_artifact_paths(profile)
+    servers = mcp_cmd._servers_for_bridge(workspace)
+    has_stdio = any(not server.is_remote for server in servers.values())
+    if has_stdio and not allow_global_stdio:
+        detail = "stdio MCP servers require --allow-global-stdio for the Pi bridge"
+        item = {
+            "surface": "mcp-bridge",
+            "path": str(descriptor_path),
+            "status": "conflict",
+            "action": "preserve",
+            "detail": detail,
+        }
+        items.append(item)
+        conflicts.append(item)
+        return items, conflicts, writes
+
+    gen_state = state.get("generated", {}) if isinstance(state, dict) else {}
+    owned_files = gen_state.get("files", {}) if isinstance(gen_state, dict) else {}
+    try:
+        descriptor = _pi_bridge_descriptor(profile, workspace)
+    except ValueError as exc:
+        item = {
+            "surface": "mcp-bridge",
+            "path": str(descriptor_path),
+            "status": "conflict",
+            "action": "preserve",
+            "detail": str(exc),
+        }
+        items.append(item)
+        conflicts.append(item)
+        return items, conflicts, writes
+    extension_text = render_pi_extension()
+    descriptor_text = json.dumps(descriptor, indent=2, sort_keys=True) + "\n"
+    artifacts = [
+        (extension_path, extension_text, "extensions/brigade-mcp/index.ts"),
+        (descriptor_path, descriptor_text, "brigade/mcp-profile.json"),
+    ]
+    for path, text, rel in artifacts:
+        desired_digest = digest_text(text)
+        if not path.exists():
+            status, action = "missing", "create"
+        elif not path.is_file():
+            item = {
+                "surface": "mcp",
+                "path": str(path),
+                "status": "conflict",
+                "action": "preserve",
+                "detail": f"Pi MCP artifact is not a regular file: {path}",
+            }
+            items.append(item)
+            conflicts.append(item)
+            continue
+        else:
+            try:
+                live = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                item = {
+                    "surface": "mcp",
+                    "path": str(path),
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": str(exc),
+                }
+                items.append(item)
+                conflicts.append(item)
+                continue
+            live_digest = digest_text(live)
+            if live_digest == desired_digest:
+                status, action = "current", "none"
+            elif owned_files.get(rel) == live_digest:
+                status, action = "stale", "update"
+            else:
+                item = {
+                    "surface": "mcp",
+                    "path": str(path),
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": "foreign Pi MCP artifact; recover with: "
+                    "brigade harness install pi --scope user --adopt --write",
+                }
+                items.append(item)
+                conflicts.append(item)
+                continue
+        items.append({"surface": "mcp", "path": str(path), "status": status, "action": action})
+        if action in {"create", "update"}:
+            writes.append((path, text, rel, desired_digest))
+    return items, conflicts, writes
+
+
+def _apply_pi_mcp(writes, state, profile):
+    """Write the owned Pi MCP artifacts and record ownership in ``generated``.
+
+    Returns the sorted absolute paths written. Files land at ``0600`` via
+    ``localio.write_text_atomic``. Digests are recorded under
+    ``state["generated"]["files"][rel]`` and created leaf directories under
+    ``state["generated"]["created_directories"]``.
+    """
+    written: list[str] = []
+    gen = state.setdefault("generated", {})
+    if not isinstance(gen, dict):
+        gen = {}
+        state["generated"] = gen
+    files = gen.setdefault("files", {})
+    if not isinstance(files, dict):
+        files = {}
+        gen["files"] = files
+    created_dirs = gen.setdefault("created_directories", [])
+    if not isinstance(created_dirs, list):
+        created_dirs = []
+        gen["created_directories"] = created_dirs
+    root_resolved = profile.user_root.resolve()
+    for path, text, rel, desired_digest in writes:
+        missing = _missing_dirs_under(path, profile.user_root)
+        localio.write_text_atomic(path, text)
+        files[rel] = desired_digest
+        for directory in missing:
+            rel_dir = directory.resolve().relative_to(root_resolved).as_posix()
+            if rel_dir not in created_dirs:
+                created_dirs.append(rel_dir)
+        written.append(str(path))
+    return sorted(written)
+
+
+# --- Issue #438 Task 5: native MCP projection + Pi/native MCP uninstall ---
+
+
+def _native_mcp_kimi_root(profile) -> Path | None:
+    """Return the Kimi root value for the kimi-user adapter, else None."""
+    if profile.mcp_harness == "kimi-user":
+        return profile.user_root
+    return None
+
+
+def _malformed_native_config(adapter: mcp_adapters.McpAdapter, text: str | None) -> str | None:
+    """Return a detail string when an existing native config is malformed.
+
+    A missing file (``text is None``) is not malformed. JSON adapters require a
+    JSON object whose ``top_key`` path is either absent or navigable to an
+    object section. TOML adapters require parseable TOML with ``mcp_servers``
+    absent or a table. The check never mutates the file; the caller blocks the
+    whole MCP stage on a non-None return so a malformed native config is
+    preserved byte-for-byte.
+    """
+    if text is None:
+        return None
+    if adapter.fmt == "json":
+        try:
+            doc = json.loads(text)
+        except json.JSONDecodeError:
+            return "existing native MCP config is not valid JSON; refusing to overwrite"
+        if not isinstance(doc, dict):
+            return "existing native MCP config is not a JSON object; refusing to overwrite"
+        node: Any = doc
+        for part in adapter.top_key.split("."):
+            if part not in node:
+                return None  # section absent -> safe to create
+            node = node[part]
+            if not isinstance(node, dict):
+                return f"existing native MCP config section {adapter.top_key!r} is not an object; refusing to overwrite"
+        return None
+    if adapter.fmt == "toml":
+        try:
+            doc = _toml_loads(text)
+        except _TOMLDecodeError:
+            return "existing native MCP config is not valid TOML; refusing to overwrite"
+        if not isinstance(doc, dict):
+            return "existing native MCP config is not a TOML table; refusing to overwrite"
+        servers = doc.get("mcp_servers")
+        if servers is not None and not isinstance(servers, dict):
+            return "existing native MCP config mcp_servers section is not a table; refusing to overwrite"
+        return None
+    return None
+
+
+def _plan_native_mcp(profile, state, workspace, allow_global_stdio, adopt):
+    """Plan the native MCP projection for a profile with a non-None ``mcp_harness``.
+
+    Returns ``(items, conflicts, write_plan)``. ``write_plan`` is ``None`` when
+    nothing is to be written; otherwise a dict carrying the resolved path,
+    adapter, the per-server owned provider dicts to merge, the remove set
+    (always empty on install), and the ownership records to persist.
+
+    A missing canonical catalog is a no-op (no items, no conflicts): the
+    profile's instruction/skill stages still run, preserving the pre-MCP
+    behavior. A stdio-bearing projection requires ``--allow-global-stdio``,
+    matching the user-scope stdio gate the native adapters use. A malformed
+    existing config blocks the stage without mutation. Foreign entries are
+    conflicts unless ``adopt`` is set.
+    """
+    harness = profile.mcp_harness
+    adapter = mcp_adapters.ADAPTERS[harness]
+    kimi_root = _native_mcp_kimi_root(profile)
+    path = mcp_adapters.resolve_path(adapter, workspace, kimi_root=kimi_root)
+    servers, errors, _warnings = mcp_cmd.load_canonical(workspace)
+    if errors:
+        return [], [], None
+    desired = {
+        name: server
+        for name, server in servers.items()
+        if server.enabled and mcp_cmd._server_targets_harness(server, harness)
+    }
+    has_stdio = any(not server.is_remote for server in desired.values())
+    if has_stdio and not allow_global_stdio:
+        detail = "stdio MCP servers require --allow-global-stdio for user-scope projection"
+        item = {
+            "surface": "mcp",
+            "path": str(path),
+            "status": "conflict",
+            "action": "preserve",
+            "detail": detail,
+        }
+        return [item], [item], None
+
+    if path.exists() and not path.is_file():
+        item = {
+            "surface": "mcp",
+            "path": str(path),
+            "status": "conflict",
+            "action": "preserve",
+            "detail": "existing native MCP config is not a regular file; refusing to overwrite",
+        }
+        return [item], [item], None
+    try:
+        existing_text = path.read_text(encoding="utf-8") if path.is_file() else None
+    except (OSError, UnicodeDecodeError) as exc:
+        item = {
+            "surface": "mcp",
+            "path": str(path),
+            "status": "conflict",
+            "action": "preserve",
+            "detail": f"existing native MCP config is unreadable: {exc}",
+        }
+        return [item], [item], None
+    malformed = _malformed_native_config(adapter, existing_text)
+    if malformed is not None:
+        item = {"surface": "mcp", "path": str(path), "status": "conflict", "action": "preserve", "detail": malformed}
+        return [item], [item], None
+
+    live = adapter.read_file(existing_text)
+    mcp_state = state.get("mcp") if isinstance(state.get("mcp"), dict) else {}
+    items: list[dict] = []
+    conflicts: list[dict] = []
+    to_write: dict[str, dict[str, Any]] = {}
+    ownership: dict[str, dict[str, str]] = {}
+    for name, server in sorted(desired.items()):
+        provider = mcp_cmd._project_server(workspace, harness, server)
+        proj_fp = localio.stable_hash(provider)
+        if name not in live:
+            items.append({"surface": "mcp", "path": str(path), "name": name, "status": "missing", "action": "create"})
+            to_write[name] = provider
+            ownership[name] = {"projected_fingerprint": proj_fp}
+            continue
+        live_fp = localio.stable_hash(live[name])
+        owned = mcp_state.get(name) if isinstance(mcp_state.get(name), dict) else {}
+        owned_fp = owned.get("projected_fingerprint")
+        if live_fp == proj_fp:
+            items.append({"surface": "mcp", "path": str(path), "name": name, "status": "current", "action": "none"})
+            ownership[name] = {"projected_fingerprint": proj_fp}
+        elif owned_fp is not None and live_fp == owned_fp:
+            items.append({"surface": "mcp", "path": str(path), "name": name, "status": "stale", "action": "update"})
+            to_write[name] = provider
+            ownership[name] = {"projected_fingerprint": proj_fp}
+        elif adopt:
+            items.append({"surface": "mcp", "path": str(path), "name": name, "status": "adopted", "action": "update"})
+            to_write[name] = provider
+            ownership[name] = {"projected_fingerprint": proj_fp}
+        else:
+            item = {
+                "surface": "mcp",
+                "path": str(path),
+                "name": name,
+                "status": "conflict",
+                "action": "preserve",
+                "detail": "a native MCP entry with this name already exists; "
+                "remove it or rerun with --adopt to take ownership",
+            }
+            items.append(item)
+            conflicts.append(item)
+    write_plan = None
+    if ownership:
+        write_plan = {
+            "path": path,
+            "adapter": adapter,
+            "owned": to_write,
+            "remove": set(),
+            "ownership": ownership,
+            "existing_text": existing_text,
+        }
+    return items, conflicts, write_plan
+
+
+def _apply_native_mcp(write_plan, state):
+    """Merge the owned native MCP entries into the native config and record ownership.
+
+    Returns the sorted absolute paths written. The merge preserves every
+    foreign server and unrelated top-level key; atomic write lands the file at
+    ``0600``. Ownership is recorded under ``state["mcp"][<name>]``.
+    """
+    if write_plan is None:
+        return []
+    path = write_plan["path"]
+    adapter = write_plan["adapter"]
+    if write_plan["owned"]:
+        new_text = adapter.write_file(write_plan["existing_text"], write_plan["owned"], write_plan["remove"])
+        localio.write_text_atomic(path, new_text)
+    mcp_state = state.setdefault("mcp", {})
+    if not isinstance(mcp_state, dict):
+        mcp_state = {}
+        state["mcp"] = mcp_state
+    for name, record in write_plan["ownership"].items():
+        mcp_state[name] = record
+    return [str(path)] if write_plan["owned"] else []
+
+
+def _plan_native_mcp_removal(profile, state, workspace):
+    """Plan removal of owned native MCP entries for a profile.
+
+    Returns ``(items, conflicts, remove_plan)``. ``remove_plan`` is ``None`` or
+    a dict carrying the resolved path, adapter, the server names whose live
+    projected value still matches the recorded ownership, and the existing
+    text. Only matching entries are removed; an edited owned entry is a
+    conflict with ownership retained; a missing config is already-removed; a
+    malformed config blocks without mutation and retains ownership.
+    """
+    harness = profile.mcp_harness
+    adapter = mcp_adapters.ADAPTERS[harness]
+    kimi_root = _native_mcp_kimi_root(profile)
+    path = mcp_adapters.resolve_path(adapter, workspace, kimi_root=kimi_root)
+    mcp_state = state.get("mcp") if isinstance(state.get("mcp"), dict) else {}
+    owned_names = {name for name, record in mcp_state.items() if isinstance(record, dict)}
+
+    if not path.exists():
+        # missing config: already removed. Surface an absent item per owned
+        # entry so the caller can clear stale ownership; with no ownership this
+        # is a clean no-op (nothing to verify, nothing to remove).
+        if not owned_names:
+            return [], [], None
+        items = [
+            {"surface": "mcp", "path": str(path), "name": name, "status": "absent", "action": "none"}
+            for name in sorted(owned_names)
+        ]
+        return items, [], {"path": path, "adapter": adapter, "remove": set(), "absent": set(), "clear_all": True}
+
+    if not path.is_file():
+        item = {
+            "surface": "mcp",
+            "path": str(path),
+            "status": "conflict",
+            "action": "preserve",
+            "detail": "existing native MCP config is not a regular file; refusing to remove entries",
+        }
+        return [item], [item], None
+
+    try:
+        existing_text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        detail = f"existing native MCP config is unreadable: {exc}"
+        items = [
+            {
+                "surface": "mcp",
+                "path": str(path),
+                "name": name,
+                "status": "conflict",
+                "action": "preserve",
+                "detail": detail,
+            }
+            for name in sorted(owned_names)
+        ]
+        if not items:
+            items.append(
+                {"surface": "mcp", "path": str(path), "status": "conflict", "action": "preserve", "detail": detail}
+            )
+        return items, items, None
+    malformed = _malformed_native_config(adapter, existing_text)
+    if malformed is not None:
+        # A malformed native config cannot be parsed to distinguish owned from
+        # foreign entries, so Brigade cannot confirm a safe removal: block
+        # without mutating and retain any recorded ownership for a later retry.
+        items: list[dict] = []
+        conflicts: list[dict] = []
+        if owned_names:
+            for name in sorted(owned_names):
+                item = {
+                    "surface": "mcp",
+                    "path": str(path),
+                    "name": name,
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": malformed,
+                }
+                items.append(item)
+                conflicts.append(item)
+        else:
+            item = {
+                "surface": "mcp",
+                "path": str(path),
+                "status": "conflict",
+                "action": "preserve",
+                "detail": malformed,
+            }
+            items.append(item)
+            conflicts.append(item)
+        return items, conflicts, None
+
+    if not owned_names:
+        # parseable config with no Brigade ownership: nothing to remove.
+        return [], [], None
+
+    live = adapter.read_file(existing_text)
+    items = []
+    conflicts = []
+    to_remove: set[str] = set()
+    absent_names: set[str] = set()
+    for name in sorted(owned_names):
+        record = mcp_state.get(name) if isinstance(mcp_state.get(name), dict) else {}
+        owned_fp = record.get("projected_fingerprint")
+        if name not in live:
+            # owned entry already gone from the file: clear stale ownership
+            items.append({"surface": "mcp", "path": str(path), "name": name, "status": "absent", "action": "none"})
+            absent_names.add(name)
+            continue
+        live_fp = localio.stable_hash(live[name])
+        if owned_fp is not None and live_fp == owned_fp:
+            items.append({"surface": "mcp", "path": str(path), "name": name, "status": "managed", "action": "remove"})
+            to_remove.add(name)
+        else:
+            item = {
+                "surface": "mcp",
+                "path": str(path),
+                "name": name,
+                "status": "conflict",
+                "action": "preserve",
+                "detail": "owned native MCP entry was edited; recover with: "
+                "brigade harness install <harness> --scope user --adopt --write",
+            }
+            items.append(item)
+            conflicts.append(item)
+    remove_plan = None
+    if to_remove or absent_names:
+        remove_plan = {
+            "path": path,
+            "adapter": adapter,
+            "remove": to_remove,
+            "absent": absent_names,
+            "existing_text": existing_text,
+        }
+    return items, conflicts, remove_plan
+
+
+def _apply_native_mcp_removal(remove_plan, state):
+    """Remove digest-matching owned native MCP entries and clear ownership.
+
+    Returns the sorted absolute paths written (the config file is rewritten
+    when any entry is removed). Foreign servers and unrelated top-level keys
+    are preserved. Ownership for removed and already-absent entries is
+    cleared; conflicted entries keep their ownership for a future retry.
+    """
+    if remove_plan is None:
+        return []
+    mcp_state = state.get("mcp") if isinstance(state.get("mcp"), dict) else {}
+    if remove_plan.get("clear_all"):
+        for name in list(mcp_state):
+            mcp_state.pop(name, None)
+        return []
+    to_remove = remove_plan["remove"]
+    absent_names = remove_plan["absent"]
+    if to_remove:
+        path = remove_plan["path"]
+        adapter = remove_plan["adapter"]
+        new_text = adapter.write_file(remove_plan["existing_text"], {}, to_remove)
+        localio.write_text_atomic(path, new_text)
+    for name in to_remove | absent_names:
+        mcp_state.pop(name, None)
+    return [str(remove_plan["path"])] if to_remove else []
+
+
+def _plan_generated_removals(profile, state):
+    """Plan removal of owned generated files recorded under ``state["generated"]``.
+
+    Shared by the Cursor plugin/rule/hook surfaces and the Pi MCP extension +
+    bridge descriptor. Returns ``(items, conflicts, writes)`` where ``writes``
+    is the list of ``(path, rel)`` tuples whose live bytes still match the
+    recorded ownership and may be unlinked.
+    """
+    root = profile.user_root
+    gen_state = state.get("generated", {}) if isinstance(state, dict) else {}
+    owned_files = gen_state.get("files", {}) if isinstance(gen_state, dict) else {}
+    if not isinstance(owned_files, dict):
+        return [], [], []
+    items: list[dict] = []
+    conflicts: list[dict] = []
+    writes: list[tuple[Path, str]] = []
+    for rel, owned_digest in sorted(owned_files.items()):
+        if not isinstance(owned_digest, str):
+            continue
+        path = root / rel
+        item = {"surface": "generated", "path": str(path), "_rel": rel}
+        if not path.exists():
+            item.update(status="absent", action="none")
+        elif not path.is_file():
+            item.update(status="conflict", action="preserve", detail="owned generated file is not a regular file")
+            conflicts.append(item)
+        else:
+            try:
+                live = digest_text(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as exc:
+                item.update(status="conflict", action="preserve", detail=str(exc))
+                conflicts.append(item)
+            else:
+                if live == owned_digest:
+                    item.update(status="managed", action="remove")
+                    writes.append((path, rel))
+                else:
+                    item.update(
+                        status="conflict",
+                        action="preserve",
+                        detail="owned generated file was edited; recover with: "
+                        "brigade harness install <harness> --scope user --adopt --write",
+                    )
+                    conflicts.append(item)
+        items.append(item)
+    return items, conflicts, writes
+
+
+def _install_profile(profile, workspace, write, adopt, allow_global_stdio=False):
     state, error, migration, retire_mcp, retire_paths, retire_file_own, retire_mcp_own = _load_state_for_profile(
         profile, workspace
     )
@@ -1456,7 +2077,28 @@ def _install_profile(profile, workspace, write, adopt):
         conflicts.extend(hook_conflict)
     generated_ready = not gen_conflicts and not hook_conflict
 
-    ready = instruction_ready and skills_ready and generated_ready
+    pi_mcp_items: list[dict] = []
+    pi_mcp_conflicts: list[dict] = []
+    pi_mcp_writes: list[tuple[Path, str, str, str]] = []
+    if profile.harness == "pi":
+        pi_mcp_items, pi_mcp_conflicts, pi_mcp_writes = _plan_pi_mcp(profile, state, workspace, allow_global_stdio)
+        items.extend(pi_mcp_items)
+        conflicts.extend(pi_mcp_conflicts)
+
+    # Native MCP projection for non-Pi, non-Cursor profiles. Cursor keeps its
+    # own v1 MCP retirement path; Pi uses the aggregate bridge above.
+    native_mcp_items: list[dict] = []
+    native_mcp_conflicts: list[dict] = []
+    native_mcp_write: dict[str, Any] | None = None
+    if profile.mcp_harness is not None and profile.harness not in ("pi", "cursor"):
+        native_mcp_items, native_mcp_conflicts, native_mcp_write = _plan_native_mcp(
+            profile, state, workspace, allow_global_stdio, adopt
+        )
+        items.extend(native_mcp_items)
+        conflicts.extend(native_mcp_conflicts)
+    mcp_ready = not pi_mcp_conflicts and not native_mcp_conflicts
+
+    ready = instruction_ready and skills_ready and generated_ready and mcp_ready
     files_removed: list[str] = []
 
     if write and ready:
@@ -1565,6 +2207,12 @@ def _install_profile(profile, workspace, write, adopt):
                 state_path=profile.state_path,
             )
             files_written.extend(sw)
+        if profile.harness == "pi" and pi_mcp_writes:
+            pw = _apply_pi_mcp(pi_mcp_writes, state, profile)
+            files_written.extend(pw)
+        if native_mcp_write is not None:
+            nw = _apply_native_mcp(native_mcp_write, state)
+            files_written.extend(nw)
         # 5. persist v2
         write_profile_state(state_path=profile.state_path, state=state)
         status = "updated" if (files_written or files_removed) else "current"
@@ -1576,6 +2224,17 @@ def _install_profile(profile, workspace, write, adopt):
         status = "current" if ready else "conflict"
         reload_required = not write  # dry-run always signals reload hint per legacy cursor contract
 
+    mcp_payload = None
+    if profile.harness == "pi":
+        mcp_payload = {
+            "status": "ready" if mcp_ready else "conflict",
+            "items": _strip_private(pi_mcp_items),
+        }
+    elif native_mcp_items:
+        mcp_payload = {
+            "status": "ready" if mcp_ready else "conflict",
+            "items": _strip_private(native_mcp_items),
+        }
     return _result(
         profile.harness,
         status=status,
@@ -1589,6 +2248,7 @@ def _install_profile(profile, workspace, write, adopt):
         files_removed=files_removed,
         migration=migration,
         capabilities=profile.capabilities,
+        mcp=mcp_payload,
     ), reload_required
 
 
@@ -1725,7 +2385,29 @@ def _uninstall_profile(profile, workspace, write):
         conflicts.extend(hook_conflict)
     generated_ready = not gen_conflicts and not hook_conflict
 
-    ready = instruction_ready and skills_ready and generated_ready
+    # Native MCP removal (kimi-user, opencode-user, ...). Cursor keeps its own
+    # v1 MCP retirement path; Pi uses the generated-artifacts path below.
+    native_mcp_items: list[dict] = []
+    native_mcp_conflicts: list[dict] = []
+    native_mcp_remove: dict[str, Any] | None = None
+    if profile.mcp_harness is not None and profile.harness not in ("pi", "cursor"):
+        native_mcp_items, native_mcp_conflicts, native_mcp_remove = _plan_native_mcp_removal(profile, state, workspace)
+        items.extend(native_mcp_items)
+        conflicts.extend(native_mcp_conflicts)
+    native_mcp_ready = not native_mcp_conflicts
+
+    # Pi generated artifacts (extension + bridge descriptor) share the generic
+    # generated-removal planner; created directories are swept after files.
+    pi_gen_items: list[dict] = []
+    pi_gen_conflicts: list[dict] = []
+    pi_gen_writes: list[tuple[Path, str]] = []
+    if profile.harness == "pi":
+        pi_gen_items, pi_gen_conflicts, pi_gen_writes = _plan_generated_removals(profile, state)
+        items.extend(pi_gen_items)
+        conflicts.extend(pi_gen_conflicts)
+    pi_gen_ready = not pi_gen_conflicts
+
+    ready = instruction_ready and skills_ready and generated_ready and native_mcp_ready and pi_gen_ready
 
     reload_required = False
     if write:
@@ -1784,6 +2466,45 @@ def _uninstall_profile(profile, workspace, write):
                     gen["hooks"].pop("sessionStart", None)
             # rmdir recorded created directories deepest-first; never recursive
             gen = state.get("generated", {})
+            created = gen.get("created_directories", []) if isinstance(gen, dict) else []
+            root_resolved = profile.user_root.resolve()
+            for rel in sorted(created, key=lambda r: (-len(Path(r).parts), r)):
+                d = (root_resolved / rel).resolve()
+                if not d.is_relative_to(root_resolved):
+                    continue
+                try:
+                    d.rmdir()
+                except OSError:
+                    continue
+                if isinstance(created, list):
+                    created.remove(rel)
+        # Native MCP removal: rewrite the config preserving foreign entries,
+        # clear ownership for removed and already-absent owned servers.
+        if native_mcp_remove is not None:
+            nw = _apply_native_mcp_removal(native_mcp_remove, state)
+            files_removed.extend(nw)
+        # Pi generated artifacts: unlink digest-matching owned files and clear
+        # stale ownership for already-absent ones.
+        if profile.harness == "pi":
+            gen = state.get("generated", {})
+            if not isinstance(gen, dict):
+                gen = {}
+                state["generated"] = gen
+            owned_files = gen.get("files", {})
+            if not isinstance(owned_files, dict):
+                owned_files = {}
+                gen["files"] = owned_files
+            for p, rel in pi_gen_writes:
+                try:
+                    p.unlink()
+                    files_removed.append(str(p))
+                except FileNotFoundError:
+                    pass
+                owned_files.pop(rel, None)
+            for item in pi_gen_items:
+                if item.get("action") == "none" and item.get("status") == "absent":
+                    owned_files.pop(item["_rel"], None)
+            # rmdir recorded created directories deepest-first; never recursive
             created = gen.get("created_directories", []) if isinstance(gen, dict) else []
             root_resolved = profile.user_root.resolve()
             for rel in sorted(created, key=lambda r: (-len(Path(r).parts), r)):
@@ -1948,13 +2669,14 @@ def _run_profiles(
     if home is None:
         home = Path.home()
     workspace = workspace.expanduser().resolve()
-    profiles = harness_profiles.resolve_profiles(harness=harness, home=home, workspace=workspace)
+    profiles = harness_profiles.resolve_slice1_profiles(harness=harness, home=home, workspace=workspace)
     results = []
     any_not_ready = False
     any_reload = False
+    install_ops = {"install", "sync"}
     for profile in profiles:
-        if operation == "install":
-            result, reload_required = _install_profile(profile, workspace, write, adopt)
+        if operation in install_ops:
+            result, reload_required = _install_profile(profile, workspace, write, adopt, allow_global_stdio)
         elif operation == "uninstall":
             result, reload_required = _uninstall_profile(profile, workspace, write)
         else:
@@ -1965,7 +2687,7 @@ def _run_profiles(
         if reload_required:
             any_reload = True
 
-    reload_required = (not write and operation in {"install", "uninstall"}) or any_reload
+    reload_required = (not write and operation in {*install_ops, "uninstall"}) or any_reload
     payload = {
         "schema_version": 1,
         "operation": operation,
@@ -1996,6 +2718,29 @@ def _emit_human(payload):
                 print(f"  ! {item['path']}{name}")
     if payload.get("reload_required"):
         print("next: reload harness windows")
+
+
+def sync(
+    *,
+    harness: str,
+    workspace: Path,
+    write: bool = False,
+    allow_global_stdio: bool = False,
+    adopt: bool = False,
+    json_output: bool = False,
+    home: Path | None = None,
+) -> int:
+    return _run_profiles(
+        "sync",
+        harness=harness,
+        workspace=workspace,
+        write=write,
+        allow_global_stdio=allow_global_stdio,
+        adopt=adopt,
+        verify_mcp=False,
+        json_output=json_output,
+        home=home,
+    )
 
 
 def install(
