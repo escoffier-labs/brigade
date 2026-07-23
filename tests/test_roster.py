@@ -1016,6 +1016,31 @@ def test_load_rejects_orchestrator_fallback_to_acpx_worker(tmp_path):
         roster_mod.load_roster(_write(tmp_path, text))
 
 
+@pytest.mark.parametrize(
+    "fallback_definition",
+    [
+        (
+            '[agents.cloud_worker]\ncli = "codex-cloud:env"\nrole = "worker"\n'
+            'requires = { cli = "codex" }\n'
+            '[limits]\nallow_models = ["claude", "codex-cloud:*"]\n'
+        ),
+        ('[agents.endpoint_worker]\nrole = "worker"\nendpoint = "http://example.test/v1"\nmodel = "m"\n'),
+    ],
+)
+def test_load_rejects_orchestrator_fallback_to_other_worker_only_seats(tmp_path, fallback_definition):
+    fallback_name = "cloud_worker" if "cloud_worker" in fallback_definition else "endpoint_worker"
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "claude"\nrole = "plan"\n'
+        'requires = { cli = "claude" }\n'
+        f'fallback = ["{fallback_name}"]\n'
+        f"{fallback_definition}"
+    )
+
+    with pytest.raises(ValueError, match="worker-only"):
+        roster_mod.load_roster(_write(tmp_path, text))
+
+
 def test_load_rejects_non_orchestrator_fallback_naming_orchestrator(tmp_path):
     text = (
         'orchestrator = "chef"\n'

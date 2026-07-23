@@ -450,6 +450,13 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
                 )
             if agent_name == orchestrator and fallback_agent.transport == "acpx":
                 raise ValueError(f"agents.{agent_name}.fallback cannot alias an acpx worker into the orchestrator slot")
+            if agent_name == orchestrator and (
+                fallback_agent.cli is None or fallback_agent.cli.startswith("codex-cloud:")
+            ):
+                raise ValueError(
+                    f"agents.{agent_name}.fallback cannot alias worker-only seat {fallback_name!r} "
+                    "into the orchestrator slot"
+                )
             if agent_name != orchestrator and fallback_name == orchestrator:
                 raise ValueError(f"agents.{agent_name}.fallback cannot name the orchestrator {orchestrator!r}")
 
