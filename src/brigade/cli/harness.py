@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .. import harness_profiles
 
-SLICE1_TARGETS = harness_profiles.USER_SCOPE_SLICE1_TARGETS
+USER_SCOPE_TARGETS = harness_profiles.USER_SCOPE_TARGETS
 
 
 def _write_mode(parser: argparse.ArgumentParser, *, default_dry: bool = True) -> None:
@@ -24,9 +24,9 @@ def _write_mode(parser: argparse.ArgumentParser, *, default_dry: bool = True) ->
 def _common_slice1(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--target",
-        choices=SLICE1_TARGETS,
+        choices=USER_SCOPE_TARGETS,
         required=True,
-        help="Harness to configure (claude, codex, or all for both).",
+        help="Harness to configure (claude, codex, openclaw, kimi, grok, cursor, opencode, or all).",
     )
     parser.add_argument("--scope", choices=["user"], required=True, help="Configuration scope.")
     parser.add_argument(
@@ -49,7 +49,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     commands = parser.add_subparsers(dest="harness_command", metavar="<harness-command>")
     commands.required = True
 
-    sync = commands.add_parser("sync", help="Plan or apply Claude/Codex user-scope onboarding (dry-run default).")
+    sync = commands.add_parser("sync", help="Plan or apply user-scope harness onboarding (dry-run default).")
     _common_slice1(sync)
     _write_mode(sync)
     sync.add_argument(
@@ -67,8 +67,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     uninstall_target = uninstall.add_mutually_exclusive_group(required=True)
     uninstall_target.add_argument(
         "--target",
-        choices=SLICE1_TARGETS,
-        help="Claude/Codex user-scope target to uninstall.",
+        choices=USER_SCOPE_TARGETS,
+        help="User-scope harness target to uninstall.",
     )
     uninstall_target.add_argument(
         "harness",
@@ -90,8 +90,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     doctor_target = doctor.add_mutually_exclusive_group(required=True)
     doctor_target.add_argument(
         "--target",
-        choices=SLICE1_TARGETS,
-        help="Claude/Codex user-scope target to inspect.",
+        choices=USER_SCOPE_TARGETS,
+        help="User-scope harness target to inspect.",
     )
     doctor_target.add_argument(
         "harness",
@@ -110,10 +110,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     doctor.add_argument(
         "--verify-mcp",
         action="store_true",
-        help="Also verify native MCP projections for Claude/Codex.",
+        help="Also verify native MCP projections for the selected targets.",
     )
 
-    install = commands.add_parser("install", help="Legacy Cursor user-scope install (use sync for Claude/Codex).")
+    install = commands.add_parser("install", help="Legacy Cursor user-scope install (use sync for user profiles).")
     _common_cursor(install)
     _write_mode(install)
     install.add_argument(
@@ -167,7 +167,7 @@ def dispatch(args) -> int:
 
     if args.harness_command == "install":
         if args.harness != "cursor":
-            args._brigade_parser.error("use `brigade harness sync --target <claude|codex|all> --scope user`")
+            args._brigade_parser.error("use `brigade harness sync --target <harness|all> --scope user`")
             return 2
         if args.projection_only and not args.surface:
             print("error: --projection-only requires --surface", file=sys.stderr)

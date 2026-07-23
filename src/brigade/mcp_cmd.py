@@ -153,6 +153,12 @@ def _server_targets_harness(server: CanonicalServer, harness: str) -> bool:
         return True
     if harness == "cursor-user":
         return "cursor" in server.targets or "cursor-user" in server.targets
+    if harness == "grok-user":
+        return "grok" in server.targets or "grok-user" in server.targets
+    if harness == "kimi-user":
+        return "kimi" in server.targets or "kimi-user" in server.targets
+    if harness == "opencode-user":
+        return "opencode" in server.targets or "opencode-user" in server.targets
     return harness in server.targets
 
 
