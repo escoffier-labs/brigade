@@ -547,6 +547,66 @@ def _parse_challenger_output(text: str) -> dict[str, Any]:
     }
 
 
+_TOP_LEVEL_KEYS = frozenset(
+    {
+        "schema",
+        "decision",
+        "perspectives",
+        "challenger",
+        "agreements",
+        "unresolved_conflicts",
+        "assumptions",
+        "evidence_references",
+        "minority_report",
+        "recommendation",
+        "confidence",
+        "invalid_lenses",
+    }
+)
+_PERSPECTIVE_KEYS = frozenset(
+    {
+        "worker",
+        "stage",
+        "status",
+        "detail",
+        "evidence_scope",
+        "position",
+        "assumptions",
+        "evidence_references",
+        "agreements",
+        "conflicts",
+        "raw_output",
+    }
+)
+_SCOPE_KEYS = frozenset({"kind", "reference", "query", "grounded", "status"})
+_CHALLENGER_KEYS = frozenset(
+    {
+        "worker",
+        "stage",
+        "status",
+        "detail",
+        "attacks",
+        "minority_report",
+        "recommendation",
+        "confidence",
+        "unresolved_conflicts",
+        "agreements",
+        "raw_output",
+    }
+)
+
+
+def _reject_unknown_keys(payload: dict[str, object], *, allowed: frozenset[str], label: str) -> None:
+    unknown = set(payload) - allowed
+    if unknown:
+        raise ValueError(f"{label} has unknown fields: {', '.join(sorted(unknown))}")
+
+
+def _string_list_field(value: object, *, label: str) -> None:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"{label} must be a list of strings")
+
+
 def _non_empty_string(value: object) -> str:
     text = _one_line(value)
     if not text:
@@ -577,11 +637,25 @@ def assemble_artifact(
         if lens.role != "perspective":
             continue
         result = by_worker_stage.get((lens.worker, lens.task))
-        parsed = _parse_perspective_output(result.text if result is not None else "")
+        if result is None or not result.ok:
+            detail = result.detail if result is not None else "perspective did not run"
+            perspectives.append(
+                {
+                    "worker": lens.worker,
+                    "stage": lens.stage,
+                    "status": "unavailable",
+                    "detail": _one_line(detail) or "perspective unavailable",
+                    "evidence_scope": lens.scope.payload(),
+                    "raw_output": result.text if result is not None else "",
+                }
+            )
+            continue
+        parsed = _parse_perspective_output(result.text)
         perspectives.append(
             {
                 "worker": lens.worker,
                 "stage": lens.stage,
+                "status": "completed",
                 "evidence_scope": lens.scope.payload(),
                 **parsed,
             }
@@ -659,6 +733,9 @@ def assemble_artifact(
 
 def validate_schema(payload: dict[str, object]) -> None:
     """Validate a deliberation artifact against the v1 schema."""
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    _reject_unknown_keys(payload, allowed=_TOP_LEVEL_KEYS, label="deliberation artifact")
     if payload.get("schema") != SCHEMA:
         raise ValueError(f"schema must be {SCHEMA!r}")
     if not isinstance(payload.get("decision"), str) or not str(payload["decision"]).strip():
@@ -666,16 +743,25 @@ def validate_schema(payload: dict[str, object]) -> None:
     perspectives = payload.get("perspectives")
     if not isinstance(perspectives, list) or not MIN_PERSPECTIVES <= len(perspectives) <= MAX_PERSPECTIVES:
         raise ValueError("perspectives must contain 2 to 3 entries")
+    _string_list_field(payload.get("agreements"), label="agreements")
+    _string_list_field(payload.get("unresolved_conflicts"), label="unresolved_conflicts")
+    _string_list_field(payload.get("assumptions"), label="assumptions")
+    _string_list_field(payload.get("evidence_references"), label="evidence_references")
     fingerprints: set[tuple[str, str]] = set()
     for item in perspectives:
         if not isinstance(item, dict):
             raise ValueError("each perspective must be an object")
+        _reject_unknown_keys(item, allowed=_PERSPECTIVE_KEYS, label="perspective")
         _non_empty_string(item.get("worker"))
         if item.get("stage") != PERSPECTIVE_STAGE:
             raise ValueError("each perspective must be stage 1")
+        status = item.get("status")
+        if status not in {"completed", "unavailable"}:
+            raise ValueError("perspective status must be completed or unavailable")
         scope = item.get("evidence_scope")
         if not isinstance(scope, dict):
             raise ValueError("each perspective must include evidence_scope")
+        _reject_unknown_keys(scope, allowed=_SCOPE_KEYS, label="evidence_scope")
         for key in ("kind", "reference", "query", "grounded", "status"):
             if key not in scope:
                 raise ValueError(f"evidence_scope missing {key!r}")
@@ -690,10 +776,20 @@ def validate_schema(payload: dict[str, object]) -> None:
         if fingerprint in fingerprints:
             raise ValueError("perspective evidence scopes must be distinct")
         fingerprints.add(fingerprint)
-        _non_empty_string(item.get("position"))
+        if status == "completed":
+            _non_empty_string(item.get("position"))
+            _string_list_field(item.get("assumptions"), label="perspective.assumptions")
+            _string_list_field(item.get("evidence_references"), label="perspective.evidence_references")
+            _string_list_field(item.get("agreements"), label="perspective.agreements")
+            _string_list_field(item.get("conflicts"), label="perspective.conflicts")
+        else:
+            _non_empty_string(item.get("detail"))
+        if not isinstance(item.get("raw_output"), str):
+            raise ValueError("perspective raw_output must be a string")
     challenger = payload.get("challenger")
     if not isinstance(challenger, dict):
         raise ValueError("challenger must be an object")
+    _reject_unknown_keys(challenger, allowed=_CHALLENGER_KEYS, label="challenger")
     if challenger.get("stage") != CHALLENGER_STAGE:
         raise ValueError("challenger must be stage 2")
     _non_empty_string(challenger.get("worker"))
@@ -708,13 +804,18 @@ def validate_schema(payload: dict[str, object]) -> None:
         _non_empty_string(challenger.get("recommendation"))
         if challenger.get("confidence") not in _CONFIDENCE_VALUES:
             raise ValueError("challenger confidence must be low, medium, or high")
+        _string_list_field(challenger.get("attacks"), label="challenger.attacks")
+        _string_list_field(challenger.get("unresolved_conflicts"), label="challenger.unresolved_conflicts")
+        _string_list_field(challenger.get("agreements"), label="challenger.agreements")
     else:
         _non_empty_string(challenger.get("detail"))
+    if not isinstance(challenger.get("raw_output"), str):
+        raise ValueError("challenger raw_output must be a string")
     if payload.get("confidence") not in _CONFIDENCE_VALUES:
         raise ValueError("confidence must be low, medium, or high")
-    if "minority_report" not in payload:
+    if not isinstance(payload.get("minority_report"), str):
         raise ValueError("minority_report is required")
-    if "recommendation" not in payload:
+    if not isinstance(payload.get("recommendation"), str):
         raise ValueError("recommendation is required")
     invalid_lenses = payload.get("invalid_lenses")
     if not isinstance(invalid_lenses, list):

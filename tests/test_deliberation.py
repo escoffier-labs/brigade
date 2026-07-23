@@ -287,6 +287,7 @@ def test_validate_schema_requires_two_grounded_graphtrail_perspectives():
     perspective = {
         "worker": "coder",
         "stage": 1,
+        "status": "completed",
         "evidence_scope": {
             "kind": "graphtrail-context",
             "reference": "queue",
@@ -386,6 +387,7 @@ def test_runs_show_and_watch_surface_deliberation(tmp_path, capsys):
                     {
                         "worker": "coder",
                         "stage": 1,
+                        "status": "completed",
                         "evidence_scope": {
                             "kind": "graphtrail-context",
                             "reference": "auth",
@@ -403,6 +405,7 @@ def test_runs_show_and_watch_surface_deliberation(tmp_path, capsys):
                     {
                         "worker": "reviewer",
                         "stage": 1,
+                        "status": "completed",
                         "evidence_scope": {
                             "kind": "graphtrail-callers",
                             "reference": "auth.login",

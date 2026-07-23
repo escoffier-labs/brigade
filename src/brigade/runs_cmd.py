@@ -652,8 +652,12 @@ def _resume_available(run_dir: Path) -> bool:
 
 
 def _print_recovery_guidance(run_dir: Path) -> None:
+    from .deliberation import is_deliberation_run
+
     if _resume_available(run_dir):
         print(f"resume: brigade runs resume {run_dir}")
+    elif is_deliberation_run(run_dir):
+        print("resume: unavailable (deliberation runs cannot be resumed in v1)")
     else:
         print("resume: unavailable (no resumable app-server worker thread)")
 
