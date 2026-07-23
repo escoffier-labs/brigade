@@ -59,7 +59,7 @@ def test_build_argv_for_read_only_codex():
         "--permission-mode",
         "plan",
         "--disallowedTools",
-        "Task,Agent,Bash,Edit,Write,NotebookEdit,mcp__*",
+        "Task,Agent,Bash,Edit,Write,NotebookEdit,WebSearch,WebFetch,mcp__*",
         "--",
         "hi",
     ]
@@ -124,7 +124,7 @@ def test_claude_read_only_disallows_mutating_tools_and_subagents():
         "--permission-mode",
         "plan",
         "--disallowedTools",
-        "Task,Agent,Bash,Edit,Write,NotebookEdit,mcp__*",
+        "Task,Agent,Bash,Edit,Write,NotebookEdit,WebSearch,WebFetch,mcp__*",
         "--",
         "inspect it",
     ]
@@ -137,7 +137,7 @@ def test_claude_read_only_sandbox_variant_matches_read_only_flag():
         "--permission-mode",
         "plan",
         "--disallowedTools",
-        "Task,Agent,Bash,Edit,Write,NotebookEdit,mcp__*",
+        "Task,Agent,Bash,Edit,Write,NotebookEdit,WebSearch,WebFetch,mcp__*",
         "--",
         "inspect it",
     ]
@@ -197,6 +197,33 @@ def test_claude_danger_full_access_prompt_is_not_consumed_by_disallowed_tools():
     assert argv[disallowed_index + 2] == "--"
     assert argv[disallowed_index + 1 : argv.index("--")] == [agents._CLAUDE_DISALLOWED_ALWAYS]
     assert "--dangerously-skip-permissions" in argv
+
+
+def test_claude_read_only_denies_web_tools_that_prompt_for_approval():
+    # Regression for #456: under `--permission-mode plan`, Claude Code's built-in
+    # WebSearch/WebFetch tools route to an interactive approval prompt that a
+    # non-interactive Brigade worker cannot answer, so a read-only worker blocked
+    # with no final output. Both must be hidden from the read-only tool surface
+    # via the deny list, exactly like Bash/Edit/Write.
+    prompt = "summarize this module"
+    argv = agents.build_argv("claude", prompt, read_only=True)
+
+    disallowed_index = argv.index("--disallowedTools")
+    denied = argv[disallowed_index + 1].split(",")
+    assert "WebSearch" in denied
+    assert "WebFetch" in denied
+    # The deny list is still a single comma-joined argv element and the prompt
+    # is still separated by the end-of-options marker (#446/#451 must not
+    # regress): the web tool names must not leak into the prompt position.
+    assert argv[disallowed_index + 2] == "--"
+    assert argv[-1] == prompt
+    # The danger-full-access branch skips permissions entirely, so no prompt
+    # can block there; its deny list stays scoped to subagent spawning only.
+    full_access = agents.build_argv("claude", prompt, sandbox="danger-full-access")
+    full_denied = full_access[full_access.index("--disallowedTools") + 1]
+    assert full_denied == agents._CLAUDE_DISALLOWED_ALWAYS
+    assert "WebSearch" not in full_denied
+    assert "WebFetch" not in full_denied
 
 
 def test_claude_workspace_write_rejected_before_launch():

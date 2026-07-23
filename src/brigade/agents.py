@@ -79,7 +79,12 @@ _CLAUDE_DISALLOWED_ALWAYS = "Task,Agent"
 # leave them available). Read-only is also enforced by `--permission-mode plan`,
 # the actual permission/sandbox mechanism, so a buggy `--disallowedTools` for
 # MCP tools cannot let a write through.
-_CLAUDE_DISALLOWED_READ_ONLY = "Task,Agent,Bash,Edit,Write,NotebookEdit,mcp__*"
+# `WebSearch`/`WebFetch` (Claude Code's built-in web tool names) are denied too:
+# they are read tools, but under `--permission-mode plan` they still route to an
+# interactive approval prompt that a non-interactive Brigade worker cannot
+# answer, so the worker blocks with no final output (#456). Hiding them from the
+# tool surface, exactly like Bash/Edit/Write, removes the prompt entirely.
+_CLAUDE_DISALLOWED_READ_ONLY = "Task,Agent,Bash,Edit,Write,NotebookEdit,WebSearch,WebFetch,mcp__*"
 
 
 class UnsupportedSandboxError(ValueError):
