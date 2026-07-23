@@ -7,6 +7,7 @@ Persists the Selection to .brigade/config.json.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from .config import Config, write_config
-from .selection import Selection, WRITER_INBOXES
+from .selection import Selection, SurfaceInstallRefusal, SurfaceRecord, WRITER_INBOXES
 from .templates import (
     harness_memory_owner,
     is_text,
@@ -30,6 +31,7 @@ GITIGNORE_END = "# <<< brigade gitignore block <<<"
 LEGACY_GITIGNORE_BEGIN = "# >>> solo-mise gitignore block >>>"
 LEGACY_GITIGNORE_END = "# <<< solo-mise gitignore block <<<"
 DEFAULT_WIRED_SKILLS = ("brigade-work", "ultra-work-scout")
+SURFACE_EVIDENCE_REL_PATH = ".brigade/surface-evidence.json"
 
 
 def build_gitignore_block(selection: Selection) -> str:
@@ -275,6 +277,36 @@ def resolve_manifests(selection: Selection) -> Tuple[List[dict], List[str], List
     return deduped_files, deduped_dirs, notes
 
 
+def ensure_surface_installable(surface: SurfaceRecord, *, projection_only: bool) -> None:
+    """Refuse runtime-absent surfaces unless projection-only mode is explicit."""
+    state = surface.availability.get("state")
+    reason = surface.availability.get("reason")
+    if state == "externally_blocked" and reason == "binary_not_found" and not projection_only:
+        raise SurfaceInstallRefusal(surface.surface_id, "availability is externally_blocked: binary_not_found")
+    if state == "external_only" and not projection_only:
+        raise SurfaceInstallRefusal(surface.surface_id, "external-only surfaces require --projection-only")
+
+
+def _preflight_surfaces(selection: Selection, *, projection_only: bool) -> None:
+    for surface in selection.surfaces:
+        ensure_surface_installable(surface, projection_only=projection_only)
+
+
+def _write_surface_evidence(target: Path, selection: Selection, *, projection_only: bool) -> None:
+    if not selection.surfaces:
+        return
+    path = target / SURFACE_EVIDENCE_REL_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "surfaces": {
+            surface.surface_id: surface.persisted_evidence(projection_only=projection_only)
+            for surface in selection.surfaces
+        },
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
 def install_selection(
     target: Path,
     selection: Selection,
@@ -284,10 +316,12 @@ def install_selection(
     use_git_exclude: bool = False,
     update_gitignore: bool = True,
     wire_skills: bool = True,
+    projection_only: bool = False,
 ) -> int:
     """Install a Selection into `target`. Returns process exit code."""
     selection.validate()
     target = target.expanduser().resolve()
+    _preflight_surfaces(selection, projection_only=projection_only)
 
     if target == Path.home() and not allow_home:
         print(
@@ -360,6 +394,7 @@ def install_selection(
 
     # Persist config.json.
     write_config(target, Config(version=1, selection=selection))
+    _write_surface_evidence(target, selection, projection_only=projection_only)
 
     # Wire Brigade's built-in skills into each harness's skills directory so
     # agents actually USE Brigade and can scout large work before editing.
