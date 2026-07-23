@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from brigade import agents
 from brigade import cli
 from brigade import model_trials
 from brigade.roster import Agent, Roster
@@ -551,7 +552,9 @@ def test_process_exit_measurement_dominates_deterministic_failure():
     assert model_trials.process_exit(summary) == 3
     summary = {"measurement_failures": 0, "counts": {"rejected": 1}}
     assert model_trials.process_exit(summary) == 1
-    summary = {"measurement_failures": 0, "counts": {"accepted": 2}}
+    summary = {"measurement_failures": 0, "counts": {"execution_error": 1}}
+    assert model_trials.process_exit(summary) == 1
+    summary = {"measurement_failures": 0, "counts": {"accepted": 1, "unscored": 1}}
     assert model_trials.process_exit(summary) == 0
 
 
@@ -586,6 +589,128 @@ def test_summarize_splits_partial_scores_from_headline_scores(tmp_path):
     assert summary["partial_scores"]["count"] == 1
     assert summary["partial_scores"]["mean"] == 1.0
     assert summary["scores"]["count"] == 0
+
+
+def test_execute_mixed_battery_through_real_aboyeur_run_boundary(tmp_path, monkeypatch):
+    manifest = {
+        "schema": "brigade.eval_manifest.v1",
+        "name": "mixed-battery",
+        "trials": 1,
+        "seats": ["cursor"],
+        "cases": [
+            {"id": "reject", "prompt": "produce-rejected"},
+            {"id": "timeout", "prompt": "produce-timeout"},
+            {"id": "nonzero", "prompt": "produce-nonzero-exit"},
+        ],
+        "graders": [{"type": "exact_output", "expected": "hello"}],
+    }
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        if "produce-rejected" in prompt:
+            return agents.AgentResult(text="goodbye\n", ok=True)
+        if "produce-timeout" in prompt:
+            return agents.AgentResult(
+                text="partial\n",
+                ok=False,
+                detail="worker timed out",
+                timed_out=True,
+                status="timeout",
+            )
+        if "produce-nonzero-exit" in prompt:
+            return agents.AgentResult(
+                text="partial\n",
+                ok=False,
+                detail="worker exited with status 1",
+                exit_code=1,
+            )
+        raise AssertionError(f"unexpected prompt: {prompt!r}")
+
+    monkeypatch.setattr(model_trials.aboyeur.agents, "run_agent", fake_run_agent)
+    root = tmp_path / "results"
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 3
+
+    by_case = {}
+    for cell_path in (root / "cells").glob("*/cell.json"):
+        cell = json.loads(cell_path.read_text())
+        by_case[cell["case_id"]] = cell
+
+    assert by_case["reject"]["state"] == "rejected"
+    assert by_case["reject"].get("failure_reason") is None
+
+    assert by_case["timeout"]["state"] == "execution_error"
+    assert by_case["timeout"]["failure_reason"] == "timeout"
+
+    assert by_case["nonzero"]["state"] == "execution_error"
+    assert by_case["nonzero"].get("failure_reason") != "timeout"
+
+    summary = model_trials.summarize(root)
+    assert summary["measurement_failures"] == 1
+    assert summary["counts"] == {"execution_error": 2, "rejected": 1}
+
+    nonzero_only = dict(manifest)
+    nonzero_only["cases"] = [{"id": "nonzero", "prompt": "produce-nonzero-exit"}]
+    nonzero_manifest_path = tmp_path / "nonzero-eval.json"
+    nonzero_manifest_path.write_text(json.dumps(nonzero_only))
+    assert (
+        model_trials.execute(
+            nonzero_manifest_path,
+            _roster(),
+            workspace=tmp_path,
+            output_dir=tmp_path / "nonzero-results",
+            resume=False,
+        )
+        == 1
+    )
+
+
+def test_regrade_refuses_tampered_final_txt_without_seat_rerun(tmp_path, monkeypatch, capsys):
+    manifest = _manifest()
+    manifest["trials"] = 1
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+    root = tmp_path / "results"
+    cell = model_trials.expand_cells(manifest, _roster())[0]
+    run_dir = root / "cells" / cell.cell_id / "attempts" / "attempt-001" / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "final.txt").write_text("hello\n")
+    (run_dir / "run.json").write_text(json.dumps({"status": "ok", "cwd": str(tmp_path), "duration_seconds": 0.1}))
+    digest = model_trials._output_digest("hello\n")
+    plan, _ = model_trials.build_plan(manifest_path, _roster(), root)
+    model_trials.localio.write_json(root / "plan.json", plan)
+    broken_graders = model_trials.grade_output(
+        graders=[{"type": "regex_output", "pattern": "["}],
+        text="hello\n",
+        exit_code=0,
+        workspace=tmp_path,
+        run_dir=run_dir,
+    )
+    payload = model_trials._finalize_cell_payload(
+        cell,
+        plan=plan,
+        attempt=1,
+        started_at="2026-01-01T00:00:00+00:00",
+        exit_code=0,
+        run_dir=run_dir,
+        graders=broken_graders,
+        text="hello\n",
+        failure_reason=None,
+    )
+    model_trials._write_cell_payload(root / "cells" / cell.cell_id, run_dir.parent, payload)
+    assert payload["state"] == "grader_error"
+
+    (run_dir / "final.txt").write_text("tampered\n")
+    monkeypatch.setattr(
+        model_trials.aboyeur, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("seat rerun"))
+    )
+
+    assert model_trials.regrade(root) == 2
+    assert "stored output digest mismatch" in capsys.readouterr().err
+
+    unchanged = json.loads((root / "cells" / cell.cell_id / "cell.json").read_text())
+    assert unchanged["state"] == "grader_error"
+    assert unchanged["graders"][0]["output_digest"] == digest
 
 
 def test_regrade_rescores_grader_error_without_seat_rerun(tmp_path, monkeypatch):
@@ -671,16 +796,21 @@ def test_resume_regrades_grader_error_cells(tmp_path, monkeypatch):
 
 
 def test_project_cell_strips_prompt_and_relativizes_run_dir(tmp_path):
+    secret = "secret prompt contents must not leak"
     run_dir = tmp_path / "results" / "cells" / "abc" / "attempts" / "attempt-001" / "run"
     cell = {
         "schema": model_trials.CELL_SCHEMA,
         "cell_id": "abc",
-        "prompt": "secret prompt",
-        "case": {"id": "hello", "prompt": "nested secret"},
+        "prompt": secret,
+        "case": {"id": "hello", "prompt": secret},
         "run_dir": str(run_dir),
     }
     projected = model_trials.project_cell(cell, base_dir=tmp_path / "results")
+    serialized = json.dumps(projected)
     assert "prompt" not in projected
+    assert secret not in serialized
+    assert str(tmp_path) not in serialized
+    assert str(run_dir) not in serialized
     assert projected["prompt_digest"].startswith("sha256:")
     assert projected["case"]["prompt_digest"].startswith("sha256:")
     assert "prompt" not in projected["case"]
