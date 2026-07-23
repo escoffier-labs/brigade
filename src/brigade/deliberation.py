@@ -831,6 +831,13 @@ def validate_schema(payload: dict[str, object]) -> None:
         if not isinstance(scope, dict):
             raise ValueError(f"invalid_lenses[{index}] must include evidence_scope")
         _reject_unknown_keys(scope, allowed=_SCOPE_KEYS, label=f"invalid_lenses[{index}].evidence_scope")
+        for key in ("kind", "reference", "query", "grounded", "status"):
+            if key not in scope:
+                raise ValueError(f"invalid_lenses[{index}].evidence_scope missing {key!r}")
+        _non_empty_string(scope.get("reference"))
+        _non_empty_string(scope.get("query"))
+        if scope.get("status") not in {"valid", "invalid", "duplicate"}:
+            raise ValueError(f"invalid_lenses[{index}].evidence_scope status is invalid")
 
 
 def plan_payload(plan: DeliberationPlan) -> dict[str, object]:
