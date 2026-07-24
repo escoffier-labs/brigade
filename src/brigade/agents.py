@@ -1110,9 +1110,9 @@ def run_agent(
         :200
     ]
     if result.code != 0:
-        provider_preflight = _oracle_auth_detail(
+        provider_preflight = _oracle_auth_detail(cli_ref, safe_stdout, safe_stderr) or _provider_preflight_detail(
             cli_ref, safe_stdout, safe_stderr
-        ) or _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr)
+        )
         if provider_preflight is not None:
             return AgentResult(
                 text=safe_text,
@@ -1203,9 +1203,9 @@ def run_agent(
         detail = "empty output"
         empty_failure_phase: str | None = None
         empty_failure_kind: str | None = None
-        provider_preflight = _oracle_auth_detail(
+        provider_preflight = _oracle_auth_detail(cli_ref, safe_stdout, safe_stderr) or _provider_preflight_detail(
             cli_ref, safe_stdout, safe_stderr
-        ) or _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr)
+        )
         if provider_preflight is not None:
             detail = provider_preflight
             empty_failure_phase = "provider-preflight"

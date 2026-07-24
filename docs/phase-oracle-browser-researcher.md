@@ -141,10 +141,34 @@ Models the browser engine accepts: `gemini-3.5-flash`, `gemini-3.1-pro`, and
 - [x] Test the `min_timeout` floor raises a short engine timeout, never lowers
       a generous one, and leaves seats without `timeout_seconds` unchanged.
 - [x] Test the expired-cookie preflight detail string.
-- [ ] Run focused tests and `./scripts/verify` through
+- [x] Run focused tests and `./scripts/verify` through
       `brigade work verify run`.
-- [ ] Live smoke: one `brigade research run` against real synced cookies,
+- [x] Live smoke: one `brigade research run` against real synced cookies,
       recording the result or the environmental blocker.
+
+## Live result
+
+The adapter dispatches correctly and fails cleanly when the binary is absent.
+`agents.run_agent("oracle", "hello")` returned `ok=False`,
+`failure_phase="dispatch"`, `failure_kind="command-not-found"`, detail
+`oracle not installed`, and `build_argv` produced exactly
+`['oracle', '--model', 'gemini-3.1-pro', '--engine', 'browser', '-p', 'hello']`.
+
+A full browser round trip could not run, blocked twice on this machine:
+
+- `oracle` is not installed (`command not found`, and no global npm package).
+  Brigade does not install it by design.
+- `brigade pantry status` reports the agentpantry build **rejected by version
+  policy** (unreleased or non-semver build; expected released >= 0.5.0), so the
+  cookie substrate is not healthy here either.
+
+Consequently the settled stdout decision is **not yet empirically confirmed**.
+It rests on reading oracle's `src/cli/renderOutput.ts` (`if (!richTty) return
+markdown;`, `richTty` defaulting to `process.stdout.isTTY`) plus never passing
+`--heartbeat`. The first real run should check whether stdout carried only the
+answer; if it did not, add an extraction function following the
+`_parse_grok_final_output` precedent rather than loosening
+`validate_final_output`.
 
 ## Resolved during planning
 
