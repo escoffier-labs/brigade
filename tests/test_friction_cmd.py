@@ -418,7 +418,7 @@ def test_structured_recurrence_dedupes_across_receipt_paths(tmp_path, capsys):
     assert payload["duplicates"] == 1
 
 
-def test_friction_scan_rejects_documentation_and_reports_family_dispositions(tmp_path, capsys):
+def test_friction_scan_rejects_denylisted_sources_and_reports_family_dispositions(tmp_path, capsys):
     notes = tmp_path / "notes"
     notes.mkdir()
     (notes / "README.md").write_text("The fallback is blocked when a timeout occurs.\n")
@@ -438,7 +438,7 @@ def test_friction_scan_rejects_documentation_and_reports_family_dispositions(tmp
                 "--target",
                 str(tmp_path),
                 "--max-candidates",
-                "1",
+                "10",
                 "--json",
             ]
         )
@@ -446,13 +446,16 @@ def test_friction_scan_rejects_documentation_and_reports_family_dispositions(tmp
     )
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["candidate_count"] == 1
-    assert payload["rejected_noise"] == 4
+    assert payload["candidate_count"] == 4
+    assert payload["rejected_noise"] == 2
+    damped = [item for item in payload["candidates"] if item.get("prose_damped")]
+    assert len(damped) == 2
+    assert all(item["severity"] == "low" for item in damped)
     assert payload["counts"]["by_source_family"]["regex"] == {
-        "accepted": 1,
+        "accepted": 4,
         "grouped": 0,
-        "rejected": 4,
-        "truncated": 1,
+        "rejected": 2,
+        "truncated": 0,
     }
 
 
@@ -526,13 +529,11 @@ def test_friction_scan_groups_repeated_timeout_warnings_with_child_evidence(tmp_
     }
 
 
-def test_friction_scan_groups_regex_cascade_from_one_command_log(tmp_path, capsys):
+def test_friction_scan_groups_identical_regex_snippets_in_one_command_log(tmp_path, capsys):
     notes = tmp_path / "notes"
     notes.mkdir()
-    (notes / "compiler.log").write_text(
-        "TypeScript compile failed because module alpha cannot be resolved.\n"
-        "TypeScript compile failed because module beta cannot be resolved.\n"
-    )
+    line = "TypeScript compile failed because module alpha cannot be resolved.\n"
+    (notes / "compiler.log").write_text(line + line)
 
     assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
 
@@ -540,6 +541,7 @@ def test_friction_scan_groups_regex_cascade_from_one_command_log(tmp_path, capsy
     assert payload["candidate_count"] == 1
     candidate = payload["candidates"][0]
     assert candidate["source_family"] == "regex"
+    assert candidate["evidence"]["occurrence_count"] == 2
     assert len(candidate["evidence"]["children"]) == 2
     assert payload["counts"]["by_source_family"]["regex"]["grouped"] == 1
 
@@ -626,4 +628,77 @@ def test_friction_scan_mixed_network_and_zero_failure_line_has_no_blocked_duplic
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidate_count"] == 1
     assert payload["counts"]["by_type"] == {"network_timeout": 1}
+    assert payload["candidates"][0]["friction_type"] == "network_timeout"
+
+
+def test_friction_scan_damps_skill_prose_keyword_matches(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "SKILL.md").write_text(
+        "When a command fails, do not treat the failure as high-severity friction by default.\n"
+    )
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    candidate = payload["candidates"][0]
+    assert candidate["severity"] == "low"
+    assert candidate["prose_damped"] is True
+    assert candidate["friction_type"] == "blocked"
+
+
+def test_friction_scan_aggregates_identical_warn_lines_across_files(tmp_path, capsys):
+    warn_line = "[warn] mcp-server: no timeout set\n"
+    for index in range(5):
+        run_dir = tmp_path / ".brigade" / "work" / "verify-runs" / f"v{index}"
+        run_dir.mkdir(parents=True)
+        (run_dir / "doctor.log").write_text(warn_line)
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    regex_candidates = [item for item in payload["candidates"] if item.get("source_family") == "regex"]
+    assert len(regex_candidates) == 1
+    candidate = regex_candidates[0]
+    assert candidate["evidence"]["occurrence_count"] == 5
+    assert len(candidate["evidence"]["source_paths"]) == 5
+    assert candidate["friction_type"] == "network_timeout"
+
+
+def test_friction_scan_skips_denylisted_model_cache_file(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "model-cache.json").write_text('{"models": [{"id": "composer", "status": "failed", "blocked": true}]}\n')
+    (notes / "real.log").write_text("permission denied while refreshing the session\n")
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    assert payload["rejected_noise"] == 1
+    assert payload["candidates"][0]["evidence"]["path"] == "notes/real.log"
+
+
+def test_friction_scan_honors_custom_denylist_config(tmp_path, capsys):
+    config_dir = tmp_path / ".brigade" / "friction"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "deny_names": ["custom-cache.json"],
+                "deny_globs": [],
+            }
+        )
+    )
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "custom-cache.json").write_text('{"blocked": true, "failed": true}\n')
+    (notes / "real.log").write_text("connection refused by the local service\n")
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    assert payload["rejected_noise"] == 1
     assert payload["candidates"][0]["friction_type"] == "network_timeout"

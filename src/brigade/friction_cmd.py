@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import re
@@ -103,22 +104,30 @@ PASSING_ZERO_FAILURE_RE = re.compile(
     r"(?i)(?:test result:\s*ok\.?[^.\n]*\b0\s+failed\b|"
     r"\d+\s+passed\b[^.\n]*\b0\s+failed\b|(?:all\s+tests?|tests?)\s+passed\b[^.\n]*\b0\s+failed\b)"
 )
-DOCUMENTATION_NAMES = frozenset(
+DEFAULT_DENIED_NAMES = frozenset(
     {
-        "agents.md",
-        "changelog.md",
-        "claude.md",
-        "contributing.md",
-        "install_for_agents.md",
-        "quickstart.md",
-        "readme.md",
-        "roadmap.md",
-        "skill.md",
-        "third_party_notices.md",
+        "ambient-suggestions.json",
+        "model-cache.json",
+        "models-cache.json",
+        "recommendations.json",
+        "suggestions.json",
     }
 )
-GENERATED_SUGGESTION_STEMS = frozenset({"recommendations", "suggestions"})
+DEFAULT_DENIED_STEMS = frozenset({"ambient-suggestions", "recommendations", "suggestions"})
+DEFAULT_DENIED_GLOBS = (
+    "**/.codex/skills/**",
+    "**/.claude/skills/**",
+    "**/templates/skills/**",
+)
+RUN_ARTIFACT_MARKERS = ("/.brigade/work/", "/.brigade/runs/")
 SOURCE_FAMILIES = ("verification", "run", "evaluation", "miseledger", "regex")
+SEVERITY_DAMP_MAP = {"high": "low", "medium": "low", "low": "low"}
+
+
+@dataclass(frozen=True)
+class FrictionScanConfig:
+    deny_names: frozenset[str] = DEFAULT_DENIED_NAMES
+    deny_globs: tuple[str, ...] = DEFAULT_DENIED_GLOBS
 
 
 @dataclass(frozen=True)
@@ -156,6 +165,78 @@ def _candidate_id(source: str, friction_type: str, text: str, *, stable_source: 
     material = f"{friction_type}\0{source}" if stable_source else f"{friction_type}\0{text}"
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
     return f"friction-{digest}"
+
+
+def _load_scan_config(target: Path) -> FrictionScanConfig:
+    defaults = FrictionScanConfig()
+    config_path = target / ".brigade" / "friction" / "config.json"
+    if not config_path.is_file():
+        return defaults
+    payload = _read_object(config_path)
+    if payload is None:
+        return defaults
+    deny_names = defaults.deny_names
+    raw_names = payload.get("deny_names")
+    if isinstance(raw_names, list):
+        deny_names = frozenset({str(name).lower() for name in raw_names if str(name).strip()})
+    deny_globs = defaults.deny_globs
+    raw_globs = payload.get("deny_globs")
+    if isinstance(raw_globs, list):
+        deny_globs = tuple(str(item) for item in raw_globs if str(item).strip())
+    return FrictionScanConfig(deny_names=deny_names, deny_globs=deny_globs)
+
+
+def _path_matches_deny_glob(path: Path, pattern: str) -> bool:
+    normalized = path.as_posix()
+    if fnmatch.fnmatch(normalized, pattern.lstrip("/")):
+        return True
+    if fnmatch.fnmatch(normalized, pattern):
+        return True
+    if "**" not in pattern:
+        return False
+    anchor = pattern.replace("**", "").strip("/")
+    if not anchor:
+        return False
+    return (
+        f"/{anchor}/" in f"/{normalized}/" or normalized.endswith(f"/{anchor}") or normalized.startswith(f"{anchor}/")
+    )
+
+
+def _is_under_skills_tree(path: Path) -> bool:
+    parts = tuple(part.lower() for part in path.parts)
+    for index, part in enumerate(parts):
+        if part in {".codex", ".claude"} and index + 1 < len(parts) and parts[index + 1] == "skills":
+            return True
+        if part == "skills" and index > 0 and parts[index - 1] in {".codex", ".claude", "templates"}:
+            return True
+    return False
+
+
+def _is_denylisted_source(path: Path, config: FrictionScanConfig) -> bool:
+    lowered_parts = tuple(part.lower() for part in path.parts)
+    if "memory-handoffs" in lowered_parts and "processed" in lowered_parts:
+        return True
+    if path.name.lower() in config.deny_names or path.stem.lower() in config.deny_names:
+        return True
+    if path.stem.lower() in DEFAULT_DENIED_STEMS:
+        return True
+    if _is_under_skills_tree(path):
+        return True
+    for pattern in config.deny_globs:
+        if _path_matches_deny_glob(path, pattern):
+            return True
+    return False
+
+
+def _should_damp_prose(path: Path) -> bool:
+    if path.suffix.lower() != ".md":
+        return False
+    posix = path.as_posix()
+    return not any(marker in posix for marker in RUN_ARTIFACT_MARKERS)
+
+
+def _damp_severity(severity: str) -> str:
+    return SEVERITY_DAMP_MAP.get(severity, severity)
 
 
 def _iter_source_roots(target: Path, *, include_agent_logs: bool, agent_logs_only: bool = False) -> list[Path]:
@@ -308,14 +389,6 @@ def _is_verify_receipt(path: Path) -> bool:
     return path.name == "receipt.json" and "verify-runs" in path.parts
 
 
-def _is_noise_file(path: Path) -> bool:
-    lowered_parts = tuple(part.lower() for part in path.parts)
-    processed_handoff = "memory-handoffs" in lowered_parts and "processed" in lowered_parts
-    return (
-        path.name.lower() in DOCUMENTATION_NAMES or path.stem.lower() in GENERATED_SUGGESTION_STEMS or processed_handoff
-    )
-
-
 def _is_successful_verify_receipt(payload: dict[str, Any]) -> bool:
     run_status = str(payload.get("status") or "completed")
     if run_status != "completed":
@@ -386,13 +459,29 @@ def _group_candidates(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
     for candidate_id in order:
         bucket = indexed[candidate_id]
         if len(bucket) == 1:
-            result.append(bucket[0])
+            single = dict(bucket[0])
+            raw_evidence = single.get("evidence")
+            if isinstance(raw_evidence, dict):
+                evidence = dict(raw_evidence)
+                evidence.setdefault("occurrence_count", 1)
+                single["evidence"] = evidence
+            result.append(single)
             continue
         grouped += len(bucket) - 1
         primary = dict(bucket[0])
         raw_evidence = primary.get("evidence")
         evidence = dict(raw_evidence) if isinstance(raw_evidence, dict) else {}
         evidence["children"] = [_evidence_child(occurrence) for occurrence in bucket]
+        evidence["occurrence_count"] = len(bucket)
+        source_paths = sorted(
+            {
+                str(occurrence.get("evidence", {}).get("path") or "")
+                for occurrence in bucket
+                if isinstance(occurrence.get("evidence"), dict) and occurrence["evidence"].get("path")
+            }
+        )
+        if source_paths:
+            evidence["source_paths"] = source_paths
         primary["evidence"] = evidence
         result.append(primary)
     return result, grouped
@@ -472,30 +561,33 @@ def _workflow_from_path(target: Path, path: Path) -> str:
     return parts[0]
 
 
-def _make_candidate(target: Path, match: Match) -> dict[str, Any]:
+def _make_candidate(target: Path, match: Match, *, damp_prose: bool = False) -> dict[str, Any]:
     try:
         source = str(match.path.resolve().relative_to(target))
     except ValueError:
         source = str(match.path)
     snippet = _short(match.line)
     text = f"{match.title}: {snippet}"
+    severity = _damp_severity(match.severity) if damp_prose else match.severity
     return {
-        "id": _candidate_id(source, match.friction_type, snippet, stable_source=True),
+        "id": _candidate_id(source, match.friction_type, snippet, stable_source=False),
         "title": match.title,
         "text": text,
         "status": "candidate",
         "kind": "finding",
         "source": "friction-scan",
         "friction_type": match.friction_type,
-        "severity": match.severity,
+        "severity": severity,
         "workflow": _workflow_from_path(target, match.path),
         "evidence": {
             "path": source,
             "line": match.line_number,
             "snippet": snippet,
+            "occurrence_count": 1,
         },
         "suggested_fix": "Review the evidence, decide whether this is actionable, then promote to a task, note, memory card, rule, or tool fix.",
         "detection": "regex",
+        "prose_damped": damp_prose,
     }
 
 
@@ -732,6 +824,7 @@ def scan_payload(
         print("error: --max-candidates must be a positive integer", file=sys.stderr)
         return None, 2
 
+    scan_config = _load_scan_config(target)
     roots = _iter_source_roots(target, include_agent_logs=include_agent_logs, agent_logs_only=agent_logs_only)
     files, skipped_files = _iter_files(roots, since=since, max_files=max_files)
     families = (
@@ -746,15 +839,19 @@ def scan_payload(
     for path in files:
         if _is_verify_receipt(path) or path.name in {"run.json", "worker-results.json", "cell.json"}:
             continue
+        if _is_denylisted_source(path, scan_config):
+            dispositions["regex"]["rejected"] += 1
+            rejected_noise += 1
+            continue
         try:
             resolved_path = path.expanduser().resolve()
         except OSError:
             resolved_path = path
-        reject_as_documentation = _is_noise_file(path)
         reject_as_historical = resolved_path in successful_verify_logs
+        damp_prose = _should_damp_prose(path)
         matches = _scan_file(path)
         for match in matches:
-            if reject_as_documentation or reject_as_historical:
+            if reject_as_historical:
                 dispositions["regex"]["rejected"] += 1
                 rejected_noise += 1
                 continue
@@ -762,7 +859,7 @@ def scan_payload(
                 dispositions["regex"]["rejected"] += 1
                 rejected_noise += 1
                 continue
-            candidate = _make_candidate(target, match)
+            candidate = _make_candidate(target, match, damp_prose=damp_prose)
             candidate["source_family"] = "regex"
             regex_candidates.append(candidate)
     families["regex"] = regex_candidates
