@@ -168,6 +168,39 @@ role = "Hosted open-weight worker on the ollama cloud free tier."
 
 Brigade never auto-pulls ollama models: dispatch fails unless the model is already present, which protects the disk from multi-GB surprise pulls. Hosted models can be retired upstream without notice, so validate before each wiring.
 
+### Gemini web via oracle (browser cookie lane)
+
+The only lane here that is neither an API nor a coding CLI. [oracle](https://github.com/steipete/oracle)
+drives a real `gemini.google.com` session using the Chrome cookies Agent Pantry
+syncs, so it costs no API key and no metered quota. It is a consult seat: one
+shot, no tools, no file writes.
+
+Requires a user-installed `oracle` (`npm install -g @steipete/oracle`) and a
+pantry-synced cookie jar. Brigade installs neither.
+
+```toml
+[agents.researcher]
+cli = "oracle"
+model = "gemini-3.1-pro"
+role = "researcher"
+timeout_seconds = 300
+```
+
+Models the browser engine accepts: `gemini-3.5-flash`, `gemini-3.1-pro`, and
+`gemini-3-deep-think` (browser-only; oracle rejects it in API mode).
+
+Read-only enforcement is `hard` by construction, since oracle has no filesystem
+write path. When the seat fails with a login or expired-session message, run
+`brigade pantry expiry-alert` and re-sync the source before retrying.
+
+A browser round trip is much slower than a CLI seat. The research engine asks
+for a 30 second planning call, which a browser session will not meet, so the
+seat must declare its own `timeout_seconds`; `research` takes it as a floor that
+raises short engine timings and never lowers generous ones.
+
+Keep this to a single operator machine. Oracle's browser mode is experimental
+and cookie automation of a consumer session is grey against provider terms.
+
 ## Validate before trusting
 
 A seat that answers a smoke prompt is wired, not proven. The pattern:

@@ -106,10 +106,13 @@ Models the browser engine accepts: `gemini-3.5-flash`, `gemini-3.1-pro`, and
 
 - **oracle absent.** `resolve_agent_executable` already returns
   `failure_kind="command-not-found"` at `failure_phase="dispatch"`. No work.
-- **cookies expired.** This must not surface as a generic nonzero exit. Add an
-  `oracle` case to `_provider_preflight_detail` (`agents.py:493`) that
-  recognises oracle's login prompt and points the operator at
-  `brigade pantry expiry-alert`.
+- **cookies expired.** This must not surface as a generic nonzero exit.
+  `_oracle_auth_detail` recognises oracle's login and expired-session messages
+  and points the operator at `brigade pantry expiry-alert`. It is a sibling of
+  `_provider_preflight_detail`, not a branch inside it: that function is about
+  workspace trust, a concept oracle does not have. Both failure paths in
+  `run_agent` try the auth detail first, since it is the more specific
+  diagnosis.
 - **browser too slow for the engine's timings.** Not a hang, the common case.
   Fixed by the `min_timeout` floor above, driven by the seat's
   `timeout_seconds`. `.brigade/research.toml` is the wrong home for this:
@@ -127,17 +130,17 @@ Models the browser engine accepts: `gemini-3.5-flash`, `gemini-3.1-pro`, and
 
 ## Verification
 
-- [ ] Unit test `_oracle_argv` argv construction, including model pin position.
-- [ ] Test that the adapter never emits an API-mode argv.
-- [ ] Test `READ_ONLY_ENFORCEMENT` reports `hard`, and that
+- [x] Unit test `_oracle_argv` argv construction, including model pin position.
+- [x] Test that the adapter never emits an API-mode argv.
+- [x] Test `READ_ONLY_ENFORCEMENT` reports `hard`, and that
       `brigade run --read-only` raises no soft-enforcement warning for an
       oracle seat. In scope despite the researcher-only boundary, because
       registering the adapter makes oracle dispatchable by `brigade run`.
-- [ ] Test roster validation accepts a `cli = "oracle"` researcher and that
+- [x] Test roster validation accepts a `cli = "oracle"` researcher and that
       `resolve_backend` returns a `CliBackend`.
-- [ ] Test the `min_timeout` floor raises a short engine timeout, never lowers
+- [x] Test the `min_timeout` floor raises a short engine timeout, never lowers
       a generous one, and leaves seats without `timeout_seconds` unchanged.
-- [ ] Test the expired-cookie preflight detail string.
+- [x] Test the expired-cookie preflight detail string.
 - [ ] Run focused tests and `./scripts/verify` through
       `brigade work verify run`.
 - [ ] Live smoke: one `brigade research run` against real synced cookies,
