@@ -1,6 +1,6 @@
 import json
 
-from brigade import center_cmd, pantry_cmd, work_cmd
+from brigade import center_cmd, pantry_cmd, pantry_compat, work_cmd
 
 
 def test_pantry_status_reports_uninstalled(monkeypatch, tmp_path):
@@ -193,6 +193,24 @@ def test_work_brief_includes_pantry_health(monkeypatch, tmp_path):
     assert payload["pantry"]["summary"] == "pantry test summary"
 
 
+def test_work_brief_surfaces_pantry_policy_rejection_without_leak(monkeypatch, tmp_path, capsys):
+    _pantry_installed(monkeypatch)
+
+    def fake_run(args, **kw):
+        assert args == ["agentpantry", "version", "--json"]
+        return pantry_cmd.proc.Result(code=0, stdout='{"version": "dev"}', stderr="")
+
+    monkeypatch.setattr(pantry_cmd.proc, "run", fake_run)
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    pantry_line = next(line for line in out.splitlines() if line.startswith("pantry: "))
+    assert "agentpantry build rejected by version policy" in pantry_line
+    assert pantry_compat.released_floor_label() in pantry_line
+    assert "unparsable" not in pantry_line
+    assert "dev" not in pantry_line
+
+
 def test_center_status_includes_pantry_health(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pantry_cmd, "status_payload", lambda target: {"installed": False, "summary": "pantry center summary"}
@@ -301,8 +319,8 @@ def test_pantry_status_unhealthy_on_dev_version(monkeypatch, tmp_path):
     # An unparsable version string collapses to the fixed sanitized label and
     # never leaks the raw value into the surfaced pantry payload.
     assert payload["version"] == "invalid-version"
-    assert "expected >= 0.5.0" in payload["summary"]
-    assert "invalid-version" in payload["summary"]
+    assert "rejected by version policy" in payload["summary"]
+    assert pantry_compat.released_floor_label() in payload["summary"]
     assert "dev" not in payload["summary"]
     assert "dev" not in payload["version"]
     assert calls == [["agentpantry", "version", "--json"]]
@@ -324,7 +342,7 @@ def test_pantry_status_never_leaks_secret_version_field(monkeypatch, tmp_path):
     assert payload["version"] == "invalid-version"
     assert secret not in payload["version"]
     assert secret not in payload["summary"]
-    assert "invalid-version" in payload["summary"]
+    assert "rejected by version policy" in payload["summary"]
 
 
 def test_pantry_status_unhealthy_on_missing_version_field(monkeypatch, tmp_path):

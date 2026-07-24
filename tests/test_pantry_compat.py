@@ -114,27 +114,28 @@ def test_probe_incompatible_on_non_string_version(monkeypatch):
     assert probe.compatible is False
     assert probe.observed == "non-string"
     assert "expected >= 0.5.0" in probe.detail
-    assert "non-string" in probe.detail
+    assert "is not a string" in probe.detail
 
 
 @pytest.mark.parametrize("version", ["dev", "unknown", "0.5.0-dev", "0.5.0-rc.1", "0.5", ""])
 def test_probe_incompatible_on_unparsable_string_versions(monkeypatch, version):
     probe = _probe(monkeypatch, stdout=json.dumps({"version": version}))
     assert probe.compatible is False
-    assert "expected >= 0.5.0" in probe.detail
+    assert probe.observed == "invalid-version"
+    assert "rejected by version policy" in probe.detail
+    assert "unreleased or non-semver build" in probe.detail
+    assert pantry_compat.released_floor_label() in probe.detail
+    assert "unparsable" not in probe.detail
     # Any unparsable string collapses to the fixed sanitized label; the raw
     # invalid version field never reaches observed or detail.
-    assert probe.observed == "invalid-version"
-    # The raw value must not leak (skip the substring check for the empty
-    # string, which is vacuously a substring of every string).
     if version:
         assert version not in probe.observed
-        # detail always carries the fixed safe floor text, so a raw value that
-        # overlaps the floor (e.g. "0.5" is a substring of "expected >= 0.5.0")
-        # would make a bare substring assertion vacuously fail. Strip the fixed
-        # floor text first; the raw invalid field must not appear in the
-        # remainder, which still proves no raw content leaks.
-        assert version not in probe.detail.replace(pantry_compat.floor_label(), "")
+        # detail carries the fixed safe floor text, so a raw value that
+        # overlaps the floor (e.g. "0.5" is a substring of "expected released
+        # >= 0.5.0") would make a bare substring assertion vacuously fail.
+        # Strip the fixed floor text first; the raw invalid field must not
+        # appear in the remainder, which still proves no raw content leaks.
+        assert version not in probe.detail.replace(pantry_compat.released_floor_label(), "")
 
 
 def test_probe_unparsable_secret_version_field_never_leaks(monkeypatch):
@@ -146,6 +147,7 @@ def test_probe_unparsable_secret_version_field_never_leaks(monkeypatch):
     assert probe.observed == "invalid-version"
     assert secret not in probe.observed
     assert secret not in probe.detail
+    assert "rejected by version policy" in probe.detail
 
 
 def test_probe_unparsable_version_field_never_leaks_other_stdout(monkeypatch):
@@ -161,6 +163,7 @@ def test_probe_unparsable_version_field_never_leaks_other_stdout(monkeypatch):
     assert "/home/user/private" not in probe.detail
     assert "prerelease" not in probe.observed
     assert "prerelease" not in probe.detail
+    assert "rejected by version policy" in probe.detail
 
 
 def test_probe_below_floor_still_exposes_normalized_semver(monkeypatch):
@@ -240,7 +243,7 @@ def test_probe_oversized_segment_collapses_to_invalid_version_label(monkeypatch)
     assert huge not in probe.detail
     assert raw_version not in probe.observed
     assert raw_version not in probe.detail
-    assert "expected >= 0.5.0" in probe.detail
+    assert pantry_compat.released_floor_label() in probe.detail
 
 
 def test_probe_non_ascii_digit_version_collapses_to_invalid_version_label(monkeypatch):
@@ -252,7 +255,7 @@ def test_probe_non_ascii_digit_version_collapses_to_invalid_version_label(monkey
     assert probe.observed == "invalid-version"
     assert raw_version not in probe.observed
     assert raw_version not in probe.detail
-    assert "expected >= 0.5.0" in probe.detail
+    assert pantry_compat.released_floor_label() in probe.detail
 
 
 def test_probe_oversized_segment_never_leaks_other_stdout(monkeypatch):
