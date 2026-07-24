@@ -1128,6 +1128,97 @@ def _is_brigade_verify(tokens: list[str]) -> bool:
     return bool(invocation and invocation[0] == "brigade" and invocation[1][:2] == ["work", "verify"])
 
 
+def _is_brigade_run_tokens(tokens: list[str]) -> bool:
+    names = [Path(token).name for token in tokens]
+    if names[:2] == ["brigade", "run"]:
+        return True
+    invocation = _python_module_invocation(tokens)
+    return bool(invocation and invocation[0] == "brigade" and invocation[1][:1] == ["run"])
+
+
+def _is_brigade_run(command: object) -> bool:
+    if not isinstance(command, str) or not command.strip():
+        return False
+    try:
+        tokens = _shell_tokens(command)
+    except ValueError:
+        return False
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _SHELL_SEPARATORS:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return any(_is_brigade_run_tokens(_strip_env(segment)) for segment in segments if segment)
+
+
+def _is_brigade_internal_artifact_relative(relative: Path) -> bool:
+    parts = relative.parts
+    return bool(parts) and parts[0] == ".brigade"
+
+
+def _relative_path_under_target(target: Path, raw: object) -> Path | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = target / path
+    try:
+        return path.resolve().relative_to(target.expanduser().resolve())
+    except (OSError, ValueError):
+        return None
+
+
+def _path_targets_brigade_internal_artifact(target: Path, raw: object) -> bool:
+    relative = _relative_path_under_target(target, raw)
+    return relative is not None and _is_brigade_internal_artifact_relative(relative)
+
+
+def _bash_confident_write_touches_worktree(target: Path, command: object) -> bool:
+    if not isinstance(command, str) or not command.strip():
+        return False
+    try:
+        tokens = _shell_tokens(command)
+    except ValueError:
+        return True
+    if any(">" in token for token in tokens if token and set(token) <= set(";&|<>")):
+        return True
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _SHELL_SEPARATORS:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    touches_worktree = False
+    for segment in segments:
+        stripped = _strip_env(segment)
+        if not stripped:
+            continue
+        names = [Path(token).name for token in stripped]
+        command_name = names[0]
+        if command_name in _BASH_WRITE_COMMANDS:
+            candidates = [token for token in stripped[1:] if not token.startswith("-")]
+            if not candidates:
+                return True
+            if any(not _path_targets_brigade_internal_artifact(target, token) for token in candidates):
+                touches_worktree = True
+        elif command_name == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in stripped[1:]):
+            candidates = [token for token in stripped[1:] if not token.startswith("-")]
+            if not candidates:
+                return True
+            if any(not _path_targets_brigade_internal_artifact(target, token) for token in candidates):
+                touches_worktree = True
+        elif command_name == "ruff" and names[1:2] == ["format"] and not {"--check", "--diff"}.intersection(names[2:]):
+            candidates = [token for token in stripped[2:] if not token.startswith("-")]
+            if not candidates:
+                return True
+            if any(not _path_targets_brigade_internal_artifact(target, token) for token in candidates):
+                touches_worktree = True
+        elif command_name == "git" and len(names) > 1 and names[1] in _GIT_WRITE_COMMANDS:
+            touches_worktree = True
+    return touches_worktree
+
+
 def _shell_wrapper_payload(tokens: list[str]) -> str | None:
     if not tokens or Path(tokens[0]).name not in _SHELL_WRAPPERS:
         return None
@@ -1724,8 +1815,16 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         tool_name = payload.get("tool_name")
         raw_post_tool_input = payload.get("tool_input")
         post_tool_input: dict[str, Any] = raw_post_tool_input if isinstance(raw_post_tool_input, dict) else {}
+        command = post_tool_input.get("command")
+        if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):
+            state.pop("pending_bash_fingerprint", None)
+            state.pop("pending_bash_started_at", None)
+            write_session_state(target, session_id, state)
+            return None
         wrote = tool_name in _WRITE_TOOLS or (
-            tool_name == "Bash" and _is_confident_bash_write(post_tool_input.get("command"))
+            tool_name == "Bash"
+            and _is_confident_bash_write(command)
+            and _bash_confident_write_touches_worktree(target, command)
         )
         if not wrote and tool_name == "Bash":
             wrote = _bash_write_detected(
