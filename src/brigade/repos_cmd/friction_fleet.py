@@ -85,6 +85,9 @@ def _signature_key(record: dict[str, Any]) -> str:
 def _occurrence_count(candidate: dict[str, Any]) -> int:
     evidence = candidate.get("evidence")
     if isinstance(evidence, dict):
+        explicit = evidence.get("occurrence_count")
+        if isinstance(explicit, int) and explicit > 0:
+            return explicit
         children = evidence.get("children")
         if isinstance(children, list) and children:
             return len(children)

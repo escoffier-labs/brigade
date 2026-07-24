@@ -71,15 +71,14 @@ def test_repos_friction_scan_aggregates_recurrence_and_survives_repo_failure(tmp
     assert payload["repo_count"] == 3
     assert payload["completed_repo_count"] == 2
     assert payload["failed_repo_count"] == 1
-    assert payload["signature_count"] == 2
-    signature = next(item for item in payload["signatures"] if item["occurrence_count"] == 4)
-    assert signature["friction_type"] == "network_timeout"
-    assert signature["repo_count"] == 2
-    assert signature["occurrence_count"] == 4
-    assert signature["trend"] == "new"
-    assert [repo["repo_id"] for repo in signature["repos"]] == ["alpha", "beta"]
-    assert [repo["occurrence_count"] for repo in signature["repos"]] == [2, 2]
-    assert payload["repos"][0]["source_families"]["regex"]["accepted"] == 2
+    assert payload["signature_count"] == 3
+    assert all(item["occurrence_count"] == 2 for item in payload["signatures"])
+    assert all(item["repo_count"] == 2 for item in payload["signatures"])
+    assert all(item["trend"] == "new" for item in payload["signatures"])
+    assert {item["friction_type"] for item in payload["signatures"]} == {"network_timeout"}
+    assert [repo["repo_id"] for repo in payload["signatures"][0]["repos"]] == ["alpha", "beta"]
+    assert [repo["occurrence_count"] for repo in payload["signatures"][0]["repos"]] == [1, 1]
+    assert payload["repos"][0]["source_families"]["regex"]["accepted"] == 3
     assert payload["repos"][0]["source_families"]["regex"]["skipped"] == 1
     assert payload["repos"][2]["status"] == "failed"
     rendered = json.dumps(payload)
