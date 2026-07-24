@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 _INJECTION_PATTERNS = (
     "ig" + "nore (all )?(previous|prior) instructions",
@@ -82,6 +82,14 @@ def wrap_untrusted(
     return "\n".join(parts)
 
 
+@dataclass(frozen=True)
+class InjectionHit:
+    line: int
+    severity: str
+    rule: str
+    excerpt: str
+
+
 @dataclass
 class InjectionSignal:
     flagged: bool
@@ -89,20 +97,135 @@ class InjectionSignal:
     markers: List[str]
 
 
+_LINE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("classic-injection", PROMPT_INJECTION_RE),
+    ("disregard-system-prompt", re.compile(r"(?i)disregard (your |the )?system prompt")),
+    (
+        "ignore-instructions",
+        re.compile(r"(?i)ignore (all |any )?(previous|prior|above) (instructions|directives)"),
+    ),
+    ("fake-system-block", re.compile(r"(?i)(<\s*/?\s*system\b|\[INST\]|\[/INST\]|<<\s*SYS\s*>>)")),
+    ("role-override", re.compile(r"(?i)\byou are now\b")),
+    (
+        "assistant-directive",
+        re.compile(
+            r"(?i)(?:^(?:assistant|agent|ai)\s*[,:-]\s*(?:you )?(?:must|should|need to)\b"
+            r"|(?:dear|hey) (?:assistant|agent|ai)\b.*\b(?:ignore|disregard|override)\b)"
+        ),
+    ),
+)
+
+_BASE64_BLOB = re.compile(r"[A-Za-z0-9+/]{80,}={0,2}")
+_DECODE_INSTRUCTION = re.compile(r"(?i)\b(?:base64|atob|decode|decrypt)\b")
+
+_BENIGN_LINE_MARKERS = (
+    re.compile(r"(?i)\bprompt[- ]injection\b"),
+    re.compile(r"(?i)\binjection (?:heuristic|signal|scan|detection|mitigation|fixture)\b"),
+    re.compile(r"(?i)\b(?:example|documented|detected|benign|fixture|quoted|pattern|mitigation)\b"),
+    re.compile(r"(?i)\b(?:scans?|checks?) for\b"),
+)
+
+
+def _excerpt(line: str) -> str:
+    return line.strip()[:_MARKER_MAX]
+
+
+def _benign_injection_discussion(line: str, *, text: str) -> bool:
+    if any(marker.search(line) for marker in _BENIGN_LINE_MARKERS):
+        return True
+    if "`" in line and any(token in line.lower() for token in ("ignore", "disregard", "<system", "[inst]")):
+        return True
+    if re.search(r'(?i)["\'].*(?:ignore|disregard).*(?:instructions|system prompt).*["\']', line):
+        return True
+    if "prompt injection" in text.lower() and re.search(r"(?i)\b(?:issue|handoff|heuristic|#)\b", line):
+        return True
+    return False
+
+
+def _line_hits(line: str, line_number: int, *, text: str) -> list[InjectionHit]:
+    hits: list[InjectionHit] = []
+    seen_rules: set[str] = set()
+    for rule_id, pattern in _LINE_RULES:
+        if not pattern.search(line):
+            continue
+        severity = "info" if _benign_injection_discussion(line, text=text) else "warning"
+        if rule_id in seen_rules:
+            continue
+        seen_rules.add(rule_id)
+        hits.append(InjectionHit(line=line_number, severity=severity, rule=rule_id, excerpt=_excerpt(line)))
+    return hits
+
+
+def _cross_line_hits(text: str) -> list[InjectionHit]:
+    normalized = re.sub(r"\s+", " ", text)
+    if not PROMPT_INJECTION_RE.search(normalized):
+        return []
+    for _line_number, line in enumerate(text.splitlines(), start=1):
+        if PROMPT_INJECTION_RE.search(line):
+            return []
+    start = PROMPT_INJECTION_RE.search(normalized)
+    if not start:
+        return []
+    excerpt = normalized[start.start() :].strip()[:_MARKER_MAX]
+    severity = "info" if _benign_injection_discussion(excerpt, text=text) else "warning"
+    return [InjectionHit(line=1, severity=severity, rule="classic-injection", excerpt=excerpt)]
+
+
+def _base64_decode_hits(lines: list[str]) -> list[InjectionHit]:
+    hits: list[InjectionHit] = []
+    for index, line in enumerate(lines):
+        if not _BASE64_BLOB.search(line):
+            continue
+        window = "\n".join(lines[index : index + 4])
+        if not _DECODE_INSTRUCTION.search(window):
+            continue
+        line_number = index + 1
+        severity = "info" if _benign_injection_discussion(line, text=window) else "warning"
+        hits.append(
+            InjectionHit(
+                line=line_number,
+                severity=severity,
+                rule="base64-decode-chain",
+                excerpt=_excerpt(line),
+            )
+        )
+    return hits
+
+
+def scan_handoff_injection_heuristics(content: str) -> tuple[InjectionHit, ...]:
+    """Scan handoff bodies for instruction-shaped injection payloads."""
+    text = content if isinstance(content, str) else ""
+    lines = text.splitlines()
+    hits: list[InjectionHit] = []
+    seen: set[tuple[int, str]] = set()
+    for line_number, line in enumerate(lines, start=1):
+        for hit in _line_hits(line, line_number, text=text):
+            key = (hit.line, hit.rule)
+            if key in seen:
+                continue
+            seen.add(key)
+            hits.append(hit)
+    for hit in _cross_line_hits(text):
+        key = (hit.line, hit.rule)
+        if key not in seen:
+            seen.add(key)
+            hits.append(hit)
+    for hit in _base64_decode_hits(lines):
+        key = (hit.line, hit.rule)
+        if key in seen:
+            continue
+        seen.add(key)
+        hits.append(hit)
+    return tuple(hits)
+
+
+def _warning_hits(hits: Iterable[InjectionHit]) -> list[InjectionHit]:
+    return [hit for hit in hits if hit.severity == "warning"]
+
+
 def scan_untrusted(content: str) -> InjectionSignal:
     """Report whether `content` carries injection-style instructions."""
-    text = content if isinstance(content, str) else ""
-    markers: List[str] = []
-    for line in text.splitlines():
-        if PROMPT_INJECTION_RE.search(line):
-            markers.append(line.strip()[:_MARKER_MAX])
-    # Per-line matching alone is evadable by splitting a phrase across newlines
-    # ("ignore all\nprevious instructions"). Scan a whitespace-normalized copy
-    # too so a cross-line phrase is still caught; only add a marker if the
-    # per-line pass missed it, to avoid double-counting single-line hits.
-    if not markers:
-        normalized = re.sub(r"\s+", " ", text)
-        m = PROMPT_INJECTION_RE.search(normalized)
-        if m:
-            markers.append(normalized[m.start() :].strip()[:_MARKER_MAX])
-    return InjectionSignal(flagged=bool(markers), count=len(markers), markers=markers)
+    hits = scan_handoff_injection_heuristics(content)
+    warnings = _warning_hits(hits)
+    markers = [hit.excerpt for hit in warnings]
+    return InjectionSignal(flagged=bool(warnings), count=len(warnings), markers=markers)

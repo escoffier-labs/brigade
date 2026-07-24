@@ -2,7 +2,7 @@
   "_comment": [
     "Personal policy: for local working notes and memory handoffs before ingest.",
     "It blocks secrets and attribution trailers, while warning on personal or infrastructure-like context.",
-    "Use via: brigade handoff lint --content-guard --guard-policy personal"
+    "Use via: brigade handoff lint --content-guard --guard-policy personal (leak scan + injection heuristics)"
   ],
   "_brigade_version": "0.25.1",
   "categories": {
