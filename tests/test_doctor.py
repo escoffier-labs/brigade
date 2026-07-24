@@ -131,7 +131,13 @@ def test_doctor_cli_forwards_full(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor_mod, "run", fake_run)
 
     assert cli.main(["doctor", "--target", str(tmp_path), "--harness", "hermes", "--full"]) == 0
-    assert seen == {"target": tmp_path, "harness": "hermes", "json_output": False, "full": True}
+    assert seen == {
+        "target": tmp_path,
+        "harness": "hermes",
+        "json_output": False,
+        "full": True,
+        "operator": False,
+    }
 
 
 def test_doctor_agents_quality_warns_without_definition_of_done(tmp_target: Path, capsys):
@@ -156,9 +162,22 @@ def test_doctor_agents_quality_ok_for_seeded_workspace(tmp_target: Path, capsys)
     assert agents and agents[0]["status"] == "OK"
 
 
-def test_doctor_groups_machine_level_findings(tmp_target: Path, capsys):
-    # issue #80: host-global findings (a content-guard clone) must not read as
-    # this repo's responsibility; they go under a machine-level header.
+def test_doctor_groups_operator_scoped_findings_with_operator_flag(tmp_target: Path, capsys):
+    # issue #80 / #478: host-global findings belong under an operator header when
+    # explicitly requested; they are hidden from the default target-scoped run.
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    capsys.readouterr()
+    doctor_mod.run(target=tmp_target, harness="generic", full=True, operator=True)
+    out = capsys.readouterr().out
+    assert "operator/host (not specific to this target):" in out
+    header_idx = out.index("operator/host (not specific to this target):")
+    assert "guard: embedded content guard" in out[header_idx:]
+
+
+def test_doctor_hides_operator_scoped_checks_by_default(tmp_target: Path, capsys):
     install_selection(
         tmp_target,
         Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
@@ -166,22 +185,73 @@ def test_doctor_groups_machine_level_findings(tmp_target: Path, capsys):
     capsys.readouterr()
     doctor_mod.run(target=tmp_target, harness="generic", full=True)
     out = capsys.readouterr().out
-    assert "machine-level (not specific to this repo):" in out
-    header_idx = out.index("machine-level (not specific to this repo):")
-    assert "guard: embedded content guard" in out[header_idx:]
+    assert "operator/host (not specific to this target):" not in out
+    assert "guard: embedded content guard" not in out
 
 
-def test_doctor_json_tags_machine_scope(tmp_target: Path, capsys):
+def test_doctor_json_tags_operator_scope_when_requested(tmp_target: Path, capsys):
     install_selection(
         tmp_target,
         Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
     )
     capsys.readouterr()
-    doctor_mod.run(target=tmp_target, harness="generic", json_output=True)
+    doctor_mod.run(target=tmp_target, harness="generic", json_output=True, operator=True)
     payload = json.loads(capsys.readouterr().out)
     scopes = {c["name"]: c["scope"] for c in payload["checks"]}
-    assert scopes.get("guard: embedded content guard") == "machine"
-    assert any(scope == "repo" for scope in scopes.values())
+    assert scopes.get("guard: embedded content guard") == "operator"
+    assert any(scope == "target" for scope in scopes.values())
+
+
+def test_doctor_json_omits_operator_checks_by_default(tmp_target: Path, capsys, monkeypatch):
+    from brigade import component_report
+
+    marker = "ISSUE478_HOST_GLOBAL_MARKER"
+
+    def fake_component_checks(**kwargs):
+        return [(doctor_mod.OK, "components: fake-host", marker)]
+
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    monkeypatch.setattr(component_report, "doctor_checks", fake_component_checks)
+    capsys.readouterr()
+    doctor_mod.run(target=tmp_target, harness="generic", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert marker not in json.dumps(payload)
+    assert not any(check["name"].startswith("components:") for check in payload["checks"])
+
+
+def test_doctor_operator_flag_includes_host_global_state(tmp_target: Path, capsys, monkeypatch):
+    from brigade import component_report
+
+    marker = "ISSUE478_HOST_GLOBAL_MARKER"
+
+    def fake_component_checks(**kwargs):
+        return [(doctor_mod.OK, "components: fake-host", marker)]
+
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    monkeypatch.setattr(component_report, "doctor_checks", fake_component_checks)
+    capsys.readouterr()
+    doctor_mod.run(target=tmp_target, harness="generic", json_output=True, operator=True)
+    payload = json.loads(capsys.readouterr().out)
+    host_checks = [check for check in payload["checks"] if check["name"].startswith("components:")]
+    assert host_checks
+    assert any(marker in check["detail"] for check in host_checks)
+
+
+def test_doctor_target_scoped_detail_names_workspace(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    capsys.readouterr()
+    doctor_mod.run(target=tmp_target, harness="generic", full=True)
+    out = capsys.readouterr().out
+    assert f"target={tmp_target.resolve()}:" in out
 
 
 def test_doctor_reports_failures_on_empty_dir(tmp_target: Path, capsys):
@@ -339,7 +409,7 @@ def test_doctor_openclaw_reports_manual_when_config_missing(tmp_target: Path, mo
     )
     monkeypatch.setenv("HOME", str(tmp_target))  # so ~/.openclaw resolves into the temp dir
     monkeypatch.setattr(Path, "home", lambda: tmp_target)
-    rc = doctor_mod.run(target=tmp_target, harness="openclaw", full=True)
+    rc = doctor_mod.run(target=tmp_target, harness="openclaw", full=True, operator=True)
     out = capsys.readouterr().out
     assert "openclaw: config" in out
     # missing config is MANUAL, not FAIL -> exit 0
@@ -576,7 +646,7 @@ def test_doctor_openclaw_reports_cron_memory_jobs(tmp_target: Path, monkeypatch,
     monkeypatch.setenv("HOME", str(tmp_target))
     monkeypatch.setattr(Path, "home", lambda: tmp_target)
 
-    rc = doctor_mod.run(target=tmp_target, harness="openclaw", full=True)
+    rc = doctor_mod.run(target=tmp_target, harness="openclaw", full=True, operator=True)
     out = capsys.readouterr().out
     assert rc == 0
     assert "openclaw: handoff ingest cron" in out
@@ -790,7 +860,7 @@ def test_doctor_includes_embedded_content_guard_without_external_binary(monkeypa
 
     monkeypatch.setattr(managed.proc, "which", lambda c: None)
 
-    doctor_mod.run(target=tmp_target, harness="generic", full=True)
+    doctor_mod.run(target=tmp_target, harness="generic", full=True, operator=True)
     out = capsys.readouterr().out
     assert "guard: embedded content guard" in out
 
@@ -803,7 +873,7 @@ def test_doctor_reports_absent_tool_as_manual(monkeypatch, tmp_target, capsys):
     install_selection(tmp_target, Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]))
     monkeypatch.setattr(managed.proc, "which", lambda c: None)  # nothing installed
 
-    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
+    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True, operator=True)
     out = capsys.readouterr().out
     # absent managed tools must not fail the run
     assert rc == 0
@@ -841,7 +911,7 @@ def test_doctor_includes_agent_notify_managed_tool(monkeypatch, tmp_target, caps
         managed.component_bins, "resolve", lambda name, **kw: "/x/" + name if name == "agent-notify" else None
     )
 
-    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True)
+    rc = doctor_mod.run(target=tmp_target, harness="generic", full=True, operator=True)
     out = capsys.readouterr().out
 
     assert rc == 0
@@ -856,7 +926,7 @@ def test_doctor_collapses_missing_managed_tools_to_one_line(tmp_path, capsys, mo
 
     install_selection(tmp_path, Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[]))
     capsys.readouterr()
-    doctor_mod.run(tmp_path, harness="generic")
+    doctor_mod.run(tmp_path, harness="generic", operator=True)
     out = capsys.readouterr().out
     manual_lines = [line for line in out.splitlines() if "not installed; run `brigade add" in line]
     assert len(manual_lines) <= 1, manual_lines
