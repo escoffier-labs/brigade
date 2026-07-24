@@ -226,11 +226,20 @@ def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return results
 
 
-def run(target: Path, harness: str = "generic", *, json_output: bool = False, full: bool = False) -> int:
+def run(
+    target: Path,
+    harness: str = "generic",
+    *,
+    json_output: bool = False,
+    full: bool = False,
+    operator: bool = False,
+) -> int:
     ctx = build_context(target, harness)
     checks = _gather_checks(ctx)
+    if not operator:
+        checks = _filter_target_scoped_checks(checks)
     if json_output:
-        return _report_json(ctx, checks)
+        return _report_json(ctx, checks, operator=operator)
 
     print(f"brigade doctor: target {ctx.target}")
     if ctx.selection is not None:
@@ -241,7 +250,9 @@ def run(target: Path, harness: str = "generic", *, json_output: bool = False, fu
             print(f"  harnesses: (legacy target, no config; declared {', '.join(ctx.harnesses)})")
         else:
             print("  harnesses: (unspecified; no Brigade config and no explicit --harness)")
-    return _report(checks, full=full)
+    if not operator:
+        print("  scope: target workspace only (pass --operator for host-global checks)")
+    return _report(checks, full=full, target=ctx.target, operator=operator)
 
 
 def _gather_checks(ctx: DoctorContext) -> List[CheckResult]:
@@ -957,18 +968,66 @@ _MARKERS = {
     INFO: "  [info]",
 }
 
-# Checks about host-global state rather than this specific repo. Grouping them
-# under their own header keeps a single-repo run from reading as if the repo
-# itself is responsible for an unrelated OpenClaw config or content-guard clone.
-_MACHINE_LEVEL_PREFIXES = ("openclaw:", "components:")
-_MACHINE_LEVEL_NAMES = {"guard: embedded content guard", "managed tools"}
+# Checks about host-global / operator state rather than the --target workspace.
+# Hidden by default (#478); pass --operator to include them in the report.
+_OPERATOR_SCOPED_PREFIXES = (
+    "openclaw:",
+    "components:",
+    "bootstrap-doctor",
+    "agentpantry",
+    "miseledger",
+    "usage-tracker",
+    "code-search-api",
+    "code-search-mcp",
+    "token-glace",
+    "agent-notify",
+    "plating",
+)
+_OPERATOR_SCOPED_EXACT = {"guard: embedded content guard", "managed tools"}
+_MANAGED_OPERATOR_TOOL_SLUGS = {
+    "bootstrap-doctor",
+    "token-glace",
+    "code-search-api",
+    "code-search-mcp",
+    "agentpantry",
+    "agent-notify",
+    "miseledger",
+    "usage-tracker",
+    "plating",
+}
 
 
-def _is_machine_level(name: str) -> bool:
-    return name.startswith(_MACHINE_LEVEL_PREFIXES) or name in _MACHINE_LEVEL_NAMES
+def _is_operator_scoped(name: str) -> bool:
+    if name in _OPERATOR_SCOPED_EXACT:
+        return True
+    if name.startswith(_OPERATOR_SCOPED_PREFIXES):
+        return True
+    if ": " in name:
+        _, rhs = name.split(": ", 1)
+        slug = rhs.split()[0]
+        if slug in _MANAGED_OPERATOR_TOOL_SLUGS:
+            return True
+    return False
 
 
-def _report(checks: List[CheckResult], *, full: bool = True) -> int:
+def _filter_target_scoped_checks(checks: List[CheckResult]) -> List[CheckResult]:
+    return [check for check in checks if not _is_operator_scoped(check[1])]
+
+
+def _target_detail_prefix(target: Path) -> str:
+    return f"target={target}: "
+
+
+def _annotate_target_detail(target: Path, name: str, detail: str) -> str:
+    if _is_operator_scoped(name):
+        return detail
+    prefix = _target_detail_prefix(target)
+    if detail.startswith(prefix) or detail.startswith(str(target)):
+        return detail
+    return f"{prefix}{detail}"
+
+
+def _report(checks: List[CheckResult], *, full: bool = True, target: Path | None = None, operator: bool = False) -> int:
     width = max((len(name) for _, name, _ in checks), default=20)
     counts = _status_counts(checks)
     print(
@@ -978,22 +1037,24 @@ def _report(checks: List[CheckResult], *, full: bool = True) -> int:
 
     condensed = not full and len(checks) > DEFAULT_TEXT_CHECK_LIMIT
     visible_checks = [check for check in checks if check[0] in {FAIL, WARN, MANUAL}] if condensed else checks
-    repo_checks = [check for check in visible_checks if not _is_machine_level(check[1])]
-    machine_checks = [check for check in visible_checks if _is_machine_level(check[1])]
+    target_checks = [check for check in visible_checks if not _is_operator_scoped(check[1])]
+    operator_checks = [check for check in visible_checks if _is_operator_scoped(check[1])]
 
     def _emit(items: List[CheckResult]) -> None:
         for status, name, detail in items:
+            if target is not None:
+                detail = _annotate_target_detail(target, name, detail)
             print(f"{_MARKERS[status]} {name.ljust(width)}  {detail}")
 
     print()
     if visible_checks:
-        _emit(repo_checks)
+        _emit(target_checks)
     else:
         print("  no failures, warnings, or manual actions")
-    if machine_checks:
+    if operator and operator_checks:
         print()
-        print("machine-level (not specific to this repo):")
-        _emit(machine_checks)
+        print("operator/host (not specific to this target):")
+        _emit(operator_checks)
 
     if condensed:
         print()
@@ -1011,7 +1072,7 @@ def _status_counts(checks: List[CheckResult]) -> dict[str, int]:
     return counts
 
 
-def _report_json(ctx: DoctorContext, checks: List[CheckResult]) -> int:
+def _report_json(ctx: DoctorContext, checks: List[CheckResult], *, operator: bool = False) -> int:
     counts = _status_counts(checks)
     sel = ctx.selection
     payload = {
@@ -1019,12 +1080,13 @@ def _report_json(ctx: DoctorContext, checks: List[CheckResult]) -> int:
         "harnesses": list(ctx.harnesses),
         "owner": getattr(sel, "owner", None),
         "depth": getattr(sel, "depth", None),
+        "operator": operator,
         "checks": [
             {
                 "status": status,
                 "name": name,
-                "detail": detail,
-                "scope": "machine" if _is_machine_level(name) else "repo",
+                "detail": _annotate_target_detail(ctx.target, name, detail),
+                "scope": "operator" if _is_operator_scoped(name) else "target",
             }
             for status, name, detail in checks
         ],

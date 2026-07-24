@@ -672,12 +672,12 @@ def test_doctor_component_checks_human_and_json(tmp_target: Path, tmp_path, monk
     checks = component_report.doctor_checks(env=env, system="linux")
     assert all(status == doctor_mod.OK for status, _name, _detail in checks)
     capsys.readouterr()
-    assert doctor_mod.run(target=tmp_target, harness="generic", json_output=True) == 0
+    assert doctor_mod.run(target=tmp_target, harness="generic", json_output=True, operator=True) == 0
     payload = json.loads(capsys.readouterr().out)
     component_checks = [item for item in payload["checks"] if item["name"].startswith("components:")]
     assert component_checks
     assert all(item["status"] == doctor_mod.OK for item in component_checks)
-    assert all(item["scope"] == "machine" for item in component_checks)
+    assert all(item["scope"] == "operator" for item in component_checks)
 
 
 def test_doctor_missing_is_manual_and_stale_is_warn(tmp_path, monkeypatch):
