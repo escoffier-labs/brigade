@@ -18,6 +18,15 @@ from .toml_compat import loads as _toml_loads
 _RECOVERY_COMMAND = "brigade harness sync --target <harness> --scope user --adopt --write"
 _SECTIONS = ("instructions", "skills", "generated", "mcp")
 _HOOK_STATE_KEY = "hooks.json#sessionStart"
+_LEGACY_MIGRATED = "legacy_migrated"
+_LEGACY_CURSOR_INSTRUCTION = "plugins/local/brigade-loop/rules/brigade-loop.mdc"
+_LEGACY_CURSOR_GENERATED = (
+    "plugins/local/brigade-loop/.cursor-plugin/plugin.json",
+    "hooks/brigade-session-start",
+    "brigade/mcp.json",
+)
+_LEGACY_CURSOR_SKILL_ID = "brigade-work"
+_LEGACY_CURSOR_SKILL_PREFIX = "skills/brigade-work/"
 
 
 @dataclass(frozen=True)
@@ -35,6 +44,7 @@ class SurfacePlan:
 class LoadedProfileState:
     state: dict[str, Any]
     error: str | None
+    migrated_from_legacy: bool = False
 
 
 def digest_text(text: str) -> str:
@@ -62,6 +72,69 @@ def write_profile_state(*, state_path: Path, state: dict[str, Any]) -> None:
     localio.write_json(state_path, state)
 
 
+def is_legacy_install_state(state: dict[str, Any]) -> bool:
+    """Return True for the superseded Cursor legacy installer state shape."""
+    return (
+        state.get("schema_version") is None
+        and state.get("version") == 1
+        and isinstance(state.get("files"), dict)
+        and isinstance(state.get("hooks"), dict)
+        and isinstance(state.get("mcp"), dict)
+    )
+
+
+def _legacy_migrated_record(**fields: Any) -> dict[str, Any]:
+    return {**fields, _LEGACY_MIGRATED: True}
+
+
+def _legacy_projected_fingerprint(fingerprint: str) -> str:
+    """Normalize a legacy full-sha256 MCP attestation to profile projected form."""
+    return fingerprint[:16] if len(fingerprint) >= 16 else fingerprint
+
+
+def migrate_legacy_cursor_install_state(*, state: dict[str, Any], workspace: Path, harness: str) -> dict[str, Any]:
+    """Map legacy Cursor install attestations into schema_version 2 profile state."""
+    files = state["files"]
+    hooks = state["hooks"]
+    mcp = state["mcp"]
+    migrated = empty_profile_state(workspace=workspace, harness=harness)
+    package_version = state.get("package_version")
+    if isinstance(package_version, str) and package_version:
+        migrated["package_version"] = package_version
+
+    rule_digest = files.get(_LEGACY_CURSOR_INSTRUCTION)
+    if isinstance(rule_digest, str):
+        migrated["instructions"] = _legacy_migrated_record(digest=rule_digest, created_file=True)
+
+    generated: dict[str, dict[str, Any]] = {}
+    for relative in _LEGACY_CURSOR_GENERATED:
+        digest = files.get(relative)
+        if isinstance(digest, str):
+            generated[relative] = _legacy_migrated_record(digest=digest)
+    hook_fingerprint = hooks.get("sessionStart")
+    if isinstance(hook_fingerprint, str):
+        generated[_HOOK_STATE_KEY] = _legacy_migrated_record(entry_fingerprint=hook_fingerprint)
+    migrated["generated"] = generated
+
+    skill_files: dict[str, str] = {}
+    for relative, digest in files.items():
+        if not isinstance(relative, str) or not isinstance(digest, str):
+            continue
+        if relative.startswith(_LEGACY_CURSOR_SKILL_PREFIX):
+            skill_files[relative.removeprefix(_LEGACY_CURSOR_SKILL_PREFIX)] = digest
+    if skill_files:
+        migrated["skills"][_LEGACY_CURSOR_SKILL_ID] = _legacy_migrated_record(files=skill_files)
+
+    for name, fingerprint in mcp.items():
+        if not isinstance(name, str) or not isinstance(fingerprint, str):
+            continue
+        migrated["mcp"][name] = _legacy_migrated_record(
+            projected_fingerprint=_legacy_projected_fingerprint(fingerprint),
+            managed=True,
+        )
+    return migrated
+
+
 def load_profile_state(*, state_path: Path, workspace: Path, harness: str) -> LoadedProfileState:
     """Read ownership state without writing, including version refreshes."""
     if not state_path.exists():
@@ -73,6 +146,12 @@ def load_profile_state(*, state_path: Path, workspace: Path, harness: str) -> Lo
     if not isinstance(state, dict):
         return LoadedProfileState({}, "ownership state is not an object")
     if state.get("schema_version") != harness_profiles.PROFILE_STATE_VERSION:
+        if harness == "cursor" and is_legacy_install_state(state):
+            return LoadedProfileState(
+                migrate_legacy_cursor_install_state(state=state, workspace=workspace, harness=harness),
+                None,
+                migrated_from_legacy=True,
+            )
         return LoadedProfileState({}, f"unsupported ownership state version: {state.get('schema_version')}")
     if state.get("harness") != harness:
         return LoadedProfileState({}, f"ownership harness mismatch: {state.get('harness')} != {harness}")
@@ -445,8 +524,21 @@ def _skill_plans(profile, state: dict[str, Any], workspace: Path) -> dict[str, A
             elif path is None or not path.exists():
                 item.update(status="absent", action="remove")
             elif digest_bytes(path.read_bytes()) == owned_digest:
-                item.update(status="removed-registry", action="remove")
-                removes.append(path)
+                if record.get(_LEGACY_MIGRATED):
+                    item.update(status="current", action="none")
+                    preserved = desired_records.get(skill_id)
+                    if not isinstance(preserved, dict):
+                        preserved = {}
+                        desired_records[skill_id] = preserved
+                    files_map = preserved.get("files")
+                    if not isinstance(files_map, dict):
+                        files_map = {}
+                        preserved["files"] = files_map
+                    files_map[relative] = owned_digest
+                    preserved[_LEGACY_MIGRATED] = True
+                else:
+                    item.update(status="removed-registry", action="remove")
+                    removes.append(path)
             else:
                 item.update(status="changed", action="preserve", detail="removed-registry skill file was edited")
                 conflicts.append(item)
@@ -598,8 +690,12 @@ def _generated_plans(profile, state: dict[str, Any], *, adopt: bool) -> dict[str
             elif not path.exists():
                 item.update(status="absent", action="remove")
             elif digest_text(path.read_text(encoding="utf-8")) == record["digest"]:
-                item.update(status="removed-profile", action="remove")
-                removes.append(path)
+                if record.get(_LEGACY_MIGRATED):
+                    item.update(status="current", action="none")
+                    next_records[relative] = dict(record)
+                else:
+                    item.update(status="removed-profile", action="remove")
+                    removes.append(path)
             else:
                 item.update(status="conflict", action="preserve", detail="removed-profile generated file was edited")
                 conflicts.append(item)
@@ -775,6 +871,28 @@ def _mcp_plan(
                 "remove": set(),
                 "next": {},
             }
+        if all(isinstance(record, dict) and record.get(_LEGACY_MIGRATED) for record in state["mcp"].values()):
+            text = path.read_text(encoding="utf-8") if path.is_file() else None
+            legacy_items = [
+                {
+                    "surface": "mcp",
+                    "path": str(path),
+                    "name": name,
+                    "status": "current",
+                    "action": "none",
+                }
+                for name in sorted(state["mcp"])
+            ]
+            return {
+                "items": legacy_items,
+                "conflicts": [],
+                "path": path,
+                "adapter": adapter,
+                "text": text,
+                "updates": {},
+                "remove": set(),
+                "next": state["mcp"],
+            }
         item = {
             "surface": "mcp",
             "path": str(path),
@@ -847,8 +965,12 @@ def _mcp_plan(
             elif name not in live:
                 item.update(status="absent", action="remove")
             elif localio.stable_hash(live[name]) == record.get("projected_fingerprint"):
-                item.update(status="removed-catalog", action="remove")
-                remove.add(name)
+                if record.get(_LEGACY_MIGRATED):
+                    item.update(status="current", action="none")
+                    ownership[name] = record
+                else:
+                    item.update(status="removed-catalog", action="remove")
+                    remove.add(name)
             else:
                 item.update(status="conflict", action="preserve", detail="removed-catalog MCP entry was edited")
                 conflicts.append(item)
@@ -1003,6 +1125,7 @@ def _result(
     mcp: dict[str, Any],
     receipt_path: Path,
     receipt_state: str,
+    migration: str | None = None,
 ) -> dict[str, Any]:
     return {
         "harness": profile.harness,
@@ -1015,7 +1138,7 @@ def _result(
         "conflicts": conflicts,
         "files_written": sorted(files_written),
         "files_removed": sorted(files_removed),
-        "migration": None,
+        "migration": migration,
         "capabilities": {},
         "mcp": mcp,
         "receipt_path": str(receipt_path),
@@ -1137,6 +1260,7 @@ def _sync_profile(
     if surface_conflicts:
         return _surface_conflict_result(profile, surface_conflicts)
     loaded = load_profile_state(state_path=profile.state_path, workspace=workspace, harness=profile.harness)
+    migrated_from_legacy = loaded.migrated_from_legacy
     if loaded.error:
         conflict = {
             "surface": "ownership-state",
@@ -1201,6 +1325,8 @@ def _sync_profile(
             }
             if isinstance(old_instruction, dict) and old_instruction.get("created_directories"):
                 instruction_record["created_directories"] = list(old_instruction["created_directories"])
+            if isinstance(old_instruction, dict) and old_instruction.get(_LEGACY_MIGRATED):
+                instruction_record[_LEGACY_MIGRATED] = True
             proposed["instructions"] = instruction_record
         else:
             proposed["instructions"] = {}
@@ -1299,6 +1425,7 @@ def _sync_profile(
             mcp={"status": "ready", "items": mcp_plan["items"]},
             receipt_path=profile.receipt_path,
             receipt_state="applied" if files_written or files_removed else "current",
+            migration="legacy-v1" if migrated_from_legacy else None,
         ), bool(files_written or files_removed)
     receipt_state = "present" if profile.receipt_path.exists() else "missing"
     return _result(
@@ -1312,6 +1439,7 @@ def _sync_profile(
         mcp={"status": "ready" if not mcp_plan["conflicts"] else "conflict", "items": mcp_plan["items"]},
         receipt_path=profile.receipt_path,
         receipt_state=receipt_state,
+        migration="legacy-v1" if migrated_from_legacy and ready else None,
     ), False
 
 
