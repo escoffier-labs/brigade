@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import __version__, component_bins, localio
+from . import __version__, component_bins, harness_profiles, localio
 
 STATE_VERSION = 1
 MANAGED_MCP_NAMES = ("brigade", "graphtrail", "miseledger")
@@ -138,7 +138,14 @@ def _load_state(root: Path) -> dict[str, Any]:
         empty["_read_error"] = error or "ownership state is unreadable"
         return empty
     if payload.get("version") != STATE_VERSION:
-        empty["_read_error"] = f"unsupported ownership state version: {payload.get('version')!r}"
+        if payload.get("schema_version") == harness_profiles.PROFILE_STATE_VERSION:
+            empty["_read_error"] = (
+                "ownership state is managed by `brigade harness sync` (profile schema "
+                f"v{harness_profiles.PROFILE_STATE_VERSION}); recover by running `brigade harness "
+                "uninstall --target cursor --scope user` from the owning surface first"
+            )
+        else:
+            empty["_read_error"] = f"unsupported ownership state version: {payload.get('version')!r}"
         return empty
     for key in ("files", "hooks", "mcp"):
         if not isinstance(payload.get(key), dict):

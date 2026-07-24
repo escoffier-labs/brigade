@@ -461,3 +461,88 @@ def test_target_all_dry_run_reports_seven_results(tmp_path, monkeypatch, capsys)
     payload = json.loads(capsys.readouterr().out)
     assert [result["harness"] for result in payload["results"]] == list(harness_profiles.USER_SCOPE_HARNESS_IDS)
     assert len(payload["results"]) == 7
+
+
+def _legacy_cursor_install(home: Path, monkeypatch, capsys) -> None:
+    """Run the superseded `harness install cursor` surface against the temp home."""
+    from brigade import cli, cursor_user_cmd
+
+    monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: home)
+    assert cli.main(["harness", "install", "cursor", "--scope", "user", "--write", "--json"]) == 0
+    capsys.readouterr()
+
+
+def test_cursor_legacy_install_migrates_into_profile_sync(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace_with_stdio_server(tmp_path, capsys, ["cursor"])
+    _legacy_cursor_install(home, monkeypatch, capsys)
+    cursor = home / ".cursor"
+    state_path = home / SURFACES["cursor"]["state"]
+    assert json.loads(state_path.read_text())["version"] == 1
+    rule = home / SURFACES["cursor"]["instruction"]
+    rule_text = rule.read_text()
+
+    assert cli.main(_sync_base(workspace, "cursor") + ["--allow-global-stdio", "--write", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    result = payload["results"][0]
+    assert result["status"] == "updated"
+    assert result["migration"]["from"] == "legacy-install-v1"
+
+    migrated = json.loads(state_path.read_text())
+    assert migrated["schema_version"] == harness_profiles.PROFILE_STATE_VERSION
+    assert migrated["harness"] == "cursor"
+    # Legacy attestations are carried into the v2 ownership model, not clobbered.
+    assert migrated["instructions"]["digest"]
+    assert "hooks.json#sessionStart" in migrated["generated"]
+    assert "brigade" in migrated["mcp"]
+    # The legacy-owned rule survives byte-for-byte.
+    assert rule.read_text() == rule_text
+
+    # A second sync over the migrated state is a no-op.
+    assert cli.main(_sync_base(workspace, "cursor") + ["--allow-global-stdio", "--write", "--json"]) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["results"][0]["status"] == "current"
+    assert second["results"][0]["files_written"] == []
+    assert second["results"][0]["migration"] is None
+
+    # Uninstall removes exactly the artifacts, legacy-originated and synced alike.
+    assert cli.main(_uninstall_base(workspace, "cursor") + ["--write", "--json"]) == 0
+    capsys.readouterr()
+    assert not rule.exists()
+    # Leaf directories the legacy uninstaller owned are pruned once empty.
+    assert not (cursor / "plugins" / "local" / "brigade-loop").exists()
+    assert not (cursor / "hooks" / "brigade-session-start").exists()
+    assert not (cursor / "skills" / "brigade-work").exists()
+    assert not (cursor / "brigade" / "mcp.json").exists()
+    assert not state_path.exists()
+    assert not (home / SURFACES["cursor"]["receipt"]).exists()
+    hooks_doc = json.loads((cursor / "hooks.json").read_text())
+    assert "sessionStart" not in hooks_doc.get("hooks", {})
+    servers = json.loads((cursor / "mcp.json").read_text()).get("mcpServers", {})
+    assert not {"brigade", "graphtrail", "miseledger"} & set(servers)
+
+
+def test_cursor_profile_sync_then_legacy_install_names_recovery(tmp_path, monkeypatch, capsys):
+    from brigade import cli, cursor_user_cmd
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    assert cli.main(_sync_base(workspace, "cursor") + ["--write", "--json"]) == 0
+    capsys.readouterr()
+    state_path = home / SURFACES["cursor"]["state"]
+    before = state_path.read_bytes()
+
+    monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: home)
+    assert cli.main(["harness", "install", "cursor", "--scope", "user", "--write", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is False
+    assert payload["files_written"] == []
+    state_conflicts = [item for item in payload["conflicts"] if item["surface"] == "ownership-state"]
+    assert len(state_conflicts) == 1
+    assert "brigade harness uninstall --target cursor --scope user" in state_conflicts[0]["detail"]
+
+    # Fails closed: the profile-owned state and artifacts are untouched.
+    assert state_path.read_bytes() == before
+    assert json.loads(state_path.read_text())["schema_version"] == harness_profiles.PROFILE_STATE_VERSION

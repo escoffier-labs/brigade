@@ -35,6 +35,7 @@ class SurfacePlan:
 class LoadedProfileState:
     state: dict[str, Any]
     error: str | None
+    migration: dict[str, Any] | None = None
 
 
 def digest_text(text: str) -> str:
@@ -62,6 +63,78 @@ def write_profile_state(*, state_path: Path, state: dict[str, Any]) -> None:
     localio.write_json(state_path, state)
 
 
+_LEGACY_CURSOR_RULE = "plugins/local/brigade-loop/rules/brigade-loop.mdc"
+_LEGACY_CURSOR_PLUGIN_MANIFEST = "plugins/local/brigade-loop/.cursor-plugin/plugin.json"
+
+
+def _migrate_legacy_cursor_state(
+    *, state: dict[str, Any], state_path: Path, workspace: Path
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Adopt a legacy `brigade harness install cursor` ownership state (schema v1).
+
+    The legacy installer is documented as superseded by `harness sync`, so its
+    attestations are carried into the v2 ownership model instead of deadlocking:
+    uninstall still removes exactly what the legacy installer wrote.  Returns
+    ``None`` when the payload is not a migratable legacy state.
+    """
+    from . import cursor_user_cmd
+
+    if state.get("schema_version") is not None or state.get("version") != cursor_user_cmd.STATE_VERSION:
+        return None
+    files = state.get("files")
+    hooks = state.get("hooks")
+    mcp = state.get("mcp")
+    if not (isinstance(files, dict) and isinstance(hooks, dict) and isinstance(mcp, dict)):
+        return None
+    sections = (files, hooks, mcp)
+    if any(not isinstance(fingerprint, str) for section in sections for fingerprint in section.values()):
+        return None
+    root = state_path.parent.parent
+    migrated = empty_profile_state(workspace=workspace, harness="cursor")
+    rule_fingerprint = files.get(_LEGACY_CURSOR_RULE)
+    if rule_fingerprint is not None:
+        migrated["instructions"] = {
+            "digest": rule_fingerprint,
+            "created_file": True,
+            # Leaf directories the legacy uninstaller removed once empty.
+            "created_directories": [
+                str(root / "plugins" / "local" / "brigade-loop" / "rules"),
+                str(root / "plugins" / "local" / "brigade-loop"),
+            ],
+        }
+    for relative, fingerprint in sorted(files.items()):
+        if relative == _LEGACY_CURSOR_RULE:
+            continue
+        parts = relative.split("/")
+        if len(parts) >= 3 and parts[0] == "skills":
+            skill_id = parts[1]
+            record = migrated["skills"].setdefault(
+                skill_id, {"files": {}, "created_directories": [str(root / "skills" / skill_id)]}
+            )
+            record["files"]["/".join(parts[2:])] = fingerprint
+            continue
+        created: list[str] = []
+        if relative == _LEGACY_CURSOR_PLUGIN_MANIFEST:
+            created = [
+                str(root / "plugins" / "local" / "brigade-loop" / ".cursor-plugin"),
+                str(root / "plugins" / "local" / "brigade-loop"),
+            ]
+        migrated["generated"][relative] = {"digest": fingerprint, "created_directories": created}
+    hook_fingerprint = hooks.get("sessionStart")
+    if hook_fingerprint is not None:
+        migrated["generated"][_HOOK_STATE_KEY] = {"entry_fingerprint": hook_fingerprint}
+    for name, fingerprint in sorted(mcp.items()):
+        # cursor_user_cmd._digest_value and localio.stable_hash share the same
+        # canonical JSON rendering; stable_hash truncates to 16 chars, so the
+        # legacy digest's prefix attests to an unedited live entry.
+        migrated["mcp"][name] = {"projected_fingerprint": fingerprint[:16], "managed": True}
+    report = {
+        "from": "legacy-install-v1",
+        "adopted": {"files": len(files), "hooks": len(hooks), "mcp": len(mcp)},
+    }
+    return migrated, report
+
+
 def load_profile_state(*, state_path: Path, workspace: Path, harness: str) -> LoadedProfileState:
     """Read ownership state without writing, including version refreshes."""
     if not state_path.exists():
@@ -73,6 +146,11 @@ def load_profile_state(*, state_path: Path, workspace: Path, harness: str) -> Lo
     if not isinstance(state, dict):
         return LoadedProfileState({}, "ownership state is not an object")
     if state.get("schema_version") != harness_profiles.PROFILE_STATE_VERSION:
+        if harness == "cursor":
+            migrated = _migrate_legacy_cursor_state(state=state, state_path=state_path, workspace=workspace)
+            if migrated is not None:
+                migrated_state, report = migrated
+                return LoadedProfileState(migrated_state, None, report)
         return LoadedProfileState({}, f"unsupported ownership state version: {state.get('schema_version')}")
     if state.get("harness") != harness:
         return LoadedProfileState({}, f"ownership harness mismatch: {state.get('harness')} != {harness}")
@@ -1003,6 +1081,7 @@ def _result(
     mcp: dict[str, Any],
     receipt_path: Path,
     receipt_state: str,
+    migration: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "harness": profile.harness,
@@ -1015,7 +1094,7 @@ def _result(
         "conflicts": conflicts,
         "files_written": sorted(files_written),
         "files_removed": sorted(files_removed),
-        "migration": None,
+        "migration": migration,
         "capabilities": {},
         "mcp": mcp,
         "receipt_path": str(receipt_path),
@@ -1299,6 +1378,7 @@ def _sync_profile(
             mcp={"status": "ready", "items": mcp_plan["items"]},
             receipt_path=profile.receipt_path,
             receipt_state="applied" if files_written or files_removed else "current",
+            migration=loaded.migration,
         ), bool(files_written or files_removed)
     receipt_state = "present" if profile.receipt_path.exists() else "missing"
     return _result(
@@ -1312,6 +1392,7 @@ def _sync_profile(
         mcp={"status": "ready" if not mcp_plan["conflicts"] else "conflict", "items": mcp_plan["items"]},
         receipt_path=profile.receipt_path,
         receipt_state=receipt_state,
+        migration=loaded.migration,
     ), False
 
 
