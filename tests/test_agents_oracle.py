@@ -60,3 +60,23 @@ def test_oracle_supports_model_pinning_but_not_reasoning():
     assert agents.supports_model_pinning("oracle") is True
     # --browser-thinking-time is deferred to the ChatGPT Pro phase.
     assert agents.supports_reasoning("oracle") is False
+
+
+def test_oracle_auth_detail_points_at_pantry():
+    detail = agents._oracle_auth_detail("oracle", "", "Error: not logged in to gemini.google.com")
+    assert detail is not None
+    assert "brigade pantry expiry-alert" in detail
+
+
+def test_oracle_auth_detail_matches_expired_cookies():
+    detail = agents._oracle_auth_detail("oracle", "browser session expired", "")
+    assert detail is not None
+
+
+def test_oracle_auth_detail_ignores_other_clis():
+    # A claude seat saying "sign in" is not a pantry problem.
+    assert agents._oracle_auth_detail("claude", "", "please sign in") is None
+
+
+def test_oracle_auth_detail_ignores_unrelated_oracle_failures():
+    assert agents._oracle_auth_detail("oracle", "", "TypeError: bad flag") is None

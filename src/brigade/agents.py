@@ -514,6 +514,37 @@ def _provider_preflight_detail(cli_ref: str, stdout: str, stderr: str) -> str | 
     )
 
 
+_ORACLE_AUTH_RE = re.compile(
+    r"(?:"
+    r"\bnot logged in\b|"
+    r"\bsign[- ]in\b|"
+    r"\blogin required\b|"
+    r"\b(?:browser )?session (?:expired|invalid)\b|"
+    r"\bcookies? (?:expired|missing|invalid|not found)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _oracle_auth_detail(cli_ref: str, stdout: str, stderr: str) -> str | None:
+    """Turn an oracle browser-session auth failure into a pantry next step.
+
+    Oracle reads its cookies from the Chrome profile Agent Pantry syncs, so a
+    stale jar is an operator action, not a model failure. Everything else about
+    oracle failing stays generic.
+    """
+    if cli_ref != "oracle":
+        return None
+    combined = "\n".join(part for part in (stderr, stdout) if part).strip()
+    if not combined or not _ORACLE_AUTH_RE.search(combined):
+        return None
+    return (
+        "oracle could not use the browser session; the synced cookies are "
+        "likely stale. Check `brigade pantry expiry-alert`, then re-sync the "
+        "pantry source before retrying"
+    )
+
+
 def _pin_after_cmd(argv: List[str], flag: str, model: str) -> List[str]:
     """Insert `flag model` right after the command (argv[0])."""
     return [argv[0], flag, model, *argv[1:]]
@@ -1079,7 +1110,9 @@ def run_agent(
         :200
     ]
     if result.code != 0:
-        provider_preflight = _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr)
+        provider_preflight = _oracle_auth_detail(
+            cli_ref, safe_stdout, safe_stderr
+        ) or _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr)
         if provider_preflight is not None:
             return AgentResult(
                 text=safe_text,
@@ -1170,7 +1203,9 @@ def run_agent(
         detail = "empty output"
         empty_failure_phase: str | None = None
         empty_failure_kind: str | None = None
-        provider_preflight = _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr)
+        provider_preflight = _oracle_auth_detail(
+            cli_ref, safe_stdout, safe_stderr
+        ) or _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr)
         if provider_preflight is not None:
             detail = provider_preflight
             empty_failure_phase = "provider-preflight"
