@@ -10,7 +10,7 @@ Content Guard is Brigade's publish and memory-safety scanner. Brigade shells out
 
 Use it in three places:
 
-- `brigade handoff lint --content-guard --guard-policy personal` checks pending handoffs before memory ingest.
+- `brigade handoff lint --content-guard --guard-policy personal` checks pending handoffs before memory ingest. The flag runs content-guard for secret and identity leaks and Brigade injection heuristics for instruction-shaped payloads in handoff bodies (for example override phrases, fake system blocks, and base64-decode chains). Injection hits are reported as line-numbered warnings; benign discussion of prompt injection may appear as info-level notes.
 - `brigade handoff draft --guard --guard-policy personal ...` writes a draft and returns failure if Content Guard blocks it.
 - `brigade work import content-guard --policy public-repo` runs a scan and turns blocking findings into reviewable work imports.
 

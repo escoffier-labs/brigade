@@ -2055,10 +2055,12 @@ def test_handoff_lint_surfaces_injection_signals(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     flagged = [r for r in payload["results"] if r.get("injection_signals")]
     assert flagged, "lint should report injection signal counts"
+    assert flagged[0]["injection_heuristics"]
+    assert any(hit["severity"] == "warning" for hit in flagged[0]["injection_heuristics"])
     assert flagged[0]["hints"] == []
 
     handoff_cmd.lint(target=tmp_path)
     out = capsys.readouterr().out
-    assert "injection" in out.lower()
-    assert "security scan" in out.lower()
+    assert "line " in out
+    assert "classic-injection" in out or "ignore-instructions" in out
     assert "handoff migrate" not in out

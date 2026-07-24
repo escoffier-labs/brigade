@@ -45,7 +45,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_handoff_lint.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_lint.add_argument(
-        "--content-guard", action="store_true", help="Also scan handoff files with content-guard."
+        "--content-guard",
+        action="store_true",
+        help="Run content-guard leak scan plus handoff injection heuristics (secrets/PII and instruction-shaped payloads).",
     )
     p_handoff_lint.add_argument(
         "--guard-policy", default="personal", help="Content Guard policy name or path for --content-guard."

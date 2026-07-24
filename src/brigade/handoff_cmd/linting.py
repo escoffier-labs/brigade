@@ -24,6 +24,30 @@ from . import models as _family_base
 globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
 
 
+def _injection_hit_dict(hit: Any) -> dict[str, Any]:
+    return {
+        "line": hit.line,
+        "severity": hit.severity,
+        "rule": hit.rule,
+        "excerpt": hit.excerpt,
+    }
+
+
+def _injection_messages(hits: tuple[Any, ...]) -> tuple[str, ...]:
+    messages: list[str] = []
+    for hit in hits:
+        prefix = "info" if hit.severity == "info" else "warning"
+        messages.append(f"line {hit.line}: {prefix}: [{hit.rule}] {hit.excerpt}")
+    return tuple(messages)
+
+
+def _read_handoff_text(path: Path) -> str | None:
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return None
+
+
 def lint(
     *,
     target: Path,
@@ -36,29 +60,55 @@ def lint(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    from ..untrusted import scan_untrusted
+    from ..untrusted import scan_handoff_injection_heuristics, scan_untrusted
 
     results = lint_targets(target, paths=paths)
-    guard_results = (
-        [_guard_handoff_path(path, target=target, policy=guard_policy) for path in [result.path for result in results]]
-        if content_guard
-        else []
-    )
+    guard_results: list[dict[str, Any]] = []
+    if content_guard:
+        for result in results:
+            guard_item = _guard_handoff_path(result.path, target=target, policy=guard_policy)
+            text = _read_handoff_text(result.path)
+            hits = scan_handoff_injection_heuristics(text or "") if text is not None else ()
+            guard_item["injection_heuristics"] = [_injection_hit_dict(hit) for hit in hits]
+            guard_item["injection_warning_count"] = len([hit for hit in hits if hit.severity == "warning"])
+            guard_results.append(guard_item)
     guard_ok = all(item.get("exit_code") == 0 for item in guard_results)
-    # Content-guard checks egress (secrets/PII), not instructions. Surface the
-    # injection signal here too so a poisoned note never reads as fully clean.
     injection_counts: dict[str, int] = {}
+    injection_hits_by_path: dict[str, tuple[Any, ...]] = {}
+    enriched_results: list[HandoffLintResult] = []
     for result in results:
-        try:
-            signal = scan_untrusted(result.path.read_text(errors="replace"))
-        except OSError:
+        text = _read_handoff_text(result.path)
+        if text is None:
+            enriched_results.append(result)
             continue
+        hits = scan_handoff_injection_heuristics(text)
+        injection_hits_by_path[str(result.path)] = hits
+        signal = scan_untrusted(text)
         if signal.flagged:
             injection_counts[str(result.path)] = signal.count
+        injection_messages = _injection_messages(hits) if content_guard or hits else ()
+        if not injection_messages and signal.flagged:
+            injection_messages = (
+                f"line ?: warning: [{signal.count} prompt-injection signal(s); see `brigade security scan`]",
+            )
+        enriched_results.append(
+            HandoffLintResult(
+                path=result.path,
+                action=result.action,
+                valid=result.valid,
+                errors=result.errors,
+                warnings=result.warnings + injection_messages,
+                hints=result.hints,
+            )
+        )
+    results = tuple(enriched_results)
     result_dicts = []
     for result in results:
         row = result.as_dict()
-        row["injection_signals"] = injection_counts.get(str(result.path), 0)
+        path_key = str(result.path)
+        row["injection_signals"] = injection_counts.get(path_key, 0)
+        hits = injection_hits_by_path.get(path_key, ())
+        row["injection_heuristics"] = [_injection_hit_dict(hit) for hit in hits]
         result_dicts.append(row)
     payload = {
         "target": str(target),
@@ -82,17 +132,23 @@ def lint(
         for hint in result.hints:
             print(f"  hint: {hint}")
         for warning in result.warnings:
-            print(f"  warning: {warning}")
-        signals = injection_counts.get(str(result.path), 0)
-        if signals:
-            print(
-                f"  warning: {signals} prompt-injection signal(s); content-guard does not check this, see `brigade security scan`"
-            )
+            if warning.startswith("line "):
+                print(f"  {warning}")
+            else:
+                print(f"  warning: {warning}")
     if content_guard:
-        print(f"content_guard_policy: {guard_policy}")
+        print(f"content_guard_policy: {guard_policy} (leak scan + injection heuristics)")
         for item in guard_results:
-            status = OK if item.get("exit_code") == 0 else FAIL
-            print(f"[{status}] content_guard: {item.get('path')} {item.get('detail')}")
+            leak_status = OK if item.get("exit_code") == 0 else FAIL
+            print(f"[{leak_status}] content_guard leaks: {item.get('path')} {item.get('detail')}")
+            warning_count = int(item.get("injection_warning_count") or 0)
+            if warning_count:
+                print(f"  warning: {warning_count} injection heuristic hit(s)")
+            for hit in item.get("injection_heuristics") or []:
+                if hit.get("severity") == "info":
+                    print(f"  line {hit['line']}: info: [{hit['rule']}] {hit['excerpt']}")
+                elif hit.get("severity") == "warning":
+                    print(f"  line {hit['line']}: warning: [{hit['rule']}] {hit['excerpt']}")
     return 0 if payload["valid"] else 1
 
 
