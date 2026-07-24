@@ -276,6 +276,17 @@ def _crush_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | N
     return ["crush", "run", task]
 
 
+def _oracle_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
+    # Oracle is a one-shot consult CLI with no filesystem write path, so
+    # read_only needs neither a flag nor a prompt instruction and the argv is
+    # identical either way. --engine browser pins the run to the cookie lane
+    # that Agent Pantry keeps fresh, so the adapter can never silently fall
+    # back to an API key. --heartbeat is deliberately never passed: stdout
+    # carries the answer, and oracle emits plain unrendered markdown there
+    # whenever stdout is not a TTY.
+    return ["oracle", "--engine", "browser", "-p", prompt]
+
+
 _ADAPTERS: dict[str, Callable[[str, bool, str | None, Path | None], List[str]]] = {
     "claude": _claude_argv,
     "codex": _codex_argv,
@@ -294,6 +305,7 @@ _ADAPTERS: dict[str, Callable[[str, bool, str | None, Path | None], List[str]]] 
     "grok": _grok_argv,
     "amp": _amp_argv,
     "crush": _crush_argv,
+    "oracle": _oracle_argv,
 }
 
 
@@ -321,6 +333,8 @@ READ_ONLY_ENFORCEMENT: dict[str, str] = {
     "crush": "soft",
     "claude": "hard",
     "opencode": "none",
+    # Hard by construction rather than by sandbox: oracle cannot write files.
+    "oracle": "hard",
 }
 
 
@@ -527,6 +541,7 @@ _MODEL_PIN: dict[str, tuple[str, Callable[[List[str], str, str], List[str]]]] = 
     "kimi": ("-m", _pin_after_cmd),  # kimi -m X -p <prompt>
     "cursor": ("--model", _pin_after_cmd),  # cursor-agent --model X -p --output-format text -f <prompt>
     "antigravity": ("--model", _pin_after_cmd),  # agy --model X [--sandbox] --print <prompt>
+    "oracle": ("--model", _pin_after_cmd),  # oracle --model X --engine browser -p <prompt>
 }
 
 _REASONING_ADAPTERS = frozenset({"codex", "opencode", "pi", "grok"})
