@@ -557,6 +557,141 @@ def test_mixed_bash_code_and_handoff_write_requires_new_verification(tmp_path: P
     assert blocked["decision"] == "block"
 
 
+def test_stop_ignores_postcapture_brigade_run_artifact_writes(tmp_path: Path, monkeypatch):
+    """Issue #483: detached brigade run artifacts under .brigade/runs/ must not re-arm closeout."""
+    target = _wired_claude(tmp_path)
+    session_id = "brigade-runs-artifact"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "file.py")},
+        ),
+    )
+    state = runtime.read_session_state(target, session_id)
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": state["last_verification_write_at"],
+                "harness_session": {
+                    "harness": "claude",
+                    "fingerprint": state["session_fingerprint"],
+                },
+            }
+        )
+        + "\n"
+    )
+    artifact = target / ".brigade" / "runs" / "detached-1" / "run.json"
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Bash",
+            tool_input={"command": f"mkdir -p {artifact.parent} && touch {artifact}"},
+        ),
+    )
+
+    updated = runtime.read_session_state(target, session_id)
+    assert updated["last_verification_write_at"] == state["last_verification_write_at"]
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    assert "decision" not in result
+
+
+def test_stop_still_blocks_after_source_edit_post_capture(tmp_path: Path, monkeypatch):
+    """Issue #483: real source edits after capture must still trip the closeout gate."""
+    target = _wired_claude(tmp_path)
+    session_id = "source-edit-post-capture"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "file.py")},
+        ),
+    )
+    state = runtime.read_session_state(target, session_id)
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": state["last_verification_write_at"],
+                "harness_session": {
+                    "harness": "claude",
+                    "fingerprint": state["session_fingerprint"],
+                },
+            }
+        )
+        + "\n"
+    )
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "src.py"), "content": "changed\n"},
+        ),
+    )
+
+    updated = runtime.read_session_state(target, session_id)
+    assert updated["last_verification_write_at"] > state["last_verification_write_at"]
+    blocked = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    assert blocked["decision"] == "block"
+
+
+def test_posttooluse_brigade_run_does_not_record_write(tmp_path: Path, monkeypatch):
+    """Issue #483: brigade run bash must not bump verification write timestamps."""
+    target = _wired_claude(tmp_path)
+    session_id = "brigade-run-bash"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=session_id,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "file.py")},
+        ),
+    )
+    state = runtime.read_session_state(target, session_id)
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": "brigade run --detach -- echo noop"},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    assert "pending_bash_fingerprint" in runtime.read_session_state(target, session_id)
+
+    runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"})
+
+    updated = runtime.read_session_state(target, session_id)
+    assert updated["last_verification_write_at"] == state["last_verification_write_at"]
+    assert "pending_bash_fingerprint" not in updated
+
+
 def test_repo_worktree_fingerprint_detects_dirty_tracked_same_size_rewrite(tmp_path: Path):
     target = _git_wired_claude(tmp_path)
     tracked = target / "tracked.txt"
