@@ -176,11 +176,22 @@ def _workspace_inventory(target: Path) -> dict[str, Any]:
         ".learnings",
         "memory/cards",
     ]
-    guidance_dirs = {"rules", ".learnings", "memory/cards"}
-    guidance = [
-        {"path": rel, "exists": (target / rel).exists(), "kind": "dir" if rel in guidance_dirs else "file"}
-        for rel in guidance_paths
-    ]
+    expected_guidance_dirs = {"rules", ".learnings", "memory/cards"}
+    guidance = []
+    for rel in guidance_paths:
+        path = target / rel
+        if path.is_file():
+            guidance.append({"path": rel, "exists": True, "kind": "file"})
+        elif path.is_dir():
+            guidance.append({"path": rel, "exists": True, "kind": "dir"})
+        else:
+            guidance.append(
+                {
+                    "path": rel,
+                    "exists": False,
+                    "kind": "dir" if rel in expected_guidance_dirs else "file",
+                }
+            )
     harness_rows = []
     for harness in KNOWN_HARNESSES:
         root = target / f".{harness}"
@@ -202,7 +213,7 @@ def _workspace_inventory(target: Path) -> dict[str, Any]:
         "pipeline",
         "memory-handoffs",
     ]
-    local_state = [{"path": rel, "exists": (target / rel).exists()} for rel in local_state_paths]
+    local_state = [{"path": rel, "exists": (target / rel).is_dir()} for rel in local_state_paths]
     brigade_root = target / ".brigade"
     return {
         "brigade": {
@@ -214,8 +225,12 @@ def _workspace_inventory(target: Path) -> dict[str, Any]:
         },
         "guidance": {
             "items": guidance,
-            "present_count": sum(1 for item in guidance if item["exists"] and item["kind"] == "file"),
-            "present_dir_count": sum(1 for item in guidance if item["exists"] and item["kind"] == "dir"),
+            "present_count": sum(
+                1 for item in guidance if item["kind"] == "file" and (target / item["path"]).is_file()
+            ),
+            "present_dir_count": sum(
+                1 for item in guidance if item["kind"] == "dir" and (target / item["path"]).is_dir()
+            ),
         },
         "harnesses": {
             "items": harness_rows,

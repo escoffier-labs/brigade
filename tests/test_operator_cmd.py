@@ -1658,10 +1658,20 @@ def test_local_operator_doctor_does_not_block_on_inactive_content_guard_hook(tmp
 
 def test_adopt_plan_counts_guidance_files_and_dirs_separately(tmp_path, capsys):
     (tmp_path / "CLAUDE.md").write_text("# rules\n")
-    (tmp_path / "memory" / "cards").mkdir(parents=True)
+    cards_dir = tmp_path / "memory" / "cards"
+    cards_dir.mkdir(parents=True)
+    for index in range(3):
+        (cards_dir / f"card-{index}.md").write_text(f"# card {index}\n")
 
     assert cli.main(["operator", "adopt", "plan", "--target", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     guidance = payload["workspace"]["guidance"]
     assert guidance["present_count"] == 1
     assert guidance["present_dir_count"] == 1
+    present = {item["path"]: item for item in guidance["items"] if item["exists"]}
+    assert present["CLAUDE.md"]["kind"] == "file"
+    assert present["memory/cards"]["kind"] == "dir"
+
+    assert cli.main(["operator", "adopt", "plan", "--target", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "guidance_files: 1 (+1 dirs)" in out
