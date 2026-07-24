@@ -67,11 +67,18 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_history.add_argument("--limit", type=int, default=20, help="Maximum history rows to show.")
     p_skills_history.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_diff = skills_sub.add_parser(
-        "diff", help="Diff an installed skill against the current rendered registry version."
+        "diff",
+        help="Diff an installed skill against the bundled Brigade template (default) or the local registry.",
     )
     p_skills_diff.add_argument("skill", help="Skill id, path, or directory.")
     p_skills_diff.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
     p_skills_diff.add_argument("--harness", required=True, help="Harness target to compare.")
+    p_skills_diff.add_argument(
+        "--against",
+        choices=["bundled", "registry"],
+        default="bundled",
+        help="Comparison baseline: bundled package template (default) or local registry entry.",
+    )
     p_skills_diff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_fleet = skills_sub.add_parser("fleet", help="Inspect installed skill copies across harnesses.")
     skills_fleet_sub = p_skills_fleet.add_subparsers(dest="skills_fleet_command", metavar="<skills-fleet-command>")
@@ -251,7 +258,13 @@ def dispatch(args) -> int:
             json_output=args.json,
         )
     if args.skills_command == "diff":
-        return skills_cmd.diff(target=args.target, skill=args.skill, harness=args.harness, json_output=args.json)
+        return skills_cmd.diff(
+            target=args.target,
+            skill=args.skill,
+            harness=args.harness,
+            against=args.against,
+            json_output=args.json,
+        )
     if args.skills_command == "fleet":
         if args.skills_fleet_command == "status":
             return skills_cmd.fleet_status(target=args.target, json_output=args.json)

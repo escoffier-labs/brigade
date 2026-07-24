@@ -927,6 +927,76 @@ def test_bundled_install_and_diff_share_canonical_source(tmp_path, capsys):
     }
 
 
+def test_skills_diff_defaults_to_bundled_template_over_stale_registry(tmp_path, capsys):
+    stale = _write_skill(tmp_path / ".brigade" / "skills" / "registry", name="brigade-work")
+    (stale / "SKILL.md").write_text("# stale registry copy\n")
+
+    assert (
+        skills_cmd.install(workspace=tmp_path, skill="registry:brigade-work", harness="claude", json_output=True) == 0
+    )
+    capsys.readouterr()
+
+    assert skills_cmd.diff(target=tmp_path, skill="brigade-work", harness="claude", json_output=True) == 0
+    diff = json.loads(capsys.readouterr().out)
+    assert diff["against"] == "bundled"
+    assert diff["baseline_skill"] == "bundled:brigade-work"
+    assert diff["source"]["kind"] == "brigade-bundle"
+    assert diff["changed"] is True
+    assert diff["drift"]["content_changed"] is True
+
+
+def test_skills_diff_registry_selector_still_uses_bundled_by_default(tmp_path, capsys):
+    stale = _write_skill(tmp_path / ".brigade" / "skills" / "registry", name="brigade-work")
+    (stale / "SKILL.md").write_text("# stale registry copy\n")
+
+    assert (
+        skills_cmd.install(workspace=tmp_path, skill="registry:brigade-work", harness="claude", json_output=True) == 0
+    )
+    capsys.readouterr()
+
+    assert skills_cmd.diff(target=tmp_path, skill="registry:brigade-work", harness="claude", json_output=True) == 0
+    diff = json.loads(capsys.readouterr().out)
+    assert diff["baseline_skill"] == "bundled:brigade-work"
+    assert diff["changed"] is True
+
+
+def test_skills_diff_against_registry_compares_installed_to_registry(tmp_path, capsys):
+    stale = _write_skill(tmp_path / ".brigade" / "skills" / "registry", name="brigade-work")
+    (stale / "SKILL.md").write_text("# stale registry copy\n")
+
+    assert (
+        skills_cmd.install(workspace=tmp_path, skill="registry:brigade-work", harness="claude", json_output=True) == 0
+    )
+    capsys.readouterr()
+
+    assert (
+        skills_cmd.diff(
+            target=tmp_path,
+            skill="brigade-work",
+            harness="claude",
+            against="registry",
+            json_output=True,
+        )
+        == 0
+    )
+    diff = json.loads(capsys.readouterr().out)
+    assert diff["against"] == "registry"
+    assert diff["baseline_skill"] == "registry:brigade-work"
+    assert diff["source"]["kind"] == "registry"
+    assert diff["changed"] is False
+
+
+def test_skills_diff_matches_bundled_template_reports_clean(tmp_path, capsys):
+    assert skills_cmd.install(workspace=tmp_path, skill="brigade-work", harness="cursor", json_output=True) == 0
+    capsys.readouterr()
+
+    assert skills_cmd.diff(target=tmp_path, skill="brigade-work", harness="cursor", json_output=True) == 0
+    diff = json.loads(capsys.readouterr().out)
+    assert diff["baseline_skill"] == "bundled:brigade-work"
+    assert diff["changed"] is False
+    assert diff["drift"]["content_changed"] is False
+
+
 def test_explicit_registry_source_does_not_inherit_bundled_review(tmp_path, capsys):
     source = _write_skill(tmp_path / "source", name="brigade-work")
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0

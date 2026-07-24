@@ -463,6 +463,37 @@ def _bundled_skill_path(skill_id: str) -> Path:
     return template_root() / "skills" / _slug(skill_id)
 
 
+def _bundled_skill_exists(skill_id: str) -> bool:
+    return _skill_md_path(_bundled_skill_path(skill_id)).is_file()
+
+
+def _resolve_diff_baseline(target: Path, skill_or_path: str, *, against: str = "bundled") -> str:
+    requested = str(skill_or_path)
+    candidate = Path(requested).expanduser()
+    if candidate.exists():
+        return requested
+    if requested.startswith("registry:"):
+        skill_id = _slug(requested.removeprefix("registry:"))
+    elif requested.startswith("bundled:"):
+        skill_id = _slug(requested.removeprefix("bundled:"))
+    else:
+        skill_id = _slug(requested)
+    registry_dir = _skill_path(target, skill_id)
+    registry_exists = _skill_md_path(registry_dir).is_file()
+    bundled_exists = _bundled_skill_exists(skill_id)
+    if against == "registry":
+        if registry_exists:
+            return f"registry:{skill_id}"
+        if bundled_exists:
+            return f"bundled:{skill_id}"
+        return requested
+    if bundled_exists:
+        return f"bundled:{skill_id}"
+    if registry_exists:
+        return f"registry:{skill_id}"
+    return requested
+
+
 def _source_identity(*, skill_dir: Path, skill_id: str, kind: str, reviewed: bool) -> dict[str, Any]:
     if kind == "brigade-bundle":
         identity = f"{BUNDLED_SOURCE_PREFIX}{skill_id}"
@@ -1540,9 +1571,10 @@ def history(
     return 0
 
 
-def diff(*, target: Path, skill: str, harness: str, json_output: bool = False) -> int:
+def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    lint_payload = _lint_payload(target, skill)
+    baseline_skill = _resolve_diff_baseline(target, skill, against=against)
+    lint_payload = _lint_payload(target, baseline_skill)
     if not lint_payload["valid"]:
         if json_output:
             print(
@@ -1588,6 +1620,8 @@ def diff(*, target: Path, skill: str, harness: str, json_output: bool = False) -
         "target": str(target),
         "skill_id": skill_id,
         "harness": harness,
+        "against": against,
+        "baseline_skill": baseline_skill,
         "installed": installed_skill.is_file(),
         "installed_path": str(installed_skill),
         "changed": bool(diff_lines),
