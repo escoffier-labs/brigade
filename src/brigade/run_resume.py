@@ -91,11 +91,6 @@ def resume(run_dir: Path) -> int:
     if not isinstance(status, str) or status in _NONTERMINAL_RUN_STATUSES:
         print("error: run is not terminal; recover or wait for the active run before resuming", file=sys.stderr)
         return 2
-    from .deliberation import is_deliberation_run
-
-    if is_deliberation_run(run_dir):
-        print("error: deliberation runs cannot be resumed in v1; rerun the experiment", file=sys.stderr)
-        return 2
     workspace = runguard.resolve_run_lock_workspace(run_meta, run_dir)
     if workspace is None:
         print("error: run artifact has no workspace cwd; cannot verify lock ownership", file=sys.stderr)

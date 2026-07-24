@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- Removed the opt-in `brigade run --deliberate` grounded-deliberation mode
+  (planner, `brigade.deliberation.v1` artifact emission, and related runs
+  show/watch/resume surfaces). Recoverable from git history; see #442 / #471.
+
 ### Added
 - Imported `stations/notify` Go module into the Brigade monorepo. Unified release
   manifests now enumerate five native components (25 platform assets plus

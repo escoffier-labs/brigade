@@ -177,40 +177,6 @@ def _print_synthesis(synthesis: dict[str, Any] | None) -> None:
         print(f"  {synthesis.get('orchestrator', 'orchestrator')}")
 
 
-def _print_deliberation(deliberation: dict[str, Any] | None) -> None:
-    if not deliberation:
-        return
-    print("deliberation:")
-    _line("  schema", deliberation.get("schema"))
-    _line("  recommendation", deliberation.get("recommendation"))
-    _line("  confidence", deliberation.get("confidence"))
-    minority = deliberation.get("minority_report")
-    if isinstance(minority, str) and minority.strip():
-        print(f"  minority_report: {minority}")
-    perspectives = deliberation.get("perspectives")
-    if isinstance(perspectives, list):
-        for item in perspectives:
-            if not isinstance(item, dict):
-                continue
-            scope = item.get("evidence_scope")
-            scope_kind = scope.get("kind") if isinstance(scope, dict) else "unknown"
-            scope_status = scope.get("status") if isinstance(scope, dict) else "unknown"
-            print(
-                f"  perspective [{scope_status}] {item.get('worker', 'unknown')} "
-                f"({scope_kind}): {item.get('position', '')}"
-            )
-    challenger = deliberation.get("challenger")
-    if isinstance(challenger, dict):
-        print(f"  challenger {challenger.get('worker', 'unknown')}: {challenger.get('minority_report', '')}")
-    invalid_lenses = deliberation.get("invalid_lenses")
-    if isinstance(invalid_lenses, list) and invalid_lenses:
-        print("  invalid_lenses:")
-        for item in invalid_lenses:
-            if not isinstance(item, dict):
-                continue
-            print(f"    - {item.get('worker', 'unknown')}: {item.get('reason', 'invalid')}")
-
-
 def _print_final(final_text: str | None) -> None:
     if final_text is None:
         return
@@ -348,13 +314,6 @@ def _emit_synthesis(synthesis: dict[str, Any], *, json_output: bool) -> None:
     _print_synthesis(synthesis)
 
 
-def _emit_deliberation(deliberation: dict[str, Any], *, json_output: bool) -> None:
-    if json_output:
-        _emit_json({"type": "deliberation", "artifact": deliberation})
-        return
-    _print_deliberation(deliberation)
-
-
 def _emit_final(final_text: str, *, json_output: bool) -> None:
     if json_output:
         _emit_json({"type": "final", "text": final_text})
@@ -451,13 +410,6 @@ def _poll_watch_artifacts(
             if signatures.get("synthesis") != synthesis_sig:
                 _emit_synthesis(synthesis, json_output=json_output)
                 signatures["synthesis"] = synthesis_sig
-
-        deliberation = _read_json(run_dir / "deliberation.json")
-        if deliberation is not None:
-            deliberation_sig = _artifact_signature(deliberation)
-            if signatures.get("deliberation") != deliberation_sig:
-                _emit_deliberation(deliberation, json_output=json_output)
-                signatures["deliberation"] = deliberation_sig
 
         final_text = _read_text(run_dir / "final.txt")
         if final_text is not None and signatures.get("final") != final_text:
@@ -630,10 +582,6 @@ def show_latest(*, cwd: Path, runs_dir: Path | None = None) -> int:
 
 
 def _resume_available(run_dir: Path) -> bool:
-    from .deliberation import is_deliberation_run
-
-    if is_deliberation_run(run_dir):
-        return False
     try:
         worker_results = _read_json(run_dir / "worker-results.json")
     except ValueError:
@@ -652,12 +600,8 @@ def _resume_available(run_dir: Path) -> bool:
 
 
 def _print_recovery_guidance(run_dir: Path) -> None:
-    from .deliberation import is_deliberation_run
-
     if _resume_available(run_dir):
         print(f"resume: brigade runs resume {run_dir}")
-    elif is_deliberation_run(run_dir):
-        print("resume: unavailable (deliberation runs cannot be resumed in v1)")
     else:
         print("resume: unavailable (no resumable app-server worker thread)")
 
@@ -847,7 +791,6 @@ def show(run_dir: Path) -> int:
         plan = _read_json(run_dir / "plan.json")
         worker_results = _read_json(run_dir / "worker-results.json")
         synthesis = _read_json(run_dir / "synthesis.json")
-        deliberation = _read_json(run_dir / "deliberation.json")
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -876,7 +819,6 @@ def show(run_dir: Path) -> int:
     _print_plan(plan)
     _print_workers(worker_results)
     _print_ground_truth(worker_results)
-    _print_deliberation(deliberation)
     _print_synthesis(synthesis)
     _print_final(_read_text(run_dir / "final.txt"))
     _print_terminal_guidance(run_dir, run_meta)
