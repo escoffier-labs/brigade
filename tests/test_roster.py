@@ -1389,3 +1389,19 @@ def test_collect_seat_receipt_stats_counts_failures_without_durations(tmp_path):
     assert coder.sample_count == 2
     assert coder.median_duration_seconds == pytest.approx(10.0)
     assert coder.failure_rate == pytest.approx(0.5)
+
+
+def test_load_accepts_scheduler_limit(tmp_path):
+    for scheduler in ("waves", "dag"):
+        text = VALID.replace("[limits]\n", f'[limits]\nscheduler = "{scheduler}"\n')
+        assert roster_mod.load_roster(_write(tmp_path, text)).scheduler == scheduler
+
+
+def test_load_defaults_scheduler_to_none(tmp_path):
+    assert roster_mod.load_roster(_write(tmp_path, VALID)).scheduler is None
+
+
+def test_load_rejects_invalid_scheduler_limit(tmp_path):
+    text = VALID.replace("[limits]\n", '[limits]\nscheduler = "ready-queue"\n')
+    with pytest.raises(ValueError, match="limits.scheduler"):
+        roster_mod.load_roster(_write(tmp_path, text))

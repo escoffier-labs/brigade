@@ -2894,3 +2894,50 @@ def test_run_cli_rejects_orchestrator_as_worker(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "chef" in err
     assert "orchestrator" in err.lower()
+
+
+def test_run_cli_scheduler_defaults_from_roster_limits(tmp_path, monkeypatch):
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[limits]
+scheduler = "dag"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "ollama:llama3.3"
+role = "code"
+"""
+    )
+    seen = {}
+
+    def fake_run(task, loaded_roster, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    rc = cli.main(["run", "do something", "--roster", str(roster_path), "--cwd", str(tmp_path), "--no-artifacts"])
+    assert rc == 0
+    assert seen["scheduler"] == "dag"
+
+    seen.clear()
+    rc = cli.main(
+        [
+            "run",
+            "do something",
+            "--roster",
+            str(roster_path),
+            "--cwd",
+            str(tmp_path),
+            "--scheduler",
+            "waves",
+            "--no-artifacts",
+        ]
+    )
+    assert rc == 0
+    assert seen["scheduler"] == "waves"

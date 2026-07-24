@@ -256,8 +256,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_run.add_argument(
         "--scheduler",
         choices=("waves", "dag"),
-        default="waves",
-        help="Worker scheduling: fixed integer-stage waves (default) or router-DAG ready queue.",
+        default=None,
+        help=(
+            "Worker scheduling: fixed integer-stage waves or router-DAG ready queue. "
+            "Defaults to limits.scheduler from the roster, then waves."
+        ),
     )
     p_run.set_defaults(func=dispatch)
 
@@ -487,7 +490,7 @@ def dispatch(args) -> int:
             if args.deliberate:
                 run_kwargs["deliberation"] = True
             run_kwargs["fail_fast"] = not args.keep_going
-            run_kwargs["scheduler"] = args.scheduler
+            run_kwargs["scheduler"] = args.scheduler or loaded_roster.scheduler or "waves"
             try:
                 rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
             except runguard.RetainRunLockError:
