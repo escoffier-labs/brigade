@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import managed
+from brigade import managed, pantry_compat
 from brigade import station_manifest
 from brigade import stations_cmd
 from brigade.station import DoctorContext
@@ -296,9 +296,20 @@ def test_agentpantry_doctor_warns_on_unparsable_version(monkeypatch, version_val
     ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
     results = t.doctor(ctx)
     assert all(status != "FAIL" and status != "OK" for status, _, _ in results)
-    assert any(
-        status == "WARN" and "expected >= 0.5.0" in detail and observed in detail for status, _, detail in results
-    ), (version_value, observed, results)
+    if observed == "invalid-version":
+        assert any(
+            status == "WARN"
+            and "rejected by version policy" in detail
+            and pantry_compat.released_floor_label() in detail
+            for status, _, detail in results
+        ), (version_value, observed, results)
+    else:
+        assert any(
+            status == "WARN"
+            and "expected >= 0.5.0" in detail
+            and (observed in detail if observed != "non-string" else "is not a string" in detail)
+            for status, _, detail in results
+        ), (version_value, observed, results)
     # The raw invalid version field must not leak into any surfaced doctor detail.
     raw = "" if version_value is None else str(version_value)
     if raw:
@@ -321,7 +332,7 @@ def test_agentpantry_doctor_never_leaks_secret_version_field(monkeypatch):
     results = t.doctor(ctx)
     assert all(status != "FAIL" and status != "OK" for status, _, _ in results)
     assert any(
-        status == "WARN" and "invalid-version" in detail and "expected >= 0.5.0" in detail
+        status == "WARN" and "rejected by version policy" in detail and pantry_compat.released_floor_label() in detail
         for status, _, detail in results
     ), results
     assert all(secret not in detail for _, _, detail in results), results

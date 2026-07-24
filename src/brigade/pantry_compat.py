@@ -13,6 +13,14 @@ parsing. It adds no dependency and never raises: a missing binary, nonzero
 probe, malformed JSON, non-string version, prerelease-shaped, or below-floor
 version all collapse to an incompatible :class:`VersionProbe` with a precise
 detail string.
+
+**Version policy:** Brigade accepts only released ASCII semver triples (optional
+leading ``v``, no prerelease or build suffix). Dev builds, prerelease tags,
+unknown labels, and any other non-triple string are rejected deliberately, not
+because parsing failed. Those values collapse to the fixed
+:data:`_INVALID_VERSION_LABEL` in :attr:`VersionProbe.observed` so the raw
+version field never reaches ``work brief``, doctor output, logs, or receipts.
+The surfaced detail explains policy rejection instead of echoing the raw string.
 """
 
 from __future__ import annotations
@@ -97,6 +105,17 @@ def floor_label() -> str:
     return f"expected >= {major}.{minor}.{patch}"
 
 
+def released_floor_label() -> str:
+    """Return the released-build floor expectation, e.g. ``expected released >= 0.5.0``."""
+    major, minor, patch = AGENTPANTRY_MIN_VERSION
+    return f"expected released >= {major}.{minor}.{patch}"
+
+
+def _policy_rejected_detail() -> str:
+    """Detail string when a version string fails the released-semver policy."""
+    return f"agentpantry build rejected by version policy (unreleased or non-semver build); {released_floor_label()}"
+
+
 def parse_version(value: object) -> Optional[Tuple[int, int, int]]:
     """Parse a version value into an integer ``(major, minor, patch)`` triple.
 
@@ -172,10 +191,16 @@ def probe_agentpantry_version() -> VersionProbe:
     parsed = parse_version(raw_version)
     if parsed is None:
         observed = _unparsable_observed_label(raw_version)
+        if observed == _INVALID_VERSION_LABEL:
+            detail = _policy_rejected_detail()
+        elif observed == "missing":
+            detail = f"agentpantry version field missing; {expected}"
+        else:
+            detail = f"agentpantry version field is not a string; {expected}"
         return VersionProbe(
             compatible=False,
             observed=observed,
-            detail=f"agentpantry version unparsable ({observed}); {expected}",
+            detail=detail,
         )
     observed = _format_triple(parsed)
     if parsed < AGENTPANTRY_MIN_VERSION:
