@@ -67,8 +67,10 @@ Format: trigger, then the rule, then what to do instead.
 
 ## Orientation
 
-- `src/brigade/cli.py` is the entry point; commands live in sibling modules
-  (`doctor.py`, `selection.py`, `operator_cmd/`, `work_cmd/`, ...).
+- The CLI entry point is `brigade.cli:main` (`[project.scripts]` in `pyproject.toml`).
+  Command families live in `src/brigade/cli/` — one module per group (e.g. `doctor.py`,
+  `operator.py`, `init.py`, `work/`); `__init__.py` builds the parser and dispatches
+  to each module's `register`/`dispatch`.
 - New harness adapter? Follow the step list in `CONTRIBUTING.md` (manifest,
   templates, `KNOWN_HARNESSES`, CI matrix, README table).
 - Doctor checks return `OK`, `WARN`, `FAIL`, or `MANUAL`. Prefer `WARN` or

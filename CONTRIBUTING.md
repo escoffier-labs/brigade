@@ -63,7 +63,7 @@ To add a harness:
 
 ## Adding a depth
 
-Depths live at `src/brigade/templates/depth/<id>.json` and may use `extends` to inherit from another depth. Add the id to `KNOWN_DEPTHS` in `selection.py` and to the `--depth` choices in `cli.py`.
+Depths live at `src/brigade/templates/depth/<id>.json` and may use `extends` to inherit from another depth. Add the id to `KNOWN_DEPTHS` in `selection.py` and to the `--depth` choices in `src/brigade/cli/init.py`.
 
 ## Adding an include
 

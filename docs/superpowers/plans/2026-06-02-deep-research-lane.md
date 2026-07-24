@@ -30,7 +30,7 @@ Create under `src/brigade/research/`:
 
 Modify:
 - `src/brigade/research_cmd.py` (Create) - CLI verb group.
-- `src/brigade/cli.py` - register the `research` group.
+- `src/brigade/cli/__init__.py` - register the `research` group.
 - `src/brigade/roster.py` - allow `endpoint`/`model` on the `researcher` agent.
 - `pyproject.toml` - `[project.optional-dependencies] research = ["playwright>=1.40"]`.
 - `README.md`, `CHANGELOG.md`, `ROADMAP.md`, `docs/command-inventory.md`.
@@ -1457,7 +1457,7 @@ git commit -m "feat(roster): researcher agent may declare endpoint+model or cli"
 
 **Files:**
 - Create: `src/brigade/research_cmd.py`
-- Modify: `src/brigade/cli.py`
+- Modify: `src/brigade/cli/__init__.py`
 - Test: `tests/test_research_cmd.py`
 
 Wires everything: `run` builds caps from config+flags, resolves the LLM backend,
@@ -1619,9 +1619,9 @@ def _new_run_id(question: str) -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + registry.slug(question)
 ```
 
-- [ ] **Step 4: Wire into cli.py**
+- [ ] **Step 4: Wire into `src/brigade/cli/__init__.py`**
 
-Read `src/brigade/cli.py`, find how an existing group (e.g. `context` or `learn`)
+Read `src/brigade/cli/__init__.py`, find how an existing group (e.g. `context` or `learn`)
 is registered (subparser + dispatch), and add a `research` group with verbs
 `run/list/show/cancel/resume/open` calling `research_cmd`. `run` flags:
 `question` (positional), `--corpus`, `--source` (append), `--web`, `--rounds`,
@@ -1647,7 +1647,7 @@ Expected: command parses and exits 0.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/brigade/research_cmd.py src/brigade/cli.py tests/test_research_cmd.py
+git add src/brigade/cli/research.py src/brigade/cli/__init__.py tests/test_research_cmd.py
 git commit -m "feat(research): brigade research run/list/show/cancel/resume command group"
 ```
 
