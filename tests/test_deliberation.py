@@ -631,3 +631,60 @@ def test_runs_show_and_watch_surface_deliberation(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "deliberation:" in out
     assert meta is not None
+
+
+_FAKE_GRAPHTRAIL = """\
+#!/bin/sh
+# Mimics the installed graphtrail CLI's flag surface: `context` accepts
+# --markdown/--limit/--json, while callers/callees/impact reject them.
+shift 2
+cmd="$1"
+shift
+case "$cmd" in
+  context)
+    shift
+    for arg in "$@"; do
+      if [ "$arg" = "--json" ]; then
+        echo '{"entry_points":[{"qualified_name":"module.fn"}]}'
+        exit 0
+      fi
+    done
+    echo "# context pack"
+    exit 0
+    ;;
+  callers|callees|impact)
+    shift
+    for arg in "$@"; do
+      case "$arg" in
+        --markdown|--limit)
+          echo "error: unexpected argument '$arg' found" >&2
+          exit 2
+          ;;
+      esac
+    done
+    echo "$cmd edge list"
+    exit 0
+    ;;
+esac
+exit 2
+"""
+
+
+def test_candidate_scopes_survive_probe_flag_rejection(monkeypatch, tmp_path):
+    """Issue #442 experiment route C: callers/callees/impact reject --markdown
+    and --limit, so passing them left the planner with a single scope and every
+    deliberation plan was rejected before dispatch."""
+    fake = tmp_path / "fake-graphtrail"
+    fake.write_text(_FAKE_GRAPHTRAIL)
+    fake.chmod(0o755)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(fake))
+    graph_dir = tmp_path / ".graphtrail"
+    graph_dir.mkdir()
+    (graph_dir / "graphtrail.db").write_text("")
+
+    scopes = deliberation._candidate_graphtrail_scopes(tmp_path, "migrate the queue")
+
+    kinds = {scope.kind for scope in scopes}
+    assert "graphtrail-context" in kinds
+    assert {"graphtrail-callers", "graphtrail-callees", "graphtrail-impact"} <= kinds
+    assert all(scope.grounded for scope in scopes)

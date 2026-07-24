@@ -147,12 +147,15 @@ def _truncate_scope_text(text: str, limit: int = 3500) -> str:
     return clipped.rstrip() + note
 
 
-def _graphtrail_markdown(cwd: Path, db_path: Path, args: list[str]) -> str:
+def _graphtrail_scope_text(cwd: Path, db_path: Path, args: list[str], *, markdown: bool = False) -> str:
     binary = _graphtrail_bin()
     if binary is None:
         return ""
+    # Only `context` accepts --markdown/--limit; callers, callees, and impact
+    # reject them and would exit non-zero, leaving the planner one scope short.
+    extra = ["--markdown", "--limit", "8"] if markdown else []
     result = proc.run(
-        [binary, "--db", str(db_path), *args, "--markdown", "--limit", "8"],
+        [binary, "--db", str(db_path), *args, *extra],
         timeout=10.0,
         cwd=cwd,
     )
@@ -208,7 +211,7 @@ def _candidate_graphtrail_scopes(cwd: Path, task: str) -> list[EvidenceScope]:
     if not db_path.is_file():
         return []
     candidates: list[EvidenceScope] = []
-    context_text = _graphtrail_markdown(cwd, db_path, ["context", task])
+    context_text = _graphtrail_scope_text(cwd, db_path, ["context", task], markdown=True)
     if context_text:
         candidates.append(
             EvidenceScope(
@@ -228,7 +231,7 @@ def _candidate_graphtrail_scopes(cwd: Path, task: str) -> list[EvidenceScope]:
             ("graphtrail-callees", ["callees", symbol]),
             ("graphtrail-impact", ["impact", symbol]),
         ):
-            text = _graphtrail_markdown(cwd, db_path, command)
+            text = _graphtrail_scope_text(cwd, db_path, command)
             if not text:
                 continue
             candidates.append(
