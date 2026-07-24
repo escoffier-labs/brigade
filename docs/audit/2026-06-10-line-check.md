@@ -36,7 +36,7 @@ Brigade is healthy. CI is green on main, all 1038 tests pass locally in 101 seco
 
 ### [MEDIUM] Continue the monolith split: five command modules near 5k lines
 - **Station:** Structure
-- **Where:** `src/brigade/work_cmd/services.py` (5983), `src/brigade/tools_cmd.py` (5729), `src/brigade/repos_cmd.py` (5092), `src/brigade/cli.py` (5056), `src/brigade/phases_cmd.py` (4719); plus `tests/test_work_cmd.py` (11417)
+- **Where:** `src/brigade/work_cmd/services.py` (5983), `src/brigade/tools_cmd.py` (5729), `src/brigade/repos_cmd.py` (5092), `src/brigade/cli/` (was a single ~5k-line `cli.py` module), `src/brigade/phases_cmd.py` (4719); plus `tests/test_work_cmd.py` (11417)
 - **What:** The 0.10.0 work_cmd package split was the right move, but five modules remain near or above 5k lines, and the single largest file in the repo is one test module. The project already tracks this in `docs/simplification-audit-plan.md` and `docs/work-cmd-split-plan.md`, so this is acknowledged, unfinished work, not news.
 - **Why it matters:** A newcomer (or agent) cannot predict where the next change belongs inside a 5k-line module, and an 11k-line test file makes targeted test runs and review diffs painful.
 - **Fix:** Repeat the work_cmd recipe (facade + frozen-surface test) on `tools_cmd.py` and `repos_cmd.py` next, and split `test_work_cmd.py` along the same package boundaries already created (`constants`/`helpers`/`ledger`/`config`/`services`/`session`).
