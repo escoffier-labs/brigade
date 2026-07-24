@@ -1,0 +1,41 @@
+{
+  "schema": "brigade.synthesis.v1",
+  "mode": "direct-worker",
+  "worker": "sample",
+  "orchestrator": null,
+  "result": {
+    "ok": true,
+    "detail": "",
+    "text": "{\"answer_label\":\"separate\",\"answer\":\"Move agent-notify into Brigade as an opt-in adapter, but keep Agent Pantry independently built and released.\",\"contradiction_caught\":true,\"contradiction_explanation\":\"The premise is false: shared release-train assumptions do not override Pantry's separate security ownership and threat model.\",\"minority_finding\":\"Brigade may enforce a Pantry minimum version, which supports compatibility without source consolidation.\",\"evidence\":[\"Agent Pantry has separate security ownership due to browser-session and secret-handling risks.\",\"agent-notify is described as a small opt-in delivery adapter that can join Brigade.\"]}",
+    "exit_code": 0,
+    "timed_out": false,
+    "stdout_log": "logs/worker-001-sample.stdout.log",
+    "stderr_log": "logs/worker-001-sample.stderr.log",
+    "duration_seconds": 11.398,
+    "transport": "cli",
+    "requested_model": "gpt-5.6-terra",
+    "reasoning": "low"
+  },
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-08-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

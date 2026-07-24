@@ -1,0 +1,120 @@
+2026-07-24T00:38:34.301429Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:38:34.301452Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+OpenAI Codex v0.145.0
+--------
+workdir: <case-05-worktree>
+model: gpt-5.6-terra
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: low
+reasoning summaries: none
+session id: 019f918f-4815-7382-b38b-6ea6edcf9d62
+--------
+user
+## Code graph context (GraphTrail, read-only)
+
+# Context Pack: resolve_capabilities resolve_capabilities EVIDENCE.md
+
+_schema v7 - 8 entry points - 2 callers - 31 callees - 4 related files_
+
+## Entry points
+
+- `resolve_capabilities` (function) - src/brigade/roster.py:637-706
+- `test_resolve_capabilities_uses_first_satisfiable_fallback` (function) - tests/test_roster.py:751-773
+- `test_resolve_capabilities_selects_self_when_requirements_pass` (function) - tests/test_roster.py:731-748
+- `test_resolve_capabilities_drops_unsatisfied_seat_with_reason` (function) - tests/test_roster.py:776-792
+- `test_resolve_capabilities_keeps_no_requirement_endpoint_seats` (function) - tests/test_roster.py:805-818
+- `test_resolve_capabilities_dropped_orchestrator_sets_usable_false` (function) - tests/test_roster.py:990-1004
+- `test_resolve_capabilities_includes_invalid_final_fallback_dependency` (function) - tests/test_roster.py:1124-1138
+- `test_resolve_capabilities_selects_first_of_two_satisfiable_fallbacks` (function) - tests/test_roster.py:854-875
+
+## Callers
+
+- `suggest` -> `resolve_capabilities` - src/brigade/roster_cmd.py:253 -> src/brigade/roster.py
+- `doctor` -> `resolve_capabilities` - src/brigade/roster_cmd.py:342 -> src/brigade/roster.py
+
+## Callees
+
+- `resolve_capabilities` -> `SeatResolution` - src/brigade/roster.py:651 -> src/brigade/roster.py
+- `resolve_capabilities` -> `SeatResolution` - src/brigade/roster.py:679 -> src/brigade/roster.py
+- `resolve_capabilities` -> `SeatResolution` - src/brigade/roster.py:693 -> src/brigade/roster.py
+- `resolve_capabilities` -> `RosterCapabilityResolution` - src/brigade/roster.py:703 -> src/brigade/roster.py
+- `resolve_capabilities` -> `HostCapabilityProbe` - src/brigade/roster.py:641 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_requested_roots` - src/brigade/roster.py:645 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_requirements_satisfied` - src/brigade/roster.py:647 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_requirements_satisfied` - src/brigade/roster.py:667 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_resolved_self_agent` - src/brigade/roster.py:649 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_resolved_fallback_agent` - src/brigade/roster.py:670 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_ensure_invalid_final_fallback_deps` - src/brigade/roster.py:701 -> src/brigade/roster.py
+- `test_resolve_capabilities_uses_first_satisfiable_fallback` -> `next` - tests/test_roster.py:770 -> src/brigade/work_cmd/session/task_ops.py
+- `test_resolve_capabilities_uses_first_satisfiable_fallback` -> `FakeProbe` - tests/test_roster.py:753 -> tests/test_roster.py
+- `test_resolve_capabilities_uses_first_satisfiable_fallback` -> `_metadata_roster_from_text` - tests/test_roster.py:752 -> tests/test_roster.py
+- `test_resolve_capabilities_selects_self_when_requirements_pass` -> `next` - tests/test_roster.py:746 -> src/brigade/work_cmd/session/task_ops.py
+- `test_resolve_capabilities_selects_self_when_requirements_pass` -> `FakeProbe` - tests/test_roster.py:733 -> tests/test_roster.py
+- `test_resolve_capabilities_selects_self_when_requirements_pass` -> `_metadata_roster_from_text` - tests/test_roster.py:732 -> tests/test_roster.py
+- `test_resolve_capabilities_drops_unsatisfied_seat_with_reason` -> `next` - tests/test_roster.py:788 -> src/brigade/work_cmd/session/task_ops.py
+- `test_resolve_capabilities_drops_unsatisfied_seat_with_reason` -> `FakeProbe` - tests/test_roster.py:778 -> tests/test_roster.py
+- `test_resolve_capabilities_drops_unsatisfied_seat_with_reason` -> `_metadata_roster_from_text` - tests/test_roster.py:777 -> tests/test_roster.py
+- `test_resolve_capabilities_keeps_no_requirement_endpoint_seats` -> `next` - tests/test_roster.py:817 -> src/brigade/work_cmd/session/task_ops.py
+
+[GraphTrail context truncated to 4000 chars.]
+
+You are Brigade worker sample.
+Role:
+Read EVIDENCE.md in the working directory and produce one independent decision from that evidence plus the attached Brigade context only. Do not inspect any other files or run other tools. Return the requested JSON object in under 180 words.
+
+Sub-task:
+resolve_capabilities resolve_capabilities EVIDENCE.md
+
+Return a concise, complete final user-visible result.
+
+READ-ONLY MODE:
+- Do not modify files.
+- Do not install packages, change configuration, commit, push, or call external write APIs.
+- You may inspect, reason, summarize, and recommend exact next steps.
+- If a task appears to require changes, describe the proposed changes instead of making them.
+warning: Under-development features enabled: realtime_conversation. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in <home>/.codex/config.toml.
+2026-07-24T00:38:34.781925Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:38:34.781945Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+codex
+I’ll inspect only `EVIDENCE.md` and base the decision solely on it and the supplied graph context.
+exec
+/bin/bash -lc "sed -n '1,240p' EVIDENCE.md" in <case-05-worktree>
+ succeeded in 0ms:
+Code grounding symbol: resolve_capabilities resolve_capabilities
+resolve_capabilities.
+
+Experiment case 5. Decide from the evidence below.
+
+Use only this prompt and the evidence attached by Brigade. Do not inspect other
+files, call GitHub, use the network, or look for a known-good answer. Return one
+JSON object with exactly these keys:
+
+{"answer_label":"incremental-463|from-scratch-462","answer":"brief rationale","contradiction_caught":null,"contradiction_explanation":"","minority_finding":"useful dissent or empty string","evidence":["specific fact","specific fact"]}
+
+Use one allowed answer_label. Keep the response under 180 words. Longer or
+repeated answers receive no extra credit.
+
+Decision question: Which roster change should land, the from-scratch work in
+#462 or the incremental work in #463?
+
+Evidence context from escoffier-labs/brigade issue #444 and pull requests #454,
+#462, and #463:
+
+- #454 already merged packaged presets and fallback resolution in roster.py.
+- #462 started from an older base and re-implemented the same parts with a new
+  roster_resolution.py module and another minimal.toml preset.
+- #462 conflicts with the merged resolver.
+- #463 extends the resolver already merged in #454 with roster suggestion,
+  receipt-backed stats, and doctor warnings.
+- #463 does not add a second resolver module and keeps existing presets.
+
+Grounding seed for Brigade Code Intelligence: roster suggest
+resolve_capabilities load_roster fallback.
+
+codex
+{"answer_label":"incremental-463","answer":"Land #463. It builds on #454’s merged resolver, adds suggestion, receipt-backed stats, and doctor warnings without duplicating resolution logic or presets.","contradiction_caught":"#462 claims equivalent roster work but re-implements resolver behavior after #454.","contradiction_explanation":"#462 began from an older base, conflicts with the merged resolver, and introduces a second resolver module plus another minimal preset.","minority_finding":"#462 could contain independently useful ideas, but they should be ported selectively into the existing resolver path.","evidence":["#454 already merged packaged presets and fallback resolution in roster.py.","#463 extends that resolver and avoids a second resolver module, while #462 conflicts with it."]}
+2026-07-24T00:38:48.254551Z  WARN codex_file_watcher: failed to unwatch <home>/.codex/skills/.system: No watch was found. about ["<home>/.codex/skills/.system"]
+tokens used
+17,748

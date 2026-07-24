@@ -1,0 +1,20 @@
+orchestrator = "chef"
+codex_transport = "exec"
+
+[agents.chef]
+cli = "codex"
+model = "gpt-5.6-terra"
+reasoning = "low"
+role = "Create exactly one assignment for analyst, then synthesize the final decision as the requested JSON object. Read EVIDENCE.md in the working directory and use only that evidence plus the attached Brigade context. Do not inspect any other files or run other tools. Keep each response under 180 words."
+
+[agents.analyst]
+cli = "codex"
+model = "gpt-5.6-terra"
+reasoning = "low"
+role = "Read EVIDENCE.md in the working directory and decide from that evidence plus the attached Brigade context only. Do not inspect any other files or run other tools. Return the requested JSON object in under 180 words."
+
+[limits]
+max_workers = 1
+timeout_seconds = 900
+allow_models = ["codex"]
+sandbox = "read-only"

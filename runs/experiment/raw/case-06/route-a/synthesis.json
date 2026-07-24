@@ -1,0 +1,39 @@
+{
+  "schema": "brigade.synthesis.v1",
+  "orchestrator": "chef",
+  "result": {
+    "ok": true,
+    "detail": "",
+    "text": "{\"answer_label\":\"brigade-schema\",\"answer\":\"Use a Brigade-owned versioned schema for shared code-reference evidence. Brigade already composes code intelligence with evidence memory, and consolidation removes competing lifecycle owners while retaining GraphTrail and MiseLedger as separate processes.\",\"contradiction_caught\":null,\"contradiction_explanation\":\"\",\"minority_finding\":\"Keep engine process boundaries separate and preserve existing receipt and JSON contracts through compatibility tests or a reviewed migration.\",\"evidence\":[\"EVIDENCE.md states that consolidation moves shared receipt, graph-reference, and evidence contracts under Brigade.\",\"src/brigade/evidence_cmd.py documents that MiseLedger performs exact code-reference matching before lexical fallback; the named test asserts verbatim forwarding of --code-reference.\"]}",
+    "exit_code": 0,
+    "timed_out": false,
+    "stdout_log": "logs/synthesis.stdout.log",
+    "stderr_log": "logs/synthesis.stderr.log",
+    "duration_seconds": 26.991,
+    "transport": "cli",
+    "requested_model": "gpt-5.6-terra",
+    "reasoning": "low"
+  },
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-06-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

@@ -1,0 +1,5 @@
+**measurement-exit-3**
+
+A measurement failure controls a mixed battery because the result is not trustworthy. Adapter, grader, transport, provider, and timeout failures are measurement failures, so use exit code `3`.
+
+A legitimate rejection alone would use exit code `1`.

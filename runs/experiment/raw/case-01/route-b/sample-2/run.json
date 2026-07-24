@@ -1,0 +1,48 @@
+{
+  "schema": "brigade.run.v1",
+  "task": "_pre_agent_notify_manifest EVIDENCE.md",
+  "cwd": "<case-01-worktree>",
+  "orchestrator": "chef",
+  "dry_run": false,
+  "read_only": true,
+  "status": "failed",
+  "started_at": "2026-07-24T00:33:35.927394Z",
+  "status_started_at": "2026-07-24T00:33:35.935709Z",
+  "suspected_noop": false,
+  "code_graph_brief": {
+    "attached": false,
+    "bytes": 0
+  },
+  "drift_impact_brief": {
+    "attached": false,
+    "bytes": 0,
+    "pending_count": 0
+  },
+  "evidence_brief": {
+    "attached": false,
+    "bytes": 0
+  },
+  "brief_budget": {
+    "bytes": 6000,
+    "attached": []
+  },
+  "roster": {
+    "path": "<experiment-worktree>/runs/experiment/config/route-b.toml",
+    "source": "explicit",
+    "shadowed": []
+  },
+  "lock_workspace": "<case-01-worktree>",
+  "worker": "sample",
+  "artifacts": "<experiment-worktree>/runs/experiment/raw/case-01/route-b/sample-2",
+  "codex_transport": "exec",
+  "error": "RunLockError: another brigade run appears active: <case-01-worktree>/.brigade/run.lock. Remove the lock only if no run is active.",
+  "failure_phase": "startup",
+  "failure": {
+    "phase": "startup",
+    "kind": "unexpected-error",
+    "detail": "RunLockError: another brigade run appears active: <case-01-worktree>/.brigade/run.lock. Remove the lock only if no run is active.",
+    "seat": "sample"
+  },
+  "finished_at": "2026-07-24T00:33:35.935709Z",
+  "duration_seconds": 0.008
+}

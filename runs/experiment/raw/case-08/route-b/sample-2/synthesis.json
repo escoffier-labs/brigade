@@ -1,0 +1,41 @@
+{
+  "schema": "brigade.synthesis.v1",
+  "mode": "direct-worker",
+  "worker": "sample",
+  "orchestrator": null,
+  "result": {
+    "ok": true,
+    "detail": "",
+    "text": "{\"answer_label\":\"separate\",\"answer\":\"Move agent-notify into Brigade as an opt-in adapter, but keep Agent Pantry independently owned and released.\",\"contradiction_caught\":true,\"contradiction_explanation\":\"The premise is false: Pantry has separate security ownership and an independent release model; a minimum-version requirement does not create shared source ownership.\",\"minority_finding\":\"A release-train alignment might simplify coordination, but it would conflict with Pantry's separate threat model.\",\"evidence\":[\"Agent Pantry remains independently built and released because browser-session and secret handling have separate security ownership.\",\"Brigade can enforce an Agent Pantry minimum version without owning Pantry's source or release.\"]}",
+    "exit_code": 0,
+    "timed_out": false,
+    "stdout_log": "logs/worker-001-sample.stdout.log",
+    "stderr_log": "logs/worker-001-sample.stderr.log",
+    "duration_seconds": 14.874,
+    "transport": "cli",
+    "requested_model": "gpt-5.6-terra",
+    "reasoning": "low"
+  },
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-08-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "schema": "brigade.worker_results.v1",
+  "results": [
+    {
+      "worker": "analyst",
+      "task": "Read EVIDENCE.md only and, using the supplied GraphTrail context, determine the requested outcome and recommend exact read-only next steps.",
+      "ok": true,
+      "detail": "",
+      "text": "{\"answer_label\":\"stations/notify\",\"answer\":\"Agent-notify should live at stations/notify/. It is a registered station, and engines/ conflicts with the station registry and current station contract.\",\"contradiction_caught\":\"engines/ avoids release work\",\"contradiction_explanation\":\"Release-manifest membership is required under either directory, so engines/ removes none of that work.\",\"minority_finding\":\"stations/notify/ needs a scoped Go job and publish working-directory override.\",\"evidence\":[\"Manifest, provenance, installer, and resolver behavior keys on IDs, assets, and exact counts, not source directories.\",\"Existing engines/ paths are for engine-specific CI and build jobs; a new source tree can use its own filter and working directory.\"]}",
+      "exit_code": 0,
+      "timed_out": false,
+      "stdout_log": "logs/worker-001-analyst.stdout.log",
+      "stderr_log": "logs/worker-001-analyst.stderr.log",
+      "duration_seconds": 11.633,
+      "transport": "cli",
+      "requested_model": "gpt-5.6-terra",
+      "reasoning": "low"
+    }
+  ],
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-02-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

@@ -1,0 +1,3 @@
+roster: <experiment-worktree>/runs/experiment/config/route-c.toml (explicit)
+error: deliberation could not assemble enough grounded GraphTrail evidence scopes; need distinct dependency traces from .graphtrail/graphtrail.db
+artifacts: <experiment-worktree>/runs/experiment/raw/case-03/route-c

@@ -1,0 +1,39 @@
+{
+  "schema": "brigade.synthesis.v1",
+  "orchestrator": "chef",
+  "result": {
+    "ok": true,
+    "detail": "",
+    "text": "Remove `exit_code` from `_grader_result` before the stable schema freeze.\n\nFor scored results it is always `0`; otherwise it is `null`. No shipped grader provides an independent process outcome through this field, so consumers could incorrectly treat it as execution evidence.\n\nUpdate the result schema and its expectations in callers, tests, fixtures, and documentation together.",
+    "exit_code": 0,
+    "timed_out": false,
+    "stdout_log": "logs/synthesis.stdout.log",
+    "stderr_log": "logs/synthesis.stderr.log",
+    "duration_seconds": 13.98,
+    "transport": "cli",
+    "requested_model": "gpt-5.6-terra",
+    "reasoning": "low"
+  },
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-03-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

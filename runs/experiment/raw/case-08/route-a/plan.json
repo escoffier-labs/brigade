@@ -1,0 +1,15 @@
+{
+  "schema": "brigade.run_plan.v1",
+  "assignments": [
+    {
+      "stage": 1,
+      "worker": "analyst",
+      "task": "Read EVIDENCE.md only and, using the supplied GraphTrail context, identify the issue, affected behavior, likely root cause, and exact recommended next steps without modifying files.",
+      "covers": [
+        "evidence analysis",
+        "impact assessment",
+        "recommended remediation"
+      ]
+    }
+  ]
+}

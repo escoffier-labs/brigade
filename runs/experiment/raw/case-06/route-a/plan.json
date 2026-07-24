@@ -1,0 +1,14 @@
+{
+  "schema": "brigade.run_plan.v1",
+  "assignments": [
+    {
+      "stage": 1,
+      "worker": "analyst",
+      "task": "Read EVIDENCE.md only, combine it with the supplied GraphTrail context, and identify the likely intended behavior and exact source/test areas to inspect next. Return a concise read-only recommendation.",
+      "covers": [
+        "evidence interpretation",
+        "next-step recommendation"
+      ]
+    }
+  ]
+}

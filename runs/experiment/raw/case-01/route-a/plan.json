@@ -1,0 +1,15 @@
+{
+  "schema": "brigade.run_plan.v1",
+  "assignments": [
+    {
+      "stage": 1,
+      "worker": "analyst",
+      "task": "Read EVIDENCE.md only and, using the supplied GraphTrail context, identify the intended investigation scope, affected manifest compatibility paths, and recommended read-only next steps.",
+      "covers": [
+        "evidence review",
+        "impact assessment",
+        "recommendation"
+      ]
+    }
+  ]
+}

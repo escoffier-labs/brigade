@@ -1,0 +1,41 @@
+{
+  "schema": "brigade.roster_snapshot.v1",
+  "orchestrator": "chef",
+  "max_workers": 1,
+  "timeout_seconds": 900.0,
+  "allow_models": [
+    "codex"
+  ],
+  "sandbox": "read-only",
+  "agents": {
+    "chef": {
+      "cli": "codex",
+      "model": "gpt-5.6-terra",
+      "reasoning": "low",
+      "transport": "direct",
+      "transport_version": null,
+      "role": "Create exactly one assignment for analyst, then synthesize the final decision as the requested JSON object. Read EVIDENCE.md in the working directory and use only that evidence plus the attached Brigade context. Do not inspect any other files or run other tools. Keep each response under 180 words.",
+      "timeout_seconds": null,
+      "invalid_final_fallback": null,
+      "read_only_capable": true,
+      "env": null
+    },
+    "analyst": {
+      "cli": "codex",
+      "model": "gpt-5.6-terra",
+      "reasoning": "low",
+      "transport": "direct",
+      "transport_version": null,
+      "role": "Read EVIDENCE.md in the working directory and decide from that evidence plus the attached Brigade context only. Do not inspect any other files or run other tools. Return the requested JSON object in under 180 words.",
+      "timeout_seconds": null,
+      "invalid_final_fallback": null,
+      "read_only_capable": true,
+      "env": null
+    }
+  },
+  "resolution": {
+    "path": "<experiment-worktree>/runs/experiment/config/route-a.toml",
+    "source": "explicit",
+    "shadowed": []
+  }
+}

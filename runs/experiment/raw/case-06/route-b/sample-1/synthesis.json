@@ -1,0 +1,41 @@
+{
+  "schema": "brigade.synthesis.v1",
+  "mode": "direct-worker",
+  "worker": "sample",
+  "orchestrator": null,
+  "result": {
+    "ok": true,
+    "detail": "",
+    "text": "{\"decision\":\"No code change is justified from this evidence alone. The named test is an entry point, but the supplied graph does not include its implementation, assertions, or the code-reference and lexical-fallback symbols it exercises. Next step: inspect only EVIDENCE.md to identify the exact asserted forwarding order and the production call path, then make the smallest targeted change and add or adjust the corresponding regression test if needed.\",\"confidence\":\"low\",\"basis\":\"The provided graph establishes the test location but shows no direct callees or relevant production search symbols for the test.\"}",
+    "exit_code": 0,
+    "timed_out": false,
+    "stdout_log": "logs/worker-001-sample.stdout.log",
+    "stderr_log": "logs/worker-001-sample.stderr.log",
+    "duration_seconds": 6.836,
+    "transport": "cli",
+    "requested_model": "gpt-5.6-terra",
+    "reasoning": "low"
+  },
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-06-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

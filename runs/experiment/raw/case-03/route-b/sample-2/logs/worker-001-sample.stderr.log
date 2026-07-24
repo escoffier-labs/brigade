@@ -1,0 +1,124 @@
+2026-07-24T00:36:29.616436Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:36:29.616456Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+OpenAI Codex v0.145.0
+--------
+workdir: <case-03-worktree>
+model: gpt-5.6-terra
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: low
+reasoning summaries: none
+session id: 019f918d-6103-7f92-84f4-6ed8c6fa1069
+--------
+user
+## Code graph context (GraphTrail, read-only)
+
+# Context Pack: _grader_result EVIDENCE.md
+
+_schema v7 - 8 entry points - 37 callers - 5 callees - 11 related files_
+
+## Entry points
+
+- `_grader_result` (function) - src/brigade/model_trials.py:170-183
+- `_render_plan_md` (function) - src/brigade/evidence_cmd.py:679-710
+- `_md_to_html` (function) - src/brigade/research/report.py:8-23
+- `_skill_md_path` (function) - src/brigade/skills_cmd.py:123-124
+- `register._add_md_common` (function) - src/brigade/cli/memory.py:87-94
+- `_render_plan_md` (function) - src/brigade/pantry_cmd.py:400-434
+- `_render_plan_md` (function) - src/brigade/work_cmd/ledger.py:1511-1575
+- `render_plan_md` (function) - src/brigade/station_health.py:83-122
+
+## Callers
+
+- `grade_output` -> `_grader_result` - src/brigade/model_trials.py:221 -> src/brigade/model_trials.py
+- `grade_output` -> `_grader_result` - src/brigade/model_trials.py:281 -> src/brigade/model_trials.py
+- `grade_output` -> `_grader_result` - src/brigade/model_trials.py:285 -> src/brigade/model_trials.py
+- `_write_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:726 -> src/brigade/evidence_cmd.py
+- `crawl_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:740 -> src/brigade/evidence_cmd.py
+- `export_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:754 -> src/brigade/evidence_cmd.py
+- `render_html` -> `_md_to_html` - src/brigade/research/report.py:73 -> src/brigade/research/report.py
+- `_artifact_content_path` -> `_skill_md_path` - src/brigade/outcome_cmd.py:88 -> src/brigade/skills_cmd.py
+- `_copy_skill_for_harness` -> `_skill_md_path` - src/brigade/skills_cmd.py:260 -> src/brigade/skills_cmd.py
+- `_copy_skill_for_harness` -> `_skill_md_path` - src/brigade/skills_cmd.py:263 -> src/brigade/skills_cmd.py
+- `_load_skill` -> `_skill_md_path` - src/brigade/skills_cmd.py:501 -> src/brigade/skills_cmd.py
+- `_lint_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:529 -> src/brigade/skills_cmd.py
+- `_drift_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:854 -> src/brigade/skills_cmd.py
+- `install` -> `_skill_md_path` - src/brigade/skills_cmd.py:955 -> src/brigade/skills_cmd.py
+- `install` -> `_skill_md_path` - src/brigade/skills_cmd.py:995 -> src/brigade/skills_cmd.py
+- `_sync_plan` -> `_skill_md_path` - src/brigade/skills_cmd.py:1127 -> src/brigade/skills_cmd.py
+- `_user_profile_package` -> `_skill_md_path` - src/brigade/skills_cmd.py:1265 -> src/brigade/skills_cmd.py
+- `diff` -> `_skill_md_path` - src/brigade/skills_cmd.py:1564 -> src/brigade/skills_cmd.py
+- `diff` -> `_skill_md_path` - src/brigade/skills_cmd.py:1567 -> src/brigade/skills_cmd.py
+- `_mcp_read_resource` -> `_skill_md_path` - src/brigade/skills_cmd.py:1923 -> src/brigade/skills_cmd.py
+- `_compatibility_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2131 -> src/brigade/skills_cmd.py
+- `_compatibility_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2142 -> src/brigade/skills_cmd.py
+- `_fleet_skill_ids` -> `_skill_md_path` - src/brigade/skills_cmd.py:2256 -> src/brigade/skills_cmd.py
+- `_fleet_copy_keys` -> `_skill_md_path` - src/brigade/skills_cmd.py:2297 -> src/brigade/skills_cmd.py
+- `_fleet_status_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2394 -> src/brigade/skills_cmd.py
+- `_fleet_status_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2410 -> src/brigade/skills_cmd.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:99 -> src/brigade/cli/memory.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:103 -> src/brigade/cli/memory.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:108 -> src/brigade/cli/memory.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:121 -> src/brigade/cli/memory.py
+- `_write_plan` -> `_render_plan_md` - src/brigade/pantry_cmd.py:450 -> src/brigade/pantry_cmd.py
+
+[GraphTrail context truncated to 4000 chars.]
+
+You are Brigade worker sample.
+Role:
+Read EVIDENCE.md in the working directory and produce one independent decision from that evidence plus the attached Brigade context only. Do not inspect any other files or run other tools. Return the requested JSON object in under 180 words.
+
+Sub-task:
+_grader_result EVIDENCE.md
+
+Return a concise, complete final user-visible result.
+
+READ-ONLY MODE:
+- Do not modify files.
+- Do not install packages, change configuration, commit, push, or call external write APIs.
+- You may inspect, reason, summarize, and recommend exact next steps.
+- If a task appears to require changes, describe the proposed changes instead of making them.
+warning: Under-development features enabled: realtime_conversation. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in <home>/.codex/config.toml.
+2026-07-24T00:36:29.917701Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:36:29.917718Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+warning: Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.
+codex
+I’ll review only `EVIDENCE.md` and return the requested JSON decision.
+exec
+/bin/bash -lc "sed -n '1,240p' EVIDENCE.md" in <case-03-worktree>
+ succeeded in 0ms:
+Code grounding symbol: _grader_result _grader_result _grader_result.
+
+Experiment case 3. Decide from the evidence below.
+
+Use only this prompt and the evidence attached by Brigade. Do not inspect other
+files, call GitHub, use the network, or look for a known-good answer. Return one
+JSON object with exactly these keys:
+
+{"answer_label":"drop-exit-code|keep-exit-code","answer":"brief rationale","contradiction_caught":null,"contradiction_explanation":"","minority_finding":"useful dissent or empty string","evidence":["specific fact","specific fact"]}
+
+Use one allowed answer_label. Keep the response under 180 words. Longer or
+repeated answers receive no extra credit.
+
+Decision question: Before the stable schema freeze, should
+brigade.grader_result.v1 keep its exit_code field?
+
+Evidence context from escoffier-labs/brigade issue #435:
+
+- The field is hardcoded to 0 for scored results and null otherwise, regardless
+  of what actually ran.
+- No shipped grader supplies an independent process exit through this field.
+- Consumers may infer meaning from a named field even though it carries no
+  signal.
+- Removing a field after the stable freeze is a breaking schema change.
+- Removing it before the freeze does not require compatibility handling.
+
+Grounding seed for Brigade Code Intelligence: _grader_result grade_output
+grader result.
+
+codex
+{"answer_label":"drop-exit-code","answer":"Drop it before the schema freeze: it does not report an actual process outcome and risks misleading consumers.","contradiction_caught":null,"contradiction_explanation":"","minority_finding":"Keeping it could avoid a later breaking addition if graders gain exit-code data, but no shipped grader currently supplies that signal.","evidence":["The field is hardcoded to 0 for scored results and null otherwise, regardless of what ran.","Removing it before the stable freeze requires no compatibility handling."]}
+2026-07-24T00:36:38.923519Z  WARN codex_file_watcher: failed to unwatch <home>/.codex/skills/.system: No watch was found. about ["<home>/.codex/skills/.system"]
+tokens used
+13,575

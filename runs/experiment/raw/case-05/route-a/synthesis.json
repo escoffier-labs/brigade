@@ -1,0 +1,39 @@
+{
+  "schema": "brigade.synthesis.v1",
+  "orchestrator": "chef",
+  "result": {
+    "ok": true,
+    "detail": "",
+    "text": "{\"answer_label\":\"incremental-463\",\"answer\":\"Land #463. It extends the fallback resolver and presets already merged in #454, adding suggestion, receipt-backed stats, and doctor warnings without duplicating resolution logic.\",\"contradiction_caught\":\"#462 is presented as a roster change but re-implements work already merged in #454.\",\"contradiction_explanation\":\"#462 started from an older base, conflicts with the merged resolver, adds a second roster_resolution.py module, and adds another minimal.toml preset.\",\"minority_finding\":\"#462 could only be salvaged by rebasing and removing its duplicate resolver and preset work.\",\"evidence\":[\"#454 already merged packaged presets and fallback resolution in roster.py.\",\"#463 extends that resolver and preserves existing presets; #462 conflicts and duplicates it.\"]}",
+    "exit_code": 0,
+    "timed_out": false,
+    "stdout_log": "logs/synthesis.stdout.log",
+    "stderr_log": "logs/synthesis.stderr.log",
+    "duration_seconds": 21.048,
+    "transport": "cli",
+    "requested_model": "gpt-5.6-terra",
+    "reasoning": "low"
+  },
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-05-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

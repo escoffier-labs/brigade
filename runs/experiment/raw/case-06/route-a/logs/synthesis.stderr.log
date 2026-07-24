@@ -1,0 +1,979 @@
+2026-07-24T00:37:50.814856Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:37:50.814884Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+OpenAI Codex v0.145.0
+--------
+workdir: <case-06-worktree>
+model: gpt-5.6-terra
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: low
+reasoning summaries: none
+session id: 019f918e-9e31-7e92-baea-143d93909d9b
+--------
+user
+## Code graph context (GraphTrail, read-only)
+
+# Context Pack: test_evidence_search_forwards_code_reference_before_lexical_fallback EVIDENCE.md
+
+_schema v7 - 8 entry points - 34 callers - 6 callees - 11 related files_
+
+## Entry points
+
+- `test_evidence_search_forwards_code_reference_before_lexical_fallback` (function) - tests/test_issue362_code_evidence_facades.py:332-343
+- `_render_plan_md` (function) - src/brigade/evidence_cmd.py:679-710
+- `_md_to_html` (function) - src/brigade/research/report.py:8-23
+- `_skill_md_path` (function) - src/brigade/skills_cmd.py:123-124
+- `register._add_md_common` (function) - src/brigade/cli/memory.py:87-94
+- `_render_plan_md` (function) - src/brigade/pantry_cmd.py:400-434
+- `_render_plan_md` (function) - src/brigade/work_cmd/ledger.py:1511-1575
+- `render_plan_md` (function) - src/brigade/station_health.py:83-122
+
+## Callers
+
+- `_write_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:726 -> src/brigade/evidence_cmd.py
+- `crawl_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:740 -> src/brigade/evidence_cmd.py
+- `export_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:754 -> src/brigade/evidence_cmd.py
+- `render_html` -> `_md_to_html` - src/brigade/research/report.py:73 -> src/brigade/research/report.py
+- `_artifact_content_path` -> `_skill_md_path` - src/brigade/outcome_cmd.py:88 -> src/brigade/skills_cmd.py
+- `_copy_skill_for_harness` -> `_skill_md_path` - src/brigade/skills_cmd.py:260 -> src/brigade/skills_cmd.py
+- `_copy_skill_for_harness` -> `_skill_md_path` - src/brigade/skills_cmd.py:263 -> src/brigade/skills_cmd.py
+- `_load_skill` -> `_skill_md_path` - src/brigade/skills_cmd.py:501 -> src/brigade/skills_cmd.py
+- `_lint_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:529 -> src/brigade/skills_cmd.py
+- `_drift_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:854 -> src/brigade/skills_cmd.py
+- `install` -> `_skill_md_path` - src/brigade/skills_cmd.py:955 -> src/brigade/skills_cmd.py
+- `install` -> `_skill_md_path` - src/brigade/skills_cmd.py:995 -> src/brigade/skills_cmd.py
+- `_sync_plan` -> `_skill_md_path` - src/brigade/skills_cmd.py:1127 -> src/brigade/skills_cmd.py
+- `_user_profile_package` -> `_skill_md_path` - src/brigade/skills_cmd.py:1265 -> src/brigade/skills_cmd.py
+- `diff` -> `_skill_md_path` - src/brigade/skills_cmd.py:1564 -> src/brigade/skills_cmd.py
+- `diff` -> `_skill_md_path` - src/brigade/skills_cmd.py:1567 -> src/brigade/skills_cmd.py
+- `_mcp_read_resource` -> `_skill_md_path` - src/brigade/skills_cmd.py:1923 -> src/brigade/skills_cmd.py
+- `_compatibility_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2131 -> src/brigade/skills_cmd.py
+- `_compatibility_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2142 -> src/brigade/skills_cmd.py
+- `_fleet_skill_ids` -> `_skill_md_path` - src/brigade/skills_cmd.py:2256 -> src/brigade/skills_cmd.py
+- `_fleet_copy_keys` -> `_skill_md_path` - src/brigade/skills_cmd.py:2297 -> src/brigade/skills_cmd.py
+- `_fleet_status_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2394 -> src/brigade/skills_cmd.py
+- `_fleet_status_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2410 -> src/brigade/skills_cmd.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:99 -> src/brigade/cli/memory.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:103 -> src/brigade/cli/memory.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:108 -> src/brigade/cli/memory.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:121 -> src/brigade/cli/memory.py
+- `_write_plan` -> `_render_plan_md` - src/brigade/pantry_cmd.py:450 -> src/brigade/pantry_cmd.py
+- `setup_plan` -> `_render_plan_md` - src/brigade/pantry_cmd.py:473 -> src/brigade/pantry_cmd.py
+- `service_plan` -> `_render_plan_md` - src/brigade/pantry_cmd.py:494 -> src/brigade/pantry_cmd.py
+
+[GraphTrail context truncated to 4000 chars.]
+
+You are the Brigade orchestrator. Synthesize the final answer for the user.
+Account for worker failures if any are present. Do not include implementation chatter.
+
+Brigade-computed facts:
+- changed_files: observed during the run, author unknown (0)
+- untracked_files: observed during the run, author unknown (0)
+- diffstat: unavailable (dirty baseline; line counts would include pre-existing changes)
+- verify_receipts: 0
+- code_graph_delta: code graph delta skipped: read-only run
+
+Original task:
+test_evidence_search_forwards_code_reference_before_lexical_fallback EVIDENCE.md
+
+Worker results:
+Worker: analyst
+Sub-task: Read EVIDENCE.md only, combine it with the supplied GraphTrail context, and identify the likely intended behavior and exact source/test areas to inspect next. Return a concise read-only recommendation.
+Status: ok
+Detail:
+Output:
+{"answer_label":"brigade-schema","answer":"Use a Brigade-owned versioned schema: the evidence assigns Brigade ownership of shared receipt, graph-reference, and evidence contracts, avoiding two lifecycle owners. Inspect the code-reference evidence-search facade to confirm exact reference lookup is attempted before its explicit lexical fallback, then preserve existing JSON/receipt compatibility.","contradiction_caught":null,"contradiction_explanation":"","minority_finding":"Engine process boundaries should remain separate even though the shared contract moves to Brigade.","evidence":["Issues #352 and #361 say consolidation moves shared receipt, graph-reference, and evidence contracts under Brigade.","tests/test_issue362_code_evidence_facades.py:332-343 contains test_evidence_search_forwards_code_reference_before_lexical_fallback."]}
+
+
+READ-ONLY MODE:
+- Do not modify files.
+- Do not install packages, change configuration, commit, push, or call external write APIs.
+- You may inspect, reason, summarize, and recommend exact next steps.
+- If a task appears to require changes, describe the proposed changes instead of making them.
+warning: Under-development features enabled: realtime_conversation. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in <home>/.codex/config.toml.
+2026-07-24T00:37:53.006566Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:37:53.006582Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+codex
+I’ll inspect the relevant evidence and source/test surfaces in read-only mode, then provide the intended behavior and next change.
+exec
+/bin/bash -lc "sed -n '1,240p' <home>/.codex/skills/using-skillet/SKILL.md && sed -n '1,260p' <home>/.codex/skills/brigade-work/SKILL.md" in <case-06-worktree>
+ succeeded in 0ms:
+---
+name: using-skillet
+description: Use when starting any conversation - establishes how to find and use skillet skills, requiring skill invocation before ANY response including clarifying questions.
+---
+
+<SUBAGENT-STOP>
+If you were dispatched as a subagent to execute a specific task, skip this skill and do the task.
+</SUBAGENT-STOP>
+
+<EXTREMELY-IMPORTANT>
+If you think there is even a 1% chance a skill might apply to what you are doing, you MUST invoke the skill. If a skill applies, using it is not optional. You cannot rationalize your way out of it.
+</EXTREMELY-IMPORTANT>
+
+# using-skillet
+
+A kitchen runs on mise en place: everything in its place before service, every cook reaching for the same prepped components instead of improvising. skillet is that prep for an AI coding session. The skills are the prepped stations; this skill is the line check that runs before you touch anything, deciding which station the current task belongs to and sending you there before you start cooking.
+
+## The rule
+
+**Invoke the relevant or requested skill BEFORE any response or action,** including before clarifying questions and before "just looking." Even a 1% chance a skill applies means you invoke it to check. If it turns out wrong for the situation, you drop it; checking costs nothing, skipping costs a botched dish.
+
+```
+user message or task
+  -> about to design/build something new? -> mise (then recipe) BEFORE anything else
+  -> might any other skill apply? (yes, even 1%) -> invoke it
+     -> announce: "Using skillet's <skill> to <purpose>"
+     -> follow it exactly; if it has a checklist, make a todo per item
+  -> definitely nothing applies -> respond
+```
+
+## Instruction priority
+
+skillet skills override default system behavior where they conflict, but **the user always wins**:
+
+1. **User instructions** (CLAUDE.md, AGENTS.md, direct requests) - highest.
+2. **skillet skills** - override default behavior.
+3. **Default system prompt** - lowest.
+
+If the user's instructions say to do something a skill discourages, follow the user. They are in control.
+
+## How to load skills
+
+Never read a skill's SKILL.md by hand with file tools; load it through your platform's skill mechanism so it activates properly. In Claude Code, use the `Skill` tool. In Codex and OpenClaw, skills load natively, follow them as presented. The skill names below are lowercase and match how you invoke them (e.g. `skillet:mise`).
+
+## The stations (skillet skills by job)
+
+**Design and build:**
+- `mise` - turn an idea into an approved design and written spec, before any code. The first move for any "let's build X."
+- `recipe` - turn an approved spec into a concrete implementation plan.
+- `demi` - start from the smallest useful code path; avoid speculative architecture.
+- `taste` - test-driven: write the failing test first, watch it fail, then the minimal code.
+- `fire` - execute a written plan task by task, verifying and committing each.
+- `stations` - fan out two or more genuinely independent pieces of work to concurrent agents.
+- `worktree` - set up an isolated workspace before risky or parallel work.
+
+**Debug and verify:**
+- `refire` - anything misbehaving: find the root cause before proposing any fix.
+- `check` - before claiming anything works, is fixed, or passes: run it, read the output, then claim with evidence.
+
+**Review and ship:**
+- `pass` - the pre-PR gate; nothing is filed until it clears.
+- `review` - dispatch an independent reviewer with crafted context.
+- `sendback` - act on review feedback: verify each claim before implementing it.
+- `release-cut` - cut a release, roll the changelog, tag a version (on request).
+- `expedite` - work the backlog from an audit, fix the findings in priority order.
+
+**Audit and direction:**
+- `line-check` - audit a repo's health, find the highest-value improvements.
+- `bug-hunt` - sweep for correctness defects.
+- `security-sweep` - find and fix vulnerabilities, leaked secrets, vulnerable deps.
+- `special` - propose what to build next, grounded in the code.
+
+**Simplify:**
+- `reduce` - simplify and tidy code without changing behavior.
+
+**Writing and publishing:**
+- `grill` - harden a technical writeup for a skeptical audience (HN, Lobsters).
+- `plate` - scrub identity and infra leaks from prose before it goes public.
+- `publish-readiness` - pre-publication leak scan of a repo and its history.
+- `reel-check` - scrub leaks burned into a rendered video or demo.
+- `seo-fleet` - audit and fix SEO to the fleet contract.
+
+**Memory and work loop:**
+- `memory-handoff` - capture durable knowledge at the end of a session.
+- `brigade-handoffs` - set up, write, lint, and troubleshoot Brigade memory handoffs.
+- `brigade-work` - in a Brigade-wired repo or workspace, route work through Brigade: brief at start, verify via `brigade work verify run`, capture outcomes, handoff at end, so the outcome ledger fills instead of sitting empty.
+
+**Pressure and meta:**
+- `pressure-test` - stress-test an idea, plan, or scope before anyone builds it.
+- `skillify` - turn a repeated workflow or runbook into a reusable skill.
+- `using-skillet` - this skill.
+
+## Skill priority
+
+When more than one could apply, run **process skills first** (they set how you approach the work), then implementation skills:
+
+- "Let's build X" -> `mise` first, then `recipe`, then the build skills.
+- "Fix this bug" -> `refire` first, then the fix, then `check`.
+- "Is this ready to ship" -> `pass` (which itself calls `review`, `taste`, `check`).
+
+## Skill types
+
+- **Rigid** (taste, refire, check, pass): follow exactly. Do not adapt away the discipline.
+- **Flexible** (the rest): adapt the principles to the situation.
+
+The skill itself tells you which.
+
+## Red flags
+
+These thoughts mean stop, you are rationalizing past a skill:
+
+| Thought | Reality |
+|---|---|
+| "This is just a simple question." | Questions are tasks. Check for a skill. |
+| "Let me look at the code first." | Skills tell you HOW to look. Check first. |
+| "I need more context before invoking." | The skill check comes before clarifying questions. |
+| "This doesn't need a formal skill." | If a skill exists for it, use it. |
+| "I remember what this skill says." | Skills evolve. Load the current version. |
+| "I'll just do this one quick thing first." | Check before doing anything. |
+| "The skill is overkill here." | Simple things become complex. Use it. |
+---
+name: brigade-work
+description: Use at the start of any work session and whenever you verify a change in a Brigade-wired repo or workspace - routes your work through Brigade so verification, outcomes, and handoffs are actually captured instead of leaving Brigade installed-but-dormant. Triggers on starting a task, running tests/checks, or finishing a session.
+---
+
+# brigade-work
+
+Brigade only earns its keep if real work flows through it. Installed and never used, it is dead weight: the daily brief is empty, the outcome ledger never fills, and `outcome rank` says "ranking: none". This skill is the loop that feeds it. Check what is pending, run your verification *through* Brigade so it produces a signed receipt, record the outcome against the skill or card that did the work, and hand off what you learned.
+
+**Core principle:** the model never grades its own work. A real exit code captured as a Brigade verify receipt is the only signal that counts. Route verification through Brigade, capture the outcome, and the loop is honest.
+
+## When this applies
+
+The repo or workspace is Brigade-wired: a `.brigade/` directory exists, or `brigade status --target .` succeeds. If neither is true, this skill does not apply (run `brigade init` first only if the user wants Brigade here).
+
+## The loop
+
+### 1. Start: see what is pending
+At the start of a work session, before deciding what to do:
+```bash
+brigade work brief --target .        # pending work, imports, warnings, suggested next command
+```
+In a memory/operator workspace, `brigade daily status --target .` is the lighter equivalent. Read it first.
+
+### 2. Verify THROUGH Brigade, not raw
+When you would run tests or a check to confirm a change, run it through Brigade so it records the exit code:
+```bash
+brigade work verify run --target . --command "<your test command>"   # e.g. "pytest -q", "npm test", "go test ./..."
+```
+This writes a receipt under `.brigade/work/verify-runs/<run-id>/` with the real status. Running tests raw produces no signal and the ledger stays empty.
+
+To do steps 2 and 3 in one command (so the capture is never forgotten), pass `--capture`:
+```bash
+brigade work verify run --target . --command "<test command>" --capture <id>
+```
+
+### 3. Capture the outcome against what did the work
+Immediately after a verify run (if you did not use `--capture`), record the result against the skill or card you exercised:
+```bash
+brigade outcome capture <skill-or-card-id> --run-id latest --kind skill
+```
+This is the +1 (passed) or -1 (failed) the learning ratchet scores. Capture on failures too - a -1 is how a bad skill gets rolled back.
+
+**Name an id you actually have.** Capturing against an id Brigade does not recognize prints a warning and pollutes the ranking. The id is whatever genuinely guided the change:
+- a skill you followed - e.g. the skillet skills `taste`, `refire`, `recipe` **if they are installed** (a default `brigade init` does not ship them);
+- a memory card under `memory/cards/` (use `--kind card`);
+- `brigade-work` itself - a fresh repo always has this one, so when nothing else applies, capture against `brigade-work`.
+
+Do not invent a skill name you are not running just to have something to capture against.
+
+### 4. Finish: handoff, and let the ratchet run
+At session end, write a Memory Handoff for any durable knowledge (use your handoff inbox's `TEMPLATE.md`; `brigade handoff-template` prints it). The ratchet then closes itself, on a schedule or by hand:
+```bash
+brigade outcome rank --target .            # most-proven skills first
+brigade outcome reconcile --target .       # dry-run; --apply promotes a proven skill / rolls back a regressed one across harnesses
+```
+`reconcile --apply` installs a proven skill only if it lives in the registry. To make a candidate skill promotable, accept it first (`brigade skills inbox accept <id>`); the ledger id must match the registry slug. A reconcile that cannot install reports `install-skipped: not in registry` and leaves the skill a candidate (it never silently marks it promoted).
+
+## Rules
+- When a result should count, verification runs through `brigade work verify run`, never raw.
+- Capture an outcome after every verify, naming the skill or card that did the work.
+- One verify, one capture. Never batch or invent outcomes - the receipt is the evidence.
+- End-of-session handoffs stay mandatory; this skill adds the verify-and-capture half of the loop.
+
+## Common mistakes
+- Running tests raw, so the ledger stays empty and `outcome rank` shows "ranking: none" - the exact symptom of an unfed loop.
+- Capturing against a skill you did not actually use, which poisons the ranking.
+- Skipping capture on failures - the -1 signals are the whole point of the ratchet.
+- Treating Brigade as install-and-forget. It is dormant until work flows through it; this skill is how the work flows.
+- Putting shell operators in the verify command. `brigade work verify run` splits `--command` with `shlex` and runs it with `shell=False` in the `--target` directory, so `cd x && pytest`, pipes, and `&&` do NOT work. Set the working directory with `--target <dir>` and pass a single command, e.g. `--target ./pkg --command "pytest -q"`.
+
+codex
+I’m using the Brigade work-loop guidance because this repository is Brigade-wired. I’ll only run its read-only brief and inspect the named test and its facade; no files will be changed or verified.
+exec
+/bin/bash -lc "brigade work brief --target . && rg --files -g 'EVIDENCE.md' -g 'test_issue362_code_evidence_facades.py' -g '*.py' | rg '("'^|/)(EVIDENCE'"\\.md|test_issue362_code_evidence_facades\\.py|evidence)' && sed -n '280,370p' tests/test_issue362_code_evidence_facades.py && rg -n -C 4 'code_reference|lexical_fallback|lexical|evidence_search' src/brigade tests/test_issue362_code_evidence_facades.py" in <case-06-worktree>
+ succeeded in 637ms:
+work brief: <case-06-worktree>
+branch: detached:0941c3e
+dirty_files: 1
+  ?? EVIDENCE.md
+active_session: none
+latest_session: none (<case-06-worktree>/.brigade/work)
+dogfood_ready: False
+latest_run: none
+outcome_loop: verify_runs=0 records=0 scored=0 promoted=0
+outcome_loop_issue: outcome_loop_dormant no verify runs or outcome records yet; the verified-learning loop is not running
+pantry: agentpantry version unparsable (invalid-version); expected >= 0.5.0
+notifications: ok configured=True
+next_source: default_review
+next: Review this repo and recommend the next implementation slice.
+suggested_command: brigade work run
+plans: no pending tasks
+inbox_hygiene: ok
+scanner_config: <case-06-worktree>/.brigade/scanners.toml
+scanner_health: 2 warning(s)
+chat_surfaces_config: <case-06-worktree>/.brigade/chat-surfaces.toml
+chat_surfaces_health: 1 issue(s)
+chat_surfaces_top_issue: chat_surfaces_config chat surface config missing: <home>/.cache/brigade/worktrees/brigade-issue-442-case-0...
+memory_care_config: <case-06-worktree>/.brigade/memory-care.toml
+memory_care_health: 3 issue(s)
+memory_care_top_issue: memory_care_config missing, run `brigade memory care init --target <home>/.cache/brigade/worktrees/briga...
+security_config: <case-06-worktree>/.brigade/security.toml
+security_health: 3 issue(s)
+backup_config: <case-06-worktree>/.brigade/backups.toml
+backup_health: 1 issue(s)
+backup_summary: 1 active backup issue(s), 0 reviewed/deferred issue(s), 0 restore rehearsal issue(s)
+backup_top_issue: None/None backup config missing: <case-06-worktree>/.bri...
+daily_config: <case-06-worktree>/.brigade/daily.toml
+daily_driver: 1 issue(s)
+daily_top_issue: daily_config_missing missing <case-06-worktree>/.brigade/daily.toml...
+phase_ledger: ok
+phase_records: 0
+phase_actions: 0
+tool_config: <case-06-worktree>/.brigade/tools.toml
+tool_catalog: 1 issue(s)
+tool_top_issue: catalog/config tool catalog config missing: <home>/.cache/brigade/worktrees/brigade-issue-442-case-0...
+tool_call_pending: 0
+tool_runs: 0
+tool_checkpoints: 0
+roadmap_completion: 1 issue(s)
+roadmap_top_issue: roadmap_documented_command_missing_cli 2 documented command(s) missing from CLI
+repo_fleet_config: <case-06-worktree>/.brigade/repos.toml
+repo_fleet: 5 issue(s)
+repo_fleet_top_issue: repo_fleet_config missing config: <case-06-worktree>/.brigade/re...
+context_packs: 0
+context_top_issue: context_pack_missing no context packs
+project_consolidation: 1 issue(s)
+project_consolidation_top_issue: projects_config missing config: <case-06-worktree>/.brigade/pr...
+learning_candidates: 0
+research_handoffs: ok
+operator_report: 1 issue(s)
+operator_report_top_issue: operator_report_missing no local operator report has been built
+operator_report_command: brigade center report build
+operator_actions: 0 open
+EVIDENCE.md
+engines/evidence-ledger/scripts/validate_release_workflow.py
+tests/test_issue362_code_evidence_facades.py
+src/brigade/evidence_cmd.py
+src/brigade/cli/evidence.py
+src/brigade/evidence_runtime.py
+src/brigade/release_cmd/evidence.py
+src/brigade/evidence_brief.py
+
+
+def test_search_sync_plan_stays_plan_only_and_preserves_json_contract(monkeypatch, tmp_path, capsys):
+    calls: list[dict] = []
+    _patch_graphtrail(monkeypatch, run_calls=calls)
+
+    rc = cli.main(["search", "sync", "plan", "--target", str(tmp_path), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert calls == []
+    assert payload["station"] == "search"
+    assert payload["kind"] == "sync"
+    assert ["graphtrail", "sync", str(tmp_path.resolve())] in payload["commands"]
+
+
+# --- brigade evidence: MiseLedger forwarding --------------------------------
+
+
+def test_evidence_crawl_forwards_exact_argv_with_space_path(monkeypatch, tmp_path, capsys):
+    calls: list[dict] = []
+    _patch_miseledger(monkeypatch, run_calls=calls)
+    space = tmp_path / "evidence root"
+    space.mkdir()
+
+    rc = cli.main(["evidence", "crawl", "files", str(space)])
+
+    assert rc == 0
+    assert calls == [{"args": ["/fake/miseledger", "crawl", "files", str(space)], "timeout": 900.0, "kwargs": {}}]
+    assert capsys.readouterr().out == "miseledger-stdout\n"
+
+
+def test_evidence_crawl_uses_configured_timeout(monkeypatch):
+    calls: list[dict] = []
+    _patch_miseledger(monkeypatch, run_calls=calls)
+    monkeypatch.setenv("BRIGADE_EVIDENCE_CRAWL_TIMEOUT_SECONDS", "42.5")
+
+    assert cli.main(["evidence", "crawl", "sessions"]) == 0
+    assert calls[0]["timeout"] == 42.5
+
+
+@pytest.mark.parametrize("value", ("", "zero", "0", "-1", "nan", "inf"))
+def test_evidence_crawl_rejects_invalid_configured_timeout_before_starting_engine(monkeypatch, capsys, value):
+    calls: list[dict] = []
+    _patch_miseledger(monkeypatch, run_calls=calls)
+    monkeypatch.setenv("BRIGADE_EVIDENCE_CRAWL_TIMEOUT_SECONDS", value)
+
+    assert cli.main(["evidence", "crawl", "sessions"]) == 2
+    assert calls == []
+    assert "BRIGADE_EVIDENCE_CRAWL_TIMEOUT_SECONDS" in capsys.readouterr().err
+
+
+def test_evidence_search_forwards_code_reference_before_lexical_fallback(monkeypatch, capsys):
+    calls: list[dict] = []
+    _patch_miseledger(monkeypatch, run_calls=calls)
+    ref = code_references.canonical_json(REFERENCE)
+    code_references.validate(REFERENCE)
+
+    rc = cli.main(["evidence", "search", "needle", "--code-reference", ref, "--json"])
+
+    assert rc == 0
+    assert calls[0]["args"] == ["/fake/miseledger", "search", "needle", "--code-reference", ref, "--json"]
+    assert calls[0]["timeout"] == 30.0
+    assert json.loads(capsys.readouterr().out) == {"matches": []}
+
+
+def test_evidence_search_accepts_a_leading_code_reference(monkeypatch):
+    calls: list[dict] = []
+    _patch_miseledger(monkeypatch, run_calls=calls)
+    ref = code_references.canonical_json(REFERENCE)
+
+    rc = cli.main(["evidence", "search", "--code-reference", ref])
+
+    assert rc == 0
+    assert calls[0]["args"] == ["/fake/miseledger", "search", "--code-reference", ref]
+
+
+def test_evidence_search_propagates_child_exit_code(monkeypatch):
+    calls: list[dict] = []
+    _patch_miseledger(monkeypatch, run_calls=calls)
+
+    rc = cli.main(["evidence", "search", "needle", "--test-exit", "5"])
+
+    assert rc == 5
+    assert calls[0]["args"][:3] == ["/fake/miseledger", "search", "needle"]
+
+
+def test_evidence_crawl_missing_miseledger_exits_127_with_diagnostic(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(evidence_brief, "_miseledger_bin", lambda: None)
+
+    rc = cli.main(["evidence", "crawl", "sessions"])
+tests/test_issue362_code_evidence_facades.py-14-import pytest
+tests/test_issue362_code_evidence_facades.py-15-
+tests/test_issue362_code_evidence_facades.py-16-from brigade import (
+tests/test_issue362_code_evidence_facades.py-17-    cli,
+tests/test_issue362_code_evidence_facades.py:18:    code_references,
+tests/test_issue362_code_evidence_facades.py-19-    completions,
+tests/test_issue362_code_evidence_facades.py-20-    component_manifest,
+tests/test_issue362_code_evidence_facades.py-21-    context_cmd,
+tests/test_issue362_code_evidence_facades.py-22-    evidence_brief,
+--
+tests/test_issue362_code_evidence_facades.py-328-    assert calls == []
+tests/test_issue362_code_evidence_facades.py-329-    assert "BRIGADE_EVIDENCE_CRAWL_TIMEOUT_SECONDS" in capsys.readouterr().err
+tests/test_issue362_code_evidence_facades.py-330-
+tests/test_issue362_code_evidence_facades.py-331-
+tests/test_issue362_code_evidence_facades.py:332:def test_evidence_search_forwards_code_reference_before_lexical_fallback(monkeypatch, capsys):
+tests/test_issue362_code_evidence_facades.py-333-    calls: list[dict] = []
+tests/test_issue362_code_evidence_facades.py-334-    _patch_miseledger(monkeypatch, run_calls=calls)
+tests/test_issue362_code_evidence_facades.py:335:    ref = code_references.canonical_json(REFERENCE)
+tests/test_issue362_code_evidence_facades.py:336:    code_references.validate(REFERENCE)
+tests/test_issue362_code_evidence_facades.py-337-
+tests/test_issue362_code_evidence_facades.py-338-    rc = cli.main(["evidence", "search", "needle", "--code-reference", ref, "--json"])
+tests/test_issue362_code_evidence_facades.py-339-
+tests/test_issue362_code_evidence_facades.py-340-    assert rc == 0
+--
+tests/test_issue362_code_evidence_facades.py-342-    assert calls[0]["timeout"] == 30.0
+tests/test_issue362_code_evidence_facades.py-343-    assert json.loads(capsys.readouterr().out) == {"matches": []}
+tests/test_issue362_code_evidence_facades.py-344-
+tests/test_issue362_code_evidence_facades.py-345-
+tests/test_issue362_code_evidence_facades.py:346:def test_evidence_search_accepts_a_leading_code_reference(monkeypatch):
+tests/test_issue362_code_evidence_facades.py-347-    calls: list[dict] = []
+tests/test_issue362_code_evidence_facades.py-348-    _patch_miseledger(monkeypatch, run_calls=calls)
+tests/test_issue362_code_evidence_facades.py:349:    ref = code_references.canonical_json(REFERENCE)
+tests/test_issue362_code_evidence_facades.py-350-
+tests/test_issue362_code_evidence_facades.py-351-    rc = cli.main(["evidence", "search", "--code-reference", ref])
+tests/test_issue362_code_evidence_facades.py-352-
+tests/test_issue362_code_evidence_facades.py-353-    assert rc == 0
+tests/test_issue362_code_evidence_facades.py-354-    assert calls[0]["args"] == ["/fake/miseledger", "search", "--code-reference", ref]
+tests/test_issue362_code_evidence_facades.py-355-
+tests/test_issue362_code_evidence_facades.py-356-
+tests/test_issue362_code_evidence_facades.py:357:def test_evidence_search_propagates_child_exit_code(monkeypatch):
+tests/test_issue362_code_evidence_facades.py-358-    calls: list[dict] = []
+tests/test_issue362_code_evidence_facades.py-359-    _patch_miseledger(monkeypatch, run_calls=calls)
+tests/test_issue362_code_evidence_facades.py-360-
+tests/test_issue362_code_evidence_facades.py-361-    rc = cli.main(["evidence", "search", "needle", "--test-exit", "5"])
+--
+tests/test_issue362_code_evidence_facades.py-387-    assert cli.main(["evidence", "crawl", "sessions"]) == 0
+tests/test_issue362_code_evidence_facades.py-388-    assert calls == [[str(override), "crawl", "sessions"]]
+tests/test_issue362_code_evidence_facades.py-389-
+tests/test_issue362_code_evidence_facades.py-390-
+tests/test_issue362_code_evidence_facades.py:391:def test_evidence_search_timeout_returns_124(monkeypatch):
+tests/test_issue362_code_evidence_facades.py-392-    _patch_miseledger(monkeypatch)
+tests/test_issue362_code_evidence_facades.py-393-
+tests/test_issue362_code_evidence_facades.py-394-    def timeout_run(args, timeout=30.0, **kwargs):
+tests/test_issue362_code_evidence_facades.py-395-        return proc.Result(124, "", "timeout after 0.1s\n")
+--
+src/brigade/skills_cmd.py-1204-            if not file_path.is_file():
+src/brigade/skills_cmd.py-1205-                continue
+src/brigade/skills_cmd.py-1206-            rel = file_path.relative_to(skill_dir).as_posix()
+src/brigade/skills_cmd.py-1207-            parts = Path(rel).parts
+src/brigade/skills_cmd.py:1208:            # lexical containment: reject absolute-looking keys and ".." components
+src/brigade/skills_cmd.py-1209-            if rel.startswith("/") or ".." in parts:
+src/brigade/skills_cmd.py-1210-                continue
+src/brigade/skills_cmd.py-1211-            if rel == ".git" or rel.startswith(".git/"):
+src/brigade/skills_cmd.py-1212-                continue
+--
+src/brigade/evidence_cmd.py-282-def run_engine(verb: str, arguments: list[str]) -> int:
+src/brigade/evidence_cmd.py-283-    """Run MiseLedger without changing its argv, output, or data contract.
+src/brigade/evidence_cmd.py-284-
+src/brigade/evidence_cmd.py-285-    A ``--code-reference`` JSON value is relayed verbatim to MiseLedger, which
+src/brigade/evidence_cmd.py:286:    performs exact code-reference matching before lexical fallback.
+src/brigade/evidence_cmd.py-287-    """
+src/brigade/evidence_cmd.py-288-
+src/brigade/evidence_cmd.py-289-    if verb == "crawl":
+src/brigade/evidence_cmd.py-290-        return _run_crawl(arguments)
+--
+src/brigade/pantry_compat.py-26-# v0.5.0 is the first tagged release exposing every Brigade-invoked surface:
+src/brigade/pantry_compat.py-27-# ``doctor --json --no-net``, ``status --json``, ``inventory --json``, and
+src/brigade/pantry_compat.py-28-# ``version --json``. v0.4.1 lacks ``inventory``. This floor is evidence-backed
+src/brigade/pantry_compat.py-29-# and intentionally integer-compared so multi-digit segments (e.g. 0.10.3) sort
+src/brigade/pantry_compat.py:30:# correctly rather than lexically.
+src/brigade/pantry_compat.py-31-AGENTPANTRY_MIN_VERSION: Tuple[int, int, int] = (0, 5, 0)
+src/brigade/pantry_compat.py-32-
+src/brigade/pantry_compat.py-33-# Conservative per-segment length bound. Each numeric segment of a released
+src/brigade/pantry_compat.py-34-# semver triple is realistically small; bounding the digit count keeps parsing
+--
+src/brigade/pantry_compat.py-101-    """Parse a version value into an integer ``(major, minor, patch)`` triple.
+src/brigade/pantry_compat.py-102-
+src/brigade/pantry_compat.py-103-    Returns ``None`` for non-strings, missing values, prerelease-shaped, dev,
+src/brigade/pantry_compat.py-104-    unknown, non-ASCII-digit, oversized, or otherwise unparsable inputs.
+src/brigade/pantry_compat.py:105:    Comparison is integer, not lexical. Never raises: the per-segment digit
+src/brigade/pantry_compat.py-106-    bound keeps ``int()`` conversion bounded, and a conversion ``ValueError``
+src/brigade/pantry_compat.py-107-    is caught defensively and collapsed to ``None`` so the caller surfaces the
+src/brigade/pantry_compat.py-108-    fixed :data:`_INVALID_VERSION_LABEL` rather than propagating an exception.
+src/brigade/pantry_compat.py-109-    """
+--
+src/brigade/graphtrail_delta.py-11-import time
+src/brigade/graphtrail_delta.py-12-from pathlib import Path
+src/brigade/graphtrail_delta.py-13-from typing import Any
+src/brigade/graphtrail_delta.py-14-
+src/brigade/graphtrail_delta.py:15:from . import code_references, component_bins
+src/brigade/graphtrail_delta.py-16-
+src/brigade/graphtrail_delta.py-17-SNAPSHOT_NAME = "graphtrail-before.db"
+src/brigade/graphtrail_delta.py-18-SNAPSHOT_AFTER_NAME = "graphtrail-after.db"
+src/brigade/graphtrail_delta.py-19-SIDECAR_NAME = "graph-delta.json"
+--
+src/brigade/graphtrail_delta.py-232-            "raw_counts": raw_counts,
+src/brigade/graphtrail_delta.py-233-            "changed_symbols": changed_symbols,
+src/brigade/graphtrail_delta.py-234-            "changed_symbol_count": len(changed_symbols),
+src/brigade/graphtrail_delta.py-235-            "changed_symbols_truncated": _symbol_count(diff_payload) > CHANGED_SYMBOL_LIMIT,
+src/brigade/graphtrail_delta.py:236:            **_code_reference_node_metadata(diff_payload),
+src/brigade/graphtrail_delta.py-237-            "edge_churn": edge_churn,
+src/brigade/graphtrail_delta.py-238-            "line_insensitive_edge_churn": edge_churn,
+src/brigade/graphtrail_delta.py-239-            "before_snapshot_path": str(snapshot_path),
+src/brigade/graphtrail_delta.py-240-            "db_path": str(db_path),
+--
+src/brigade/graphtrail_delta.py-433-        "raw_counts": payload.get("raw_counts") if isinstance(payload.get("raw_counts"), dict) else {},
+src/brigade/graphtrail_delta.py-434-        "edge_churn": int(payload.get("edge_churn") or 0),
+src/brigade/graphtrail_delta.py-435-        "changed_symbols": payload.get("changed_symbols") if isinstance(payload.get("changed_symbols"), list) else [],
+src/brigade/graphtrail_delta.py-436-        "changed_symbol_count": int(payload.get("changed_symbol_count") or 0),
+src/brigade/graphtrail_delta.py:437:        **_code_reference_node_metadata(payload),
+src/brigade/graphtrail_delta.py-438-    }
+src/brigade/graphtrail_delta.py-439-    timeout = payload.get("graphtrail_timeout_seconds")
+src/brigade/graphtrail_delta.py-440-    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+src/brigade/graphtrail_delta.py-441-        compact["graphtrail_timeout_seconds"] = float(timeout)
+--
+src/brigade/graphtrail_delta.py-446-        compact["commands"] = commands
+src/brigade/graphtrail_delta.py-447-    return compact
+src/brigade/graphtrail_delta.py-448-
+src/brigade/graphtrail_delta.py-449-
+src/brigade/graphtrail_delta.py:450:def _code_reference_node_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+src/brigade/graphtrail_delta.py-451-    """Keep canonical nodes plus their valid pre-cap candidate accounting."""
+src/brigade/graphtrail_delta.py:452:    existing = payload.get("code_reference_nodes")
+src/brigade/graphtrail_delta.py-453-    if isinstance(existing, list):
+src/brigade/graphtrail_delta.py:454:        normalized_nodes = [code_references.normalize_delta_node(value) for value in existing]
+src/brigade/graphtrail_delta.py-455-        malformed_candidate = any(node is None for node in normalized_nodes)
+src/brigade/graphtrail_delta.py-456-        compact_nodes = normalized_nodes
+src/brigade/graphtrail_delta.py-457-        compact_nodes = [node for node in compact_nodes if node is not None]
+src/brigade/graphtrail_delta.py-458-        compact_nodes.sort(key=lambda node: json.dumps(node, sort_keys=True, separators=(",", ":")))
+src/brigade/graphtrail_delta.py:459:        declared_total = payload.get("code_reference_nodes_total")
+src/brigade/graphtrail_delta.py:460:        declared_truncated = payload.get("code_reference_nodes_truncated")
+src/brigade/graphtrail_delta.py-461-        if (
+src/brigade/graphtrail_delta.py-462-            not malformed_candidate
+src/brigade/graphtrail_delta.py-463-            and isinstance(declared_total, int)
+src/brigade/graphtrail_delta.py-464-            and not isinstance(declared_total, bool)
+--
+src/brigade/graphtrail_delta.py-474-            total = declared_total
+src/brigade/graphtrail_delta.py-475-        else:
+src/brigade/graphtrail_delta.py-476-            total = len(compact_nodes)
+src/brigade/graphtrail_delta.py-477-        return {
+src/brigade/graphtrail_delta.py:478:            "code_reference_nodes": compact_nodes[:CODE_REFERENCE_NODE_LIMIT],
+src/brigade/graphtrail_delta.py:479:            "code_reference_nodes_total": total,
+src/brigade/graphtrail_delta.py:480:            "code_reference_nodes_truncated": total > CODE_REFERENCE_NODE_LIMIT,
+src/brigade/graphtrail_delta.py-481-        }
+src/brigade/graphtrail_delta.py-482-    nodes: list[dict[str, Any]] = []
+src/brigade/graphtrail_delta.py-483-    for source_key, change_kind in (
+src/brigade/graphtrail_delta.py-484-        ("added_nodes", "added"),
+--
+src/brigade/graphtrail_delta.py-488-        values = payload.get(source_key)
+src/brigade/graphtrail_delta.py-489-        if not isinstance(values, list):
+src/brigade/graphtrail_delta.py-490-            continue
+src/brigade/graphtrail_delta.py-491-        for value in values:
+src/brigade/graphtrail_delta.py:492:            normalized = code_references.normalize_delta_node(value, change_kind)
+src/brigade/graphtrail_delta.py-493-            if normalized is not None:
+src/brigade/graphtrail_delta.py-494-                nodes.append(normalized)
+src/brigade/graphtrail_delta.py-495-    nodes.sort(key=lambda node: json.dumps(node, sort_keys=True, separators=(",", ":")))
+src/brigade/graphtrail_delta.py-496-    return {
+src/brigade/graphtrail_delta.py:497:        "code_reference_nodes": nodes[:CODE_REFERENCE_NODE_LIMIT],
+src/brigade/graphtrail_delta.py:498:        "code_reference_nodes_total": len(nodes),
+src/brigade/graphtrail_delta.py:499:        "code_reference_nodes_truncated": len(nodes) > CODE_REFERENCE_NODE_LIMIT,
+src/brigade/graphtrail_delta.py-500-    }
+src/brigade/graphtrail_delta.py-501-
+src/brigade/graphtrail_delta.py-502-
+src/brigade/graphtrail_delta.py-503-def _status(status: str, summary: str, **extra: Any) -> dict[str, Any]:
+--
+src/brigade/receipts_cmd.py-12-from typing import Any
+src/brigade/receipts_cmd.py-13-from urllib.parse import urlparse
+src/brigade/receipts_cmd.py-14-
+src/brigade/receipts_cmd.py-15-from . import __version__
+src/brigade/receipts_cmd.py:16:from . import code_references
+src/brigade/receipts_cmd.py-17-from . import component_bins
+src/brigade/receipts_cmd.py-18-from . import localio
+src/brigade/receipts_cmd.py-19-from . import receipt_signing
+src/brigade/receipts_cmd.py-20-
+--
+src/brigade/receipts_cmd.py-722-        metadata["git"] = git
+src/brigade/receipts_cmd.py-723-    return metadata
+src/brigade/receipts_cmd.py-724-
+src/brigade/receipts_cmd.py-725-
+src/brigade/receipts_cmd.py:726:def _code_reference_repository(target: Path) -> str | None:
+src/brigade/receipts_cmd.py-727-    remote = _git_value(target, "remote", "get-url", "origin")
+src/brigade/receipts_cmd.py-728-    if remote is None:
+src/brigade/receipts_cmd.py-729-        return None
+src/brigade/receipts_cmd.py-730-    parts = _github_remote_parts(remote)
+--
+src/brigade/receipts_cmd.py-733-    _, owner, repository = parts
+src/brigade/receipts_cmd.py-734-    return f"{owner}/{repository}"
+src/brigade/receipts_cmd.py-735-
+src/brigade/receipts_cmd.py-736-
+src/brigade/receipts_cmd.py:737:def _code_references_from_delta(payload: dict[str, Any], target: Path) -> tuple[list[dict[str, Any]], int, bool]:
+src/brigade/receipts_cmd.py-738-    delta = payload.get("code_graph_delta")
+src/brigade/receipts_cmd.py-739-    git = _receipt_git(payload)
+src/brigade/receipts_cmd.py:740:    repository = _code_reference_repository(target)
+src/brigade/receipts_cmd.py-741-    if not isinstance(delta, dict) or git is None or repository is None:
+src/brigade/receipts_cmd.py-742-        return [], 0, False
+src/brigade/receipts_cmd.py-743-    commit = git.get("head")
+src/brigade/receipts_cmd.py-744-    if not isinstance(commit, str):
+src/brigade/receipts_cmd.py-745-        return [], 0, False
+src/brigade/receipts_cmd.py-746-    references: list[dict[str, Any]] = []
+src/brigade/receipts_cmd.py:747:    compact_nodes = delta.get("code_reference_nodes")
+src/brigade/receipts_cmd.py-748-    if isinstance(compact_nodes, list):
+src/brigade/receipts_cmd.py-749-        node_sources: list[tuple[Any, str | None]] = [(compact_nodes, None)]
+src/brigade/receipts_cmd.py-750-    else:
+src/brigade/receipts_cmd.py-751-        node_sources = [
+--
+src/brigade/receipts_cmd.py-757-    for nodes, fallback_change_kind in node_sources:
+src/brigade/receipts_cmd.py-758-        if not isinstance(nodes, list):
+src/brigade/receipts_cmd.py-759-            continue
+src/brigade/receipts_cmd.py-760-        for node in nodes:
+src/brigade/receipts_cmd.py:761:            normalized = code_references.normalize_delta_node(node, fallback_change_kind)
+src/brigade/receipts_cmd.py-762-            if normalized is None:
+src/brigade/receipts_cmd.py-763-                malformed_candidate = True
+src/brigade/receipts_cmd.py-764-                continue
+src/brigade/receipts_cmd.py-765-            change_kind = normalized["change_kind"]
+--
+src/brigade/receipts_cmd.py-768-            symbol_kind = normalized["kind"]
+src/brigade/receipts_cmd.py-769-            start_line = normalized["start_line"]
+src/brigade/receipts_cmd.py-770-            end_line = normalized["end_line"]
+src/brigade/receipts_cmd.py-771-            reference = {
+src/brigade/receipts_cmd.py:772:                "schema": code_references.SCHEMA,
+src/brigade/receipts_cmd.py-773-                "repository": repository,
+src/brigade/receipts_cmd.py-774-                "revision": {"commit": commit},
+src/brigade/receipts_cmd.py-775-                "file_path": file_path,
+src/brigade/receipts_cmd.py-776-                "qualified_name": qualified_name,
+--
+src/brigade/receipts_cmd.py-778-                "source_span": {"start_line": start_line, "line_count": end_line - start_line + 1},
+src/brigade/receipts_cmd.py-779-                "change_kind": change_kind,
+src/brigade/receipts_cmd.py-780-            }
+src/brigade/receipts_cmd.py-781-            try:
+src/brigade/receipts_cmd.py:782:                code_references.validate(reference)
+src/brigade/receipts_cmd.py-783-            except ValueError:
+src/brigade/receipts_cmd.py-784-                continue
+src/brigade/receipts_cmd.py-785-            references.append(reference)
+src/brigade/receipts_cmd.py:786:    references.sort(key=code_references.canonical_json)
+src/brigade/receipts_cmd.py-787-    total = len(references)
+src/brigade/receipts_cmd.py:788:    declared_total = delta.get("code_reference_nodes_total")
+src/brigade/receipts_cmd.py:789:    declared_truncated = delta.get("code_reference_nodes_truncated")
+src/brigade/receipts_cmd.py-790-    trusted_compaction_total = (
+src/brigade/receipts_cmd.py-791-        isinstance(compact_nodes, list)
+src/brigade/receipts_cmd.py-792-        and not malformed_candidate
+src/brigade/receipts_cmd.py-793-        and isinstance(declared_total, int)
+--
+src/brigade/receipts_cmd.py-806-    truncated = (trusted_compaction_total and declared_truncated is True) or total > _CODE_REFERENCE_LIMIT
+src/brigade/receipts_cmd.py-807-    return references, total, truncated
+src/brigade/receipts_cmd.py-808-
+src/brigade/receipts_cmd.py-809-
+src/brigade/receipts_cmd.py:810:def _metadata_with_code_references(metadata: dict[str, Any], payload: dict[str, Any], target: Path) -> dict[str, Any]:
+src/brigade/receipts_cmd.py:811:    references, total, truncated = _code_references_from_delta(payload, target)
+src/brigade/receipts_cmd.py-812-    if not references:
+src/brigade/receipts_cmd.py-813-        return metadata
+src/brigade/receipts_cmd.py:814:    metadata["code_references"] = references[:_CODE_REFERENCE_LIMIT]
+src/brigade/receipts_cmd.py:815:    metadata["code_references_total"] = total
+src/brigade/receipts_cmd.py:816:    metadata["code_references_truncated"] = truncated
+src/brigade/receipts_cmd.py-817-    return metadata
+src/brigade/receipts_cmd.py-818-
+src/brigade/receipts_cmd.py-819-
+src/brigade/receipts_cmd.py-820-def _metadata_with_digest_signature(metadata: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+--
+src/brigade/receipts_cmd.py-1021-        "command_count": len(commands),
+src/brigade/receipts_cmd.py-1022-        "commands": commands,
+src/brigade/receipts_cmd.py-1023-    }
+src/brigade/receipts_cmd.py-1024-    metadata = _metadata_with_delta(metadata, payload)
+src/brigade/receipts_cmd.py:1025:    metadata = _metadata_with_code_references(metadata, payload, target)
+src/brigade/receipts_cmd.py-1026-    metadata = _metadata_with_git(metadata, payload)
+src/brigade/receipts_cmd.py-1027-    metadata = _metadata_with_digest_signature(metadata, payload)
+src/brigade/receipts_cmd.py-1028-    text = f"Brigade work verify run {run_id} status={payload.get('status') or 'unknown'} commands={len(commands)}."
+src/brigade/receipts_cmd.py-1029-    command_text = _one_line(
+--
+src/brigade/receipts_cmd.py-1083-        "dry_run": payload.get("dry_run"),
+src/brigade/receipts_cmd.py-1084-        "read_only": payload.get("read_only"),
+src/brigade/receipts_cmd.py-1085-    }
+src/brigade/receipts_cmd.py-1086-    metadata = _metadata_with_delta(metadata, payload)
+src/brigade/receipts_cmd.py:1087:    metadata = _metadata_with_code_references(metadata, payload, target)
+src/brigade/receipts_cmd.py-1088-    metadata = _metadata_with_git(metadata, payload)
+src/brigade/receipts_cmd.py-1089-    metadata = _metadata_with_digest_signature(metadata, payload)
+src/brigade/receipts_cmd.py-1090-    text = f"Brigade run {run_id} status={payload.get('status') or 'unknown'}."
+src/brigade/receipts_cmd.py-1091-    if task:
+--
+src/brigade/aboyeur.py-1428-            continue
+src/brigade/aboyeur.py-1429-        receipts.append(_verify_receipt_payload(data))
+src/brigade/aboyeur.py-1430-
+src/brigade/aboyeur.py-1431-    def _sort_key(item: dict[str, object]) -> tuple[datetime, str]:
+src/brigade/aboyeur.py:1432:        # Sort by parsed UTC time: lexical started_at ordering misorders
+src/brigade/aboyeur.py-1433-        # receipts with mixed timezone offsets.
+src/brigade/aboyeur.py-1434-        parsed = _parse_iso_datetime(item.get("started_at"))
+src/brigade/aboyeur.py-1435-        return (parsed or datetime.min.replace(tzinfo=timezone.utc), str(item.get("run_id") or ""))
+src/brigade/aboyeur.py-1436-
+
+exec
+/bin/bash -lc "sed -n '1,260p' EVIDENCE.md && sed -n '240,330p' src/brigade/evidence_cmd.py && sed -n '1,200p' src/brigade/cli/evidence.py && git status --short" in <case-06-worktree>
+ succeeded in 0ms:
+Code grounding symbol:
+test_evidence_search_forwards_code_reference_before_lexical_fallback
+test_evidence_search_forwards_code_reference_before_lexical_fallback.
+
+Experiment case 6. Decide from the evidence below.
+
+Use only this prompt and the evidence attached by Brigade. Do not inspect other
+files, call GitHub, use the network, or look for a known-good answer. Return one
+JSON object with exactly these keys:
+
+{"answer_label":"brigade-schema|cross-repo-contracts","answer":"brief rationale","contradiction_caught":null,"contradiction_explanation":"","minority_finding":"useful dissent or empty string","evidence":["specific fact","specific fact"]}
+
+Use one allowed answer_label. Keep the response under 180 words. Longer or
+repeated answers receive no extra credit.
+
+Decision question: Should code-reference evidence use a Brigade-owned
+versioned schema or keep the separate GraphTrail #40 and MiseLedger #42
+contracts?
+
+Evidence context from escoffier-labs/brigade issues #352 and #361:
+
+- Brigade is the compositor between code intelligence and evidence memory.
+- The former design allowed both a direct GraphTrail-to-MiseLedger adapter and
+  Brigade receipt/evidence composition, creating two owners for one lifecycle.
+- The consolidation moves shared receipt, graph-reference, and evidence
+  contracts under Brigade while preserving engine process boundaries.
+- Exact code-reference lookup must precede explicit lexical fallback.
+- Existing receipt and JSON consumers need compatibility tests or a separately
+  reviewed migration.
+
+Grounding seed for Brigade Code Intelligence: code reference evidence schema
+exact lexical fallback.
+        _write_last_run(
+            target=target,
+            source=source,
+            status="fail",
+            exit_code=1,
+            crawler_version=runtime.version,
+            database=compat.database,
+            started_at=started_at,
+            finished_at=_now(),
+            detail=detail,
+        )
+        return 1
+
+    if runtime.resolved_path is None:
+        print(f"error: evidence crawl refused for {source}: no executable resolved", file=sys.stderr)
+        return 1
+
+    # Prepend the resolved crawler directory so MiseLedger rediscovers the same
+    # binary.  This is a Brigade-side substitute for a miseledger --crawler flag.
+    crawler_dir = str(Path(runtime.resolved_path).parent)
+    env["PATH"] = crawler_dir + os.pathsep + env.get("PATH", "")
+
+    result = _run_miseledger_result("crawl", arguments, env=env)
+    status = "ok" if result.code == 0 else "fail"
+    _write_last_run(
+        target=target,
+        source=source,
+        status=status,
+        exit_code=result.code,
+        crawler_version=runtime.version,
+        database=compat.database,
+        started_at=started_at,
+        finished_at=_now(),
+        detail=(result.stderr or "").strip()[:500],
+    )
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return result.code
+
+
+def run_engine(verb: str, arguments: list[str]) -> int:
+    """Run MiseLedger without changing its argv, output, or data contract.
+
+    A ``--code-reference`` JSON value is relayed verbatim to MiseLedger, which
+    performs exact code-reference matching before lexical fallback.
+    """
+
+    if verb == "crawl":
+        return _run_crawl(arguments)
+    return _run_miseledger(verb, arguments)
+
+
+def _run_json(args: list[str], *, timeout: float = 30.0) -> dict[str, Any]:
+    result = proc.run(args, timeout=timeout)
+    data = result.json()
+    return {
+        "command": args,
+        "exit_code": result.code,
+        "stdout_json": data if isinstance(data, dict) else None,
+        "stdout_unparsed": None if isinstance(data, dict) else (result.stdout or "")[:500],
+        "stderr": (result.stderr or "")[:500],
+    }
+
+
+def _print_next(payload: dict[str, Any]) -> None:
+    next_commands = payload.get("next_commands") or []
+    if not next_commands:
+        return
+    print("next:")
+    for command in next_commands:
+        print(f"  {command}")
+
+
+def _cursor_path(target: Path) -> Path:
+    return target / ".brigade" / "work" / "miseledger-export-cursor.json"
+
+
+def _build_status_payload(
+    target: Path,
+    *,
+    include_doctor: bool = True,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    binary = evidence_brief._miseledger_bin()
+    installed = binary is not None
+    cursor = _cursor_path(target)
+    payload: dict[str, Any] = {
+        "target": str(target),
+        "installed": installed,
+"""brigade evidence command group."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+
+def register(sub: argparse._SubParsersAction) -> None:
+    p_evidence = sub.add_parser(
+        "evidence",
+        help="Inspect and query the evidence ledger: receipts, search, crawl and export plans.",
+    )
+    evidence_sub = p_evidence.add_subparsers(dest="evidence_command", metavar="<evidence-command>")
+    evidence_sub.required = True
+
+    p_status = evidence_sub.add_parser("status", help="Show evidence engine install and archive health.")
+    p_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    p_doctor = evidence_sub.add_parser(
+        "doctor",
+        help="Advisory evidence health. Exits 1 on engine fail/incomplete/timeout.",
+    )
+    p_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    p_crawl = evidence_sub.add_parser(
+        "crawl", help="Crawl sources into the evidence ledger, or use `crawl plan` to preview it."
+    )
+    # Executable crawl arguments are intentionally opaque. `crawl plan` is
+    # parsed in dispatch to preserve the established plan command contract.
+    p_crawl.add_argument("engine_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    p_crawl.set_defaults(_brigade_command_contract_leaf=True, _brigade_legacy_plan=True)
+
+    p_search = evidence_sub.add_parser("search", help="Search the evidence ledger.")
+    p_search.add_argument("engine_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+
+    p_show = evidence_sub.add_parser("show", help="Show one evidence item by id.")
+    p_show.add_argument("engine_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+
+    p_explain = evidence_sub.add_parser("explain", help="Explain how an evidence item was ingested and linked.")
+    p_explain.add_argument("engine_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+
+    p_stats = evidence_sub.add_parser("stats", help="Show evidence ledger statistics.")
+    p_stats.add_argument("engine_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+
+    p_export = evidence_sub.add_parser(
+        "export", help="Plan receipt export into the evidence ledger without executing it."
+    )
+    export_sub = p_export.add_subparsers(dest="evidence_export_command", metavar="<export-command>")
+    export_sub.required = True
+    p_export_plan = export_sub.add_parser("plan", help="Plan brigade receipts export miseledger --new-only --import.")
+    p_export_plan.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace for plan paths and --write."
+    )
+    p_export_plan.add_argument("--write", action="store_true", help="Write plan under .brigade/evidence/plans/.")
+    p_export_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    p_evidence.set_defaults(func=dispatch)
+
+
+def dispatch(args) -> int:
+    from .. import evidence_cmd
+
+    if args.evidence_command == "status":
+        return evidence_cmd.status(target=args.target, json_output=args.json)
+    if args.evidence_command == "doctor":
+        return evidence_cmd.doctor(target=args.target, json_output=args.json)
+    if args.evidence_command == "crawl":
+        if args.engine_args and args.engine_args[0] == "plan":
+            plan_args = _crawl_plan_parser().parse_args(args.engine_args[1:])
+            return evidence_cmd.crawl_plan(target=plan_args.target, write=plan_args.write, json_output=plan_args.json)
+        return evidence_cmd.run_engine("crawl", args.engine_args)
+    if args.evidence_command == "search":
+        return evidence_cmd.run_engine("search", args.engine_args)
+    if args.evidence_command in ("show", "explain", "stats"):
+        return evidence_cmd.run_engine(args.evidence_command, args.engine_args)
+    if args.evidence_command == "export":
+        if args.evidence_export_command == "plan":
+            return evidence_cmd.export_plan(target=args.target, write=args.write, json_output=args.json)
+        args._brigade_parser.error(f"unknown evidence export command: {args.evidence_export_command}")
+        return 2
+    args._brigade_parser.error(f"unknown evidence command: {args.evidence_command}")
+    return 2
+
+
+def _crawl_plan_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="brigade evidence crawl plan")
+    parser.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace for plan paths and --write."
+    )
+    parser.add_argument("--write", action="store_true", help="Write plan under .brigade/evidence/plans/.")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    return parser
+?? EVIDENCE.md
+
+codex
+{"answer_label":"brigade-schema","answer":"Use a Brigade-owned versioned schema for shared code-reference evidence. Brigade already composes code intelligence with evidence memory, and consolidation removes competing lifecycle owners while retaining GraphTrail and MiseLedger as separate processes.","contradiction_caught":null,"contradiction_explanation":"","minority_finding":"Keep engine process boundaries separate and preserve existing receipt and JSON contracts through compatibility tests or a reviewed migration.","evidence":["EVIDENCE.md states that consolidation moves shared receipt, graph-reference, and evidence contracts under Brigade.","src/brigade/evidence_cmd.py documents that MiseLedger performs exact code-reference matching before lexical fallback; the named test asserts verbatim forwarding of --code-reference."]}
+2026-07-24T00:38:17.376122Z  WARN codex_file_watcher: failed to unwatch <home>/.codex/skills/.system: No watch was found. about ["<home>/.codex/skills/.system"]
+tokens used
+22,921

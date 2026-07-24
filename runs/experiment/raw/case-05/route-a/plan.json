@@ -1,0 +1,14 @@
+{
+  "schema": "brigade.run_plan.v1",
+  "assignments": [
+    {
+      "stage": 1,
+      "worker": "analyst",
+      "task": "Read EVIDENCE.md only and, using the supplied GraphTrail context, determine the likely resolve_capabilities issue, affected behavior, and exact recommended code/test changes. Return concise evidence-backed findings.",
+      "covers": [
+        "evidence analysis",
+        "root-cause recommendation"
+      ]
+    }
+  ]
+}

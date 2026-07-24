@@ -1,0 +1,42 @@
+{
+  "schema": "brigade.worker_results.v1",
+  "results": [
+    {
+      "worker": "sample",
+      "task": "_pre_agent_notify_manifest EVIDENCE.md",
+      "ok": true,
+      "detail": "",
+      "text": "{\"answer_label\":\"exclude-first-consolidation\",\"answer\":\"Keep both outside the first consolidation. Agent Pantry brings browser-state capture, secrets, AES-GCM, and security coverage the target repository did not yet have; agent-notify's optional alert integration does not create a source-level dependency.\",\"contradiction_caught\":null,\"contradiction_explanation\":\"\",\"minority_finding\":\"agent-notify alone is low-risk because it is a small opt-in pure-Go adapter, but the decision concerns including both components.\",\"evidence\":[\"Agent Pantry handles cleartext browser storage state, long-lived secrets, and crypto framing.\",\"Optional manifest-managed installation supports agent-notify without importing either repository.\"]}",
+      "exit_code": 0,
+      "timed_out": false,
+      "stdout_log": "logs/worker-001-sample.stdout.log",
+      "stderr_log": "logs/worker-001-sample.stderr.log",
+      "duration_seconds": 12.037,
+      "transport": "cli",
+      "requested_model": "gpt-5.6-terra",
+      "reasoning": "low"
+    }
+  ],
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-01-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

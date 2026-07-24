@@ -1,0 +1,169 @@
+{
+  "schema": "brigade.deliberation-experiment-score.v1",
+  "base_commit": "0941c3e66274b76c36a8277c106cf85ffd8a90c9",
+  "output_token_target_per_case_route": 4000,
+  "self_consistency_samples": 3,
+  "majority_rule": "At least two samples must return the same allowed answer label. Invalid or missing labels are invalid ballots.",
+  "cases": {
+    "01": {
+      "A": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": null,
+        "useful_minority_finding": "Optional Pantry-to-notify alerts do not require shared source ownership."
+      },
+      "B": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": null,
+        "useful_minority_finding": "agent-notify alone is low-risk, but the decision covers both components."
+      },
+      "C": {
+        "status": "planning_failure",
+        "matches_known_good": false,
+        "contradiction_caught": null,
+        "useful_minority_finding": ""
+      }
+    },
+    "02": {
+      "A": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": null,
+        "useful_minority_finding": "The station placement needs a scoped Go job and publish working-directory override."
+      },
+      "B": {
+        "status": "no_majority",
+        "matches_known_good": false,
+        "contradiction_caught": null,
+        "useful_minority_finding": "The one valid ballot identified the scoped Go job and publish working-directory work."
+      },
+      "C": {
+        "status": "planning_failure",
+        "matches_known_good": false,
+        "contradiction_caught": null,
+        "useful_minority_finding": ""
+      }
+    },
+    "03": {
+      "A": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": null,
+        "useful_minority_finding": ""
+      },
+      "B": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": null,
+        "useful_minority_finding": "Keeping the field could reserve an extension point, but it would be misleading now."
+      },
+      "C": {
+        "status": "planning_failure",
+        "matches_known_good": false,
+        "contradiction_caught": null,
+        "useful_minority_finding": ""
+      }
+    },
+    "04": {
+      "A": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": null,
+        "useful_minority_finding": "A legitimate rejection still maps to exit 1 when no measurement failure exists."
+      },
+      "B": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": null,
+        "useful_minority_finding": "The rejection remains meaningful seat-quality evidence even though exit 3 dominates."
+      },
+      "C": {
+        "status": "planning_failure",
+        "matches_known_good": false,
+        "contradiction_caught": null,
+        "useful_minority_finding": ""
+      }
+    },
+    "05": {
+      "A": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": null,
+        "useful_minority_finding": "Useful parts of #462 could only be ported selectively after removing duplicated resolver work."
+      },
+      "B": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": null,
+        "useful_minority_finding": "Useful ideas from #462 could be ported selectively into the merged resolver."
+      },
+      "C": {
+        "status": "planning_failure",
+        "matches_known_good": false,
+        "contradiction_caught": null,
+        "useful_minority_finding": ""
+      }
+    },
+    "06": {
+      "A": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": null,
+        "useful_minority_finding": "Retain engine process boundaries and protect existing consumers with compatibility tests."
+      },
+      "B": {
+        "status": "no_majority",
+        "matches_known_good": false,
+        "contradiction_caught": null,
+        "useful_minority_finding": ""
+      },
+      "C": {
+        "status": "planning_failure",
+        "matches_known_good": false,
+        "contradiction_caught": null,
+        "useful_minority_finding": ""
+      }
+    },
+    "07": {
+      "A": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": true,
+        "useful_minority_finding": "Existing engine-specific jobs still need a separate station filter and working directory."
+      },
+      "B": {
+        "status": "no_majority",
+        "matches_known_good": false,
+        "contradiction_caught": false,
+        "useful_minority_finding": "The one valid ballot identified the station-specific CI work."
+      },
+      "C": {
+        "status": "planning_failure",
+        "matches_known_good": false,
+        "contradiction_caught": false,
+        "useful_minority_finding": ""
+      }
+    },
+    "08": {
+      "A": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": true,
+        "useful_minority_finding": "A coordinated rollout could reduce integration friction without merging ownership."
+      },
+      "B": {
+        "status": "ok",
+        "matches_known_good": true,
+        "contradiction_caught": true,
+        "useful_minority_finding": "A minimum-version constraint can provide compatibility without consolidation."
+      },
+      "C": {
+        "status": "planning_failure",
+        "matches_known_good": false,
+        "contradiction_caught": false,
+        "useful_minority_finding": ""
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "attempts": [
+    {
+      "stage": "initial",
+      "ok": true,
+      "parsed": true,
+      "detail": "",
+      "text": "{\"assignments\":[{\"stage\":1,\"worker\":\"analyst\",\"task\":\"Read EVIDENCE.md and, using only it plus the attached GraphTrail context, identify the most likely requested investigation outcome and recommend exact read-only next steps.\",\"covers\":[\"evidence review\",\"scope recommendation\"]}]}",
+      "timed_out": false,
+      "status": ""
+    }
+  ]
+}

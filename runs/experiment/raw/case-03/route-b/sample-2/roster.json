@@ -1,0 +1,41 @@
+{
+  "schema": "brigade.roster_snapshot.v1",
+  "orchestrator": "chef",
+  "max_workers": 1,
+  "timeout_seconds": 900.0,
+  "allow_models": [
+    "codex"
+  ],
+  "sandbox": "read-only",
+  "agents": {
+    "chef": {
+      "cli": "codex",
+      "model": "gpt-5.6-terra",
+      "reasoning": "low",
+      "transport": "direct",
+      "transport_version": null,
+      "role": "Unused orchestrator required by the roster schema.",
+      "timeout_seconds": null,
+      "invalid_final_fallback": null,
+      "read_only_capable": true,
+      "env": null
+    },
+    "sample": {
+      "cli": "codex",
+      "model": "gpt-5.6-terra",
+      "reasoning": "low",
+      "transport": "direct",
+      "transport_version": null,
+      "role": "Read EVIDENCE.md in the working directory and produce one independent decision from that evidence plus the attached Brigade context only. Do not inspect any other files or run other tools. Return the requested JSON object in under 180 words.",
+      "timeout_seconds": null,
+      "invalid_final_fallback": null,
+      "read_only_capable": true,
+      "env": null
+    }
+  },
+  "resolution": {
+    "path": "<experiment-worktree>/runs/experiment/config/route-b.toml",
+    "source": "explicit",
+    "shadowed": []
+  }
+}

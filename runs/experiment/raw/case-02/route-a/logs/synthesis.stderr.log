@@ -1,0 +1,362 @@
+2026-07-24T00:33:24.009649Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:33:24.009688Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+OpenAI Codex v0.145.0
+--------
+workdir: <case-02-worktree>
+model: gpt-5.6-terra
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: low
+reasoning summaries: none
+session id: 019f918a-8c04-71b3-a93d-67c4fd12b520
+--------
+user
+## Code graph context (GraphTrail, read-only)
+
+# Context Pack: _pre_agent_notify_manifest EVIDENCE.md
+
+_schema v7 - 8 entry points - 42 callers - 4 callees - 10 related files_
+
+## Entry points
+
+- `_pre_agent_notify_manifest` (function) - tests/test_update_cmd.py:55-96
+- `_pre_agent_notify_manifest` (function) - tests/test_component_manifest.py:863-869
+- `_render_plan_md` (function) - src/brigade/evidence_cmd.py:679-710
+- `_write_pre_agent_notify_manifest` (function) - tests/test_component_install.py:2025-2062
+- `_md_to_html` (function) - src/brigade/research/report.py:8-23
+- `_skill_md_path` (function) - src/brigade/skills_cmd.py:123-124
+- `register._add_md_common` (function) - src/brigade/cli/memory.py:87-94
+- `_render_plan_md` (function) - src/brigade/pantry_cmd.py:400-434
+
+## Callers
+
+- `test_beta_update_accepts_pre_agent_notify_stable_manifest` -> `_pre_agent_notify_manifest` - tests/test_update_cmd.py:506 -> tests/test_update_cmd.py
+- `test_release_manifest_still_rejects_missing_agent_notify_without_beta_handoff` -> `_pre_agent_notify_manifest` - tests/test_update_cmd.py:543 -> tests/test_update_cmd.py
+- `test_release_manifest_compatibility_mode_rejects_missing_published_component` -> `_pre_agent_notify_manifest` - tests/test_update_cmd.py:568 -> tests/test_update_cmd.py
+- `test_strict_manifest_rejects_pre_agent_notify_stable_manifest` -> `_pre_agent_notify_manifest` - tests/test_component_manifest.py:873 -> tests/test_component_manifest.py
+- `test_compatible_stable_manifest_tolerates_missing_unpublished_agent_notify` -> `_pre_agent_notify_manifest` - tests/test_component_manifest.py:879 -> tests/test_component_manifest.py
+- `test_compatible_stable_manifest_rejects_missing_published_component` -> `_pre_agent_notify_manifest` - tests/test_component_manifest.py:895 -> tests/test_component_manifest.py
+- `test_compatible_stable_manifest_still_rejects_malformed_assets` -> `_pre_agent_notify_manifest` - tests/test_component_manifest.py:905 -> tests/test_component_manifest.py
+- `test_compatible_stable_manifest_rejects_unknown_extras` -> `_pre_agent_notify_manifest` - tests/test_component_manifest.py:920 -> tests/test_component_manifest.py
+- `_write_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:726 -> src/brigade/evidence_cmd.py
+- `crawl_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:740 -> src/brigade/evidence_cmd.py
+- `export_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:754 -> src/brigade/evidence_cmd.py
+- `test_setup_offline_reuses_persisted_beta_pre_agent_notify_stable_manifest` -> `_write_pre_agent_notify_manifest` - tests/test_component_install.py:1388 -> tests/test_component_install.py
+- `test_setup_compatible_stable_manifest_skips_missing_unpublished_agent_notify` -> `_write_pre_agent_notify_manifest` - tests/test_component_install.py:2068 -> tests/test_component_install.py
+- `test_setup_strict_manifest_rejects_pre_agent_notify_without_beta_handoff` -> `_write_pre_agent_notify_manifest` - tests/test_component_install.py:2100 -> tests/test_component_install.py
+- `test_setup_compatible_stable_manifest_rejects_missing_published_component` -> `_write_pre_agent_notify_manifest` - tests/test_component_install.py:2120 -> tests/test_component_install.py
+- `render_html` -> `_md_to_html` - src/brigade/research/report.py:73 -> src/brigade/research/report.py
+- `_artifact_content_path` -> `_skill_md_path` - src/brigade/outcome_cmd.py:88 -> src/brigade/skills_cmd.py
+- `_copy_skill_for_harness` -> `_skill_md_path` - src/brigade/skills_cmd.py:260 -> src/brigade/skills_cmd.py
+- `_copy_skill_for_harness` -> `_skill_md_path` - src/brigade/skills_cmd.py:263 -> src/brigade/skills_cmd.py
+- `_load_skill` -> `_skill_md_path` - src/brigade/skills_cmd.py:501 -> src/brigade/skills_cmd.py
+- `_lint_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:529 -> src/brigade/skills_cmd.py
+
+[GraphTrail context truncated to 4000 chars.]
+
+You are the Brigade orchestrator. Synthesize the final answer for the user.
+Account for worker failures if any are present. Do not include implementation chatter.
+
+Brigade-computed facts:
+- changed_files: observed during the run, author unknown (0)
+- untracked_files: observed during the run, author unknown (0)
+- diffstat: unavailable (dirty baseline; line counts would include pre-existing changes)
+- verify_receipts: 0
+- code_graph_delta: code graph delta skipped: read-only run
+
+Original task:
+_pre_agent_notify_manifest EVIDENCE.md
+
+Worker results:
+Worker: analyst
+Sub-task: Read EVIDENCE.md only and, using the supplied GraphTrail context, determine the requested outcome and recommend exact read-only next steps.
+Status: ok
+Detail:
+Output:
+{"answer_label":"stations/notify","answer":"Agent-notify should live at stations/notify/. It is a registered station, and engines/ conflicts with the station registry and current station contract.","contradiction_caught":"engines/ avoids release work","contradiction_explanation":"Release-manifest membership is required under either directory, so engines/ removes none of that work.","minority_finding":"stations/notify/ needs a scoped Go job and publish working-directory override.","evidence":["Manifest, provenance, installer, and resolver behavior keys on IDs, assets, and exact counts, not source directories.","Existing engines/ paths are for engine-specific CI and build jobs; a new source tree can use its own filter and working directory."]}
+
+
+READ-ONLY MODE:
+- Do not modify files.
+- Do not install packages, change configuration, commit, push, or call external write APIs.
+- You may inspect, reason, summarize, and recommend exact next steps.
+- If a task appears to require changes, describe the proposed changes instead of making them.
+warning: Under-development features enabled: realtime_conversation. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in <home>/.codex/config.toml.
+2026-07-24T00:33:24.444055Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:33:24.444081Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+codex
+I’ll inspect the required project workflow and the referenced evidence, then provide a read-only recommendation.
+exec
+/bin/bash -lc "sed -n '1,240p' <home>/.codex/skills/using-skillet/SKILL.md && sed -n '1,260p' <home>/.codex/skills/brigade-work/SKILL.md && brigade work brief --target . && rg --files -g 'EVIDENCE.md' -g 'AGENTS.md' -g 'CLAUDE.md'" in <case-02-worktree>
+ succeeded in 595ms:
+work brief: <case-02-worktree>
+branch: detached:0941c3e
+dirty_files: 1
+  ?? EVIDENCE.md
+active_session: none
+latest_session: none (<case-02-worktree>/.brigade/work)
+dogfood_ready: False
+latest_run: none
+outcome_loop: verify_runs=0 records=0 scored=0 promoted=0
+outcome_loop_issue: outcome_loop_dormant no verify runs or outcome records yet; the verified-learning loop is not running
+pantry: agentpantry version unparsable (invalid-version); expected >= 0.5.0
+notifications: ok configured=True
+next_source: default_review
+next: Review this repo and recommend the next implementation slice.
+suggested_command: brigade work run
+plans: no pending tasks
+inbox_hygiene: ok
+scanner_config: <case-02-worktree>/.brigade/scanners.toml
+scanner_health: 2 warning(s)
+chat_surfaces_config: <case-02-worktree>/.brigade/chat-surfaces.toml
+chat_surfaces_health: 1 issue(s)
+chat_surfaces_top_issue: chat_surfaces_config chat surface config missing: <home>/.cache/brigade/worktrees/brigade-issue-442-case-0...
+memory_care_config: <case-02-worktree>/.brigade/memory-care.toml
+memory_care_health: 3 issue(s)
+memory_care_top_issue: memory_care_config missing, run `brigade memory care init --target <home>/.cache/brigade/worktrees/briga...
+security_config: <case-02-worktree>/.brigade/security.toml
+security_health: 3 issue(s)
+backup_config: <case-02-worktree>/.brigade/backups.toml
+backup_health: 1 issue(s)
+backup_summary: 1 active backup issue(s), 0 reviewed/deferred issue(s), 0 restore rehearsal issue(s)
+backup_top_issue: None/None backup config missing: <case-02-worktree>/.bri...
+daily_config: <case-02-worktree>/.brigade/daily.toml
+daily_driver: 1 issue(s)
+daily_top_issue: daily_config_missing missing <case-02-worktree>/.brigade/daily.toml...
+phase_ledger: ok
+phase_records: 0
+phase_actions: 0
+tool_config: <case-02-worktree>/.brigade/tools.toml
+tool_catalog: 1 issue(s)
+tool_top_issue: catalog/config tool catalog config missing: <home>/.cache/brigade/worktrees/brigade-issue-442-case-0...
+tool_call_pending: 0
+tool_runs: 0
+tool_checkpoints: 0
+roadmap_completion: 1 issue(s)
+roadmap_top_issue: roadmap_documented_command_missing_cli 2 documented command(s) missing from CLI
+repo_fleet_config: <case-02-worktree>/.brigade/repos.toml
+repo_fleet: 5 issue(s)
+repo_fleet_top_issue: repo_fleet_config missing config: <case-02-worktree>/.brigade/re...
+context_packs: 0
+context_top_issue: context_pack_missing no context packs
+project_consolidation: 1 issue(s)
+project_consolidation_top_issue: projects_config missing config: <case-02-worktree>/.brigade/pr...
+learning_candidates: 0
+research_handoffs: ok
+operator_report: 1 issue(s)
+operator_report_top_issue: operator_report_missing no local operator report has been built
+operator_report_command: brigade center report build
+operator_actions: 0 open
+EVIDENCE.md
+engines/evidence-ledger/AGENTS.md
+engines/evidence-ledger/CLAUDE.md
+AGENTS.md
+src/brigade/templates/workspace/AGENTS.md
+src/brigade/templates/workspace/CLAUDE.md
+src/brigade/templates/repo/AGENTS.md
+src/brigade/templates/repo/CLAUDE.md
+engines/code-graph/AGENTS.md
+
+exec
+/bin/bash -lc "sed -n '1,260p' EVIDENCE.md && rg -n \"stations/notify|agent-notify|notify\" README.md CONTRIBUTING.md pyproject.toml .github src tests 2>/dev/null | head -n 160" in <case-02-worktree>
+ succeeded in 0ms:
+Code grounding symbol: _pre_agent_notify_manifest
+_pre_agent_notify_manifest _pre_agent_notify_manifest.
+
+Experiment case 2. Decide from the evidence below.
+
+Use only this prompt and the evidence attached by Brigade. Do not inspect other
+files, call GitHub, use the network, or look for a known-good answer. Return one
+JSON object with exactly these keys:
+
+{"answer_label":"stations/notify|engines","answer":"brief rationale","contradiction_caught":null,"contradiction_explanation":"","minority_finding":"useful dissent or empty string","evidence":["specific fact","specific fact"]}
+
+Use one allowed answer_label. Keep the response under 180 words. Longer or
+repeated answers receive no extra credit.
+
+Decision question: Should agent-notify live at stations/notify/ or under
+engines/?
+
+Evidence context from escoffier-labs/brigade issue #431:
+
+- The component manifest, provenance checks, installer, and resolver key on
+  component IDs, asset names, and exact asset counts, not source directories.
+- Existing literal engines/ paths belong to current engine-specific CI and
+  build jobs. A new source tree can receive its own path filter and working
+  directory.
+- A registered station under engines/ conflicts with the station registry and
+  current station contract.
+- Release-manifest membership is required under either directory, so engines/
+  removes none of that release work.
+- A stations/ placement needs a scoped Go job and publish working-directory
+  override.
+
+Grounding seed for Brigade Code Intelligence: agent notify registry station
+component manifest.
+README.md:185:| Notifications | `brigade add notifications` | Optional `agent-notify` binary for Discord, Telegram, or Signal; status and setup planning only until you wire hooks or pass an explicit `--send` |
+.github/workflows/ci.yml:20:      notify: ${{ steps.filter.outputs.notify }}
+.github/workflows/ci.yml:35:            notify:
+.github/workflows/ci.yml:36:              - 'stations/notify/**'
+.github/workflows/ci.yml:155:  notify-build-and-test:
+.github/workflows/ci.yml:156:    name: notify-build-and-test (ubuntu-latest)
+.github/workflows/ci.yml:158:    if: ${{ needs.changes.outputs.notify == 'true' }}
+.github/workflows/ci.yml:162:        working-directory: stations/notify
+.github/workflows/ci.yml:170:          cache-dependency-path: stations/notify/go.sum
+.github/workflows/ci.yml:181:          cache-dependency-path: stations/notify/go.sum
+.github/workflows/ci.yml:187:  notify-windows:
+.github/workflows/ci.yml:188:    name: notify-build-and-test (windows-latest)
+.github/workflows/ci.yml:190:    if: ${{ needs.changes.outputs.notify == 'true' }}
+.github/workflows/ci.yml:194:        working-directory: stations/notify
+.github/workflows/ci.yml:202:          cache-dependency-path: stations/notify/go.sum
+.github/workflows/publish.yml:143:  build-agent-notify-native:
+.github/workflows/publish.yml:144:    name: agent-notify native (${{ matrix.platform }})
+.github/workflows/publish.yml:169:        working-directory: stations/notify
+.github/workflows/publish.yml:176:      - name: Build agent-notify binary with exact release metadata
+.github/workflows/publish.yml:193:          go build -trimpath -ldflags "-X main.version=${VERSION} -X main.commit=${AGENT_NOTIFY_COMMIT} -X main.buildDate=${BUILD_DATE} -s -w" -o "$GITHUB_WORKSPACE/release-assets/agent-notify-${{ matrix.platform }}$suffix" ./cmd/agent-notify
+.github/workflows/publish.yml:196:          name: agent-notify-${{ matrix.platform }}
+.github/workflows/publish.yml:201:    needs: [build-rust-native, build-go-native, build-agent-notify-native]
+.github/workflows/publish.yml:220:          pattern: agent-notify-*
+.github/workflows/publish.yml:221:          path: downloaded/agent-notify
+.github/workflows/publish.yml:258:            release-assets/agent-notify-linux-amd64
+.github/workflows/publish.yml:259:            release-assets/agent-notify-linux-arm64
+.github/workflows/publish.yml:260:            release-assets/agent-notify-darwin-amd64
+.github/workflows/publish.yml:261:            release-assets/agent-notify-darwin-arm64
+.github/workflows/publish.yml:262:            release-assets/agent-notify-windows-amd64.exe
+tests/test_mcp_runtime.py:122:    script = _script(tmp_path, "notifying_mcp.py", NOTIFYING_STDIO)
+tests/test_mcp_runtime.py:123:    _seed_stdio(tmp_path, "notifying", script)
+src/brigade/component_bins.py:27:    "agent-notify": "AGENT_NOTIFY_BIN",
+src/brigade/component_bins.py:36:    "agent-notify": (Path("go") / "bin" / "agent-notify",),
+tests/test_pantry_cmd.py:150:    assert payload["planned_argv"][:4] == ["agent-notify", "send", "--profile", "expiry"]
+tests/test_pantry_cmd.py:155:def test_expiry_alert_send_invokes_agent_notify(monkeypatch):
+tests/test_pantry_cmd.py:171:        if args[:2] == ["agent-notify", "send"]:
+tests/test_pantry_cmd.py:180:    # calls[0] is the version probe; calls[1] is inventory; calls[2] is agent-notify send.
+tests/test_pantry_cmd.py:182:    assert calls[2][0][0:4] == ["agent-notify", "send", "--profile", "agent-stop"]
+tests/test_component_manifest_provenance.py:21:COMPONENTS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+tests/test_release_manifest_generator.py:16:COMPONENTS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+tests/test_ci_workflow.py:26:    assert "notify: ${{ steps.filter.outputs.notify }}" in changes
+tests/test_ci_workflow.py:29:    assert "stations/notify:" not in changes
+tests/test_ci_workflow.py:34:        "stations/notify/**",
+tests/test_ci_workflow.py:70:def test_ci_workflow_gates_notify_jobs_with_valid_expressions():
+tests/test_ci_workflow.py:73:        "notify-build-and-test": "notify",
+tests/test_ci_workflow.py:74:        "notify-windows": "notify",
+tests/test_ci_workflow.py:78:    assert {name for name in job_names if name.startswith("notify-")} == set(expected_jobs)
+tests/test_ci_workflow.py:130:def test_ci_workflow_runs_notify_go_commands_from_notify_directory():
+tests/test_ci_workflow.py:133:    ubuntu = _workflow_job_section(text, "notify-build-and-test")
+tests/test_ci_workflow.py:135:    assert "working-directory: stations/notify" in ubuntu
+tests/test_ci_workflow.py:138:    # Both Go setup steps pin the notify go.sum so the root cache warning clears.
+tests/test_ci_workflow.py:139:    assert ubuntu.count("cache-dependency-path: stations/notify/go.sum") == 2
+tests/test_ci_workflow.py:161:    windows = _workflow_job_section(text, "notify-windows")
+tests/test_ci_workflow.py:163:    assert "working-directory: stations/notify" in windows
+tests/test_ci_workflow.py:167:    assert "cache-dependency-path: stations/notify/go.sum" in windows
+tests/test_ci_workflow.py:545:    assert "agent-notify" in unpublished
+tests/test_ci_workflow.py:546:    assert set(unpublished) == {"agent-notify"}
+tests/test_ci_workflow.py:553:    # for empty "assets": {} maps (bare .Count is unreliable and dropped agent-notify).
+tests/test_ci_workflow.py:586:    # The agent-notify absolute-path smoke is gated on the computed required set
+tests/test_ci_workflow.py:587:    # so source mode skips an unpublished agent-notify instead of invoking a
+tests/test_ci_workflow.py:589:    assert '$requiredIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |' in main
+tests/test_ci_workflow.py:591:    assert 'if ($requiredIds -contains "agent-notify") {' in main
+tests/test_ci_workflow.py:592:    agent_block = main[main.index('if ($requiredIds -contains "agent-notify") {') :]
+tests/test_ci_workflow.py:594:        'Get-ManagedExecutablePath -Report $report -ComponentId "agent-notify" -ManagedBin $managedBin' in agent_block
+tests/test_ci_workflow.py:608:    assert unpublished == ["agent-notify"]
+tests/test_ci_workflow.py:618:    # unpublished agent-notify or hide a published component failure.
+tests/test_ci_workflow.py:645:def test_windows_native_acceptance_pypi_mode_never_skips_agent_notify():
+tests/test_ci_workflow.py:647:    no skip set, agent-notify must install, digest-check, and smoke by absolute
+tests/test_ci_workflow.py:662:    assert '"agent-notify"' in digest_fn
+tests/test_ci_workflow.py:666:    for component_id in ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"):
+tests/test_ci_workflow.py:674:def test_windows_native_acceptance_pypi_mode_rejects_bare_agent_notify_metadata():
+tests/test_ci_workflow.py:679:    agent-notify block, which source mode never enters for an unpublished
+tests/test_ci_workflow.py:680:    agent-notify."""
+tests/test_ci_workflow.py:694:    agent_block = main[main.index('if ($requiredIds -contains "agent-notify") {') :]
+tests/test_doctor.py:813:def test_doctor_includes_agent_notify_managed_tool(monkeypatch, tmp_target, capsys):
+tests/test_doctor.py:819:    config_path = tmp_target / ".config" / "agent-notify" / "config.toml"
+tests/test_doctor.py:839:    monkeypatch.setattr(managed.proc, "which", lambda c: "/x/" + c if c == "agent-notify" else None)
+tests/test_doctor.py:841:        managed.component_bins, "resolve", lambda name, **kw: "/x/" + name if name == "agent-notify" else None
+tests/test_doctor.py:848:    assert "agent-notify" in out
+tests/test_component_install.py:53:_FOUR_ENGINE_IDS = tuple(cid for cid in component_manifest.KNOWN_COMPONENT_IDS if cid != "agent-notify")
+tests/test_component_install.py:1317:    The cached manifest may be a pre-agent-notify stable manifest (missing the
+tests/test_component_install.py:1318:    unpublished agent-notify id), so load it in compatible mode to tolerate
+tests/test_component_install.py:1384:def test_setup_offline_reuses_persisted_beta_pre_agent_notify_stable_manifest(tmp_path, monkeypatch):
+tests/test_component_install.py:1385:    # The saved stable manifest predates agent-notify; compatible mode must
+tests/test_component_install.py:1388:    _write_pre_agent_notify_manifest(manifest_path, brigade_version="0.25.0")
+tests/test_component_install.py:1407:    assert "agent-notify" not in installed.components
+tests/test_component_install.py:1674:def test_setup_rollback_four_to_five_upgrade_restores_prior_and_removes_managed_agent_notify(tmp_path):
+tests/test_component_install.py:1683:    notify_path = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+tests/test_component_install.py:1684:    assert notify_path.is_file()
+tests/test_component_install.py:1693:    assert "agent-notify" not in restored.components
+tests/test_component_install.py:1694:    assert not notify_path.exists()
+tests/test_component_install.py:1701:def test_setup_rollback_four_to_five_never_removes_external_path_agent_notify(tmp_path):
+tests/test_component_install.py:1709:    managed_notify = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+tests/test_component_install.py:1712:    path_notify = path_dir / "agent-notify"
+tests/test_component_install.py:1713:    path_notify.write_bytes(b"external-path-agent-notify")
+tests/test_component_install.py:1714:    path_notify.chmod(0o700)
+tests/test_component_install.py:1716:    record = current.components["agent-notify"]
+tests/test_component_install.py:1725:            "agent-notify": component_state.InstalledComponentRecord(
+tests/test_component_install.py:1731:                executable=str(path_notify),
+tests/test_component_install.py:1736:    managed_notify.unlink()
+tests/test_component_install.py:1739:    assert path_notify.read_bytes() == b"external-path-agent-notify"
+tests/test_component_install.py:1740:    assert not managed_notify.exists()
+tests/test_component_install.py:1743:def test_setup_rollback_four_to_five_never_removes_env_override_agent_notify(tmp_path):
+tests/test_component_install.py:1751:    managed_notify = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+tests/test_component_install.py:1752:    override = tmp_path / "override" / "agent-notify"
+tests/test_component_install.py:1754:    override.write_bytes(b"env-override-agent-notify")
+tests/test_component_install.py:1759:    assert not managed_notify.exists()
+tests/test_component_install.py:1760:    assert override.read_bytes() == b"env-override-agent-notify"
+tests/test_component_install.py:1771:    managed_notify = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+tests/test_component_install.py:1773:    managed_notify.write_bytes(foreign)
+tests/test_component_install.py:1774:    managed_notify.chmod(0o700)
+tests/test_component_install.py:1776:    assert current.components["agent-notify"].executable == str(managed_notify)
+tests/test_component_install.py:1779:    assert managed_notify.read_bytes() == foreign
+tests/test_component_install.py:1792:    notify_path = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+tests/test_component_install.py:1793:    notify_before = notify_path.read_bytes()
+tests/test_component_install.py:1804:    assert notify_path.read_bytes() == notify_before
+tests/test_component_install.py:1941:def _write_unpublished_notify_manifest(path: Path, *, brigade_version: str) -> component_manifest.ComponentManifest:
+tests/test_component_install.py:1942:    """Manifest with the 4 native engines published and agent-notify unpublished."""
+tests/test_component_install.py:1945:        if component_id == "agent-notify":
+tests/test_component_install.py:1949:                "executable": "agent-notify",
+tests/test_component_install.py:1983:def test_build_setup_plan_skips_unpublished_agent_notify(tmp_path, monkeypatch):
+tests/test_component_install.py:1986:    manifest = _write_unpublished_notify_manifest(manifest_path, brigade_version=brigade.__version__)
+tests/test_component_install.py:1993:    # agent-notify is a known component carried unpublished (empty asset matrix);
+tests/test_component_install.py:2001:    assert "agent-notify" not in {action.component_id for action in plan}
+tests/test_component_install.py:2004:def test_setup_install_skips_unpublished_agent_notify_and_installs_four(tmp_path, monkeypatch):
+tests/test_component_install.py:2007:    _write_unpublished_notify_manifest(manifest_path, brigade_version=brigade.__version__)
+tests/test_component_install.py:2020:    assert "agent-notify" not in state.components
+tests/test_component_install.py:2021:    notify_path = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+tests/test_component_install.py:2022:    assert not notify_path.exists()
+tests/test_component_install.py:2025:def _write_pre_agent_notify_manifest(path: Path, *, brigade_version: str) -> None:
+tests/test_component_install.py:2026:    """Last-stable manifest predating the agent-notify KNOWN_COMPONENT_IDS entry.
+tests/test_component_install.py:2028:    Unlike ``_write_unpublished_notify_manifest``, this manifest has no
+tests/test_component_install.py:2029:    agent-notify entry at all, mirroring the real beta handoff that downloads
+tests/test_component_install.py:2030:    the most recent stable release published before agent-notify was added.
+tests/test_component_install.py:2034:        if component_id == "agent-notify":
+tests/test_component_install.py:2065:def test_setup_compatible_stable_manifest_skips_missing_unpublished_agent_notify(tmp_path, monkeypatch):
+tests/test_component_install.py:2068:    _write_pre_agent_notify_manifest(manifest_path, brigade_version=brigade.__version__)
+tests/test_component_install.py:2074:    # agent-notify, which the manifest predates. The compatibility flag must
+tests/test_component_install.py:2092:    assert "agent-notify" not in state.components
+tests/test_component_install.py:2093:    notify_path = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
+tests/test_component_install.py:2094:    assert not notify_path.exists()
+tests/test_component_install.py:2097:def test_setup_strict_manifest_rejects_pre_agent_notify_without_beta_handoff(tmp_path, monkeypatch, capsys):
+tests/test_component_install.py:2100:    _write_pre_agent_notify_manifest(manifest_path, brigade_version=brigade.__version__)
+tests/test_component_install.py:2105:    # pre-agent-notify manifest for the missing required component.
+tests/test_component_install.py:2114:    assert "missing required components: agent-notify" in capsys.readouterr().err
+tests/test_component_install.py:2120:    _write_pre_agent_notify_manifest(manifest_path, brigade_version=brigade.__version__)
+tests/test_component_install.py:2403:    assert calls[0][0] == [managed["agent-notify"], "version", "--json"]
+tests/test_add.py:66:def test_add_skips_agent_notify_when_component_bins_resolves(monkeypatch, tmp_target, capsys):
+tests/test_add.py:72:        lambda name, **kw: "/managed/agent-notify" if name == "agent-notify" else None,
+tests/test_add.py:83:    assert "[skip] agent-notify already installed" in out
+tests/test_add.py:88:def test_add_agent_notify_uses_install_command_resolver(monkeypatch, tmp_target, capsys):
+tests/test_add.py:97:    tool = managed.resolve("agent-notify")
+tests/test_add.py:100:    rc = add_mod.run(target=tmp_target, station="agent-notify")
+tests/test_add.py:104:    assert f"[install] agent-notify: {' '.join(expected)}" in out
+tests/test_update_cmd.py:55:def _pre_agent_notify_manifest() -> bytes:
+tests/test_update_cmd.py:56:    """Last-stable manifest predating the agent-notify KNOWN_COMPONENT_IDS entry.
+tests/test_update_cmd.py:59:    was published before agent-notify was added to KNOWN_COMPONENT_IDS on main
+tests/test_update_cmd.py:60:    and therefore carries the four published native engines and no agent-notify
+tests/test_update_cmd.py:66:        if component == "agent-notify":
+tests/test_update_cmd.py:501:def test_beta_update_accepts_pre_agent_notify_stable_manifest(tmp_path):
+
+codex
+{"answer_label":"stations/notify","answer":"Agent-notify should live at stations/notify/. It is a registered station, and engines/ conflicts with the station registry and current station contract.","contradiction_caught":"engines/ avoids release work","contradiction_explanation":"Release-manifest membership is required under either directory, so engines/ removes none of that work.","minority_finding":"stations/notify/ needs a scoped Go job and publish working-directory override.","evidence":["Manifest, provenance, installer, and resolver behavior keys on IDs, assets, and exact counts, not source directories.","Existing engines/ paths are for engine-specific CI and build jobs; a new source tree can use its own filter and working directory."]}
+2026-07-24T00:33:47.617157Z  WARN codex_file_watcher: failed to unwatch <home>/.codex/skills/.system: No watch was found. about ["<home>/.codex/skills/.system"]
+tokens used
+16,841

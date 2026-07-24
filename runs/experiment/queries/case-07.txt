@@ -1,0 +1,1 @@
+_pre_agent_notify_manifest EVIDENCE.md

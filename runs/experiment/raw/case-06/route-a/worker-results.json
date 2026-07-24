@@ -1,0 +1,42 @@
+{
+  "schema": "brigade.worker_results.v1",
+  "results": [
+    {
+      "worker": "analyst",
+      "task": "Read EVIDENCE.md only, combine it with the supplied GraphTrail context, and identify the likely intended behavior and exact source/test areas to inspect next. Return a concise read-only recommendation.",
+      "ok": true,
+      "detail": "",
+      "text": "{\"answer_label\":\"brigade-schema\",\"answer\":\"Use a Brigade-owned versioned schema: the evidence assigns Brigade ownership of shared receipt, graph-reference, and evidence contracts, avoiding two lifecycle owners. Inspect the code-reference evidence-search facade to confirm exact reference lookup is attempted before its explicit lexical fallback, then preserve existing JSON/receipt compatibility.\",\"contradiction_caught\":null,\"contradiction_explanation\":\"\",\"minority_finding\":\"Engine process boundaries should remain separate even though the shared contract moves to Brigade.\",\"evidence\":[\"Issues #352 and #361 say consolidation moves shared receipt, graph-reference, and evidence contracts under Brigade.\",\"tests/test_issue362_code_evidence_facades.py:332-343 contains test_evidence_search_forwards_code_reference_before_lexical_fallback.\"]}",
+      "exit_code": 0,
+      "timed_out": false,
+      "stdout_log": "logs/worker-001-analyst.stdout.log",
+      "stderr_log": "logs/worker-001-analyst.stderr.log",
+      "duration_seconds": 14.419,
+      "transport": "cli",
+      "requested_model": "gpt-5.6-terra",
+      "reasoning": "low"
+    }
+  ],
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-06-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

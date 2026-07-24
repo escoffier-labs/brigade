@@ -1,0 +1,13 @@
+{
+  "attempts": [
+    {
+      "stage": "initial",
+      "ok": true,
+      "parsed": true,
+      "detail": "",
+      "text": "{\"assignments\":[{\"stage\":1,\"worker\":\"analyst\",\"task\":\"Read EVIDENCE.md only and determine the requested assessment for `_grader_result`, using the supplied GraphTrail context as supporting context. Return a concise JSON recommendation with evidence-backed proposed next steps; do not inspect other files or use tools.\",\"covers\":[\"evidence review\",\"impact assessment\",\"recommended next steps\"]}]}",
+      "timed_out": false,
+      "status": ""
+    }
+  ]
+}

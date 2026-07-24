@@ -1,0 +1,2 @@
+roster: <experiment-worktree>/runs/experiment/config/route-b.toml (explicit)
+error: another brigade run appears active: <case-02-worktree>/.brigade/run.lock. Remove the lock only if no run is active.

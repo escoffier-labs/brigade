@@ -1,0 +1,41 @@
+{
+  "schema": "brigade.synthesis.v1",
+  "mode": "direct-worker",
+  "worker": "sample",
+  "orchestrator": null,
+  "result": {
+    "ok": true,
+    "detail": "",
+    "text": "{\"answer_label\":\"stations/notify\",\"answer\":\"Agent-notify should remain under stations/notify/. Release membership is component-based, not keyed to its source directory.\",\"contradiction_caught\":true,\"contradiction_explanation\":\"The premise is false: manifests use component IDs, assets, digests, and counts, and release membership requires the same component entry under either placement.\",\"minority_finding\":\"engines/ could remain relevant for engine-specific jobs, with a separate stations/notify/ filter and working directory.\",\"evidence\":[\"The registry and station contract classify agent-notify as a station.\",\"Component resolution identifies executable names and managed paths.\"]}",
+    "exit_code": 0,
+    "timed_out": false,
+    "stdout_log": "logs/worker-001-sample.stdout.log",
+    "stderr_log": "logs/worker-001-sample.stderr.log",
+    "duration_seconds": 17.784,
+    "transport": "cli",
+    "requested_model": "gpt-5.6-terra",
+    "reasoning": "low"
+  },
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-07-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

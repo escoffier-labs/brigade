@@ -1,0 +1,32 @@
+orchestrator = "chef"
+codex_transport = "exec"
+
+[agents.chef]
+cli = "codex"
+model = "gpt-5.6-terra"
+reasoning = "low"
+role = "Read EVIDENCE.md in the working directory, then synthesize the grounded perspectives and challenger into the requested final JSON object. Do not inspect any other files or run other tools. Keep the response under 180 words."
+
+[agents.perspective_one]
+cli = "codex"
+model = "gpt-5.6-terra"
+reasoning = "low"
+role = "Read EVIDENCE.md in the working directory. Use only that case evidence and the assigned grounded scope. Do not inspect any other files or run other tools. Return the required perspective JSON in under 180 words."
+
+[agents.perspective_two]
+cli = "codex"
+model = "gpt-5.6-terra"
+reasoning = "low"
+role = "Read EVIDENCE.md in the working directory. Use only that case evidence and the assigned grounded scope. Do not inspect any other files or run other tools. Return the required perspective JSON in under 180 words."
+
+[agents.challenger]
+cli = "codex"
+model = "gpt-5.6-terra"
+reasoning = "low"
+role = "Read EVIDENCE.md in the working directory. Review the independent perspectives, attack their strongest consensus, and preserve any useful minority finding. Do not inspect any other files or run other tools. Return the required challenger JSON in under 180 words."
+
+[limits]
+max_workers = 2
+timeout_seconds = 900
+allow_models = ["codex"]
+sandbox = "read-only"

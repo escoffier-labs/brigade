@@ -1,0 +1,88 @@
+2026-07-24T00:38:31.687100Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:38:31.687120Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+OpenAI Codex v0.145.0
+--------
+workdir: <case-06-worktree>
+model: gpt-5.6-terra
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: low
+reasoning summaries: none
+session id: 019f918f-3ddf-7c21-aa5f-5b1f6f0429c4
+--------
+user
+## Code graph context (GraphTrail, read-only)
+
+# Context Pack: test_evidence_search_forwards_code_reference_before_lexical_fallback EVIDENCE.md
+
+_schema v7 - 8 entry points - 34 callers - 6 callees - 11 related files_
+
+## Entry points
+
+- `test_evidence_search_forwards_code_reference_before_lexical_fallback` (function) - tests/test_issue362_code_evidence_facades.py:332-343
+- `_render_plan_md` (function) - src/brigade/evidence_cmd.py:679-710
+- `_md_to_html` (function) - src/brigade/research/report.py:8-23
+- `_skill_md_path` (function) - src/brigade/skills_cmd.py:123-124
+- `register._add_md_common` (function) - src/brigade/cli/memory.py:87-94
+- `_render_plan_md` (function) - src/brigade/pantry_cmd.py:400-434
+- `_render_plan_md` (function) - src/brigade/work_cmd/ledger.py:1511-1575
+- `render_plan_md` (function) - src/brigade/station_health.py:83-122
+
+## Callers
+
+- `_write_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:726 -> src/brigade/evidence_cmd.py
+- `crawl_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:740 -> src/brigade/evidence_cmd.py
+- `export_plan` -> `_render_plan_md` - src/brigade/evidence_cmd.py:754 -> src/brigade/evidence_cmd.py
+- `render_html` -> `_md_to_html` - src/brigade/research/report.py:73 -> src/brigade/research/report.py
+- `_artifact_content_path` -> `_skill_md_path` - src/brigade/outcome_cmd.py:88 -> src/brigade/skills_cmd.py
+- `_copy_skill_for_harness` -> `_skill_md_path` - src/brigade/skills_cmd.py:260 -> src/brigade/skills_cmd.py
+- `_copy_skill_for_harness` -> `_skill_md_path` - src/brigade/skills_cmd.py:263 -> src/brigade/skills_cmd.py
+- `_load_skill` -> `_skill_md_path` - src/brigade/skills_cmd.py:501 -> src/brigade/skills_cmd.py
+- `_lint_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:529 -> src/brigade/skills_cmd.py
+- `_drift_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:854 -> src/brigade/skills_cmd.py
+- `install` -> `_skill_md_path` - src/brigade/skills_cmd.py:955 -> src/brigade/skills_cmd.py
+- `install` -> `_skill_md_path` - src/brigade/skills_cmd.py:995 -> src/brigade/skills_cmd.py
+- `_sync_plan` -> `_skill_md_path` - src/brigade/skills_cmd.py:1127 -> src/brigade/skills_cmd.py
+- `_user_profile_package` -> `_skill_md_path` - src/brigade/skills_cmd.py:1265 -> src/brigade/skills_cmd.py
+- `diff` -> `_skill_md_path` - src/brigade/skills_cmd.py:1564 -> src/brigade/skills_cmd.py
+- `diff` -> `_skill_md_path` - src/brigade/skills_cmd.py:1567 -> src/brigade/skills_cmd.py
+- `_mcp_read_resource` -> `_skill_md_path` - src/brigade/skills_cmd.py:1923 -> src/brigade/skills_cmd.py
+- `_compatibility_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2131 -> src/brigade/skills_cmd.py
+- `_compatibility_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2142 -> src/brigade/skills_cmd.py
+- `_fleet_skill_ids` -> `_skill_md_path` - src/brigade/skills_cmd.py:2256 -> src/brigade/skills_cmd.py
+- `_fleet_copy_keys` -> `_skill_md_path` - src/brigade/skills_cmd.py:2297 -> src/brigade/skills_cmd.py
+- `_fleet_status_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2394 -> src/brigade/skills_cmd.py
+- `_fleet_status_payload` -> `_skill_md_path` - src/brigade/skills_cmd.py:2410 -> src/brigade/skills_cmd.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:99 -> src/brigade/cli/memory.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:103 -> src/brigade/cli/memory.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:108 -> src/brigade/cli/memory.py
+- `register` -> `register._add_md_common` - src/brigade/cli/memory.py:121 -> src/brigade/cli/memory.py
+- `_write_plan` -> `_render_plan_md` - src/brigade/pantry_cmd.py:450 -> src/brigade/pantry_cmd.py
+- `setup_plan` -> `_render_plan_md` - src/brigade/pantry_cmd.py:473 -> src/brigade/pantry_cmd.py
+- `service_plan` -> `_render_plan_md` - src/brigade/pantry_cmd.py:494 -> src/brigade/pantry_cmd.py
+
+[GraphTrail context truncated to 4000 chars.]
+
+You are Brigade worker sample.
+Role:
+Read EVIDENCE.md in the working directory and produce one independent decision from that evidence plus the attached Brigade context only. Do not inspect any other files or run other tools. Return the requested JSON object in under 180 words.
+
+Sub-task:
+test_evidence_search_forwards_code_reference_before_lexical_fallback EVIDENCE.md
+
+Return a concise, complete final user-visible result.
+
+READ-ONLY MODE:
+- Do not modify files.
+- Do not install packages, change configuration, commit, push, or call external write APIs.
+- You may inspect, reason, summarize, and recommend exact next steps.
+- If a task appears to require changes, describe the proposed changes instead of making them.
+warning: Under-development features enabled: realtime_conversation. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in <home>/.codex/config.toml.
+2026-07-24T00:38:32.025643Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:38:32.025669Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+codex
+{"decision":"The test should assert that code-reference evidence is searched and forwarded before the lexical fallback runs. This preserves higher-specificity evidence selection and prevents lexical matches from masking a direct code reference.","confidence":"high","basis":"The supplied GraphTrail context names the focused test and shows its scope is a code-evidence facade behavior, with no indication that the unrelated Markdown, skills, memory, pantry, or station-health entry points participate.","next_step":"Inspect EVIDENCE.md directly in a normal worker run to confirm the exact expected call order and asserted payload fields before changing code or tests."}
+2026-07-24T00:38:38.381965Z  WARN codex_file_watcher: failed to unwatch <home>/.codex/skills/.system: No watch was found. about ["<home>/.codex/skills/.system"]
+tokens used
+7,283

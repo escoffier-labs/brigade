@@ -1,0 +1,42 @@
+{
+  "schema": "brigade.worker_results.v1",
+  "results": [
+    {
+      "worker": "analyst",
+      "task": "Read EVIDENCE.md only and, using the supplied GraphTrail context, identify the issue, affected behavior, likely root cause, and exact recommended next steps without modifying files.",
+      "ok": true,
+      "detail": "",
+      "text": "{\"answer_label\":\"separate\",\"answer\":\"Move agent-notify into Brigade as an opt-in delivery adapter, but keep Agent Pantry external and independently released.\",\"contradiction_caught\":true,\"contradiction_explanation\":\"The premise is false: shared integration or version enforcement does not create a shared source or release train.\",\"minority_finding\":\"A voluntary coordinated rollout could reduce integration friction, but it should not consolidate ownership or releases.\",\"evidence\":[\"Agent Pantry has separate browser-session and secret-handling security ownership.\",\"Brigade can enforce a Pantry minimum version without owning Pantry source or release.\"]}",
+      "exit_code": 0,
+      "timed_out": false,
+      "stdout_log": "logs/worker-001-analyst.stdout.log",
+      "stderr_log": "logs/worker-001-analyst.stderr.log",
+      "duration_seconds": 10.093,
+      "transport": "cli",
+      "requested_model": "gpt-5.6-terra",
+      "reasoning": "low"
+    }
+  ],
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-08-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

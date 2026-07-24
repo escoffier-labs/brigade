@@ -1,0 +1,41 @@
+{
+  "schema": "brigade.synthesis.v1",
+  "mode": "direct-worker",
+  "worker": "sample",
+  "orchestrator": null,
+  "result": {
+    "ok": true,
+    "detail": "",
+    "text": "{\"decision\":\"Keep the compatibility-mode behavior that accepts a stable manifest missing unpublished `agent_notify`, while strict mode rejects it.\",\"evidence\":\"The listed tests cover this distinction in manifest validation, update handling, and offline setup. They also separately require rejection when a published component is missing, assets are malformed, or unknown extras exist.\",\"next_step\":\"Preserve or add regression coverage across `test_component_manifest.py`, `test_update_cmd.py`, and `test_component_install.py` for the strict-versus-compatible boundary.\"}",
+    "exit_code": 0,
+    "timed_out": false,
+    "stdout_log": "logs/worker-001-sample.stdout.log",
+    "stderr_log": "logs/worker-001-sample.stderr.log",
+    "duration_seconds": 6.879,
+    "transport": "cli",
+    "requested_model": "gpt-5.6-terra",
+    "reasoning": "low"
+  },
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-02-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

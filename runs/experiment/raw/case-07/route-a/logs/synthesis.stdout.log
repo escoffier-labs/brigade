@@ -1,0 +1,7 @@
+Keep `agent-notify` under `stations/notify/`.
+
+Release membership is determined by manifest component entries, assets, and digests, not whether the source lives under `engines/`. The registry contract classifies agent-notify as a station, so relocating it to `engines/` is unsupported by the supplied evidence.
+
+Before changing release wiring, verify that CI path filters and each related job’s working directory include `stations/notify/`. Existing engine-specific job labels do not prevent a separate notify filter or working directory.
+
+No files were modified and no verification receipt was created in this read-only run.

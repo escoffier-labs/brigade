@@ -1,0 +1,73 @@
+{
+  "schema": "brigade.run.v1",
+  "task": "resolve_capabilities resolve_capabilities EVIDENCE.md",
+  "cwd": "<case-05-worktree>",
+  "orchestrator": "chef",
+  "dry_run": false,
+  "read_only": true,
+  "status": "ok",
+  "started_at": "2026-07-24T00:38:20.092106Z",
+  "status_started_at": "2026-07-24T00:38:33.777714Z",
+  "suspected_noop": false,
+  "code_graph_brief": {
+    "attached": true,
+    "bytes": 3877
+  },
+  "drift_impact_brief": {
+    "attached": false,
+    "bytes": 0,
+    "pending_count": 0
+  },
+  "evidence_brief": {
+    "attached": false,
+    "bytes": 0
+  },
+  "brief_budget": {
+    "bytes": 6000,
+    "attached": [
+      {
+        "name": "code_graph",
+        "bytes": 3877,
+        "truncated": false
+      }
+    ]
+  },
+  "roster": {
+    "path": "<experiment-worktree>/runs/experiment/config/route-b.toml",
+    "source": "explicit",
+    "shadowed": []
+  },
+  "lock_workspace": "<case-05-worktree>",
+  "worker": "sample",
+  "git": {
+    "head": "0941c3e66274b76c36a8277c106cf85ffd8a90c9",
+    "branch": "HEAD",
+    "dirty_files": 1
+  },
+  "pre_run_snapshot": {
+    "schema": "brigade.pre_run_snapshot.v1",
+    "branch": "HEAD",
+    "head": "0941c3e66274b76c36a8277c106cf85ffd8a90c9",
+    "tracked_dirty_files": [],
+    "tracked_dirty_fingerprints": {},
+    "untracked_files": [
+      "EVIDENCE.md"
+    ],
+    "untracked_fingerprints": {
+      "EVIDENCE.md": "file:436:e259d332813200a250c6d04e97470fbfb61e74acc73ef524093e509d24886b3f"
+    }
+  },
+  "code_graph_delta": {
+    "status": "skipped_read_only",
+    "ok": false,
+    "summary": "code graph delta skipped: read-only run",
+    "raw_counts": {},
+    "edge_churn": 0,
+    "changed_symbols": [],
+    "changed_symbol_count": 0
+  },
+  "finished_at": "2026-07-24T00:38:33.777617Z",
+  "duration_seconds": 13.686,
+  "artifacts": "<experiment-worktree>/runs/experiment/raw/case-05/route-b/sample-2",
+  "codex_transport": "exec"
+}

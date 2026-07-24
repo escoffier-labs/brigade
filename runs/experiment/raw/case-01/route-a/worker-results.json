@@ -1,0 +1,42 @@
+{
+  "schema": "brigade.worker_results.v1",
+  "results": [
+    {
+      "worker": "analyst",
+      "task": "Read EVIDENCE.md only and, using the supplied GraphTrail context, identify the intended investigation scope, affected manifest compatibility paths, and recommended read-only next steps.",
+      "ok": true,
+      "detail": "",
+      "text": "{\"answer_label\":\"exclude-first-consolidation\",\"answer\":\"Keep the first consolidation limited to Brigade, GraphTrail, and MiseLedger. Pantry introduces browser-state storage, shared secrets, AES-GCM, and security coverage absent from Brigade at the decision point; agent-notify is an independent opt-in Go adapter.\",\"contradiction_caught\":null,\"contradiction_explanation\":\"\",\"minority_finding\":\"Pantry can invoke agent-notify for expiry alerts, but the integration is optional and does not require shared source consolidation.\",\"evidence\":[\"First consolidation is defined as Brigade Python control plane plus GraphTrail and MiseLedger.\",\"Optional manifest-managed installation can provide both components without importing their source.\"]}",
+      "exit_code": 0,
+      "timed_out": false,
+      "stdout_log": "logs/worker-001-analyst.stdout.log",
+      "stderr_log": "logs/worker-001-analyst.stderr.log",
+      "duration_seconds": 14.244,
+      "transport": "cli",
+      "requested_model": "gpt-5.6-terra",
+      "reasoning": "low"
+    }
+  ],
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-01-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

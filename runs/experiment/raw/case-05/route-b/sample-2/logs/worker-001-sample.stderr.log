@@ -1,0 +1,244 @@
+2026-07-24T00:38:20.417702Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:38:20.417722Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+OpenAI Codex v0.145.0
+--------
+workdir: <case-05-worktree>
+model: gpt-5.6-terra
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: low
+reasoning summaries: none
+session id: 019f918f-11ce-7c73-b0a2-27fd35a4c564
+--------
+user
+## Code graph context (GraphTrail, read-only)
+
+# Context Pack: resolve_capabilities resolve_capabilities EVIDENCE.md
+
+_schema v7 - 8 entry points - 2 callers - 31 callees - 4 related files_
+
+## Entry points
+
+- `resolve_capabilities` (function) - src/brigade/roster.py:637-706
+- `test_resolve_capabilities_uses_first_satisfiable_fallback` (function) - tests/test_roster.py:751-773
+- `test_resolve_capabilities_selects_self_when_requirements_pass` (function) - tests/test_roster.py:731-748
+- `test_resolve_capabilities_drops_unsatisfied_seat_with_reason` (function) - tests/test_roster.py:776-792
+- `test_resolve_capabilities_keeps_no_requirement_endpoint_seats` (function) - tests/test_roster.py:805-818
+- `test_resolve_capabilities_dropped_orchestrator_sets_usable_false` (function) - tests/test_roster.py:990-1004
+- `test_resolve_capabilities_includes_invalid_final_fallback_dependency` (function) - tests/test_roster.py:1124-1138
+- `test_resolve_capabilities_selects_first_of_two_satisfiable_fallbacks` (function) - tests/test_roster.py:854-875
+
+## Callers
+
+- `suggest` -> `resolve_capabilities` - src/brigade/roster_cmd.py:253 -> src/brigade/roster.py
+- `doctor` -> `resolve_capabilities` - src/brigade/roster_cmd.py:342 -> src/brigade/roster.py
+
+## Callees
+
+- `resolve_capabilities` -> `SeatResolution` - src/brigade/roster.py:651 -> src/brigade/roster.py
+- `resolve_capabilities` -> `SeatResolution` - src/brigade/roster.py:679 -> src/brigade/roster.py
+- `resolve_capabilities` -> `SeatResolution` - src/brigade/roster.py:693 -> src/brigade/roster.py
+- `resolve_capabilities` -> `RosterCapabilityResolution` - src/brigade/roster.py:703 -> src/brigade/roster.py
+- `resolve_capabilities` -> `HostCapabilityProbe` - src/brigade/roster.py:641 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_requested_roots` - src/brigade/roster.py:645 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_requirements_satisfied` - src/brigade/roster.py:647 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_requirements_satisfied` - src/brigade/roster.py:667 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_resolved_self_agent` - src/brigade/roster.py:649 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_resolved_fallback_agent` - src/brigade/roster.py:670 -> src/brigade/roster.py
+- `resolve_capabilities` -> `_ensure_invalid_final_fallback_deps` - src/brigade/roster.py:701 -> src/brigade/roster.py
+- `test_resolve_capabilities_uses_first_satisfiable_fallback` -> `next` - tests/test_roster.py:770 -> src/brigade/work_cmd/session/task_ops.py
+- `test_resolve_capabilities_uses_first_satisfiable_fallback` -> `FakeProbe` - tests/test_roster.py:753 -> tests/test_roster.py
+- `test_resolve_capabilities_uses_first_satisfiable_fallback` -> `_metadata_roster_from_text` - tests/test_roster.py:752 -> tests/test_roster.py
+- `test_resolve_capabilities_selects_self_when_requirements_pass` -> `next` - tests/test_roster.py:746 -> src/brigade/work_cmd/session/task_ops.py
+- `test_resolve_capabilities_selects_self_when_requirements_pass` -> `FakeProbe` - tests/test_roster.py:733 -> tests/test_roster.py
+- `test_resolve_capabilities_selects_self_when_requirements_pass` -> `_metadata_roster_from_text` - tests/test_roster.py:732 -> tests/test_roster.py
+- `test_resolve_capabilities_drops_unsatisfied_seat_with_reason` -> `next` - tests/test_roster.py:788 -> src/brigade/work_cmd/session/task_ops.py
+- `test_resolve_capabilities_drops_unsatisfied_seat_with_reason` -> `FakeProbe` - tests/test_roster.py:778 -> tests/test_roster.py
+- `test_resolve_capabilities_drops_unsatisfied_seat_with_reason` -> `_metadata_roster_from_text` - tests/test_roster.py:777 -> tests/test_roster.py
+- `test_resolve_capabilities_keeps_no_requirement_endpoint_seats` -> `next` - tests/test_roster.py:817 -> src/brigade/work_cmd/session/task_ops.py
+
+[GraphTrail context truncated to 4000 chars.]
+
+You are Brigade worker sample.
+Role:
+Read EVIDENCE.md in the working directory and produce one independent decision from that evidence plus the attached Brigade context only. Do not inspect any other files or run other tools. Return the requested JSON object in under 180 words.
+
+Sub-task:
+resolve_capabilities resolve_capabilities EVIDENCE.md
+
+Return a concise, complete final user-visible result.
+
+READ-ONLY MODE:
+- Do not modify files.
+- Do not install packages, change configuration, commit, push, or call external write APIs.
+- You may inspect, reason, summarize, and recommend exact next steps.
+- If a task appears to require changes, describe the proposed changes instead of making them.
+warning: Under-development features enabled: realtime_conversation. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in <home>/.codex/config.toml.
+2026-07-24T00:38:20.833655Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/
+2026-07-24T00:38:20.833681Z  WARN codex_core_skills::loader: ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/
+codex
+I’ll follow the supplied evidence packet and return a single read-only decision.
+exec
+/bin/bash -lc "sed -n '1,240p' <home>/.codex/skills/using-skillet/SKILL.md" in <case-05-worktree>
+ succeeded in 0ms:
+---
+name: using-skillet
+description: Use when starting any conversation - establishes how to find and use skillet skills, requiring skill invocation before ANY response including clarifying questions.
+---
+
+<SUBAGENT-STOP>
+If you were dispatched as a subagent to execute a specific task, skip this skill and do the task.
+</SUBAGENT-STOP>
+
+<EXTREMELY-IMPORTANT>
+If you think there is even a 1% chance a skill might apply to what you are doing, you MUST invoke the skill. If a skill applies, using it is not optional. You cannot rationalize your way out of it.
+</EXTREMELY-IMPORTANT>
+
+# using-skillet
+
+A kitchen runs on mise en place: everything in its place before service, every cook reaching for the same prepped components instead of improvising. skillet is that prep for an AI coding session. The skills are the prepped stations; this skill is the line check that runs before you touch anything, deciding which station the current task belongs to and sending you there before you start cooking.
+
+## The rule
+
+**Invoke the relevant or requested skill BEFORE any response or action,** including before clarifying questions and before "just looking." Even a 1% chance a skill applies means you invoke it to check. If it turns out wrong for the situation, you drop it; checking costs nothing, skipping costs a botched dish.
+
+```
+user message or task
+  -> about to design/build something new? -> mise (then recipe) BEFORE anything else
+  -> might any other skill apply? (yes, even 1%) -> invoke it
+     -> announce: "Using skillet's <skill> to <purpose>"
+     -> follow it exactly; if it has a checklist, make a todo per item
+  -> definitely nothing applies -> respond
+```
+
+## Instruction priority
+
+skillet skills override default system behavior where they conflict, but **the user always wins**:
+
+1. **User instructions** (CLAUDE.md, AGENTS.md, direct requests) - highest.
+2. **skillet skills** - override default behavior.
+3. **Default system prompt** - lowest.
+
+If the user's instructions say to do something a skill discourages, follow the user. They are in control.
+
+## How to load skills
+
+Never read a skill's SKILL.md by hand with file tools; load it through your platform's skill mechanism so it activates properly. In Claude Code, use the `Skill` tool. In Codex and OpenClaw, skills load natively, follow them as presented. The skill names below are lowercase and match how you invoke them (e.g. `skillet:mise`).
+
+## The stations (skillet skills by job)
+
+**Design and build:**
+- `mise` - turn an idea into an approved design and written spec, before any code. The first move for any "let's build X."
+- `recipe` - turn an approved spec into a concrete implementation plan.
+- `demi` - start from the smallest useful code path; avoid speculative architecture.
+- `taste` - test-driven: write the failing test first, watch it fail, then the minimal code.
+- `fire` - execute a written plan task by task, verifying and committing each.
+- `stations` - fan out two or more genuinely independent pieces of work to concurrent agents.
+- `worktree` - set up an isolated workspace before risky or parallel work.
+
+**Debug and verify:**
+- `refire` - anything misbehaving: find the root cause before proposing any fix.
+- `check` - before claiming anything works, is fixed, or passes: run it, read the output, then claim with evidence.
+
+**Review and ship:**
+- `pass` - the pre-PR gate; nothing is filed until it clears.
+- `review` - dispatch an independent reviewer with crafted context.
+- `sendback` - act on review feedback: verify each claim before implementing it.
+- `release-cut` - cut a release, roll the changelog, tag a version (on request).
+- `expedite` - work the backlog from an audit, fix the findings in priority order.
+
+**Audit and direction:**
+- `line-check` - audit a repo's health, find the highest-value improvements.
+- `bug-hunt` - sweep for correctness defects.
+- `security-sweep` - find and fix vulnerabilities, leaked secrets, vulnerable deps.
+- `special` - propose what to build next, grounded in the code.
+
+**Simplify:**
+- `reduce` - simplify and tidy code without changing behavior.
+
+**Writing and publishing:**
+- `grill` - harden a technical writeup for a skeptical audience (HN, Lobsters).
+- `plate` - scrub identity and infra leaks from prose before it goes public.
+- `publish-readiness` - pre-publication leak scan of a repo and its history.
+- `reel-check` - scrub leaks burned into a rendered video or demo.
+- `seo-fleet` - audit and fix SEO to the fleet contract.
+
+**Memory and work loop:**
+- `memory-handoff` - capture durable knowledge at the end of a session.
+- `brigade-handoffs` - set up, write, lint, and troubleshoot Brigade memory handoffs.
+- `brigade-work` - in a Brigade-wired repo or workspace, route work through Brigade: brief at start, verify via `brigade work verify run`, capture outcomes, handoff at end, so the outcome ledger fills instead of sitting empty.
+
+**Pressure and meta:**
+- `pressure-test` - stress-test an idea, plan, or scope before anyone builds it.
+- `skillify` - turn a repeated workflow or runbook into a reusable skill.
+- `using-skillet` - this skill.
+
+## Skill priority
+
+When more than one could apply, run **process skills first** (they set how you approach the work), then implementation skills:
+
+- "Let's build X" -> `mise` first, then `recipe`, then the build skills.
+- "Fix this bug" -> `refire` first, then the fix, then `check`.
+- "Is this ready to ship" -> `pass` (which itself calls `review`, `taste`, `check`).
+
+## Skill types
+
+- **Rigid** (taste, refire, check, pass): follow exactly. Do not adapt away the discipline.
+- **Flexible** (the rest): adapt the principles to the situation.
+
+The skill itself tells you which.
+
+## Red flags
+
+These thoughts mean stop, you are rationalizing past a skill:
+
+| Thought | Reality |
+|---|---|
+| "This is just a simple question." | Questions are tasks. Check for a skill. |
+| "Let me look at the code first." | Skills tell you HOW to look. Check first. |
+| "I need more context before invoking." | The skill check comes before clarifying questions. |
+| "This doesn't need a formal skill." | If a skill exists for it, use it. |
+| "I remember what this skill says." | Skills evolve. Load the current version. |
+| "I'll just do this one quick thing first." | Check before doing anything. |
+| "The skill is overkill here." | Simple things become complex. Use it. |
+
+exec
+/bin/bash -lc "sed -n '1,260p' EVIDENCE.md" in <case-05-worktree>
+ succeeded in 0ms:
+Code grounding symbol: resolve_capabilities resolve_capabilities
+resolve_capabilities.
+
+Experiment case 5. Decide from the evidence below.
+
+Use only this prompt and the evidence attached by Brigade. Do not inspect other
+files, call GitHub, use the network, or look for a known-good answer. Return one
+JSON object with exactly these keys:
+
+{"answer_label":"incremental-463|from-scratch-462","answer":"brief rationale","contradiction_caught":null,"contradiction_explanation":"","minority_finding":"useful dissent or empty string","evidence":["specific fact","specific fact"]}
+
+Use one allowed answer_label. Keep the response under 180 words. Longer or
+repeated answers receive no extra credit.
+
+Decision question: Which roster change should land, the from-scratch work in
+#462 or the incremental work in #463?
+
+Evidence context from escoffier-labs/brigade issue #444 and pull requests #454,
+#462, and #463:
+
+- #454 already merged packaged presets and fallback resolution in roster.py.
+- #462 started from an older base and re-implemented the same parts with a new
+  roster_resolution.py module and another minimal.toml preset.
+- #462 conflicts with the merged resolver.
+- #463 extends the resolver already merged in #454 with roster suggestion,
+  receipt-backed stats, and doctor warnings.
+- #463 does not add a second resolver module and keeps existing presets.
+
+Grounding seed for Brigade Code Intelligence: roster suggest
+resolve_capabilities load_roster fallback.
+
+codex
+{"answer_label":"incremental-463","answer":"Land #463: it builds on the resolver and presets already merged in #454, while #462 duplicates that work from an older base and conflicts with the existing resolver.","contradiction_caught":null,"contradiction_explanation":"","minority_finding":"#462 may contain useful ideas, but they should be ported selectively into the existing resolver path.","evidence":["#454 already merged packaged presets and fallback resolution in roster.py.","#463 extends the merged resolver without adding a second resolver module; #462 re-implements it and conflicts."]}
+2026-07-24T00:38:33.255884Z  WARN codex_file_watcher: failed to unwatch <home>/.codex/skills/.system: No watch was found. about ["<home>/.codex/skills/.system"]
+tokens used
+10,041

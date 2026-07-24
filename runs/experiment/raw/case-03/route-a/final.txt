@@ -1,0 +1,5 @@
+Remove `exit_code` from `_grader_result` before the stable schema freeze.
+
+For scored results it is always `0`; otherwise it is `null`. No shipped grader provides an independent process outcome through this field, so consumers could incorrectly treat it as execution evidence.
+
+Update the result schema and its expectations in callers, tests, fixtures, and documentation together.

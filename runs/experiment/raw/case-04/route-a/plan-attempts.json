@@ -1,0 +1,13 @@
+{
+  "attempts": [
+    {
+      "stage": "initial",
+      "ok": true,
+      "parsed": true,
+      "detail": "",
+      "text": "{\"assignments\":[{\"stage\":1,\"worker\":\"analyst\",\"task\":\"Read EVIDENCE.md only and, using it plus the supplied GraphTrail context, determine the requested process_exit evidence and recommended next steps.\",\"covers\":[\"process_exit EVIDENCE.md\"]}]}",
+      "timed_out": false,
+      "status": ""
+    }
+  ]
+}

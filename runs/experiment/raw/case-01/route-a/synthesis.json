@@ -1,0 +1,39 @@
+{
+  "schema": "brigade.synthesis.v1",
+  "orchestrator": "chef",
+  "result": {
+    "ok": true,
+    "detail": "",
+    "text": "{\"answer_label\":\"exclude-first-consolidation\",\"answer\":\"Keep the first consolidation limited to Brigade, GraphTrail, and MiseLedger. Pantry adds browser-state storage, shared secrets, AES-GCM, and security coverage absent from Brigade at the decision point; agent-notify is an independent opt-in Go adapter.\",\"contradiction_caught\":null,\"contradiction_explanation\":\"\",\"minority_finding\":\"Pantry may invoke agent-notify for expiry alerts, but the integration is optional and does not require shared source consolidation.\",\"evidence\":[\"The first consolidation is defined as Brigade's Python control plane plus GraphTrail and MiseLedger.\",\"Optional manifest-managed installation can provide both components without importing their source.\"]}",
+    "exit_code": 0,
+    "timed_out": false,
+    "stdout_log": "logs/synthesis.stdout.log",
+    "stderr_log": "logs/synthesis.stderr.log",
+    "duration_seconds": 17.07,
+    "transport": "cli",
+    "requested_model": "gpt-5.6-terra",
+    "reasoning": "low"
+  },
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-01-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

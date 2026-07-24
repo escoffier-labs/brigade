@@ -1,0 +1,42 @@
+{
+  "schema": "brigade.worker_results.v1",
+  "results": [
+    {
+      "worker": "analyst",
+      "task": "Read EVIDENCE.md and, using only it plus the attached GraphTrail context, identify the most likely requested investigation outcome and recommend exact read-only next steps.",
+      "ok": true,
+      "detail": "",
+      "text": "{\"answer_label\":\"stations/notify\",\"answer\":\"Keep agent-notify under stations/notify/. Release membership is keyed by component entries, not source-directory placement, and the registry contract classifies it as a station.\",\"contradiction_caught\":true,\"contradiction_explanation\":\"The premise is false: engines/ is not required for agent-notify release membership. Existing engine-specific job strings can support a separate stations/notify/ filter and working directory.\",\"minority_finding\":\"Verify any CI path filters and job working directories include stations/notify/ before changing release wiring.\",\"evidence\":[\"Manifest generation and provenance checks use component IDs, asset names, digests, and asset counts.\",\"Release-manifest membership requires the same component entry under either source placement; the registry and station contract classify agent-notify as a station.\"]}",
+      "exit_code": 0,
+      "timed_out": false,
+      "stdout_log": "logs/worker-001-analyst.stdout.log",
+      "stderr_log": "logs/worker-001-analyst.stderr.log",
+      "duration_seconds": 12.323,
+      "transport": "cli",
+      "requested_model": "gpt-5.6-terra",
+      "reasoning": "low"
+    }
+  ],
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-07-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

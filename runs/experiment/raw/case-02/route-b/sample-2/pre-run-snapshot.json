@@ -1,0 +1,13 @@
+{
+  "schema": "brigade.pre_run_snapshot.v1",
+  "branch": "HEAD",
+  "head": "0941c3e66274b76c36a8277c106cf85ffd8a90c9",
+  "tracked_dirty_files": [],
+  "tracked_dirty_fingerprints": {},
+  "untracked_files": [
+    "EVIDENCE.md"
+  ],
+  "untracked_fingerprints": {
+    "EVIDENCE.md": "file:436:e0ba81b4e23306e55e7477c052f95bfe5740d20e9d96932a7e67d1e5717911c2"
+  }
+}

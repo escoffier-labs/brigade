@@ -1,0 +1,13 @@
+{
+  "attempts": [
+    {
+      "stage": "initial",
+      "ok": true,
+      "parsed": true,
+      "detail": "",
+      "text": "{\"assignments\":[{\"stage\":1,\"worker\":\"analyst\",\"task\":\"Read EVIDENCE.md only and, using the supplied GraphTrail context, determine the requested outcome and recommend exact read-only next steps.\",\"covers\":[\"evidence review\",\"manifest compatibility analysis\"]}]}",
+      "timed_out": false,
+      "status": ""
+    }
+  ]
+}

@@ -1,0 +1,543 @@
+{
+  "cases": {
+    "01": {
+      "A": {
+        "model_calls": 3,
+        "output_tokens": 1214,
+        "reasoning_output_tokens": 298,
+        "sessions": [
+          {
+            "output_tokens": 98,
+            "reasoning_output_tokens": 29,
+            "session_id": "019f918a-2d96-71b3-810a-2039b2447d0a",
+            "started_at": "2026-07-24T00:32:59.808Z"
+          },
+          {
+            "output_tokens": 496,
+            "reasoning_output_tokens": 137,
+            "session_id": "019f918a-4020-7010-b274-f928f2297c47",
+            "started_at": "2026-07-24T00:33:04.557Z"
+          },
+          {
+            "output_tokens": 620,
+            "reasoning_output_tokens": 132,
+            "session_id": "019f918a-77d8-7551-b744-6506e760b937",
+            "started_at": "2026-07-24T00:33:18.822Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 36.912,
+        "within_4000_token_ceiling": true
+      },
+      "B": {
+        "model_calls": 3,
+        "output_tokens": 1391,
+        "reasoning_output_tokens": 555,
+        "sessions": [
+          {
+            "output_tokens": 487,
+            "reasoning_output_tokens": 259,
+            "session_id": "019f918a-bbc6-7853-bd95-5a60dedb659f",
+            "started_at": "2026-07-24T00:33:36.203Z"
+          },
+          {
+            "output_tokens": 421,
+            "reasoning_output_tokens": 165,
+            "session_id": "019f918c-3288-7860-8020-18a2a6e67dc2",
+            "started_at": "2026-07-24T00:35:12.143Z"
+          },
+          {
+            "output_tokens": 483,
+            "reasoning_output_tokens": 131,
+            "session_id": "019f918c-60a8-7ef1-955c-79e70ad2749b",
+            "started_at": "2026-07-24T00:35:23.957Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 40.585,
+        "within_4000_token_ceiling": true
+      },
+      "C": {
+        "model_calls": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "sessions": [],
+        "status": "failed",
+        "wall_seconds": 0.291,
+        "within_4000_token_ceiling": true
+      }
+    },
+    "02": {
+      "A": {
+        "model_calls": 3,
+        "output_tokens": 1128,
+        "reasoning_output_tokens": 336,
+        "sessions": [
+          {
+            "output_tokens": 79,
+            "reasoning_output_tokens": 18,
+            "session_id": "019f918a-4ef2-7050-942e-1a4a5094bc5a",
+            "started_at": "2026-07-24T00:33:08.352Z"
+          },
+          {
+            "output_tokens": 447,
+            "reasoning_output_tokens": 179,
+            "session_id": "019f918a-5e74-7102-a94d-50a3aeb9ded0",
+            "started_at": "2026-07-24T00:33:12.320Z"
+          },
+          {
+            "output_tokens": 602,
+            "reasoning_output_tokens": 139,
+            "session_id": "019f918a-8c04-71b3-a93d-67c4fd12b520",
+            "started_at": "2026-07-24T00:33:23.982Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 40.299,
+        "within_4000_token_ceiling": true
+      },
+      "B": {
+        "model_calls": 3,
+        "output_tokens": 738,
+        "reasoning_output_tokens": 332,
+        "sessions": [
+          {
+            "output_tokens": 191,
+            "reasoning_output_tokens": 81,
+            "session_id": "019f918a-ebc0-77d0-ac10-174b50ed1b1c",
+            "started_at": "2026-07-24T00:33:48.486Z"
+          },
+          {
+            "output_tokens": 205,
+            "reasoning_output_tokens": 150,
+            "session_id": "019f918c-4f3a-74d3-8065-bd8a22a80b1c",
+            "started_at": "2026-07-24T00:35:19.495Z"
+          },
+          {
+            "output_tokens": 342,
+            "reasoning_output_tokens": 101,
+            "session_id": "019f918c-6986-7a60-81d9-5eb091dfc51a",
+            "started_at": "2026-07-24T00:35:26.225Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 26.131,
+        "within_4000_token_ceiling": true
+      },
+      "C": {
+        "model_calls": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "sessions": [],
+        "status": "failed",
+        "wall_seconds": 0.302,
+        "within_4000_token_ceiling": true
+      }
+    },
+    "03": {
+      "A": {
+        "model_calls": 3,
+        "output_tokens": 827,
+        "reasoning_output_tokens": 265,
+        "sessions": [
+          {
+            "output_tokens": 105,
+            "reasoning_output_tokens": 21,
+            "session_id": "019f918c-caf7-7f91-a309-6e714df3994e",
+            "started_at": "2026-07-24T00:35:51.169Z"
+          },
+          {
+            "output_tokens": 341,
+            "reasoning_output_tokens": 90,
+            "session_id": "019f918c-dd58-7ef3-bced-1d5fef906b52",
+            "started_at": "2026-07-24T00:35:55.875Z"
+          },
+          {
+            "output_tokens": 381,
+            "reasoning_output_tokens": 154,
+            "session_id": "019f918d-029e-7120-93ee-2aecaf0fb109",
+            "started_at": "2026-07-24T00:36:05.425Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 28.716,
+        "within_4000_token_ceiling": true
+      },
+      "B": {
+        "model_calls": 3,
+        "output_tokens": 1184,
+        "reasoning_output_tokens": 309,
+        "sessions": [
+          {
+            "output_tokens": 343,
+            "reasoning_output_tokens": 57,
+            "session_id": "019f918d-3ab0-7692-861f-acb1dfaaef51",
+            "started_at": "2026-07-24T00:36:19.772Z"
+          },
+          {
+            "output_tokens": 352,
+            "reasoning_output_tokens": 131,
+            "session_id": "019f918d-6103-7f92-84f4-6ed8c6fa1069",
+            "started_at": "2026-07-24T00:36:29.584Z"
+          },
+          {
+            "output_tokens": 489,
+            "reasoning_output_tokens": 121,
+            "session_id": "019f918d-8857-7e31-95d6-5a75e186d48a",
+            "started_at": "2026-07-24T00:36:39.651Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 33.738,
+        "within_4000_token_ceiling": true
+      },
+      "C": {
+        "model_calls": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "sessions": [],
+        "status": "failed",
+        "wall_seconds": 0.293,
+        "within_4000_token_ceiling": true
+      }
+    },
+    "04": {
+      "A": {
+        "model_calls": 3,
+        "output_tokens": 837,
+        "reasoning_output_tokens": 281,
+        "sessions": [
+          {
+            "output_tokens": 81,
+            "reasoning_output_tokens": 20,
+            "session_id": "019f918c-f7f7-79a2-aa6c-6a7de3ec25fd",
+            "started_at": "2026-07-24T00:36:02.683Z"
+          },
+          {
+            "output_tokens": 455,
+            "reasoning_output_tokens": 142,
+            "session_id": "019f918d-07bf-7491-9ecb-c5e549551550",
+            "started_at": "2026-07-24T00:36:06.729Z"
+          },
+          {
+            "output_tokens": 301,
+            "reasoning_output_tokens": 119,
+            "session_id": "019f918d-3b1e-7151-92b5-a2191caf7048",
+            "started_at": "2026-07-24T00:36:19.885Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 26.436,
+        "within_4000_token_ceiling": true
+      },
+      "B": {
+        "model_calls": 3,
+        "output_tokens": 1021,
+        "reasoning_output_tokens": 242,
+        "sessions": [
+          {
+            "output_tokens": 361,
+            "reasoning_output_tokens": 98,
+            "session_id": "019f918d-5f1b-7a72-b8bf-f022a9a3ae73",
+            "started_at": "2026-07-24T00:36:29.094Z"
+          },
+          {
+            "output_tokens": 280,
+            "reasoning_output_tokens": 70,
+            "session_id": "019f918d-8df9-7a41-bce4-305f6373670a",
+            "started_at": "2026-07-24T00:36:41.094Z"
+          },
+          {
+            "output_tokens": 380,
+            "reasoning_output_tokens": 74,
+            "session_id": "019f918d-b3c1-7800-b863-1750d51c1f22",
+            "started_at": "2026-07-24T00:36:50.758Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 33.874,
+        "within_4000_token_ceiling": true
+      },
+      "C": {
+        "model_calls": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "sessions": [],
+        "status": "failed",
+        "wall_seconds": 0.322,
+        "within_4000_token_ceiling": true
+      }
+    },
+    "05": {
+      "A": {
+        "model_calls": 3,
+        "output_tokens": 1185,
+        "reasoning_output_tokens": 298,
+        "sessions": [
+          {
+            "output_tokens": 94,
+            "reasoning_output_tokens": 20,
+            "session_id": "019f918e-3aae-7cb1-9c3e-3aa61d349622",
+            "started_at": "2026-07-24T00:37:25.308Z"
+          },
+          {
+            "output_tokens": 349,
+            "reasoning_output_tokens": 74,
+            "session_id": "019f918e-4bbd-7cf0-91e6-c76d4e876d07",
+            "started_at": "2026-07-24T00:37:29.677Z"
+          },
+          {
+            "output_tokens": 742,
+            "reasoning_output_tokens": 204,
+            "session_id": "019f918e-8cb3-7c12-aed6-1896ba0ccf1a",
+            "started_at": "2026-07-24T00:37:46.304Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 42.538,
+        "within_4000_token_ceiling": true
+      },
+      "B": {
+        "model_calls": 3,
+        "output_tokens": 1116,
+        "reasoning_output_tokens": 231,
+        "sessions": [
+          {
+            "output_tokens": 335,
+            "reasoning_output_tokens": 53,
+            "session_id": "019f918e-e214-7483-9d07-3861e9917344",
+            "started_at": "2026-07-24T00:38:08.156Z"
+          },
+          {
+            "output_tokens": 409,
+            "reasoning_output_tokens": 79,
+            "session_id": "019f918f-11ce-7c73-b0a2-27fd35a4c564",
+            "started_at": "2026-07-24T00:38:20.378Z"
+          },
+          {
+            "output_tokens": 372,
+            "reasoning_output_tokens": 99,
+            "session_id": "019f918f-4815-7382-b38b-6ea6edcf9d62",
+            "started_at": "2026-07-24T00:38:34.265Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 41.344,
+        "within_4000_token_ceiling": true
+      },
+      "C": {
+        "model_calls": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "sessions": [],
+        "status": "failed",
+        "wall_seconds": 0.297,
+        "within_4000_token_ceiling": true
+      }
+    },
+    "06": {
+      "A": {
+        "model_calls": 3,
+        "output_tokens": 1552,
+        "reasoning_output_tokens": 533,
+        "sessions": [
+          {
+            "output_tokens": 144,
+            "reasoning_output_tokens": 72,
+            "session_id": "019f918e-5119-7c00-a925-9ee2b850d39b",
+            "started_at": "2026-07-24T00:37:31.046Z"
+          },
+          {
+            "output_tokens": 592,
+            "reasoning_output_tokens": 316,
+            "session_id": "019f918e-65b8-7352-9ec9-fc841e290c1b",
+            "started_at": "2026-07-24T00:37:36.324Z"
+          },
+          {
+            "output_tokens": 816,
+            "reasoning_output_tokens": 145,
+            "session_id": "019f918e-9e31-7e92-baea-143d93909d9b",
+            "started_at": "2026-07-24T00:37:50.780Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 47.201,
+        "within_4000_token_ceiling": true
+      },
+      "B": {
+        "model_calls": 3,
+        "output_tokens": 618,
+        "reasoning_output_tokens": 282,
+        "sessions": [
+          {
+            "output_tokens": 235,
+            "reasoning_output_tokens": 116,
+            "session_id": "019f918f-091a-7d50-a35d-d3f2990f0057",
+            "started_at": "2026-07-24T00:38:18.142Z"
+          },
+          {
+            "output_tokens": 141,
+            "reasoning_output_tokens": 49,
+            "session_id": "019f918f-251e-7bd3-bcd9-2c55af4b2d10",
+            "started_at": "2026-07-24T00:38:25.321Z"
+          },
+          {
+            "output_tokens": 242,
+            "reasoning_output_tokens": 117,
+            "session_id": "019f918f-3ddf-7c21-aa5f-5b1f6f0429c4",
+            "started_at": "2026-07-24T00:38:31.652Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 21.045,
+        "within_4000_token_ceiling": true
+      },
+      "C": {
+        "model_calls": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "sessions": [],
+        "status": "failed",
+        "wall_seconds": 0.315,
+        "within_4000_token_ceiling": true
+      }
+    },
+    "07": {
+      "A": {
+        "model_calls": 3,
+        "output_tokens": 956,
+        "reasoning_output_tokens": 248,
+        "sessions": [
+          {
+            "output_tokens": 84,
+            "reasoning_output_tokens": 19,
+            "session_id": "019f918f-ba0e-73a3-a015-14c91537ca34",
+            "started_at": "2026-07-24T00:39:03.450Z"
+          },
+          {
+            "output_tokens": 435,
+            "reasoning_output_tokens": 147,
+            "session_id": "019f918f-cadc-7d32-9706-ca1cbddb58f2",
+            "started_at": "2026-07-24T00:39:07.745Z"
+          },
+          {
+            "output_tokens": 437,
+            "reasoning_output_tokens": 82,
+            "session_id": "019f918f-fb29-76d0-877c-d0e442e1699e",
+            "started_at": "2026-07-24T00:39:20.114Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 30.212,
+        "within_4000_token_ceiling": true
+      },
+      "B": {
+        "model_calls": 3,
+        "output_tokens": 820,
+        "reasoning_output_tokens": 336,
+        "sessions": [
+          {
+            "output_tokens": 146,
+            "reasoning_output_tokens": 76,
+            "session_id": "019f9190-2feb-7212-80b6-e06bcfafda62",
+            "started_at": "2026-07-24T00:39:33.622Z"
+          },
+          {
+            "output_tokens": 252,
+            "reasoning_output_tokens": 182,
+            "session_id": "019f9190-462b-7f20-9018-b2194ab2426b",
+            "started_at": "2026-07-24T00:39:39.315Z"
+          },
+          {
+            "output_tokens": 422,
+            "reasoning_output_tokens": 78,
+            "session_id": "019f9190-6477-7c11-a6ee-4001713aec23",
+            "started_at": "2026-07-24T00:39:47.075Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 31.67,
+        "within_4000_token_ceiling": true
+      },
+      "C": {
+        "model_calls": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "sessions": [],
+        "status": "failed",
+        "wall_seconds": 0.286,
+        "within_4000_token_ceiling": true
+      }
+    },
+    "08": {
+      "A": {
+        "model_calls": 3,
+        "output_tokens": 1061,
+        "reasoning_output_tokens": 224,
+        "sessions": [
+          {
+            "output_tokens": 95,
+            "reasoning_output_tokens": 24,
+            "session_id": "019f918f-cf87-7952-b2ba-e242537f530d",
+            "started_at": "2026-07-24T00:39:08.948Z"
+          },
+          {
+            "output_tokens": 349,
+            "reasoning_output_tokens": 80,
+            "session_id": "019f918f-e053-7681-ae5e-8b619b9c57e8",
+            "started_at": "2026-07-24T00:39:13.247Z"
+          },
+          {
+            "output_tokens": 617,
+            "reasoning_output_tokens": 120,
+            "session_id": "019f9190-07e8-7631-aa73-e1f7851d8d8d",
+            "started_at": "2026-07-24T00:39:23.379Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 35.381,
+        "within_4000_token_ceiling": true
+      },
+      "B": {
+        "model_calls": 3,
+        "output_tokens": 1374,
+        "reasoning_output_tokens": 496,
+        "sessions": [
+          {
+            "output_tokens": 565,
+            "reasoning_output_tokens": 209,
+            "session_id": "019f9190-593f-71b3-86ed-6d7ee81f18a4",
+            "started_at": "2026-07-24T00:39:44.200Z"
+          },
+          {
+            "output_tokens": 415,
+            "reasoning_output_tokens": 128,
+            "session_id": "019f9190-93da-7223-b7b2-63ec16a3fd12",
+            "started_at": "2026-07-24T00:39:59.203Z"
+          },
+          {
+            "output_tokens": 394,
+            "reasoning_output_tokens": 159,
+            "session_id": "019f9190-cf55-7793-9048-2e4702d4ff3b",
+            "started_at": "2026-07-24T00:40:14.429Z"
+          }
+        ],
+        "status": "ok",
+        "wall_seconds": 42.021,
+        "within_4000_token_ceiling": true
+      },
+      "C": {
+        "model_calls": 0,
+        "output_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "sessions": [],
+        "status": "failed",
+        "wall_seconds": 0.29,
+        "within_4000_token_ceiling": true
+      }
+    }
+  },
+  "schema": "brigade.deliberation-experiment.tokens.v1",
+  "token_ceiling_per_case_route": 4000,
+  "token_definition": "Codex session total_token_usage.output_tokens summed across every model call attributed to the route interval. This includes reasoning output tokens."
+}

@@ -1,0 +1,13 @@
+{
+  "schema": "brigade.run_plan.v1",
+  "assignments": [
+    {
+      "stage": 1,
+      "worker": "analyst",
+      "task": "Read EVIDENCE.md only and, using it plus the supplied GraphTrail context, determine the requested process_exit evidence and recommended next steps.",
+      "covers": [
+        "process_exit EVIDENCE.md"
+      ]
+    }
+  ]
+}

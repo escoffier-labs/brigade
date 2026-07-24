@@ -1,0 +1,42 @@
+{
+  "schema": "brigade.worker_results.v1",
+  "results": [
+    {
+      "worker": "analyst",
+      "task": "Read EVIDENCE.md only and determine the requested assessment for `_grader_result`, using the supplied GraphTrail context as supporting context. Return a concise JSON recommendation with evidence-backed proposed next steps; do not inspect other files or use tools.",
+      "ok": true,
+      "detail": "",
+      "text": "{\"answer_label\":\"drop-exit-code\",\"answer\":\"Remove it before the stable schema freeze because it conveys no independent execution result.\",\"contradiction_caught\":null,\"contradiction_explanation\":\"\",\"minority_finding\":\"\",\"evidence\":[\"exit_code is hardcoded to 0 for scored results and null otherwise, regardless of what ran\",\"No shipped grader supplies an independent process exit through this field; retaining it invites false consumer inference\"]}",
+      "exit_code": 0,
+      "timed_out": false,
+      "stdout_log": "logs/worker-001-analyst.stdout.log",
+      "stderr_log": "logs/worker-001-analyst.stderr.log",
+      "duration_seconds": 9.543,
+      "transport": "cli",
+      "requested_model": "gpt-5.6-terra",
+      "reasoning": "low"
+    }
+  ],
+  "ground_truth": {
+    "available": true,
+    "cwd": "<case-03-worktree>",
+    "diffstat": "",
+    "changed_files": [],
+    "untracked_files": [],
+    "patch_ref": null,
+    "verify_receipts": [],
+    "latest_verify": null,
+    "diffstat_unavailable": true,
+    "change_provenance": "observed-during-run-author-unknown",
+    "code_graph_delta": {
+      "status": "skipped_read_only",
+      "ok": false,
+      "summary": "code graph delta skipped: read-only run",
+      "raw_counts": {},
+      "edge_churn": 0,
+      "changed_symbols": [],
+      "changed_symbol_count": 0
+    },
+    "suspected_noop": false
+  }
+}

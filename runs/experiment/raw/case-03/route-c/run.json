@@ -1,0 +1,82 @@
+{
+  "schema": "brigade.run.v1",
+  "task": "_grader_result EVIDENCE.md",
+  "cwd": "<case-03-worktree>",
+  "orchestrator": "chef",
+  "dry_run": false,
+  "read_only": true,
+  "status": "failed",
+  "started_at": "2026-07-24T00:36:53.166103Z",
+  "status_started_at": "2026-07-24T00:36:53.243673Z",
+  "suspected_noop": false,
+  "code_graph_brief": {
+    "attached": true,
+    "bytes": 3956
+  },
+  "drift_impact_brief": {
+    "attached": false,
+    "bytes": 0,
+    "pending_count": 0
+  },
+  "evidence_brief": {
+    "attached": false,
+    "bytes": 0
+  },
+  "brief_budget": {
+    "bytes": 6000,
+    "attached": [
+      {
+        "name": "code_graph",
+        "bytes": 3956,
+        "truncated": false
+      }
+    ]
+  },
+  "deliberation": true,
+  "roster": {
+    "path": "<experiment-worktree>/runs/experiment/config/route-c.toml",
+    "source": "explicit",
+    "shadowed": []
+  },
+  "lock_workspace": "<case-03-worktree>",
+  "git": {
+    "head": "0941c3e66274b76c36a8277c106cf85ffd8a90c9",
+    "branch": "HEAD",
+    "dirty_files": 1
+  },
+  "pre_run_snapshot": {
+    "schema": "brigade.pre_run_snapshot.v1",
+    "branch": "HEAD",
+    "head": "0941c3e66274b76c36a8277c106cf85ffd8a90c9",
+    "tracked_dirty_files": [],
+    "tracked_dirty_fingerprints": {},
+    "untracked_files": [
+      "EVIDENCE.md"
+    ],
+    "untracked_fingerprints": {
+      "EVIDENCE.md": "file:436:a71ecc10955012ecbb16b4ebdccb98cbd41e431204d46cbe563ba4a6569ecca9"
+    }
+  },
+  "code_graph_delta": {
+    "status": "skipped_read_only",
+    "ok": false,
+    "summary": "code graph delta skipped: read-only run",
+    "raw_counts": {},
+    "edge_churn": 0,
+    "changed_symbols": [],
+    "changed_symbol_count": 0
+  },
+  "finished_at": "2026-07-24T00:36:53.241944Z",
+  "duration_seconds": 0.076,
+  "artifacts": "<experiment-worktree>/runs/experiment/raw/case-03/route-c",
+  "error": "deliberation could not assemble enough grounded GraphTrail evidence scopes; need distinct dependency traces from .graphtrail/graphtrail.db",
+  "failure_phase": "planning",
+  "failure_kind": "invalid-plan",
+  "failure": {
+    "phase": "planning",
+    "kind": "invalid-plan",
+    "detail": "deliberation could not assemble enough grounded GraphTrail evidence scopes; need distinct dependency traces from .graphtrail/graphtrail.db",
+    "seat": "chef"
+  },
+  "codex_transport": "exec"
+}

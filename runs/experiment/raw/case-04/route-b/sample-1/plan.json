@@ -1,0 +1,10 @@
+{
+  "schema": "brigade.run_plan.v1",
+  "assignments": [
+    {
+      "stage": 1,
+      "worker": "sample",
+      "task": "process_exit EVIDENCE.md"
+    }
+  ]
+}

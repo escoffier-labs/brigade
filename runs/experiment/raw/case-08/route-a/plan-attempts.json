@@ -1,0 +1,13 @@
+{
+  "attempts": [
+    {
+      "stage": "initial",
+      "ok": true,
+      "parsed": true,
+      "detail": "",
+      "text": "{\"assignments\":[{\"stage\":1,\"worker\":\"analyst\",\"task\":\"Read EVIDENCE.md only and, using the supplied GraphTrail context, identify the issue, affected behavior, likely root cause, and exact recommended next steps without modifying files.\",\"covers\":[\"evidence analysis\",\"impact assessment\",\"recommended remediation\"]}]}",
+      "timed_out": false,
+      "status": ""
+    }
+  ]
+}

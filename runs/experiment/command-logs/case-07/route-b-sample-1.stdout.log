@@ -1,0 +1,1 @@
+{"decision":"Insufficient evidence to make an independent manifest-compatibility decision: EVIDENCE.md contents were not provided, and the task prohibits inspecting files. The supplied graph context shows pre-agent-notify manifests are covered by strict and compatible-mode tests. Next step: provide EVIDENCE.md text for review."}

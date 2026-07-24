@@ -1,0 +1,65 @@
+{
+  "schema": "brigade.roster_snapshot.v1",
+  "orchestrator": "chef",
+  "max_workers": 2,
+  "timeout_seconds": 900.0,
+  "allow_models": [
+    "codex"
+  ],
+  "sandbox": "read-only",
+  "agents": {
+    "chef": {
+      "cli": "codex",
+      "model": "gpt-5.6-terra",
+      "reasoning": "low",
+      "transport": "direct",
+      "transport_version": null,
+      "role": "Read EVIDENCE.md in the working directory, then synthesize the grounded perspectives and challenger into the requested final JSON object. Do not inspect any other files or run other tools. Keep the response under 180 words.",
+      "timeout_seconds": null,
+      "invalid_final_fallback": null,
+      "read_only_capable": true,
+      "env": null
+    },
+    "perspective_one": {
+      "cli": "codex",
+      "model": "gpt-5.6-terra",
+      "reasoning": "low",
+      "transport": "direct",
+      "transport_version": null,
+      "role": "Read EVIDENCE.md in the working directory. Use only that case evidence and the assigned grounded scope. Do not inspect any other files or run other tools. Return the required perspective JSON in under 180 words.",
+      "timeout_seconds": null,
+      "invalid_final_fallback": null,
+      "read_only_capable": true,
+      "env": null
+    },
+    "perspective_two": {
+      "cli": "codex",
+      "model": "gpt-5.6-terra",
+      "reasoning": "low",
+      "transport": "direct",
+      "transport_version": null,
+      "role": "Read EVIDENCE.md in the working directory. Use only that case evidence and the assigned grounded scope. Do not inspect any other files or run other tools. Return the required perspective JSON in under 180 words.",
+      "timeout_seconds": null,
+      "invalid_final_fallback": null,
+      "read_only_capable": true,
+      "env": null
+    },
+    "challenger": {
+      "cli": "codex",
+      "model": "gpt-5.6-terra",
+      "reasoning": "low",
+      "transport": "direct",
+      "transport_version": null,
+      "role": "Read EVIDENCE.md in the working directory. Review the independent perspectives, attack their strongest consensus, and preserve any useful minority finding. Do not inspect any other files or run other tools. Return the required challenger JSON in under 180 words.",
+      "timeout_seconds": null,
+      "invalid_final_fallback": null,
+      "read_only_capable": true,
+      "env": null
+    }
+  },
+  "resolution": {
+    "path": "<experiment-worktree>/runs/experiment/config/route-c.toml",
+    "source": "explicit",
+    "shadowed": []
+  }
+}

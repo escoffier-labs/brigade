@@ -1,0 +1,1 @@
+{"decision":"Retain the compatibility-mode exception for the unpublished agent-notify component, while keeping strict mode unchanged. Evidence shows compatible manifests may omit this unpublished component, but must still reject missing published components, malformed assets, and unknown extras."}
