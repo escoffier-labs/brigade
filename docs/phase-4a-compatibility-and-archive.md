@@ -133,7 +133,7 @@ guidance from documentation.
 - [x] Migrate operator MCP client configuration to the Brigade-managed absolute path installed by `brigade setup` (operator machine migrated 2026-07-21: codex, Cursor, OpenClaw, and Claude configs plus the capped MCP wrapper now use the managed set).
 - [x] Confirm migration notices as ordinary commits on both mirrors (graphtrail PR #44 and miseledger PR #44, merged 2026-07-21).
 - [x] Verify that neither standalone `master` branch was rewritten or force-pushed (ancestry-checked against the pre-notice heads on 2026-07-21).
-- [ ] Update product and documentation links to the Brigade release path.
+- [x] Update product and documentation links to the Brigade release path.
 - [x] Archive `escoffier-labs/graphtrail` (archived 2026-07-21).
 - [x] Archive `escoffier-labs/miseledger` (archived 2026-07-21).
 
