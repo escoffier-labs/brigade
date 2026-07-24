@@ -57,6 +57,7 @@ class Roster:
     allow_models: tuple[str, ...] = ()
     timeout_seconds: float = 600.0
     sandbox: str | None = None
+    scheduler: str | None = None
     codex_transport: str = "exec"
     resolution: RosterResolution | None = None
 
@@ -321,6 +322,10 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
     timeout_seconds = _as_positive_number(limits.get("timeout_seconds", 600.0), "limits.timeout_seconds")
     sandbox = _as_sandbox(limits.get("sandbox"))
 
+    scheduler = limits.get("scheduler")
+    if scheduler is not None and scheduler not in ("waves", "dag"):
+        raise ValueError("limits.scheduler must be one of: waves, dag")
+
     codex_transport = data.get("codex_transport", "exec")
     if codex_transport not in CODEX_TRANSPORT_CHOICES:
         choices = ", ".join(CODEX_TRANSPORT_CHOICES)
@@ -505,6 +510,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None) -> Ro
         allow_models=allow_models,
         timeout_seconds=timeout_seconds,
         sandbox=sandbox,
+        scheduler=scheduler,
         codex_transport=codex_transport,
         resolution=resolution,
     )
