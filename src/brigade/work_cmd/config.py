@@ -648,7 +648,7 @@ def _load_scanner_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]
                 errors.append(f"{label}: duplicate id {scanner_id}")
             seen_ids.add(scanner_id)
         if "cadence" in scanner and _scanner_start_minute(scanner["cadence"]) is None:
-            errors.append(f"{label}: cadence must be daily@HH:MM or hourly@MM")
+            errors.append(f"{label}: cadence must be daily@HH:MM, weekly@HH:MM, or hourly@MM")
         if "conflict_window" in scanner and _scanner_window_minutes(scanner["conflict_window"]) is None:
             errors.append(f"{label}: conflict_window must be HH:MM-HH:MM")
         if scanner:
@@ -778,6 +778,9 @@ def _scanner_start_minute(cadence: str) -> int | None:
     daily = re.fullmatch(r"daily@(.+)", cadence.strip())
     if daily:
         return _parse_clock_minutes(daily.group(1))
+    weekly = re.fullmatch(r"weekly@(.+)", cadence.strip())
+    if weekly:
+        return _parse_clock_minutes(weekly.group(1))
     hourly = re.fullmatch(r"hourly@([0-5]?\d)", cadence.strip())
     if hourly:
         return int(hourly.group(1))

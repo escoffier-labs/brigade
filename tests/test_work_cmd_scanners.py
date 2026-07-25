@@ -65,7 +65,7 @@ def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsy
     out = capsys.readouterr().out
     config = tmp_path / ".brigade" / "scanners.toml"
     assert f"scanner_config: {config}" in out
-    assert "scanners: 8" in out
+    assert "scanners: 9" in out
     assert ".brigade/scanners.toml" in (tmp_path / ".gitignore").read_text()
 
     assert work_cmd.scanners_list(target=tmp_path) == 0
@@ -73,6 +73,7 @@ def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsy
     assert "work scanners:" in out
     assert "- chat-memory-sweep [enabled] daily@02:15 source=chat-memory-sweep" in out
     assert "brigade work import chat-sweep --json" in out
+    assert "- friction-scan [enabled] weekly@03:45 source=friction-scan" in out
 
     assert work_cmd.scanners_list(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -838,4 +839,67 @@ conflict_window = "02:00-02:10"
     payload = json.loads(capsys.readouterr().out)
     assert payload["completed"] == 1
     assert payload["failed"] == 0
+
+
+def test_scanner_weekly_cadence_parses_and_due_after_seven_days(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+
+    from brigade.work_cmd import config as config_mod
+    from brigade.work_cmd import scanners as scanners_mod
+
+    assert config_mod._scanner_start_minute("weekly@03:45") == 3 * 60 + 45
+    assert config_mod._scanner_start_minute("weekly@99:99") is None
+
+    now = datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(scanners_mod.helpers, "_now", lambda: now)
+
+    scanner = {"id": "friction-scan", "cadence": "weekly@03:45", "enabled": True}
+
+    monkeypatch.setattr(scanners_mod, "_scanner_latest_success", lambda target, scanner_id: None)
+    assert scanners_mod._scanner_is_due(Path("."), scanner, now=now) is True
+
+    recent = {"completed_at": (now - timedelta(days=6)).isoformat()}
+    monkeypatch.setattr(scanners_mod, "_scanner_latest_success", lambda target, scanner_id: recent)
+    assert scanners_mod._scanner_is_due(Path("."), scanner, now=now) is False
+
+    stale = {"completed_at": (now - timedelta(days=7)).isoformat()}
+    monkeypatch.setattr(scanners_mod, "_scanner_latest_success", lambda target, scanner_id: stale)
+    assert scanners_mod._scanner_is_due(Path("."), scanner, now=now) is True
+
+
+def test_scanner_config_accepts_weekly_cadence(tmp_path):
+    from brigade.work_cmd import config as config_mod
+
+    brigade = tmp_path / ".brigade"
+    brigade.mkdir()
+    (brigade / "scanners.toml").write_text(
+        "\n".join(
+            [
+                "[[scanner]]",
+                'id = "friction-scan"',
+                'source = "friction-scan"',
+                'command = "brigade friction scan --json"',
+                'cadence = "weekly@03:45"',
+                "enabled = true",
+                "timeout = 300",
+                'output_path = ".brigade/friction/latest.json"',
+                'conflict_window = "03:40-04:00"',
+                "",
+            ]
+        )
+    )
+    scanners, errors = config_mod._load_scanner_config(tmp_path)
+    assert errors == []
+    assert scanners[0]["cadence"] == "weekly@03:45"
+
+
+def test_scanner_defaults_include_weekly_friction_scan():
+    from brigade.work_cmd import constants
+
+    entry = next(item for item in constants.SCANNER_DEFAULTS if item["id"] == "friction-scan")
+    assert entry["command"] == "brigade friction scan --json"
+    assert entry["cadence"] == "weekly@03:45"
+    assert entry["enabled"] is True
+    assert entry["output_path"] == ".brigade/friction/latest.json"
     assert payload["ingest_errors"] == []

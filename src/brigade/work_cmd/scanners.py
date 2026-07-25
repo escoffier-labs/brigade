@@ -94,6 +94,8 @@ def _scanner_is_due(target: Path, scanner: dict[str, Any], *, now: datetime | No
         return (now - started).total_seconds() >= 3600
     if cadence.startswith("daily@"):
         return now.date() > started.date()
+    if cadence.startswith("weekly@"):
+        return (now - started).total_seconds() >= 7 * 24 * 3600
     return False
 
 
@@ -416,14 +418,19 @@ def _scanner_plan_payload(target: Path) -> dict[str, Any]:
     for item in planned:
         current = int(item["start_minute"])
         suggested = current if next_start is None else max(current, next_start)
+        cadence_value = str(item.get("cadence", ""))
+        if cadence_value.startswith("daily@"):
+            suggested_cadence = f"daily@{config_mod._format_clock_minutes(suggested)}"
+        elif cadence_value.startswith("weekly@"):
+            suggested_cadence = f"weekly@{config_mod._format_clock_minutes(suggested)}"
+        else:
+            suggested_cadence = f"hourly@{suggested % 60:02d}"
         suggestions.append(
             {
                 "id": item["id"],
                 "current": item["cadence"],
                 "suggested_start": config_mod._format_clock_minutes(suggested),
-                "suggested_cadence": f"daily@{config_mod._format_clock_minutes(suggested)}"
-                if str(item.get("cadence", "")).startswith("daily@")
-                else f"hourly@{suggested % 60:02d}",
+                "suggested_cadence": suggested_cadence,
             }
         )
         next_start = suggested + 15
