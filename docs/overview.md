@@ -28,6 +28,8 @@ Brigade gives the setup a home base.
 
 The goal is not to make a giant automation machine. The goal is to make agent memory understandable, reviewable, and portable across harnesses.
 
+**Agents run the system.** Install, setup, verify, and handoffs are designed to be executed by coding agents (often from a paste into Claude Code, Codex, Cursor, or OpenClaw). Humans own policy and review when a gate is ambiguous or risky. You can type every command yourself; production use is agent-driven, not a human day-to-day terminal workflow.
+
 ## Mise En Place (brand metaphor)
 
 The product name comes from the kitchen. A *brigade de cuisine* is the staff that runs the line, and *mise en place*, pronounced "meez", means everything is in its place before the work starts. That metaphor lives in brand art and deep docs. The commands you type stay plain: `setup`, `verify`, `sync`, `code`, `evidence`.
