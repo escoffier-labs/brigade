@@ -49,6 +49,20 @@ Work enters as intent and leaves as evidence.
 
 ## Install
 
+**Default path: give the job to an agent.** Paste something like this into Claude Code, Codex, Cursor, OpenClaw, or any agent with shell access:
+
+```text
+Read https://github.com/escoffier-labs/brigade and follow AGENTS.md.
+Install brigade-cli with pipx if missing. Run operator quickstart with
+--dry-run first and show the plan. Then apply, run brigade operator doctor,
+and report ready: yes. Keep existing memory layout. Do not touch remotes,
+do not commit, stop before anything destructive.
+```
+
+The agent installs, runs `brigade setup`, wires harnesses, and leaves files on disk. You review when the gate is ambiguous or risky. You do not have to type the install path yourself.
+
+**If you prefer a shell** (same commands the agent would run):
+
 ```bash
 pipx install brigade-cli
 pipx ensurepath           # then open a new shell so `brigade` is on PATH
@@ -240,6 +254,8 @@ I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions. 
 | Bootstrap Doctor | same | Full OpenClaw bootstrap set: SOUL, TOOLS, AGENTS, IDENTITY, MEMORY, and related session-start files |
 
 Kitchen language (*brigade de cuisine*, *mise en place*, station nicknames) is brand and deep docs. Commands and product surfaces stay plain: receipt, code map, evidence log, sync, handoff.
+
+**Who runs what:** agents install, set up, verify, and write handoffs. Humans set policy and review gates when something is ambiguous or risky. The CLI is the control plane the fleet drives, not a tool you are expected to operate by hand all day.
 
 ## Harnesses
 
