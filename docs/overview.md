@@ -28,13 +28,20 @@ Brigade gives the setup a home base.
 
 The goal is not to make a giant automation machine. The goal is to make agent memory understandable, reviewable, and portable across harnesses.
 
-## Mise En Place
+## Mise En Place (brand metaphor)
 
-The name comes from the kitchen. A *brigade de cuisine* is the staff that runs the line, and *mise en place*, pronounced "meez", means everything is in its place before the work starts.
+The product name comes from the kitchen. A *brigade de cuisine* is the staff that runs the line, and *mise en place*, pronounced "meez", means everything is in its place before the work starts. That metaphor lives in brand art and deep docs. The commands you type stay plain: `setup`, `verify`, `sync`, `code`, `evidence`.
 
-In a kitchen, that is the chef's first job: prep the station, label the ingredients, sharpen the tools, and make sure service does not depend on hunting for basics mid-rush. For agents, it is the same job: rules, memory, handoff inboxes, tools, guards, receipts, and verification paths set up before the session gets expensive.
+In a kitchen, the first job is prep: label ingredients, sharpen tools, and avoid hunting for basics mid-rush. For agents, it is the same job: rules, memory, handoff inboxes, tools, guards, receipts, and verification paths set up before the session gets expensive.
 
-That is the idea Brigade is built on. The chef owns the station, and every agent working in it should leave the setup clearer, safer, and easier for the next agent to use.
+Public names for the built-in engines:
+
+| Public | Commands | Historical |
+|---|---|---|
+| Code map | `brigade code …` | GraphTrail |
+| Evidence log | `brigade evidence …` | MiseLedger |
+
+Standalone GraphTrail or MiseLedger installs are replaced by `brigade setup`. Some binary and path names still use the historical labels; the operator surface is the public table above.
 
 ## Start Small
 
@@ -331,7 +338,7 @@ Memory and handoff tools:
 - [OpenClaw](https://github.com/solomonneas/openclaw): personal AI assistant and memory owner.
 - Hermes: local memory owner and handoff writer convention.
 - Memory maintenance is embedded in Brigade: `brigade memory status`, `lint`, `compact`, and `init-git` (the retired [memory-doctor](https://github.com/escoffier-labs/memory-doctor) package). Use `brigade ingest` for handoff promotion.
-- [bootstrap-doctor](https://github.com/escoffier-labs/bootstrap-doctor): audits and trims oversized OpenClaw bootstrap files.
+- [bootstrap-doctor](https://github.com/escoffier-labs/bootstrap-doctor): audits and trims the full OpenClaw bootstrap set (SOUL.md, TOOLS.md, AGENTS.md, IDENTITY.md, MEMORY.md, and related session-start files), and the same idea for other harnesses with large bootstrap files.
 
 Safety and operations tools:
 
@@ -341,17 +348,18 @@ Safety and operations tools:
 - [Token Glace](https://github.com/escoffier-labs/token-glace): output compaction for terminal-heavy agent workflows.
 - Built-in Scout skills: Brigade wires `brigade-work` and `ultra-work-scout` during `brigade init`; use Skillet when you want the full optional skill roster.
 
-Evidence ledger tools:
+Evidence log and code map (built in):
 
-- [MiseLedger](https://github.com/escoffier-labs/brigade/tree/main/engines/evidence-ledger) (`engines/evidence-ledger/` in this monorepo): local-first evidence ledger. One binary crawls sessions, files, git history, and chat sources (`miseledger crawl ...`), stores `miseledger.adapter.v1` JSONL in SQLite with FTS5, and emits Brigade-ready evidence bundles. The archived [miseledger](https://github.com/escoffier-labs/miseledger) repository is a frozen history mirror.
-- Brigade station CLI (process boundary):
-  - `brigade setup` installs GraphTrail, `graphtrail-mcp`, MiseLedger, SessionFind, and `agent-notify` (when published on the release manifest) from the exact release manifest
-  - `brigade add evidence` is a one-release compatibility fallback for an independent MiseLedger install
-  - `brigade evidence status` / `doctor` — advisory health + next commands
-  - `brigade evidence crawl <args...>` / `search <args...>` - transparent MiseLedger execution; engine output and exit code pass through
-  - `brigade evidence crawl plan` / `export plan` — review-only plans under `.brigade/evidence/plans/`
-  - `brigade receipts export miseledger --new-only --import` — export verify/run receipts into the ledger
-- Historical note only: StationTrail and SourceHarvest were absorbed into MiseLedger crawl in v0.3.0; their archived repos are migration notes, not active products.
+- **Evidence log** (`brigade evidence …`): local-first ledger of runs, crawls, and imports. Engine lives at [`engines/evidence-ledger/`](https://github.com/escoffier-labs/brigade/tree/main/engines/evidence-ledger) (historically MiseLedger). Crawls sessions, files, git, and chat into SQLite with FTS5. Archived standalone [miseledger](https://github.com/escoffier-labs/miseledger) is a history mirror only.
+- **Code map** (`brigade code …`): local symbol graph (callers, impact, context). Engine lives under the monorepo engines tree (historically GraphTrail). Archived standalone [graphtrail](https://github.com/escoffier-labs/graphtrail) is a history mirror only.
+- Brigade CLI (process boundary):
+  - `brigade setup` installs the code-map engine, its MCP bridge, the evidence engine, SessionFind, and `agent-notify` (when published on the release manifest) from the exact release manifest
+  - `brigade add evidence` / `brigade add graphtrail` remain one-release compatibility shims
+  - `brigade evidence status` / `doctor` - advisory health + next commands
+  - `brigade evidence crawl <args...>` / `search <args...>` - engine output and exit code pass through
+  - `brigade evidence crawl plan` / `export plan` - review-only plans under `.brigade/evidence/plans/`
+  - `brigade receipts export miseledger --new-only --import` - export verify/run receipts into the ledger (command keeps the historical export name for now)
+- Historical note only: StationTrail and SourceHarvest were absorbed into evidence crawl in v0.3.0; their archived repos are migration notes, not active products.
 
 Search and context tools:
 

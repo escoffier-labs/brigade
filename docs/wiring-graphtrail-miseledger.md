@@ -1,4 +1,8 @@
-# Wiring GraphTrail and MiseLedger MCP
+# Wiring the code map and evidence log MCP
+
+> **Public names:** code map (`brigade code`, historically GraphTrail) and evidence log
+> (`brigade evidence`, historically MiseLedger). Engine binaries and some paths still use
+> the historical names. New installs use `brigade setup`.
 
 Installing the CLIs is not the same as wiring them. If the binaries are on PATH but no
 `[mcp_servers.*]` block (Codex) or `mcpServers` entry (Claude Code) references them, agents

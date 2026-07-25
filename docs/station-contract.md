@@ -17,8 +17,8 @@ Fresh repo installs use the `repo` profile: core, skills, memory, guard, securit
 | `tokens` | token-glace | tracks token spend across your harnesses and compacts noisy output |
 | `memory` | bootstrap-doctor (optional); memory maintenance is built in | `brigade memory status|lint|compact` plus memory-care for card freshness |
 | `pantry` | agentpantry (Go sidecar) | plans and health-checks sealed browser-session sync; never starts source/sink |
-| `search` | code-search; GraphTrail is installed by `brigade setup` | local semantic search plus the code-graph engine for callers, impact, and structural diffs |
-| `evidence` | MiseLedger, the evidence engine installed by `brigade setup` | explicitly runs local MiseLedger for `brigade evidence crawl|search`; crawl/export plans are review-only, and Brigade neither starts daemons nor uploads data |
+| `search` | code-search; the code map engine is installed by `brigade setup` (historically GraphTrail) | local semantic search plus the code map for callers, impact, and structural diffs (`brigade code …`) |
+| `evidence` | evidence log engine installed by `brigade setup` (historically MiseLedger) | runs the local evidence engine for `brigade evidence crawl|search`; crawl/export plans are review-only, and Brigade neither starts daemons nor uploads data |
 
 ## Inspecting a station before install
 
