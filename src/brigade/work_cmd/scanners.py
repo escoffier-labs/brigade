@@ -80,6 +80,14 @@ def _scanner_latest_success(target: Path, scanner_id: str) -> dict[str, Any] | N
     return None
 
 
+def _scanner_stale_hours(cadence: str) -> float:
+    """Return the freshness WARN threshold for a scanner cadence."""
+    value = (cadence or "").strip()
+    if value.startswith("weekly@"):
+        return float(constants.SCANNER_WEEKLY_STALE_HOURS)
+    return float(constants.SCANNER_OUTPUT_STALE_HOURS)
+
+
 def _scanner_is_due(target: Path, scanner: dict[str, Any], *, now: datetime | None = None) -> bool:
     now = now or helpers._now()
     scanner_id = str(scanner.get("id") or "")
@@ -533,7 +541,7 @@ def _scanner_health(target: Path) -> dict[str, Any]:
         if now is None:
             continue
         age_hours = (now.timestamp() - path.stat().st_mtime) / 3600
-        if age_hours > constants.SCANNER_OUTPUT_STALE_HOURS:
+        if age_hours > _scanner_stale_hours(str(scanner.get("cadence") or "")):
             stale_outputs.append(f"{scanner.get('id')}={age_hours:.1f}h")
     if missing_outputs or stale_outputs:
         parts = []
@@ -614,7 +622,7 @@ def _scanner_health(target: Path) -> dict[str, Any]:
                 stale_successes.append(str(scanner.get("id")))
                 continue
             age_hours = (now - completed).total_seconds() / 3600
-            if age_hours > constants.SCANNER_RUN_STALE_HOURS:
+            if age_hours > _scanner_stale_hours(str(scanner.get("cadence") or "")):
                 stale_successes.append(f"{scanner.get('id')}={age_hours:.1f}h")
     if stale_successes:
         checks.append(

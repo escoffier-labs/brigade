@@ -73,7 +73,7 @@ def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsy
     assert "work scanners:" in out
     assert "- chat-memory-sweep [enabled] daily@02:15 source=chat-memory-sweep" in out
     assert "brigade work import chat-sweep --json" in out
-    assert "- friction-scan [enabled] weekly@03:45 source=friction-scan" in out
+    assert "- friction-scan [enabled] weekly@05:00 source=friction-scan" in out
 
     assert work_cmd.scanners_list(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -880,18 +880,18 @@ def test_scanner_config_accepts_weekly_cadence(tmp_path):
                 'id = "friction-scan"',
                 'source = "friction-scan"',
                 'command = "brigade friction scan --json"',
-                'cadence = "weekly@03:45"',
+                'cadence = "weekly@05:00"',
                 "enabled = true",
                 "timeout = 300",
                 'output_path = ".brigade/friction/latest.json"',
-                'conflict_window = "03:40-04:00"',
+                'conflict_window = "04:50-05:15"',
                 "",
             ]
         )
     )
     scanners, errors = config_mod._load_scanner_config(tmp_path)
     assert errors == []
-    assert scanners[0]["cadence"] == "weekly@03:45"
+    assert scanners[0]["cadence"] == "weekly@05:00"
 
 
 def test_scanner_defaults_include_weekly_friction_scan():
@@ -899,6 +899,16 @@ def test_scanner_defaults_include_weekly_friction_scan():
 
     entry = next(item for item in constants.SCANNER_DEFAULTS if item["id"] == "friction-scan")
     assert entry["command"] == "brigade friction scan --json"
-    assert entry["cadence"] == "weekly@03:45"
+    assert entry["cadence"] == "weekly@05:00"
     assert entry["enabled"] is True
     assert entry["output_path"] == ".brigade/friction/latest.json"
+    assert entry["conflict_window"] == "04:50-05:15"
+
+
+def test_scanner_weekly_stale_threshold_is_longer_than_daily():
+    from brigade.work_cmd import constants
+    from brigade.work_cmd import scanners as scanners_mod
+
+    assert scanners_mod._scanner_stale_hours("daily@02:15") == constants.SCANNER_OUTPUT_STALE_HOURS
+    assert scanners_mod._scanner_stale_hours("weekly@05:00") == constants.SCANNER_WEEKLY_STALE_HOURS
+    assert constants.SCANNER_WEEKLY_STALE_HOURS > 7 * 24

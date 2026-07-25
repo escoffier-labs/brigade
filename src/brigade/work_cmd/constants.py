@@ -189,6 +189,11 @@ SCANNER_OUTPUT_STALE_HOURS = 48
 SCANNER_RUN_STALE_HOURS = 48
 
 
+# Weekly scanners are due every 7 days; keep the stale threshold a day past due
+# so a successful weekly run does not WARN for most of the cycle.
+SCANNER_WEEKLY_STALE_HOURS = 192
+
+
 SCANNER_SWEEP_STALE_HOURS = 36
 
 
@@ -292,11 +297,11 @@ SCANNER_DEFAULTS = (
         "id": "friction-scan",
         "source": "friction-scan",
         "command": "brigade friction scan --json",
-        "cadence": "weekly@03:45",
+        "cadence": "weekly@05:00",
         "enabled": True,
         "timeout": 300,
         "output_path": ".brigade/friction/latest.json",
-        "conflict_window": "03:40-04:00",
+        "conflict_window": "04:50-05:15",
     },
 )
 
