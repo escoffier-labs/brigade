@@ -331,6 +331,59 @@ def _parse_markdown_sections(text: str) -> dict[str, str]:
     return {name: "\n".join(lines).strip() for name, lines in sections.items()}
 
 
+def _normalize_section_heading(name: str) -> str:
+    return re.sub(r"\s+", " ", name.strip().casefold()).rstrip(":").strip()
+
+
+_SECTION_SYNONYMS: dict[str, str] = {
+    "type": "Type",
+    "handoff type": "Type",
+    "kind": "Type",
+    "title": "Title",
+    "name": "Title",
+    "summary": "Summary",
+    "tldr": "Summary",
+    "tl;dr": "Summary",
+    "overview": "Summary",
+    "durable facts": "Durable facts",
+    "facts": "Durable facts",
+    "evidence": "Evidence",
+    "recommended memory action": "Recommended memory action",
+    "memory action": "Recommended memory action",
+    "recommended action": "Recommended memory action",
+    "target card": "Target card",
+    "card": "Target card",
+    "card target": "Target card",
+    "suggested card content": "Suggested card content",
+    "card content": "Suggested card content",
+    "target document": "Target document",
+    "document": "Target document",
+    "document target": "Target document",
+    "suggested document content": "Suggested document content",
+    "document content": "Suggested document content",
+}
+
+
+def _canonicalize_sections(sections: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+    resolved: dict[str, str] = {}
+    owners: dict[str, str] = {}
+    errors: list[str] = []
+    for raw_name, body in sections.items():
+        key = _normalize_section_heading(raw_name)
+        canonical = _SECTION_SYNONYMS.get(key)
+        if canonical is None:
+            resolved[raw_name] = body
+            continue
+        prior = owners.get(canonical)
+        if prior is not None and prior != raw_name:
+            errors.append(f"ambiguous section headings for {canonical}: {prior!r}, {raw_name!r}")
+            continue
+        owners[canonical] = raw_name
+        if canonical not in resolved or (body and not resolved[canonical]):
+            resolved[canonical] = body
+    return resolved, errors
+
+
 def _section_value(sections: dict[str, str], name: str) -> str:
     raw = sections.get(name, "")
     lines: list[str] = []

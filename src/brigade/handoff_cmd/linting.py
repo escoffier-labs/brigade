@@ -191,7 +191,9 @@ def lint_file(path: Path) -> HandoffLintResult:
             warnings=(),
         )
 
-    sections = _parse_markdown_sections(text)
+    raw_sections = _parse_markdown_sections(text)
+    sections, collision_errors = _canonicalize_sections(raw_sections)
+    errors.extend(collision_errors)
     for required in ("Type", "Title", "Summary", "Recommended memory action"):
         if required not in sections or not _section_value(sections, required):
             errors.append(f"missing required section: {required}")
@@ -233,7 +235,8 @@ def _loose_field(text: str, name: str) -> str | None:
 
 def _migrate_extract(text: str) -> tuple[dict[str, str], list[str]]:
     """Merge proper `## Section` values with loose bullet metadata; report gaps."""
-    sections = _parse_markdown_sections(text)
+    raw_sections = _parse_markdown_sections(text)
+    sections, _collision_errors = _canonicalize_sections(raw_sections)
 
     def field(section_name: str) -> str:
         return _section_value(sections, section_name) or _loose_field(text, section_name) or ""

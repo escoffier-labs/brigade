@@ -63,6 +63,30 @@ Document handoffs only include document fields.
 """
 
 
+SYNONYM_NO_CARD_HANDOFF = """# Memory Handoff
+
+## Kind
+learning
+
+## Name
+Handoff lint synonyms
+
+## TL;DR
+Near-miss headings should lint clean.
+
+## Memory action
+no-card
+
+## Document target
+.learnings/LEARNINGS.md
+
+## Document content
+### Handoff lint synonyms
+
+Synonym headings resolve to canonical sections.
+"""
+
+
 PROMOTED_IMPORT_HANDOFF = """# Memory Handoff
 
 ## Type
@@ -2064,3 +2088,52 @@ def test_handoff_lint_surfaces_injection_signals(tmp_path, capsys):
     assert "line " in out
     assert "classic-injection" in out or "ignore-instructions" in out
     assert "handoff migrate" not in out
+
+
+def test_handoff_lint_accepts_synonym_section_headings(tmp_path):
+    note = tmp_path / "synonym.md"
+    note.write_text(SYNONYM_NO_CARD_HANDOFF)
+    result = handoff_cmd.lint_file(note)
+    assert result.valid, result.errors
+
+
+def test_handoff_lint_rejects_ambiguous_synonym_collision(tmp_path):
+    note = tmp_path / "collision.md"
+    note.write_text(
+        """# Memory Handoff
+
+## Summary
+First summary
+
+## TL;DR
+Second summary
+
+## Type
+learning
+
+## Title
+Collision
+
+## Recommended memory action
+no-card
+
+## Target document
+.learnings/LEARNINGS.md
+
+## Suggested document content
+### Collision
+
+Body
+"""
+    )
+    result = handoff_cmd.lint_file(note)
+    assert not result.valid
+    assert any("ambiguous section headings" in err for err in result.errors)
+    assert any("Summary" in err for err in result.errors)
+
+
+def test_handoff_lint_still_accepts_canonical_headings(tmp_path):
+    note = tmp_path / "canonical.md"
+    note.write_text(NO_CARD_HANDOFF)
+    result = handoff_cmd.lint_file(note)
+    assert result.valid, result.errors
