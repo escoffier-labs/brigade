@@ -1,21 +1,25 @@
 # Agent-Assisted Setup
 
-You can point an agent at the Brigade repository and ask it to install Brigade for you. The root `AGENTS.md` contains the direct instructions an agent should follow, so users should not need to paste a long prompt.
+Point a coding agent at the Brigade repository (or paste a short prompt from the README). **The agent installs and wires Brigade.** Humans often never type `pipx` or `brigade setup`.
 
-Brigade is designed to help users adapt an existing homegrown agent setup, not replace it wholesale. Keep the user's current memory owner, workspace or repo layout, harness choices, and local habits unless Brigade needs a small compatibility file or handoff inbox to make the workflow portable.
+Root `AGENTS.md` is for **developing Brigade**. For install and adapt, agents follow **`docs/agents-guide.md`** (this doc is supporting detail).
 
-The agent should treat Brigade setup as local workspace wiring, not as a release, deploy, or remote mutation. Local-first means local data on the operator-controlled machine first, before any external service; that machine can be a laptop, workstation, or VPS.
+Brigade is designed so agents run the control plane (install, setup, verify, handoffs) and humans review when a gate is ambiguous or risky. Adapt an existing homegrown setup; do not replace it wholesale. Keep the user's memory owner, workspace or repo layout, harness choices, and local habits unless Brigade needs a small compatibility file or handoff inbox.
 
-## Agent Entry Point
+Treat setup as local workspace wiring, not as a release, deploy, or remote mutation. Local-first means data on the operator-controlled machine first (laptop, workstation, or VPS) before any external service.
+
+Built-in engines use public names **code map** (`brigade code`) and **evidence log** (`brigade evidence`). Historical product names GraphTrail and MiseLedger may still appear in engine paths and MCP entry labels.
+
+## Agent entry point
 
 If an agent has access to this repository, it should start by reading:
 
-- `AGENTS.md`
-- `README.md`
-- `docs/new-user-quickstart.md`
-- `docs/agent-assisted-setup.md`
+1. `README.md`
+2. `docs/agents-guide.md`
+3. `docs/agent-assisted-setup.md` (this file)
+4. `docs/new-user-quickstart.md` if useful
 
-Then it should work inside the target repo or operator workspace and run:
+Then work inside the **target** repo or operator workspace and run:
 
 ```bash
 pipx install brigade-cli
@@ -38,12 +42,14 @@ brigade operator doctor --target . --profile local-operator
 
 The agent should:
 
-- install the `brigade-cli` package if missing
+- install the `brigade-cli` package if missing (humans often will not)
+- run `brigade setup` so the code map and evidence engines are present
 - run quickstart in dry-run mode first
 - apply quickstart only after the dry-run looks reasonable
 - run `operator doctor` and report the exact result
+- prefer `brigade work verify run` for checks after wiring, not raw test claims
 - explain which files are shareable or durable and which are local-only
-- preserve the user's existing memory layout and agent conventions where possible
+- preserve the user's existing memory layout and agent conventions where possible (including OpenClaw `SOUL.md`, `TOOLS.md`, `AGENTS.md`, `IDENTITY.md`, `MEMORY.md`, and related bootstrap files)
 - suggest Brigade compatibility wiring instead of moving or renaming personal systems
 - stop and ask before remote changes, destructive commands, new services, schedulers, or commits
 
