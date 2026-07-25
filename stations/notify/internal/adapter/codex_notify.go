@@ -43,9 +43,12 @@ func CodexNotifyFromBytes(raw []byte) (canonical.Message, error) {
 		title = "Codex (" + turnID + ")"
 	}
 
+	model := firstString(ev, "model", "model-name", "model_name")
+
 	return canonical.Message{
 		Title:  title,
 		Body:   body,
 		Source: "codex",
+		Model:  model,
 	}, nil
 }

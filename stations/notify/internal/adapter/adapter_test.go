@@ -16,12 +16,12 @@ func TestAutoDetect_PlainStringIsBody(t *testing.T) {
 }
 
 func TestAutoDetect_CanonicalJSONParsesAllFields(t *testing.T) {
-	in := `{"title":"T","body":"B","level":"warn","source":"s","tags":["x","y"]}`
+	in := `{"title":"T","body":"B","level":"warn","source":"s","model":"m","tags":["x","y"]}`
 	m, err := AutoDetect(strings.NewReader(in))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Title != "T" || m.Body != "B" || m.Level != "warn" || m.Source != "s" {
+	if m.Title != "T" || m.Body != "B" || m.Level != "warn" || m.Source != "s" || m.Model != "m" {
 		t.Errorf("fields wrong: %+v", m)
 	}
 	if len(m.Tags) != 2 {
