@@ -1,35 +1,60 @@
 # Agent Guide: Installing and Adapting Brigade
 
-Use this guide when a user points you at the Brigade repository and asks you to install, evaluate, or adapt Brigade for their workspace.
+You are a coding agent. **You** install, set up, verify, and leave handoffs. The human usually does not type these commands. They point you at this repo (or paste a short prompt) and expect files and a doctor result on disk.
 
-Developing Brigade itself? Start from `AGENTS.md` at the repo root, then `CONTRIBUTING.md`.
+Developing Brigade itself? Start from root `AGENTS.md`, then `CONTRIBUTING.md`. That file is for contributors, not for wiring a user workspace.
 
-## Start Here
+## What Brigade is for
 
-Read these files first:
+Brigade is a **local control plane for coding agents**, not a human day-to-day terminal app.
 
-1. `README.md`
-2. `docs/new-user-quickstart.md`
-3. `docs/agent-assisted-setup.md`
+- **Agents run:** install, `setup`, `operator quickstart`, `work verify`, handoffs, `code`, `evidence`.
+- **Humans own:** policy and review when a gate is ambiguous or risky (or when they explicitly ask for a destructive or remote action).
+- **Artifacts:** plain files on the machine (receipts, memory cards, configs). No daemon. No lock-in.
 
-Brigade is local-first workspace wiring. Local-first means local data on the operator-controlled machine first, before any external service; that machine can be a laptop, workstation, or VPS. Brigade should help the user adapt their existing memory, handoff, and agent workflow instead of replacing it with someone else's exact layout.
+Public names for the built-in engines:
 
-## Installing Brigade For A User
+| Public surface | Commands | Historical name |
+|---|---|---|
+| Code map | `brigade code …` | GraphTrail |
+| Evidence log | `brigade evidence …` | MiseLedger |
 
-Brigade supports Linux, macOS, and native Windows PowerShell with Python 3.10 or newer. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required.
+Standalone GraphTrail or MiseLedger product installs are replaced by `brigade setup`. Some binary and path names still use the historical labels.
 
-When the user wants Brigade installed in a target repo or operator workspace, work in that target directory and run:
+## Start here
+
+Read in this order:
+
+1. `README.md` (agent-first install paste + product surface)
+2. This file (`docs/agents-guide.md`)
+3. `docs/agent-assisted-setup.md` (boundaries and adaptation detail)
+4. `docs/new-user-quickstart.md` if the target is a first-time human skim
+
+Brigade is local-first workspace wiring. Local-first means data on the operator-controlled machine first (laptop, workstation, or VPS) before any external service. Adapt the user's existing memory, handoff, and agent workflow. Do not replace a working layout with someone else's exact tree.
+
+## Installing for a user (you run this)
+
+Platform: Linux, macOS, or native Windows PowerShell with Python 3.10 or newer. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required.
+
+Work in the **target** directory (the repo or operator workspace the user named), not the Brigade source tree unless they asked to develop Brigade.
+
+Always dry-run before write. Then apply. Then doctor.
 
 ```bash
 pipx install brigade-cli
 brigade setup
 brigade --version
-brigade operator quickstart --target . --harnesses codex --dry-run
-brigade operator quickstart --target . --harnesses codex
+brigade operator quickstart --target . --harnesses <harness> --dry-run
+# show the plan to the user if they are watching; then apply
+brigade operator quickstart --target . --harnesses <harness>
 brigade operator doctor --target . --profile local-operator
 ```
 
-For an OpenClaw or Hermes workspace rather than a code repo, prefer workspace depth:
+Replace `<harness>` with what they use (for example `codex`, `claude`, `cursor`). If unsure, use the current harness and say how to add more later.
+
+### OpenClaw or Hermes workspace (not a code repo)
+
+Prefer workspace depth and an explicit memory owner:
 
 ```bash
 brigade operator quickstart --target . --depth workspace --harnesses openclaw,hermes --owner openclaw --dry-run
@@ -37,17 +62,17 @@ brigade operator quickstart --target . --depth workspace --harnesses openclaw,he
 brigade operator doctor --target . --profile local-operator
 ```
 
-If the user uses more than one harness, use a comma-separated list:
+OpenClaw bootstrap files often include `SOUL.md`, `TOOLS.md`, `AGENTS.md`, `IDENTITY.md`, `MEMORY.md`, and related session-start files. Preserve them. Oversize bootstrap sets are a Bootstrap Doctor concern (`brigade add bootstrap-doctor` / bootstrap-doctor CLI), not something to silently truncate.
+
+### Multiple harnesses
 
 ```bash
 brigade operator quickstart --target . --harnesses codex,claude,opencode,antigravity,pi,cursor,aider,goose,continue,copilot,qwen,kimi,adal,openhands,grok,amp,crush
 ```
 
-If you are unsure which harnesses the user uses, start with the current harness and explain how to add more later.
-
 ### Cursor GUI work loop at user scope
 
-Cursor GUI agents need user-level wiring in addition to a repository handoff inbox. Preview the narrow profile before applying it:
+Cursor GUI agents need user-level wiring in addition to a repository handoff inbox. Preview, then apply:
 
 ```bash
 brigade harness install cursor --scope user --dry-run
@@ -55,90 +80,68 @@ brigade harness install cursor --scope user --write
 brigade harness doctor cursor --scope user
 ```
 
-This profile manages a local plugin rule, the global `brigade-work` skill, one `sessionStart` hook, and the `brigade`, `graphtrail`, and `miseledger` entries in `~/.cursor/mcp.json`. It preserves unrelated plugins, hooks, MCP servers, and sibling JSON fields. Existing values with a managed name are reported as conflicts instead of being replaced. Reload Cursor windows after a successful write.
+This profile manages a local plugin rule, the global `brigade-work` skill, one `sessionStart` hook, and MCP entries for Brigade plus the code-map and evidence engines (often still labeled `graphtrail` / `miseledger` in native Cursor config). It preserves unrelated plugins, hooks, MCP servers, and sibling JSON fields. Existing values with a managed name are reported as conflicts instead of being replaced. Reload Cursor windows after a successful write.
 
-To remove the profile, preview and then apply the ownership-aware uninstall:
+Uninstall is ownership-aware:
 
 ```bash
 brigade harness uninstall cursor --scope user --dry-run
 brigade harness uninstall cursor --scope user --write
 ```
 
-Uninstall removes entries only when they still match Brigade's ownership record. User-edited managed entries are preserved and reported as conflicts.
+## After install: the agent work loop
 
-## Adapting Existing Setups
+Once doctor is healthy, **you** (the coding agent) should prefer:
 
-Before changing files, inspect the target directory for existing setup:
+```bash
+brigade work verify run --target . --command "<real check>" --capture brigade-work
+brigade code impact <symbol>    # when a change has blast radius
+brigade evidence search "<query>"  # when you need prior runs or claims
+```
 
-- `AGENTS.md`
-- `CLAUDE.md`
-- `MEMORY.md`
-- `TOOLS.md`
-- `.codex/`
-- `.claude/`
-- `.opencode/`
-- `.antigravity/`
-- `.pi/`
-- `.cursor/`
-- `.aider/`
-- `.goose/`
-- `.continue/`
-- `.copilot/`
-- `.qwen/`
-- `.kimi/`
-- `.adal/`
-- `.openhands/`
-- `.grok/`
-- `.hermes/`
-- `.openclaw/`
-- `.mcp/`
+Do not claim tests passed without a real exit code. Prefer Brigade-wrapped verify over raw test commands when the project wires the work loop.
 
-Preserve the user's existing memory owner, conventions, repo layout, and tool-specific docs when possible. Prefer adding compatibility wiring such as handoff inboxes, shared instruction files, portable tool sources, or scanner config.
+## Adapting existing setups
 
-Do not force the user into Brigade's example layout when they already have a working homegrown setup. Do not assume the target must be a git repo; an OpenClaw/Hermes memory workspace or VPS operator directory is also a valid target.
+Before changing files, inventory what is already there:
 
-## Local And Shareable Files
+- `AGENTS.md`, `CLAUDE.md`, `MEMORY.md`, `TOOLS.md`, `SOUL.md`, `IDENTITY.md` (OpenClaw and friends)
+- harness dirs: `.codex/`, `.claude/`, `.cursor/`, `.openclaw/`, `.hermes/`, and the rest listed in the previous inventory
+
+Preserve the user's memory owner, conventions, repo layout, and tool-specific docs when possible. Prefer adding compatibility wiring (handoff inboxes, shared instructions, portable tool sources, scanner config).
+
+Do not force Brigade's example layout when they already have a working homegrown setup. Do not assume the target must be a git repo; an OpenClaw/Hermes memory workspace or VPS operator directory is valid.
+
+When the target may already have scripts, handoffs, crons, or process managers, use adopt before rewrite:
+
+```bash
+brigade operator adopt plan --target . --json
+# only after review:
+# brigade operator adopt capture --target . --json
+```
+
+## Local vs shareable files
 
 Usually safe to commit after review:
 
-- `AGENTS.md`
-- `MEMORY.md` and reviewed memory cards if this repo owns memory
-- `rules/`
-- `tools/`
-- public docs
+- `AGENTS.md`, `MEMORY.md` and reviewed memory cards if this repo owns memory
+- `rules/`, `tools/`, public docs
 
 Usually local-only:
 
 - `.brigade/`
-- `.codex/`
-- `.claude/`
-- `.opencode/`
-- `.antigravity/`
-- `.pi/`
-- `.cursor/`
-- `.aider/`
-- `.goose/`
-- `.continue/`
-- `.copilot/`
-- `.qwen/`
-- `.kimi/`
-- `.adal/`
-- `.openhands/`
-- `.grok/`
-- `.hermes/`
-- `.openclaw/`
-- `.mcp/`
-- generated `scripts/` projections
+- harness local dirs (`.codex/`, `.claude/`, `.cursor/`, `.openclaw/`, …)
+- generated projections and scanner state
 
-Do not commit generated local state unless the user explicitly asks and the Brigade docs say it is repo-shareable.
+Do not commit generated local state unless the user explicitly asks and the docs say it is repo-shareable.
 
-## Safety Boundaries
+## Safety boundaries
 
-Do not start daemons, install schedulers, publish, push, tag, deploy, mutate remotes, install hooks, or run destructive commands as part of Brigade setup unless the user explicitly asks for that action.
+Do not start daemons, install schedulers, publish, push, tag, deploy, mutate remotes, install hooks, or run destructive commands as part of Brigade setup unless the user explicitly asks.
 
 Do not paste raw scanner output, session text, tokens, API keys, private hostnames, private repo names, or unredacted absolute paths into public issues or docs.
 
-If setup fails, collect machine-readable output and summarize it after redaction:
+If setup fails, collect machine-readable output and summarize after redaction:
 
 ```bash
 brigade operator quickstart --target . --harnesses codex --json
@@ -147,13 +150,9 @@ brigade tools doctor --target . --json
 brigade skills doctor --target . --json
 ```
 
-Use the "Quickstart setup problem" issue form:
+Issue form: https://github.com/escoffier-labs/brigade/issues/new/choose
 
-```text
-https://github.com/escoffier-labs/brigade/issues/new/choose
-```
-
-## Success Criteria
+## Success criteria
 
 Report the exact commands you ran. A healthy first run should end with:
 
