@@ -542,3 +542,88 @@ def test_status_payload_counts_legacy_and_foreign_as_disjoint(tmp_path: Path):
     assert status["legacy_handler_count"] == 2
     assert status["foreign_handler_count"] == 2
     assert status["legacy_events"] == ["SessionStart", "Stop"]
+
+
+def _unwired_with_settings(tmp_path: Path) -> Path:
+    """Home-like tree: Claude settings present, no Brigade config / Claude wiring."""
+    target = tmp_path / "home"
+    settings = target / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    seeded = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                f"python3 {target / '.claude' / 'hooks' / 'brigade-work-loop.py'} "
+                                "--event SessionStart"
+                            ),
+                        }
+                    ]
+                }
+            ],
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                f"python3 {target / '.claude' / 'hooks' / 'brigade-work-loop.py'} "
+                                "--event PreToolUse"
+                            ),
+                        },
+                        {"type": "command", "command": "echo foreign-pretool"},
+                    ],
+                }
+            ],
+            "Stop": [{"hooks": [_legacy_handler("Stop")]}],
+        }
+    }
+    settings.write_text(json.dumps(seeded, indent=2) + "\n")
+    return target
+
+
+def test_hooks_install_adopts_unwired_user_settings_with_legacy_handlers(tmp_path: Path):
+    target = _unwired_with_settings(tmp_path)
+    assert not (target / ".brigade").exists()
+
+    assert hooks_install(target=target) == 0
+
+    after = json.loads((target / ".claude" / "settings.json").read_text())
+    session_cmds = [
+        handler["command"]
+        for group in after["hooks"]["SessionStart"]
+        for handler in group.get("hooks", [])
+        if isinstance(handler, dict)
+    ]
+    pre_cmds = [
+        handler["command"]
+        for group in after["hooks"]["PreToolUse"]
+        for handler in group.get("hooks", [])
+        if isinstance(handler, dict)
+    ]
+    assert not any("brigade-work-loop.py" in cmd for cmd in session_cmds + pre_cmds)
+    assert any(cmd.startswith("brigade work hook-run") for cmd in session_cmds)
+    assert "echo foreign-pretool" in pre_cmds
+    sidecar = json.loads((target / ".brigade" / "claude-hooks.json").read_text())
+    assert sidecar["package_id"] == PACKAGE_ID
+    assert sidecar["package_version"] == PACKAGE_VERSION
+
+
+def test_hooks_install_still_refuses_unwired_target_without_settings(tmp_path: Path):
+    target = tmp_path / "empty"
+    target.mkdir()
+    assert hooks_install(target=target) == 2
+    assert not (target / ".claude" / "settings.json").exists()
+    assert not (target / ".brigade" / "claude-hooks.json").exists()
+
+
+def test_hooks_update_adopts_and_is_idempotent_on_unwired_user_settings(tmp_path: Path):
+    target = _unwired_with_settings(tmp_path)
+    assert hooks_install(target=target) == 0
+    before = (target / ".claude" / "settings.json").read_text()
+    assert hooks_update(target=target) == 0
+    assert (target / ".claude" / "settings.json").read_text() == before
