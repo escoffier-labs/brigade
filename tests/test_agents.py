@@ -143,6 +143,18 @@ def test_claude_read_only_sandbox_variant_matches_read_only_flag():
     ]
 
 
+def test_hides_write_tools_reports_plan_mode_seats():
+    # #518: plan-mode seats hide every write tool, so a prompt that leads the
+    # model toward a plan-file write produces a failed write, not a file.
+    assert agents.hides_write_tools("claude", read_only=True) is True
+    assert agents.hides_write_tools("claude", sandbox="read-only") is True
+    assert agents.hides_write_tools("grok", read_only=True) is True
+    assert agents.hides_write_tools("cursor", read_only=True) is True
+    assert agents.hides_write_tools("claude", sandbox="danger-full-access") is False
+    assert agents.hides_write_tools("codex", read_only=True) is False
+    assert agents.hides_write_tools("ollama:llama3.3", read_only=True) is False
+
+
 def test_claude_write_run_uses_skip_permissions_and_disallows_subagents():
     # Contract: only an explicit --sandbox danger-full-access request may add
     # --dangerously-skip-permissions. A write run with no explicit sandbox must

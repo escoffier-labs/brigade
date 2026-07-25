@@ -3094,6 +3094,95 @@ def test_invalid_plan_writes_attempt_artifact(monkeypatch, tmp_path, capsys):
     assert not (output_dir / "plan.json").exists()
 
 
+def _plan_mode_roster(orchestrator_cli: str) -> Roster:
+    return Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", orchestrator_cli, "plan and synthesize"),
+            "coder": Agent("coder", "codex", "write code"),
+        },
+        max_workers=1,
+    )
+
+
+def test_plan_retry_schema_forces_json_after_prose(monkeypatch):
+    # #518: the chef's first turn was hook-rebuttal prose, not a plan. The retry
+    # must name the parse error and demand JSON only, or the second turn is prose too.
+    prompts: list[str] = []
+    replies = [
+        "I can't write a memory handoff this session: no Write/Edit tool is enabled.",
+        json.dumps({"assignments": [{"stage": 1, "worker": "coder", "task": "implement it"}]}),
+    ]
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        prompts.append(prompt)
+        return agents.AgentResult(text=replies[len(prompts) - 1], ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    attempts: list[dict[str, object]] = []
+    assignments = aboyeur.plan("build feature", _roster(), attempts=attempts)
+
+    assert [assignment.worker for assignment in assignments] == ["coder"]
+    assert [attempt["stage"] for attempt in attempts] == ["initial", "correction"]
+    assert [attempt["parsed"] for attempt in attempts] == [False, True]
+    assert "plan is not valid JSON" in str(attempts[0]["parse_error"])
+
+    retry = prompts[1]
+    assert "plan is not valid JSON" in retry
+    assert aboyeur.PLAN_JSON_ONLY_RULE in retry
+
+
+def test_plan_fails_after_two_prose_replies(monkeypatch):
+    # The schema-force retry is bounded: two prose turns end the run instead of
+    # looping a seat whose final message keeps getting hijacked.
+    calls: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        calls.append(prompt)
+        return agents.AgentResult(text="No Brigade handoff tool surfaced, so I am stopping here.", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    attempts: list[dict[str, object]] = []
+    with pytest.raises(RuntimeError, match="orchestrator returned an invalid plan"):
+        aboyeur.plan("build feature", _roster(), attempts=attempts)
+
+    assert len(calls) == 2
+    assert [attempt["stage"] for attempt in attempts] == ["initial", "correction"]
+    assert [attempt["parsed"] for attempt in attempts] == [False, False]
+
+
+def test_plan_mode_orchestrator_is_told_not_to_write_a_plan_file(monkeypatch):
+    # A read-only claude seat launches with every write tool hidden, so the
+    # harness plan-file write it reaches for fails and trips user-level hooks.
+    prompts: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        prompts.append(prompt)
+        return agents.AgentResult(text=json.dumps({"assignments": []}), ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    aboyeur.plan("build feature", _plan_mode_roster("claude"), read_only=True)
+
+    assert aboyeur.NO_PLAN_FILE_RULE in prompts[0]
+
+
+def test_write_capable_orchestrator_keeps_the_plan_prompt_unchanged(monkeypatch):
+    prompts: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        prompts.append(prompt)
+        return agents.AgentResult(text=json.dumps({"assignments": []}), ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    aboyeur.plan("build feature", _plan_mode_roster("codex"))
+
+    assert aboyeur.NO_PLAN_FILE_RULE not in prompts[0]
+
+
 def test_plan_timeout_writes_terminal_timeout_receipt(monkeypatch, tmp_path):
     def fake_run_agent(cli_ref, prompt, **kwargs):
         return agents.AgentResult(
