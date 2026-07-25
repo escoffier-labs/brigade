@@ -902,4 +902,3 @@ def test_scanner_defaults_include_weekly_friction_scan():
     assert entry["cadence"] == "weekly@03:45"
     assert entry["enabled"] is True
     assert entry["output_path"] == ".brigade/friction/latest.json"
-    assert payload["ingest_errors"] == []

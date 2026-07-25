@@ -288,6 +288,16 @@ SCANNER_DEFAULTS = (
         "output_path": ".brigade/tools.toml",
         "conflict_window": "04:20-04:40",
     },
+    {
+        "id": "friction-scan",
+        "source": "friction-scan",
+        "command": "brigade friction scan --json",
+        "cadence": "weekly@03:45",
+        "enabled": True,
+        "timeout": 300,
+        "output_path": ".brigade/friction/latest.json",
+        "conflict_window": "03:40-04:00",
+    },
 )
 
 

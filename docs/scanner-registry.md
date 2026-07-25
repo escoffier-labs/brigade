@@ -109,7 +109,7 @@ Fields:
 - `id`: stable scanner id.
 - `command`: command the operator or wrapper may run explicitly.
 - `source`: expected work import source.
-- `cadence`: `daily@HH:MM` or `hourly@MM`.
+- `cadence`: `daily@HH:MM`, `weekly@HH:MM`, or `hourly@MM`.
 - `enabled`: true or false.
 - `timeout`: expected max runtime in seconds.
 - `output_path`: local output or state file used for freshness checks.
@@ -118,6 +118,6 @@ Fields:
 - `conflict_window`: `HH:MM-HH:MM` window that should not overlap related jobs.
 - `cwd` or `target`: optional repo-relative working directory for execution.
 
-Default local producers cover chat sweep imports, memory refresh imports, handoff ingest sync, security findings, and optional disabled memory-care, backup-health, and tool-catalog entries. Product-specific chat adapters and tool projection writers remain outside this registry phase.
+Default local producers cover chat sweep imports, memory refresh imports, handoff ingest sync, security findings, a weekly workspace friction scan, and optional disabled memory-care, backup-health, and tool-catalog entries. Product-specific chat adapters and tool projection writers remain outside this registry phase.
 
 Project consolidation, learning-loop, context-pack, and operator-center commands are not scanner executions by themselves. They can still route reviewable work into the same inbox through `brigade projects import-issues`, `brigade learn import-issues`, and subsystem-specific import commands. The operator-center commands are read-only summaries and never ingest, promote, or execute scanner output.
