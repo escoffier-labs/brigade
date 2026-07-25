@@ -47,6 +47,23 @@ DRIFT_IMPACT_LIMIT = 4000
 BRIEF_BUDGET_BYTES = 6000
 NOOP_DETAIL = "no-op"
 
+# A plan-mode seat has no write tool, so any file it tries to create fails, and a
+# failed write is what invites harness hooks to hijack the seat's final message
+# (#518). Say the quiet part in the prompt: the plan lives in the reply, nowhere else.
+NO_PLAN_FILE_RULE = (
+    "- Do not write, create, or edit any file, including a plan, design, or context file. "
+    "This seat runs with every write tool hidden: the write fails, and the failure can "
+    "replace your plan with tool or hook commentary. The plan belongs in this reply only."
+)
+
+# The corrective turn is the last chance before the run dies on an unparsable
+# plan, so it restates the output contract instead of only naming the parse error.
+PLAN_JSON_ONLY_RULE = (
+    "Reply with the JSON plan object and nothing else: no prose, no preamble, no explanation, "
+    "no tool-failure or hook commentary, nothing before or after the object. "
+    'If no worker is useful, reply with exactly {"assignments": []}.'
+)
+
 
 @dataclass(frozen=True)
 class CodeGraphBrief:
@@ -367,6 +384,7 @@ def build_plan_prompt(
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
     route: RouteBrief | None = None,
+    no_file_writes: bool = False,
 ) -> str:
     worker_lines = "\n".join(
         f"- {agent.name}: cli={agent.cli}; "
@@ -380,6 +398,7 @@ def build_plan_prompt(
     note = f"\nCorrection needed: {corrective_note}\n" if corrective_note else ""
     policy = f"\n\n{_read_only_rules()}\n" if read_only else ""
     capability_rule = "- Assign only workers with read_only_capable=true.\n" if read_only else ""
+    no_write_rule = f"\n{NO_PLAN_FILE_RULE}" if no_file_writes else ""
     route_section = ""
     route_rule = ""
     if route is not None and route.attached and route.text:
@@ -404,6 +423,7 @@ def build_plan_prompt(
         f"{capability_rule}"
         "- Use zero assignments only if no worker is useful."
         f"{route_rule}"
+        f"{no_write_rule}"
         f"{policy}"
     )
     return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
@@ -805,6 +825,22 @@ def _unknown_covers(route: RouteBrief | None, assignments: list[Assignment]) -> 
     return unknown_covers(route, assignments)
 
 
+def _orchestrator_hides_write_tools(
+    roster: Roster,
+    *,
+    read_only: bool,
+    sandbox_read_only: bool | None,
+    sandbox: str | None,
+) -> bool:
+    """True when the orchestrator seat launches without any file-write tool."""
+    orchestrator = roster.agents.get(roster.orchestrator)
+    if orchestrator is None:
+        return False
+    # _run_orchestrator resolves read-only the same way before building argv.
+    effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
+    return agents.hides_write_tools(orchestrator.cli, read_only=effective_read_only, sandbox=sandbox)
+
+
 def plan(
     task: str,
     roster: Roster,
@@ -821,6 +857,12 @@ def plan(
     process_registry: proc.ProcessRegistry | None = None,
 ) -> list[Assignment]:
     transport = codex_transport or roster.codex_transport
+    no_file_writes = _orchestrator_hides_write_tools(
+        roster,
+        read_only=read_only,
+        sandbox_read_only=sandbox_read_only,
+        sandbox=sandbox,
+    )
     first = _call_with_process_registry(
         _run_orchestrator,
         roster,
@@ -832,6 +874,7 @@ def plan(
             drift_impact=drift_impact,
             evidence=evidence,
             route=route,
+            no_file_writes=no_file_writes,
         ),
         cwd=cwd,
         read_only=read_only,
@@ -855,18 +898,21 @@ def plan(
         )
     except ValueError as exc:
         _record_plan_attempt(attempts, stage="initial", result=first, parse_error=str(exc))
+        # Schema-force the retry: the parse error alone left a seat whose final
+        # message had been hijacked by hooks with nothing to correct toward (#518).
         second = _call_with_process_registry(
             _run_orchestrator,
             roster,
             build_plan_prompt(
                 task,
                 roster,
-                corrective_note=str(exc),
+                corrective_note=f"{exc} {PLAN_JSON_ONLY_RULE}",
                 read_only=read_only,
                 code_graph=code_graph,
                 drift_impact=drift_impact,
                 evidence=evidence,
                 route=route,
+                no_file_writes=no_file_writes,
             ),
             cwd=cwd,
             read_only=read_only,
@@ -919,6 +965,7 @@ def plan(
             drift_impact=drift_impact,
             evidence=evidence,
             route=route,
+            no_file_writes=no_file_writes,
         ),
         cwd=cwd,
         read_only=read_only,

@@ -87,6 +87,21 @@ _CLAUDE_DISALLOWED_ALWAYS = "Task,Agent"
 _CLAUDE_DISALLOWED_READ_ONLY = "Task,Agent,Bash,Edit,Write,NotebookEdit,WebSearch,WebFetch,mcp__*"
 
 
+# Read-only argv for these CLIs is a harness plan mode: every file-write tool is
+# hidden, but the harness still offers its own plan-file affordance and the model
+# reaches for it. #518: the chef's plan-file write failed for exactly that reason,
+# user-level hooks fired on the failed write, and the hook rebuttal replaced the
+# plan JSON in the seat's final message. Prompts for these seats must say so.
+_PLAN_MODE_CLIS = frozenset({"claude", "cursor", "grok"})
+
+
+def hides_write_tools(cli_ref: str, *, read_only: bool = False, sandbox: str | None = None) -> bool:
+    """Return True when this seat launches with every file-write tool hidden."""
+    if not (read_only or sandbox == "read-only"):
+        return False
+    return cli_ref.split(":", 1)[0] in _PLAN_MODE_CLIS
+
+
 class UnsupportedSandboxError(ValueError):
     """A builder rejected the launch because the sandbox cannot be enforced.
 

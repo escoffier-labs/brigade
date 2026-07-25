@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade mcp sync --user-scope` (and `brigade operator sync-mcp --user-scope`) no longer writes stdio MCP servers into a user-wide client config silently: interactive runs show the destination, stdio count, and the servers-times-sessions process formula and ask for confirmation, non-interactive and `--json` runs require `--allow-global-stdio`, and plan/sync items now carry `transport` and `scope`. (#349)
 
 ### Fixed
+- `brigade run` no longer dies on the first unparsable plan when the chef's final
+  message is prose. The corrective plan turn now restates the output contract
+  ("reply with the JSON plan object and nothing else") alongside the parse error,
+  and orchestrator seats that launch in a harness plan mode (claude, cursor, grok
+  under read-only) are told not to write a plan, design, or context file: the
+  failed write is what let user-level hooks replace the plan JSON with hook
+  rebuttal prose. Retries stay bounded at one correction. (#518)
 - Agent Pantry version parsing stays non-throwing and bounded for arbitrarily
   long numeric segments: the parser accepts ASCII-numeric semver triples only,
   enforces a conservative per-segment digit bound, catches `int()` conversion
