@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/brigade-kitchen-scene.jpg" alt="Brigade - the brigade at the pass" width="900">
+  <img src="docs/assets/brigade-kitchen-scene.jpg" alt="Brigade brand art: kitchen brigade at the pass (metaphor for coordinated agents)" width="900">
 </p>
 
 <h1 align="center">Brigade</h1>
@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Coding agents do real work unsupervised now, and at the end of a session all you have is their word for what happened. Brigade makes the fleet auditable: every check leaves a receipt with the real exit code and the exact symbols the change touched, backed by a built-in code-intelligence graph and evidence ledger. It also keeps the plumbing shared: one MCP and tool catalog synced into every harness, and one reviewed memory that improves from real outcomes, never from a model grading itself. A CLI that writes plain files on your machine. No daemon, no lock-in.
+  When an agent says tests passed, get a file with the real exit code, a <strong>code map</strong> of what the change touched (<code>brigade code</code>), and an <strong>evidence log</strong> you can search later (<code>brigade evidence</code>). Optional: one MCP and tools catalog synced across your coding agents, and shared session notes with a review gate. Local CLI. Plain files. No daemon. No lock-in.
 </p>
 
 <p align="center">
@@ -21,8 +21,8 @@
   <img src="https://shieldcn.dev/pypi/v/brigade-cli.svg?label=pypi&size=xs" alt="PyPI version">
   <img src="https://shieldcn.dev/pypi/dm/brigade-cli.svg?size=xs" alt="PyPI downloads per month">
   <img src="https://shieldcn.dev/badge/python-3.10+-blue.svg?logo=python&logoColor=white&size=xs" alt="Python 3.10+">
-  <img src="https://shieldcn.dev/badge/rust-Code_engine-b7410e.svg?logo=rust&logoColor=white&size=xs" alt="Rust: the Code engine">
-  <img src="https://shieldcn.dev/badge/go-Evidence_engine-00add8.svg?logo=go&logoColor=white&size=xs" alt="Go: the Evidence engine">
+  <img src="https://shieldcn.dev/badge/rust-code_map-b7410e.svg?logo=rust&logoColor=white&size=xs" alt="Rust: code map engine">
+  <img src="https://shieldcn.dev/badge/go-evidence_log-00add8.svg?logo=go&logoColor=white&size=xs" alt="Go: evidence log engine">
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
@@ -30,7 +30,7 @@
   <img src="docs/assets/brigade-demo.svg" alt="Recording: an agent claims tests pass; a verify run writes a receipt with the real exit code, code impact shows what the change touched, evidence search finds the run in the ledger, and outcome rank scores the skill that did the work" width="800">
 </p>
 
-<p align="center"><em>An agent said "tests pass." This is the claim becoming a record: receipt, graph, ledger, rank.</em></p>
+<p align="center"><em>An agent said "tests pass." This is the claim becoming a record: receipt, code map, evidence log, rank.</em></p>
 
 ## The loop
 
@@ -86,11 +86,11 @@ brigade work verify run --target . --command "pytest -q" --capture brigade-work
 }
 ```
 
-Receipts land in the Evidence ledger, a Go engine installed by `brigade setup`, and every consequential action elsewhere in Brigade (a memory write, a skill promotion, a sync) is logged the same way. `brigade evidence search` answers "what ran, when, and what did it change" from files, weeks later. Cross-model dispatches through `brigade run` carry the same paper trail. When someone asks what your agents did this week, the answer comes from receipts you can grep, not from scrollback. [Capability page](https://brigade.tools/evidence-memory).
+Receipts land in the **evidence log** (`brigade evidence`), a Go engine installed by `brigade setup` (historically shipped as MiseLedger). Every consequential action elsewhere in Brigade (a memory write, a skill promotion, a sync) is logged the same way. `brigade evidence search` answers "what ran, when, and what did it change" from files, weeks later. Cross-model dispatches through `brigade run` carry the same paper trail. When someone asks what your agents did this week, the answer comes from receipts you can grep, not from scrollback. [Capability page](https://brigade.tools/evidence-memory).
 
-## Code intelligence, built in
+## Code map, built in
 
-The `code_graph_delta` line in that receipt comes from a Rust code-graph engine, also installed by `brigade setup` (digest-verified, no toolchain required). It indexes your repo once and keeps up incrementally. On this repository a sync pass over 652 files and 10,405 symbols reports in well under a second. A receipt names the exact symbols a change touched, and your agents stop grepping and start asking structural questions:
+The `code_graph_delta` line in that receipt comes from the **code map** (`brigade code`), a Rust engine installed by `brigade setup` (historically shipped as GraphTrail; digest-verified, no toolchain required). It indexes your repo once and keeps up incrementally. On this repository a sync pass over 652 files and 10,405 symbols reports in well under a second. A receipt names the exact symbols a change touched, and your agents stop grepping and start asking structural questions:
 
 ```
 $ brigade code impact _write_receipt
@@ -175,16 +175,25 @@ The ledger is plain JSON and markdown under `memory/outcome/`, tracked in git, r
 
 ## Optional stations
 
-Code intelligence, Evidence, and Content Guard (`brigade scrub`, a secrets and PII scan before anything goes public) are built in and installed by `brigade setup`. Everything else is an optional station in its own repo. Core works with none installed, and `brigade status` health-checks whatever is present.
+**Built in** (via `brigade setup`):
+
+| Surface | Commands | Notes |
+|---|---|---|
+| Code map | `brigade code …` | Callers, impact, context. Formerly GraphTrail. |
+| Evidence log | `brigade evidence …` | Searchable ledger of runs and imports. Formerly MiseLedger. |
+| Content Guard | `brigade guard` / `brigade scrub` | Secrets and private detail before publish. |
+
+**Optional stations** (add when you need them). Core works with none installed. `brigade status` health-checks whatever is present.
 
 | Station | Install | Role |
 |---|---|---|
 | [Agent Pantry](https://github.com/escoffier-labs/agentpantry) | `brigade add pantry` | Encrypted browser-session and secret sync across machines |
 | [Token Glace](https://github.com/escoffier-labs/token-glace) | `brigade add tokens` | Compact noisy tool output before it burns context |
 | [Skillet](https://github.com/escoffier-labs/skillet) | optional roster | Portable skills that reconcile can promote or roll back |
+| [Bootstrap Doctor](https://github.com/escoffier-labs/bootstrap-doctor) | `brigade add bootstrap-doctor` | Audit OpenClaw bootstrap files (SOUL.md, TOOLS.md, AGENTS.md, IDENTITY.md, MEMORY.md, and the rest of the set) and trim oversize detail into cards |
 | Notifications | `brigade add notifications` | Optional `agent-notify` binary for Discord, Telegram, or Signal; status and setup planning only until you wire hooks or pass an explicit `--send` |
 
-Upgrading from the standalone GraphTrail or MiseLedger installs? `brigade setup` replaces both. The old `brigade add graphtrail` / `add evidence` paths remain as compatibility shims. Details: [wiring guide](docs/wiring-graphtrail-miseledger.md), [station contract](docs/station-contract.md).
+Upgrading from standalone GraphTrail or MiseLedger installs? `brigade setup` replaces both. The old `brigade add graphtrail` / `add evidence` paths remain as compatibility shims. Engine binaries and some paths still use the historical names; the operator surface is `brigade code` and `brigade evidence`. Details: [wiring guide](docs/wiring-graphtrail-miseledger.md), [station contract](docs/station-contract.md).
 
 Beyond the daily loop, the same review-and-receipt pattern covers cross-model runs (`brigade run` dispatches one bounded task across your roster), security scans, friction mining, research reports, and fleet health. All of it stays behind `brigade extras on` until you ask. The full tour: [docs/overview.md](docs/overview.md).
 
@@ -213,10 +222,21 @@ And it is not the other projects that share the name. This Brigade is the AI-age
 ## Why I built this
 
 <p align="center">
-  <img src="docs/assets/brigade-social-preview.jpg" alt="Brigade - le chef de cuisine" width="900">
+  <img src="docs/assets/brigade-social-preview.jpg" alt="Brigade social banner: kitchen metaphor brand art" width="900">
 </p>
 
 I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions. Every one of those tools wakes up empty, and whatever a session learned scattered across tool-specific folders and died there. Two incidents shaped the design: a "dreaming" job that promoted raw session fragments straight into memory bloated `MEMORY.md` past the bootstrap budget, so every session started truncated and nobody noticed for weeks. And 195 handoff notes sat unread across 35 repos because an ingester had a hardcoded allowlist and nothing warned about the gap. Silence is the failure mode. Every part of Brigade that lints, warns, or writes a receipt exists because something once failed in silence. The full production stack, now 482 cards across daily multi-agent work, is documented in the [Cookbook](https://escoffierlabs.dev/cookbook/).
+
+## Names (public vs historical)
+
+| What you type / say | Historical name | Notes |
+|---|---|---|
+| Code map · `brigade code` | GraphTrail | Built in via `brigade setup` |
+| Evidence log · `brigade evidence` | MiseLedger | Built in via `brigade setup` |
+| Content Guard · `brigade guard` / `scrub` | content-guard | Embedded |
+| Bootstrap Doctor | same | Full OpenClaw bootstrap set: SOUL, TOOLS, AGENTS, IDENTITY, MEMORY, and related session-start files |
+
+Kitchen language (*brigade de cuisine*, *mise en place*, station nicknames) is brand and deep docs. Commands and product surfaces stay plain: receipt, code map, evidence log, sync, handoff.
 
 ## Harnesses
 
@@ -233,6 +253,6 @@ Nineteen harnesses get handoff inboxes and ingest coverage, from Codex, Claude C
 
 MIT. See [LICENSE](LICENSE).
 
-Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), command `brigade`. The name comes from the kitchen: a *brigade de cuisine* runs the line, and *mise en place* means the station is prepped before service. Set up the rules, memory, tools, and receipts before the session gets expensive.
+Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), command `brigade`. The product name comes from a kitchen line (*brigade de cuisine*): coordinated stations, prep before service. You do not need the kitchen glossary to install or run it. Set up rules, memory, tools, and receipts before the session gets expensive.
 
 It is early-stage and moving fast. If you hit a broken workflow, a confusing command, or a setup issue, [open an issue](https://github.com/escoffier-labs/brigade/issues) and I will get it fixed.
