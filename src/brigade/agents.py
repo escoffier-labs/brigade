@@ -1110,16 +1110,18 @@ def run_agent(
         :200
     ]
     if result.code != 0:
-        provider_preflight = _oracle_auth_detail(cli_ref, safe_stdout, safe_stderr) or _provider_preflight_detail(
-            cli_ref, safe_stdout, safe_stderr
-        )
+        oracle_auth = _oracle_auth_detail(cli_ref, safe_stdout, safe_stderr)
+        provider_preflight = oracle_auth or _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr)
         if provider_preflight is not None:
             return AgentResult(
                 text=safe_text,
                 ok=False,
                 detail=provider_preflight,
                 failure_phase="provider-preflight",
-                failure_kind="workspace-trust",
+                # A stale browser cookie jar is an auth problem, not a
+                # workspace-trust one; the kinds must stay distinguishable
+                # downstream in outcome capture and the scorecard.
+                failure_kind="browser-auth" if oracle_auth else "workspace-trust",
                 stdout=safe_stdout,
                 stderr=safe_stderr,
                 exit_code=result.code,
@@ -1203,13 +1205,12 @@ def run_agent(
         detail = "empty output"
         empty_failure_phase: str | None = None
         empty_failure_kind: str | None = None
-        provider_preflight = _oracle_auth_detail(cli_ref, safe_stdout, safe_stderr) or _provider_preflight_detail(
-            cli_ref, safe_stdout, safe_stderr
-        )
+        oracle_auth = _oracle_auth_detail(cli_ref, safe_stdout, safe_stderr)
+        provider_preflight = oracle_auth or _provider_preflight_detail(cli_ref, safe_stdout, safe_stderr)
         if provider_preflight is not None:
             detail = provider_preflight
             empty_failure_phase = "provider-preflight"
-            empty_failure_kind = "workspace-trust"
+            empty_failure_kind = "browser-auth" if oracle_auth else "workspace-trust"
         elif cursor_limitation is not None:
             detail = cursor_limitation
         elif cli_ref in {"cursor", "grok"}:

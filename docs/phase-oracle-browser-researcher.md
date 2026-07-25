@@ -112,7 +112,14 @@ Models the browser engine accepts: `gemini-3.5-flash`, `gemini-3.1-pro`, and
   `_provider_preflight_detail`, not a branch inside it: that function is about
   workspace trust, a concept oracle does not have. Both failure paths in
   `run_agent` try the auth detail first, since it is the more specific
-  diagnosis.
+  diagnosis, and an auth hit reports `failure_kind="browser-auth"` rather than
+  `"workspace-trust"`. Keeping those kinds distinct matters downstream: outcome
+  capture and the model scorecard read `failure_kind`, and a stale cookie jar
+  is an operator action while a trust refusal is a workspace problem. The
+  first implementation shared the preflight branch and mislabelled every
+  oracle auth failure as `workspace-trust`; the regression tests that caught
+  it exercise both call sites through `run_agent`, not the detail function
+  alone.
 - **browser too slow for the engine's timings.** Not a hang, the common case.
   Fixed by the `min_timeout` floor above, driven by the seat's
   `timeout_seconds`. `.brigade/research.toml` is the wrong home for this:
@@ -145,6 +152,26 @@ Models the browser engine accepts: `gemini-3.5-flash`, `gemini-3.1-pro`, and
       `brigade work verify run`.
 - [x] Live smoke: one `brigade research run` against real synced cookies,
       recording the result or the environmental blocker.
+
+## Proof coverage
+
+What is proven, and by what:
+
+| Claim | Evidence |
+|---|---|
+| argv shape, model pin position, no `--heartbeat`, no API path | unit, `tests/test_agents_oracle.py` |
+| argv survives a real `exec` | stub binary on a narrowed PATH records its own argv |
+| stdout is the answer channel at the Brigade layer | stub returns markdown, `run_agent` returns it verbatim |
+| auth failure on the nonzero-exit path | `run_agent` returns `failure_kind="browser-auth"` |
+| auth failure on the empty-output path | separate branch, same assertion |
+| auth beats workspace-trust when both patterns appear | stub emits both, auth wins |
+| non-oracle seats keep `workspace-trust` | codex regression guard |
+| timeout floor survives the real engine | `DeepResearcher` run asserts 300, not the engine's 30 |
+| roster accepts `cli = "oracle"` | clears `is_known` and `limits.allow_models` |
+
+Still unproven, and only oracle itself can settle it: whether real oracle stdout
+carries progress chrome around the answer, and whether the browser session
+actually completes against synced cookies.
 
 ## Live result
 
