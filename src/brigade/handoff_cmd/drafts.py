@@ -378,7 +378,8 @@ def _draft_summary(
         text = path.read_text(errors="replace")
     except OSError:
         text = ""
-    sections = _parse_markdown_sections(text)
+    raw_sections = _parse_markdown_sections(text)
+    sections, _collision_errors = _canonicalize_sections(raw_sections)
     lint_result = lint_file(path)
     action = lint_result.action
     target_card = (
