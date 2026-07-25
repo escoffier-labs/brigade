@@ -619,6 +619,19 @@ def test_hooks_install_still_refuses_unwired_target_without_settings(tmp_path: P
     assert not (target / ".brigade" / "claude-hooks.json").exists()
 
 
+def test_hooks_install_refuses_malformed_brigade_config_even_with_settings(tmp_path: Path, capsys):
+    target = _unwired_with_settings(tmp_path)
+    brigade = target / ".brigade"
+    brigade.mkdir()
+    (brigade / "config.json").write_text("{not-json\n")
+    before = (target / ".claude" / "settings.json").read_bytes()
+
+    assert hooks_install(target=target) == 2
+    assert "unable to load Brigade config" in capsys.readouterr().err
+    assert (target / ".claude" / "settings.json").read_bytes() == before
+    assert not (target / ".brigade" / "claude-hooks.json").exists()
+
+
 def test_hooks_update_adopts_and_is_idempotent_on_unwired_user_settings(tmp_path: Path):
     target = _unwired_with_settings(tmp_path)
     assert hooks_install(target=target) == 0

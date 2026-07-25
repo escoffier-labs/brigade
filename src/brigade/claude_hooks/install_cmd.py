@@ -102,8 +102,6 @@ def _resolve_hooks_target(target: Path) -> tuple[Path | None, str | None]:
     try:
         config = load_config(target)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        if settings_path.exists():
-            return target, None
         return None, f"unable to load Brigade config: {type(exc).__name__}: {exc}"
     if config is not None and "claude" in config.selection.harnesses:
         return target, None
