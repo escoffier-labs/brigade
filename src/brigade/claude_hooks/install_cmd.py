@@ -95,15 +95,23 @@ def _remove_settings(settings: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def _wired_for_claude(target: Path) -> tuple[Path | None, str | None]:
+def _resolve_hooks_target(target: Path) -> tuple[Path | None, str | None]:
+    """Allow install/update on Brigade-wired Claude targets or existing user settings."""
     target = target.expanduser().resolve()
+    settings_path = target / SETTINGS_REL_PATH
     try:
         config = load_config(target)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return None, f"unable to load Brigade config: {type(exc).__name__}: {exc}"
-    if config is None or "claude" not in config.selection.harnesses:
-        return None, f"target is not wired for Claude: {target}"
-    return target, None
+    if config is not None and "claude" in config.selection.harnesses:
+        return target, None
+    if settings_path.exists():
+        return target, None
+    return None, (
+        f"target is not wired for Claude and has no {SETTINGS_REL_PATH}: {target}; "
+        "run brigade init with the Claude harness, or point --target at a tree that "
+        f"already has {SETTINGS_REL_PATH}"
+    )
 
 
 def _sidecar(target: Path) -> dict[str, Any] | None:
@@ -111,7 +119,7 @@ def _sidecar(target: Path) -> dict[str, Any] | None:
 
 
 def _write_package(target: Path, *, action: str) -> tuple[dict[str, Any] | None, str | None]:
-    resolved, error = _wired_for_claude(target)
+    resolved, error = _resolve_hooks_target(target)
     if resolved is None:
         return None, error
     settings_path = resolved / SETTINGS_REL_PATH

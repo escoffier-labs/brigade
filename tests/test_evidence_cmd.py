@@ -51,7 +51,7 @@ def test_evidence_status_distinguishes_explicit_execution_from_review_only_plans
     assert "brigade evidence export plan    # review-only" in quickstart
     assert "brigade code sync .             # preferred GraphTrail facade" in quickstart
     assert "brigade search sync|context|impact` remain compatibility aliases" in quickstart
-    assert "explicitly runs local MiseLedger for `brigade evidence crawl|search`" in station_contract
+    assert "runs the local evidence engine for `brigade evidence crawl|search`" in station_contract
     assert "crawl/export plans are review-only" in station_contract
     assert "Explicit user-invoked" in evidence_docstring
     assert "brigade code sync|context|impact" in search_docstring
