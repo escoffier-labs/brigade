@@ -44,6 +44,16 @@ func CodexNotifyFromBytes(raw []byte) (canonical.Message, error) {
 	}
 
 	model := firstString(ev, "model", "model-name", "model_name")
+	if model == "" {
+		// Codex's notify event often omits the model; fall back to the model
+		// recorded for this turn in the Codex CLI session rollout. Resolve by
+		// the explicit thread id only (never session_id, which is not a
+		// thread alias).
+		threadID := firstString(ev, "thread-id", "thread_id")
+		if threadID != "" && turnID != "" {
+			model = resolveCodexModel(threadID, turnID)
+		}
+	}
 
 	return canonical.Message{
 		Title:  title,
