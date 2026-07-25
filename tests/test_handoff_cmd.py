@@ -2137,3 +2137,45 @@ def test_handoff_lint_still_accepts_canonical_headings(tmp_path):
     note.write_text(NO_CARD_HANDOFF)
     result = handoff_cmd.lint_file(note)
     assert result.valid, result.errors
+
+
+def test_handoff_draft_summary_resolves_synonym_target_card(tmp_path):
+    note = tmp_path / "synonym-card.md"
+    note.write_text(
+        """# Memory Handoff
+
+## Kind
+learning
+
+## Name
+Synonym draft target
+
+## TL;DR
+Drafts should resolve synonym card targets.
+
+## Memory action
+create-card
+
+## Card
+synonym-draft.md
+
+## Card content
+---
+topic: synonym-draft
+category: foundation
+tags: [memory]
+---
+
+# Synonym draft
+
+Body
+"""
+    )
+    draft = handoff_cmd._draft_summary(
+        note,
+        target=tmp_path,
+        inbox=".claude/memory-handoffs",
+        watched=True,
+    )
+    assert draft.action == "create-card"
+    assert draft.target_card == "synonym-draft.md"
