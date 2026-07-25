@@ -9,7 +9,10 @@
 </p>
 
 <p align="center">
-  When an agent says tests passed, get a file with the real exit code, a <strong>code map</strong> of what the change touched (<code>brigade code</code>), and an <strong>evidence log</strong> you can search later (<code>brigade evidence</code>). Optional: one MCP and tools catalog synced across your coding agents, and shared session notes with a review gate. Local CLI. Plain files. No daemon. No lock-in.
+  <strong>Built for coding agents to run end to end</strong> (install, setup, verify, handoffs), not as a human day-to-day terminal app.
+  When an agent says tests passed, you get a file with the real exit code, a <strong>code map</strong> of what changed (<code>brigade code</code>), and an <strong>evidence log</strong> you can search later (<code>brigade evidence</code>).
+  Optional: one MCP and tools catalog across agents, and shared notes with a review gate.
+  Local files. No daemon. No lock-in.
 </p>
 
 <p align="center">
