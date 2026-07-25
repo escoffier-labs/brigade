@@ -557,8 +557,7 @@ def _unwired_with_settings(tmp_path: Path) -> Path:
                         {
                             "type": "command",
                             "command": (
-                                f"python3 {target / '.claude' / 'hooks' / 'brigade-work-loop.py'} "
-                                "--event SessionStart"
+                                f"python3 {target / '.claude' / 'hooks' / 'brigade-work-loop.py'} --event SessionStart"
                             ),
                         }
                     ]
@@ -571,8 +570,7 @@ def _unwired_with_settings(tmp_path: Path) -> Path:
                         {
                             "type": "command",
                             "command": (
-                                f"python3 {target / '.claude' / 'hooks' / 'brigade-work-loop.py'} "
-                                "--event PreToolUse"
+                                f"python3 {target / '.claude' / 'hooks' / 'brigade-work-loop.py'} --event PreToolUse"
                             ),
                         },
                         {"type": "command", "command": "echo foreign-pretool"},
