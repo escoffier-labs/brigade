@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Codex notifications now show the verified per-turn model from the notify payload or matching local rollout metadata. Informational Telegram and Signal messages use an OpenAI text mark instead of the generic information symbol.
+
 ### Fixed
 - Channel transport failures now return bounded provider, stage, status, and cause fields without retaining request URLs or credentials; the dispatcher sanitizes errors again before writing stderr.
 

@@ -271,6 +271,8 @@ agent-notify hooks print codex --profile agent-stop
 notify = ["agent-notify", "--hook", "codex-notify", "--profile", "agent-stop"]
 ```
 
+Model enrichment reads only the matching local Codex turn_context, is best effort, and falls back to the existing Codex title when metadata is missing.
+
 ## Adding a custom hook source (escape hatch)
 
 If a built-in adapter ever breaks because an upstream tool changes its event schema, write a small shell wrapper that extracts the fields you want and pipes canonical JSON to `agent-notify`:
@@ -296,11 +298,11 @@ Then point the upstream tool's hook config at `my-tool-notify.sh` instead.
 
 ## Channel formatting
 
-| Channel | Format |
-|---------|--------|
-| Discord | Embed with title + body. Color by level (info=blue, warn=yellow, error=red, success=green). Tags as inline fields. Source as footer. |
-| Telegram | Markdown V2. Level emoji prefix (ℹ️ / ⚠️ / 🚨 / ✅). Title bolded. Tags as italicized footer. |
-| Signal | Plain text. Level emoji prefix. Title on its own line. Tags as `[tag1, tag2]` footer. |
+| Channel | Format | Codex model identity |
+|---------|--------|----------------------|
+| Discord | Embed with title + body. Color by level (info=blue, warn=yellow, error=red, success=green). Tags as inline fields. Source as footer. | Embed title becomes `OpenAI · <model>` for verified Codex turns. |
+| Telegram | Markdown V2. Level emoji prefix (ℹ️ / ⚠️ / 🚨 / ✅). Title bolded. Tags as italicized footer. | Informational Codex turns render `◉ OpenAI · <model>`. Warn/error/success emoji keep precedence. |
+| Signal | Plain text. Level emoji prefix. Title on its own line. Tags as `[tag1, tag2]` footer. | Same identity and severity precedence as Telegram. |
 
 ## Why not <alternatives>?
 
