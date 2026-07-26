@@ -10,10 +10,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from .. import config, graphtrail_delta, localio, proc, receipt_signing
+from .. import config, graphtrail_delta, localio, proc, receipt_signing, runguard
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -132,6 +133,7 @@ def _verify_execution_argv(argv: list[str], target: Path) -> list[str]:
 _VERIFY_CANCELED_RC = 130
 _VERIFY_INTERRUPTED_COMMAND_STATUS = "interrupted"
 _VERIFY_CANCELED_RECEIPT_STATUS = "canceled"
+_VERIFY_RECEIPT_SCHEMA_VERSION = 2
 
 
 def _verify_child_popen_kwargs() -> dict[str, Any]:
@@ -576,9 +578,16 @@ def _write_verify_markdown(run_dir: Path, receipt: dict[str, Any]) -> None:
         f"- Started: {receipt.get('started_at')}",
         f"- Completed: {receipt.get('completed_at')}",
         "",
-        "## Commands",
-        "",
     ]
+    lines.extend(_verify_identity_lines(receipt))
+    if lines[-1] != "":
+        lines.append("")
+    lines.extend(
+        [
+            "## Commands",
+            "",
+        ]
+    )
     for command in receipt.get("commands", []):
         if not isinstance(command, dict):
             continue
@@ -597,10 +606,56 @@ def _write_verify_markdown(run_dir: Path, receipt: dict[str, Any]) -> None:
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
 
-def _fingerprint_segment(hasher, label: str, data: bytes) -> None:
-    encoded_label = label.encode()
-    hasher.update(str(len(encoded_label)).encode() + b":" + encoded_label)
-    hasher.update(str(len(data)).encode() + b":" + data)
+def _verify_identity_binding(receipt: dict[str, Any]) -> str | None:
+    baseline = receipt.get("baseline_commit")
+    fingerprint = receipt.get("tree_fingerprint")
+    patch_hash = receipt.get("changes_patch_sha256")
+    if not isinstance(baseline, str) or not baseline:
+        return None
+    if not isinstance(fingerprint, str) or not fingerprint:
+        return None
+    if not isinstance(patch_hash, str) or not patch_hash:
+        return None
+    return f"verified tree {fingerprint} = baseline {baseline} + patch {patch_hash}"
+
+
+def _verify_identity_lines(receipt: dict[str, Any]) -> list[str]:
+    baseline = receipt.get("baseline_commit")
+    fingerprint = receipt.get("tree_fingerprint")
+    patch_hash = receipt.get("changes_patch_sha256")
+    if not isinstance(baseline, str) or not baseline:
+        return []
+    if not isinstance(fingerprint, str) or not fingerprint:
+        return []
+    if not isinstance(patch_hash, str) or not patch_hash:
+        return []
+    binding = _verify_identity_binding(receipt)
+    assert binding is not None
+    return [
+        f"- Baseline commit: `{baseline}`",
+        f"- Tree fingerprint: `{fingerprint}`",
+        f"- Patch hash: `{patch_hash}`",
+        f"- {binding}",
+    ]
+
+
+def _git_with_index(target: Path, index_file: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "GIT_INDEX_FILE": str(index_file)}
+    try:
+        return subprocess.run(
+            ["git", "-C", str(target), *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(exc.cmd, 124, stdout="", stderr=f"git timed out after {exc.timeout:g}s")
+    except OSError:
+        return subprocess.CompletedProcess(["git"], 127, stdout="", stderr="git unavailable")
 
 
 def _stamp_harness_session(receipt: dict[str, Any]) -> None:
@@ -611,30 +666,55 @@ def _stamp_harness_session(receipt: dict[str, Any]) -> None:
 
 
 def _tree_fingerprint(target: Path) -> str | None:
-    """Content hash of HEAD + tracked diff + untracked files. None outside git."""
+    """Git tree object for HEAD plus tracked and non-ignored untracked files."""
     try:
-        head = helpers._git(target, "rev-parse", "HEAD")
-        if head.returncode != 0:
-            return None
-        diff = helpers._git(target, "diff", "HEAD")
-        untracked = helpers._git(target, "ls-files", "--others", "--exclude-standard")
-        if diff.returncode != 0 or untracked.returncode != 0:
-            return None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_file = Path(tmpdir) / "index"
+            read_tree = _git_with_index(target, index_file, "read-tree", "HEAD")
+            if read_tree.returncode != 0:
+                return None
+            add_all = _git_with_index(target, index_file, "add", "-A")
+            if add_all.returncode != 0:
+                return None
+            write_tree = _git_with_index(target, index_file, "write-tree")
+            if write_tree.returncode != 0:
+                return None
+            value = write_tree.stdout.strip()
+            return value or None
     except OSError:
-        # helpers._git only catches TimeoutExpired; a missing git binary (e.g. a
-        # test that restricts PATH) raises FileNotFoundError, an OSError subclass.
         return None
-    hasher = hashlib.sha256()
-    _fingerprint_segment(hasher, "head", head.stdout.encode())
-    _fingerprint_segment(hasher, "diff", diff.stdout.encode())
-    for name in sorted(untracked.stdout.splitlines()):
-        path = target / name
-        try:
-            data = path.read_bytes()
-        except OSError:
-            return None
-        _fingerprint_segment(hasher, f"untracked:{name}", data)
-    return hasher.hexdigest()
+
+
+def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
+    unavailable: dict[str, Any] = {
+        "schema_version": _VERIFY_RECEIPT_SCHEMA_VERSION,
+        "baseline_commit": None,
+        "tree_fingerprint": None,
+        "changes_patch_sha256": None,
+    }
+    patch_path = run_dir / "changes.patch"
+    try:
+        baseline_commit = helpers._git_value(target, "rev-parse", "HEAD")
+        tree_fingerprint = _tree_fingerprint(target)
+        if baseline_commit is None or tree_fingerprint is None:
+            return unavailable
+        runguard.collect_changes_patch(target, patch_path)
+        patch_bytes = patch_path.read_bytes()
+        if (
+            helpers._git_value(target, "rev-parse", "HEAD") != baseline_commit
+            or _tree_fingerprint(target) != tree_fingerprint
+        ):
+            patch_path.unlink(missing_ok=True)
+            return unavailable
+    except (OSError, runguard.RunGuardError):
+        patch_path.unlink(missing_ok=True)
+        return unavailable
+    return {
+        "schema_version": _VERIFY_RECEIPT_SCHEMA_VERSION,
+        "baseline_commit": baseline_commit,
+        "tree_fingerprint": tree_fingerprint,
+        "changes_patch_sha256": hashlib.sha256(patch_bytes).hexdigest(),
+    }
 
 
 def _run_verify_commands(
@@ -654,6 +734,7 @@ def _run_verify_commands(
     finalized = False
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
+        identity = _capture_verify_identity(target, run_dir)
         receipt = {
             "run_id": run_id,
             "target": str(target),
@@ -663,9 +744,9 @@ def _run_verify_commands(
             "path": str(run_dir),
             "evidence": _verification_evidence_payload(target),
             "commands": [],
-            "tree_fingerprint": _tree_fingerprint(target),
             "planned_commands": _planned_commands_display(commands),
         }
+        receipt.update(identity)
         _stamp_harness_session(receipt)
         try:
             graph_delta_before = graphtrail_delta.capture_before(target, run_dir, timeout=graphtrail_timeout)
@@ -796,7 +877,6 @@ def _run_verify_commands(
 def _write_reused_receipt(
     target: Path,
     latest: dict[str, Any],
-    fingerprint: str | None,
     planned_display: list[str],
     timeout: int,
 ) -> tuple[dict[str, Any], int]:
@@ -805,6 +885,7 @@ def _write_reused_receipt(
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
     run_dir = helpers._verify_runs_root(target) / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    identity = _capture_verify_identity(target, run_dir)
     completed_at = helpers._now()
     receipt: dict[str, Any] = {
         "run_id": run_id,
@@ -817,9 +898,9 @@ def _write_reused_receipt(
         "path": str(run_dir),
         "commands": copy.deepcopy(latest.get("commands", [])),
         "reused_from": latest.get("run_id"),
-        "tree_fingerprint": fingerprint,
         "planned_commands": planned_display,
     }
+    receipt.update(identity)
     _stamp_harness_session(receipt)
     git = _receipt_git_snapshot(target)
     if git is not None:
@@ -1082,7 +1163,7 @@ def verify_run(
                 and latest.get("tree_fingerprint") == fingerprint
                 and latest.get("planned_commands") == planned_display
             ):
-                receipt, rc = _write_reused_receipt(target, latest, fingerprint, planned_display, timeout)
+                receipt, rc = _write_reused_receipt(target, latest, planned_display, timeout)
         if receipt is None:
             receipt, rc = _run_verify_commands(
                 target, planned, timeout, graphtrail_timeout=effective_graphtrail_timeout
@@ -1175,6 +1256,23 @@ def verify_show(*, target: Path, run_id: str, json_output: bool = False) -> int:
     print(f"target: {run.get('target')}")
     print(f"started: {run.get('started_at')}")
     print(f"completed: {run.get('completed_at')}")
+    baseline = run.get("baseline_commit")
+    fingerprint = run.get("tree_fingerprint")
+    patch_hash = run.get("changes_patch_sha256")
+    if (
+        isinstance(baseline, str)
+        and baseline
+        and isinstance(fingerprint, str)
+        and fingerprint
+        and isinstance(patch_hash, str)
+        and patch_hash
+    ):
+        print(f"baseline commit: {baseline}")
+        print(f"tree fingerprint: {fingerprint}")
+        print(f"patch hash: {patch_hash}")
+        binding = _verify_identity_binding(run)
+        if binding:
+            print(binding)
     for command in run.get("commands", []):
         if isinstance(command, dict):
             print(f"- {command.get('command')} [{command.get('status')}] exit={command.get('exit_code')}")
