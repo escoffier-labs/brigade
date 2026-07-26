@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shlex
@@ -2047,3 +2048,222 @@ def test_tree_fingerprint_distinguishes_tracked_binary_changes(tmp_path):
     assert fp_a is not None
     assert fp_b is not None
     assert fp_a != fp_b
+
+
+EMPTY_PATCH_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def _run_verify_with_graphtrail_disabled(target, monkeypatch, *, commands=None, reuse=True):
+    from brigade.work_cmd import verification
+
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(target / "missing-graphtrail"))
+    return verification.verify_run(
+        target=target,
+        commands=commands or ["true"],
+        timeout=60,
+        reuse=reuse,
+        json_output=True,
+    )
+
+
+def test_verify_receipt_identity_same_tree_twice(tmp_target, monkeypatch, capsys):
+    _init_verify_target_with_head(tmp_target)
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert first["tree_fingerprint"] == second["tree_fingerprint"]
+    assert first["baseline_commit"] == second["baseline_commit"]
+    assert first["changes_patch_sha256"] == second["changes_patch_sha256"]
+
+
+def test_verify_receipt_identity_changed_file_differs(tmp_target, monkeypatch, capsys):
+    _init_verify_target_with_head(tmp_target)
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
+    clean = json.loads(capsys.readouterr().out)
+    (tmp_target / "tracked.txt").write_text("changed\n")
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch, reuse=False) == 0
+    dirty = json.loads(capsys.readouterr().out)
+    assert dirty["tree_fingerprint"] != clean["tree_fingerprint"]
+    assert dirty["baseline_commit"] == clean["baseline_commit"]
+    assert dirty["changes_patch_sha256"] != clean["changes_patch_sha256"]
+
+
+def test_verify_receipt_identity_ignores_gitignored_untracked(tmp_target, monkeypatch, capsys):
+    _init_verify_target_with_head(tmp_target)
+    (tmp_target / ".gitignore").write_text(".brigade/\nignored.txt\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=tmp_target, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-c", "user.name=Test User", "-c", "user.email=test@example.invalid", "commit", "-m", "ignore"],
+        cwd=tmp_target,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
+    baseline = json.loads(capsys.readouterr().out)
+    (tmp_target / "ignored.txt").write_text("secret\n")
+    (tmp_target / "visible.txt").write_text("visible\n")
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch, reuse=False) == 0
+    with_visible = json.loads(capsys.readouterr().out)
+    patch_text = Path(with_visible["path"], "changes.patch").read_text()
+    assert "visible.txt" in patch_text
+    assert "ignored.txt" not in patch_text
+    (tmp_target / "visible.txt").unlink()
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch, reuse=False) == 0
+    ignored_only = json.loads(capsys.readouterr().out)
+    assert ignored_only["tree_fingerprint"] == baseline["tree_fingerprint"]
+    assert ignored_only["changes_patch_sha256"] == baseline["changes_patch_sha256"]
+
+
+def test_verify_receipt_identity_includes_unignored_untracked(tmp_target, monkeypatch, capsys):
+    _init_verify_target_with_head(tmp_target)
+    (tmp_target / "new.txt").write_text("fresh\n")
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch, reuse=False) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    patch_text = Path(receipt["path"], "changes.patch").read_text()
+    assert "new.txt" in patch_text
+    assert receipt["changes_patch_sha256"] == hashlib.sha256(patch_text.encode()).hexdigest()
+
+
+def test_verify_receipt_changes_patch_sha256_matches_file(tmp_target, monkeypatch, capsys):
+    _init_verify_target_with_head(tmp_target)
+    (tmp_target / "delta.txt").write_text("delta\n")
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch, reuse=False) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    patch_bytes = (Path(receipt["path"]) / "changes.patch").read_bytes()
+    assert receipt["changes_patch_sha256"] == hashlib.sha256(patch_bytes).hexdigest()
+
+
+def test_verify_receipt_clean_tree_empty_patch(tmp_target, monkeypatch, capsys):
+    _init_verify_target_with_head(tmp_target)
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    patch_path = Path(receipt["path"]) / "changes.patch"
+    assert patch_path.is_file()
+    assert patch_path.read_bytes() == b""
+    assert receipt["changes_patch_sha256"] == EMPTY_PATCH_SHA256
+
+
+def test_verify_receipt_schema_version_two(tmp_target, monkeypatch, capsys):
+    _init_verify_target_with_head(tmp_target)
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["schema_version"] == 2
+
+
+def test_verify_show_old_format_receipt_without_identity_fields(tmp_target, capsys):
+    from brigade.work_cmd import helpers, verification
+
+    _init_verify_target_with_head(tmp_target)
+    run_dir = helpers._verify_runs_root(tmp_target) / "20260101-000000-work-verify-legacy"
+    run_dir.mkdir(parents=True)
+    legacy = {
+        "run_id": run_dir.name,
+        "target": str(tmp_target),
+        "status": "completed",
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "completed_at": "2026-01-01T00:00:01+00:00",
+        "path": str(run_dir),
+        "commands": [{"command": "true", "status": "completed", "exit_code": 0}],
+    }
+    helpers._write_json(run_dir / "receipt.json", legacy)
+    assert verification.verify_show(target=tmp_target, run_id=run_dir.name) == 0
+    out = capsys.readouterr().out
+    assert "baseline" not in out.lower()
+    assert "verified tree" not in out
+
+
+def test_verify_show_renders_identity_binding(tmp_target, monkeypatch, capsys):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert verification.verify_show(target=tmp_target, run_id=receipt["run_id"]) == 0
+    out = capsys.readouterr().out
+    assert f"baseline commit: {receipt['baseline_commit']}" in out
+    assert f"tree fingerprint: {receipt['tree_fingerprint']}" in out
+    assert f"patch hash: {receipt['changes_patch_sha256']}" in out
+    assert (
+        f"verified tree {receipt['tree_fingerprint']} = baseline {receipt['baseline_commit']} + patch {receipt['changes_patch_sha256']}"
+        in out
+    )
+
+
+def test_verify_markdown_renders_identity_binding(tmp_target, monkeypatch, capsys):
+    _init_verify_target_with_head(tmp_target)
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    summary = Path(receipt["path"], "summary.md").read_text()
+    assert f"baseline {receipt['baseline_commit']}" in summary.lower()
+    assert receipt["tree_fingerprint"] in summary
+    assert receipt["changes_patch_sha256"] in summary
+    assert (
+        f"verified tree {receipt['tree_fingerprint']} = baseline {receipt['baseline_commit']} + patch {receipt['changes_patch_sha256']}"
+        in summary
+    )
+
+
+def test_verify_reused_receipt_captures_identity_binding(tmp_target, monkeypatch, capsys):
+    _init_verify_target_with_head(tmp_target)
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
+    capsys.readouterr()
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
+    reused = json.loads(capsys.readouterr().out)
+    assert reused.get("reused_from")
+    assert reused["schema_version"] == 2
+    assert reused["baseline_commit"]
+    assert reused["tree_fingerprint"]
+    assert reused["changes_patch_sha256"] == EMPTY_PATCH_SHA256
+    patch_path = Path(reused["path"]) / "changes.patch"
+    assert patch_path.is_file()
+    assert patch_path.read_bytes() == b""
+    assert (
+        f"verified tree {reused['tree_fingerprint']} = baseline {reused['baseline_commit']} + patch {reused['changes_patch_sha256']}"
+        in (Path(reused["path"]) / "summary.md").read_text()
+    )
+
+
+def test_verify_receipt_identity_patch_collection_failure_is_explicit(tmp_target, monkeypatch, capsys):
+    from brigade import runguard
+
+    _init_verify_target_with_head(tmp_target)
+
+    def fail_patch_collection(*_args, **_kwargs):
+        raise runguard.RunGuardError("simulated patch collection failure")
+
+    monkeypatch.setattr(runguard, "collect_changes_patch", fail_patch_collection)
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch, reuse=False) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["schema_version"] == 2
+    assert receipt["baseline_commit"] is None
+    assert receipt["tree_fingerprint"] is None
+    assert receipt["changes_patch_sha256"] is None
+
+
+def test_verify_receipt_identity_preserves_real_index(tmp_target, monkeypatch, capsys):
+    _init_verify_target_with_head(tmp_target)
+    (tmp_target / "tracked.txt").write_text("staged\n")
+    subprocess.run(
+        ["git", "add", "tracked.txt"],
+        cwd=tmp_target,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    before = subprocess.run(
+        ["git", "diff", "--cached", "--binary"],
+        cwd=tmp_target,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch, reuse=False) == 0
+    capsys.readouterr()
+    after = subprocess.run(
+        ["git", "diff", "--cached", "--binary"],
+        cwd=tmp_target,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert after == before
