@@ -50,6 +50,9 @@ class WorkerAttempt:
     stderr: str | None = None
     stdout_log: str | None = None
     stderr_log: str | None = None
+    detail: str = ""
+    ok: bool = True
+    timed_out: bool = False
 
 
 def _attempt_timestamp() -> str:
@@ -123,6 +126,9 @@ def _worker_attempt(
         selected=selected,
         stdout=result.stdout,
         stderr=result.stderr,
+        detail=result.detail,
+        ok=result.ok,
+        timed_out=result.timed_out,
     )
 
 

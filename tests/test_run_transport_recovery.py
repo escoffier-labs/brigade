@@ -51,6 +51,17 @@ def test_worker_payload_serializes_required_attempt_fields_with_null_exit_code()
         "terminal_reason": "malformed-final-output",
         "failure_phase": "output-validation",
         "failure_kind": "malformed-final-output",
+        "failure": {
+            "schema": "brigade.worker_failure.v1",
+            "class": "output-contract-violation",
+            "domain": "infrastructure",
+            "phase": "validation",
+            "retry": "never",
+            "detected_by": "legacy-failure-kind",
+            "cause_code": "malformed-final-output",
+            "detail": "",
+            "attempt": 1,
+        },
         "session_id": "019f0000-0000-7000-8000-000000000001",
         "selected": False,
     }

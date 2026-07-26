@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import agents, localio
 from .run_transport import Assignment, WorkerAttempt, WorkerResult
+from .worker_failure import normalized_failure
 
 
 def assignment_payload(assignments: list[Assignment]) -> list[dict[str, object]]:
@@ -38,6 +39,16 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
             entry["failure_phase"] = result.failure_phase
         if result.failure_kind is not None:
             entry["failure_kind"] = result.failure_kind
+        if not result.ok:
+            failure = normalized_failure(
+                failure_phase=result.failure_phase,
+                failure_kind=result.failure_kind,
+                detail=result.detail,
+                timed_out=result.timed_out,
+                status=result.status,
+            )
+            if failure is not None:
+                entry["failure"] = failure.payload()
         if result.transport_warning is not None:
             entry["transport_warning"] = dict(result.transport_warning)
         if result.thread_id is not None:
@@ -73,12 +84,15 @@ def worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
         if result.endpoint_host is not None:
             entry["endpoint_host"] = result.endpoint_host
         if result.attempts:
-            entry["attempts"] = [_attempt_payload(attempt) for attempt in result.attempts]
+            entry["attempts"] = [
+                _attempt_payload(attempt, attempt_number=index)
+                for index, attempt in enumerate(result.attempts, start=1)
+            ]
         payload.append(entry)
     return payload
 
 
-def _attempt_payload(attempt: WorkerAttempt) -> dict[str, object]:
+def _attempt_payload(attempt: WorkerAttempt, *, attempt_number: int) -> dict[str, object]:
     payload: dict[str, object] = {
         "kind": attempt.kind,
         "worker": attempt.worker,
@@ -99,6 +113,17 @@ def _attempt_payload(attempt: WorkerAttempt) -> dict[str, object]:
         payload["stdout_log"] = attempt.stdout_log
     if attempt.stderr_log is not None:
         payload["stderr_log"] = attempt.stderr_log
+    if not attempt.ok or attempt.failure_phase is not None or attempt.failure_kind is not None:
+        failure = normalized_failure(
+            failure_phase=attempt.failure_phase,
+            failure_kind=attempt.failure_kind,
+            detail=attempt.detail,
+            timed_out=attempt.timed_out,
+            status="",
+            attempt=attempt_number,
+        )
+        if failure is not None:
+            payload["failure"] = failure.payload()
     return payload
 
 
