@@ -397,6 +397,10 @@ def _real_auth_hit(text: str) -> bool:
     return bool(re.search(_SIGNAL_PATTERNS[1][1], stripped))
 
 
+ROUTE_TEMPLATE_VERSION = "brigade.route-template.v1"
+ROUTE_DECISION_CONFIDENCE = "deterministic"
+
+
 @dataclass(frozen=True)
 class RouteBrief:
     """Deterministic route computed before planning; attached to the plan prompt."""
@@ -412,6 +416,8 @@ class RouteBrief:
     size: str = "empty"
     triggered_by: dict = field(default_factory=dict)
     dependencies: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    confidence: str = ROUTE_DECISION_CONFIDENCE
+    template_version: str = ROUTE_TEMPLATE_VERSION
 
     def payload(self) -> dict:
         """Telemetry shape for run.json. Signals, approvals, and overrides
@@ -428,6 +434,8 @@ class RouteBrief:
             "size": self.size,
             "triggered_by": dict(self.triggered_by),
             "dependencies": {k: list(v) for k, v in self.dependencies.items()},
+            "confidence": self.confidence,
+            "template_version": self.template_version,
         }
 
 
