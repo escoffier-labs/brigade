@@ -34,6 +34,7 @@ def suppress(*, target: Path, fingerprint: str, reason: str, json_output: bool =
         return 2
     fingerprint = fingerprint.strip()
     cleaned_reason = _clean_reason(reason)
+    finding: dict[str, Any] | None = None
     if not FINGERPRINT_RE.match(fingerprint):
         finding, message = _resolve_finding_record(target, fingerprint)
         if finding is None or not FINGERPRINT_RE.match(str(finding.get("fingerprint") or "")):
@@ -48,10 +49,26 @@ def suppress(*, target: Path, fingerprint: str, reason: str, json_output: bool =
     except ValueError as exc:
         print(f"error: invalid security config: {exc}", file=sys.stderr)
         return 2
+    migration_map = _read_fingerprint_migration_map(target)
+    fingerprint = migration_map.get(fingerprint, fingerprint)
     suppressions = list(config.suppressions)
+    reasons = dict(config.suppression_reasons)
+    related_aliases = {legacy for legacy, primary in migration_map.items() if primary == fingerprint}
+    if finding is not None:
+        related_aliases.update(
+            _configured_suppression_aliases(
+                finding, suppressions=set(suppressions), reasons=reasons, migration_map=migration_map
+            )
+        )
+    for alias in related_aliases:
+        if alias == fingerprint:
+            continue
+        suppressions = [item for item in suppressions if item != alias]
+        inherited_reason = reasons.pop(alias, None)
+        if inherited_reason and fingerprint not in reasons:
+            reasons[fingerprint] = inherited_reason
     if fingerprint not in suppressions:
         suppressions.append(fingerprint)
-    reasons = dict(config.suppression_reasons)
     reasons[fingerprint] = cleaned_reason
     path = write_config(
         target,
@@ -96,6 +113,7 @@ def unsuppress(*, target: Path, fingerprint: str, json_output: bool = False) -> 
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     fingerprint = fingerprint.strip()
+    finding: dict[str, Any] | None = None
     if not FINGERPRINT_RE.match(fingerprint):
         finding, message = _resolve_finding_record(target, fingerprint)
         if finding is None or not FINGERPRINT_RE.match(str(finding.get("fingerprint") or "")):
@@ -107,12 +125,43 @@ def unsuppress(*, target: Path, fingerprint: str, json_output: bool = False) -> 
     except ValueError as exc:
         print(f"error: invalid security config: {exc}", file=sys.stderr)
         return 2
-    if fingerprint not in config.suppressions and fingerprint not in config.suppression_reasons:
+    migration_map = _read_fingerprint_migration_map(target)
+    fingerprint = migration_map.get(fingerprint, fingerprint)
+    configured_aliases: tuple[str, ...]
+    if finding is not None:
+        configured_aliases = _configured_suppression_aliases(
+            finding,
+            suppressions=set(config.suppressions),
+            reasons=config.suppression_reasons,
+            migration_map=migration_map,
+        )
+    else:
+        configured = _expand_suppression_fingerprints(
+            set(config.suppressions) | set(config.suppression_reasons),
+            migration_map,
+        )
+        if fingerprint not in configured:
+            configured_aliases = ()
+        else:
+            related = {fingerprint}
+            mapped_primary = migration_map.get(fingerprint)
+            if mapped_primary:
+                related.add(mapped_primary)
+            for legacy, primary in migration_map.items():
+                if primary == fingerprint:
+                    related.add(legacy)
+            configured_aliases = tuple(
+                sorted(
+                    alias for alias in related if alias in config.suppressions or alias in config.suppression_reasons
+                )
+            )
+    if not configured_aliases:
         print(f"error: suppression not found: {fingerprint}", file=sys.stderr)
         return 1
-    suppressions = tuple(item for item in config.suppressions if item != fingerprint)
+    suppressions = tuple(item for item in config.suppressions if item not in configured_aliases)
     reasons = dict(config.suppression_reasons)
-    reasons.pop(fingerprint, None)
+    for alias in configured_aliases:
+        reasons.pop(alias, None)
     path = write_config(
         target,
         SecurityConfig(
@@ -226,6 +275,15 @@ def _suppression_health_from_active(config: SecurityConfig, active: set[str]) ->
     }
 
 
+def _active_fingerprint_aliases(report: dict[str, Any]) -> set[str]:
+    active: set[str] = set()
+    for finding in list(report.get("findings") or []) + list(report.get("suppressed_findings") or []):
+        if not isinstance(finding, dict):
+            continue
+        active.update(_safe_fingerprint_aliases(finding))
+    return active
+
+
 def _write_suppression_health_cache(target: Path, effective: EffectivePolicy, health: dict[str, Any]) -> None:
     config = load_config(target)
     if config is None or not effective.config_loaded or not effective.suppressions:
@@ -244,11 +302,7 @@ def _write_suppression_health_cache_from_report(
     config = load_config(target)
     if config is None or not config.suppressions:
         return
-    active = {
-        str(item.get("fingerprint"))
-        for item in list(report.get("findings") or []) + list(report.get("suppressed_findings") or [])
-        if item.get("fingerprint")
-    }
+    active = _active_fingerprint_aliases(report)
     _write_suppression_health_cache(target, effective, _suppression_health_from_active(config, active))
 
 
@@ -336,7 +390,7 @@ def suppression_health(target: Path) -> dict[str, Any]:
         exclude_paths=effective.exclude_paths,
         severity_threshold=effective.severity_threshold,
     )
-    active = {str(item.get("fingerprint")) for item in report["findings"] if item.get("fingerprint")}
+    active = _active_fingerprint_aliases(report)
     health = _suppression_health_from_active(config, active)
     _write_suppression_health_cache(target, effective, health)
     return health

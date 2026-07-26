@@ -652,6 +652,66 @@ def test_security_scan_does_not_open_excluded_paths(tmp_path, monkeypatch):
     assert "excluded/secret.txt" not in opened
 
 
+def test_security_scan_cli_excludes_brigade_glob_from_self_scan(tmp_path, capsys):
+    (tmp_path / "hooks" / "install.sh").parent.mkdir(parents=True)
+    (tmp_path / "hooks" / "install.sh").write_text("curl https://example.invalid/install.sh | sh\n")
+    evidence_dir = tmp_path / ".brigade" / "center" / "reports" / "operator-one"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "CENTER_EVIDENCE.json").write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "path": "README.md",
+                        "line": 42,
+                        "safe_excerpt": "npx -y @example/unpinned-package",
+                        "category": "supply-chain",
+                        "title": "Unpinned remote package execution",
+                    }
+                ]
+            }
+        )
+        + "\n"
+    )
+    config = tmp_path / ".brigade" / "security.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'scan_profile = "local-only-audit"',
+                'fail_on = "none"',
+                "include_templates = false",
+                'enabled_checks = ["automation", "supply-chain"]',
+                "include_paths = []",
+                'exclude_paths = [".brigade/**"]',
+                'severity_threshold = "low"',
+                'output_path = ".brigade/security/latest"',
+                "",
+                "[suppressions]",
+                "fingerprints = []",
+                "",
+                "[suppression_reasons]",
+                "",
+            ]
+        )
+    )
+
+    assert cli.main(["security", "config", "--target", str(tmp_path), "--json"]) == 0
+    config_payload = json.loads(capsys.readouterr().out)
+    assert config_payload["config"]["exclude_paths"] == [".brigade/**"]
+
+    assert cli.main(["security", "scan", "--target", str(tmp_path), "--json", "--fail-on", "none"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    finding_paths = {finding["path"] for finding in payload["findings"]}
+    scanned_paths = set(payload["scanned_files"])
+    assert finding_paths == {"hooks/install.sh"}
+    assert not any(path.startswith(".brigade/") for path in finding_paths)
+    assert not any(path.startswith(".brigade/") for path in scanned_paths)
+    assert ".brigade/security.toml" not in scanned_paths
+    assert ".brigade/center/reports/operator-one/CENTER_EVIDENCE.json" not in scanned_paths
+    assert not security_cmd._path_matches_any("nested/.brigade/evidence.json", (".brigade/**",))
+
+
 def test_security_scan_include_paths_do_not_open_unrelated_files(tmp_path, monkeypatch):
     included = tmp_path / "included"
     included.mkdir()
@@ -759,6 +819,1205 @@ def test_security_scan_classifies_each_file_once(tmp_path, monkeypatch):
     assert report["finding_count"] >= 3
     assert surface_calls == ["script.sh"]
     assert confidence_calls == ["script.sh"]
+
+
+def test_security_suppression_fingerprint_survives_line_shift(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+    first = security_cmd.scan_target(tmp_path)
+    finding = next(item for item in first["findings"] if item["category"] == "supply-chain")
+    fingerprint = finding["fingerprint"]
+
+    assert security_cmd.suppress(target=tmp_path, fingerprint=fingerprint, reason="reviewed docs example") == 0
+    capsys.readouterr()
+
+    readme.write_text("# Title\n\n| col | val |\n| --- | --- |\n| a | b |\n\n" + needle)
+    second = security_cmd.scan_target(tmp_path, suppressions=security_cmd.load_config(tmp_path).suppressions)
+
+    assert second["finding_count"] == 0
+    assert second["suppressed_count"] == 1
+    suppressed = second["suppressed_findings"][0]
+    assert suppressed["fingerprint"] == fingerprint
+    assert suppressed["line"] != finding["line"]
+
+
+def test_security_fingerprint_distinguishes_identical_duplicates(tmp_path):
+    line = "npx -y @example/unpinned-package\n"
+    (tmp_path / "dup.txt").write_text(line + "middle section\n" + line)
+
+    report = security_cmd.scan_target(tmp_path)
+    findings = [item for item in report["findings"] if item["category"] == "supply-chain"]
+
+    assert len(findings) == 2
+    assert findings[0]["fingerprint"] != findings[1]["fingerprint"]
+    assert findings[0]["occurrence"] == 0
+    assert findings[1]["occurrence"] == 1
+    assert findings[0]["safe_excerpt"] == findings[1]["safe_excerpt"]
+
+    suppressed = security_cmd.scan_target(tmp_path, suppressions=(findings[0]["fingerprint"],))
+    assert suppressed["finding_count"] == 1
+    assert suppressed["suppressed_count"] == 1
+    assert suppressed["findings"][0]["fingerprint"] == findings[1]["fingerprint"]
+    assert suppressed["suppressed_findings"][0]["fingerprint"] == findings[0]["fingerprint"]
+    assert findings[0]["duplicate_count"] == 2
+    assert findings[1]["duplicate_count"] == 2
+
+
+def test_security_suppression_does_not_transfer_when_duplicate_removed(tmp_path, capsys):
+    line = "npx -y @example/unpinned-package\n"
+    dup_path = tmp_path / "dup.txt"
+    dup_path.write_text(line + "middle section\n" + line)
+
+    first = security_cmd.scan_target(tmp_path)
+    findings = [item for item in first["findings"] if item["category"] == "supply-chain"]
+    assert len(findings) == 2
+
+    assert security_cmd.suppress(target=tmp_path, fingerprint=findings[0]["fingerprint"], reason="reviewed first") == 0
+    capsys.readouterr()
+
+    dup_path.write_text("middle section\n" + line)
+    after = security_cmd.scan_target(tmp_path, suppressions=security_cmd.load_config(tmp_path).suppressions)
+    assert after["finding_count"] == 1
+    assert after["suppressed_count"] == 0
+
+
+def test_security_suppression_does_not_transfer_when_duplicate_inserted(tmp_path, capsys):
+    line = "npx -y @example/unpinned-package\n"
+    dup_path = tmp_path / "dup.txt"
+    dup_path.write_text(line)
+
+    first = security_cmd.scan_target(tmp_path)
+    finding = next(item for item in first["findings"] if item["category"] == "supply-chain")
+    assert finding["duplicate_count"] == 1
+
+    assert security_cmd.suppress(target=tmp_path, fingerprint=finding["fingerprint"], reason="reviewed single") == 0
+    capsys.readouterr()
+
+    dup_path.write_text(line + "middle section\n" + line)
+    after = security_cmd.scan_target(tmp_path, suppressions=security_cmd.load_config(tmp_path).suppressions)
+    open_findings = [item for item in after["findings"] if item["category"] == "supply-chain"]
+    assert after["finding_count"] == 2
+    assert after["suppressed_count"] == 0
+    assert len(open_findings) == 2
+    assert {item["duplicate_count"] for item in open_findings} == {2}
+
+
+def test_security_scan_import_rekeys_when_duplicate_group_changes(tmp_path, capsys):
+    line = "npx -y @example/unpinned-package\n"
+    dup_path = tmp_path / "dup.txt"
+    dup_path.write_text(line)
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    capsys.readouterr()
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    first_import = json.loads(imports_path.read_text().splitlines()[0])
+    assert first_import["metadata"]["duplicate_count"] == 1
+
+    dup_path.write_text(line + "middle section\n" + line)
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    out = capsys.readouterr().out
+    assert "imported_findings: 2" in out
+    imports = [json.loads(raw) for raw in imports_path.read_text().splitlines()]
+    assert len(imports) == 3
+    assert [item["metadata"]["duplicate_count"] for item in imports] == [1, 2, 2]
+
+
+def test_security_health_migrates_closeout_using_discovered_path_not_payload_path(tmp_path, capsys):
+    assert security_cmd.init(target=tmp_path) == 0
+    capsys.readouterr()
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    scan = json.loads(capsys.readouterr().out)
+    finding = next(item for item in scan["findings"] if item["category"] == "supply-chain")
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    outside_path = tmp_path.parent / "crafted-outside-closeout.json"
+    closeout_dir = tmp_path / ".brigade" / "security" / "closeouts" / "trusted-closeout"
+    closeout_dir.mkdir(parents=True)
+    closeout_path = closeout_dir / "closeout.json"
+    closeout_path.write_text(
+        json.dumps(
+            {
+                "status": "accepted-risk",
+                "created_at": "2026-07-01T00:00:00Z",
+                "source_fingerprints": [legacy],
+                "policy_pack": {"accepted_risk": True},
+                "path": str(outside_path),
+            }
+        )
+        + "\n"
+    )
+
+    health = security_cmd.health(tmp_path)
+    assert health["quieted_finding_count"] == 1
+    assert not outside_path.exists()
+
+    migrated = json.loads(closeout_path.read_text())
+    assert migrated["path"] == str(closeout_path)
+    assert primary in migrated["source_fingerprints"]
+    assert migrated["fingerprint_migrations"] == {legacy: primary}
+
+
+def test_security_read_closeouts_rejects_symlinked_entries(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from brigade.security_cmd import models as security_models
+
+    assert security_cmd.init(target=tmp_path) == 0
+    outside = tmp_path.parent / "outside-closeout.json"
+    closeout_root = tmp_path / ".brigade" / "security" / "closeouts"
+    trusted_dir = closeout_root / "trusted-closeout"
+    trusted_dir.mkdir(parents=True)
+    trusted_path = trusted_dir / "closeout.json"
+    trusted_path.write_text(
+        json.dumps(
+            {
+                "status": "accepted-risk",
+                "created_at": "2026-07-01T00:00:00Z",
+                "source_fingerprints": ["abc123"],
+                "policy_pack": {"accepted_risk": True},
+            }
+        )
+        + "\n"
+    )
+
+    for symlinked_path in (closeout_root, trusted_dir, trusted_path):
+        monkeypatch.setattr(
+            security_models,
+            "_closeout_path_is_symlink",
+            lambda path, symlinked_path=symlinked_path: path == symlinked_path,
+        )
+        assert security_models._read_closeouts(tmp_path) == []
+
+    monkeypatch.setattr(security_models, "_closeout_path_is_symlink", Path.is_symlink)
+    outside_payload = {
+        "status": "accepted-risk",
+        "created_at": "2026-07-02T00:00:00Z",
+        "source_fingerprints": ["def456"],
+        "policy_pack": {"accepted_risk": True},
+        "path": str(outside),
+    }
+    outside.write_text(json.dumps(outside_payload) + "\n")
+    trusted_path.write_text(
+        json.dumps({**outside_payload, "source_fingerprints": ["abc123"], "path": str(outside)}) + "\n"
+    )
+
+    closeouts = security_models._read_closeouts(tmp_path)
+    assert len(closeouts) == 1
+    assert closeouts[0]["source_fingerprints"] == ["abc123"]
+    assert closeouts[0]["path"] == str(trusted_path.resolve())
+    assert closeouts[0]["path"] != str(outside)
+
+
+def test_security_scan_does_not_migrate_through_unsafe_state_path(tmp_path, capsys, monkeypatch):
+    from brigade.security_cmd import models as security_models
+
+    line = "npx -y @example/unpinned-package\n"
+    (tmp_path / "README.md").write_text(line)
+    finding = next(
+        item for item in security_cmd.scan_target(tmp_path)["findings"] if item["category"] == "supply-chain"
+    )
+    legacy = finding["legacy_fingerprint"]
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}"]',
+                "",
+            ]
+        )
+    )
+    monkeypatch.setattr(security_models, "_workspace_state_path_is_safe", lambda _target, _path: False)
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["suppressed_count"] == 1
+    assert payload.get("suppression_migrations") is None
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.suppressions == (legacy,)
+    assert not security_models.fingerprint_migration_map_path(tmp_path).exists()
+
+
+def test_security_singleton_suppression_stays_open_when_duplicate_added_before_upgrade(tmp_path, capsys):
+    line = "npx -y @example/unpinned-package\n"
+    dup_path = tmp_path / "dup.txt"
+    dup_path.write_text(line)
+
+    first = security_cmd.scan_target(tmp_path)
+    finding = next(item for item in first["findings"] if item["category"] == "supply-chain")
+    legacy = finding["legacy_fingerprint"]
+    assert finding["duplicate_count"] == 1
+
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                'enabled_checks = ["supply-chain"]',
+                "include_paths = []",
+                "exclude_paths = []",
+                'severity_threshold = "low"',
+                'output_path = ".brigade/security/latest"',
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}"]',
+                "",
+                "[suppression_reasons]",
+                f'{legacy} = "singleton legacy suppression"',
+                "",
+            ]
+        )
+    )
+
+    dup_path.write_text(line + "middle section\n" + line)
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    open_findings = [item for item in payload["findings"] if item["category"] == "supply-chain"]
+    assert payload["suppressed_count"] == 0
+    assert len(open_findings) == 2
+    assert payload.get("suppression_migrations") is None
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert legacy in loaded.suppressions
+    assert legacy in loaded.suppression_reasons
+
+
+def test_security_diff_treats_duplicate_cardinality_change_as_re_review(tmp_path, capsys):
+    line = "npx -y @example/unpinned-package\n"
+    dup_path = tmp_path / "dup.txt"
+    dup_path.write_text(line)
+    singleton = security_cmd.scan_target(tmp_path)
+    finding = next(item for item in singleton["findings"] if item["category"] == "supply-chain")
+    legacy = finding["legacy_fingerprint"]
+
+    dup_path.write_text(line + "middle section\n" + line)
+    duplicate_group = security_cmd.scan_target(tmp_path)
+    duplicate_findings = [item for item in duplicate_group["findings"] if item["category"] == "supply-chain"]
+    assert len(duplicate_findings) == 2
+
+    base_dir = tmp_path / ".brigade" / "security" / "base"
+    against_dir = tmp_path / ".brigade" / "security" / "against"
+    base_dir.mkdir(parents=True)
+    against_dir.mkdir(parents=True)
+    (base_dir / "security-report.json").write_text(json.dumps(singleton, indent=2, sort_keys=True) + "\n")
+    (against_dir / "security-report.json").write_text(json.dumps(duplicate_group, indent=2, sort_keys=True) + "\n")
+
+    assert security_cmd.diff(target=tmp_path, base_dir=base_dir, against_dir=against_dir, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["persisting_count"] == 0
+    assert payload["new_count"] == 2
+    assert payload["resolved_count"] == 1
+    assert legacy not in {item.get("fingerprint") for item in payload["persisting"]}
+
+
+def test_security_scan_import_reimports_when_legacy_singleton_becomes_duplicate_group(tmp_path, capsys):
+    line = "npx -y @example/unpinned-package\n"
+    dup_path = tmp_path / "dup.txt"
+    dup_path.write_text(line)
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    capsys.readouterr()
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    first_import = json.loads(imports_path.read_text().splitlines()[0])
+    legacy = first_import["metadata"]["legacy_fingerprint"]
+    first_import["text"] = first_import["text"].rsplit(" [", 1)[0]
+    first_import["metadata"].pop("occurrence")
+    first_import["metadata"].pop("duplicate_count")
+    first_import["metadata"].pop("legacy_fingerprint")
+    first_import["metadata"]["fingerprint"] = legacy
+    first_import["metadata"]["finding_id"] = f"security-{legacy}"
+    first_import["metadata"]["source_item_key"] = f"security-scan:{legacy}"
+    imports_path.write_text(json.dumps(first_import) + "\n")
+
+    dup_path.write_text(line + "middle section\n" + line)
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    out = capsys.readouterr().out
+    assert "imported_findings: 2" in out
+    assert len(imports_path.read_text().splitlines()) == 3
+
+
+def test_security_review_old_report_after_migration_and_line_shift(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+    output_dir = tmp_path / ".brigade" / "security" / "latest"
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+    current = json.loads((output_dir / "security-report.json").read_text())
+    finding = next(item for item in current["findings"] if item["category"] == "supply-chain")
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    config = tmp_path / ".brigade" / "security.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}"]',
+                "",
+                "[suppression_reasons]",
+                f'{legacy} = "legacy bundle reason"',
+                "",
+            ]
+        )
+    )
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+    migration_map_path = tmp_path / ".brigade" / "security" / "fingerprint-migration-map.json"
+    migration_map = json.loads(migration_map_path.read_text())
+    assert migration_map["migrations"][legacy] == primary
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.suppressions == (primary,)
+    assert legacy not in loaded.suppressions
+
+    old_bundle_dir = tmp_path / ".brigade" / "security" / "old-bundle"
+    old_bundle_dir.mkdir(parents=True)
+    old_finding = dict(finding)
+    old_finding["fingerprint"] = legacy
+    old_finding.pop("legacy_fingerprint", None)
+    old_report = dict(current)
+    old_report["findings"] = [old_finding]
+    old_report["finding_count"] = 1
+    (old_bundle_dir / "security-report.json").write_text(json.dumps(old_report, indent=2, sort_keys=True) + "\n")
+    (old_bundle_dir / "security-report.md").write_text("# old bundle\n")
+
+    assert security_cmd.review(target=tmp_path, output_dir=old_bundle_dir, json_output=True) == 0
+    review_payload = json.loads(capsys.readouterr().out)
+    assert review_payload["suppressed_count"] == 1
+    assert review_payload["findings"][0]["status"] == "suppressed"
+    assert review_payload["findings"][0]["reason"] == "legacy bundle reason"
+
+    readme.write_text("# Title\n\n| col | val |\n| --- | --- |\n| a | b |\n\n" + needle)
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+    assert security_cmd.review(target=tmp_path, output_dir=old_bundle_dir, json_output=True) == 0
+    shifted_review = json.loads(capsys.readouterr().out)
+    assert shifted_review["suppressed_count"] == 1
+
+    assert security_cmd.unsuppress(target=tmp_path, fingerprint=legacy, json_output=True) == 0
+    capsys.readouterr()
+    reloaded = security_cmd.load_config(tmp_path)
+    assert reloaded is not None
+    assert reloaded.suppressions == ()
+    assert primary not in reloaded.suppression_reasons
+
+    assert (
+        security_cmd.suppress(
+            target=tmp_path,
+            fingerprint=legacy,
+            reason="re-suppressed through legacy alias",
+            json_output=True,
+        )
+        == 0
+    )
+    suppress_payload = json.loads(capsys.readouterr().out)
+    assert suppress_payload["fingerprint"] == primary
+    reloaded = security_cmd.load_config(tmp_path)
+    assert reloaded is not None
+    assert reloaded.suppressions == (primary,)
+    assert reloaded.suppression_reasons == {primary: "re-suppressed through legacy alias"}
+
+
+def test_security_line_based_suppression_matches_legacy_alias(tmp_path, capsys):
+    import hashlib
+
+    from brigade.security_cmd import scan_engine as scan_engine
+
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+    current = security_cmd.scan_target(tmp_path)
+    finding = next(item for item in current["findings"] if item["category"] == "supply-chain")
+
+    legacy = hashlib.sha256(
+        "\n".join(
+            [
+                finding["category"],
+                finding["title"],
+                finding["path"],
+                str(finding["line"]),
+                scan_engine._short(needle.strip(), limit=96),
+            ]
+        ).encode()
+    ).hexdigest()[:16]
+    assert legacy == finding["legacy_fingerprint"]
+    assert legacy != finding["fingerprint"]
+
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'scan_profile = "local-only-audit"',
+                'fail_on = "none"',
+                "include_templates = false",
+                'enabled_checks = ["supply-chain"]',
+                "include_paths = []",
+                "exclude_paths = []",
+                'severity_threshold = "low"',
+                'output_path = ".brigade/security/latest"',
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}"]',
+                "",
+                "[suppression_reasons]",
+                f'{legacy} = "legacy line-based suppression"',
+                "",
+            ]
+        )
+    )
+
+    with_legacy = security_cmd.scan(target=tmp_path, fail_on="none", json_output=True)
+    assert with_legacy == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["finding_count"] == 0
+    assert payload["suppressed_count"] == 1
+    assert payload["suppressed_findings"][0]["fingerprint"] == finding["fingerprint"]
+
+
+def test_security_scan_migrates_legacy_suppression_to_primary(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+    current = security_cmd.scan_target(tmp_path)
+    finding = next(item for item in current["findings"] if item["category"] == "supply-chain")
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'scan_profile = "local-only-audit"',
+                'fail_on = "none"',
+                "include_templates = false",
+                'enabled_checks = ["supply-chain"]',
+                "include_paths = []",
+                "exclude_paths = []",
+                'severity_threshold = "low"',
+                'output_path = ".brigade/security/latest"',
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}", "{legacy}"]',
+                "",
+                "[suppression_reasons]",
+                f'{legacy} = "legacy line-based suppression"',
+                "",
+            ]
+        )
+    )
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["suppression_migrations"] == [{"from": legacy, "to": primary}]
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.suppressions == (primary,)
+    assert loaded.suppression_reasons[primary] == "legacy line-based suppression"
+    assert legacy not in loaded.suppressions
+    assert legacy not in loaded.suppression_reasons
+
+    readme.write_text("# Title\n\n| col | val |\n| --- | --- |\n| a | b |\n\n" + needle)
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    shifted = json.loads(capsys.readouterr().out)
+    assert shifted["finding_count"] == 0
+    assert shifted["suppressed_count"] == 1
+    assert shifted.get("suppression_migrations") is None
+
+
+def test_security_scan_suppression_uses_migration_map_when_config_stays_legacy(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+    current = security_cmd.scan_target(tmp_path)
+    finding = next(item for item in current["findings"] if item["category"] == "supply-chain")
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'scan_profile = "local-only-audit"',
+                'fail_on = "none"',
+                "include_templates = false",
+                'enabled_checks = ["supply-chain"]',
+                "include_paths = []",
+                "exclude_paths = []",
+                'severity_threshold = "low"',
+                'output_path = ".brigade/security/latest"',
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}"]',
+                "",
+                "[suppression_reasons]",
+                f'{legacy} = "legacy line-based suppression"',
+                "",
+            ]
+        )
+    )
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    capsys.readouterr()
+    migration_map_path = tmp_path / ".brigade" / "security" / "fingerprint-migration-map.json"
+    assert json.loads(migration_map_path.read_text())["migrations"][legacy] == primary
+
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'scan_profile = "local-only-audit"',
+                'fail_on = "none"',
+                "include_templates = false",
+                'enabled_checks = ["supply-chain"]',
+                "include_paths = []",
+                "exclude_paths = []",
+                'severity_threshold = "low"',
+                'output_path = ".brigade/security/latest"',
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}"]',
+                "",
+                "[suppression_reasons]",
+                f'{legacy} = "legacy line-based suppression"',
+                "",
+            ]
+        )
+    )
+
+    readme.write_text("# Title\n\n| col | val |\n| --- | --- |\n| a | b |\n\n" + needle)
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    shifted = json.loads(capsys.readouterr().out)
+    assert shifted["finding_count"] == 0
+    assert shifted["suppressed_count"] == 1
+    assert shifted.get("suppression_migrations") is None
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert legacy in loaded.suppressions
+    assert primary not in loaded.suppressions
+
+
+def test_security_scan_import_reimports_on_severity_escalation(tmp_path, capsys):
+    from brigade.security_cmd import scan_engine as scan_engine_mod
+
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text(needle)
+    finding = next(
+        item for item in security_cmd.scan_target(tmp_path)["findings"] if item["category"] == "supply-chain"
+    )
+    assert finding["severity"] == "medium"
+
+    imported, skipped = scan_engine_mod._import_findings(tmp_path, [finding])
+    assert len(imported) == 1
+    assert skipped == []
+    assert imported[0]["kind"] == "finding"
+
+    escalated = dict(finding)
+    escalated["severity"] = "high"
+    reimported, reskipped = scan_engine_mod._import_findings(tmp_path, [escalated])
+    assert len(reimported) == 1
+    assert reskipped == []
+    assert reimported[0]["metadata"]["severity"] == "high"
+    assert reimported[0]["kind"] == "incident"
+    assert reimported[0]["metadata"]["source_item_key"] == imported[0]["metadata"]["source_item_key"]
+
+    unchanged, unchanged_skipped = scan_engine_mod._import_findings(tmp_path, [escalated])
+    assert unchanged == []
+    assert len(unchanged_skipped) == 1
+
+
+def test_security_scan_import_reimports_dismissed_on_severity_escalation(tmp_path, capsys):
+    from brigade.security_cmd import scan_engine as scan_engine_mod
+
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text(needle)
+    finding = next(
+        item for item in security_cmd.scan_target(tmp_path)["findings"] if item["category"] == "supply-chain"
+    )
+
+    imported, _ = scan_engine_mod._import_findings(tmp_path, [finding])
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=imported[0]["id"], reason="accepted risk") == 0
+    capsys.readouterr()
+
+    same_severity, skipped = scan_engine_mod._import_findings(tmp_path, [finding])
+    assert same_severity == []
+    assert len(skipped) == 1
+
+    escalated = dict(finding)
+    escalated["severity"] = "high"
+    reimported, reskipped = scan_engine_mod._import_findings(tmp_path, [escalated])
+    assert len(reimported) == 1
+    assert reskipped == []
+    assert reimported[0]["status"] == "pending"
+    assert reimported[0]["metadata"]["severity"] == "high"
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    imports = [json.loads(line) for line in imports_path.read_text().splitlines()]
+    assert len(imports) == 2
+    assert imports[0]["status"] == "dismissed"
+
+
+def test_security_show_and_unsuppress_resolve_legacy_alias(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+    output_dir = tmp_path / ".brigade" / "security" / "latest"
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+    finding = next(
+        item
+        for item in json.loads((output_dir / "security-report.json").read_text())["findings"]
+        if item["category"] == "supply-chain"
+    )
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    config = tmp_path / ".brigade" / "security.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}"]',
+                "",
+                "[suppression_reasons]",
+                f'{primary} = "legacy alias reason"',
+                "",
+            ]
+        )
+    )
+
+    assert security_cmd.show(target=tmp_path, finding_id=f"security-{legacy}", json_output=True) == 0
+    show_payload = json.loads(capsys.readouterr().out)
+    assert show_payload["finding"]["fingerprint"] == primary
+    assert show_payload["finding"]["reason"] == "legacy alias reason"
+
+    assert security_cmd.unsuppress(target=tmp_path, fingerprint=finding["id"]) == 0
+    out = capsys.readouterr().out
+    assert f"unsuppressed: {primary}" in out
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.suppressions == ()
+    assert primary not in loaded.suppression_reasons
+    assert legacy not in loaded.suppression_reasons
+
+
+def test_security_show_resolves_migrated_legacy_after_line_shift(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+    output_dir = tmp_path / ".brigade" / "security" / "latest"
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+    finding = next(
+        item
+        for item in json.loads((output_dir / "security-report.json").read_text())["findings"]
+        if item["category"] == "supply-chain"
+    )
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    config = tmp_path / ".brigade" / "security.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}"]',
+                "",
+            ]
+        )
+    )
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+
+    readme.write_text("# Title\n\n| col | val |\n| --- | --- |\n| a | b |\n\n" + needle)
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+
+    assert security_cmd.show(target=tmp_path, finding_id=legacy, json_output=True) == 0
+    show_payload = json.loads(capsys.readouterr().out)
+    assert show_payload["finding"]["fingerprint"] == primary
+
+
+def test_security_diff_expands_migration_map_without_duplicate_legacy_match(tmp_path, capsys):
+    line = "npx -y @example/unpinned-package\n"
+    dup_path = tmp_path / "dup.txt"
+    dup_path.write_text(line)
+    singleton = security_cmd.scan_target(tmp_path)
+    finding = next(item for item in singleton["findings"] if item["category"] == "supply-chain")
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}"]',
+                "",
+            ]
+        )
+    )
+    security_cmd.scan(target=tmp_path, fail_on="none")
+    capsys.readouterr()
+
+    base_dir = tmp_path / ".brigade" / "security" / "base"
+    against_dir = tmp_path / ".brigade" / "security" / "against"
+    base_dir.mkdir(parents=True)
+    against_dir.mkdir(parents=True)
+    base_finding = {**finding, "fingerprint": legacy}
+    base_finding.pop("legacy_fingerprint", None)
+    base_report = dict(singleton)
+    base_report["findings"] = [base_finding]
+    base_report["finding_count"] = 1
+    (base_dir / "security-report.json").write_text(json.dumps(base_report, indent=2, sort_keys=True) + "\n")
+
+    against_report = dict(singleton)
+    against_report["generated_at"] = "2026-07-02T00:00:00Z"
+    (against_dir / "security-report.json").write_text(json.dumps(against_report, indent=2, sort_keys=True) + "\n")
+
+    assert security_cmd.diff(target=tmp_path, base_dir=base_dir, against_dir=against_dir, json_output=True) == 0
+    migrated = json.loads(capsys.readouterr().out)
+    assert migrated["persisting_count"] == 1
+    assert migrated["new_count"] == 0
+    assert migrated["resolved_count"] == 0
+    assert migrated["persisting"][0]["fingerprint"] == primary
+
+    dup_path.write_text(line)
+    singleton_rescan = security_cmd.scan_target(tmp_path)
+    dup_path.write_text(line + "middle section\n" + line)
+    duplicate_rescan = security_cmd.scan_target(tmp_path)
+    (base_dir / "security-report.json").write_text(json.dumps(singleton_rescan, indent=2, sort_keys=True) + "\n")
+    (against_dir / "security-report.json").write_text(json.dumps(duplicate_rescan, indent=2, sort_keys=True) + "\n")
+
+    assert security_cmd.diff(target=tmp_path, base_dir=base_dir, against_dir=against_dir, json_output=True) == 1
+    cardinality = json.loads(capsys.readouterr().out)
+    assert cardinality["persisting_count"] == 0
+    assert cardinality["new_count"] == 2
+    assert cardinality["resolved_count"] == 1
+
+
+def test_security_health_matches_accepted_risk_via_migration_map(tmp_path, capsys):
+    assert security_cmd.init(target=tmp_path) == 0
+    capsys.readouterr()
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    scan = json.loads(capsys.readouterr().out)
+    finding = next(item for item in scan["findings"] if item["category"] == "supply-chain")
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    config = tmp_path / ".brigade" / "security.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}"]',
+                "",
+            ]
+        )
+    )
+    assert security_cmd.scan(target=tmp_path, fail_on="none") == 0
+    capsys.readouterr()
+
+    closeout_dir = tmp_path / ".brigade" / "security" / "closeouts" / "current-closeout"
+    closeout_dir.mkdir(parents=True)
+    (closeout_dir / "closeout.json").write_text(
+        json.dumps(
+            {
+                "status": "accepted-risk",
+                "created_at": "2026-07-01T00:00:00Z",
+                "source_fingerprints": [primary],
+                "policy_pack": {"accepted_risk": True},
+            }
+        )
+        + "\n"
+    )
+
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                "fingerprints = []",
+                "",
+            ]
+        )
+    )
+
+    stale_finding = dict(finding)
+    stale_finding["id"] = f"security-{legacy}"
+    stale_finding["fingerprint"] = legacy
+    stale_finding.pop("legacy_fingerprint", None)
+    stale_report = dict(scan)
+    stale_report["findings"] = [stale_finding]
+    stale_report["suppressed_findings"] = []
+    stale_report["finding_count"] = 1
+    stale_report["suppressed_count"] = 0
+    output_dir = tmp_path / ".brigade" / "security" / "latest"
+    (output_dir / "security-report.json").write_text(json.dumps(stale_report, indent=2, sort_keys=True) + "\n")
+    (output_dir / "security-report.md").write_text("# stale security report\n")
+
+    health = security_cmd.health(tmp_path)
+    assert health["quieted_finding_count"] == 1
+    assert health["top_finding"] is None
+
+
+def test_security_unsuppress_stale_legacy_finding_removes_primary_suppression(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+    output_dir = tmp_path / ".brigade" / "security" / "latest"
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+    finding = next(
+        item
+        for item in json.loads((output_dir / "security-report.json").read_text())["findings"]
+        if item["category"] == "supply-chain"
+    )
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    config = tmp_path / ".brigade" / "security.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{legacy}"]',
+                "",
+                "[suppression_reasons]",
+                f'{legacy} = "legacy bundle reason"',
+                "",
+            ]
+        )
+    )
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+
+    stale_finding = dict(finding)
+    stale_finding["id"] = f"security-{legacy}"
+    stale_finding["fingerprint"] = legacy
+    stale_finding.pop("legacy_fingerprint", None)
+    stale_report = {
+        "findings": [stale_finding],
+        "suppressed_findings": [],
+        "finding_count": 1,
+        "suppressed_count": 0,
+    }
+    (output_dir / "security-report.json").write_text(json.dumps(stale_report, indent=2, sort_keys=True) + "\n")
+    (output_dir / "security-report.md").write_text("# stale security report\n")
+
+    assert security_cmd.unsuppress(target=tmp_path, fingerprint=stale_finding["id"]) == 0
+    capsys.readouterr()
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.suppressions == ()
+    assert primary not in loaded.suppression_reasons
+    assert legacy not in loaded.suppression_reasons
+
+
+def test_security_diff_treats_legacy_alias_intersection_as_persisting(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+    current = security_cmd.scan_target(tmp_path)
+    finding = next(item for item in current["findings"] if item["category"] == "supply-chain")
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    base_dir = tmp_path / ".brigade" / "security" / "base"
+    against_dir = tmp_path / ".brigade" / "security" / "against"
+    base_dir.mkdir(parents=True)
+    against_dir.mkdir(parents=True)
+    base_report = dict(current)
+    legacy_finding = {**finding, "fingerprint": legacy}
+    legacy_finding.pop("legacy_fingerprint")
+    base_report["findings"] = [legacy_finding]
+    base_report["finding_count"] = 1
+    for bucket in ("suppressed_findings",):
+        base_report.pop(bucket, None)
+    against_report = dict(current)
+    against_report["generated_at"] = "2026-07-02T00:00:00Z"
+    (base_dir / "security-report.json").write_text(json.dumps(base_report, indent=2, sort_keys=True) + "\n")
+    (against_dir / "security-report.json").write_text(json.dumps(against_report, indent=2, sort_keys=True) + "\n")
+
+    assert security_cmd.diff(target=tmp_path, base_dir=base_dir, against_dir=against_dir, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["new_count"] == 0
+    assert payload["resolved_count"] == 0
+    assert payload["persisting_count"] == 1
+    assert payload["persisting"][0]["fingerprint"] == primary
+
+
+def test_security_diff_falls_back_without_fingerprints(tmp_path, capsys):
+    base_dir = tmp_path / ".brigade" / "security" / "base"
+    against_dir = tmp_path / ".brigade" / "security" / "against"
+    base_dir.mkdir(parents=True)
+    against_dir.mkdir(parents=True)
+    shared = {
+        "category": "supply-chain",
+        "path": "README.md",
+        "line": 3,
+        "title": "Unpinned remote package execution",
+        "severity": "medium",
+    }
+    (base_dir / "security-report.json").write_text(
+        json.dumps({"findings": [dict(shared)], "suppressed_findings": []}, indent=2, sort_keys=True) + "\n"
+    )
+    (against_dir / "security-report.json").write_text(
+        json.dumps({"findings": [dict(shared)], "suppressed_findings": []}, indent=2, sort_keys=True) + "\n"
+    )
+
+    assert security_cmd.diff(target=tmp_path, base_dir=base_dir, against_dir=against_dir, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["new_count"] == 0
+    assert payload["resolved_count"] == 0
+    assert payload["persisting_count"] == 1
+
+
+def test_security_accepted_risk_closeout_migrates_legacy_fingerprint(tmp_path, capsys):
+    assert security_cmd.init(target=tmp_path) == 0
+    capsys.readouterr()
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    scan = json.loads(capsys.readouterr().out)
+    finding = next(item for item in scan["findings"] if item["category"] == "supply-chain")
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    closeout_dir = tmp_path / ".brigade" / "security" / "closeouts" / "legacy-closeout"
+    closeout_dir.mkdir(parents=True)
+    closeout_path = closeout_dir / "closeout.json"
+    closeout_path.write_text(
+        json.dumps(
+            {
+                "status": "accepted-risk",
+                "created_at": "2026-07-01T00:00:00Z",
+                "source_fingerprints": [legacy],
+                "policy_pack": {"accepted_risk": True},
+                "path": str(closeout_path),
+            }
+        )
+        + "\n"
+    )
+
+    health = security_cmd.health(tmp_path)
+    assert health["quieted_finding_count"] == 1
+    migrated = json.loads(closeout_path.read_text())
+    assert primary in migrated["source_fingerprints"]
+    assert migrated["fingerprint_migrations"] == {legacy: primary}
+
+    readme.write_text("# Title\n\n| col | val |\n| --- | --- |\n| a | b |\n\n" + needle)
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    capsys.readouterr()
+    after_shift = security_cmd.health(tmp_path)
+    assert after_shift["quieted_finding_count"] == 1
+    assert after_shift["top_finding"] is None
+
+
+def test_security_health_migrates_legacy_harness_closeout_fingerprint(tmp_path):
+    harness_dir = tmp_path / ".brigade" / "hermes"
+    harness_dir.mkdir(parents=True)
+    (harness_dir / "workspace.harness.json").write_text(json.dumps({"endpoint": "https://agent.invalid/api"}, indent=2))
+    wiring = security_cmd.harness_wiring_payload(tmp_path)
+    finding = wiring["findings"][0]
+    legacy = finding["legacy_fingerprint"]
+    primary = finding["fingerprint"]
+
+    closeout_dir = tmp_path / ".brigade" / "security" / "closeouts" / "legacy-harness-closeout"
+    closeout_dir.mkdir(parents=True)
+    closeout_path = closeout_dir / "closeout.json"
+    closeout_path.write_text(
+        json.dumps(
+            {
+                "status": "accepted-risk",
+                "created_at": "2026-07-01T00:00:00Z",
+                "source_fingerprints": [legacy],
+                "policy_pack": {"accepted_risk": True},
+            }
+        )
+        + "\n"
+    )
+
+    health = security_cmd.health(tmp_path)
+    assert health["harness_wiring"]["quieted_finding_count"] == 1
+    migrated = json.loads(closeout_path.read_text())
+    assert primary in migrated["source_fingerprints"]
+    assert migrated["fingerprint_migrations"] == {legacy: primary}
+
+
+def test_security_include_paths_match_literal_bracket_segments(tmp_path):
+    route_dir = tmp_path / "app" / "[id]"
+    route_dir.mkdir(parents=True)
+    other_dir = tmp_path / "app" / "settings"
+    other_dir.mkdir(parents=True)
+    (route_dir / "page.txt").write_text("npx -y @example/unpinned-package\n")
+    (other_dir / "page.txt").write_text("npx -y @example/other-unpinned-package\n")
+
+    report = security_cmd.scan_target(tmp_path, include_paths=("app/[id]",), enabled_checks=("supply-chain",))
+
+    assert report["finding_count"] == 1
+    assert report["findings"][0]["path"] == "app/[id]/page.txt"
+    assert "app/settings/page.txt" not in report["scanned_files"]
+
+
+def test_security_accepted_risk_closeout_matches_legacy_fingerprint(tmp_path, capsys):
+    assert security_cmd.init(target=tmp_path) == 0
+    capsys.readouterr()
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    scan = json.loads(capsys.readouterr().out)
+    finding = next(item for item in scan["findings"] if item["category"] == "supply-chain")
+    legacy = finding["legacy_fingerprint"]
+
+    closeout_dir = tmp_path / ".brigade" / "security" / "closeouts" / "legacy-closeout"
+    closeout_dir.mkdir(parents=True)
+    (closeout_dir / "closeout.json").write_text(
+        json.dumps(
+            {
+                "status": "accepted-risk",
+                "created_at": "2026-07-01T00:00:00Z",
+                "source_fingerprints": [legacy],
+                "policy_pack": {"accepted_risk": True},
+            }
+        )
+        + "\n"
+    )
+
+    health = security_cmd.health(tmp_path)
+    assert health["quieted_finding_count"] == 1
+    assert health["top_finding"] is None
+
+
+def test_security_scan_import_dedupes_after_line_shift(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text("# Title\n\n" + needle)
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    capsys.readouterr()
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    first_import = json.loads(imports_path.read_text().splitlines()[0])
+    assert first_import["metadata"]["occurrence"] == 0
+    legacy = first_import["metadata"]["legacy_fingerprint"]
+    first_import["text"] = first_import["text"].rsplit(" [", 1)[0]
+    first_import["metadata"].pop("occurrence")
+    first_import["metadata"].pop("legacy_fingerprint")
+    first_import["metadata"]["fingerprint"] = legacy
+    first_import["metadata"]["finding_id"] = f"security-{legacy}"
+    first_import["metadata"]["source_item_key"] = f"security-scan:{legacy}"
+    imports_path.write_text(json.dumps(first_import) + "\n")
+
+    readme.write_text("# Title\n\n| col | val |\n| --- | --- |\n| a | b |\n\n" + needle)
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    out = capsys.readouterr().out
+    assert "imported_findings: 0" in out
+    assert "skipped_duplicate_imports: 1" in out
+    assert len(imports_path.read_text().splitlines()) == 1
+
+
+def test_security_scan_import_counts_identical_legacy_duplicates(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    needle = "npx -y @example/unpinned-package\n"
+    readme.write_text(needle + "middle section\n" + needle)
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    capsys.readouterr()
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    legacy_imports = []
+    for raw in imports_path.read_text().splitlines():
+        item = json.loads(raw)
+        legacy = item["metadata"]["legacy_fingerprint"]
+        item["text"] = item["text"].rsplit(" [", 1)[0]
+        item["metadata"].pop("occurrence")
+        item["metadata"].pop("legacy_fingerprint")
+        item["metadata"]["fingerprint"] = legacy
+        item["metadata"]["finding_id"] = f"security-{legacy}"
+        item["metadata"]["source_item_key"] = f"security-scan:{legacy}"
+        legacy_imports.append(item)
+    assert len(legacy_imports) == 2
+    imports_path.write_text("\n".join(json.dumps(item) for item in legacy_imports) + "\n")
+
+    readme.write_text("# Inserted above\n\n" + needle + "middle section\n" + needle)
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    out = capsys.readouterr().out
+    assert "imported_findings: 0" in out
+    assert "skipped_duplicate_imports: 2" in out
+    assert len(imports_path.read_text().splitlines()) == 2
+
+
+def test_security_scan_import_distinguishes_changed_evidence(tmp_path, capsys):
+    readme = tmp_path / "README.md"
+    readme.write_text("npx -y @example/unpinned-package\n")
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    capsys.readouterr()
+
+    readme.write_text("npx -y @example/other-unpinned-package\n")
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    out = capsys.readouterr().out
+    assert "imported_findings: 1" in out
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    assert len(imports_path.read_text().splitlines()) == 2
 
 
 def test_security_review_suppress_and_unsuppress(tmp_path, capsys):

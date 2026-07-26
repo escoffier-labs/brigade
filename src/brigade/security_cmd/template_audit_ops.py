@@ -205,6 +205,7 @@ def harness_wiring_payload(target: Path) -> dict[str, Any]:
             text=text,
             classification=_classification_for(path, target),
         )
+    _assign_fingerprints(findings)
     findings = _filter_findings(
         findings,
         enabled_checks=SECURITY_CHECKS,

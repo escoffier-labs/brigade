@@ -36,7 +36,8 @@ Supported fields:
 - `fail_on`: `none`, `low`, `medium`, `high`, or `critical`.
 - `include_templates`: whether public template files are scanned.
 - `enabled_checks`: any of `automation`, `mcp`, `permissions`, `prompt-injection`, `secrets`, and `supply-chain`.
-- `include_paths` and `exclude_paths`: relative path prefixes.
+- `include_paths`: relative path prefixes. Bracketed Next.js-style segments such as `app/[id]` are matched literally, not as globs.
+- `exclude_paths`: relative path prefixes. A trailing `/**` excludes the prefix and all descendants (for example `.brigade/**` covers `.brigade/security.toml` and nested files).
 - `severity_threshold`: minimum severity retained in reports.
 - `output_path`: relative path for the latest local evidence bundle.
 - `[suppressions]` and `[suppression_reasons]`: reviewed finding fingerprints and reasons.
@@ -56,7 +57,17 @@ brigade security unsuppress <finding-id-or-fingerprint>
 brigade security doctor
 ```
 
-Findings include stable `id`, `fingerprint`, `rule_id`, `severity`, `category`, `path`, `line`, `safe_excerpt`, `remediation_hint`, and optional `response_options` fields. Secret-looking values are redacted before JSON reports, Markdown reports, SARIF, work imports, docs, or session artifacts are written.
+Findings include stable `id`, `fingerprint`, `rule_id`, `severity`, `category`, `path`, `line`, `occurrence`, `safe_excerpt`, `remediation_hint`, and optional `response_options` fields. Secret-looking values are redacted before JSON reports, Markdown reports, SARIF, work imports, docs, or session artifacts are written.
+
+### Finding fingerprints and suppressions
+
+Finding fingerprints are content-addressed, not line-addressed. A fingerprint hashes `rule_id`, repo-relative `path`, a normalized redacted 96-character excerpt of the matched content, and a zero-based `occurrence` index for genuine duplicates of the same rule and text in one file. When more than one identical match exists in a file, the fingerprint also includes that group's `duplicate_count` so removing or adding a duplicate rekeys the remaining findings instead of transferring a suppression from a removed sibling. Singleton matches keep the pre-cardinality formula byte-for-byte unchanged. Absolute line numbers are reported for review but do not affect fingerprint identity, so suppressions survive unrelated edits above a finding.
+
+Each finding also carries a `legacy_fingerprint` alias computed with the pre-upgrade line-based formula (`category`, `title`, `path`, `line`, and a 96-character redacted excerpt). Suppressions, accepted-risk closeouts, and suppression-health checks match the content-addressed fingerprint and may also match the legacy alias only when the finding is a singleton (`duplicate_count = 1`, or the field is missing on historical reports). Duplicate groups never inherit a pre-upgrade singleton suppression or accepted-risk closeout through the shared legacy alias. On the first exact legacy match for a singleton, a scan migrates the configured suppression to the primary fingerprint, writes a local legacy-to-primary map under `.brigade/security/fingerprint-migration-map.json`, and health records the primary fingerprint in an accepted-risk closeout. Review, findings, show, suppress, and unsuppress consult that map bidirectionally so an older evidence bundle that still lists only the legacy fingerprint remains manageable after migration and later line movement. `security.toml` stays canonical: legacy suppression entries are removed and only the primary fingerprint is retained; old evidence bundles are not rewritten.
+
+When the same rule matches identical redacted text twice in one file, the first match uses `occurrence = 0`, the second `occurrence = 1`, and so on, and both carry `duplicate_count = 2`. Occurrence order follows ascending scan line number, which keeps duplicate strings distinct without tying identity to a single absolute line. If one duplicate is removed, the survivor's `duplicate_count` drops to `1` and its fingerprint changes, so a suppression on the removed instance does not quiet the remaining match.
+
+**One-time migration edge case:** a legacy suppression or accepted-risk record for a finding that already moved before its first upgraded scan cannot be mapped automatically, because the legacy alias depends on the original line number. Re-review that finding once under its new content-addressed fingerprint. Findings that stayed at the same location keep working through the legacy alias without manual rework.
 
 Secret findings include a small response playbook. Typical options are moving active credentials into a gitignored `.env` file or environment variable, scrubbing tracked files and rotating exposed values, showing the redacted finding to the operator so they can preserve the real value in KeePass before deciding, and redacting or archiving chat/session transcripts when a session log contains an exposed key.
 

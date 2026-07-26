@@ -905,9 +905,357 @@ def _secret_response_options(path: Path, target: Path) -> list[str]:
     return options
 
 
-def _fingerprint(*, category: str, title: str, rel_path: Path, line: int, evidence: str) -> str:
-    stable = "\n".join([category, title, str(rel_path), str(line), _short(evidence, limit=96)])
+def _normalized_matched_content(evidence: str) -> str:
+    return _short(evidence, limit=96)
+
+
+def _fingerprint(
+    *,
+    rule_id: str,
+    rel_path: str,
+    matched_content: str,
+    occurrence: int,
+    duplicate_count: int = 1,
+) -> str:
+    if duplicate_count > 1:
+        stable = "\n".join([rule_id, rel_path, matched_content, str(duplicate_count), str(occurrence)])
+    else:
+        stable = "\n".join([rule_id, rel_path, matched_content, str(occurrence)])
     return hashlib.sha256(stable.encode()).hexdigest()[:16]
+
+
+def _legacy_fingerprint(*, category: str, title: str, rel_path: str, line: int, evidence: str) -> str:
+    stable = "\n".join([category, title, rel_path, str(line), _short(evidence, limit=96)])
+    return hashlib.sha256(stable.encode()).hexdigest()[:16]
+
+
+def _finding_duplicate_count(finding: dict[str, Any]) -> int:
+    duplicate_count = finding.get("duplicate_count")
+    if isinstance(duplicate_count, int) and duplicate_count > 0:
+        return duplicate_count
+    return 1
+
+
+def _safe_fingerprint_aliases(finding: dict[str, Any]) -> tuple[str, ...]:
+    aliases: list[str] = []
+    primary = str(finding.get("fingerprint") or "")
+    if primary:
+        aliases.append(primary)
+    if _finding_duplicate_count(finding) <= 1:
+        legacy = str(finding.get("legacy_fingerprint") or "")
+        if legacy and legacy not in aliases:
+            aliases.append(legacy)
+    return tuple(aliases)
+
+
+def _finding_fingerprint_aliases(finding: dict[str, Any]) -> tuple[str, ...]:
+    return _safe_fingerprint_aliases(finding)
+
+
+def _display_fingerprint_aliases(finding: dict[str, Any]) -> tuple[str, ...]:
+    aliases: list[str] = []
+    primary = str(finding.get("fingerprint") or "")
+    if primary:
+        aliases.append(primary)
+    legacy = str(finding.get("legacy_fingerprint") or "")
+    if legacy and legacy not in aliases:
+        aliases.append(legacy)
+    return tuple(aliases)
+
+
+def _expand_suppression_fingerprints(fingerprints: set[str], migration_map: dict[str, str] | None = None) -> set[str]:
+    expanded = set(fingerprints)
+    if not migration_map:
+        return expanded
+    for legacy, primary in migration_map.items():
+        if primary in fingerprints:
+            expanded.add(legacy)
+        if legacy in fingerprints:
+            expanded.add(primary)
+    return expanded
+
+
+def _suppression_reason_for_configured_fingerprint(
+    fingerprint: str, *, reasons: dict[str, str], migration_map: dict[str, str] | None = None
+) -> str | None:
+    reason = reasons.get(fingerprint)
+    if reason:
+        return reason
+    if not migration_map:
+        return None
+    primary = migration_map.get(fingerprint)
+    if primary:
+        return reasons.get(primary)
+    for legacy, mapped_primary in migration_map.items():
+        if mapped_primary == fingerprint:
+            mapped_reason = reasons.get(mapped_primary) or reasons.get(legacy)
+            if mapped_reason:
+                return mapped_reason
+    return None
+
+
+def _finding_matches_fingerprints(
+    finding: dict[str, Any],
+    fingerprints: set[str],
+    *,
+    migration_map: dict[str, str] | None = None,
+) -> bool:
+    if not fingerprints:
+        return False
+    effective = _expand_suppression_fingerprints(fingerprints, migration_map)
+    return any(alias in effective for alias in _safe_fingerprint_aliases(finding))
+
+
+def _suppression_reason_for_finding(
+    finding: dict[str, Any],
+    *,
+    suppressions: set[str],
+    reasons: dict[str, str],
+    migration_map: dict[str, str] | None = None,
+) -> str | None:
+    aliases = _safe_fingerprint_aliases(finding)
+    effective = _expand_suppression_fingerprints(suppressions, migration_map)
+    if not any(alias in effective for alias in aliases):
+        return None
+    for alias in aliases:
+        reason = _suppression_reason_for_configured_fingerprint(alias, reasons=reasons, migration_map=migration_map)
+        if reason:
+            return reason
+    return None
+
+
+def _expand_finding_suppression_aliases(
+    finding: dict[str, Any],
+    *,
+    migration_map: dict[str, str] | None = None,
+) -> set[str]:
+    aliases = set(_safe_fingerprint_aliases(finding))
+    if not migration_map:
+        return aliases
+    return _expand_suppression_fingerprints(aliases, migration_map)
+
+
+def _configured_suppression_aliases(
+    finding: dict[str, Any],
+    *,
+    suppressions: set[str],
+    reasons: dict[str, str] | None = None,
+    migration_map: dict[str, str] | None = None,
+) -> tuple[str, ...]:
+    configured = _expand_suppression_fingerprints(set(suppressions), migration_map)
+    if reasons is not None:
+        configured.update(_expand_suppression_fingerprints(set(reasons), migration_map))
+    finding_aliases = _expand_finding_suppression_aliases(finding, migration_map=migration_map)
+    return tuple(sorted(alias for alias in configured if alias in finding_aliases))
+
+
+def _migrate_legacy_suppressions(
+    config: SecurityConfig,
+    report: dict[str, Any],
+) -> tuple[SecurityConfig, list[dict[str, str]]]:
+    migrations: list[dict[str, str]] = []
+    suppressions = list(config.suppressions)
+    suppression_set = set(suppressions)
+    reasons = dict(config.suppression_reasons)
+    migrated_from: set[str] = set()
+    seen_findings: set[tuple[str, str]] = set()
+
+    for bucket in ("findings", "suppressed_findings"):
+        for finding in report.get(bucket) or []:
+            if not isinstance(finding, dict):
+                continue
+            primary = str(finding.get("fingerprint") or "")
+            legacy = str(finding.get("legacy_fingerprint") or "")
+            if not primary or not legacy or legacy not in suppression_set:
+                continue
+            if _finding_duplicate_count(finding) > 1:
+                continue
+            identity = (primary, legacy)
+            if identity in seen_findings or legacy in migrated_from:
+                continue
+            seen_findings.add(identity)
+            reason = reasons.get(legacy) or reasons.get(primary)
+            suppressions = [item for item in suppressions if item != legacy]
+            if primary not in suppressions:
+                suppressions.append(primary)
+            reasons.pop(legacy, None)
+            if reason:
+                reasons[primary] = reason
+            migrations.append({"from": legacy, "to": primary})
+            migrated_from.add(legacy)
+            suppression_set.discard(legacy)
+            suppression_set.add(primary)
+
+    if not migrations:
+        return config, migrations
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for fingerprint in suppressions:
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        deduped.append(fingerprint)
+
+    migrated = SecurityConfig(
+        policy=config.policy,
+        scan_profile=config.scan_profile,
+        fail_on=config.fail_on,
+        include_templates=config.include_templates,
+        enabled_checks=config.enabled_checks,
+        include_paths=config.include_paths,
+        exclude_paths=config.exclude_paths,
+        severity_threshold=config.severity_threshold,
+        output_path=config.output_path,
+        suppressions=tuple(deduped),
+        suppression_reasons=reasons,
+        enrichment=config.enrichment,
+    )
+    return migrated, migrations
+
+
+def _migrate_closeout_fingerprints(
+    closeout: dict[str, Any],
+    quieted_findings: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if closeout.get("status") != "accepted-risk":
+        return None
+    source_fingerprints = [
+        str(item) for item in closeout.get("source_fingerprints", []) if isinstance(item, str) and item.strip()
+    ]
+    source_set = set(source_fingerprints)
+    raw_migrations = closeout.get("fingerprint_migrations")
+    migrations = dict(raw_migrations) if isinstance(raw_migrations, dict) else {}
+    changed = False
+    for finding in quieted_findings:
+        if not isinstance(finding, dict):
+            continue
+        primary = str(finding.get("fingerprint") or "")
+        legacy = str(finding.get("legacy_fingerprint") or "")
+        if not primary or not legacy or legacy not in source_set or primary in source_set:
+            continue
+        if _finding_duplicate_count(finding) > 1:
+            continue
+        source_fingerprints.append(primary)
+        source_set.add(primary)
+        migrations[legacy] = primary
+        changed = True
+    if not changed:
+        return None
+    updated = dict(closeout)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for fingerprint in source_fingerprints:
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        deduped.append(fingerprint)
+    updated["source_fingerprints"] = deduped
+    updated["fingerprint_migrations"] = migrations
+    closeout_path = closeout.get("path")
+    if isinstance(closeout_path, str) and closeout_path.strip():
+        trusted_path = Path(closeout_path).expanduser().resolve()
+        _write_json(trusted_path, updated)
+    return updated
+
+
+def _import_content_identity(
+    *,
+    rule_id: str,
+    rel_path: str,
+    safe_detail: str,
+    occurrence: int,
+    duplicate_count: int,
+) -> tuple[str, str, str, int, int]:
+    return (
+        rule_id,
+        rel_path,
+        _normalized_matched_content(safe_detail),
+        duplicate_count,
+        occurrence,
+    )
+
+
+def _import_content_base_identity(
+    *,
+    rule_id: str,
+    rel_path: str,
+    safe_detail: str,
+) -> tuple[str, str, str]:
+    return (
+        rule_id,
+        rel_path,
+        _normalized_matched_content(safe_detail),
+    )
+
+
+def _finding_import_content_identity(finding: dict[str, Any]) -> tuple[str, str, str, int, int]:
+    safe_detail = str(finding.get("safe_excerpt") or finding.get("evidence") or "")
+    return _import_content_identity(
+        rule_id=str(finding.get("rule_id") or ""),
+        rel_path=str(finding.get("path") or ""),
+        safe_detail=safe_detail,
+        occurrence=int(finding.get("occurrence") or 0),
+        duplicate_count=int(finding.get("duplicate_count") or 1),
+    )
+
+
+def _import_metadata_content_identity(metadata: dict[str, Any]) -> tuple[str, str, str, int, int] | None:
+    occurrence = metadata.get("occurrence")
+    duplicate_count = metadata.get("duplicate_count")
+    if not isinstance(occurrence, int) or not isinstance(duplicate_count, int):
+        return None
+    safe_detail = str(metadata.get("safe_detail") or metadata.get("safe_excerpt") or "")
+    return _import_content_identity(
+        rule_id=str(metadata.get("rule_id") or ""),
+        rel_path=str(metadata.get("path") or ""),
+        safe_detail=safe_detail,
+        occurrence=occurrence,
+        duplicate_count=duplicate_count,
+    )
+
+
+def _import_metadata_content_base_identity(metadata: dict[str, Any]) -> tuple[str, str, str]:
+    safe_detail = str(metadata.get("safe_detail") or metadata.get("safe_excerpt") or "")
+    return _import_content_base_identity(
+        rule_id=str(metadata.get("rule_id") or ""),
+        rel_path=str(metadata.get("path") or ""),
+        safe_detail=safe_detail,
+    )
+
+
+def _assign_fingerprints(findings: list[dict[str, Any]]) -> None:
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for finding in findings:
+        key = (
+            str(finding.get("rule_id") or ""),
+            str(finding.get("path") or ""),
+            str(finding.get("_fingerprint_content") or finding.get("safe_excerpt") or finding.get("evidence") or ""),
+        )
+        groups.setdefault(key, []).append(finding)
+    for (_, _, matched_content), items in groups.items():
+        items.sort(key=lambda finding: (int(finding.get("line") or 0), str(finding.get("id") or "")))
+        duplicate_count = len(items)
+        for occurrence, finding in enumerate(items):
+            fingerprint = _fingerprint(
+                rule_id=str(finding.get("rule_id") or ""),
+                rel_path=str(finding.get("path") or ""),
+                matched_content=matched_content,
+                occurrence=occurrence,
+                duplicate_count=duplicate_count,
+            )
+            finding["occurrence"] = occurrence
+            finding["duplicate_count"] = duplicate_count
+            finding["fingerprint"] = fingerprint
+            finding["legacy_fingerprint"] = _legacy_fingerprint(
+                category=str(finding.get("category") or ""),
+                title=str(finding.get("title") or ""),
+                rel_path=str(finding.get("path") or ""),
+                line=int(finding.get("line") or 0),
+                evidence=str(finding.get("safe_excerpt") or finding.get("evidence") or ""),
+            )
+            finding["id"] = f"security-{fingerprint}"
+            finding.pop("_fingerprint_content", None)
 
 
 def _finding(
@@ -927,13 +1275,11 @@ def _finding(
     rel = path.relative_to(target)
     file_classification = classification or _classification_for(path, target)
     safe_excerpt = _short(evidence)
-    fingerprint = _fingerprint(category=category, title=title, rel_path=rel, line=line, evidence=safe_excerpt)
-    finding_id = f"security-{fingerprint}"
+    matched_content = _normalized_matched_content(evidence)
+    rule = _rule_id(category, title)
     findings.append(
         {
-            "id": finding_id,
-            "fingerprint": fingerprint,
-            "rule_id": _rule_id(category, title),
+            "rule_id": rule,
             "severity": severity,
             "category": category,
             "title": title,
@@ -943,6 +1289,7 @@ def _finding(
             "confidence": file_classification.confidence,
             "evidence": safe_excerpt,
             "safe_excerpt": safe_excerpt,
+            "_fingerprint_content": matched_content,
             "suggestion": suggestion,
             "remediation_hint": suggestion,
             "response_options": response_options or [],
@@ -1170,6 +1517,11 @@ def _path_matches_any(rel_path: str, patterns: tuple[str, ...]) -> bool:
         clean = pattern.strip().replace("\\", "/").strip("/")
         if not clean:
             continue
+        if clean.endswith("/**"):
+            prefix = clean[:-3].rstrip("/")
+            if normalized == prefix or normalized.startswith(prefix + "/"):
+                return True
+            continue
         if normalized == clean or normalized.startswith(clean.rstrip("/") + "/"):
             return True
     return False
@@ -1296,6 +1648,7 @@ def scan_target(
         _scan_package_json(findings, target=target, path=path, text=text, classification=classification)
         _scan_github_actions(findings, target=target, path=path, text=text, classification=classification)
         _scan_python_project(findings, target=target, path=path, text=text, classification=classification)
+    _assign_fingerprints(findings)
     findings = _filter_findings(
         findings,
         enabled_checks=enabled_checks,
@@ -1303,8 +1656,16 @@ def scan_target(
         exclude_paths=exclude_paths,
         severity_threshold=severity_threshold,
     )
-    suppressed = [finding for finding in findings if finding.get("fingerprint") in suppressions]
-    findings = [finding for finding in findings if finding.get("fingerprint") not in suppressions]
+    migration_map = _read_fingerprint_migration_map(target)
+    suppression_set = set(suppressions)
+    suppressed = []
+    open_findings = []
+    for finding in findings:
+        if _finding_matches_fingerprints(finding, suppression_set, migration_map=migration_map):
+            suppressed.append(finding)
+        else:
+            open_findings.append(finding)
+    findings = open_findings
     counts: dict[str, int] = {}
     for finding in findings:
         severity = str(finding["severity"])
@@ -1334,25 +1695,45 @@ def _import_findings(
     *,
     evidence_path: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    existing_fingerprints = {
-        str(item.get("metadata", {}).get("fingerprint"))
-        for item in work_cmd._pending_imports(target)
-        if isinstance(item, dict)
-        and item.get("source") == "security-scan"
-        and isinstance(item.get("metadata"), dict)
-        and item.get("metadata", {}).get("fingerprint")
-    }
+    existing_identities: dict[tuple[str, str, str, int, int], set[str]] = {}
+    legacy_counts: dict[tuple[str, str, str], dict[str, int]] = {}
+    for item in work_cmd._read_imports(target):
+        if not isinstance(item, dict) or item.get("source") != "security-scan":
+            continue
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        severity = str(metadata.get("severity") or "")
+        identity = _import_metadata_content_identity(metadata)
+        if identity is not None:
+            existing_identities.setdefault(identity, set()).add(severity)
+            continue
+        base_identity = _import_metadata_content_base_identity(metadata)
+        severity_counts = legacy_counts.setdefault(base_identity, {})
+        severity_counts[severity] = severity_counts.get(severity, 0) + 1
     records = []
     skipped: list[dict[str, Any]] = []
+    legacy_remaining = {key: counts.copy() for key, counts in legacy_counts.items()}
     for finding in findings:
-        fingerprint = str(finding.get("fingerprint") or "")
-        if fingerprint and fingerprint in existing_fingerprints:
+        content_identity = _finding_import_content_identity(finding)
+        base_identity = content_identity[:3]
+        severity = str(finding.get("severity") or "")
+        known_severities = existing_identities.get(content_identity)
+        if known_severities is not None and severity in known_severities:
+            skipped.append(finding)
+            continue
+        duplicate_count = int(finding.get("duplicate_count") or 1)
+        original_severity_counts = legacy_counts.get(base_identity, {})
+        original_legacy_count = sum(original_severity_counts.values())
+        remaining_severity_counts = legacy_remaining.get(base_identity, {})
+        remaining_legacy = remaining_severity_counts.get(severity, 0)
+        if remaining_legacy > 0 and original_legacy_count == duplicate_count:
+            remaining_severity_counts[severity] = remaining_legacy - 1
             skipped.append(finding)
             continue
         path = finding.get("path")
         line = finding.get("line")
         title = finding.get("title")
-        severity = finding.get("severity")
         category = finding.get("category")
         kind = "incident" if SEVERITY_ORDER.get(str(severity), 0) >= SEVERITY_ORDER["high"] else "finding"
         acceptance = [
@@ -1366,7 +1747,10 @@ def _import_findings(
             )
         records.append(
             {
-                "text": f"Review security finding [{severity}] {category} in {path}:{line}: {title}",
+                "text": (
+                    f"Review security finding [{severity}] {category} in {path}:{line}: {title} "
+                    f"[{finding.get('fingerprint')}]"
+                ),
                 "kind": kind,
                 "source": "security-scan",
                 "type": "security",
@@ -1378,14 +1762,33 @@ def _import_findings(
                     "rule_id": finding.get("rule_id"),
                     "issue_type": category,
                     "fingerprint": finding.get("fingerprint"),
-                    "source_item_key": f"security-scan:{finding.get('fingerprint')}",
+                    "legacy_fingerprint": finding.get("legacy_fingerprint"),
+                    "occurrence": finding.get("occurrence", 0),
+                    "duplicate_count": finding.get("duplicate_count", 1),
+                    "source_item_key": (
+                        "security-scan:"
+                        + work_cmd._stable_hash(
+                            {
+                                "rule_id": finding.get("rule_id"),
+                                "path": path,
+                                "safe_detail": _normalized_matched_content(
+                                    str(finding.get("safe_excerpt") or finding.get("evidence") or "")
+                                ),
+                                "occurrence": finding.get("occurrence", 0),
+                                "duplicate_count": finding.get("duplicate_count", 1),
+                            }
+                        )
+                    ),
                     "source_fingerprint": work_cmd._stable_hash(
                         {
                             "rule_id": finding.get("rule_id"),
                             "fingerprint": finding.get("fingerprint"),
+                            "legacy_fingerprint": finding.get("legacy_fingerprint"),
                             "severity": severity,
                             "path": path,
                             "line": line,
+                            "occurrence": finding.get("occurrence", 0),
+                            "duplicate_count": finding.get("duplicate_count", 1),
                             "safe_excerpt": finding.get("safe_excerpt") or finding.get("evidence"),
                         }
                     ),
@@ -1403,8 +1806,7 @@ def _import_findings(
                 },
             }
         )
-        if fingerprint:
-            existing_fingerprints.add(fingerprint)
+        existing_identities.setdefault(content_identity, set()).add(severity)
     imported, duplicate_records, dismissed_records = work_cmd._append_import_records(target, records)
     skipped.extend(duplicate_records)
     skipped.extend(dismissed_records)

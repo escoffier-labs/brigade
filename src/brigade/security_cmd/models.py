@@ -41,6 +41,12 @@ ARTIFACTS_REL_PATH = ".brigade/security/latest"
 SUPPRESSION_HEALTH_CACHE_REL_PATH = ".brigade/security/suppression-health-cache.json"
 
 
+FINGERPRINT_MIGRATION_MAP_REL_PATH = ".brigade/security/fingerprint-migration-map.json"
+
+
+FINGERPRINT_MIGRATION_MAP_SCHEMA = "brigade.security.fingerprint-migration-map.v1"
+
+
 SUPPRESSION_HEALTH_CACHE_VERSION = 1
 
 
@@ -373,21 +379,133 @@ def suppression_health_cache_path(target: Path) -> Path:
     return target / SUPPRESSION_HEALTH_CACHE_REL_PATH
 
 
+def fingerprint_migration_map_path(target: Path) -> Path:
+    return target / FINGERPRINT_MIGRATION_MAP_REL_PATH
+
+
+def _workspace_state_path_is_safe(target: Path, path: Path) -> bool:
+    target_resolved = target.expanduser().resolve()
+    try:
+        relative = path.relative_to(target_resolved)
+    except ValueError:
+        return False
+    candidate = target_resolved
+    for part in relative.parts:
+        candidate /= part
+        if candidate.is_symlink():
+            return False
+    try:
+        path.resolve(strict=False).relative_to(target_resolved)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _closeout_path_is_symlink(path: Path) -> bool:
+    return path.is_symlink()
+
+
+def _closeout_path_contained_in(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _closeouts_root(target: Path) -> Path:
     return target / ".brigade" / "security" / "closeouts"
 
 
+def _read_fingerprint_migration_map(target: Path) -> dict[str, str]:
+    target_resolved = target.expanduser().resolve()
+    path = fingerprint_migration_map_path(target_resolved)
+    if not _workspace_state_path_is_safe(target_resolved, path):
+        return {}
+    payload = localio.read_json_dict(path)
+    if payload is None:
+        return {}
+    if payload.get("schema") != FINGERPRINT_MIGRATION_MAP_SCHEMA:
+        return {}
+    raw_migrations = payload.get("migrations")
+    if not isinstance(raw_migrations, dict):
+        return {}
+    migrations: dict[str, str] = {}
+    for legacy, primary in raw_migrations.items():
+        if not isinstance(legacy, str) or not isinstance(primary, str):
+            continue
+        legacy = legacy.strip()
+        primary = primary.strip()
+        if FINGERPRINT_RE.fullmatch(legacy) and FINGERPRINT_RE.fullmatch(primary):
+            migrations[legacy] = primary
+    return migrations
+
+
+def _write_fingerprint_migration_map(target: Path, migrations: dict[str, str]) -> bool:
+    if not migrations:
+        return True
+    target_resolved = target.expanduser().resolve()
+    path = fingerprint_migration_map_path(target_resolved)
+    if not _workspace_state_path_is_safe(target_resolved, path):
+        return False
+    _write_json(
+        path,
+        {
+            "schema": FINGERPRINT_MIGRATION_MAP_SCHEMA,
+            "migrations": dict(sorted(migrations.items())),
+        },
+    )
+    return True
+
+
+def _merge_fingerprint_migration_map(target: Path, entries: list[dict[str, str]]) -> bool:
+    merged = _read_fingerprint_migration_map(target)
+    changed = False
+    for entry in entries:
+        legacy = str(entry.get("from") or "").strip()
+        primary = str(entry.get("to") or "").strip()
+        if not legacy or not primary:
+            continue
+        if merged.get(legacy) == primary:
+            continue
+        merged[legacy] = primary
+        changed = True
+    if changed:
+        return _write_fingerprint_migration_map(target, merged)
+    return True
+
+
 def _read_closeouts(target: Path) -> list[dict[str, Any]]:
-    root = _closeouts_root(target.expanduser().resolve())
+    target_resolved = target.expanduser().resolve()
+    root = _closeouts_root(target_resolved)
     receipts: list[dict[str, Any]] = []
-    if not root.is_dir():
+    if not root.is_dir() or _closeout_path_is_symlink(root):
         return receipts
-    for path in sorted(root.glob("*/closeout.json")):
-        payload = _read_json(path)
+    if not _closeout_path_contained_in(root, target_resolved):
+        return receipts
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        return receipts
+    for closeout_dir in sorted(item for item in root.iterdir() if item.is_dir()):
+        if _closeout_path_is_symlink(closeout_dir):
+            continue
+        if not _closeout_path_contained_in(closeout_dir, root_resolved):
+            continue
+        closeout_json = closeout_dir / "closeout.json"
+        if not closeout_json.is_file() or _closeout_path_is_symlink(closeout_json):
+            continue
+        try:
+            trusted_path = closeout_json.resolve()
+        except OSError:
+            continue
+        if not _closeout_path_contained_in(trusted_path, root_resolved):
+            continue
+        payload = _read_json(trusted_path)
         if payload is None:
             continue
-        payload.setdefault("closeout_id", path.parent.name)
-        payload.setdefault("path", str(path))
+        payload.setdefault("closeout_id", closeout_dir.name)
+        payload["path"] = str(trusted_path)
         receipts.append(payload)
     return sorted(receipts, key=lambda item: str(item.get("created_at") or item.get("closeout_id") or ""), reverse=True)
 
