@@ -1,0 +1,61 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPLACE_WITH_HOOK_SCRIPT",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|run_terminal_command|Edit|Write|MultiEdit|search_replace|write_file|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPLACE_WITH_HOOK_SCRIPT",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|run_terminal_command|Edit|Write|MultiEdit|search_replace|write_file|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPLACE_WITH_HOOK_SCRIPT",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPLACE_WITH_HOOK_SCRIPT",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPLACE_WITH_HOOK_SCRIPT",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

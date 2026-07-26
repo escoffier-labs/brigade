@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   show/watch/resume surfaces). Recoverable from git history; see #442 / #471.
 
 ### Added
+- `brigade work resolve-target --cwd PATH [--harness NAME]` prints the
+  Brigade-wired project root (requires `.brigade/config.json`) so shell hooks
+  share Claude's discovery contract instead of matching any `.brigade/` dir.
+- Shared `brigade.wiring.resolve_wired_target` helper used by Claude hooks and
+  the new resolver CLI; optional harness filter.
+- Grok work-loop hook templates under `src/brigade/templates/grok/hooks/` that
+  use `resolve-target`, timeout the session brief, and do not deny edits while
+  a brief is running (#536).
 - Imported `stations/notify` Go module into the Brigade monorepo. Unified release
   manifests now enumerate five native components (25 platform assets plus
   `component-manifest-v1.json` and `checksums.txt`) with managed resolution
@@ -31,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade mcp sync --user-scope` (and `brigade operator sync-mcp --user-scope`) no longer writes stdio MCP servers into a user-wide client config silently: interactive runs show the destination, stdio count, and the servers-times-sessions process formula and ask for confirmation, non-interactive and `--json` runs require `--allow-global-stdio`, and plan/sync items now carry `transport` and `scope`. (#349)
 
 ### Fixed
+- Grok/T3 work-loop discovery no longer treats `~/.brigade` (user-level aboyeur
+  roster) as a project work root. Hooks and `work resolve-target` require
+  `.brigade/config.json`, so sessions under `$HOME` or unwired dirs do not
+  background `brigade work brief --target $HOME` (#536).
 - `brigade run` no longer dies on the first unparsable plan when the chef's final
   message is prose. The corrective plan turn now restates the output contract
   ("reply with the JSON plan object and nothing else") alongside the parse error,
