@@ -87,6 +87,30 @@ Synonym headings resolve to canonical sections.
 """
 
 
+HOMEGROWN_NO_CARD_HANDOFF = """# Memory Handoff
+
+## Category
+workflow
+
+## Subject
+Keep release checks attached to Brigade receipts
+
+## What changed
+Verification commands now run through Brigade so the outcome ledger receives the result.
+
+## Recommended memory action
+no-card
+
+## Target document
+.learnings/LEARNINGS.md
+
+## Suggested document content
+### Receipt-backed verification
+
+Run completion checks through `brigade work verify run` and capture the outcome.
+"""
+
+
 PROMOTED_IMPORT_HANDOFF = """# Memory Handoff
 
 ## Type
@@ -2088,6 +2112,21 @@ def test_handoff_lint_surfaces_injection_signals(tmp_path, capsys):
     assert "line " in out
     assert "classic-injection" in out or "ignore-instructions" in out
     assert "handoff migrate" not in out
+
+
+def test_handoff_lint_rejects_homegrown_section_headings_while_ingest_parses_action(tmp_path):
+    from brigade import ingest as ingest_mod
+
+    note = tmp_path / "homegrown.md"
+    note.write_text(HOMEGROWN_NO_CARD_HANDOFF)
+    result = handoff_cmd.lint_file(note)
+    assert not result.valid
+    assert any("missing required section: Type" in err for err in result.errors)
+    assert any("missing required section: Title" in err for err in result.errors)
+    assert any("missing required section: Summary" in err for err in result.errors)
+
+    sections = ingest_mod.parse(note)
+    assert sections.get("recommended memory action", "").strip().casefold() == "no-card"
 
 
 def test_handoff_lint_accepts_synonym_section_headings(tmp_path):
