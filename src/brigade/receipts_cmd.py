@@ -734,6 +734,13 @@ def _code_reference_repository(target: Path) -> str | None:
     return f"{owner}/{repository}"
 
 
+def _miseledger_project(target: Path) -> str:
+    repository = _code_reference_repository(target)
+    if repository is None:
+        return target.name
+    return repository.rsplit("/", 1)[-1]
+
+
 def _code_references_from_delta(payload: dict[str, Any], target: Path) -> tuple[list[dict[str, Any]], int, bool]:
     delta = payload.get("code_graph_delta")
     git = _receipt_git(payload)
@@ -1015,6 +1022,8 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
         "run_id": run_id,
         "status": payload.get("status"),
         "target": payload.get("target"),
+        "project": _miseledger_project(target),
+        "workspace_dir": str(target),
         "path": _rel(path, target),
         "digest": receipt_hash,
         "digest_source": digest_source,
@@ -1075,6 +1084,8 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
         "run_id": run_id,
         "status": payload.get("status"),
         "cwd": payload.get("cwd"),
+        "project": _miseledger_project(target),
+        "workspace_dir": str(target),
         "path": _rel(path, target),
         "digest": receipt_hash,
         "digest_source": digest_source,
