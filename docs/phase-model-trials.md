@@ -22,6 +22,19 @@ separate.
 - Raw values plus count, mean, median, min, max, and population standard
   deviation.
 
+## Adversarial fixture packs
+
+Shipped under `src/brigade/templates/evals/adversarial/` as
+`brigade.eval_manifest.v1` manifests:
+
+- `prompt-injection` (3 cases; first case encodes the handoff-lint content-guard regression)
+- `untrusted-evidence` (2 cases)
+- `unsafe-command` (2 cases)
+- `failed-verification` (2 cases)
+
+Run with `brigade model trial plan|run` against a manifest path and a roster whose
+`worker` seat is a direct CLI worker.
+
 ## Verification
 
 - [x] Prove stable identity and changed-condition invalidation.
