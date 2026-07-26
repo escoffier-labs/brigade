@@ -105,3 +105,36 @@ func TestDiscord_NameAndType(t *testing.T) {
 		t.Errorf("Type = %s, want discord", d.Type())
 	}
 }
+
+// TestDiscord_Send_UsesModelIdentityTitle verifies that a Codex message with
+// a resolved model sets the embed title to the provider/model identity
+// instead of the generic "Codex (turn-N)" title.
+func TestDiscord_Send_UsesModelIdentityTitle(t *testing.T) {
+	var got discordPayload
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("invalid JSON to webhook: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	d := NewDiscord("discord-main", srv.URL, 5*time.Second)
+	msg := canonical.Message{
+		Title:  "Codex (turn-7)",
+		Body:   "Done.",
+		Level:  "info",
+		Source: "codex",
+		Model:  "gpt-5.6-sol",
+	}
+	if err := d.Send(context.Background(), msg); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+	if len(got.Embeds) != 1 {
+		t.Fatalf("expected 1 embed, got %d", len(got.Embeds))
+	}
+	if e := got.Embeds[0]; e.Title != "OpenAI · gpt-5.6-sol" {
+		t.Errorf("title = %q, want OpenAI · gpt-5.6-sol", e.Title)
+	}
+}

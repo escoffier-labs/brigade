@@ -73,10 +73,11 @@ func (s *Signal) Send(ctx context.Context, m canonical.Message) error {
 
 func formatSignal(m canonical.Message) string {
 	var sb strings.Builder
-	sb.WriteString(emojiFor(m.Level))
+	sb.WriteString(indicatorFor(m))
 	sb.WriteString(" ")
-	if m.Title != "" {
-		sb.WriteString(m.Title)
+	title := titleFor(m)
+	if title != "" {
+		sb.WriteString(title)
 		sb.WriteString("\n")
 	}
 	sb.WriteString(m.Body)

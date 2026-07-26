@@ -77,11 +77,12 @@ func (t *Telegram) Send(ctx context.Context, m canonical.Message) error {
 
 func formatTelegram(m canonical.Message) string {
 	var sb strings.Builder
-	sb.WriteString(emojiFor(m.Level))
+	sb.WriteString(indicatorFor(m))
 	sb.WriteString(" ")
-	if m.Title != "" {
+	title := titleFor(m)
+	if title != "" {
 		sb.WriteString("*")
-		sb.WriteString(escapeMDV2(m.Title))
+		sb.WriteString(escapeMDV2(title))
 		sb.WriteString("*\n")
 	}
 	sb.WriteString(escapeMDV2(m.Body))

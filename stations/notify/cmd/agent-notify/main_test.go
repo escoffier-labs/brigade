@@ -647,3 +647,50 @@ func TestRun_HooksPrintCodex(t *testing.T) {
 		t.Fatalf("stdout = %q, want %q", strings.TrimSpace(stdout), want)
 	}
 }
+
+// TestRun_CodexNotifyResolvesModelIdentity verifies the end-to-end path: a
+// Codex notify event with thread-id/turn-id but no inline model resolves the
+// model from the CODEX_HOME session rollout, and the Discord embed title
+// renders the provider/model identity ("OpenAI · gpt-5.6-sol") instead of
+// the generic "Codex (turn-N)" title.
+func TestRun_CodexNotifyResolvesModelIdentity(t *testing.T) {
+	codexHome := t.TempDir()
+	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "07", "25")
+	if err := os.MkdirAll(rolloutDir, 0o755); err != nil {
+		t.Fatalf("mkdir rollout dir: %v", err)
+	}
+	// Filename rollout-test-thread-7.jsonl matches the rollout-<ts>-<thread>
+	// convention with thread id "thread-7" (suffix "-thread-7.jsonl").
+	rolloutPath := filepath.Join(rolloutDir, "rollout-test-thread-7.jsonl")
+	turnContext := `{"type":"turn_context","payload":{"turn_id":"turn-7","model":"gpt-5.6-sol"}}`
+	if err := os.WriteFile(rolloutPath, []byte(turnContext+"\n"), 0o644); err != nil {
+		t.Fatalf("write rollout: %v", err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+
+	var got map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	event := `{"type":"agent-turn-complete","thread-id":"thread-7","turn-id":"turn-7","last-assistant-message":"Done."}`
+	code, _, stderr := runMain(t,
+		[]string{"agent-notify", "--hook", "codex-notify", event},
+		"",
+		map[string]string{"DISCORD_WEBHOOK_URL": srv.URL},
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	embeds, _ := got["embeds"].([]interface{})
+	if len(embeds) != 1 {
+		t.Fatalf("expected 1 embed, got %#v", got["embeds"])
+	}
+	embed, _ := embeds[0].(map[string]interface{})
+	if embed["title"] != "OpenAI · gpt-5.6-sol" {
+		t.Errorf("embed title = %#v, want OpenAI · gpt-5.6-sol", embed["title"])
+	}
+}
