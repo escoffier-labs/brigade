@@ -209,6 +209,33 @@ def test_repos_sweep_failed_repo_does_not_block_other_repo(tmp_path, capsys):
     assert sweep["failed_count"] == 1
 
 
+def test_repos_sweep_injects_src_pythonpath_for_built_in_commands(tmp_path, monkeypatch, capsys):
+    # Regression for issue #542: _run_sweep_command must prepend src/ (parents[2]),
+    # not src/brigade (parents[1]), so a built-in `python -m brigade ...` command
+    # imports the package from the injected PYTHONPATH alone. `-S` disables
+    # site-packages so the subprocess can only resolve `brigade` via PYTHONPATH.
+    repo = tmp_path / "repo-alpha"
+    _init_repo(repo)
+    _seed_workspace(tmp_path, repo)
+    monkeypatch.setattr(
+        repos_cmd,
+        "_sweep_commands",
+        lambda: [
+            repos_cmd.SweepCommand(
+                "work-brief-no-site",
+                [sys.executable, "-S", "-m", "brigade", "work", "brief", "--json"],
+            ),
+        ],
+    )
+
+    assert repos_cmd.sweep_run(target=tmp_path, repo_ids=["alpha"], json_output=True) == 0
+    sweep = json.loads(capsys.readouterr().out)
+    commands = {command["label"]: command for command in sweep["repos"][0]["commands"]}
+    assert commands["work-brief-no-site"]["status"] == "completed"
+    assert commands["work-brief-no-site"]["exit_code"] == 0
+    assert "No module named brigade" not in commands["work-brief-no-site"]["stderr_summary"]
+
+
 def test_repos_sweep_records_nonzero_and_timeout_commands(tmp_path, monkeypatch, capsys):
     repo = tmp_path / "repo-alpha"
     _init_repo(repo)

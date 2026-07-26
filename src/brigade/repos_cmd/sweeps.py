@@ -516,7 +516,7 @@ def _run_sweep_command(entry: constants.RepoEntry, command: constants.SweepComma
     command_dir = sweep_dir / "logs" / entry.repo_id / command.label
     command_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    source_path = Path(__file__).resolve().parents[1]
+    source_path = Path(__file__).resolve().parents[2]
     env["PYTHONPATH"] = str(source_path) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     try:
         result = subprocess.run(
