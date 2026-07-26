@@ -88,6 +88,38 @@ SECURITY_CHECKS = (
 )
 
 
+DEFAULT_EXCLUDE_PATHS = (".brigade/**",)
+
+
+CONFIG_TOP_LEVEL_KEYS = frozenset(
+    {
+        "policy",
+        "scan_profile",
+        "fail_on",
+        "include_templates",
+        "enabled_checks",
+        "include_paths",
+        "exclude_paths",
+        "severity_threshold",
+        "output_path",
+    }
+)
+
+
+CONFIG_SUPPRESSIONS_KEYS = frozenset({"fingerprints"})
+
+
+CONFIG_ENRICHMENT_KEYS = frozenset(
+    {
+        "provider",
+        "misp_url",
+        "misp_api_key_env",
+        "timeout_seconds",
+        "cache_path",
+    }
+)
+
+
 SKIP_DIRS = {
     ".git",
     ".hg",
@@ -337,7 +369,7 @@ class SecurityConfig:
     include_templates: bool | None = None
     enabled_checks: tuple[str, ...] = SECURITY_CHECKS
     include_paths: tuple[str, ...] = ()
-    exclude_paths: tuple[str, ...] = ()
+    exclude_paths: tuple[str, ...] = DEFAULT_EXCLUDE_PATHS
     severity_threshold: str = "low"
     output_path: str = ARTIFACTS_REL_PATH
     suppressions: tuple[str, ...] = ()
