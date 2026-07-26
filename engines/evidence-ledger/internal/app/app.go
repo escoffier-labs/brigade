@@ -134,20 +134,11 @@ func openMigrated() (*sql.DB, Paths, error) {
 func cmdInit(args []string, out, errw io.Writer) int {
 	_ = args
 	paths := ResolvePaths()
-	if err := security.EnsurePrivateParent(paths.ConfigPath); err != nil {
-		return fatalf(errw, "init: %s", err)
-	}
 	if err := security.EnsurePrivateDir(paths.DataDir); err != nil {
 		return fatalf(errw, "init: %s", err)
 	}
 	if err := security.EnsurePrivateDir(paths.CacheDir); err != nil {
 		return fatalf(errw, "init: %s", err)
-	}
-	if _, err := os.Stat(paths.ConfigPath); errors.Is(err, os.ErrNotExist) {
-		body := fmt.Sprintf("db_path = %q\ncache_dir = %q\n", paths.DBPath, paths.CacheDir)
-		if err := security.WritePrivateFileAtomic(paths.ConfigPath, []byte(body)); err != nil {
-			return fatalf(errw, "init: %s", err)
-		}
 	}
 	db, err := archive.Open(paths.DBPath)
 	if err != nil {
