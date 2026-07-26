@@ -50,6 +50,7 @@ class _DagHarness:
         outcomes=None,
         held=None,
         slow_workers=None,
+        on_scheduler_resolved=None,
     ):
         outcomes = outcomes or {}
         slow_workers = slow_workers or {}
@@ -80,6 +81,7 @@ class _DagHarness:
             scheduler="dag",
             route_dependencies=dict(dependencies),
             route_held=held or {},
+            on_scheduler_resolved=on_scheduler_resolved,
         )
 
     @property
@@ -159,6 +161,38 @@ def test_partially_unknown_covers_falls_back_to_waves(dag_harness, capsys):
     )
     assert "falling back to wave scheduler" in capsys.readouterr().err
     assert len(results) == 1
+
+
+def test_scheduler_resolution_reported_when_dag_engages(dag_harness):
+    # The receipt must be able to say the DAG actually ran, not just that it was
+    # asked for: stderr-only reporting left run.json unable to tell the two apart.
+    resolved = []
+    dag_harness(
+        assignments=[_a("p", 1, ["plan"]), _a("i", 2, ["implement"])],
+        dependencies=DEPS,
+        on_scheduler_resolved=lambda used, reason: resolved.append((used, reason)),
+    )
+    assert resolved == [("dag", None)]
+
+
+def test_scheduler_resolution_reports_wave_fallback(dag_harness):
+    resolved = []
+    dag_harness(
+        assignments=[_a("p", 1, ["plan"]), Assignment(worker="x", task="t", stage=2)],
+        dependencies=DEPS,
+        on_scheduler_resolved=lambda used, reason: resolved.append((used, reason)),
+    )
+    assert resolved == [("waves", "plan not fully covered")]
+
+
+def test_scheduler_resolution_reports_missing_route_dependencies(dag_harness):
+    resolved = []
+    dag_harness(
+        assignments=[_a("p", 1, ["plan"])],
+        dependencies={},
+        on_scheduler_resolved=lambda used, reason: resolved.append((used, reason)),
+    )
+    assert resolved == [("waves", "no route dependencies available")]
 
 
 DEPS_REDUNDANT = {

@@ -257,6 +257,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_run.set_defaults(func=dispatch)
 
 
+def _resolved_scheduler(args, roster) -> str:
+    """Scheduler precedence: --scheduler flag, then roster limits.scheduler, then waves."""
+    return args.scheduler or roster.scheduler or "waves"
+
+
 def dispatch(args) -> int:
     from .. import aboyeur as aboyeur_mod
     from .. import runguard
@@ -426,6 +431,7 @@ def dispatch(args) -> int:
                     dry_run=args.dry_run,
                     lock_workspace=run_cwd,
                     codex_transport=args.codex_transport or loaded_roster.codex_transport,
+                    scheduler=_resolved_scheduler(args, loaded_roster),
                 )
             if output_dir is not None and (advisory or output_warnings):
                 from .. import localio
@@ -477,7 +483,7 @@ def dispatch(args) -> int:
             if args.route_signals:
                 run_kwargs["route_overrides"] = tuple(args.route_signals)
             run_kwargs["fail_fast"] = not args.keep_going
-            run_kwargs["scheduler"] = args.scheduler or loaded_roster.scheduler or "waves"
+            run_kwargs["scheduler"] = _resolved_scheduler(args, loaded_roster)
             try:
                 rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
             except runguard.RetainRunLockError:
@@ -669,6 +675,7 @@ def _dispatch_detached(args, *, run_cwd: Path, roster_resolution, roster, output
                 roster=roster,
                 read_only=args.read_only,
                 worker=args.worker,
+                scheduler=_resolved_scheduler(args, roster),
             )
             initial_receipt = (output_dir / "run.json").read_bytes()
             log_path = output_dir / "detached.log"

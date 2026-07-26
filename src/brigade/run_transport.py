@@ -257,9 +257,16 @@ def dispatch(
     route_held: dict[str, list[str]] | None = None,
     on_stage_start: Callable[[int, tuple[str, ...]], None] | None = None,
     on_interrupt: Callable[[], None] | None = None,
+    on_scheduler_resolved: Callable[[str, str | None], None] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
 ) -> list[WorkerResult]:
-    """Dispatch staged assignments while keeping transport policy in one module."""
+    """Dispatch staged assignments while keeping transport policy in one module.
+
+    ``on_scheduler_resolved`` receives the scheduler that actually ran and the
+    fallback reason, so a receipt can distinguish a real DAG dispatch from a
+    silent degrade to waves. Without it the fallback is stderr-only and the run
+    record cannot tell the two apart.
+    """
 
     process_registry = process_registry or proc.ProcessRegistry()
 
@@ -624,6 +631,8 @@ def dispatch(
     if scheduler == "dag":
         placement_error = _dag_placement_error(assignments, route_dependencies)
         if placement_error is None:
+            if on_scheduler_resolved is not None:
+                on_scheduler_resolved("dag", None)
             return _dag_dispatch(
                 assignments,
                 roster,
@@ -634,10 +643,14 @@ def dispatch(
                 route_dependencies=route_dependencies or {},
                 route_held=route_held or {},
             )
+        if on_scheduler_resolved is not None:
+            on_scheduler_resolved("waves", placement_error)
         print(
             f"warning: dag scheduler: {placement_error}; falling back to wave scheduler",
             file=sys.stderr,
         )
+    elif on_scheduler_resolved is not None:
+        on_scheduler_resolved("waves", None)
 
     stage_order = sorted({assignment.stage for assignment in assignments})
     abort_after_stage: int | None = None
