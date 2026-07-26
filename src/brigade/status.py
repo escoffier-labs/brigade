@@ -51,7 +51,7 @@ def _normalize_payload_health(raw: object, *, installed: bool | None) -> str:
 
 
 def _health_from_checks(checks: list[_doctor.CheckResult]) -> str:
-    levels = {status for status, _name, _detail in checks}
+    levels = {check[0] for check in checks}
     if _doctor.FAIL in levels:
         return "failed"
     if _doctor.WARN in levels:
@@ -105,9 +105,9 @@ def run(target: Path, *, json_output: bool = False) -> int:
             summary = str(payload.get("summary") or station.summary)
         else:
             checks = station.doctor(ctx) if station.doctor else []
-            ok = sum(1 for s, _, _ in checks if s == _doctor.OK)
-            warn = sum(1 for s, _, _ in checks if s == _doctor.WARN)
-            fail = sum(1 for s, _, _ in checks if s == _doctor.FAIL)
+            ok = sum(1 for check in checks if check[0] == _doctor.OK)
+            warn = sum(1 for check in checks if check[0] == _doctor.WARN)
+            fail = sum(1 for check in checks if check[0] == _doctor.FAIL)
             health = _health_from_checks(checks)
             summary = station.summary
         rows.append(
