@@ -1855,6 +1855,11 @@ values(?,?,?,?,?,?,?,?,?,?)`, id, "source-1", "collection-1", "actor-1", id, "me
 			}
 		}
 	}
+	if _, err := db.Exec(`insert into item_metadata(item_id, key, value) values
+('item-000','project','escoffier-labs/brigade'),
+('item-001','cwd','/workspace/brigade')`); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func explainPlan(t *testing.T, db *sql.DB, sqlText string, args ...any) string {
@@ -2016,6 +2021,38 @@ func TestSearchPlanBoundsFTSCandidatesBeforeJoins(t *testing.T) {
 		if !strings.Contains(plan, want) {
 			t.Fatalf("search plan missing %q:\n%s", want, plan)
 		}
+	}
+
+	projectSQL, projectParams := buildSearchQuery(SearchOpts{Query: "needle", Project: "workspace", Limit: 5})
+	projectPlan := explainPlan(t, db, projectSQL, projectParams...)
+	for _, want := range []string{
+		"SCAN fc",
+		"SEARCH i USING",
+		"SEARCH im USING COVERING INDEX",
+		"(item_id=?",
+	} {
+		if !strings.Contains(projectPlan, want) {
+			t.Fatalf("project filter plan missing %q:\n%s", want, projectPlan)
+		}
+	}
+	if strings.Index(projectPlan, "SCAN fc") > strings.Index(projectPlan, "SEARCH i USING") {
+		t.Fatalf("project filter plan does not keep FTS candidates outermost:\n%s", projectPlan)
+	}
+
+	exactProject, err := search(db, SearchOpts{Query: "needle", Project: "escoffier-labs/brigade", Limit: 5})
+	if err != nil {
+		t.Fatalf("exact project search: %v", err)
+	}
+	if len(exactProject) != 1 || exactProject[0].ID != "item-000" {
+		t.Fatalf("exact project results = %#v, want item-000", exactProject)
+	}
+
+	substringProject, err := search(db, SearchOpts{Query: "needle", Project: "workspace/brigade", Limit: 5})
+	if err != nil {
+		t.Fatalf("substring project search: %v", err)
+	}
+	if len(substringProject) != 1 || substringProject[0].ID != "item-001" {
+		t.Fatalf("substring project results = %#v, want item-001", substringProject)
 	}
 
 	results, err := search(db, opts)

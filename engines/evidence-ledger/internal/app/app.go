@@ -1824,6 +1824,8 @@ func buildSearchQuery(opts SearchOpts) (string, []any) {
 	where, params := appendSearchResultFilters(opts, []string{"1=1"}, params)
 	params = append(params, limit)
 
+	// CROSS JOIN pins the candidate pool as the outer loop. A reorder through
+	// sources and items evaluates correlated filters against the whole archive.
 	sqlText := `with fts_candidates as materialized (
   select item_id, snippet(item_fts, 5, '[', ']', '...', 20) as snippet, bm25(item_fts) as fts_score
   from item_fts
@@ -1833,7 +1835,7 @@ func buildSearchQuery(opts SearchOpts) (string, []any) {
 )
 select i.id, s.kind, c.name, c.kind, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), fc.snippet, printf('%.6f', fc.fts_score), i.content_hash
 from fts_candidates fc
-join items i on i.id = fc.item_id
+cross join items i on i.id = fc.item_id
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 left join actors a on a.id = i.actor_id
