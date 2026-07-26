@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from .. import config, graphtrail_delta, localio, proc, receipt_signing, runguard
+from .. import config, graphtrail_delta, localio, proc, receipt_schema, receipt_signing, runguard
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -133,7 +133,6 @@ def _verify_execution_argv(argv: list[str], target: Path) -> list[str]:
 _VERIFY_CANCELED_RC = 130
 _VERIFY_INTERRUPTED_COMMAND_STATUS = "interrupted"
 _VERIFY_CANCELED_RECEIPT_STATUS = "canceled"
-_VERIFY_RECEIPT_SCHEMA_VERSION = 2
 
 
 def _verify_child_popen_kwargs() -> dict[str, Any]:
@@ -281,15 +280,15 @@ def _finalize_verify_receipt(
             receipt["digests"]["key_id"] = key_id
     except Exception:
         receipt.pop("digests", None)
+    helpers._write_json(run_dir / "receipt.json", receipt)
     try:
-        helpers._write_json(run_dir / "receipt.json", receipt)
         _write_verify_markdown(run_dir, receipt)
+    except Exception:
+        pass
+    try:
         _prune_verify_runs(target)
     except Exception:
-        try:
-            helpers._write_json(run_dir / "receipt.json", receipt)
-        except OSError:
-            pass
+        pass
     return receipt, rc
 
 
@@ -687,7 +686,7 @@ def _tree_fingerprint(target: Path) -> str | None:
 
 def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
     unavailable: dict[str, Any] = {
-        "schema_version": _VERIFY_RECEIPT_SCHEMA_VERSION,
+        "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
         "baseline_commit": None,
         "tree_fingerprint": None,
         "changes_patch_sha256": None,
@@ -710,7 +709,7 @@ def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
         patch_path.unlink(missing_ok=True)
         return unavailable
     return {
-        "schema_version": _VERIFY_RECEIPT_SCHEMA_VERSION,
+        "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
         "baseline_commit": baseline_commit,
         "tree_fingerprint": tree_fingerprint,
         "changes_patch_sha256": hashlib.sha256(patch_bytes).hexdigest(),
@@ -897,11 +896,13 @@ def _write_reused_receipt(
         "timeout": timeout,
         "path": str(run_dir),
         "commands": copy.deepcopy(latest.get("commands", [])),
-        "reused_from": latest.get("run_id"),
         "planned_commands": planned_display,
     }
     receipt.update(identity)
     _stamp_harness_session(receipt)
+    reused_from = latest.get("run_id")
+    if isinstance(reused_from, str) and reused_from:
+        receipt["reused_from"] = reused_from
     git = _receipt_git_snapshot(target)
     if git is not None:
         receipt["git"] = git
@@ -1026,6 +1027,7 @@ def _work_closeout_payload(target: Path, session_id: str, *, write: bool = False
     now = helpers._now()
     closeout_id = f"{now.strftime('%Y%m%d-%H%M%S')}-work-closeout-{uuid4().hex[:6]}"
     closeout = {
+        "schema_version": receipt_schema.WORK_CLOSEOUT_SCHEMA_VERSION,
         "closeout_id": closeout_id,
         "target": str(target),
         "status": "ready" if not blockers else "blocked",

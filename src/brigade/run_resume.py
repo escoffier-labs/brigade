@@ -12,7 +12,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import aboyeur, agents, codex_appserver, runguard
+from . import aboyeur, agents, codex_appserver, receipt_schema, runguard
 from .roster import Agent, Roster, _as_bool, _as_env
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
@@ -201,11 +201,10 @@ def _resume_locked(run_dir: Path) -> int:
     ground_truth = worker_data.get("ground_truth") or {}
     aboyeur._write_json(
         run_dir / "worker-results.json",
-        {
-            "schema": "brigade.worker_results.v1",
-            "results": aboyeur._worker_payload(worker_results),
-            "ground_truth": ground_truth,
-        },
+        receipt_schema.worker_results_document(
+            aboyeur._worker_payload(worker_results),
+            ground_truth=ground_truth,
+        ),
     )
 
     task = run_meta.get("task", "")
@@ -229,19 +228,18 @@ def _resume_locked(run_dir: Path) -> int:
     )
     aboyeur._write_json(
         run_dir / "synthesis.json",
-        {
-            "schema": "brigade.synthesis.v1",
-            "orchestrator": roster.orchestrator,
-            "result": {"ok": final.ok, "detail": final.detail, "text": final.text},
-            "ground_truth": ground_truth,
-        },
+        receipt_schema.synthesis_document(
+            orchestrator=roster.orchestrator,
+            result={"ok": final.ok, "detail": final.detail, "text": final.text},
+            ground_truth=ground_truth,
+        ),
     )
     now = datetime.now(timezone.utc).isoformat()
     run_meta.setdefault("resumed_at", []).append(now)
     if not final.ok:
         run_meta["status"] = "failed"
         run_meta["error"] = final.detail
-        aboyeur._write_json(run_dir / "run.json", run_meta)
+        aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
         print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
         return 2
     (run_dir / "final.txt").write_text(final.text + "\n")
@@ -255,6 +253,6 @@ def _resume_locked(run_dir: Path) -> int:
             history = []
             run_meta["recovery_history"] = history
         history.append(recovered_failure)
-    aboyeur._write_json(run_dir / "run.json", run_meta)
+    aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
     print(final.text)
     return 0

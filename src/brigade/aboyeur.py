@@ -25,7 +25,7 @@ from . import context_eval
 from . import evidence_brief as evidence_brief_mod
 from . import graphtrail_delta
 from . import localio
-from . import proc, runguard
+from . import proc, receipt_schema, runguard
 from . import run_control
 from .result_integrity import validate_final_output
 from .run_receipts import (
@@ -475,7 +475,7 @@ def _write_json(path: Path, payload: object) -> None:
     # run.json is polled by `brigade runs watch/steer/interrupt` while the run
     # rewrites it, so the write must be atomic or a concurrent reader can
     # observe a truncated file.
-    localio.write_text_atomic(path, json.dumps(payload, indent=2) + "\n")
+    localio.write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _utc_iso(value: datetime) -> str:
@@ -1707,6 +1707,10 @@ def set_artifact_patch_ref(output_dir: Path, patch_ref: str = "changes.patch") -
         if not isinstance(payload, dict) or "ground_truth" not in payload:
             raise runguard.RunGuardError(f"{filename} is missing ground_truth while recording artifact patch reference")
         payload["ground_truth"] = _with_patch_ref(payload.get("ground_truth"), patch_ref)
+        if filename == "worker-results.json":
+            receipt_schema.stamp_worker_results_document(payload)
+        else:
+            receipt_schema.stamp_synthesis_document(payload)
         try:
             _write_json(path, payload)
         except OSError as exc:
@@ -1799,7 +1803,7 @@ def record_artifact_collection(
                 )
     payload["artifact_collection"] = collection
     try:
-        _write_json(run_path, payload)
+        _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
     except OSError as exc:
         raise runguard.RetainRunLockError(f"failed to update run receipt after artifact collection: {exc}") from exc
 
@@ -1872,7 +1876,7 @@ def record_run_termination(
                 round((finished_at - started).total_seconds(), 3),
             )
     try:
-        _write_json(run_path, payload)
+        _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
     except OSError as exc:
         raise runguard.RetainRunLockError(f"failed to write terminal run receipt: {exc}") from exc
 
@@ -1900,7 +1904,7 @@ def record_dispatch_stage(output_dir: Path, *, stage: int, seats: tuple[str, ...
         }
     )
     try:
-        _write_json(run_path, payload)
+        _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
     except OSError as exc:
         raise runguard.RetainRunLockError(f"failed to write dispatch stage receipt: {exc}") from exc
 
@@ -1929,7 +1933,7 @@ def record_result_processing(output_dir: Path, *, seat: str) -> None:
     payload.pop("active_stage", None)
     payload.pop("active_seats", None)
     try:
-        _write_json(run_path, payload)
+        _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
     except OSError as exc:
         raise runguard.RetainRunLockError(f"failed to record result-processing phase: {exc}") from exc
 
@@ -1946,7 +1950,8 @@ def _roster_resolution_payload(roster: Roster) -> dict[str, object] | None:
 
 def _roster_payload(roster: Roster) -> dict[str, object]:
     payload: dict[str, object] = {
-        "schema": "brigade.roster_snapshot.v1",
+        "schema": receipt_schema.ROSTER_SNAPSHOT_SCHEMA,
+        "schema_version": receipt_schema.ROSTER_SNAPSHOT_SCHEMA_VERSION,
         "orchestrator": roster.orchestrator,
         "max_workers": roster.max_workers,
         "timeout_seconds": roster.timeout_seconds,
@@ -2011,9 +2016,9 @@ def _run_payload(
     scheduler: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
-        "schema": "brigade.run.v1",
+        "schema": receipt_schema.RUN_RECEIPT_SCHEMA,
+        "schema_version": receipt_schema.RUN_RECEIPT_SCHEMA_VERSION,
         "task": task,
-        "cwd": str(cwd) if cwd is not None else None,
         "orchestrator": roster.orchestrator,
         "dry_run": dry_run,
         "read_only": read_only,
@@ -2039,6 +2044,8 @@ def _run_payload(
             "attached": list(brief_set.attached) if brief_set is not None else [],
         },
     }
+    if cwd is not None:
+        payload["cwd"] = str(cwd)
     if scheduler is not None:
         payload["scheduler"] = scheduler
     if resolution := _roster_resolution_payload(roster):
@@ -2575,7 +2582,7 @@ def run(
         _write_json(output_dir / "plan-attempts.json", attempts_payload)
         _write_json(
             output_dir / "plan.json",
-            {"schema": "brigade.run_plan.v1", "assignments": _assignment_payload(assignments)},
+            receipt_schema.run_plan_document(_assignment_payload(assignments)),
         )
 
     if dry_run:
@@ -2851,11 +2858,10 @@ def run(
         worker_results = _write_worker_logs(output_dir, worker_results)
         _write_json(
             output_dir / "worker-results.json",
-            {
-                "schema": "brigade.worker_results.v1",
-                "results": _worker_payload(worker_results),
-                "ground_truth": ground_truth,
-            },
+            receipt_schema.worker_results_document(
+                _worker_payload(worker_results),
+                ground_truth=ground_truth,
+            ),
         )
     if verbose:
         _print_worker_status(worker_results)
@@ -2933,21 +2939,18 @@ def run(
         if not direct_worker:
             final = _write_agent_logs(output_dir, "synthesis", final)
         synthesis_payload = (
-            {
-                "schema": "brigade.synthesis.v1",
-                "mode": "direct-worker",
-                "worker": worker,
-                "orchestrator": None,
-                "result": _agent_result_payload(final),
-                "ground_truth": ground_truth,
-            }
+            receipt_schema.synthesis_document(
+                mode="direct-worker",
+                worker=worker,
+                result=_agent_result_payload(final),
+                ground_truth=ground_truth,
+            )
             if direct_worker
-            else {
-                "schema": "brigade.synthesis.v1",
-                "orchestrator": roster.orchestrator,
-                "result": _agent_result_payload(final),
-                "ground_truth": ground_truth,
-            }
+            else receipt_schema.synthesis_document(
+                orchestrator=roster.orchestrator,
+                result=_agent_result_payload(final),
+                ground_truth=ground_truth,
+            )
         )
         _write_json(output_dir / "synthesis.json", synthesis_payload)
     if not final.ok:

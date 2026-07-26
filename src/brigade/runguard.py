@@ -16,7 +16,7 @@ from time import monotonic as _monotonic
 from time import sleep as _sleep
 from uuid import uuid4
 
-from . import localio, proc
+from . import localio, proc, receipt_schema
 
 _NONTERMINAL_RUN_STATUSES = frozenset(
     {
@@ -366,7 +366,7 @@ def _recover_run_artifact(owner: dict[str, object] | None) -> str:
         }
     )
     try:
-        localio.write_json(run_json, payload)
+        localio.write_json(run_json, receipt_schema.stamp_run_receipt(payload))
     except OSError:
         return "write-failed"
     return "recovered"

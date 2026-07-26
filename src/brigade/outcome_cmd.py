@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import localio, outcome as core
+from . import localio, outcome as core, receipt_schema
 
 
 def _records_path(target: Path) -> Path:
@@ -453,6 +453,7 @@ def _last_record_digest(path: Path) -> str | None:
 
 def _record_payload(record: core.OutcomeRecord) -> dict:
     row = dataclasses.asdict(record)
+    row["schema_version"] = receipt_schema.OUTCOME_RECORD_SCHEMA_VERSION
     if row.get("code_graph_delta") is None:
         row.pop("code_graph_delta", None)
     if row.get("context_eval") is None:
@@ -1286,6 +1287,7 @@ def reconcile(
             new_status = prior_status if install_failed else decision.new_status
             effective_status[decision.artifact_id] = new_status
             receipt = {
+                "schema_version": receipt_schema.OUTCOME_DECISION_SCHEMA_VERSION,
                 "artifact_id": decision.artifact_id,
                 "action": decision.action,
                 "prior_status": prior_status,
