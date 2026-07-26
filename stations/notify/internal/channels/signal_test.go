@@ -86,3 +86,28 @@ func TestSignal_NameAndType(t *testing.T) {
 		t.Errorf("Type = %s, want signal", s.Type())
 	}
 }
+
+// TestSignal_ModelIdentity verifies that a Codex message with a resolved
+// model renders the provider/model identity as the title prefixed by the
+// neutral provider mark (◉), replacing the generic info emoji and Codex
+// title. Signal does not escape Markdown.
+func TestSignal_ModelIdentity(t *testing.T) {
+	msg := canonical.Message{
+		Title:  "Codex (turn-7)",
+		Body:   "Done.",
+		Level:  "info",
+		Source: "codex",
+		Model:  "gpt-5.6-sol",
+	}
+	got := formatSignal(msg)
+	want := "◉ OpenAI · gpt-5.6-sol\n"
+	if !strings.HasPrefix(got, want) {
+		t.Errorf("expected prefix %q, got %q", want, got)
+	}
+	if strings.Contains(got, "ℹ️") {
+		t.Errorf("info emoji must be replaced by provider mark, got %q", got)
+	}
+	if strings.Contains(got, "Codex") {
+		t.Errorf("generic Codex title must not leak when model identity is known, got %q", got)
+	}
+}

@@ -101,3 +101,50 @@ func TestTelegram_NameAndType(t *testing.T) {
 		t.Errorf("Type = %s, want telegram", tg.Type())
 	}
 }
+
+// TestTelegram_ModelIdentityReplacesInfoIndicator verifies that a Codex
+// message with a resolved model renders the provider/model identity as the
+// title and uses the neutral provider mark (◉) instead of the info emoji
+// (ℹ️). The original "Codex (turn-N)" title must not leak into MarkdownV2.
+func TestTelegram_ModelIdentityReplacesInfoIndicator(t *testing.T) {
+	msg := canonical.Message{
+		Title:  "Codex (turn-7)",
+		Body:   "Done.",
+		Level:  "info",
+		Source: "codex",
+		Model:  "gpt-5.6-sol",
+	}
+	got := formatTelegram(msg)
+	// MarkdownV2 escapes the dots and dashes inside the model id; the middle
+	// dot is not a MarkdownV2 special character and stays literal.
+	want := "◉ *OpenAI · gpt\\-5\\.6\\-sol*"
+	if !strings.Contains(got, want) {
+		t.Errorf("expected MarkdownV2 to contain %q, got %q", want, got)
+	}
+	if strings.Contains(got, "ℹ️") {
+		t.Errorf("info emoji must be replaced by provider mark, got %q", got)
+	}
+	if strings.Contains(got, "Codex") {
+		t.Errorf("generic Codex title must not leak when model identity is known, got %q", got)
+	}
+}
+
+// TestTelegram_SeverityIndicatorWinsOverProviderMark verifies that a
+// non-info level still prefixes the severity emoji even when a model
+// identity is present, while the title still carries the identity.
+func TestTelegram_SeverityIndicatorWinsOverProviderMark(t *testing.T) {
+	msg := canonical.Message{
+		Title:  "Codex (turn-7)",
+		Body:   "boom",
+		Level:  "error",
+		Source: "codex",
+		Model:  "gpt-5.6-sol",
+	}
+	got := formatTelegram(msg)
+	if !strings.HasPrefix(got, "🚨 ") {
+		t.Errorf("error level must prefix 🚨, got %q", got)
+	}
+	if !strings.Contains(got, "*OpenAI · gpt\\-5\\.6\\-sol*") {
+		t.Errorf("model identity title must be retained on error, got %q", got)
+	}
+}

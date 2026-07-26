@@ -63,7 +63,7 @@ type discordRequest struct {
 
 func (d *Discord) Send(ctx context.Context, m canonical.Message) error {
 	embed := discordEmbed{
-		Title:       m.Title,
+		Title:       titleFor(m),
 		Description: m.Body,
 		Color:       colorFor(m.Level),
 	}

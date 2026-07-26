@@ -9,6 +9,7 @@ type Message struct {
 	Body   string   `json:"body"`
 	Level  string   `json:"level,omitempty"`
 	Source string   `json:"source,omitempty"`
+	Model  string   `json:"model,omitempty"`
 	Tags   []string `json:"tags,omitempty"`
 }
 

@@ -64,3 +64,19 @@ func TestCodexNotify_BadJSONErrors(t *testing.T) {
 		t.Fatal("expected error for bad JSON")
 	}
 }
+
+func TestCodexNotify_ExtractsDirectModel(t *testing.T) {
+	in := `{
+		"type": "agent-turn-complete",
+		"turn-id": "turn-91",
+		"model": "gpt-5.6-sol",
+		"last-assistant-message": "Shipped."
+	}`
+	m, err := CodexNotify(strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.Model != "gpt-5.6-sol" {
+		t.Errorf("model = %q, want gpt-5.6-sol", m.Model)
+	}
+}
