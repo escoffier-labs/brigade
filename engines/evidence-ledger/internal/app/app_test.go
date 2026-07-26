@@ -28,9 +28,12 @@ func TestInitCreatesPrivateDirsAndDoctorJSON(t *testing.T) {
 		t.Fatalf("init failed: code=%d err=%s", code, errb.String())
 	}
 	paths := ResolvePaths()
-	assertPrivate(t, filepath.Dir(paths.ConfigPath))
+	if _, err := os.Stat(paths.ConfigPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("init created config.toml at %s: %v", paths.ConfigPath, err)
+	}
 	assertPrivate(t, paths.DataDir)
 	assertPrivate(t, paths.CacheDir)
+	assertPrivate(t, paths.DBPath)
 
 	out.Reset()
 	errb.Reset()
@@ -43,6 +46,23 @@ func TestInitCreatesPrivateDirsAndDoctorJSON(t *testing.T) {
 	}
 	if got["ok"] != true {
 		t.Fatalf("doctor not ok: %v", got)
+	}
+}
+
+func TestInitLeavesExistingConfigUntouched(t *testing.T) {
+	withTempHome(t)
+	paths := ResolvePaths()
+	custom := "db_path = \"/custom/fork.db\"\ncache_dir = \"/custom/cache\"\n"
+	mustWrite(t, paths.ConfigPath, custom)
+
+	runOK(t, "init")
+
+	got, err := os.ReadFile(paths.ConfigPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(got) != custom {
+		t.Fatalf("init rewrote config.toml:\n got %q\nwant %q", got, custom)
 	}
 }
 
