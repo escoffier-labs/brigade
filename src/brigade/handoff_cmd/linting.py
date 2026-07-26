@@ -41,6 +41,21 @@ def _injection_messages(hits: tuple[Any, ...]) -> tuple[str, ...]:
     return tuple(messages)
 
 
+def _egress_verdict(exit_code: Any) -> str:
+    return OK if exit_code == 0 else FAIL
+
+
+def _injection_verdict(hits: tuple[Any, ...]) -> str:
+    return FAIL if any(hit.severity == "warning" for hit in hits) else OK
+
+
+def _injection_detail(*, warning_count: int) -> str:
+    if warning_count:
+        label = "warning" if warning_count == 1 else "warnings"
+        return f"{warning_count} injection {label}"
+    return "clean"
+
+
 def _read_handoff_text(path: Path) -> str | None:
     try:
         return path.read_text(errors="replace")
@@ -71,8 +86,10 @@ def lint(
             hits = scan_handoff_injection_heuristics(text or "") if text is not None else ()
             guard_item["injection_heuristics"] = [_injection_hit_dict(hit) for hit in hits]
             guard_item["injection_warning_count"] = len([hit for hit in hits if hit.severity == "warning"])
+            guard_item["egress_verdict"] = _egress_verdict(guard_item.get("exit_code"))
+            guard_item["injection_verdict"] = _injection_verdict(hits)
             guard_results.append(guard_item)
-    guard_ok = all(item.get("exit_code") == 0 for item in guard_results)
+    guard_ok = all(item.get("egress_verdict") == OK and item.get("injection_verdict") == OK for item in guard_results)
     injection_counts: dict[str, int] = {}
     injection_hits_by_path: dict[str, tuple[Any, ...]] = {}
     enriched_results: list[HandoffLintResult] = []
@@ -110,7 +127,7 @@ def lint(
         hits = injection_hits_by_path.get(path_key, ())
         row["injection_heuristics"] = [_injection_hit_dict(hit) for hit in hits]
         result_dicts.append(row)
-    payload = {
+    payload: dict[str, Any] = {
         "target": str(target),
         "count": len(results),
         "valid": all(result.valid for result in results) and guard_ok,
@@ -118,6 +135,13 @@ def lint(
         "results": result_dicts,
         "content_guard": guard_results,
     }
+    if content_guard:
+        payload["content_guard_egress"] = (
+            OK if all(item.get("egress_verdict") == OK for item in guard_results) else FAIL
+        )
+        payload["content_guard_injection"] = (
+            OK if all(item.get("injection_verdict") == OK for item in guard_results) else FAIL
+        )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["valid"] else 1
@@ -137,14 +161,18 @@ def lint(
             else:
                 print(f"  warning: {warning}")
     if content_guard:
-        print(f"content_guard_policy: {guard_policy} (leak scan + injection heuristics)")
+        print(f"content_guard_policy: {guard_policy} (egress leak scan + injection heuristics)")
         for item in guard_results:
-            leak_status = OK if item.get("exit_code") == 0 else FAIL
-            print(f"[{leak_status}] content_guard leaks: {item.get('path')} {item.get('detail')}")
+            hits = item.get("injection_heuristics") or []
+            egress_status = item.get("egress_verdict", OK)
+            print(f"[{egress_status}] content_guard egress: {item.get('path')} {item.get('detail')}")
+            injection_status = item.get("injection_verdict", OK)
             warning_count = int(item.get("injection_warning_count") or 0)
-            if warning_count:
-                print(f"  warning: {warning_count} injection heuristic hit(s)")
-            for hit in item.get("injection_heuristics") or []:
+            print(
+                f"[{injection_status}] content_guard injection: {item.get('path')} "
+                f"{_injection_detail(warning_count=warning_count)}"
+            )
+            for hit in hits:
                 if hit.get("severity") == "info":
                     print(f"  line {hit['line']}: info: [{hit['rule']}] {hit['excerpt']}")
                 elif hit.get("severity") == "warning":
