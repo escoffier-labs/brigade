@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -239,6 +240,79 @@ def test_work_verify_plan_run_list_show(tmp_path, capsys):
 def _init_verify_target_with_head(target):
     target.mkdir(parents=True, exist_ok=True)
     _init_git_repo_with_head(target)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell env-prefix invocation")
+def test_verify_reused_receipt_stamps_harness_session_from_outer_env_prefix(tmp_target, monkeypatch):
+    """Regression #541: cache-hit receipts must stamp outer BRIGADE_CLAUDE_SESSION."""
+    from brigade.claude_hooks.runtime import _session_fingerprint
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    graphtrail_bin = str(tmp_target / "missing-graphtrail")
+    monkeypatch.setenv("GRAPHTRAIL_BIN", graphtrail_bin)
+
+    fingerprint_a = _session_fingerprint("session-a-outer-prefix")
+    fingerprint_b = _session_fingerprint("session-b-outer-prefix")
+    verify_command = "true"
+    target = str(tmp_target)
+    brigade_cli = (
+        f"{shlex.quote(sys.executable)} -m brigade work verify run "
+        f"--target {shlex.quote(target)} --command {shlex.quote(verify_command)}"
+    )
+    subprocess_env = {**os.environ, "GRAPHTRAIL_BIN": graphtrail_bin}
+
+    case_a = subprocess.run(
+        ["/bin/sh", "-c", f"BRIGADE_CLAUDE_SESSION={fingerprint_a} {brigade_cli}"],
+        cwd=tmp_target,
+        env=subprocess_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert case_a.returncode == 0, case_a.stderr
+
+    case_b = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            f"BRIGADE_CLAUDE_SESSION={fingerprint_b} PY=/fake/path {brigade_cli}",
+        ],
+        cwd=tmp_target,
+        env=subprocess_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert case_b.returncode == 0, case_b.stderr
+
+    receipts = verification._verify_receipts(tmp_target)
+    assert len(receipts) == 2
+    reused = receipts[0]
+    fresh = receipts[1]
+    assert reused["reused_from"] == fresh["run_id"]
+    assert fresh["harness_session"] == {"harness": "claude", "fingerprint": fingerprint_a}
+    assert reused["harness_session"] == {"harness": "claude", "fingerprint": fingerprint_b}
+    assert reused["planned_commands"] == [verify_command]
+
+
+def test_verify_reused_receipt_records_env_assignments_inside_command(tmp_target, monkeypatch):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    command = f'FOO=bar BAZ=qux {sys.executable} -c "print(1)"'
+
+    assert verification.verify_run(target=tmp_target, commands=[command], timeout=60) == 0
+    assert verification.verify_run(target=tmp_target, commands=[command], timeout=60) == 0
+
+    receipts = verification._verify_receipts(tmp_target)
+    assert len(receipts) == 2
+    reused = receipts[0]
+    fresh = receipts[1]
+    assert reused["reused_from"] == fresh["run_id"]
+    assert reused["commands"][0]["env"] == ["BAZ", "FOO"]
+    assert reused["planned_commands"] == [command]
 
 
 def test_verify_reuses_identical_tree(tmp_target, monkeypatch):
