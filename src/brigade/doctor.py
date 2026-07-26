@@ -9,7 +9,7 @@ import shlex
 import shutil
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 from .budgets import (
     BOOTSTRAP_BUDGETS,
@@ -20,18 +20,44 @@ from .selection import WRITER_INBOXES
 from .station import DoctorContext
 
 CheckResult = Tuple[str, str, str]  # (status, name, detail)
+ScopedCheckResult = Tuple[str, str, str, str]  # (status, name, detail, scope)
 OK = "OK"
 WARN = "WARN"
 FAIL = "FAIL"
 MANUAL = "MANUAL"
 INFO = "INFO"
-DEFAULT_TEXT_CHECK_LIMIT = 50
+SCOPE_TARGET = "target"
+SCOPE_OPERATOR = "operator"
+ACTIONABLE_STATUSES = frozenset({FAIL, WARN, MANUAL})
 ADAPTER_CHECK_PREFIX = "adapter: "
 
 
 def _adapter_check_name(name: str) -> str:
     """Label Brigade adapter/projection checks distinctly from native harness checks."""
     return f"{ADAPTER_CHECK_PREFIX}{name}"
+
+
+def _scoped_check(status: str, name: str, detail: str, scope: str = SCOPE_TARGET) -> ScopedCheckResult:
+    return (status, name, detail, scope)
+
+
+def _operator_check(status: str, name: str, detail: str) -> ScopedCheckResult:
+    return _scoped_check(status, name, detail, SCOPE_OPERATOR)
+
+
+def _normalize_scoped_check(
+    check: CheckResult | ScopedCheckResult,
+    *,
+    default_scope: str = SCOPE_TARGET,
+) -> ScopedCheckResult:
+    if len(check) == 4:
+        return check  # type: ignore[return-value]
+    status, name, detail = check
+    return _scoped_check(status, name, detail, default_scope)
+
+
+def _check_scope(check: CheckResult | ScopedCheckResult) -> str:
+    return check[3] if len(check) == 4 else SCOPE_TARGET
 
 
 def build_context(target: Path, harness: str = "generic") -> DoctorContext:
@@ -62,7 +88,7 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
         if check is not None:
             checks.append(check)
     if "openclaw" in ctx.harnesses:
-        checks.extend(_check_openclaw())
+        checks.extend(_operator_check(status, name, detail) for status, name, detail in _check_openclaw())
     if "hermes" in ctx.harnesses:
         checks.extend(_check_hermes(ctx.target))
     checks.extend(_check_orphan_inboxes(ctx.target, ctx.harnesses))
@@ -255,35 +281,40 @@ def run(
     return _report(checks, full=full, target=ctx.target, operator=operator)
 
 
-def _gather_checks(ctx: DoctorContext) -> List[CheckResult]:
+def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
     from . import component_report
     from .registry import all_stations
     from . import managed
 
-    checks: List[CheckResult] = []
-    checks.extend(component_report.doctor_checks())
+    checks: List[ScopedCheckResult] = []
+    for status, name, detail in component_report.doctor_checks():
+        checks.append(_operator_check(status, name, detail))
     missing_tools: List[Tuple[str, str]] = []
     for station in all_stations():
         if station.doctor is not None:
-            checks.extend(station.doctor(ctx))
+            for check in station.doctor(ctx):
+                checks.append(_normalize_scoped_check(check))
         for tool in managed.for_station(station.name):
             if tool.detect():
-                checks.extend(tool.doctor(ctx))
+                for check in tool.doctor(ctx):
+                    checks.append(_operator_check(check[0], check[1], check[2]))
             else:
                 missing_tools.append((station.name, tool.name))
     if len(missing_tools) == 1:
         station_name, tool_name = missing_tools[0]
-        checks.append((MANUAL, f"{station_name}: {tool_name}", f"not installed; run `brigade add {station_name}`"))
+        checks.append(
+            _operator_check(MANUAL, f"{station_name}: {tool_name}", f"not installed; run `brigade add {station_name}`")
+        )
     elif missing_tools:
         stations = sorted({station for station, _ in missing_tools})
         checks.append(
-            (
+            _operator_check(
                 MANUAL,
                 "managed tools",
                 f"{len(missing_tools)} managed tools not installed ({', '.join(stations)}); optional, install with `brigade add <station>`",
             )
         )
-    checks.append(_check_receipts(ctx.target))
+    checks.append(_normalize_scoped_check(_check_receipts(ctx.target)))
     return checks
 
 
@@ -813,9 +844,13 @@ def _check_publish_gate(target: Path) -> List[CheckResult]:
     scanner_dir = scrub.scanner_dir()
     if scanner_dir.is_dir():
         label = "external compatibility override" if os.environ.get("CONTENT_GUARD_DIR") else "embedded content guard"
-        results.append((OK, "guard: embedded content guard", f"{label}: {scanner_dir}"))
+        results.append(_operator_check(OK, "guard: embedded content guard", f"{label}: {scanner_dir}"))
     else:
-        results.append((MANUAL, "guard: embedded content guard", f"not found at {scanner_dir}; reinstall brigade-cli"))
+        results.append(
+            _operator_check(
+                MANUAL, "guard: embedded content guard", f"not found at {scanner_dir}; reinstall brigade-cli"
+            )
+        )
     return results
 
 
@@ -968,58 +1003,28 @@ _MARKERS = {
     INFO: "  [info]",
 }
 
-# Checks about host-global / operator state rather than the --target workspace.
-# Hidden by default (#478); pass --operator to include them in the report.
-_OPERATOR_SCOPED_PREFIXES = (
-    "openclaw:",
-    "components:",
-    "bootstrap-doctor",
-    "agentpantry",
-    "miseledger",
-    "usage-tracker",
-    "code-search-api",
-    "code-search-mcp",
-    "token-glace",
-    "agent-notify",
-    "plating",
-)
-_OPERATOR_SCOPED_EXACT = {"guard: embedded content guard", "managed tools"}
-_MANAGED_OPERATOR_TOOL_SLUGS = {
-    "bootstrap-doctor",
-    "token-glace",
-    "code-search-api",
-    "code-search-mcp",
-    "agentpantry",
-    "agent-notify",
-    "miseledger",
-    "usage-tracker",
-    "plating",
+_SEVERITY_ORDER = (FAIL, WARN, MANUAL, INFO, OK)
+_SEVERITY_GROUP_LABELS = {
+    FAIL: "failures:",
+    WARN: "warnings:",
+    MANUAL: "manual actions:",
+    INFO: "info:",
+    OK: "ok:",
 }
+_OPERATOR_SECTION_HEADER = "operator/host (not specific to this target):"
 
 
-def _is_operator_scoped(name: str) -> bool:
-    if name in _OPERATOR_SCOPED_EXACT:
-        return True
-    if name.startswith(_OPERATOR_SCOPED_PREFIXES):
-        return True
-    if ": " in name:
-        _, rhs = name.split(": ", 1)
-        slug = rhs.split()[0]
-        if slug in _MANAGED_OPERATOR_TOOL_SLUGS:
-            return True
-    return False
-
-
-def _filter_target_scoped_checks(checks: List[CheckResult]) -> List[CheckResult]:
-    return [check for check in checks if not _is_operator_scoped(check[1])]
+def _filter_target_scoped_checks(checks: List[ScopedCheckResult]) -> List[ScopedCheckResult]:
+    return [check for check in checks if _check_scope(check) == SCOPE_TARGET]
 
 
 def _target_detail_prefix(target: Path) -> str:
     return f"target={target}: "
 
 
-def _annotate_target_detail(target: Path, name: str, detail: str) -> str:
-    if _is_operator_scoped(name):
+def _annotate_target_detail(target: Path, check: CheckResult | ScopedCheckResult) -> str:
+    status, name, detail, scope = _normalize_scoped_check(check)
+    if scope == SCOPE_OPERATOR:
         return detail
     prefix = _target_detail_prefix(target)
     if detail.startswith(prefix) or detail.startswith(str(target)):
@@ -1027,53 +1032,78 @@ def _annotate_target_detail(target: Path, name: str, detail: str) -> str:
     return f"{prefix}{detail}"
 
 
-def _report(checks: List[CheckResult], *, full: bool = True, target: Path | None = None, operator: bool = False) -> int:
-    width = max((len(name) for _, name, _ in checks), default=20)
-    counts = _status_counts(checks)
+def _report(
+    checks: Sequence[CheckResult | ScopedCheckResult],
+    *,
+    full: bool = True,
+    target: Path | None = None,
+    operator: bool = False,
+) -> int:
+    scoped_checks = [_normalize_scoped_check(check) for check in checks]
+    width = max((len(check[1]) for check in scoped_checks), default=20)
+    counts = _status_counts(scoped_checks)
     print(
-        f"triage: {len(checks)} checks, {counts[OK]} ok, {counts[WARN]} warn, "
+        f"triage: {len(scoped_checks)} checks, {counts[OK]} ok, {counts[WARN]} warn, "
         f"{counts[FAIL]} failed, {counts[MANUAL]} manual, {counts[INFO]} info"
     )
 
-    condensed = not full and len(checks) > DEFAULT_TEXT_CHECK_LIMIT
-    visible_checks = [check for check in checks if check[0] in {FAIL, WARN, MANUAL}] if condensed else checks
-    target_checks = [check for check in visible_checks if not _is_operator_scoped(check[1])]
-    operator_checks = [check for check in visible_checks if _is_operator_scoped(check[1])]
+    visible_statuses = set(_SEVERITY_ORDER) if full else ACTIONABLE_STATUSES
+    visible_checks = [check for check in scoped_checks if check[0] in visible_statuses]
+    target_checks = [check for check in visible_checks if _check_scope(check) == SCOPE_TARGET]
+    operator_checks = [check for check in visible_checks if _check_scope(check) == SCOPE_OPERATOR]
+    hidden_detail = not full and any(check[0] not in ACTIONABLE_STATUSES for check in scoped_checks)
 
-    def _emit(items: List[CheckResult]) -> None:
-        for status, name, detail in items:
+    def _emit(items: List[ScopedCheckResult]) -> None:
+        for status, name, detail, scope in items:
+            annotated_detail = detail
             if target is not None:
-                detail = _annotate_target_detail(target, name, detail)
-            print(f"{_MARKERS[status]} {name.ljust(width)}  {detail}")
+                annotated_detail = _annotate_target_detail(target, (status, name, detail, scope))
+            print(f"{_MARKERS[status]} {name.ljust(width)}  {annotated_detail}")
+
+    def _emit_grouped(items: List[ScopedCheckResult]) -> bool:
+        emitted = False
+        for status in _SEVERITY_ORDER:
+            if status not in visible_statuses:
+                continue
+            group = [check for check in items if check[0] == status]
+            if not group:
+                continue
+            emitted = True
+            print(_SEVERITY_GROUP_LABELS[status])
+            _emit(group)
+        return emitted
 
     print()
     if visible_checks:
-        _emit(target_checks)
+        if not _emit_grouped(target_checks):
+            print("  no failures, warnings, or manual actions")
     else:
         print("  no failures, warnings, or manual actions")
     if operator and operator_checks:
         print()
-        print("operator/host (not specific to this target):")
-        _emit(operator_checks)
+        print(_OPERATOR_SECTION_HEADER)
+        _emit_grouped(operator_checks)
 
-    if condensed:
+    if hidden_detail:
         print()
         print(f"showing {len(visible_checks)} actionable checks; run `brigade doctor --full` to show all checks")
 
     print()
-    print(f"summary: {len(checks)} checks, {counts[FAIL]} failed, {counts[MANUAL]} manual")
+    print(f"summary: {len(scoped_checks)} checks, {counts[FAIL]} failed, {counts[MANUAL]} manual")
     return 1 if counts[FAIL] else 0
 
 
-def _status_counts(checks: List[CheckResult]) -> dict[str, int]:
+def _status_counts(checks: List[CheckResult | ScopedCheckResult]) -> dict[str, int]:
     counts = {OK: 0, WARN: 0, FAIL: 0, MANUAL: 0, INFO: 0}
-    for status, _, _ in checks:
+    for check in checks:
+        status = check[0]
         counts[status] = counts.get(status, 0) + 1
     return counts
 
 
-def _report_json(ctx: DoctorContext, checks: List[CheckResult], *, operator: bool = False) -> int:
-    counts = _status_counts(checks)
+def _report_json(ctx: DoctorContext, checks: List[CheckResult | ScopedCheckResult], *, operator: bool = False) -> int:
+    scoped_checks = [_normalize_scoped_check(check) for check in checks]
+    counts = _status_counts(scoped_checks)
     sel = ctx.selection
     payload = {
         "target": str(ctx.target),
@@ -1085,13 +1115,13 @@ def _report_json(ctx: DoctorContext, checks: List[CheckResult], *, operator: boo
             {
                 "status": status,
                 "name": name,
-                "detail": _annotate_target_detail(ctx.target, name, detail),
-                "scope": "operator" if _is_operator_scoped(name) else "target",
+                "detail": _annotate_target_detail(ctx.target, (status, name, detail, scope)),
+                "scope": scope,
             }
-            for status, name, detail in checks
+            for status, name, detail, scope in scoped_checks
         ],
         "summary": {
-            "total": len(checks),
+            "total": len(scoped_checks),
             "ok": counts[OK],
             "warn": counts[WARN],
             "manual": counts[MANUAL],

@@ -93,10 +93,27 @@ def test_doctor_triages_long_output_by_default(tmp_target: Path, capsys, monkeyp
     assert doctor_mod.run(target=tmp_target) == 1
     out = capsys.readouterr().out
     assert "triage: 51 checks, 48 ok, 1 warn, 1 failed, 1 manual, 0 info" in out
+    assert "failures:" in out
+    assert "warnings:" in out
+    assert "manual actions:" in out
+    assert out.index("failures:") < out.index("warnings:") < out.index("manual actions:")
     assert "warning-check" in out
     assert "failed-check" in out
     assert "manual-check" in out
     assert "check-0" not in out
+    assert "run `brigade doctor --full` to show all checks" in out
+
+
+def test_doctor_default_hides_ok_even_below_condensation_threshold(tmp_target: Path, capsys, monkeypatch):
+    checks = [(doctor_mod.OK, f"check-{index}", "ready") for index in range(10)]
+    checks.append((doctor_mod.WARN, "warning-check", "needs attention"))
+    monkeypatch.setattr(doctor_mod, "_gather_checks", lambda _ctx: checks)
+
+    doctor_mod.run(target=tmp_target)
+    out = capsys.readouterr().out
+    assert "check-0" not in out
+    assert "warning-check" in out
+    assert "warnings:" in out
     assert "run `brigade doctor --full` to show all checks" in out
 
 
@@ -106,6 +123,7 @@ def test_doctor_full_preserves_exhaustive_text_output(tmp_target: Path, capsys, 
 
     assert doctor_mod.run(target=tmp_target, full=True) == 0
     out = capsys.readouterr().out
+    assert "ok:" in out
     assert "check-0" in out
     assert "check-50" in out
     assert "brigade doctor --full" not in out
@@ -116,6 +134,7 @@ def test_doctor_shared_reporter_is_exhaustive_by_default(capsys):
 
     assert doctor_mod._report(checks) == 0
     out = capsys.readouterr().out
+    assert "ok:" in out
     assert "shared-check-0" in out
     assert "shared-check-50" in out
     assert "brigade doctor --full" not in out
@@ -200,6 +219,65 @@ def test_doctor_json_tags_operator_scope_when_requested(tmp_target: Path, capsys
     scopes = {c["name"]: c["scope"] for c in payload["checks"]}
     assert scopes.get("guard: embedded content guard") == "operator"
     assert any(scope == "target" for scope in scopes.values())
+
+
+def test_doctor_first_contact_condenses_actionable_target_checks(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    capsys.readouterr()
+    rc = doctor_mod.run(target=tmp_target, harness="generic", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"]["total"] >= 40
+    assert rc == (0 if payload["ready"] else 1)
+
+    capsys.readouterr()
+    doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert "[ok]" not in out
+    assert "ok:" not in out
+    assert "run `brigade doctor --full` to show all checks" in out
+
+
+def test_doctor_selected_scope_counts_and_exit_unchanged(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    capsys.readouterr()
+    rc_default = doctor_mod.run(target=tmp_target, harness="generic", json_output=True)
+    default_payload = json.loads(capsys.readouterr().out)
+    capsys.readouterr()
+    rc_operator = doctor_mod.run(target=tmp_target, harness="generic", json_output=True, operator=True)
+    operator_payload = json.loads(capsys.readouterr().out)
+
+    assert default_payload["summary"]["total"] < operator_payload["summary"]["total"]
+    assert all(check["scope"] == "target" for check in default_payload["checks"])
+    assert any(check["scope"] == "operator" for check in operator_payload["checks"])
+    assert rc_default == (0 if default_payload["summary"]["failed"] == 0 else 1)
+    assert rc_operator == (0 if operator_payload["summary"]["failed"] == 0 else 1)
+
+
+def test_doctor_explicit_operator_scope_not_name_inferred(tmp_target: Path, capsys, monkeypatch):
+    from brigade import component_report
+
+    marker = "ISSUE556_EXPLICIT_SCOPE_MARKER"
+
+    def fake_component_checks(**kwargs):
+        return [(doctor_mod.OK, "target-looking-name", marker)]
+
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    monkeypatch.setattr(component_report, "doctor_checks", fake_component_checks)
+    capsys.readouterr()
+    doctor_mod.run(target=tmp_target, harness="generic", json_output=True, operator=True)
+    payload = json.loads(capsys.readouterr().out)
+    host_check = next(check for check in payload["checks"] if check["name"] == "target-looking-name")
+    assert host_check["scope"] == "operator"
+    assert marker in host_check["detail"]
 
 
 def test_doctor_json_omits_operator_checks_by_default(tmp_target: Path, capsys, monkeypatch):
