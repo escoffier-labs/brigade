@@ -116,14 +116,38 @@ def dispatch(args) -> int:
         return work_cmd.sweep_review(target=args.target, sweep_id=args.sweep_id, json_output=args.json)
     if args.work_command == "verify":
         if args.verify_command == "plan":
-            return work_cmd.verify_plan(target=args.target, commands=args.verify_commands, json_output=args.json)
+            has_manifest = bool(args.verify_manifest_id)
+            has_command = bool(args.verify_commands)
+            if has_manifest and has_command:
+                args._brigade_parser.error("--manifest and --command are mutually exclusive")
+            return work_cmd.verify_plan(
+                target=args.target,
+                commands=args.verify_commands,
+                manifest_id=args.verify_manifest_id,
+                json_output=args.json,
+            )
         if args.verify_command == "run":
             has_command = bool(args.verify_commands)
             has_argv_json = args.verify_argv_json is not None
-            if has_command and has_argv_json:
-                args._brigade_parser.error("--command and --argv-json are mutually exclusive")
-            if not has_command and not has_argv_json:
-                args._brigade_parser.error("work verify run requires exactly one of --command or --argv-json")
+            has_manifest = bool(args.verify_manifest_id)
+            selected = sum((has_command, has_argv_json, has_manifest))
+            if selected > 1:
+                args._brigade_parser.error("--command, --argv-json, and --manifest are mutually exclusive")
+            if selected == 0:
+                args._brigade_parser.error(
+                    "work verify run requires exactly one of --command, --argv-json, or --manifest"
+                )
+            if has_manifest:
+                return work_cmd.verify_run(
+                    target=args.target,
+                    manifest_id=args.verify_manifest_id,
+                    timeout=args.timeout,
+                    graphtrail_timeout=args.graphtrail_timeout,
+                    json_output=args.json,
+                    capture=args.capture,
+                    capture_kind=args.capture_kind,
+                    reuse=not args.no_reuse,
+                )
             if has_argv_json:
                 try:
                     parsed_argv = json.loads(args.verify_argv_json)
@@ -141,6 +165,7 @@ def dispatch(args) -> int:
             return work_cmd.verify_run(
                 target=args.target,
                 commands=commands,
+                manifest_id=None,
                 timeout=args.timeout,
                 graphtrail_timeout=args.graphtrail_timeout,
                 json_output=args.json,

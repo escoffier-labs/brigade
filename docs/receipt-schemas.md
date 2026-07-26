@@ -62,6 +62,27 @@ JSON Schema files.
 | `digests` | object | no | `{algorithm, logs, receipt_sha256, signature?, key_id?}` |
 | `reused_from` | string | no | Prior run id when reused |
 | `interruption` | object | no | Cancel metadata |
+| `verify_manifest_id` | string | no | Registered manifest id when the run was manifest-selected |
+| `required_utility_check_ids` | array of string | no | Manifest-owned utility guardrail ids required for scoring (#503) |
+| `subject_binding` | object | no | Verifier-authored scoreable subject metadata (manifest runs only) |
+| `failure_class` | string | no | Receipt-level #474-style failure class when status is not completed |
+| `failure_kind` | string | no | Receipt-level failure kind paired with `failure_class` |
+
+**`subject_binding` object** (additive, manifest-selected runs)
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `binding_mode` | string | `patch_backed` or `fixture_eval` |
+| `artifact_kind` | string | `skill` or `card` |
+| `artifact_id` | string | Verifier-owned subject id |
+| `content_fingerprint` | string | Subject content fingerprint at verify time |
+| `patch_source` | string | `worktree` or `generated` (patch-backed only) |
+| `producer_binding` | object | `{work_session_id, owned_delta_sha256, subject_clean_at_start, start_git}` for patch-backed runs |
+| `verifier_identity` | object | `{verifier_id, session_id}` independent verifier session |
+| `patch_binding` | object | Patch-backed tuple plus `subject_path` and `subject_hash` |
+| `fixture_binding` | object | `{manifest_id, case_id, check_id}` for fixture evaluation runs |
+
+Ad hoc `--command` / `--argv-json` runs omit `subject_binding` and remain audit-only (non-scoreable).
 
 **Command object**
 
@@ -76,6 +97,11 @@ JSON Schema files.
 | `duration_seconds` | number | |
 | `stdout_summary`, `stderr_summary` | string | |
 | `stdout_log_path`, `stderr_log_path` | string | Paths under run dir |
+| `check_role` | string | `effectiveness` or `utility_guardrail` (manifest-selected runs) |
+| `check_id` | string | Stable verifier-owned check id (manifest-selected runs) |
+| `obligation_id` | string | Optional obligation id from the manifest |
+| `failure_class` | string | #474-style class when the command did not succeed |
+| `failure_kind` | string | Typed failure kind paired with `failure_class` |
 
 ---
 

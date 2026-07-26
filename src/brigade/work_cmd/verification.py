@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from .. import config, graphtrail_delta, localio, proc, receipt_schema, receipt_signing, runguard
+from .. import verify_manifest, verify_trial
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -203,6 +204,106 @@ def _run_verify_child_process(
         return "timed_out", None, stdout_text, stderr_text
 
 
+def _active_work_session_id(target: Path) -> str | None:
+    current = helpers._current_path(target)
+    if not current.is_file():
+        return None
+    session_id = current.read_text().strip()
+    return session_id or None
+
+
+def _stamp_manifest_command_metadata(receipt: dict[str, Any], manifest: verify_manifest.VerifyManifest) -> None:
+    commands = receipt.get("commands")
+    if not isinstance(commands, list):
+        return
+    for index, command in enumerate(commands):
+        if not isinstance(command, dict) or index >= len(manifest.checks):
+            continue
+        spec = manifest.checks[index]
+        command["check_id"] = spec.check_id
+        command["check_role"] = spec.check_role
+        if spec.obligation_id:
+            command["obligation_id"] = spec.obligation_id
+        verify_trial.stamp_verify_command_failure_taxonomy(command)
+
+
+def _build_subject_binding(
+    target: Path,
+    manifest: verify_manifest.VerifyManifest,
+    receipt: dict[str, Any],
+    run_dir: Path,
+) -> dict[str, Any] | None:
+    fingerprint = verify_manifest.resolve_subject_fingerprint(target, manifest)
+    if fingerprint is None:
+        return None
+    verifier_session = verify_trial.verifier_session_id() or f"verify-{receipt.get('run_id')}"
+    binding: dict[str, Any] = {
+        "binding_mode": manifest.binding_mode,
+        "artifact_kind": manifest.artifact_kind,
+        "artifact_id": manifest.artifact_id,
+        "content_fingerprint": fingerprint,
+        "verifier_identity": {
+            "verifier_id": manifest.verifier_id,
+            "session_id": verifier_session,
+        },
+    }
+    if manifest.binding_mode == "fixture_eval":
+        binding["fixture_binding"] = {
+            "manifest_id": manifest.fixture_manifest_id,
+            "case_id": manifest.fixture_case_id,
+            "check_id": manifest.fixture_check_id,
+        }
+        return binding
+    if manifest.subject_path is None:
+        return None
+    patch_path = run_dir / "changes.patch"
+    try:
+        patch_bytes = patch_path.read_bytes()
+    except OSError:
+        patch_bytes = b""
+    owned_delta = verify_trial.owned_delta_sha256(patch_bytes, manifest.subject_path)
+    subject_hash = verify_trial.subject_hash_for_path(target, manifest.subject_path)
+    if subject_hash is None:
+        return None
+    binding["patch_source"] = manifest.patch_source
+    session_dir = helpers._active_session_dir(target)
+    session_payload = helpers._read_session(session_dir) if session_dir is not None else None
+    if isinstance(session_payload, dict) and session_payload.get("id"):
+        session_id = str(session_payload["id"])
+    else:
+        session_id = _active_work_session_id(target)
+    binding["producer_binding"] = verify_trial.build_producer_binding(
+        session_id=session_id,
+        session_payload=session_payload,
+        subject_path=manifest.subject_path,
+        owned_delta=owned_delta,
+    )
+    binding["patch_binding"] = {
+        "baseline_commit": receipt.get("baseline_commit"),
+        "tree_fingerprint": receipt.get("tree_fingerprint"),
+        "changes_patch_sha256": receipt.get("changes_patch_sha256"),
+        "subject_path": manifest.subject_path,
+        "subject_hash": subject_hash,
+    }
+    return binding
+
+
+def _apply_manifest_scoring_fields(
+    target: Path,
+    receipt: dict[str, Any],
+    manifest: verify_manifest.VerifyManifest,
+    run_dir: Path,
+) -> None:
+    receipt["verify_manifest_id"] = manifest.manifest_id
+    if manifest.required_utility_check_ids:
+        receipt["required_utility_check_ids"] = list(manifest.required_utility_check_ids)
+    _stamp_manifest_command_metadata(receipt, manifest)
+    subject_binding = _build_subject_binding(target, manifest, receipt, run_dir)
+    if subject_binding is not None:
+        receipt["subject_binding"] = subject_binding
+    verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
+
+
 def _finalize_verify_receipt(
     target: Path,
     run_dir: Path,
@@ -230,6 +331,12 @@ def _finalize_verify_receipt(
             receipt["status"] = "failed"
         else:
             receipt["status"] = "rejected"
+    commands = receipt.get("commands")
+    if isinstance(commands, list):
+        for command in commands:
+            if isinstance(command, dict):
+                verify_trial.stamp_verify_command_failure_taxonomy(command)
+    verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
     try:
         git = _receipt_git_snapshot(target)
         if git is not None:
@@ -544,18 +651,37 @@ def _verification_evidence_payload(target: Path, session: tuple[Path, dict[str, 
     }
 
 
-def _verify_plan_payload(target: Path, commands: list[str] | None = None) -> dict[str, Any]:
+def _verify_plan_payload(
+    target: Path,
+    commands: list[str] | None = None,
+    *,
+    manifest_id: str | None = None,
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    planned_commands = commands if commands is not None else _default_verify_commands(target)
+    manifest: verify_manifest.VerifyManifest | None = None
+    if manifest_id:
+        manifest, error = verify_manifest.resolve_manifest(target, manifest_id)
+        if manifest is None:
+            return {
+                "target": str(target),
+                "verify_runs_root": str(helpers._verify_runs_root(target)),
+                "commands": [],
+                "blockers": [error or f"verify manifest not found: {manifest_id}"],
+                "evidence": _verification_evidence_payload(target),
+                "suggested_command": f'brigade work verify run --manifest "{manifest_id}"',
+            }
+        planned_commands = manifest.planned_commands
+    else:
+        planned_commands = commands if commands is not None else _default_verify_commands(target)
     evidence = _verification_evidence_payload(target)
     blockers: list[str] = []
     if not planned_commands:
-        blockers.append("no verification commands found; pass --command")
+        blockers.append("no verification commands found; pass --command or --manifest")
     for command in planned_commands:
         _, _, error = _verify_parse_command(command, target)
         if error:
             blockers.append(f"{command}: {error}")
-    return {
+    payload = {
         "target": str(target),
         "verify_runs_root": str(helpers._verify_runs_root(target)),
         "commands": planned_commands,
@@ -565,6 +691,13 @@ def _verify_plan_payload(target: Path, commands: list[str] | None = None) -> dic
         if planned_commands
         else 'brigade work verify run --command "..."',
     }
+    if manifest is not None:
+        payload["manifest_id"] = manifest.manifest_id
+        payload["scoreable"] = True
+        payload["suggested_command"] = f'brigade work verify run --manifest "{manifest.manifest_id}"'
+    elif commands is not None:
+        payload["scoreable"] = False
+    return payload
 
 
 def _write_verify_markdown(run_dir: Path, receipt: dict[str, Any]) -> None:
@@ -722,6 +855,7 @@ def _run_verify_commands(
     timeout: int,
     *,
     graphtrail_timeout: float,
+    manifest: verify_manifest.VerifyManifest | None = None,
 ) -> tuple[dict[str, Any], int]:
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
@@ -860,6 +994,8 @@ def _run_verify_commands(
                     )
     finally:
         if receipt is not None and not finalized:
+            if manifest is not None:
+                _apply_manifest_scoring_fields(target, receipt, manifest, run_dir)
             receipt, rc = _safe_finalize_verify_receipt(
                 target,
                 run_dir,
@@ -1070,13 +1206,14 @@ def verify_plan(
     *,
     target: Path,
     commands: list[str] | None = None,
+    manifest_id: str | None = None,
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    payload = _verify_plan_payload(target, commands)
+    payload = _verify_plan_payload(target, commands, manifest_id=manifest_id)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if not payload["blockers"] else 1
@@ -1120,6 +1257,7 @@ def verify_run(
     *,
     target: Path,
     commands: list[str | list[str]] | None = None,
+    manifest_id: str | None = None,
     timeout: int = 900,
     graphtrail_timeout: float | None = None,
     json_output: bool = False,
@@ -1134,14 +1272,22 @@ def verify_run(
     if timeout < 1:
         print("error: --timeout must be a positive integer", file=sys.stderr)
         return 2
+    manifest: verify_manifest.VerifyManifest | None = None
+    if manifest_id:
+        manifest, error = verify_manifest.resolve_manifest(target, manifest_id)
+        if manifest is None:
+            print(f"error: {error}", file=sys.stderr)
+            return 1 if error and "not found" in error else 2
+        planned = manifest.planned_commands
+    else:
+        planned = commands if commands is not None else _default_verify_commands(target)
+    if not planned:
+        print("error: no verification commands found; pass --command or --manifest", file=sys.stderr)
+        return 2
     try:
         effective_graphtrail_timeout = config.resolve_graphtrail_delta_timeout(target, graphtrail_timeout)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 2
-    planned = commands if commands is not None else _default_verify_commands(target)
-    if not planned:
-        print("error: no verification commands found; pass --command", file=sys.stderr)
         return 2
     planned_display = _planned_commands_display(planned)
     planned_identity = _planned_commands_identity(planned)
@@ -1155,7 +1301,7 @@ def verify_run(
         return blocked_rc
     try:
         receipt = None
-        if reuse:
+        if reuse and manifest is None:
             fingerprint = _tree_fingerprint(target)
             latest = _latest_verify_receipt(target)
             if (
@@ -1168,7 +1314,11 @@ def verify_run(
                 receipt, rc = _write_reused_receipt(target, latest, planned_display, timeout)
         if receipt is None:
             receipt, rc = _run_verify_commands(
-                target, planned, timeout, graphtrail_timeout=effective_graphtrail_timeout
+                target,
+                planned,
+                timeout,
+                graphtrail_timeout=effective_graphtrail_timeout,
+                manifest=manifest,
             )
     except KeyboardInterrupt:
         print("error: verification canceled by user", file=sys.stderr)

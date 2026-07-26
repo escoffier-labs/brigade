@@ -1872,6 +1872,7 @@ def test_work_verify_run_cli_passes_graphtrail_timeout_override(tmp_path, monkey
         {
             "target": tmp_path,
             "commands": ["python3 -m pytest -q"],
+            "manifest_id": None,
             "timeout": 900,
             "graphtrail_timeout": 45,
             "json_output": True,
@@ -1989,12 +1990,16 @@ def test_work_verify_and_closeout_cli(tmp_path, monkeypatch):
     assert cli.main(["work", "verify", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["work", "closeout", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert seen == [
-        ("verify-plan", {"target": tmp_path, "commands": ["python3 -m pytest -q"], "json_output": True}),
+        (
+            "verify-plan",
+            {"target": tmp_path, "commands": ["python3 -m pytest -q"], "manifest_id": None, "json_output": True},
+        ),
         (
             "verify-run",
             {
                 "target": tmp_path,
                 "commands": ["python3 -m pytest -q"],
+                "manifest_id": None,
                 "timeout": 12,
                 "graphtrail_timeout": None,
                 "json_output": True,
