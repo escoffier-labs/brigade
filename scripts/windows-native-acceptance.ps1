@@ -691,6 +691,10 @@ def call_greet():
         & brigade work verify run --target $workRepo --command "python $verifyScriptName" --capture brigade-work
         if ($LASTEXITCODE -ne 0) { throw "work verify run failed" }
 
+        Write-Step "brigade work verify run (manual export)"
+        & brigade work verify run --target $workRepo --command "python $verifyScriptName" --no-reuse
+        if ($LASTEXITCODE -ne 0) { throw "manual export verify run failed" }
+
         $exportPath = Join-Path $acceptRoot "receipts.jsonl"
         Write-Step "receipts export miseledger"
         & brigade receipts export miseledger --target $workRepo --out $exportPath --new-only

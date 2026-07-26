@@ -295,6 +295,9 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert 'if ($callersOutput -notmatch "call_greet")' in text
     assert "brigadewinacceptance" in text
     assert "brigade work verify run" in text
+    assert "brigade work verify run (manual export)" in text
+    assert "--capture brigade-work" in text
+    assert "--no-reuse" in text
     assert "brigade receipts export miseledger" in text
     assert "import adapter" in text
     assert "$importPayload.inserted_items" in text
