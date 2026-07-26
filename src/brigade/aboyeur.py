@@ -1188,6 +1188,7 @@ def dispatch(
     route_held: dict[str, list[str]] | None = None,
     on_stage_start: Callable[[int, tuple[str, ...]], None] | None = None,
     on_interrupt: Callable[[], None] | None = None,
+    on_scheduler_resolved: Callable[[str, str | None], None] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     build_prompt: Callable[..., str] | None = None,
 ) -> list[WorkerResult]:
@@ -1218,6 +1219,7 @@ def dispatch(
         route_held=route_held,
         on_stage_start=on_stage_start,
         on_interrupt=on_interrupt,
+        on_scheduler_resolved=on_scheduler_resolved,
         process_registry=process_registry,
     )
 
@@ -2006,6 +2008,7 @@ def _run_payload(
     worker: str | None = None,
     include_git: bool = True,
     pre_run_snapshot: dict[str, object] | None = None,
+    scheduler: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": "brigade.run.v1",
@@ -2036,6 +2039,8 @@ def _run_payload(
             "attached": list(brief_set.attached) if brief_set is not None else [],
         },
     }
+    if scheduler is not None:
+        payload["scheduler"] = scheduler
     if resolution := _roster_resolution_payload(roster):
         payload["roster"] = resolution
     if lock_workspace is not None:
@@ -2117,8 +2122,15 @@ def record_run_start(
     lock_workspace: Path | None = None,
     codex_transport: str | None = None,
     started_at: datetime | None = None,
+    scheduler: str | None = None,
 ) -> None:
-    """Write the minimal typed receipt needed before optional or blocking work."""
+    """Write the minimal typed receipt needed before optional or blocking work.
+
+    The requested scheduler is recorded here so a run that dies before dispatch
+    still says what it was asked to do; ``used`` stays None until dispatch
+    resolves it. ``record_run_termination`` merges into this payload, so the
+    field survives a startup failure.
+    """
 
     output_dir = output_dir.expanduser().resolve()
     started_at = started_at or datetime.now(timezone.utc)
@@ -2141,6 +2153,9 @@ def record_run_start(
             codex_transport=codex_transport or roster.codex_transport,
             worker=worker,
             include_git=False,
+            scheduler=(
+                {"requested": scheduler, "used": None, "fallback_reason": None} if scheduler is not None else None
+            ),
         ),
     )
     _write_json(output_dir / "roster.json", _roster_payload(roster))
@@ -2311,10 +2326,24 @@ def run(
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     direct_worker = worker is not None
 
+    # What the roster/flag asked for vs what dispatch actually ran. `used` stays
+    # None until dispatch resolves it, so a run that dies before dispatch reads
+    # as "requested dag, never got there" rather than falsely claiming a mode.
+    scheduler_resolution: dict[str, object] = {
+        "requested": scheduler,
+        "used": None,
+        "fallback_reason": None,
+    }
+
+    def scheduler_resolved(used: str, fallback_reason: str | None) -> None:
+        scheduler_resolution["used"] = used
+        scheduler_resolution["fallback_reason"] = fallback_reason
+
     def _payload(**kwargs: Any) -> dict[str, object]:
         return _run_payload(
             lock_workspace=lock_workspace,
             pre_run_snapshot=pre_run_snapshot_payload,
+            scheduler=dict(scheduler_resolution),
             **kwargs,
         )
 
@@ -2372,6 +2401,7 @@ def run(
             lock_workspace=lock_workspace,
             codex_transport=transport_for_payload,
             started_at=started_at,
+            scheduler=scheduler,
         )
     if code_graph is None:
         code_graph = code_graph_brief(cwd, task) if code_graph_enabled else CodeGraphBrief(attached=False)
@@ -2743,6 +2773,7 @@ def run(
                 route_held=dict(route.held) if route is not None and route.attached else None,
                 on_stage_start=stage_started,
                 on_interrupt=dispatch_interrupted,
+                on_scheduler_resolved=scheduler_resolved,
                 process_registry=process_registry,
             )
         except runguard.RetainRunLockError:

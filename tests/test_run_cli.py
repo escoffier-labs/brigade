@@ -1219,6 +1219,47 @@ def test_run_cli_terminalizes_roster_snapshot_write_failure(tmp_path, monkeypatc
     }
 
 
+def test_run_cli_records_requested_scheduler_before_dispatch(tmp_path, monkeypatch):
+    # A run that dies before dispatch must still say which scheduler was asked
+    # for, and must not claim one ran. Without this the receipt cannot tell a
+    # real DAG dispatch from a silent fallback to waves.
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = repo / ".brigade" / "runs" / "scheduler-requested"
+    real_write_json = aboyeur._write_json
+
+    def fail_roster_write(path, payload):
+        if path.name == "roster.json":
+            raise OSError("roster snapshot denied")
+        return real_write_json(path, payload)
+
+    monkeypatch.setattr(aboyeur, "_write_json", fail_roster_write)
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "x",
+                "--cwd",
+                str(repo),
+                "--output-dir",
+                str(output_dir),
+                "--worker",
+                "coder",
+                "--scheduler",
+                "dag",
+            ]
+        )
+        == 2
+    )
+
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["scheduler"] == {
+        "requested": "dag",
+        "used": None,
+        "fallback_reason": None,
+    }
+
+
 def test_run_cli_terminalizes_sigterm_during_roster_snapshot(tmp_path, monkeypatch):
     repo = _git_repo_with_roster(tmp_path)
     output_dir = repo / ".brigade" / "runs" / "roster-signal"
