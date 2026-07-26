@@ -2,10 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
-try:
-    import tomllib  # py3.11+
-except ModuleNotFoundError:  # py3.10
-    import tomli as tomllib  # type: ignore
+from .. import toml_compat as tomllib
 
 
 class ResearchConfig:
