@@ -507,6 +507,13 @@ def _fingerprint_segment(hasher, label: str, data: bytes) -> None:
     hasher.update(str(len(data)).encode() + b":" + data)
 
 
+def _stamp_harness_session(receipt: dict[str, Any]) -> None:
+    """Record the caller's Claude harness session when BRIGADE_CLAUDE_SESSION is valid 16-hex."""
+    claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
+    if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
+        receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
+
+
 def _tree_fingerprint(target: Path) -> str | None:
     """Content hash of HEAD + tracked diff + untracked files. None outside git."""
     try:
@@ -563,9 +570,7 @@ def _run_verify_commands(
             "tree_fingerprint": _tree_fingerprint(target),
             "planned_commands": [shlex.join(c) if isinstance(c, list) else c for c in commands],
         }
-        claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
-        if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
-            receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
+        _stamp_harness_session(receipt)
         try:
             graph_delta_before = graphtrail_delta.capture_before(target, run_dir, timeout=graphtrail_timeout)
         except KeyboardInterrupt:
@@ -719,6 +724,7 @@ def _write_reused_receipt(
         "tree_fingerprint": fingerprint,
         "planned_commands": planned_display,
     }
+    _stamp_harness_session(receipt)
     git = _receipt_git_snapshot(target)
     if git is not None:
         receipt["git"] = git
