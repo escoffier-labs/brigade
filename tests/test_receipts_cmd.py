@@ -387,6 +387,12 @@ def test_receipts_export_recomputes_inconsistent_compact_code_reference_metadata
 
 
 def test_receipts_export_miseledger_exports_run_and_digestless_verify_receipts(tmp_path, capsys):
+    _init_git_repo_with_head(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/example-org/example-repo.git"],
+        cwd=tmp_path,
+        check=True,
+    )
     verify_path = _write_verify_export_receipt(
         tmp_path,
         "20260708-110000-work-verify-def456",
@@ -410,8 +416,12 @@ def test_receipts_export_miseledger_exports_run_and_digestless_verify_receipts(t
     ]
     assert rows[0]["collection"]["external_id"] == "brigade:runs"
     assert rows[0]["item"]["external_id"] == "brigade:run:20260708-130000-aabbccdd"
+    assert rows[0]["item"]["metadata"]["project"] == "example-repo"
+    assert rows[0]["item"]["metadata"]["workspace_dir"] == str(tmp_path.resolve())
     assert rows[0]["raw"]["hash"] == "sha256:" + json.loads(run_path.read_text())["digests"]["receipt_sha256"]
     assert rows[0]["item"]["metadata"]["code_graph_delta_summary"] == "changed_symbols=1"
+    assert rows[1]["item"]["metadata"]["project"] == "example-repo"
+    assert rows[1]["item"]["metadata"]["workspace_dir"] == str(tmp_path.resolve())
     assert rows[1]["raw"]["hash"] == "sha256:" + localio.file_sha256(verify_path)
     assert rows[1]["item"]["metadata"]["digest_source"] == "file_sha256"
 
