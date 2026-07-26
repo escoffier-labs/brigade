@@ -74,3 +74,32 @@ def test_browser_provider_trust_is_preserved():
     )
     result = eng.research("how do plants make energy?")
     assert any(f.trust == "browser" for f in result.findings)
+
+
+def test_planning_call_receives_the_seat_timeout_floor(monkeypatch):
+    """The floor must survive the real engine path, not just a direct complete().
+
+    engine._plan() hardcodes timeout=30. A browser-driven seat cannot answer in
+    30 seconds, so a roster seat declaring timeout_seconds must lift every call.
+    """
+    from brigade.research import llm as llm_mod
+
+    stub = StubLlm()
+    seen = []
+
+    def fake_run_cli(cli, prompt, timeout, model=None, env=None):
+        seen.append(timeout)
+        return stub.complete([{"role": "user", "content": prompt}])
+
+    monkeypatch.setattr(llm_mod, "_run_cli", fake_run_cli)
+    backend = llm_mod.CliBackend("oracle", "gemini-3.1-pro", min_timeout=300)
+    eng = DeepResearcher(
+        llm=backend, local_index=StubIndex(), web=None, caps=Caps.build(max_rounds=2, min_rounds=1, max_time=30)
+    )
+
+    result = eng.research("how do plants make energy?")
+
+    assert "Plants convert light" in result.report
+    assert seen, "the engine made no LLM calls"
+    # 30 is the engine's planning literal; without the floor this would be 30.
+    assert min(seen) == 300

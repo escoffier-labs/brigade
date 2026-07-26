@@ -1405,3 +1405,18 @@ def test_load_rejects_invalid_scheduler_limit(tmp_path):
     text = VALID.replace("[limits]\n", '[limits]\nscheduler = "ready-queue"\n')
     with pytest.raises(ValueError, match="limits.scheduler"):
         roster_mod.load_roster(_write(tmp_path, text))
+
+
+def test_load_accepts_oracle_researcher(tmp_path):
+    # Clears both gates: agent_adapters.is_known (from _ADAPTERS) and the
+    # limits.allow_models allowlist the VALID fixture declares. The role is
+    # retargeted too, so find_role("researcher") -- the lookup resolve_backend
+    # actually performs -- returns this seat rather than nothing.
+    text = (
+        VALID.replace('cli = "ollama:llama3.3"', 'cli = "oracle"')
+        .replace('role = "write code"', 'role = "researcher"')
+        .replace('allow_models = ["codex", "ollama:*"]', 'allow_models = ["codex", "oracle"]')
+    )
+    loaded = roster_mod.load_roster(_write(tmp_path, text))
+    assert loaded.agents["coder"].cli == "oracle"
+    assert loaded.find_role("researcher").cli == "oracle"

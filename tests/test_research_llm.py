@@ -3,7 +3,9 @@ from brigade.research import llm
 
 
 class FakeAgent:
-    def __init__(self, name, cli=None, endpoint=None, model=None, role="researcher", headers=None):
+    def __init__(
+        self, name, cli=None, endpoint=None, model=None, role="researcher", headers=None, timeout_seconds=None
+    ):
         self.name, self.cli, self.endpoint, self.model, self.role, self.headers = (
             name,
             cli,
@@ -12,6 +14,7 @@ class FakeAgent:
             role,
             headers,
         )
+        self.timeout_seconds = timeout_seconds
 
 
 class FakeRoster:
@@ -87,3 +90,65 @@ def test_cli_backend_forwards_seat_env(monkeypatch):
     backend = llm.resolve_backend(roster)
     assert backend.complete([{"role": "user", "content": "q"}]) == "answer"
     assert captured["env"] == {"ANTHROPIC_BASE_URL": "https://api.example.com/anthropic"}
+
+
+def test_resolve_cli_backend_for_oracle_researcher(monkeypatch):
+    # The whole oracle lane rests on this: a researcher declaring cli="oracle"
+    # must reach CliBackend with its model intact and no research/ changes.
+    r = FakeRoster([FakeAgent("scribe", cli="oracle", model="gemini-3.1-pro", role="researcher")])
+    captured = {}
+
+    def fake_run_cli(cli, prompt, timeout, model=None, env=None):
+        captured["cli"] = cli
+        captured["model"] = model
+        return "report"
+
+    monkeypatch.setattr(llm, "_run_cli", fake_run_cli)
+    backend = llm.resolve_backend(r)
+    assert backend.complete([{"role": "user", "content": "hi"}]) == "report"
+    assert captured == {"cli": "oracle", "model": "gemini-3.1-pro"}
+
+
+def test_cli_backend_floors_short_engine_timeouts(monkeypatch):
+    # engine.py asks for timeout=30 on the planning call. A browser seat needs
+    # far longer, so the roster's timeout_seconds acts as a floor.
+    r = FakeRoster([FakeAgent("scribe", cli="oracle", model="gemini-3.1-pro", timeout_seconds=300)])
+    captured = {}
+
+    def fake_run_cli(cli, prompt, timeout, model=None, env=None):
+        captured["timeout"] = timeout
+        return "report"
+
+    monkeypatch.setattr(llm, "_run_cli", fake_run_cli)
+    backend = llm.resolve_backend(r)
+    backend.complete([{"role": "user", "content": "hi"}], timeout=30)
+    assert captured["timeout"] == 300
+
+
+def test_cli_backend_never_lowers_a_generous_timeout(monkeypatch):
+    r = FakeRoster([FakeAgent("scribe", cli="oracle", timeout_seconds=120)])
+    captured = {}
+
+    def fake_run_cli(cli, prompt, timeout, model=None, env=None):
+        captured["timeout"] = timeout
+        return "report"
+
+    monkeypatch.setattr(llm, "_run_cli", fake_run_cli)
+    backend = llm.resolve_backend(r)
+    backend.complete([{"role": "user", "content": "hi"}], timeout=180)
+    assert captured["timeout"] == 180
+
+
+def test_cli_backend_without_a_floor_is_unchanged(monkeypatch):
+    # Existing seats declare no timeout_seconds and must keep engine timings.
+    r = FakeRoster([FakeAgent("chef", cli="codex")])
+    captured = {}
+
+    def fake_run_cli(cli, prompt, timeout, model=None, env=None):
+        captured["timeout"] = timeout
+        return "ok"
+
+    monkeypatch.setattr(llm, "_run_cli", fake_run_cli)
+    backend = llm.resolve_backend(r)
+    backend.complete([{"role": "user", "content": "hi"}], timeout=30)
+    assert captured["timeout"] == 30
