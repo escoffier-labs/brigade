@@ -344,6 +344,102 @@ def _prune_verify_runs(target: Path, keep: int = VERIFY_RUNS_KEEP) -> int:
     return removed
 
 
+def _normalize_command_identity(command: str | list[str]) -> str:
+    """Canonicalize one command without discarding execution-affecting prefixes."""
+    if isinstance(command, list):
+        return shlex.join(command)
+    try:
+        return shlex.join(shlex.split(command))
+    except ValueError:
+        return command
+
+
+def _planned_commands_display(commands: list[str | list[str]]) -> list[str]:
+    return [shlex.join(command) if isinstance(command, list) else command for command in commands]
+
+
+def _planned_commands_identity(commands: list[str | list[str]]) -> list[str]:
+    return [_normalize_command_identity(command) for command in commands]
+
+
+def _receipt_planned_commands_identity(receipt: dict[str, Any]) -> list[str] | None:
+    """Return normalized command identity from a verify receipt."""
+    planned = receipt.get("planned_commands")
+    if isinstance(planned, list) and all(isinstance(item, str) for item in planned):
+        return [_normalize_command_identity(item) for item in planned]
+    commands = receipt.get("commands")
+    if not isinstance(commands, list):
+        return None
+    display: list[str] = []
+    for command in commands:
+        if isinstance(command, dict):
+            command_text = command.get("command")
+            if isinstance(command_text, str):
+                display.append(_normalize_command_identity(command_text))
+    return display or None
+
+
+def _verify_receipt_evidence_ref(receipt: dict[str, Any]) -> str:
+    path = receipt.get("path")
+    if isinstance(path, str) and path:
+        return str(Path(path) / "receipt.json")
+    run_id = receipt.get("run_id")
+    target = receipt.get("target")
+    if isinstance(run_id, str) and run_id and isinstance(target, str) and target:
+        return str(Path(target) / ".brigade" / "work" / "verify-runs" / run_id / "receipt.json")
+    return ""
+
+
+def _verify_receipt_has_outcome_capture(target: Path, receipt: dict[str, Any]) -> bool:
+    from .. import outcome_cmd
+
+    evidence_ref = _verify_receipt_evidence_ref(receipt)
+    if not evidence_ref:
+        return False
+    resolved = Path(evidence_ref).expanduser().resolve()
+    for record in outcome_cmd.load_records(target):
+        if not record.evidence_ref:
+            continue
+        try:
+            if Path(record.evidence_ref).expanduser().resolve() == resolved:
+                return True
+        except OSError:
+            if record.evidence_ref == evidence_ref:
+                return True
+    return False
+
+
+def _find_uncaptured_failed_verify_receipt(target: Path, planned_identity: list[str]) -> dict[str, Any] | None:
+    for receipt in _verify_receipts(target):
+        if _receipt_planned_commands_identity(receipt) != planned_identity:
+            continue
+        if receipt.get("status") != "failed":
+            return None
+        if _verify_receipt_has_outcome_capture(target, receipt):
+            return None
+        return receipt
+    return None
+
+
+def _capture_before_retry_message(run_id: str) -> str:
+    return f"brigade outcome capture brigade-work --run-id {run_id}"
+
+
+def _enforce_capture_before_retry(target: Path, planned_identity: list[str], *, mode: str) -> int | None:
+    """Block or warn when the latest matching failed receipt has no outcome capture."""
+    if mode == "off":
+        return None
+    failed = _find_uncaptured_failed_verify_receipt(target, planned_identity)
+    if failed is None:
+        return None
+    message = _capture_before_retry_message(str(failed.get("run_id") or ""))
+    if mode == "block":
+        print(f"error: {message}", file=sys.stderr)
+        return 1
+    print(f"warning: {message}", file=sys.stderr)
+    return None
+
+
 def _latest_verify_receipt(target: Path) -> dict[str, Any] | None:
     receipts = _verify_receipts(target)
     return receipts[0] if receipts else None
@@ -568,7 +664,7 @@ def _run_verify_commands(
             "evidence": _verification_evidence_payload(target),
             "commands": [],
             "tree_fingerprint": _tree_fingerprint(target),
-            "planned_commands": [shlex.join(c) if isinstance(c, list) else c for c in commands],
+            "planned_commands": _planned_commands_display(commands),
         }
         _stamp_harness_session(receipt)
         try:
@@ -943,12 +1039,21 @@ def verify_run(
     if not planned:
         print("error: no verification commands found; pass --command", file=sys.stderr)
         return 2
+    planned_display = _planned_commands_display(planned)
+    planned_identity = _planned_commands_identity(planned)
+    try:
+        capture_before_retry = config.resolve_capture_before_retry(target)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    blocked_rc = _enforce_capture_before_retry(target, planned_identity, mode=capture_before_retry)
+    if blocked_rc is not None:
+        return blocked_rc
     try:
         receipt = None
         if reuse:
             fingerprint = _tree_fingerprint(target)
             latest = _latest_verify_receipt(target)
-            planned_display = [shlex.join(c) if isinstance(c, list) else c for c in planned]
             if (
                 fingerprint is not None
                 and latest is not None

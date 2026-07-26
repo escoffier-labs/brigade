@@ -372,6 +372,139 @@ def test_verify_failed_receipt_not_reused(tmp_target, monkeypatch):
     assert "reused_from" not in receipts[0]
 
 
+def test_verify_warns_before_retrying_uncaptured_failed_command(tmp_target, monkeypatch, capsys):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    failed = verification._verify_receipts(tmp_target)[0]
+    rc = verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert f"warning: brigade outcome capture brigade-work --run-id {failed['run_id']}" in err
+
+
+def test_verify_blocks_before_retrying_uncaptured_failed_command(tmp_target, monkeypatch, capsys):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    _write_brigade_config(tmp_target, capture_before_retry="block")
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    failed = verification._verify_receipts(tmp_target)[0]
+    before = _count_verify_run_dirs(tmp_target)
+    rc = verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    assert rc == 1
+    assert _count_verify_run_dirs(tmp_target) == before
+    err = capsys.readouterr().err
+    assert f"error: brigade outcome capture brigade-work --run-id {failed['run_id']}" in err
+
+
+def test_verify_off_allows_silent_retry_of_uncaptured_failed_command(tmp_target, monkeypatch, capsys):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    _write_brigade_config(tmp_target, capture_before_retry="off")
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    rc = verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "brigade outcome capture" not in err
+
+
+def test_verify_captured_failed_command_retries_silently(tmp_target, monkeypatch, capsys):
+    from brigade import outcome_cmd
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    failed = verification._verify_receipts(tmp_target)[0]
+    assert outcome_cmd.capture(target=tmp_target, artifact_id="brigade-work", run_id=failed["run_id"]) == 0
+    capsys.readouterr()
+    rc = verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "brigade outcome capture" not in err
+
+
+def test_verify_first_run_and_passed_retry_stay_silent(tmp_target, monkeypatch, capsys):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    rc = verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "brigade outcome capture" not in err
+
+    rc = verification.verify_run(target=tmp_target, commands=["true"], timeout=60, reuse=False)
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "brigade outcome capture" not in err
+
+
+def test_verify_pass_after_failure_makes_next_retry_silent(tmp_target, monkeypatch, capsys):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    (tmp_target / "check.py").write_text(
+        "from pathlib import Path\n"
+        "marker = Path('passed-once')\n"
+        "if not marker.exists():\n"
+        "    marker.write_text('ready')\n"
+        "    raise SystemExit(1)\n"
+    )
+
+    command = "python3 check.py"
+    assert verification.verify_run(target=tmp_target, commands=[command], timeout=60) != 0
+    assert verification.verify_run(target=tmp_target, commands=[command], timeout=60) == 0
+    capsys.readouterr()
+
+    assert verification.verify_run(target=tmp_target, commands=[command], timeout=60, reuse=False) == 0
+    assert "brigade outcome capture" not in capsys.readouterr().err
+
+
+def test_verify_capture_before_retry_matches_exact_command_identity(tmp_target, monkeypatch, capsys):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["VAR=1 false"], timeout=60)
+    failed = verification._verify_receipts(tmp_target)[0]
+    rc = verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "brigade outcome capture" not in err
+
+    rc = verification.verify_run(target=tmp_target, commands=["VAR=1 false"], timeout=60)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert f"warning: brigade outcome capture brigade-work --run-id {failed['run_id']}" in err
+
+
+def test_verify_command_identity_normalizes_whitespace(tmp_target, monkeypatch, capsys):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+
+    verification.verify_run(target=tmp_target, commands=["VAR=1  false"], timeout=60)
+    failed = verification._verify_receipts(tmp_target)[0]
+    verification.verify_run(target=tmp_target, commands=["VAR=1 false"], timeout=60)
+    err = capsys.readouterr().err
+    assert f"warning: brigade outcome capture brigade-work --run-id {failed['run_id']}" in err
+
+
 def _init_git_repo_with_fixed_head(path):
     """Init a git repo whose HEAD commit hash is deterministic across calls.
 
@@ -750,7 +883,12 @@ def test_work_verify_receipt_omits_git_state_outside_git_repo(tmp_path, capsys, 
     assert receipt["digests"]["receipt_sha256"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
 
 
-def _write_brigade_config(tmp_path, *, graphtrail_delta_timeout_seconds: float | None = None) -> None:
+def _write_brigade_config(
+    tmp_path,
+    *,
+    graphtrail_delta_timeout_seconds: float | None = None,
+    capture_before_retry: str | None = None,
+) -> None:
     payload = {
         "version": 1,
         "depth": "repo",
@@ -760,6 +898,8 @@ def _write_brigade_config(tmp_path, *, graphtrail_delta_timeout_seconds: float |
     }
     if graphtrail_delta_timeout_seconds is not None:
         payload["graphtrail_delta_timeout_seconds"] = graphtrail_delta_timeout_seconds
+    if capture_before_retry is not None:
+        payload["capture_before_retry"] = capture_before_retry
     brigade = tmp_path / ".brigade"
     brigade.mkdir(parents=True, exist_ok=True)
     (brigade / "config.json").write_text(json.dumps(payload, indent=2) + "\n")

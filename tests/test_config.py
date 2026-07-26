@@ -146,3 +146,53 @@ def test_load_config_rejects_invalid_graphtrail_delta_timeout_seconds(tmp_path, 
     )
     with pytest.raises(ValueError, match="graphtrail_delta_timeout_seconds must be a positive number"):
         load_config(tmp_path)
+
+
+def test_load_config_defaults_capture_before_retry(tmp_path):
+    sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+    write_config(tmp_path, Config(version=1, selection=sel))
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.capture_before_retry == "warn"
+
+
+def test_load_config_reads_capture_before_retry(tmp_path):
+    path = tmp_path / ".brigade" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "depth": "repo",
+                "harnesses": ["claude"],
+                "owner": "claude",
+                "includes": [],
+                "capture_before_retry": "block",
+            }
+        )
+        + "\n"
+    )
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.capture_before_retry == "block"
+
+
+@pytest.mark.parametrize("value", ["maybe", 1, True])
+def test_load_config_rejects_invalid_capture_before_retry(tmp_path, value):
+    path = tmp_path / ".brigade" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "depth": "repo",
+                "harnesses": ["claude"],
+                "owner": "claude",
+                "includes": [],
+                "capture_before_retry": value,
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(ValueError, match="capture_before_retry must be one of"):
+        load_config(tmp_path)
