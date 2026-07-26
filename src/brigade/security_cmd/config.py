@@ -39,9 +39,33 @@ def _parse_toml_value(raw: str) -> object:
         return value
 
 
-def _read_toml_object(path: Path) -> dict[str, object]:
+@dataclass(frozen=True)
+class _SecurityToml:
+    data: dict[str, object]
+    top_level_keys: frozenset[str]
+    suppressions_keys: frozenset[str]
+    enrichment_keys: frozenset[str]
+
+
+def _validate_config_keys(parsed: _SecurityToml) -> None:
+    unknown_top = parsed.top_level_keys - CONFIG_TOP_LEVEL_KEYS
+    if unknown_top:
+        raise ValueError(f"unsupported security config key: {', '.join(sorted(unknown_top))}")
+    unknown_suppressions = parsed.suppressions_keys - CONFIG_SUPPRESSIONS_KEYS
+    if unknown_suppressions:
+        raise ValueError(f"unsupported suppressions key: {', '.join(sorted(unknown_suppressions))}")
+    unknown_enrichment = parsed.enrichment_keys - CONFIG_ENRICHMENT_KEYS
+    if unknown_enrichment:
+        raise ValueError(f"unsupported enrichment key: {', '.join(sorted(unknown_enrichment))}")
+
+
+def _read_toml_object(path: Path) -> _SecurityToml:
     data: dict[str, object] = {}
     current = data
+    current_section = "top"
+    top_level_keys: set[str] = set()
+    suppressions_keys: set[str] = set()
+    enrichment_keys: set[str] = set()
     for line_number, raw_line in enumerate(path.read_text().splitlines(), start=1):
         line = raw_line.split("#", 1)[0].strip()
         if not line:
@@ -50,6 +74,7 @@ def _read_toml_object(path: Path) -> dict[str, object]:
             table = line[1:-1].strip()
             if table not in {"suppressions", "suppression_reasons", "enrichment"}:
                 raise ValueError(f"invalid security config line {line_number}: unsupported table [{table}]")
+            current_section = table
             current = data.setdefault(table, {})
             if not isinstance(current, dict):
                 raise ValueError(f"invalid security config line {line_number}: {table} must be a table")
@@ -60,15 +85,34 @@ def _read_toml_object(path: Path) -> dict[str, object]:
         key = key.strip()
         if not key:
             raise ValueError(f"invalid security config line {line_number}: empty key")
-        current[key] = _parse_toml_value(raw_value)
-    return data
+        value = _parse_toml_value(raw_value)
+        if current_section == "top":
+            top_level_keys.add(key)
+            current[key] = value
+        elif current_section == "suppressions":
+            suppressions_keys.add(key)
+            current[key] = value
+        elif current_section == "suppression_reasons":
+            current[key] = value
+        else:
+            enrichment_keys.add(key)
+            current[key] = value
+    parsed = _SecurityToml(
+        data=data,
+        top_level_keys=frozenset(top_level_keys),
+        suppressions_keys=frozenset(suppressions_keys),
+        enrichment_keys=frozenset(enrichment_keys),
+    )
+    _validate_config_keys(parsed)
+    return parsed
 
 
 def load_config(target: Path) -> SecurityConfig | None:
     path = config_path(target.expanduser().resolve())
     if not path.is_file():
         return None
-    data = _read_toml_object(path)
+    parsed = _read_toml_object(path)
+    data = parsed.data
     policy = data.get("policy", "personal")
     if not isinstance(policy, str) or policy not in POLICIES:
         raise ValueError("policy must be one of: ci, personal, public-repo, strict")
@@ -87,7 +131,10 @@ def load_config(target: Path) -> SecurityConfig | None:
         allowed=SECURITY_CHECKS,
     )
     include_paths = _parse_string_list(data.get("include_paths", []), field_name="include_paths")
-    exclude_paths = _parse_string_list(data.get("exclude_paths", []), field_name="exclude_paths")
+    if "exclude_paths" in parsed.top_level_keys:
+        exclude_paths = _parse_string_list(data.get("exclude_paths", []), field_name="exclude_paths")
+    else:
+        exclude_paths = DEFAULT_EXCLUDE_PATHS
     severity_threshold = data.get("severity_threshold", "low")
     if not isinstance(severity_threshold, str) or severity_threshold not in SEVERITY_ORDER:
         raise ValueError("severity_threshold must be one of: info, low, medium, high, critical")
@@ -151,6 +198,9 @@ def _parse_enrichment_config(raw: object) -> SecurityEnrichmentConfig:
         return SecurityEnrichmentConfig()
     if not isinstance(raw, dict):
         raise ValueError("enrichment must be a table")
+    unknown = set(raw.keys()) - CONFIG_ENRICHMENT_KEYS
+    if unknown:
+        raise ValueError(f"unsupported enrichment key: {', '.join(sorted(unknown))}")
     provider = raw.get("provider")
     if provider is not None:
         if not isinstance(provider, str) or provider not in ENRICHMENT_PROVIDERS:
@@ -207,7 +257,7 @@ def _effective_policy(
         include_templates=effective_include_templates,
         enabled_checks=loaded.enabled_checks if loaded is not None else SECURITY_CHECKS,
         include_paths=loaded.include_paths if loaded is not None else (),
-        exclude_paths=loaded.exclude_paths if loaded is not None else (),
+        exclude_paths=loaded.exclude_paths if loaded is not None else DEFAULT_EXCLUDE_PATHS,
         severity_threshold=loaded.severity_threshold if loaded is not None else "low",
         output_path=loaded.output_path if loaded is not None else ARTIFACTS_REL_PATH,
         suppressions=loaded.suppressions if loaded is not None else (),
@@ -233,7 +283,7 @@ def write_default_config(target: Path, *, force: bool = False) -> Path:
                 "include_templates = false",
                 'enabled_checks = ["automation", "mcp", "permissions", "prompt-injection", "secrets", "supply-chain"]',
                 "include_paths = []",
-                "exclude_paths = []",
+                'exclude_paths = [".brigade/**"]',
                 'severity_threshold = "low"',
                 'output_path = ".brigade/security/latest"',
                 "",

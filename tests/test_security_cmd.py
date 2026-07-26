@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from brigade import cli
 from brigade import learn_cmd
 from brigade import release_cmd
@@ -189,6 +191,8 @@ def test_security_policy_pack_closeout_release_and_candidate_evidence(tmp_path, 
 def test_security_accepted_risk_closeout_quiets_matching_findings_and_resurfaces_changes(tmp_path, capsys):
     assert security_cmd.init(target=tmp_path) == 0
     capsys.readouterr()
+    config_path = tmp_path / ".brigade" / "security.toml"
+    config_path.write_text(config_path.read_text().replace('exclude_paths = [".brigade/**"]', "exclude_paths = []"))
     harness_dir = tmp_path / ".brigade" / "hermes"
     harness_dir.mkdir(parents=True)
     (harness_dir / "workspace.harness.json").write_text(json.dumps({"endpoint": "https://agent.private/api"}, indent=2))
@@ -337,6 +341,18 @@ def test_security_scan_deep_mcp_config_checks(tmp_path, capsys):
 def test_security_scan_harness_wiring_checks_cross_harness_json(tmp_path, capsys):
     brigade_dir = tmp_path / ".brigade"
     brigade_dir.mkdir()
+    (brigade_dir / "security.toml").write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "exclude_paths = []",
+                "",
+                "[suppressions]",
+                "fingerprints = []",
+                "",
+            ]
+        )
+    )
     (brigade_dir / "handoff-sources.json").write_text(
         json.dumps(
             {
@@ -710,6 +726,166 @@ def test_security_scan_cli_excludes_brigade_glob_from_self_scan(tmp_path, capsys
     assert ".brigade/security.toml" not in scanned_paths
     assert ".brigade/center/reports/operator-one/CENTER_EVIDENCE.json" not in scanned_paths
     assert not security_cmd._path_matches_any("nested/.brigade/evidence.json", (".brigade/**",))
+
+
+def test_security_scan_excludes_brigade_by_default_without_config(tmp_path, capsys):
+    (tmp_path / "hooks" / "install.sh").parent.mkdir(parents=True)
+    (tmp_path / "hooks" / "install.sh").write_text("curl https://example.invalid/install.sh | sh\n")
+    brigade_evidence = tmp_path / ".brigade" / "center" / "reports" / "operator-one"
+    brigade_evidence.mkdir(parents=True)
+    (brigade_evidence / "CENTER_EVIDENCE.json").write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "path": "README.md",
+                        "line": 42,
+                        "safe_excerpt": "npx -y @example/unpinned-package",
+                        "category": "supply-chain",
+                        "title": "Unpinned remote package execution",
+                    }
+                ]
+            }
+        )
+        + "\n"
+    )
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    finding_paths = {finding["path"] for finding in report["findings"]}
+    scanned_paths = set(report["scanned_files"])
+    assert report["exclude_paths"] == [".brigade/**"]
+    assert finding_paths == {"hooks/install.sh"}
+    assert not any(path.startswith(".brigade/") for path in finding_paths)
+    assert not any(path.startswith(".brigade/") for path in scanned_paths)
+
+
+def test_security_init_default_config_excludes_brigade(tmp_path, capsys):
+    (tmp_path / "hooks" / "install.sh").parent.mkdir(parents=True)
+    (tmp_path / "hooks" / "install.sh").write_text("curl https://example.invalid/install.sh | sh\n")
+    brigade_secret = tmp_path / ".brigade" / "evidence" / "secret.txt"
+    brigade_secret.parent.mkdir(parents=True)
+    brigade_secret.write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
+
+    assert security_cmd.init(target=tmp_path) == 0
+    capsys.readouterr()
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.exclude_paths == (".brigade/**",)
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    finding_paths = {finding["path"] for finding in report["findings"]}
+    assert finding_paths == {"hooks/install.sh"}
+    assert ".brigade/evidence/secret.txt" not in report["scanned_files"]
+
+
+def test_security_explicit_empty_exclude_paths_scans_brigade(tmp_path, capsys):
+    brigade_secret = tmp_path / ".brigade" / "evidence" / "secret.txt"
+    brigade_secret.parent.mkdir(parents=True)
+    brigade_secret.write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
+    config = tmp_path / ".brigade" / "security.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'scan_profile = "local-only-audit"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "exclude_paths = []",
+                'severity_threshold = "low"',
+                'output_path = ".brigade/security/latest"',
+                "",
+                "[suppressions]",
+                "fingerprints = []",
+                "",
+            ]
+        )
+    )
+
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.exclude_paths == ()
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert ".brigade/evidence/secret.txt" in report["scanned_files"]
+    assert any(finding["path"] == ".brigade/evidence/secret.txt" for finding in report["findings"])
+
+
+def test_security_config_rejects_unknown_top_level_key(tmp_path):
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('unknown_setting = "nope"\n')
+
+    with pytest.raises(ValueError, match="unsupported security config key: unknown_setting"):
+        security_cmd.load_config(tmp_path)
+
+
+def test_security_config_rejects_unknown_suppressions_key(tmp_path):
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[suppressions]",
+                "fingerprints = []",
+                "legacy_ids = []",
+                "",
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError, match="unsupported suppressions key: legacy_ids"):
+        security_cmd.load_config(tmp_path)
+
+
+def test_security_config_rejects_unknown_enrichment_key(tmp_path):
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[enrichment]",
+                'provider = "local"',
+                "extra_flag = true",
+                "",
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError, match="unsupported enrichment key: extra_flag"):
+        security_cmd.load_config(tmp_path)
+
+
+def test_security_config_allows_suppression_reasons_fingerprint_keys(tmp_path):
+    fingerprint = "a" * 64
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{fingerprint}"]',
+                "",
+                "[suppression_reasons]",
+                f'{fingerprint} = "reviewed local fake token"',
+                "",
+            ]
+        )
+    )
+
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.suppressions == (fingerprint,)
+    assert loaded.suppression_reasons[fingerprint] == "reviewed local fake token"
 
 
 def test_security_scan_include_paths_do_not_open_unrelated_files(tmp_path, monkeypatch):
