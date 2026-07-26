@@ -60,6 +60,7 @@ def show_config(*, target: Path, json_output: bool = False) -> int:
 
 def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, Any]:
     target = target.expanduser().resolve()
+    migration_map = _read_fingerprint_migration_map(target)
     checks: list[dict[str, Any]] = []
     closeouts = _read_closeouts(target)
     latest_closeout = closeouts[0] if closeouts else None
@@ -75,6 +76,8 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
         and latest_closeout["policy_pack"].get("accepted_risk") is True
         else set()
     )
+    if accepted_fingerprints:
+        accepted_fingerprints = _expand_suppression_fingerprints(accepted_fingerprints, migration_map)
     config_ok = True
     try:
         loaded = load_config(target)
@@ -144,11 +147,30 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
     eligible_harness_findings = [
         item for item in raw_harness_findings if include_templates or item.get("confidence") != "template"
     ]
+    if isinstance(latest_closeout, dict) and eligible_harness_findings:
+        matched_harness_findings = [
+            item
+            for item in eligible_harness_findings
+            if _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
+        ]
+        migrated_closeout = _migrate_closeout_fingerprints(latest_closeout, matched_harness_findings)
+        if migrated_closeout is not None:
+            latest_closeout = migrated_closeout
+            accepted_fingerprints = {
+                str(fingerprint)
+                for fingerprint in latest_closeout.get("source_fingerprints", [])
+                if isinstance(fingerprint, str) and fingerprint
+            }
+            accepted_fingerprints = _expand_suppression_fingerprints(accepted_fingerprints, migration_map)
     active_harness_findings = [
-        item for item in eligible_harness_findings if str(item.get("fingerprint") or "") not in accepted_fingerprints
+        item
+        for item in eligible_harness_findings
+        if not _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
     ]
     quieted_harness_findings = [
-        item for item in eligible_harness_findings if str(item.get("fingerprint") or "") in accepted_fingerprints
+        item
+        for item in eligible_harness_findings
+        if _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
     ]
     harness_wiring = {
         **raw_harness_wiring,
@@ -233,10 +255,24 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
         except (OSError, ValueError, json.JSONDecodeError):
             raw_open_findings = []
         quieted_findings = [
-            item for item in raw_open_findings if str(item.get("fingerprint") or "") in accepted_fingerprints
+            item
+            for item in raw_open_findings
+            if _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
         ]
+        if isinstance(latest_closeout, dict) and quieted_findings:
+            migrated_closeout = _migrate_closeout_fingerprints(latest_closeout, quieted_findings)
+            if migrated_closeout is not None:
+                latest_closeout = migrated_closeout
+                accepted_fingerprints = {
+                    str(fingerprint)
+                    for fingerprint in latest_closeout.get("source_fingerprints", [])
+                    if isinstance(fingerprint, str) and fingerprint
+                }
+                accepted_fingerprints = _expand_suppression_fingerprints(accepted_fingerprints, migration_map)
         records = [
-            item for item in raw_open_findings if str(item.get("fingerprint") or "") not in accepted_fingerprints
+            item
+            for item in raw_open_findings
+            if not _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
         ]
         if records:
             top_finding = records[0]
@@ -411,6 +447,22 @@ def scan(
         exclude_paths=effective.exclude_paths,
         severity_threshold=effective.severity_threshold,
     )
+    suppression_migrations: list[dict[str, str]] = []
+    if effective.config_loaded:
+        loaded = load_config(target)
+        if loaded is not None:
+            migrated_config, suppression_migrations = _migrate_legacy_suppressions(loaded, report)
+            if suppression_migrations:
+                if _merge_fingerprint_migration_map(target, suppression_migrations):
+                    write_config(target, migrated_config)
+                    effective = _effective_policy(
+                        target,
+                        policy=policy,
+                        fail_on=fail_on,
+                        include_templates=include_templates,
+                    )
+                else:
+                    suppression_migrations = []
     report["policy"] = effective.policy
     report["scan_profile"] = effective.scan_profile
     report["fail_on"] = effective.fail_on
@@ -422,6 +474,8 @@ def scan(
     report["config"] = str(effective.config_path)
     report["config_loaded"] = effective.config_loaded
     report["generated_at"] = _utc_iso()
+    if suppression_migrations:
+        report["suppression_migrations"] = suppression_migrations
     _write_suppression_health_cache_from_report(target, effective, report)
     configured_output_dir = target / effective.output_path
     requested_output_dir = output_dir

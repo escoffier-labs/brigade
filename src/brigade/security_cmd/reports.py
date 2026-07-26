@@ -44,26 +44,33 @@ def _load_report_file(path: Path) -> dict[str, Any]:
 
 def _report_findings_for_review(target: Path, report: dict[str, Any]) -> list[dict[str, Any]]:
     config = load_config(target) or SecurityConfig()
+    migration_map = _read_fingerprint_migration_map(target)
     suppressed = set(config.suppressions)
     reasons = config.suppression_reasons
     records: list[dict[str, Any]] = []
     for finding in report.get("findings", []):
         if not isinstance(finding, dict):
             continue
-        fingerprint = str(finding.get("fingerprint") or "")
         record = dict(finding)
-        record["status"] = "suppressed" if fingerprint in suppressed else "open"
-        if fingerprint in reasons:
-            record["reason"] = reasons[fingerprint]
+        record["status"] = (
+            "suppressed" if _finding_matches_fingerprints(finding, suppressed, migration_map=migration_map) else "open"
+        )
+        reason = _suppression_reason_for_finding(
+            finding, suppressions=suppressed, reasons=reasons, migration_map=migration_map
+        )
+        if reason:
+            record["reason"] = reason
         records.append(record)
     for finding in report.get("suppressed_findings", []):
         if not isinstance(finding, dict):
             continue
-        fingerprint = str(finding.get("fingerprint") or "")
         record = dict(finding)
         record["status"] = "suppressed"
-        if fingerprint in reasons:
-            record["reason"] = reasons[fingerprint]
+        reason = _suppression_reason_for_finding(
+            finding, suppressions=suppressed, reasons=reasons, migration_map=migration_map
+        )
+        if reason:
+            record["reason"] = reason
         records.append(record)
     records.sort(
         key=lambda item: (
@@ -150,6 +157,71 @@ def _diff_finding_key(record: dict[str, Any]) -> str:
     return "|".join(str(record.get(field) or "") for field in ("category", "path", "line", "title"))
 
 
+def _identifier_match_candidates(identifier: str, migration_map: dict[str, str] | None = None) -> set[str]:
+    needle = identifier.strip()
+    if not needle:
+        return set()
+    candidates = {needle}
+    fingerprint = needle.removeprefix("security-")
+    if FINGERPRINT_RE.fullmatch(fingerprint):
+        candidates.add(fingerprint)
+    if migration_map and FINGERPRINT_RE.fullmatch(fingerprint):
+        aliases = _expand_suppression_fingerprints({fingerprint}, migration_map)
+        candidates.update(aliases)
+        candidates.update(f"security-{alias}" for alias in aliases)
+    return candidates
+
+
+def _diff_finding_alias_keys(
+    record: dict[str, Any],
+    migration_map: dict[str, str] | None = None,
+) -> set[str]:
+    keys: set[str] = set()
+    fingerprint = str(record.get("fingerprint") or "")
+    if fingerprint:
+        keys.add(fingerprint)
+    duplicate_count = record.get("duplicate_count")
+    is_singleton = duplicate_count is None or (isinstance(duplicate_count, int) and duplicate_count <= 1)
+    if is_singleton:
+        legacy = str(record.get("legacy_fingerprint") or "")
+        if legacy:
+            keys.add(legacy)
+        if migration_map:
+            keys = _expand_suppression_fingerprints(keys, migration_map)
+    if keys:
+        return keys
+    return {_diff_finding_key(record)}
+
+
+def _diff_records_match(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    migration_map: dict[str, str] | None = None,
+) -> bool:
+    return bool(_diff_finding_alias_keys(left, migration_map) & _diff_finding_alias_keys(right, migration_map))
+
+
+def _diff_record_matches_any(
+    record: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    migration_map: dict[str, str] | None = None,
+) -> bool:
+    return any(_diff_records_match(record, candidate, migration_map) for candidate in candidates)
+
+
+def _finding_identifier_matches(
+    record: dict[str, Any],
+    identifier: str,
+    migration_map: dict[str, str] | None = None,
+) -> bool:
+    for needle in _identifier_match_candidates(identifier, migration_map):
+        for field_name in ("id", "fingerprint", "legacy_fingerprint"):
+            value = str(record.get(field_name) or "")
+            if value == needle or value.startswith(needle):
+                return True
+    return False
+
+
 def diff(
     *,
     target: Path,
@@ -179,14 +251,15 @@ def diff(
         print(f"error: invalid security report: {exc}", file=sys.stderr)
         return 2
 
+    migration_map = _read_fingerprint_migration_map(target)
     base_records = _report_findings_for_review(target, base_report)
     against_records = _report_findings_for_review(target, against_report)
-    base_keys = {_diff_finding_key(record) for record in base_records}
-    against_keys = {_diff_finding_key(record) for record in against_records}
 
-    new = [record for record in against_records if _diff_finding_key(record) not in base_keys]
-    resolved = [record for record in base_records if _diff_finding_key(record) not in against_keys]
-    persisting = [record for record in against_records if _diff_finding_key(record) in base_keys]
+    new = [record for record in against_records if not _diff_record_matches_any(record, base_records, migration_map)]
+    resolved = [
+        record for record in base_records if not _diff_record_matches_any(record, against_records, migration_map)
+    ]
+    persisting = [record for record in against_records if _diff_record_matches_any(record, base_records, migration_map)]
 
     payload = {
         "base": str(base_dir),
@@ -255,6 +328,7 @@ def _resolve_finding_record(
     target: Path, identifier: str, output_dir: Path | None = None
 ) -> tuple[dict[str, Any] | None, str | None]:
     artifacts_dir = output_dir.expanduser().resolve() if output_dir is not None else default_artifacts_dir(target)
+    migration_map = _read_fingerprint_migration_map(target)
     try:
         report = _load_report(artifacts_dir)
         records = _report_findings_for_review(target, report)
@@ -263,17 +337,7 @@ def _resolve_finding_record(
     except (ValueError, json.JSONDecodeError) as exc:
         return None, f"invalid security report: {exc}"
     needle = identifier.strip()
-    matches = [
-        item
-        for item in records
-        if needle
-        and (
-            str(item.get("id") or "") == needle
-            or str(item.get("fingerprint") or "") == needle
-            or str(item.get("id") or "").startswith(needle)
-            or str(item.get("fingerprint") or "").startswith(needle)
-        )
-    ]
+    matches = [item for item in records if _finding_identifier_matches(item, needle, migration_map)]
     if not matches:
         return None, f"finding not found: {identifier}"
     if len(matches) > 1:
