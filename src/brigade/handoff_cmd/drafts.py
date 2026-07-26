@@ -379,7 +379,7 @@ def _draft_summary(
     except OSError:
         text = ""
     raw_sections = _parse_markdown_sections(text)
-    sections, _collision_errors = _canonicalize_sections(raw_sections)
+    sections, _collision_errors, _ = _canonicalize_sections(raw_sections)
     lint_result = lint_file(path)
     action = lint_result.action
     target_card = (

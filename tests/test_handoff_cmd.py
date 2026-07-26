@@ -2114,19 +2114,80 @@ def test_handoff_lint_surfaces_injection_signals(tmp_path, capsys):
     assert "handoff migrate" not in out
 
 
-def test_handoff_lint_rejects_homegrown_section_headings_while_ingest_parses_action(tmp_path):
+def test_handoff_lint_accepts_homegrown_section_headings_with_warnings(tmp_path):
     from brigade import ingest as ingest_mod
 
     note = tmp_path / "homegrown.md"
     note.write_text(HOMEGROWN_NO_CARD_HANDOFF)
     result = handoff_cmd.lint_file(note)
-    assert not result.valid
-    assert any("missing required section: Type" in err for err in result.errors)
-    assert any("missing required section: Title" in err for err in result.errors)
-    assert any("missing required section: Summary" in err for err in result.errors)
+    assert result.valid, result.errors
+    assert result.warnings
+    assert any("noncanonical" in warning for warning in result.warnings)
+    assert any("Category" in warning for warning in result.warnings)
+    assert any("Subject" in warning for warning in result.warnings)
+    assert any("What changed" in warning for warning in result.warnings)
+    assert result.hints
+    assert any("use ## Type instead of ## Category" in hint for hint in result.hints)
+    assert any("use ## Title instead of ## Subject" in hint for hint in result.hints)
+    assert any("use ## Summary instead of ## What changed" in hint for hint in result.hints)
 
     sections = ingest_mod.parse(note)
     assert sections.get("recommended memory action", "").strip().casefold() == "no-card"
+
+
+def test_handoff_lint_accepts_case_and_punctuation_heading_variants_with_warnings(tmp_path):
+    note = tmp_path / "variants.md"
+    note.write_text(
+        NO_CARD_HANDOFF.replace("## Type", "## TYPE")
+        .replace("## Title", "## title")
+        .replace("## Summary", "## Summary:")
+    )
+    result = handoff_cmd.lint_file(note)
+    assert result.valid, result.errors
+    assert result.warnings
+    assert any("TYPE" in warning for warning in result.warnings)
+    assert any("title" in warning for warning in result.warnings)
+    assert any("Summary:" in warning for warning in result.warnings)
+    assert result.hints
+    assert any("use ## Type instead of ## TYPE" in hint for hint in result.hints)
+    assert any("use ## Title instead of ## title" in hint for hint in result.hints)
+    assert any("use ## Summary instead of ## Summary:" in hint for hint in result.hints)
+
+
+def test_handoff_lint_accepts_reordered_canonical_sections_with_warnings(tmp_path):
+    note = tmp_path / "reordered.md"
+    note.write_text(
+        """# Memory Handoff
+
+## Summary
+Document handoffs should be routable.
+
+## Type
+learning
+
+## Title
+Handoff lint documents
+
+## Recommended memory action
+no-card
+
+## Target document
+.learnings/LEARNINGS.md
+
+## Suggested document content
+### Handoff lint documents
+
+Document handoffs only include document fields.
+"""
+    )
+    result = handoff_cmd.lint_file(note)
+    assert result.valid, result.errors
+    assert result.warnings
+    assert any("out of canonical order" in warning for warning in result.warnings)
+    assert result.hints
+    assert any("Expected section order:" in hint for hint in result.hints)
+    assert any("## Type" in hint for hint in result.hints)
+    assert any("## Summary" in hint for hint in result.hints)
 
 
 def test_handoff_lint_accepts_synonym_section_headings(tmp_path):
@@ -2134,6 +2195,9 @@ def test_handoff_lint_accepts_synonym_section_headings(tmp_path):
     note.write_text(SYNONYM_NO_CARD_HANDOFF)
     result = handoff_cmd.lint_file(note)
     assert result.valid, result.errors
+    assert result.warnings
+    assert any("noncanonical" in warning for warning in result.warnings)
+    assert result.hints
 
 
 def test_handoff_lint_rejects_ambiguous_synonym_collision(tmp_path):
@@ -2176,6 +2240,8 @@ def test_handoff_lint_still_accepts_canonical_headings(tmp_path):
     note.write_text(NO_CARD_HANDOFF)
     result = handoff_cmd.lint_file(note)
     assert result.valid, result.errors
+    assert not result.warnings
+    assert not result.hints
 
 
 def test_handoff_draft_summary_resolves_synonym_target_card(tmp_path):

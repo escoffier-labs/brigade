@@ -335,16 +335,33 @@ def _normalize_section_heading(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip().casefold()).rstrip(":").strip()
 
 
+CANONICAL_HANDOFF_SECTION_HEADINGS: tuple[str, ...] = (
+    "Type",
+    "Title",
+    "Summary",
+    "Durable facts",
+    "Evidence",
+    "Recommended memory action",
+    "Target card",
+    "Suggested card content",
+    "Target document",
+    "Suggested document content",
+)
+
+
 _SECTION_SYNONYMS: dict[str, str] = {
     "type": "Type",
     "handoff type": "Type",
     "kind": "Type",
+    "category": "Type",
     "title": "Title",
     "name": "Title",
+    "subject": "Title",
     "summary": "Summary",
     "tldr": "Summary",
     "tl;dr": "Summary",
     "overview": "Summary",
+    "what changed": "Summary",
     "durable facts": "Durable facts",
     "facts": "Durable facts",
     "evidence": "Evidence",
@@ -364,15 +381,44 @@ _SECTION_SYNONYMS: dict[str, str] = {
 }
 
 
-def _canonicalize_sections(sections: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+def _exact_canonical_heading(raw_name: str) -> str | None:
+    normalized = _normalize_section_heading(raw_name)
+    for canonical in CANONICAL_HANDOFF_SECTION_HEADINGS:
+        if _normalize_section_heading(canonical) == normalized:
+            return canonical
+    return None
+
+
+def _resolve_section_canonical(raw_name: str) -> str | None:
+    key = _normalize_section_heading(raw_name)
+    canonical = _SECTION_SYNONYMS.get(key)
+    if canonical is not None:
+        return canonical
+    return _exact_canonical_heading(raw_name)
+
+
+def _canonicalize_sections(sections: dict[str, str]) -> tuple[dict[str, str], list[str], list[tuple[str, str]]]:
     resolved: dict[str, str] = {}
     owners: dict[str, str] = {}
     errors: list[str] = []
+    noncanonical: list[tuple[str, str]] = []
     for raw_name, body in sections.items():
         key = _normalize_section_heading(raw_name)
         canonical = _SECTION_SYNONYMS.get(key)
         if canonical is None:
-            resolved[raw_name] = body
+            exact = _exact_canonical_heading(raw_name)
+            if exact is not None:
+                prior = owners.get(exact)
+                if prior is not None and prior != raw_name:
+                    errors.append(f"ambiguous section headings for {exact}: {prior!r}, {raw_name!r}")
+                    continue
+                owners[exact] = raw_name
+                if exact not in resolved or (body and not resolved[exact]):
+                    resolved[exact] = body
+                if raw_name != exact:
+                    noncanonical.append((raw_name, exact))
+            else:
+                resolved[raw_name] = body
             continue
         prior = owners.get(canonical)
         if prior is not None and prior != raw_name:
@@ -381,7 +427,46 @@ def _canonicalize_sections(sections: dict[str, str]) -> tuple[dict[str, str], li
         owners[canonical] = raw_name
         if canonical not in resolved or (body and not resolved[canonical]):
             resolved[canonical] = body
-    return resolved, errors
+        if raw_name != canonical:
+            noncanonical.append((raw_name, canonical))
+    return resolved, errors, noncanonical
+
+
+def _canonical_sections_in_file_order(sections: dict[str, str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw_name in sections:
+        canonical = _resolve_section_canonical(raw_name)
+        if canonical is None or canonical not in CANONICAL_HANDOFF_SECTION_HEADINGS:
+            continue
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        ordered.append(canonical)
+    return ordered
+
+
+def _lint_noncanonical_heading_messages(
+    noncanonical: list[tuple[str, str]],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if not noncanonical:
+        return (), ()
+    warnings = tuple(f"noncanonical section heading {raw!r}; use ## {canonical}" for raw, canonical in noncanonical)
+    hints = tuple(f"use ## {canonical} instead of ## {raw}" for raw, canonical in noncanonical)
+    return warnings, hints
+
+
+def _lint_section_order_messages(
+    sections: dict[str, str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    ordered = _canonical_sections_in_file_order(sections)
+    if len(ordered) < 2:
+        return (), ()
+    indices = [CANONICAL_HANDOFF_SECTION_HEADINGS.index(name) for name in ordered]
+    if indices == sorted(indices):
+        return (), ()
+    expected = ", ".join(f"## {name}" for name in CANONICAL_HANDOFF_SECTION_HEADINGS)
+    return ("sections are out of canonical order",), (f"Expected section order: {expected}",)
 
 
 def _section_value(sections: dict[str, str], name: str) -> str:
