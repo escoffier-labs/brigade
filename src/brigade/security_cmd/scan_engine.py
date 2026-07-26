@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import fnmatch
 import hashlib
 import json
 import os
@@ -1170,7 +1171,15 @@ def _path_matches_any(rel_path: str, patterns: tuple[str, ...]) -> bool:
         clean = pattern.strip().replace("\\", "/").strip("/")
         if not clean:
             continue
-        if normalized == clean or normalized.startswith(clean.rstrip("/") + "/"):
+        if clean.endswith("/**"):
+            prefix = clean[:-3].rstrip("/")
+            if normalized == prefix or normalized.startswith(prefix + "/"):
+                return True
+        if fnmatch.fnmatchcase(normalized, clean):
+            return True
+        if not any(char in clean for char in "*?[") and (
+            normalized == clean or normalized.startswith(clean.rstrip("/") + "/")
+        ):
             return True
     return False
 

