@@ -1022,6 +1022,26 @@ def test_assignment_payload_serializes_stage():
     assert payload == [{"stage": 2, "worker": "coder", "task": "implement it"}]
 
 
+def test_assignment_payload_serializes_selected_skill_ids():
+    payload = aboyeur._assignment_payload(
+        [
+            aboyeur.Assignment(
+                worker="coder",
+                task="implement it",
+                selected_skill_ids=("brigade-work",),
+            )
+        ]
+    )
+    assert payload == [
+        {
+            "stage": 1,
+            "worker": "coder",
+            "task": "implement it",
+            "selected_skill_ids": ["brigade-work"],
+        }
+    ]
+
+
 def test_run_dry_run_stops_after_plan(monkeypatch, capsys):
     calls = []
 

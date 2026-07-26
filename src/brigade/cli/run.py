@@ -527,7 +527,7 @@ def dispatch(args) -> int:
                 if output_dir is not None and (output_dir / "run.json").is_file():
                     from ..route_receipts import write_route_decision
 
-                    write_route_decision(output_dir, loaded_roster)
+                    write_route_decision(output_dir, loaded_roster, target=run_cwd)
             if args.worktree and output_dir is not None:
                 # Until the patch is proven good, the worktree is the only
                 # recoverable copy of the agents' edits; a collection failure

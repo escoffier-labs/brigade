@@ -28,6 +28,7 @@ class Assignment:
     task: str
     stage: int = 1
     covers: tuple[str, ...] = ()
+    selected_skill_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

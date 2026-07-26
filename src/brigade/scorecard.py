@@ -578,3 +578,15 @@ def explain_payload(target: Path, artifact_id: str, *, artifact_kind: str | None
     if card is None:
         return None
     return subject_scorecard_to_dict(card)
+
+
+def classify_band(
+    card: SubjectScorecard | None,
+    *,
+    persisted_status: str | None = None,
+    policy_marker: str | None = None,
+) -> str:
+    """Exploration band classifier used by route policy (#573)."""
+    from .route_policy import classify_band as _classify_band
+
+    return _classify_band(card, persisted_status=persisted_status, policy_marker=policy_marker)

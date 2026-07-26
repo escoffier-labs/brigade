@@ -21,6 +21,8 @@ def assignment_payload(assignments: list[Assignment]) -> list[dict[str, object]]
         }
         if assignment.covers:
             entry["covers"] = list(assignment.covers)
+        if assignment.selected_skill_ids:
+            entry["selected_skill_ids"] = list(assignment.selected_skill_ids)
         payload.append(entry)
     return payload
 

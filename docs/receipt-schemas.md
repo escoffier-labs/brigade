@@ -85,6 +85,11 @@ JSON Schema files.
 
 Ad hoc `--command` / `--argv-json` runs omit `subject_binding` and remain audit-only (non-scoreable).
 
+Tracked workspace verifier manifests live under `verify/manifests/*.json`. A manifest owns its
+subject, ordered checks, required utility ids, optional scoped-write globs, and optional route
+opt-in (`route_paths` or exact `route_classes`). Untracked manifests cannot produce scoreable
+receipts or routing authority.
+
 **Command object**
 
 | Field | Type | Notes |
@@ -180,6 +185,7 @@ original file is missing, corrupt, or not an object.
 | `roster` | object | no | Resolution metadata |
 | `lock_workspace` | string | no | |
 | `route` | object | no | Routing brief |
+| `skill_route_policy` | object | no | Frozen pre-plan score inputs, assignments, quota counters, and acceptance reasons |
 | `worker` | string | no | Direct-worker seat |
 | `git` | object | no | |
 | `pre_run_snapshot` | object | no | Run-guard snapshot |
@@ -280,6 +286,27 @@ and patch-ref binding may rewrite worker/synthesis artifacts).
 
 ---
 
+## `brigade.route-decision.v1`
+
+**Path:** `.brigade/runs/<run-id>/route-decision.json`
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema_version` | string | yes | `brigade.route-decision.v1` |
+| `chosen_route` | array of string \| null | yes | Route stages selected for the run |
+| `confidence`, `template_version` | string \| null | yes | Route metadata |
+| `admissible_seats` | array of string | yes | Non-orchestrator seats |
+| `decided_at` | string | no | Pre-plan policy timestamp |
+| `policy_version` | string | no | Skill route-policy version |
+| `score_inputs` | object | no | Receipt-only score inputs keyed by artifact id |
+| `skill_assignments` | array of object | no | Band, authority, manifest, scope, and exploration selection |
+| `exploration` | object | no | Route class, 7/30-day counters, quota, and accept/reject reasons |
+
+When skill routing applies, this receipt preserves the decision made before planning. Finalization
+must not recompute it from post-run state.
+
+---
+
 ## `brigade.roster_snapshot.v1`: `schema_version: 1`
 
 **Path:** `.brigade/runs/<run-id>/roster.json`
@@ -330,6 +357,7 @@ and patch-ref binding may rewrite worker/synthesis artifacts).
 | `worker` | string | Assigned seat name |
 | `task` | string | Task text for the worker |
 | `covers` | array of string | Optional covered artifact ids |
+| `selected_skill_ids` | array of string | Optional pre-plan exploratory skill binding |
 
 ---
 

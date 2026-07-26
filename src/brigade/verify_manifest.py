@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import localio, outcome_cmd, runguard
+from .router import PATHS
 
 VERIFY_MANIFEST_SCHEMA = "brigade.verify_manifest.v1"
 VERIFY_MANIFEST_SCHEMA_VERSION = 1
@@ -14,6 +16,8 @@ VERIFY_MANIFEST_SCHEMA_VERSION = 1
 CHECK_ROLES = frozenset({"effectiveness", "utility_guardrail"})
 BINDING_MODES = frozenset({"patch_backed", "fixture_eval"})
 PATCH_SOURCES = frozenset({"worktree", "generated"})
+_WHOLE_REPO_SCOPE_GLOBS = frozenset({"**", "**/*", "*", "/*"})
+_ROUTE_CLASS_FINGERPRINT = re.compile(r"^[a-f0-9]{64}$")
 
 _BUILTIN_MANIFESTS_DIR = Path(__file__).resolve().parent / "templates" / "verify" / "manifests"
 _WORKSPACE_MANIFESTS_REL = Path("verify") / "manifests"
@@ -36,6 +40,9 @@ class VerifyManifest:
     verifier_id: str
     checks: tuple[VerifyCheckSpec, ...]
     required_utility_check_ids: tuple[str, ...] = ()
+    scope_globs: tuple[str, ...] = ()
+    route_paths: tuple[str, ...] = ()
+    route_classes: tuple[str, ...] = ()
     subject_path: str | None = None
     content_fingerprint: str | None = None
     fixture_manifest_id: str | None = None
@@ -47,6 +54,44 @@ class VerifyManifest:
     @property
     def planned_commands(self) -> list[str | list[str]]:
         return [check.command for check in self.checks]
+
+
+def validate_route_paths(route_paths: tuple[str, ...] | list[str]) -> str | None:
+    """Return a stable rejection reason when route_paths are outside router.PATHS."""
+    for item in route_paths:
+        normalized = str(item).strip()
+        if not normalized:
+            return "invalid_route_path"
+        if normalized not in PATHS:
+            return "invalid_route_path"
+    return None
+
+
+def validate_route_classes(route_classes: tuple[str, ...] | list[str]) -> str | None:
+    """Return a stable rejection reason when route_classes are not fingerprint-shaped."""
+    for item in route_classes:
+        normalized = str(item).strip()
+        if not normalized or _ROUTE_CLASS_FINGERPRINT.fullmatch(normalized) is None:
+            return "invalid_route_class"
+    return None
+
+
+def validate_scope_globs(globs: tuple[str, ...] | list[str]) -> str | None:
+    """Return a stable rejection reason when scope_globs are unsafe or unusable."""
+    if not globs:
+        return "missing_scope_globs"
+    for item in globs:
+        normalized = str(item).strip()
+        if not normalized:
+            return "invalid_scope_glob"
+        if normalized.startswith("/") or normalized.startswith("\\"):
+            return "invalid_scope_glob"
+        parts = normalized.replace("\\", "/").split("/")
+        if any(part == ".." for part in parts):
+            return "invalid_scope_glob"
+        if normalized in _WHOLE_REPO_SCOPE_GLOBS:
+            return "invalid_scope_glob"
+    return None
 
 
 def _workspace_manifests_root(target: Path) -> Path:
@@ -170,6 +215,36 @@ def validate_manifest_payload(payload: dict[str, Any]) -> list[str]:
                 continue
             if check_id not in utility_check_ids:
                 errors.append(f"required_utility_check_ids[{index}] must name a utility_guardrail check in checks")
+    scope_globs = payload.get("scope_globs")
+    if scope_globs is not None:
+        if not isinstance(scope_globs, list):
+            errors.append("scope_globs must be an array when set")
+        else:
+            for index, item in enumerate(scope_globs):
+                if not isinstance(item, str) or not item.strip():
+                    errors.append(f"scope_globs[{index}] must be a non-empty string")
+                elif validate_scope_globs([item]) == "invalid_scope_glob":
+                    errors.append(f"scope_globs[{index}] must be a relative, non-traversing glob")
+    route_paths = payload.get("route_paths")
+    if route_paths is not None:
+        if not isinstance(route_paths, list):
+            errors.append("route_paths must be an array when set")
+        else:
+            for index, item in enumerate(route_paths):
+                if not isinstance(item, str) or not item.strip():
+                    errors.append(f"route_paths[{index}] must be a non-empty string")
+                elif item.strip() not in PATHS:
+                    errors.append(f"route_paths[{index}] must be one of: {', '.join(PATHS)}")
+    route_classes = payload.get("route_classes")
+    if route_classes is not None:
+        if not isinstance(route_classes, list):
+            errors.append("route_classes must be an array when set")
+        else:
+            for index, item in enumerate(route_classes):
+                if not isinstance(item, str) or not item.strip():
+                    errors.append(f"route_classes[{index}] must be a non-empty string")
+                elif _ROUTE_CLASS_FINGERPRINT.fullmatch(item.strip()) is None:
+                    errors.append(f"route_classes[{index}] must be a 64-character lowercase hex fingerprint")
     if binding_mode == "fixture_eval":
         fixture = payload.get("fixture")
         if not isinstance(fixture, dict):
@@ -198,6 +273,12 @@ def manifest_from_payload(payload: dict[str, Any], *, path: Path | None = None) 
     required_utility_check_ids = (
         tuple(str(item) for item in required_utility_raw) if isinstance(required_utility_raw, list) else ()
     )
+    scope_globs_raw = payload.get("scope_globs", [])
+    scope_globs = tuple(str(item) for item in scope_globs_raw) if isinstance(scope_globs_raw, list) else ()
+    route_paths_raw = payload.get("route_paths", [])
+    route_paths = tuple(str(item) for item in route_paths_raw) if isinstance(route_paths_raw, list) else ()
+    route_classes_raw = payload.get("route_classes", [])
+    route_classes = tuple(str(item) for item in route_classes_raw) if isinstance(route_classes_raw, list) else ()
     return VerifyManifest(
         manifest_id=str(payload["manifest_id"]),
         binding_mode=str(payload["binding_mode"]),
@@ -206,6 +287,9 @@ def manifest_from_payload(payload: dict[str, Any], *, path: Path | None = None) 
         verifier_id=str(payload["verifier_id"]),
         checks=tuple(checks),
         required_utility_check_ids=required_utility_check_ids,
+        scope_globs=scope_globs,
+        route_paths=route_paths,
+        route_classes=route_classes,
         subject_path=subject.get("subject_path") if isinstance(subject.get("subject_path"), str) else None,
         content_fingerprint=subject.get("content_fingerprint")
         if isinstance(subject.get("content_fingerprint"), str)
