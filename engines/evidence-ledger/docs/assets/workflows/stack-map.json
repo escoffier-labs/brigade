@@ -1,0 +1,116 @@
+{
+  "title": "From sources to searchable evidence",
+  "eyebrow": "MISELEDGER STACK MAP",
+  "description": "Agent sessions, local artifacts, and external crawlers converge on one adapter contract before readers query the local ledger.",
+  "meta": "local SQLite · FTS5",
+  "columns": [
+    {
+      "title": "SOURCES",
+      "nodes": [
+        {
+          "id": "sessions",
+          "label": "agent sessions",
+          "detail": "Codex · Claude · 5 more"
+        },
+        {
+          "id": "artifacts",
+          "label": "local artifacts",
+          "detail": "docs · files · gitlog"
+        },
+        {
+          "id": "crawlers",
+          "label": "external crawlers",
+          "detail": "discrawl · gitcrawl · 5 more"
+        }
+      ]
+    },
+    {
+      "title": "CONTRACT",
+      "nodes": [
+        {
+          "id": "adapter",
+          "label": "adapter.v1 JSONL",
+          "detail": "validate · normalize",
+          "kind": "accent"
+        }
+      ]
+    },
+    {
+      "title": "LOCAL LEDGER",
+      "nodes": [
+        {
+          "id": "sqlite",
+          "label": "SQLite archive",
+          "detail": "normalized records · raw refs",
+          "kind": "focus",
+          "badge": "local"
+        },
+        {
+          "id": "index",
+          "label": "search + scans",
+          "detail": "FTS5 · relations · manifests"
+        }
+      ]
+    },
+    {
+      "title": "READERS",
+      "nodes": [
+        {
+          "id": "cli",
+          "label": "CLI",
+          "detail": "search · explain · export"
+        },
+        {
+          "id": "evidence",
+          "label": "evidence bundles",
+          "detail": "Brigade-ready context",
+          "kind": "accent"
+        },
+        {
+          "id": "api",
+          "label": "HTTP + MCP",
+          "detail": "reader APIs · archive ops"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "sessions",
+      "to": "adapter"
+    },
+    {
+      "from": "artifacts",
+      "to": "adapter"
+    },
+    {
+      "from": "crawlers",
+      "to": "adapter"
+    },
+    {
+      "from": "adapter",
+      "to": "sqlite"
+    },
+    {
+      "from": "adapter",
+      "to": "index"
+    },
+    {
+      "from": "sqlite",
+      "to": "cli"
+    },
+    {
+      "from": "index",
+      "to": "evidence"
+    },
+    {
+      "from": "index",
+      "to": "api"
+    }
+  ],
+  "context": {
+    "title": "OWNERSHIP BOUNDARY",
+    "body": "external tools keep native sync/query · MiseLedger owns normalized local evidence",
+    "detail": "After adapter ingest, imported text remains untrusted evidence, never instructions."
+  }
+}

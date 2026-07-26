@@ -124,60 +124,11 @@ MiseLedger follows one ingest path:
 
 ## Stack Map
 
-```mermaid
-flowchart TB
-    MISELEDGER["<b>MiseLedger</b><br/><i>archive, search, evidence layer</i>"]
-    SQLITE["<b>SQLite archive</b><br/>normalized records, FTS, relations, raw refs"]
-    MISELEDGER -->|owns| SQLITE
+<p align="center">
+  <img src="docs/assets/stack-map.svg" alt="MiseLedger stack map: agent sessions, local artifacts, and external crawlers pass through native adapters and adapter.v1 validation into a normalized SQLite ledger with FTS5, then reach CLI, evidence bundle, HTTP/MCP, and archive-operation readers" width="880">
+</p>
 
-    subgraph AGENTS [" agent-session crawlers "]
-        SESSIONS["<b>miseledger crawl sessions</b><br/>Codex, Claude, OpenClaw, OpenCode, Hermes, Cursor, Grok"]
-        COMPAT["<b>Native imports</b><br/>source-specific compatibility commands"]
-    end
-
-    subgraph LOCAL [" local artifact crawlers "]
-        ARTIFACTS["<b>miseledger crawl docs/files</b><br/>Markdown, text, logs, HTML"]
-        GITLOG["<b>miseledger crawl gitlog</b><br/>repository history"]
-        GENERIC["<b>Generic adapter records</b><br/>normalized source exports"]
-    end
-
-    subgraph CRAWLERS [" external crawler binaries "]
-        DISCRAWL["discrawl"]
-        GITCRAWL["gitcrawl"]
-        GRAINCRAWL["graincrawl"]
-        NOTCRAWL["notcrawl"]
-        SLACRAWL["slacrawl"]
-        MAILCRAWL["mailcrawl"]
-        TELECRAWL["telecrawl"]
-    end
-
-    SESSIONS & COMPAT == adapter JSONL ==> MISELEDGER
-    ARTIFACTS & GITLOG & GENERIC == adapter JSONL ==> MISELEDGER
-    DISCRAWL & GITCRAWL & GRAINCRAWL & NOTCRAWL & SLACRAWL & MAILCRAWL & TELECRAWL == adapter JSONL ==> MISELEDGER
-
-    subgraph READERS [" reader workflows "]
-        CLI["<b>miseledger CLI</b><br/>search, show, explain, export"]
-        EVIDENCE["<b>Evidence bundles</b><br/>Brigade-ready context"]
-        MCP["<b>Agent readers</b><br/>HTTP loopback, stdio MCP"]
-        OPS["<b>Archive operations</b><br/>doctor, stats, compact"]
-    end
-
-    SQLITE --> CLI
-    SQLITE --> EVIDENCE
-    SQLITE --> MCP
-    SQLITE --> OPS
-
-    classDef core fill:#2563eb,stroke:#1d4ed8,color:#fff;
-    classDef archive fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
-    classDef source fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
-    classDef crawler fill:#ecfdf5,stroke:#059669,color:#064e3b;
-    classDef reader fill:#f1f5f9,stroke:#94a3b8,color:#334155;
-    class MISELEDGER core;
-    class SQLITE archive;
-    class SESSIONS,COMPAT,ARTIFACTS,GITLOG,GENERIC source;
-    class DISCRAWL,GITCRAWL,GRAINCRAWL,NOTCRAWL,SLACRAWL,MAILCRAWL,TELECRAWL crawler;
-    class CLI,EVIDENCE,MCP,OPS reader;
-```
+<p align="center"><em>Generated from <code>docs/assets/workflows/stack-map.json</code> with <code>plating workflow</code>.</em></p>
 
 MiseLedger owns local agent-session crawling, local artifact crawling, archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
 
