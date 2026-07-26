@@ -31,6 +31,7 @@ MISELEDGER_ACTOR = {"external_id": "brigade:system", "type": "system", "name": "
 MISELEDGER_CURSOR_REL = Path(".brigade") / "work" / "miseledger-export-cursor.json"
 MISELEDGER_EXPORT_RESULT_SCHEMA = "brigade.miseledger_export_result.v1"
 MISELEDGER_FLEET_EXPORT_RESULT_SCHEMA = "brigade.miseledger_fleet_export_result.v1"
+MISELEDGER_INDEX_RESULT_SCHEMA = "brigade.miseledger_index_result.v1"
 _FLEET_STATUS_PRECEDENCE = ("failed", "exported", "nothing-new", "empty")
 _CODE_REFERENCE_LIMIT = 100
 _COMPACT_CODE_REFERENCE_NODE_LIMIT = 20
@@ -1405,6 +1406,17 @@ def _print_export_result(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
 
+def _advance_miseledger_cursor(target: Path, cursor_hashes: set[str], written_hashes: list[str]) -> int:
+    if not written_hashes:
+        return 0
+    try:
+        _write_miseledger_cursor_hashes(target, cursor_hashes | set(written_hashes))
+    except OSError as exc:
+        print(f"error: could not write cursor {_miseledger_cursor_path(target)}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _finalize_repo_cursors(
     repo_results: list[dict[str, Any]],
     *,
@@ -1423,12 +1435,69 @@ def _finalize_repo_cursors(
         cursor_hashes = result.get("cursor_hashes")
         if not isinstance(cursor_hashes, set):
             cursor_hashes = set()
-        try:
-            _write_miseledger_cursor_hashes(target, cursor_hashes | set(written_hashes))
-        except OSError as exc:
-            print(f"error: could not write cursor {_miseledger_cursor_path(target)}: {exc}", file=sys.stderr)
-            return 1
+        exit_code = _advance_miseledger_cursor(target, cursor_hashes, written_hashes)
+        if exit_code != 0:
+            return exit_code
     return 0
+
+
+def _index_result_payload(result: dict[str, Any], *, status: str) -> dict[str, Any]:
+    return {
+        "schema": MISELEDGER_INDEX_RESULT_SCHEMA,
+        "status": status,
+        "candidate_count": int(result["candidate_count"]),
+        "exported_count": int(result["exported_count"]),
+        "skipped_count": int(result["skipped_count"]),
+        "error_count": int(result["error_count"]),
+    }
+
+
+def index_miseledger_receipts(*, target: Path, quiet: bool = False) -> dict[str, Any]:
+    """Export and import pending local receipts via the new-only adapter path.
+
+    Fail-open: always returns a status payload and never raises.
+    """
+    result = _repository_export_result(target=target, limit=0, new_only=True)
+    lines = result["lines"]
+    candidate_count = int(result["candidate_count"])
+    exported_count = int(result["exported_count"])
+    skipped_count = int(result["skipped_count"])
+
+    if candidate_count == 0:
+        payload = _index_result_payload(result, status="empty")
+        payload["message"] = "miseledger indexing: no receipts"
+        return payload
+
+    if not lines:
+        status = "nothing-new" if skipped_count > 0 else "empty"
+        payload = _index_result_payload(result, status=status)
+        payload["message"] = f"miseledger indexing: {status}"
+        return payload
+
+    output_path = _temporary_miseledger_export_path(target)
+    exit_code, written_hashes = _write_miseledger_lines_to_path(output_path, lines)
+    if exit_code != 0:
+        payload = _index_result_payload(result, status="failed")
+        payload["message"] = "miseledger indexing: export write failed"
+        return payload
+
+    attempted, import_failed = _import_miseledger_file(output_path, strict=False, quiet=quiet, failed_on_error=True)
+    if attempted and import_failed:
+        payload = _index_result_payload(result, status="failed")
+        payload["message"] = "miseledger indexing: import failed (receipts pending)"
+        return payload
+
+    cursor_hashes = result.get("cursor_hashes")
+    if not isinstance(cursor_hashes, set):
+        cursor_hashes = set()
+    if _advance_miseledger_cursor(target, cursor_hashes, written_hashes) != 0:
+        payload = _index_result_payload(result, status="failed")
+        payload["message"] = "miseledger indexing: cursor write failed"
+        return payload
+
+    payload = _index_result_payload(result, status="indexed")
+    payload["message"] = f"miseledger indexing: indexed {exported_count} receipt(s)"
+    return payload
 
 
 def _write_aggregate_lines(output_path: Path, lines: list[tuple[str, str]]) -> tuple[int, list[str]]:
@@ -1501,19 +1570,30 @@ def _export_miseledger_fleet(
         if result_written:
             written_hashes_by_target[result["target"]] = result_written
 
-    cursor_exit = _finalize_repo_cursors(
-        repo_results, new_only=new_only, written_hashes_by_target=written_hashes_by_target
-    )
+    cursor_exit = 0
+    if not import_miseledger:
+        cursor_exit = _finalize_repo_cursors(
+            repo_results, new_only=new_only, written_hashes_by_target=written_hashes_by_target
+        )
     if cursor_exit != 0:
         payload = _fleet_export_payload(repo_results, status="failed")
         _print_export_result(payload)
         return 1
 
     import_error_count = 0
+    import_failed = False
     if import_miseledger and aggregate_lines:
-        attempted, failed = _import_miseledger_file(output_path, strict=True, quiet=True)
-        if attempted and failed:
+        attempted, import_failed = _import_miseledger_file(output_path, strict=True, quiet=True)
+        if attempted and import_failed:
             import_error_count = 1
+        elif not import_failed:
+            cursor_exit = _finalize_repo_cursors(
+                repo_results, new_only=new_only, written_hashes_by_target=written_hashes_by_target
+            )
+            if cursor_exit != 0:
+                payload = _fleet_export_payload(repo_results, status="failed")
+                _print_export_result(payload)
+                return 1
 
     status = _fleet_export_status([str(result["status"]) for result in repo_results])
     if import_error_count:
@@ -1618,19 +1698,6 @@ def export_miseledger(
     if json_output:
         json_output_path = Path(out).expanduser()
         exit_code, written_hashes = _write_miseledger_lines_to_path(json_output_path, lines)
-        if new_only and written_hashes:
-            cursor_hashes = result["cursor_hashes"]
-            if not isinstance(cursor_hashes, set):
-                cursor_hashes = set()
-            try:
-                _write_miseledger_cursor_hashes(target, cursor_hashes | set(written_hashes))
-            except OSError as exc:
-                print(f"error: could not write cursor {_miseledger_cursor_path(target)}: {exc}", file=sys.stderr)
-                failed_result = dict(result)
-                failed_result["status"] = "failed"
-                failed_result["error_count"] = int(failed_result["error_count"]) + 1
-                _print_export_result(_single_repo_export_payload(failed_result))
-                return 1
         if exit_code != 0:
             failed_result = dict(result)
             failed_result["status"] = "failed"
@@ -1638,11 +1705,42 @@ def export_miseledger(
             _print_export_result(_single_repo_export_payload(failed_result))
             return 1
 
+        import_error_count = 0
         if import_miseledger:
             if lines:
                 attempted, import_failed = _import_miseledger_file(json_output_path, strict=True, quiet=True)
                 if attempted and import_failed:
                     import_error_count = 1
+                elif not import_failed and new_only and written_hashes:
+                    cursor_hashes = result["cursor_hashes"]
+                    if not isinstance(cursor_hashes, set):
+                        cursor_hashes = set()
+                    if _advance_miseledger_cursor(target, cursor_hashes, written_hashes) != 0:
+                        failed_result = dict(result)
+                        failed_result["status"] = "failed"
+                        failed_result["error_count"] = int(failed_result["error_count"]) + 1
+                        _print_export_result(_single_repo_export_payload(failed_result))
+                        return 1
+            elif new_only and written_hashes:
+                cursor_hashes = result["cursor_hashes"]
+                if not isinstance(cursor_hashes, set):
+                    cursor_hashes = set()
+                if _advance_miseledger_cursor(target, cursor_hashes, written_hashes) != 0:
+                    failed_result = dict(result)
+                    failed_result["status"] = "failed"
+                    failed_result["error_count"] = int(failed_result["error_count"]) + 1
+                    _print_export_result(_single_repo_export_payload(failed_result))
+                    return 1
+        elif new_only and written_hashes:
+            cursor_hashes = result["cursor_hashes"]
+            if not isinstance(cursor_hashes, set):
+                cursor_hashes = set()
+            if _advance_miseledger_cursor(target, cursor_hashes, written_hashes) != 0:
+                failed_result = dict(result)
+                failed_result["status"] = "failed"
+                failed_result["error_count"] = int(failed_result["error_count"]) + 1
+                _print_export_result(_single_repo_export_payload(failed_result))
+                return 1
 
         payload = _single_repo_export_payload(result)
         if import_error_count:
@@ -1670,17 +1768,10 @@ def export_miseledger(
     else:
         output_path = _temporary_miseledger_export_path(target) if str(out) == "-" else Path(out).expanduser()
         exit_code, written_hashes = _write_miseledger_lines_to_path(output_path, lines)
-    if new_only and written_hashes:
-        cursor_hashes = result["cursor_hashes"]
-        if not isinstance(cursor_hashes, set):
-            cursor_hashes = set()
-        try:
-            _write_miseledger_cursor_hashes(target, cursor_hashes | set(written_hashes))
-        except OSError as exc:
-            print(f"error: could not write cursor {_miseledger_cursor_path(target)}: {exc}", file=sys.stderr)
-            return 1
     if exit_code != 0:
         return exit_code
+
+    import_failed = False
     if import_miseledger and output_path is not None:
         if lines:
             attempted, import_failed = _import_miseledger_file(output_path, failed_on_error=True)
@@ -1689,6 +1780,13 @@ def export_miseledger(
         else:
             print("nothing new; import skipped")
             return 0
+
+    if new_only and written_hashes and (not import_miseledger or not import_failed):
+        cursor_hashes = result["cursor_hashes"]
+        if not isinstance(cursor_hashes, set):
+            cursor_hashes = set()
+        if _advance_miseledger_cursor(target, cursor_hashes, written_hashes) != 0:
+            return 1
     if int(result["error_count"]) > 0:
         return 1
     return 0

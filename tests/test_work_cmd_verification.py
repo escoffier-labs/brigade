@@ -57,10 +57,114 @@ def test_verify_run_capture_records_outcome_in_one_step(tmp_path, capsys):
         target=tmp_path, commands=["python3 -c \"print('ok')\""], capture="skill-x", capture_kind="skill"
     )
     assert rc == 0
-    capsys.readouterr()
+    captured = capsys.readouterr()
+    assert "miseledger indexing:" in captured.out
     records = outcome_cmd.load_records(tmp_path)
     assert len(records) == 1
     assert records[0].artifact_id == "skill-x" and records[0].signal_value == 1
+
+
+def _write_fake_miseledger_for_verify(path, marker, *, exit_code=0):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""#!{sys.executable}
+import json
+import pathlib
+import sys
+
+assert sys.argv[1:3] == ["import", "adapter"]
+export_path = pathlib.Path(sys.argv[3])
+assert sys.argv[4:] == ["--source", "brigade", "--json"]
+marker = pathlib.Path({str(marker)!r})
+marker.write_text(export_path.read_text())
+print(json.dumps({{"inserted_items": 1, "already_known": 0}}))
+sys.exit({exit_code})
+"""
+    )
+    path.chmod(0o755)
+
+
+def test_verify_run_capture_auto_indexes_miseledger_receipts(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    marker = tmp_path / "imported.jsonl"
+    _write_fake_miseledger_for_verify(tmp_path / "bin" / "miseledger", marker)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+
+    rc = work_cmd.verify_run(
+        target=tmp_path,
+        commands=["python3 -c \"print('ok')\""],
+        capture="skill-x",
+        capture_kind="skill",
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "miseledger indexing: indexed" in captured.out
+    assert marker.is_file()
+    cursor_path = tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json"
+    assert cursor_path.is_file()
+
+
+def test_verify_run_capture_json_includes_miseledger_indexing_status(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    marker = tmp_path / "imported.jsonl"
+    _write_fake_miseledger_for_verify(tmp_path / "bin" / "miseledger", marker)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+
+    rc = work_cmd.verify_run(
+        target=tmp_path,
+        commands=["python3 -c \"print('ok')\""],
+        capture="skill-x",
+        json_output=True,
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    payload = json.loads(captured.out)
+    indexing = payload["miseledger_indexing"]
+    assert indexing["schema"] == "brigade.miseledger_index_result.v1"
+    assert indexing["status"] == "indexed"
+    assert indexing["exported_count"] >= 1
+    assert captured.err == ""
+
+
+def test_verify_run_capture_miseledger_failure_is_fail_open(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", f"{empty_path}{os.pathsep}{os.environ['PATH']}")
+
+    rc = work_cmd.verify_run(
+        target=tmp_path,
+        commands=["python3 -c \"print('ok')\""],
+        capture="skill-x",
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert "miseledger indexing: import failed" in captured.out
+    cursor_path = tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json"
+    assert not cursor_path.exists()
+
+
+def test_verify_run_capture_json_miseledger_failure_preserves_exit_code(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", f"{empty_path}{os.pathsep}{os.environ['PATH']}")
+
+    rc = work_cmd.verify_run(
+        target=tmp_path,
+        commands=['python3 -c "raise SystemExit(3)"'],
+        capture="skill-x",
+        json_output=True,
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 3
+    payload = json.loads(captured.out)
+    assert payload["miseledger_indexing"]["status"] == "failed"
+    assert captured.err == ""
 
 
 def test_verify_run_stamps_valid_claude_session_fingerprint(tmp_path, capsys, monkeypatch):

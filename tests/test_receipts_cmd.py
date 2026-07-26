@@ -550,9 +550,8 @@ def test_receipts_export_miseledger_new_only_cursor_records_only_written_lines(t
 
     assert "could not write output" in captured.err
     assert len(writes) == 2
-    first_hash = json.loads(writes[0])["raw"]["hash"]
-    cursor = json.loads((tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json").read_text())
-    assert cursor["raw_hashes"] == [first_hash]
+    cursor_path = tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json"
+    assert not cursor_path.exists()
 
 
 def test_receipts_export_miseledger_import_runs_fake_binary_and_prints_summary(tmp_path, monkeypatch, capsys):
@@ -1091,6 +1090,32 @@ def test_receipts_export_miseledger_import_failure_is_failed_and_keeps_batch(tmp
     assert "miseledger import failed" in captured.err
     assert out_path.is_file()
     assert len(_jsonl(out_path.read_text())) == 1
+    cursor_path = tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json"
+    assert not cursor_path.exists()
+
+
+def test_receipts_export_miseledger_new_only_import_failure_keeps_cursor_pending(tmp_path, monkeypatch, capsys):
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120000-work-verify-import-retry",
+        started_at="2026-07-08T12:00:00Z",
+    )
+    marker = tmp_path / "import.json"
+    _write_fake_miseledger(tmp_path / "bin" / "miseledger", marker, exit_code=7)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    cursor_path = tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json"
+
+    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only", "--import"]) == 1
+    captured = capsys.readouterr()
+
+    assert "miseledger import failed" in captured.err
+    assert not cursor_path.exists()
+
+    _write_fake_miseledger(tmp_path / "bin" / "miseledger", marker)
+    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only", "--import"]) == 0
+    capsys.readouterr()
+    cursor = json.loads(cursor_path.read_text())
+    assert len(cursor["raw_hashes"]) == 1
 
 
 def test_receipts_export_miseledger_fleet_uses_configured_repo_outside_home_repos(tmp_path, capsys):
@@ -1291,6 +1316,7 @@ def test_receipts_export_miseledger_fleet_preserves_failure_and_continues(tmp_pa
                 str(fleet),
                 "--fleet",
                 "--json",
+                "--new-only",
                 "--import",
             ]
         )
@@ -1402,6 +1428,7 @@ def test_receipts_export_miseledger_fleet_import_failure_does_not_count_as_repo_
     assert payload["failed_count"] == 0
     assert payload["repos"][0]["status"] == "exported"
     assert "miseledger import failed" in captured.err
+    assert not (repo / ".brigade" / "work" / "miseledger-export-cursor.json").exists()
 
 
 def test_receipts_export_miseledger_fleet_new_only_counts_are_idempotent(tmp_path, capsys):

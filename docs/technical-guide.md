@@ -1041,7 +1041,9 @@ For scheduled local indexing, use the built-in pipeline:
 brigade receipts export miseledger --target . --new-only --import
 ```
 
-Put that export on your own timer when you want the loop to run without thinking about it. Brigade does not install the timer. The export sends new verify-run and Brigade-run receipts to MiseLedger, and the next `brigade run` can fetch them back as a compact evidence brief through the same read-only `miseledger evidence ... --source brigade --json` path. The direct command is:
+`brigade work verify run --capture <skill>` also runs that new-only export/import automatically after outcome capture, so routine verification closes the receipts-to-MiseLedger loop without a separate command. Indexing is fail-open: a missing `miseledger` binary or import failure prints an explicit status, leaves pending receipts retryable, and does not change the verification exit code. Use the manual export command above for backlog catch-up or fleet targets (`.brigade/repos.toml` with `--fleet --json`).
+
+The export sends new verify-run and Brigade-run receipts to MiseLedger, and the next `brigade run` can fetch them back as a compact evidence brief through the same read-only `miseledger evidence ... --source brigade --json` path. The direct command is:
 
 ```bash
 brigade work import context --from-miseledger "auth receipts" --target .
@@ -1051,7 +1053,7 @@ The brief contains only bounded evidence lines: run id, status, code-graph delta
 
 MiseLedger evidence is fail-open. Missing `miseledger`, a nonzero exit, timeout, malformed JSON, or zero usable results does not block `brigade run` or `brigade work import context --from-miseledger`. Run prompts proceed without the brief, and the import command reports the absence instead of writing a broken context note.
 
-`--new-only` stores exported `raw.hash` values in `.brigade/work/miseledger-export-cursor.json`, so later runs only write receipt items that have not already been exported. The cursor is an optimization, not the identity boundary. MiseLedger uses content-hash identity for adapter items, so double-importing the same receipt file remains harmless if the cursor is deleted, copied late, or skipped.
+`--new-only` stores exported `raw.hash` values in `.brigade/work/miseledger-export-cursor.json`, so later runs only write receipt items that have not already been exported. With `--import`, the cursor advances only after a successful import; failed imports leave receipts pending for the next run. Export-only runs advance the cursor after a successful write.
 
 The export is deterministic and idempotent for unchanged receipts: records are sorted newest first, external ids derive from receipt ids, hashes derive from stored receipt digests or deterministic fallbacks, and JSONL rendering uses stable key order. When a receipt carries `digests.signature` and `digests.key_id`, the export includes them at `item.metadata.digest_signature`; unsigned receipts omit that metadata field. Re-importing the same file should update or skip the same MiseLedger adapter items rather than create duplicates.
 

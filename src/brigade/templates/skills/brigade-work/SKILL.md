@@ -49,7 +49,7 @@ This is the +1 (passed) or -1 (failed) the learning ratchet scores. Capture on f
 Do not invent a skill name you are not running just to have something to capture against.
 
 ### 4. Export receipts so the next run can reuse them (optional stations)
-When GraphTrail and MiseLedger are installed, close the receipts-to-context loop so the next run sees measured evidence, not only a handoff:
+When GraphTrail and MiseLedger are installed, close the receipts-to-context loop so the next run sees measured evidence, not only a handoff. `brigade work verify run --capture <skill>` auto-exports and imports pending receipts after capture (fail-open when `miseledger` is absent). For backlog catch-up or fleet repos, run manually:
 ```bash
 brigade receipts export miseledger --target . --new-only --import   # fail-open if miseledger is absent
 # next brigade run attaches a capped evidence brief from MiseLedger automatically

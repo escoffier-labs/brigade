@@ -910,6 +910,27 @@ def verify_plan(
     return 0 if not blockers else 1
 
 
+def _attach_miseledger_indexing(
+    receipt: dict[str, object],
+    *,
+    target: Path,
+    json_output: bool,
+) -> None:
+    import contextlib
+    import io
+
+    from .. import receipts_cmd
+
+    if json_output:
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            indexing = receipts_cmd.index_miseledger_receipts(target=target, quiet=True)
+    else:
+        indexing = receipts_cmd.index_miseledger_receipts(target=target, quiet=False)
+        print(indexing["message"])
+    receipt["miseledger_indexing"] = {key: value for key, value in indexing.items() if key != "message"}
+
+
 def verify_run(
     *,
     target: Path,
@@ -976,6 +997,7 @@ def verify_run(
                     run_id=receipt["run_id"],
                     json_output=False,
                 )
+            _attach_miseledger_indexing(receipt, target=target, json_output=True)
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return rc
     print(f"work verify run: {target}")
@@ -996,6 +1018,7 @@ def verify_run(
             run_id=receipt["run_id"],
             json_output=False,
         )
+        _attach_miseledger_indexing(receipt, target=target, json_output=False)
     return rc
 
 
