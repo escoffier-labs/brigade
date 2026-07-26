@@ -47,6 +47,22 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_brief.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_brief.add_argument("--limit", type=int, default=3, help="Maximum recent sessions to include.")
     p_work_brief.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_resolve_target = work_sub.add_parser(
+        "resolve-target",
+        help="Print the Brigade-wired project root for a cwd (requires .brigade/config.json).",
+    )
+    p_work_resolve_target.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Starting directory to walk upward from.",
+    )
+    p_work_resolve_target.add_argument(
+        "--harness",
+        default=None,
+        help="Require this harness in .brigade/config.json (default: any wired project).",
+    )
+    p_work_resolve_target.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_hooks = work_sub.add_parser("hooks", help="Manage project-scoped Claude work-loop hooks.")
     hooks_sub = p_work_hooks.add_subparsers(dest="hooks_command", metavar="<hooks-command>")
     hooks_sub.required = True

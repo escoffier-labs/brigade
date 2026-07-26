@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .. import localio
-from ..config import load_config
+from ..wiring import resolve_wired_target
 from .package import PACKAGE_REF
 
 BRIEF_TIMEOUT_SECONDS = 10
@@ -114,28 +114,6 @@ def iter_session_states(
         state = localio.read_json_dict(path)
         if isinstance(state, dict):
             yield state
-
-
-def resolve_wired_target(cwd: object) -> Path | None:
-    if not isinstance(cwd, str) or not cwd.strip():
-        return None
-    try:
-        current = Path(cwd).expanduser().resolve()
-    except OSError:
-        return None
-    if not current.is_dir():
-        current = current.parent
-    for candidate in (current, *current.parents):
-        if not (candidate / ".brigade" / "config.json").is_file():
-            continue
-        try:
-            config = load_config(candidate)
-        except (OSError, ValueError, json.JSONDecodeError):
-            return None
-        if config is not None and "claude" in config.selection.harnesses:
-            return candidate
-        return None
-    return None
 
 
 def _advance_quote_state(text: str, quote: str | None) -> str | None:

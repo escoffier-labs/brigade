@@ -40,6 +40,22 @@ def dispatch(args) -> int:
         return work_cmd.resume(target=args.target)
     if args.work_command == "brief":
         return work_cmd.brief(target=args.target, limit=args.limit, json_output=args.json)
+    if args.work_command == "resolve-target":
+        from ...wiring import resolve_wired_target
+
+        harness = args.harness.strip() if isinstance(args.harness, str) and args.harness.strip() else None
+        try:
+            cwd = str(args.cwd.expanduser().resolve())
+        except OSError:
+            cwd = str(args.cwd)
+        target = resolve_wired_target(cwd, harness=harness)
+        if args.json:
+            print(json.dumps({"ok": target is not None, "target": str(target) if target else None}, indent=2))
+            return 0 if target is not None else 1
+        if target is None:
+            return 1
+        print(target)
+        return 0
     if args.work_command == "hooks":
         from ...claude_hooks import install_cmd
 
