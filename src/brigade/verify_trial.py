@@ -6,9 +6,12 @@ import hashlib
 import json
 import os
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from . import localio, verify_manifest
 
 VERIFY_INFRASTRUCTURE_FAILURE_CLASSES = frozenset(
     {
@@ -343,6 +346,193 @@ def _receipt_has_unclassified_failure(receipt: dict[str, Any]) -> tuple[bool, bo
     return has_failure, infrastructure, missing_or_unknown
 
 
+def _receipt_digest_reason(receipt: dict[str, Any]) -> str | None:
+    digests = receipt.get("digests")
+    if not isinstance(digests, dict):
+        return "receipt_digest_missing"
+    expected = digests.get("receipt_sha256")
+    if not isinstance(expected, str) or not expected:
+        return "receipt_digest_missing"
+    actual = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    if expected != actual:
+        return "receipt_digest_mismatch"
+    return None
+
+
+def _manifest_binding_dict(binding: dict[str, Any]) -> dict[str, Any] | None:
+    manifest_binding = binding.get("manifest_binding")
+    return manifest_binding if isinstance(manifest_binding, dict) else None
+
+
+def _manifest_binding_structure_complete(manifest_binding: dict[str, Any]) -> bool:
+    manifest_id = manifest_binding.get("manifest_id")
+    payload_sha256 = manifest_binding.get("payload_sha256")
+    return (
+        isinstance(manifest_id, str) and bool(manifest_id) and isinstance(payload_sha256, str) and bool(payload_sha256)
+    )
+
+
+def _verifier_identity_complete(binding: dict[str, Any]) -> bool:
+    verifier = binding.get("verifier_identity")
+    if not isinstance(verifier, dict):
+        return False
+    verifier_id = verifier.get("verifier_id")
+    session_id = verifier.get("session_id")
+    return isinstance(verifier_id, str) and bool(verifier_id) and isinstance(session_id, str) and bool(session_id)
+
+
+def _normalize_command_identity(command: dict[str, Any]) -> str | None:
+    argv = command.get("argv")
+    if isinstance(argv, list) and argv:
+        return shlex.join(str(item) for item in argv)
+    value = command.get("command")
+    if isinstance(value, str) and value:
+        try:
+            return shlex.join(shlex.split(value))
+        except ValueError:
+            return value
+    return None
+
+
+def _normalize_manifest_command(command: str | list[str]) -> str:
+    if isinstance(command, list):
+        return shlex.join(command)
+    try:
+        return shlex.join(shlex.split(command))
+    except ValueError:
+        return command
+
+
+def _manifest_command_plan(manifest: verify_manifest.VerifyManifest) -> list[tuple[str, str, str | None, str]]:
+    plan: list[tuple[str, str, str | None, str]] = []
+    for check in manifest.checks:
+        plan.append(
+            (
+                check.check_id,
+                check.check_role,
+                check.obligation_id,
+                _normalize_manifest_command(check.command),
+            )
+        )
+    return plan
+
+
+def _receipt_command_plan(receipt: dict[str, Any]) -> list[tuple[str, str, str | None, str]] | None:
+    commands = receipt.get("commands")
+    if not isinstance(commands, list) or not commands:
+        return None
+    plan: list[tuple[str, str, str | None, str]] = []
+    for command in commands:
+        if not isinstance(command, dict):
+            return None
+        check_id = command.get("check_id")
+        check_role = command.get("check_role")
+        if not isinstance(check_id, str) or not check_id:
+            return None
+        if check_role not in {"effectiveness", "utility_guardrail"}:
+            return None
+        normalized = _normalize_command_identity(command)
+        if normalized is None:
+            return None
+        obligation_id = command.get("obligation_id")
+        if obligation_id is not None and (not isinstance(obligation_id, str) or not obligation_id):
+            return None
+        plan.append((check_id, check_role, obligation_id if isinstance(obligation_id, str) else None, normalized))
+    return plan
+
+
+def _required_utility_ids_match(receipt: dict[str, Any], manifest: verify_manifest.VerifyManifest) -> bool:
+    receipt_required = receipt.get("required_utility_check_ids")
+    if not manifest.required_utility_check_ids:
+        return receipt_required is None or receipt_required == []
+    if not isinstance(receipt_required, list):
+        return False
+    return tuple(str(item) for item in receipt_required) == manifest.required_utility_check_ids
+
+
+def _manifest_binding_matches_resolved(
+    target: Path,
+    manifest_binding: dict[str, Any],
+    manifest: verify_manifest.VerifyManifest,
+) -> bool:
+    if manifest_binding.get("manifest_id") != manifest.manifest_id:
+        return False
+    expected_payload = verify_manifest.manifest_payload_sha256(manifest)
+    if expected_payload is None or manifest_binding.get("payload_sha256") != expected_payload:
+        return False
+    source_path = manifest_binding.get("source_path")
+    if source_path is not None:
+        expected_source = verify_manifest.manifest_source_path(target, manifest)
+        if not isinstance(source_path, str) or source_path != expected_source:
+            return False
+    return True
+
+
+def _binding_matches_manifest(binding: dict[str, Any], manifest: verify_manifest.VerifyManifest) -> bool:
+    if binding.get("artifact_kind") != manifest.artifact_kind:
+        return False
+    if binding.get("artifact_id") != manifest.artifact_id:
+        return False
+    verifier = binding.get("verifier_identity")
+    if not isinstance(verifier, dict) or verifier.get("verifier_id") != manifest.verifier_id:
+        return False
+    if manifest.binding_mode == "patch_backed":
+        if binding.get("patch_source") != manifest.patch_source:
+            return False
+    if manifest.binding_mode == "fixture_eval":
+        fixture_binding = binding.get("fixture_binding")
+        if not isinstance(fixture_binding, dict):
+            return False
+        if fixture_binding.get("manifest_id") != manifest.fixture_manifest_id:
+            return False
+        if fixture_binding.get("case_id") != manifest.fixture_case_id:
+            return False
+        if fixture_binding.get("check_id") != manifest.fixture_check_id:
+            return False
+    return True
+
+
+def _validate_manifest_contract(
+    receipt: dict[str, Any],
+    binding: dict[str, Any],
+    *,
+    target: Path | None,
+) -> str | None:
+    manifest_binding = _manifest_binding_dict(binding)
+    if manifest_binding is None or not _manifest_binding_structure_complete(manifest_binding):
+        return "verifier_manifest_missing"
+
+    binding_mode = binding.get("binding_mode")
+    if binding_mode in {"patch_backed", "fixture_eval"} and not _verifier_identity_complete(binding):
+        return "verifier_identity_missing"
+
+    if target is None:
+        return None
+
+    verify_manifest_id = receipt.get("verify_manifest_id")
+    if not isinstance(verify_manifest_id, str) or not verify_manifest_id:
+        return "verifier_manifest_missing"
+    if verify_manifest_id != manifest_binding.get("manifest_id"):
+        return "verifier_manifest_mismatch"
+
+    manifest, error = verify_manifest.resolve_manifest(target, verify_manifest_id)
+    if manifest is None:
+        return "verifier_manifest_missing" if error and "not found" in error else "verifier_manifest_mismatch"
+
+    if not _manifest_binding_matches_resolved(target, manifest_binding, manifest):
+        return "verifier_manifest_mismatch"
+    if not _binding_matches_manifest(binding, manifest):
+        return "verifier_manifest_mismatch"
+
+    receipt_plan = _receipt_command_plan(receipt)
+    manifest_plan = _manifest_command_plan(manifest)
+    if receipt_plan is None or receipt_plan != manifest_plan:
+        return "verifier_manifest_mismatch"
+    if not _required_utility_ids_match(receipt, manifest):
+        return "verifier_manifest_mismatch"
+    return None
+
+
 def _patch_identity_complete(receipt: dict[str, Any]) -> bool:
     for key in ("baseline_commit", "tree_fingerprint", "changes_patch_sha256"):
         value = receipt.get(key)
@@ -441,6 +631,10 @@ def project_trial(
     else:
         return TrialProjection(eligible=False, reason="missing_subject_binding", attributed=True)
 
+    manifest_reason = _validate_manifest_contract(receipt, binding, target=target)
+    if manifest_reason is not None:
+        return TrialProjection(eligible=False, reason=manifest_reason, attributed=True)
+
     for key in ("artifact_kind", "artifact_id", "content_fingerprint"):
         value = binding.get(key)
         if not isinstance(value, str) or not value:
@@ -460,5 +654,9 @@ def project_trial(
                 attributed=True,
                 infrastructure_excluded=True,
             )
+
+    digest_reason = _receipt_digest_reason(receipt)
+    if digest_reason is not None:
+        return TrialProjection(eligible=False, reason=digest_reason, attributed=True)
 
     return TrialProjection(eligible=True, reason="eligible", attributed=True)

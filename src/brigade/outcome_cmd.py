@@ -1012,6 +1012,11 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
             payload["capability_breakdown"] = capability_breakdown
         if route_breakdown is not None:
             payload["route_breakdown"] = route_breakdown
+        from . import scorecard as scorecard_mod
+
+        scorecard_payload = scorecard_mod.explain_payload(target, artifact_id, artifact_kind=kind)
+        if scorecard_payload is not None:
+            payload["scorecard"] = scorecard_payload
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"outcome explain: {artifact_id}")
@@ -1057,10 +1062,36 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
             )
     if not trail:
         print("trail: none")
-        return 0
-    for item in trail:
-        tag = f" [{item['cohort']}]" if cohorts.pinned else ""
-        print(f"- {item['ts']} {item['source']} {item['signal_value']:+d} ({item['evidence_ref']}){tag}")
+    else:
+        for item in trail:
+            tag = f" [{item['cohort']}]" if cohorts.pinned else ""
+            print(f"- {item['ts']} {item['source']} {item['signal_value']:+d} ({item['evidence_ref']}){tag}")
+    from . import scorecard as scorecard_mod
+
+    scorecard_payload = scorecard_mod.explain_payload(target, artifact_id, artifact_kind=kind)
+    if scorecard_payload is not None:
+        print("scorecard (receipt-only):")
+        dimensions = scorecard_payload["dimensions"]
+        effectiveness = dimensions["effectiveness"]
+        print(
+            f"- effectiveness wilson={effectiveness['wilson']:.3f} "
+            f"helped={effectiveness['helped']} hurt={effectiveness['hurt']} trials={effectiveness['trials']}"
+        )
+        if scorecard_payload.get("ineligible_summary"):
+            reasons = ", ".join(f"{key}={value}" for key, value in scorecard_payload["ineligible_summary"].items())
+            print(f"- ineligible: {reasons}")
+        receipt_trail = scorecard_payload.get("receipt_trail") or []
+        if not receipt_trail:
+            print("- receipt trail: none")
+        else:
+            for item in receipt_trail:
+                binding = item.get("subject_binding") or {}
+                subject_id = binding.get("artifact_id", "?")
+                print(
+                    f"- {item.get('started_at') or '?'} {subject_id} "
+                    f"eligible={item.get('eligible')} reason={item.get('reason')} "
+                    f"effectiveness={item.get('effectiveness')}"
+                )
     return 0
 
 
@@ -1439,6 +1470,9 @@ def rank(
     }
     graph_counts = _graph_delta_counts_by_artifact(records)
     brief_stats = _brief_hit_stats_by_artifact(records)
+    from . import scorecard as scorecard_mod
+
+    scorecards_by_artifact = {card.subject.artifact_id: card for card in scorecard_mod.build_scorecards(target)}
 
     def blended(artifact_id: str) -> float:
         return core.rank_score(confidence=0.0, outcome=pooled_sort_score[artifact_id], keyword=0.0)
@@ -1492,6 +1526,43 @@ def rank(
         stats = brief_stats.get(artifact_id)
         if stats is not None:
             entry.update(stats)
+        scorecard_entry = scorecards_by_artifact.get(artifact_id)
+        if scorecard_entry is not None:
+            entry["policy_version"] = scorecard_mod.SCORECARD_POLICY_VERSION
+            entry["dimensions"] = scorecard_entry.dimensions
+            entry["utility_guardrails"] = scorecard_entry.utility_guardrails
+            if scorecard_entry.ineligible_summary:
+                entry["ineligible_summary"] = scorecard_entry.ineligible_summary
+        ranking_payload.append(entry)
+
+    ranked_ids = {artifact_id for artifact_id, _ in ordered}
+    for artifact_id, scorecard_entry in sorted(scorecards_by_artifact.items()):
+        if artifact_id in ranked_ids:
+            continue
+        entry = {
+            "artifact_id": artifact_id,
+            "score": 0.0,
+            "rank_score": 0.0,
+            "helped": 0,
+            "hurt": 0,
+            "content_fingerprint": scorecard_entry.subject.content_fingerprint,
+            "lifetime_score": 0.0,
+            "lifetime_helped": 0,
+            "lifetime_hurt": 0,
+            "stale_records": 0,
+            "legacy_records": 0,
+            "capability_fingerprint": current_capability,
+            "capability_score": 0.0,
+            "capability_helped": 0,
+            "capability_hurt": 0,
+            "off_capability_records": 0,
+            "capability_legacy_records": 0,
+            "policy_version": scorecard_mod.SCORECARD_POLICY_VERSION,
+            "dimensions": scorecard_entry.dimensions,
+            "utility_guardrails": scorecard_entry.utility_guardrails,
+        }
+        if scorecard_entry.ineligible_summary:
+            entry["ineligible_summary"] = scorecard_entry.ineligible_summary
         ranking_payload.append(entry)
     payload = {
         "target": str(target),

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import verify_manifest, verify_trial, work_cmd
+from brigade import localio, verify_manifest, verify_trial, work_cmd
 from brigade.verify_manifest import _WORKSPACE_MANIFESTS_REL
 from brigade.work_cmd import verification as verify_mod
 
@@ -55,6 +55,44 @@ def _write_skill_subject(
     skill_path.parent.mkdir(parents=True, exist_ok=True)
     skill_path.write_text(content)
     return skill_path
+
+
+def _stamp_receipt_digest(receipt: dict) -> None:
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "logs": {},
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+
+
+def _minimal_manifest_binding(
+    *,
+    manifest_id: str = "structural-fixture",
+    payload_sha256: str = "sha256:" + "b" * 64,
+) -> dict:
+    return {
+        "manifest_id": manifest_id,
+        "payload_sha256": payload_sha256,
+        "source_path": f"verify/manifests/{manifest_id}.json",
+    }
+
+
+def _structural_fixture_binding(**overrides) -> dict:
+    binding = {
+        "binding_mode": "fixture_eval",
+        "artifact_kind": "skill",
+        "artifact_id": "brigade-work",
+        "content_fingerprint": "sha256:" + "a" * 64,
+        "fixture_binding": {
+            "manifest_id": "adversarial-failed-verification",
+            "case_id": "report-failing-tests",
+            "check_id": "fixture.echo-ok",
+        },
+        "manifest_binding": _minimal_manifest_binding(),
+        "verifier_identity": {"verifier_id": "test", "session_id": "verifier-1"},
+    }
+    binding.update(overrides)
+    return binding
 
 
 def _write_patch_manifest(path: Path, *, manifest_id: str = "test-skill-patch") -> dict:
@@ -229,6 +267,7 @@ def test_manifest_verify_writes_subject_binding_and_check_roles(scoreable_target
     assert receipt["verify_manifest_id"] == "test-skill-patch"
     binding = receipt["subject_binding"]
     assert binding["binding_mode"] == "patch_backed"
+    assert binding["manifest_binding"]["manifest_id"] == "test-skill-patch"
     assert binding["artifact_id"] == "brigade-work"
     assert binding["patch_binding"]["subject_path"] == "skills/brigade-work/SKILL.md"
     assert receipt["commands"][0]["check_role"] == "effectiveness"
@@ -372,6 +411,7 @@ def test_project_trial_generated_patch_requires_independent_verifier(scoreable_t
     assert projection.eligible is False
     assert projection.reason == "verifier_not_independent"
     receipt["subject_binding"]["verifier_identity"]["session_id"] = f"{producer_session}-verifier"
+    _stamp_receipt_digest(receipt)
     projection = verify_trial.project_trial(receipt, target=scoreable_target)
     assert projection.eligible is True
 
@@ -391,18 +431,7 @@ def test_project_trial_infrastructure_failure_is_ineligible(scoreable_target):
                 "failure_kind": "timeout",
             }
         ],
-        "subject_binding": {
-            "binding_mode": "fixture_eval",
-            "artifact_kind": "skill",
-            "artifact_id": "brigade-work",
-            "content_fingerprint": "sha256:" + "a" * 64,
-            "fixture_binding": {
-                "manifest_id": "adversarial-failed-verification",
-                "case_id": "report-failing-tests",
-                "check_id": "fixture.echo-ok",
-            },
-            "verifier_identity": {"verifier_id": "test", "session_id": "verifier-1"},
-        },
+        "subject_binding": _structural_fixture_binding(),
     }
     projection = verify_trial.project_trial(receipt)
     assert projection.eligible is False
@@ -421,18 +450,7 @@ def test_project_trial_missing_taxonomy_on_failure_is_ineligible(scoreable_targe
                 "check_id": "verify.echo-ok",
             }
         ],
-        "subject_binding": {
-            "binding_mode": "fixture_eval",
-            "artifact_kind": "skill",
-            "artifact_id": "brigade-work",
-            "content_fingerprint": "sha256:" + "a" * 64,
-            "fixture_binding": {
-                "manifest_id": "adversarial-failed-verification",
-                "case_id": "report-failing-tests",
-                "check_id": "fixture.echo-ok",
-            },
-            "verifier_identity": {"verifier_id": "test", "session_id": "verifier-1"},
-        },
+        "subject_binding": _structural_fixture_binding(),
     }
     projection = verify_trial.project_trial(receipt)
     assert projection.eligible is False
@@ -454,40 +472,62 @@ def test_project_trial_skill_failure_with_taxonomy_is_eligible(scoreable_target)
                 "failure_kind": "nonzero_exit",
             }
         ],
-        "subject_binding": {
-            "binding_mode": "fixture_eval",
-            "artifact_kind": "skill",
-            "artifact_id": "brigade-work",
-            "content_fingerprint": "sha256:" + "a" * 64,
-            "fixture_binding": {
-                "manifest_id": "adversarial-failed-verification",
-                "case_id": "report-failing-tests",
-                "check_id": "fixture.echo-ok",
-            },
-            "verifier_identity": {"verifier_id": "test", "session_id": "verifier-1"},
-        },
+        "subject_binding": _structural_fixture_binding(),
     }
+    _stamp_receipt_digest(receipt)
     projection = verify_trial.project_trial(receipt)
     assert projection.eligible is True
     assert projection.reason == "eligible"
+
+
+def test_project_trial_missing_receipt_digest_is_ineligible(scoreable_target):
+    receipt = {
+        "status": "completed",
+        "commands": [
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "check_role": "effectiveness",
+                "check_id": "verify.echo-ok",
+            }
+        ],
+        "subject_binding": _structural_fixture_binding(),
+    }
+    projection = verify_trial.project_trial(receipt)
+    assert projection.eligible is False
+    assert projection.reason == "receipt_digest_missing"
+    assert projection.attributed is True
+
+
+def test_project_trial_receipt_digest_mismatch_is_ineligible(scoreable_target):
+    receipt = {
+        "status": "completed",
+        "commands": [
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "check_role": "effectiveness",
+                "check_id": "verify.echo-ok",
+            }
+        ],
+        "subject_binding": _structural_fixture_binding(),
+        "digests": {
+            "algorithm": "sha256",
+            "logs": {},
+            "receipt_sha256": "b" * 64,
+        },
+    }
+    projection = verify_trial.project_trial(receipt)
+    assert projection.eligible is False
+    assert projection.reason == "receipt_digest_mismatch"
+    assert projection.attributed is True
 
 
 def test_project_trial_missing_check_role_is_ineligible(scoreable_target):
     receipt = {
         "status": "completed",
         "commands": [{"status": "completed", "exit_code": 0, "check_id": "verify.echo-ok"}],
-        "subject_binding": {
-            "binding_mode": "fixture_eval",
-            "artifact_kind": "skill",
-            "artifact_id": "brigade-work",
-            "content_fingerprint": "sha256:" + "a" * 64,
-            "fixture_binding": {
-                "manifest_id": "adversarial-failed-verification",
-                "case_id": "report-failing-tests",
-                "check_id": "fixture.echo-ok",
-            },
-            "verifier_identity": {"verifier_id": "test", "session_id": "verifier-1"},
-        },
+        "subject_binding": _structural_fixture_binding(),
     }
     projection = verify_trial.project_trial(receipt)
     assert projection.eligible is False
@@ -553,18 +593,7 @@ def test_project_trial_missing_required_utility_check_is_ineligible(scoreable_ta
                 "check_id": "verify.echo-ok",
             }
         ],
-        "subject_binding": {
-            "binding_mode": "fixture_eval",
-            "artifact_kind": "skill",
-            "artifact_id": "brigade-work",
-            "content_fingerprint": "sha256:" + "a" * 64,
-            "fixture_binding": {
-                "manifest_id": "adversarial-failed-verification",
-                "case_id": "report-failing-tests",
-                "check_id": "fixture.echo-ok",
-            },
-            "verifier_identity": {"verifier_id": "test", "session_id": "verifier-1"},
-        },
+        "subject_binding": _structural_fixture_binding(),
     }
     projection = verify_trial.project_trial(receipt)
     assert projection.eligible is False
@@ -591,3 +620,96 @@ def test_manifest_verify_stamps_required_utility_check_ids(scoreable_target, mon
     assert receipt["commands"][1]["check_role"] == "utility_guardrail"
     projection = verify_trial.project_trial(receipt, target=scoreable_target)
     assert projection.eligible is True
+
+
+def test_project_trial_missing_manifest_binding_is_ineligible(scoreable_target):
+    receipt = {
+        "status": "completed",
+        "commands": [
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "check_role": "effectiveness",
+                "check_id": "verify.echo-ok",
+            }
+        ],
+        "subject_binding": {
+            "binding_mode": "fixture_eval",
+            "artifact_kind": "skill",
+            "artifact_id": "brigade-work",
+            "content_fingerprint": "sha256:" + "a" * 64,
+            "fixture_binding": {
+                "manifest_id": "adversarial-failed-verification",
+                "case_id": "report-failing-tests",
+                "check_id": "fixture.echo-ok",
+            },
+            "verifier_identity": {"verifier_id": "test", "session_id": "verifier-1"},
+        },
+    }
+    _stamp_receipt_digest(receipt)
+    projection = verify_trial.project_trial(receipt)
+    assert projection.eligible is False
+    assert projection.reason == "verifier_manifest_missing"
+
+
+def test_project_trial_missing_verifier_identity_is_ineligible(scoreable_target):
+    binding = _structural_fixture_binding()
+    binding.pop("verifier_identity")
+    receipt = {
+        "status": "completed",
+        "commands": [
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "check_role": "effectiveness",
+                "check_id": "verify.echo-ok",
+            }
+        ],
+        "subject_binding": binding,
+    }
+    _stamp_receipt_digest(receipt)
+    projection = verify_trial.project_trial(receipt)
+    assert projection.eligible is False
+    assert projection.reason == "verifier_identity_missing"
+
+
+def test_project_trial_forged_manifest_binding_mismatch_is_ineligible(scoreable_target, monkeypatch):
+    _write_fixture_manifest(scoreable_target)
+    receipt = _run_manifest_verify(scoreable_target, "test-skill-fixture", monkeypatch=monkeypatch, start_session=False)
+    receipt["subject_binding"]["manifest_binding"]["payload_sha256"] = "sha256:" + "f" * 64
+    _stamp_receipt_digest(receipt)
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is False
+    assert projection.reason == "verifier_manifest_mismatch"
+
+
+def test_project_trial_forged_subject_artifact_id_is_ineligible(scoreable_target, monkeypatch):
+    _write_fixture_manifest(scoreable_target)
+    receipt = _run_manifest_verify(scoreable_target, "test-skill-fixture", monkeypatch=monkeypatch, start_session=False)
+    receipt["subject_binding"]["artifact_id"] = "forged-skill"
+    _stamp_receipt_digest(receipt)
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is False
+    assert projection.reason == "verifier_manifest_mismatch"
+
+
+def test_project_trial_forged_check_plan_is_ineligible(scoreable_target, monkeypatch):
+    _write_fixture_manifest(scoreable_target)
+    receipt = _run_manifest_verify(scoreable_target, "test-skill-fixture", monkeypatch=monkeypatch, start_session=False)
+    receipt["commands"][0]["check_id"] = "forged.check"
+    _stamp_receipt_digest(receipt)
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is False
+    assert projection.reason == "verifier_manifest_mismatch"
+
+
+def test_project_trial_copied_binding_without_tracked_manifest_is_ineligible(scoreable_target, monkeypatch):
+    _write_fixture_manifest(scoreable_target)
+    receipt = _run_manifest_verify(scoreable_target, "test-skill-fixture", monkeypatch=monkeypatch, start_session=False)
+    forged = dict(receipt)
+    forged.pop("verify_manifest_id", None)
+    forged["subject_binding"] = dict(receipt["subject_binding"])
+    _stamp_receipt_digest(forged)
+    projection = verify_trial.project_trial(forged, target=scoreable_target)
+    assert projection.eligible is False
+    assert projection.reason == "verifier_manifest_missing"

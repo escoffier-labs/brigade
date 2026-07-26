@@ -242,6 +242,7 @@ def _build_subject_binding(
         "artifact_kind": manifest.artifact_kind,
         "artifact_id": manifest.artifact_id,
         "content_fingerprint": fingerprint,
+        "manifest_binding": verify_manifest.build_manifest_binding(target, manifest),
         "verifier_identity": {
             "verifier_id": manifest.verifier_id,
             "session_id": verifier_session,

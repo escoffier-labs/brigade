@@ -292,6 +292,40 @@ def resolve_subject_fingerprint(target: Path, manifest: VerifyManifest) -> str |
     return None
 
 
+def manifest_source_path(target: Path, manifest: VerifyManifest) -> str | None:
+    if manifest.path is None:
+        return None
+    if _is_builtin_manifest(manifest.path):
+        try:
+            return manifest.path.resolve().relative_to(_BUILTIN_MANIFESTS_DIR.resolve()).as_posix()
+        except ValueError:
+            return manifest.path.as_posix()
+    try:
+        return manifest.path.resolve().relative_to(target.resolve()).as_posix()
+    except ValueError:
+        return manifest.path.as_posix()
+
+
+def manifest_payload_sha256(manifest: VerifyManifest) -> str | None:
+    if manifest.path is None or not manifest.path.is_file():
+        return None
+    return f"sha256:{localio.file_sha256(manifest.path)}"
+
+
+def build_manifest_binding(target: Path, manifest: VerifyManifest) -> dict[str, Any]:
+    payload_sha256 = manifest_payload_sha256(manifest)
+    if payload_sha256 is None:
+        raise ValueError(f"verify manifest payload is unreadable: {manifest.manifest_id}")
+    binding: dict[str, Any] = {
+        "manifest_id": manifest.manifest_id,
+        "payload_sha256": payload_sha256,
+    }
+    source_path = manifest_source_path(target, manifest)
+    if source_path:
+        binding["source_path"] = source_path
+    return binding
+
+
 def write_workspace_manifest(target: Path, payload: dict[str, Any]) -> Path:
     """Write a workspace-local manifest after validation (tests and operators)."""
     manifest = manifest_from_payload(payload)

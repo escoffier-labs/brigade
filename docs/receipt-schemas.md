@@ -76,6 +76,7 @@ JSON Schema files.
 | `artifact_kind` | string | `skill` or `card` |
 | `artifact_id` | string | Verifier-owned subject id |
 | `content_fingerprint` | string | Subject content fingerprint at verify time |
+| `manifest_binding` | object | `{manifest_id, payload_sha256, source_path?}` for the exact tracked verifier manifest |
 | `patch_source` | string | `worktree` or `generated` (patch-backed only) |
 | `producer_binding` | object | `{work_session_id, owned_delta_sha256, subject_clean_at_start, start_git}` for patch-backed runs |
 | `verifier_identity` | object | `{verifier_id, session_id}` independent verifier session |
