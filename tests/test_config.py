@@ -196,3 +196,103 @@ def test_load_config_rejects_invalid_capture_before_retry(tmp_path, value):
     )
     with pytest.raises(ValueError, match="capture_before_retry must be one of"):
         load_config(tmp_path)
+
+
+def _write_config_json(tmp_path, **overrides):
+    payload = {
+        "version": 1,
+        "depth": "repo",
+        "harnesses": ["claude"],
+        "owner": "claude",
+        "includes": [],
+    }
+    payload.update(overrides)
+    path = tmp_path / ".brigade" / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload) + "\n")
+
+
+def test_load_config_defaults_verify_retention_settings(tmp_path):
+    _write_config_json(tmp_path)
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.verify_runs_keep == 50
+    assert loaded.verify_archive_enabled is True
+    assert loaded.verify_archive_dir == ".brigade/work/verify-archive"
+
+
+def test_load_config_reads_verify_retention_settings(tmp_path):
+    _write_config_json(
+        tmp_path,
+        verify_runs_keep=10,
+        verify_archive_enabled=False,
+        verify_archive_dir="evidence/verify-archive",
+    )
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.verify_runs_keep == 10
+    assert loaded.verify_archive_enabled is False
+    assert loaded.verify_archive_dir == "evidence/verify-archive"
+
+
+def test_write_then_load_round_trip_preserves_verify_retention_settings(tmp_path):
+    sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+    cfg = Config(
+        version=1,
+        selection=sel,
+        verify_runs_keep=10,
+        verify_archive_enabled=False,
+        verify_archive_dir="evidence/verify-archive",
+    )
+    write_config(tmp_path, cfg)
+
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.verify_runs_keep == 10
+    assert loaded.verify_archive_enabled is False
+    assert loaded.verify_archive_dir == "evidence/verify-archive"
+
+
+@pytest.mark.parametrize("value", [0, -1, "many", True, 2.5])
+def test_load_config_rejects_invalid_verify_runs_keep(tmp_path, value):
+    _write_config_json(tmp_path, verify_runs_keep=value)
+    with pytest.raises(ValueError, match="verify_runs_keep must be a positive integer"):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize("value", ["yes", 1, 0])
+def test_load_config_rejects_invalid_verify_archive_enabled(tmp_path, value):
+    _write_config_json(tmp_path, verify_archive_enabled=value)
+    with pytest.raises(ValueError, match="verify_archive_enabled must be true or false"):
+        load_config(tmp_path)
+
+
+@pytest.mark.parametrize("value", ["", "   ", 123])
+def test_load_config_rejects_invalid_verify_archive_dir(tmp_path, value):
+    _write_config_json(tmp_path, verify_archive_dir=value)
+    with pytest.raises(ValueError, match="verify_archive_dir must be a non-empty string"):
+        load_config(tmp_path)
+
+
+def test_resolve_verify_runs_keep_defaults_without_config(tmp_path):
+    from brigade.config import resolve_verify_runs_keep
+
+    assert resolve_verify_runs_keep(tmp_path) == 50
+
+
+def test_resolve_verify_archive_defaults_without_config(tmp_path):
+    from brigade.config import resolve_verify_archive
+
+    enabled, root = resolve_verify_archive(tmp_path)
+    assert enabled is True
+    assert root == tmp_path / ".brigade" / "work" / "verify-archive"
+
+
+def test_resolve_verify_archive_honors_absolute_dir(tmp_path):
+    from brigade.config import resolve_verify_archive
+
+    destination = tmp_path / "elsewhere" / "archive"
+    _write_config_json(tmp_path, verify_archive_dir=str(destination))
+    enabled, root = resolve_verify_archive(tmp_path)
+    assert enabled is True
+    assert root == destination

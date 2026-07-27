@@ -18,6 +18,9 @@ SUPPORTED_VERSIONS = (1,)
 DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS = 10.0
 CAPTURE_BEFORE_RETRY_MODES = ("warn", "block", "off")
 DEFAULT_CAPTURE_BEFORE_RETRY = "warn"
+DEFAULT_VERIFY_RUNS_KEEP = 50
+DEFAULT_VERIFY_ARCHIVE_ENABLED = True
+DEFAULT_VERIFY_ARCHIVE_DIR = ".brigade/work/verify-archive"
 
 
 @dataclass
@@ -26,6 +29,9 @@ class Config:
     selection: Selection
     graphtrail_delta_timeout_seconds: float = DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS
     capture_before_retry: str = DEFAULT_CAPTURE_BEFORE_RETRY
+    verify_runs_keep: int = DEFAULT_VERIFY_RUNS_KEEP
+    verify_archive_enabled: bool = DEFAULT_VERIFY_ARCHIVE_ENABLED
+    verify_archive_dir: str = DEFAULT_VERIFY_ARCHIVE_DIR
 
 
 def validate_graphtrail_delta_timeout(value: Any) -> float:
@@ -65,6 +71,42 @@ def resolve_graphtrail_delta_timeout(target: Path, cli_override: float | None = 
     return DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS
 
 
+def validate_verify_runs_keep(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("verify_runs_keep must be a positive integer")
+    return value
+
+
+def validate_verify_archive_enabled(value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("verify_archive_enabled must be true or false")
+    return value
+
+
+def validate_verify_archive_dir(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("verify_archive_dir must be a non-empty string")
+    return value.strip()
+
+
+def resolve_verify_runs_keep(target: Path) -> int:
+    cfg = load_config(target)
+    if cfg is not None:
+        return cfg.verify_runs_keep
+    return DEFAULT_VERIFY_RUNS_KEEP
+
+
+def resolve_verify_archive(target: Path) -> tuple[bool, Path]:
+    """Return (enabled, archive root) for verify-run evidence archival."""
+    cfg = load_config(target)
+    enabled = cfg.verify_archive_enabled if cfg is not None else DEFAULT_VERIFY_ARCHIVE_ENABLED
+    raw = cfg.verify_archive_dir if cfg is not None else DEFAULT_VERIFY_ARCHIVE_DIR
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = target / path
+    return enabled, path
+
+
 def config_path(target: Path) -> Path:
     return target / CONFIG_REL_PATH
 
@@ -86,6 +128,15 @@ def write_config(target: Path, cfg: Config) -> None:
     capture_before_retry = validate_capture_before_retry(cfg.capture_before_retry)
     if capture_before_retry != DEFAULT_CAPTURE_BEFORE_RETRY:
         payload["capture_before_retry"] = capture_before_retry
+    verify_runs_keep = validate_verify_runs_keep(cfg.verify_runs_keep)
+    if verify_runs_keep != DEFAULT_VERIFY_RUNS_KEEP:
+        payload["verify_runs_keep"] = verify_runs_keep
+    verify_archive_enabled = validate_verify_archive_enabled(cfg.verify_archive_enabled)
+    if verify_archive_enabled != DEFAULT_VERIFY_ARCHIVE_ENABLED:
+        payload["verify_archive_enabled"] = verify_archive_enabled
+    verify_archive_dir = validate_verify_archive_dir(cfg.verify_archive_dir)
+    if verify_archive_dir != DEFAULT_VERIFY_ARCHIVE_DIR:
+        payload["verify_archive_dir"] = verify_archive_dir
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
@@ -113,9 +164,17 @@ def load_config(target: Path) -> Optional[Config]:
     timeout_raw = data.get("graphtrail_delta_timeout_seconds", DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS)
     timeout = validate_graphtrail_delta_timeout(timeout_raw)
     capture_before_retry = validate_capture_before_retry(data.get("capture_before_retry", DEFAULT_CAPTURE_BEFORE_RETRY))
+    verify_runs_keep = validate_verify_runs_keep(data.get("verify_runs_keep", DEFAULT_VERIFY_RUNS_KEEP))
+    verify_archive_enabled = validate_verify_archive_enabled(
+        data.get("verify_archive_enabled", DEFAULT_VERIFY_ARCHIVE_ENABLED)
+    )
+    verify_archive_dir = validate_verify_archive_dir(data.get("verify_archive_dir", DEFAULT_VERIFY_ARCHIVE_DIR))
     return Config(
         version=version,
         selection=sel,
         graphtrail_delta_timeout_seconds=timeout,
         capture_before_retry=capture_before_retry,
+        verify_runs_keep=verify_runs_keep,
+        verify_archive_enabled=verify_archive_enabled,
+        verify_archive_dir=verify_archive_dir,
     )

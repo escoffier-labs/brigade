@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Verify-run retention now archives receipt evidence before pruning (#565).
+  When `.brigade/work/verify-runs/` grows past the retention cap, each run
+  directory is copied into the verify archive (default
+  `.brigade/work/verify-archive/<run-id>/`) and an append-only
+  `index.jsonl` entry (`brigade.verify_archive_index.v1`) records the
+  receipt's digest, signature, key id, and schema version before the local
+  copy is deleted. Archival re-verifies the copied receipt bytes and the
+  receipt's self-declared `digests.receipt_sha256`; a run directory whose
+  archival fails or whose receipt no longer re-hashes is kept locally, so
+  pruning never destroys unpreserved evidence. New `.brigade/config.json`
+  keys: `verify_runs_keep` (default 50), `verify_archive_enabled` (default
+  true), and `verify_archive_dir` (default `.brigade/work/verify-archive`).
+
 ### Removed
 - Removed the opt-in `brigade run --deliberate` grounded-deliberation mode
   (planner, `brigade.deliberation.v1` artifact emission, and related runs
