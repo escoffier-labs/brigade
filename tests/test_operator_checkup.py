@@ -58,7 +58,7 @@ def test_operator_checkup_is_ready_when_all_surfaces_pass(monkeypatch, capsys):
     assert payload["ready"] is True
     assert payload["blocking_surface_count"] == 0
     assert payload["next_command"] is None
-    assert payload["skipped_surfaces"] == ["work", "graph", "ledger"]
+    assert payload["skipped_surfaces"] == ["work", "graph", "ledger", "outcome"]
 
 
 def test_operator_checkup_loop_reports_graph_ledger_and_brief_hit_rate(monkeypatch, tmp_path, capsys):
@@ -162,6 +162,7 @@ def test_operator_checkup_scoped_runs_only_selected_doctor(monkeypatch, tmp_path
         "work",
         "graph",
         "ledger",
+        "outcome",
     ]
     assert payload["surfaces"][0]["name"] == "doctor"
     assert isinstance(payload["surfaces"][0]["elapsed_seconds"], float)
@@ -183,6 +184,7 @@ def test_operator_checkup_lists_surfaces_and_evidence_loop_preset(tmp_path, caps
         "work",
         "graph",
         "ledger",
+        "outcome",
     }
 
 

@@ -1,8 +1,9 @@
 import datetime as dt
 import json
 
-from brigade import cli, localio, outcome, outcome_cmd, receipts_cmd, work_cmd
+from brigade import cli, localio, outcome, outcome_cmd, receipts_cmd, scorecard, work_cmd
 
+from tests.test_scorecard_reconcile import seed_registry_skill_scorecard_hurt, seed_registry_skill_scorecard_promotion
 from tests.work_cmd_test_helpers import _init_git_repo
 
 
@@ -505,7 +506,8 @@ def _decisions_dir(target):
 
 
 def test_reconcile_dry_run_reports_install_without_writing(tmp_path, capsys):
-    _seed(tmp_path, _helped("skill-x", 2))
+    _write_registry_skill(tmp_path, "skill-x")
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=False, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["apply"] is False
@@ -527,7 +529,8 @@ def _stub_execute(monkeypatch, *, install="installed"):
 
 def test_reconcile_apply_installs_and_persists_status_and_receipt(tmp_path, capsys, monkeypatch):
     _stub_execute(monkeypatch)
-    _seed(tmp_path, _helped("skill-x", 2))
+    _write_registry_skill(tmp_path, "skill-x")
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["applied"] == ["skill-x"]
@@ -540,7 +543,8 @@ def test_reconcile_apply_does_not_promote_when_install_fails(tmp_path, capsys, m
     # A skill that crosses the threshold but cannot physically install must NOT be
     # marked promoted (the forward-only ratchet would hide the failure forever).
     _stub_execute(monkeypatch, install="install-skipped: not in registry")
-    _seed(tmp_path, _helped("skill-x", 2))
+    _write_registry_skill(tmp_path, "skill-x")
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     # not counted as applied, and the surfaced status stays candidate
@@ -555,7 +559,8 @@ def test_reconcile_apply_does_not_promote_when_install_fails(tmp_path, capsys, m
 
 def test_reconcile_holds_inside_cooldown_after_apply(tmp_path, capsys, monkeypatch):
     _stub_execute(monkeypatch)
-    _seed(tmp_path, _helped("skill-x", 2))
+    _write_registry_skill(tmp_path, "skill-x")
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     capsys.readouterr()
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
@@ -596,13 +601,11 @@ def test_rebuild_status_check_accepts_mixed_legacy_and_delta_ledger(tmp_path, ca
 def test_reconcile_rolls_back_promoted_artifact_on_regression(tmp_path, capsys, monkeypatch):
     _stub_execute(monkeypatch)
     cfg = outcome.ReconcileConfig(cooldown_seconds=0)
-    _seed(tmp_path, _helped("skill-x", 2))
+    _write_registry_skill(tmp_path, "skill-x")
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, config=cfg, json_output=True) == 0
     capsys.readouterr()
-    _seed(
-        tmp_path,
-        [outcome.OutcomeRecord("skill-x", "skill", "t9", "verify", -1, "regress", "2026-06-20T09:00:00+00:00")],
-    )
+    seed_registry_skill_scorecard_hurt(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, config=cfg, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     actions = {d["artifact_id"]: d for d in payload["decisions"]}
@@ -612,7 +615,8 @@ def test_reconcile_rolls_back_promoted_artifact_on_regression(tmp_path, capsys, 
 
 
 def test_cli_outcome_reconcile_dispatch(tmp_path, capsys):
-    _seed(tmp_path, _helped("skill-x", 2))
+    _write_registry_skill(tmp_path, "skill-x")
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert cli.main(["outcome", "reconcile", "--target", str(tmp_path), "--json"]) == 0
     assert "skill-x" in capsys.readouterr().out
 
@@ -790,6 +794,9 @@ def test_rank_and_reconcile_count_verify_and_run_receipt_graph_deltas_identicall
     )
     capsys.readouterr()
 
+    _write_registry_skill(tmp_path, "skill-x")
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
+
     assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
     ranking = {item["artifact_id"]: item for item in json.loads(capsys.readouterr().out)["ranking"]}
     assert ranking["skill-x"]["helped"] == 2
@@ -837,6 +844,8 @@ def test_reconcile_dry_run_json_surfaces_graph_delta_counters(tmp_path, capsys):
             ),
         ],
     )
+    _write_registry_skill(tmp_path, "skill-x")
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
 
     assert outcome_cmd.reconcile(target=tmp_path, apply=False, json_output=True) == 0
 
@@ -949,6 +958,8 @@ def test_reconcile_json_includes_brief_hit_rate_stats(tmp_path, capsys):
             ),
         ],
     )
+    _write_registry_skill(tmp_path, "skill-x")
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=False, json_output=True) == 0
     decision = {item["artifact_id"]: item for item in json.loads(capsys.readouterr().out)["decisions"]}["skill-x"]
     assert decision["action"] == "install"
@@ -1343,27 +1354,33 @@ def test_reconcile_does_not_promote_a_candidate_on_proven_stale_evidence(tmp_pat
 
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["decisions"] == []  # held, not installed
+    hold = payload["decisions"][0]
+    assert hold["action"] == "hold"
+    assert hold["reason"] == "withheld: missing scorecard"
     assert payload["applied"] == []
     assert not _status_file(tmp_path).exists()
 
 
 def test_reconcile_still_promotes_a_never_edited_skill_grandfathered(tmp_path, capsys, monkeypatch):
-    # Grandfathering safety: a registry skill with only pre-fingerprint (legacy)
-    # signals promotes exactly as the pre-fingerprint ratchet did. No proven-stale
-    # records, so the decision and its receipt stay byte-identical.
+    # Legacy ledger rows alone no longer promote skills; receipt scorecards do.
     _stub_execute(monkeypatch)
     _write_registry_skill(tmp_path, "skill-x")
     _seed(tmp_path, _helped("skill-x", 2))  # legacy, no fingerprint
 
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
+    assert payload["applied"] == []
+    hold = {d["artifact_id"]: d for d in payload["decisions"]}["skill-x"]
+    assert hold["action"] == "hold"
+    assert hold["reason"] == "withheld: missing scorecard"
+
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
     assert payload["applied"] == ["skill-x"]
     decision = {d["artifact_id"]: d for d in payload["decisions"]}["skill-x"]
     assert decision["action"] == "install"
-    # No stale evidence dropped, so no fingerprint audit fields leak into the receipt.
-    assert "stale_records" not in decision
-    assert "content_fingerprint" not in decision
+    assert decision["policy_version"] == scorecard.SCORECARD_POLICY_VERSION
 
 
 def test_reconcile_lets_an_edited_skill_re_earn_promotion_on_fresh_signals(tmp_path, capsys, monkeypatch):
@@ -1372,18 +1389,14 @@ def test_reconcile_lets_an_edited_skill_re_earn_promotion_on_fresh_signals(tmp_p
     old_fp = _sha256_of(skill_md)
     _seed(tmp_path, _fp_helped("skill-x", 2, old_fp, start_hour=0))
     skill_md.write_text("# rewritten text\n")
-    new_fp = _sha256_of(skill_md)
-    _seed(tmp_path, _fp_helped("skill-x", 2, new_fp, start_hour=5))
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
 
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["applied"] == ["skill-x"]
     decision = {d["artifact_id"]: d for d in payload["decisions"]}["skill-x"]
     assert decision["action"] == "install"
-    # The decision was scored on the current text; the audit fields record what it dropped.
-    assert decision["content_fingerprint"] == new_fp
-    assert decision["stale_records"] == 2
-    assert decision["lifetime_helped"] == 4
+    assert decision["policy_version"] == scorecard.SCORECARD_POLICY_VERSION
 
 
 def test_reconcile_human_output_notes_a_fingerprint_narrowed_decision(tmp_path, capsys, monkeypatch):
@@ -1392,30 +1405,26 @@ def test_reconcile_human_output_notes_a_fingerprint_narrowed_decision(tmp_path, 
     old_fp = _sha256_of(skill_md)
     _seed(tmp_path, _fp_helped("skill-x", 2, old_fp, start_hour=0))
     skill_md.write_text("# rewritten text\n")
-    new_fp = _sha256_of(skill_md)
-    _seed(tmp_path, _fp_helped("skill-x", 2, new_fp, start_hour=5))
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
 
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=False) == 0
     line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
-    assert "scored current text only" in line
-    assert f"rev {new_fp[:12]}" in line
-    assert "stale=2" in line
+    assert "verified helped, no regressions" in line
+    assert "[install]" in line
 
 
 def test_reconcile_output_byte_identical_for_unedited_skill(tmp_path, capsys, monkeypatch):
-    # The teeth must not disturb the common case: a skill with no proven-stale
-    # records produces exactly the pre-fingerprint one-line output.
     _stub_execute(monkeypatch)
     _write_registry_skill(tmp_path, "skill-x")
-    _seed(tmp_path, _helped("skill-x", 2))
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=False, json_output=False) == 0
     line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
     assert line == "- skill-x candidate -> promoted [install] verified helped, no regressions"
 
 
 def test_fork_projection_uses_the_current_fingerprint_cohort(tmp_path, capsys):
-    # Lifetime would cross install_min_helped (2 helped), but all of it is proven
-    # stale, so the fork must project a hold, not a promotion.
+    # Lifetime legacy rows do not promote; without a current-fingerprint scorecard
+    # the fork projection surfaces an explicit fail-closed hold.
     skill_md = _write_registry_skill(tmp_path, "skill-x", "# old text\n")
     old_fp = _sha256_of(skill_md)
     _seed(tmp_path, _fp_helped("skill-x", 2, old_fp))
@@ -1426,8 +1435,9 @@ def test_fork_projection_uses_the_current_fingerprint_cohort(tmp_path, capsys):
     capsys.readouterr()
     projection = json.loads(out.read_text())
     entry = projection["artifacts"]["skill-x"]
-    assert entry["new_status"] != "promoted"
-    assert entry["helped"] == 0  # current cohort, not the 2 stale lifetime signals
+    assert entry["action"] == "hold"
+    assert entry["new_status"] == "candidate"
+    assert entry["reason"] == "withheld: missing scorecard"
 
 
 def _registry_skill_dir(target, skill_id):

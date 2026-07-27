@@ -154,6 +154,12 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Verification command. May be repeated.",
     )
+    p_work_verify_plan.add_argument(
+        "--manifest",
+        dest="verify_manifest_id",
+        default=None,
+        help="Registered verifier manifest id. Selects scoreable checks; mutually exclusive with --command.",
+    )
     p_work_verify_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_verify_run = verify_sub.add_parser("run", help="Run local verification commands and write a receipt.")
     p_work_verify_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -173,6 +179,15 @@ def register(sub: argparse._SubParsersAction) -> None:
             "JSON array of argv strings for one verification command, executed directly "
             "with shell=False (bypasses the shell-metacharacter check, for commands whose "
             "arguments need punctuation like ';' or quotes). Mutually exclusive with --command."
+        ),
+    )
+    p_work_verify_run.add_argument(
+        "--manifest",
+        dest="verify_manifest_id",
+        default=None,
+        help=(
+            "Registered verifier manifest id. Runs manifest-owned checks with scoreable "
+            "subject/check metadata. Mutually exclusive with --command and --argv-json."
         ),
     )
     p_work_verify_run.add_argument("--timeout", type=int, default=900, help="Timeout per command in seconds.")

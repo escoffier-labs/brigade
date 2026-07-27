@@ -204,8 +204,9 @@ def test_outcome_health_flags_dormant_then_half_fed(tmp_path):
     _init_git_repo(tmp_path)
     assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""]) == 0
     half_fed = outcome_cmd.health(tmp_path)
-    assert half_fed["verify_run_count"] >= 1 and half_fed["record_count"] == 0
+    assert half_fed["verify_run_count"] >= 1 and half_fed["eligible_receipt_count"] == 0
     assert half_fed["top_issue"]["name"] == "outcome_loop_half_fed"
+    assert "subject_binding" in half_fed["top_issue"]["detail"]
 
 
 def test_work_acceptance_rollup_covers_completion_review_and_closeout(tmp_path, capsys):
@@ -1872,6 +1873,7 @@ def test_work_verify_run_cli_passes_graphtrail_timeout_override(tmp_path, monkey
         {
             "target": tmp_path,
             "commands": ["python3 -m pytest -q"],
+            "manifest_id": None,
             "timeout": 900,
             "graphtrail_timeout": 45,
             "json_output": True,
@@ -1989,12 +1991,16 @@ def test_work_verify_and_closeout_cli(tmp_path, monkeypatch):
     assert cli.main(["work", "verify", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["work", "closeout", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert seen == [
-        ("verify-plan", {"target": tmp_path, "commands": ["python3 -m pytest -q"], "json_output": True}),
+        (
+            "verify-plan",
+            {"target": tmp_path, "commands": ["python3 -m pytest -q"], "manifest_id": None, "json_output": True},
+        ),
         (
             "verify-run",
             {
                 "target": tmp_path,
                 "commands": ["python3 -m pytest -q"],
+                "manifest_id": None,
                 "timeout": 12,
                 "graphtrail_timeout": None,
                 "json_output": True,

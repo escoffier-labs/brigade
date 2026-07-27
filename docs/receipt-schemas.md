@@ -62,6 +62,33 @@ JSON Schema files.
 | `digests` | object | no | `{algorithm, logs, receipt_sha256, signature?, key_id?}` |
 | `reused_from` | string | no | Prior run id when reused |
 | `interruption` | object | no | Cancel metadata |
+| `verify_manifest_id` | string | no | Registered manifest id when the run was manifest-selected |
+| `required_utility_check_ids` | array of string | no | Manifest-owned utility guardrail ids required for scoring (#503) |
+| `subject_binding` | object | no | Verifier-authored scoreable subject metadata (manifest runs only) |
+| `failure_class` | string | no | Receipt-level #474-style failure class when status is not completed |
+| `failure_kind` | string | no | Receipt-level failure kind paired with `failure_class` |
+
+**`subject_binding` object** (additive, manifest-selected runs)
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `binding_mode` | string | `patch_backed` or `fixture_eval` |
+| `artifact_kind` | string | `skill` or `card` |
+| `artifact_id` | string | Verifier-owned subject id |
+| `content_fingerprint` | string | Subject content fingerprint at verify time |
+| `manifest_binding` | object | `{manifest_id, payload_sha256, source_path?}` for the exact tracked verifier manifest |
+| `patch_source` | string | `worktree` or `generated` (patch-backed only) |
+| `producer_binding` | object | `{work_session_id, owned_delta_sha256, subject_clean_at_start, start_git}` for patch-backed runs |
+| `verifier_identity` | object | `{verifier_id, session_id}` independent verifier session |
+| `patch_binding` | object | Patch-backed tuple plus `subject_path` and `subject_hash` |
+| `fixture_binding` | object | `{manifest_id, case_id, check_id}` for fixture evaluation runs |
+
+Ad hoc `--command` / `--argv-json` runs omit `subject_binding` and remain audit-only (non-scoreable).
+
+Tracked workspace verifier manifests live under `verify/manifests/*.json`. A manifest owns its
+subject, ordered checks, required utility ids, optional scoped-write globs, and optional route
+opt-in (`route_paths` or exact `route_classes`). Untracked manifests cannot produce scoreable
+receipts or routing authority.
 
 **Command object**
 
@@ -76,6 +103,11 @@ JSON Schema files.
 | `duration_seconds` | number | |
 | `stdout_summary`, `stderr_summary` | string | |
 | `stdout_log_path`, `stderr_log_path` | string | Paths under run dir |
+| `check_role` | string | `effectiveness` or `utility_guardrail` (manifest-selected runs) |
+| `check_id` | string | Stable verifier-owned check id (manifest-selected runs) |
+| `obligation_id` | string | Optional obligation id from the manifest |
+| `failure_class` | string | #474-style class when the command did not succeed |
+| `failure_kind` | string | Typed failure kind paired with `failure_class` |
 
 ---
 
@@ -153,6 +185,7 @@ original file is missing, corrupt, or not an object.
 | `roster` | object | no | Resolution metadata |
 | `lock_workspace` | string | no | |
 | `route` | object | no | Routing brief |
+| `skill_route_policy` | object | no | Frozen pre-plan score inputs, assignments, quota counters, and acceptance reasons |
 | `worker` | string | no | Direct-worker seat |
 | `git` | object | no | |
 | `pre_run_snapshot` | object | no | Run-guard snapshot |
@@ -253,6 +286,27 @@ and patch-ref binding may rewrite worker/synthesis artifacts).
 
 ---
 
+## `brigade.route-decision.v1`
+
+**Path:** `.brigade/runs/<run-id>/route-decision.json`
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema_version` | string | yes | `brigade.route-decision.v1` |
+| `chosen_route` | array of string \| null | yes | Route stages selected for the run |
+| `confidence`, `template_version` | string \| null | yes | Route metadata |
+| `admissible_seats` | array of string | yes | Non-orchestrator seats |
+| `decided_at` | string | no | Pre-plan policy timestamp |
+| `policy_version` | string | no | Skill route-policy version |
+| `score_inputs` | object | no | Receipt-only score inputs keyed by artifact id |
+| `skill_assignments` | array of object | no | Band, authority, manifest, scope, and exploration selection |
+| `exploration` | object | no | Route class, 7/30-day counters, quota, and accept/reject reasons |
+
+When skill routing applies, this receipt preserves the decision made before planning. Finalization
+must not recompute it from post-run state.
+
+---
+
 ## `brigade.roster_snapshot.v1`: `schema_version: 1`
 
 **Path:** `.brigade/runs/<run-id>/roster.json`
@@ -303,6 +357,7 @@ and patch-ref binding may rewrite worker/synthesis artifacts).
 | `worker` | string | Assigned seat name |
 | `task` | string | Task text for the worker |
 | `covers` | array of string | Optional covered artifact ids |
+| `selected_skill_ids` | array of string | Optional pre-plan exploratory skill binding |
 
 ---
 

@@ -94,6 +94,8 @@ class ReconcileConfig:
     bump_min_helped: int = 3
     cooldown_seconds: int = 86_400
     z: float = 1.96
+    effective_wilson_min: float = 0.15
+    utility_min_passing_units: int = 2
 
 
 @dataclass(frozen=True)
@@ -439,11 +441,15 @@ class StatusTransition:
     The decision receipts under ``memory/outcome/decisions/`` are the transition
     log; ``status.json`` is the cache they fold into. Keeping this pure lets the
     rebuild check prove the cache is reproducible from the log.
+
+    ``route_policy`` is optional and additive: promoted skill receipts may carry
+    the routing-authority marker that ``status.json`` caches alongside status.
     """
 
     artifact_id: str
     new_status: str
     created_at: str  # ISO 8601
+    route_policy: dict[str, Any] | None = None
 
 
 def fold_status(transitions: list[StatusTransition]) -> dict[str, dict]:
@@ -458,7 +464,10 @@ def fold_status(transitions: list[StatusTransition]) -> dict[str, dict]:
     ordered = sorted(transitions, key=lambda t: (t.created_at, t.artifact_id))
     status: dict[str, dict] = {}
     for t in ordered:
-        status[t.artifact_id] = {"status": t.new_status, "last_action_ts": t.created_at}
+        entry: dict[str, Any] = {"status": t.new_status, "last_action_ts": t.created_at}
+        if t.route_policy is not None:
+            entry["route_policy"] = t.route_policy
+        status[t.artifact_id] = entry
     return status
 
 

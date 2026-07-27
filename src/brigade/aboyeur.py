@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from functools import wraps
+from functools import partial, wraps
 from json import JSONDecoder
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -39,6 +39,13 @@ from .run_receipts import (
 from .run_transport import Assignment, WorkerResult
 from .roster import Agent, Roster, is_cli_allowed, read_only_capability_error, timeout_for, workers
 from .route_catalog import RouteBrief, route_brief, uncovered_stages, unknown_covers
+from .route_policy import (
+    RoutePolicyDecision,
+    direct_worker_skill_ids,
+    planner_skill_policy_section,
+    validate_plan_skill_bindings,
+    worker_skill_policy_constraint,
+)
 
 CODE_GRAPH_HEADING = "## Code graph context (GraphTrail, read-only)"
 CODE_GRAPH_LIMIT = 4000
@@ -385,6 +392,7 @@ def build_plan_prompt(
     evidence: EvidenceBrief | None = None,
     route: RouteBrief | None = None,
     no_file_writes: bool = False,
+    skill_policy: RoutePolicyDecision | None = None,
 ) -> str:
     worker_lines = "\n".join(
         f"- {agent.name}: cli={agent.cli}; "
@@ -407,14 +415,20 @@ def build_plan_prompt(
             '\n- Tag each assignment with "covers": ["<stage>", ...] naming the route '
             "stages it satisfies; every required route stage must be covered."
         )
+    skill_section = ""
+    skill_text = planner_skill_policy_section(skill_policy)
+    if skill_text:
+        skill_section = f"\n{skill_text}"
     prompt = (
         "You are the Brigade aboyeur. Split the user's task across the available workers.\n"
         "Return exactly one JSON object, with no prose outside JSON:\n"
-        '{"assignments":[{"stage":1,"worker":"<worker-name>","task":"<specific sub-task>","covers":["<route-stage>"]}]}\n'
+        '{"assignments":[{"stage":1,"worker":"<worker-name>","task":"<specific sub-task>",'
+        '"covers":["<route-stage>"],"selected_skill_ids":["<artifact-id>"]}]}\n'
         f"{note}\n"
         f"User task:\n{task}\n\n"
         f"Available workers, excluding you:\n{worker_lines}\n"
-        f"{route_section}\n"
+        f"{route_section}"
+        f"{skill_section}\n"
         f"Rules:\n- Use at most {roster.max_workers} assignments per stage.\n"
         "- Stage must be a positive integer starting at stage 1.\n"
         "- Assignments in the same stage run in parallel; later stages receive earlier-stage worker results.\n"
@@ -598,7 +612,13 @@ def _read_only_rules() -> str:
     )
 
 
-def parse_plan(text: str, roster: Roster, *, read_only: bool = False) -> list[Assignment]:
+def parse_plan(
+    text: str,
+    roster: Roster,
+    *,
+    read_only: bool = False,
+    skill_policy: RoutePolicyDecision | None = None,
+) -> list[Assignment]:
     try:
         payload = _extract_json(text)
     except json.JSONDecodeError as exc:
@@ -638,7 +658,21 @@ def parse_plan(text: str, roster: Roster, *, read_only: bool = False) -> list[As
         if not isinstance(raw_covers, list) or any(not isinstance(c, str) or not c.strip() for c in raw_covers):
             raise ValueError("assignment.covers must be a list of non-empty strings")
         covers = tuple(dict.fromkeys(c.strip() for c in raw_covers))
-        assignment = Assignment(worker=worker, task=subtask.strip(), stage=stage, covers=covers)
+        raw_selected = item.get("selected_skill_ids", [])
+        if raw_selected is None:
+            raw_selected = []
+        if not isinstance(raw_selected, list) or any(
+            not isinstance(skill_id, str) or not skill_id.strip() for skill_id in raw_selected
+        ):
+            raise ValueError("assignment.selected_skill_ids must be a list of non-empty strings when set")
+        selected_skill_ids = tuple(dict.fromkeys(skill_id.strip() for skill_id in raw_selected))
+        assignment = Assignment(
+            worker=worker,
+            task=subtask.strip(),
+            stage=stage,
+            covers=covers,
+            selected_skill_ids=selected_skill_ids,
+        )
         key = (assignment.stage, assignment.worker, assignment.task)
         if key not in seen:
             assignments.append(assignment)
@@ -650,12 +684,18 @@ def parse_plan(text: str, roster: Roster, *, read_only: bool = False) -> list[As
             for index, existing in enumerate(assignments):
                 if (existing.stage, existing.worker, existing.task) == key:
                     merged = tuple(dict.fromkeys(existing.covers + covers))
-                    assignments[index] = replace(existing, covers=merged)
+                    merged_skills = tuple(dict.fromkeys(existing.selected_skill_ids + selected_skill_ids))
+                    assignments[index] = replace(
+                        existing,
+                        covers=merged,
+                        selected_skill_ids=merged_skills,
+                    )
                     break
 
     for stage, count in stage_counts.items():
         if count > roster.max_workers:
             raise ValueError(f"plan has {count} assignments in stage {stage}, limit is {roster.max_workers}")
+    validate_plan_skill_bindings(assignments, skill_policy)
     return sorted(assignments, key=lambda assignment: assignment.stage)
 
 
@@ -853,6 +893,7 @@ def plan(
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
     route: RouteBrief | None = None,
+    skill_policy: RoutePolicyDecision | None = None,
     codex_transport: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
 ) -> list[Assignment]:
@@ -875,6 +916,7 @@ def plan(
             evidence=evidence,
             route=route,
             no_file_writes=no_file_writes,
+            skill_policy=skill_policy,
         ),
         cwd=cwd,
         read_only=read_only,
@@ -887,7 +929,7 @@ def plan(
         _record_plan_attempt(attempts, stage="initial", result=first)
         raise RuntimeError(f"orchestrator failed during plan: {first.detail}")
     try:
-        assignments = parse_plan(first.text, roster, read_only=read_only)
+        assignments = parse_plan(first.text, roster, read_only=read_only, skill_policy=skill_policy)
         _record_plan_attempt(
             attempts,
             stage="initial",
@@ -913,6 +955,7 @@ def plan(
                 evidence=evidence,
                 route=route,
                 no_file_writes=no_file_writes,
+                skill_policy=skill_policy,
             ),
             cwd=cwd,
             read_only=read_only,
@@ -925,7 +968,7 @@ def plan(
             _record_plan_attempt(attempts, stage="correction", result=second)
             raise RuntimeError(f"orchestrator failed during plan correction: {second.detail}") from exc
         try:
-            assignments = parse_plan(second.text, roster, read_only=read_only)
+            assignments = parse_plan(second.text, roster, read_only=read_only, skill_policy=skill_policy)
             _record_plan_attempt(
                 attempts,
                 stage="correction",
@@ -966,6 +1009,7 @@ def plan(
             evidence=evidence,
             route=route,
             no_file_writes=no_file_writes,
+            skill_policy=skill_policy,
         ),
         cwd=cwd,
         read_only=read_only,
@@ -978,7 +1022,7 @@ def plan(
         _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result)
         return assignments
     try:
-        revised = parse_plan(revised_result.text, roster, read_only=read_only)
+        revised = parse_plan(revised_result.text, roster, read_only=read_only, skill_policy=skill_policy)
     except ValueError as exc:
         _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result, parse_error=str(exc))
         return assignments
@@ -1024,11 +1068,13 @@ def _worker_prompt(
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
+    skill_policy: RoutePolicyDecision | None = None,
 ) -> str:
     prior_context = ""
     if prior_results:
         prior_context = f"\n\nEarlier-stage context:\n{_render_prior_results(prior_results)}"
     policy = f"\n\n{_read_only_rules()}" if read_only else ""
+    scope_policy = worker_skill_policy_constraint(skill_policy, assignment)
     return_instruction = (
         "Return a concise, complete final user-visible result."
         if direct
@@ -1040,6 +1086,7 @@ def _worker_prompt(
         f"Sub-task:\n{assignment.task}\n\n"
         f"{return_instruction}"
         f"{prior_context}"
+        f"{scope_policy}"
         f"{policy}"
     )
     return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
@@ -2010,6 +2057,7 @@ def _run_payload(
     context_eval_payload: dict[str, object] | None = None,
     suspected_noop: bool = False,
     route: RouteBrief | None = None,
+    skill_route_policy: RoutePolicyDecision | None = None,
     worker: str | None = None,
     include_git: bool = True,
     pre_run_snapshot: dict[str, object] | None = None,
@@ -2054,6 +2102,10 @@ def _run_payload(
         payload["lock_workspace"] = str(lock_workspace)
     if route is not None:
         payload["route"] = route.payload()
+    if skill_route_policy is not None and skill_route_policy.policy_applied:
+        from .route_policy import route_policy_extensions_from_decision
+
+        payload["skill_route_policy"] = route_policy_extensions_from_decision(skill_route_policy)
     if worker is not None:
         payload["worker"] = worker
     if include_git:
@@ -2319,6 +2371,7 @@ def run(
     route_template: str | None = None,
     route_overrides: tuple[str, ...] = (),
     worker: str | None = None,
+    allow_shadow: bool = False,
     authorized_writable_worktree: bool = False,
     fail_fast: bool = True,
     scheduler: str = "waves",
@@ -2347,12 +2400,16 @@ def run(
         scheduler_resolution["fallback_reason"] = fallback_reason
 
     def _payload(**kwargs: Any) -> dict[str, object]:
+        if "skill_route_policy" not in kwargs and skill_policy is not None:
+            kwargs["skill_route_policy"] = skill_policy
         return _run_payload(
             lock_workspace=lock_workspace,
             pre_run_snapshot=pre_run_snapshot_payload,
             scheduler=dict(scheduler_resolution),
             **kwargs,
         )
+
+    skill_policy: RoutePolicyDecision | None = None
 
     # Capture pre-run git state before any worker touches the tree so ground
     # truth can attribute only the worker's changes and a drift check can fail
@@ -2472,11 +2529,65 @@ def run(
             ),
         )
 
+    if cwd is not None and route is not None and route.attached:
+        from .route_policy import decide_route_skills, route_policy_extensions_from_decision
+        from .route_receipts import write_route_decision
+
+        skill_policy = decide_route_skills(
+            cwd,
+            route_brief=route,
+            runs_dir=output_dir.parent if output_dir is not None else None,
+            now=started_at,
+            allow_shadow=allow_shadow if direct_worker else True,
+        )
+        if output_dir is not None and skill_policy.policy_applied:
+            write_route_decision(
+                output_dir,
+                roster,
+                runs_dir=output_dir.parent,
+                policy_extensions=route_policy_extensions_from_decision(skill_policy),
+            )
+            _write_json(
+                output_dir / "run.json",
+                _payload(
+                    task=task,
+                    cwd=cwd,
+                    roster=roster,
+                    dry_run=dry_run,
+                    read_only=read_only,
+                    status="started",
+                    started_at=started_at,
+                    output_dir=output_dir,
+                    code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    evidence=evidence,
+                    brief_set=brief_set,
+                    codex_transport=transport_for_payload,
+                    route=route,
+                    code_graph_delta=code_graph_delta,
+                    worker=worker,
+                ),
+            )
+
     control_socket = None
     control_transport = None
     plan_attempts: list[dict[str, object]] | None = [] if output_dir is not None else None
     if worker is not None:
-        assignments = [Assignment(worker=worker, task=task, stage=1)]
+        selected_skill_ids, bind_error = direct_worker_skill_ids(
+            skill_policy,
+            allow_shadow=allow_shadow,
+        )
+        if bind_error is not None:
+            print(f"error: {bind_error}", file=sys.stderr)
+            return 2
+        assignments = [
+            Assignment(
+                worker=worker,
+                task=task,
+                stage=1,
+                selected_skill_ids=selected_skill_ids,
+            )
+        ]
     else:
         if output_dir is not None:
             _write_json(
@@ -2514,6 +2625,7 @@ def run(
                 drift_impact=drift_impact,
                 evidence=evidence,
                 route=route,
+                skill_policy=skill_policy,
                 codex_transport=transport_for_payload,
                 process_registry=process_registry,
             )
@@ -2755,6 +2867,7 @@ def run(
         )
 
     active_seat = active_seats[0] if len(active_seats) == 1 else None
+    worker_prompt_builder = partial(_worker_prompt, skill_policy=skill_policy)
     try:
         try:
             worker_results = _call_with_process_registry(
@@ -2782,6 +2895,7 @@ def run(
                 on_interrupt=dispatch_interrupted,
                 on_scheduler_resolved=scheduler_resolved,
                 process_registry=process_registry,
+                build_prompt=worker_prompt_builder,
             )
         except runguard.RetainRunLockError:
             raise

@@ -90,6 +90,20 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_fork.add_argument("--revert-min-hurt", type=int, default=None, help="Override revert_min_hurt.")
     p_fork.add_argument("--bump-min-helped", type=int, default=None, help="Override bump_min_helped.")
     p_fork.add_argument("--z", type=float, default=None, help="Override the Wilson z score.")
+    p_fork.add_argument(
+        "--effective-wilson-min",
+        type=float,
+        default=None,
+        help="Override the scorecard effectiveness Wilson lower-bound threshold.",
+    )
+    p_fork.add_argument(
+        "--utility-check-min-passing-units",
+        "--utility-min-passing-units",
+        type=int,
+        default=None,
+        dest="utility_min_passing_units",
+        help="Override independent passing units required per utility guardrail check.",
+    )
     p_fork.add_argument("--target", "-t", type=Path, default=Path("."))
     p_fork.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_fork.set_defaults(func=_dispatch_fork)
@@ -111,6 +125,26 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_record.add_argument("--target", "-t", type=Path, default=Path("."))
     p_record.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_record.set_defaults(func=_dispatch_record)
+
+    p_backfill = outcome_sub.add_parser(
+        "backfill",
+        help="Read-only verify-receipt scorecard audits (never mutates records.jsonl).",
+    )
+    backfill_sub = p_backfill.add_subparsers(dest="outcome_backfill_command", metavar="<backfill-command>")
+    backfill_sub.required = True
+    p_backfill_scorecard = backfill_sub.add_parser(
+        "scorecard",
+        help="Audit verify receipts for scorecard eligibility without ledger joins.",
+    )
+    p_backfill_scorecard.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_backfill_scorecard.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
+    p_backfill_scorecard.set_defaults(func=_dispatch_backfill_scorecard)
+
+
+def _dispatch_backfill_scorecard(args) -> int:
+    from .. import outcome_cmd
+
+    return outcome_cmd.backfill_scorecard(target=args.target, json_output=args.json)
 
 
 def _dispatch_score(args) -> int:
@@ -183,6 +217,12 @@ def _dispatch_fork(args) -> int:
         bump_min_helped=args.bump_min_helped if args.bump_min_helped is not None else defaults.bump_min_helped,
         cooldown_seconds=defaults.cooldown_seconds,
         z=args.z if args.z is not None else defaults.z,
+        effective_wilson_min=args.effective_wilson_min
+        if args.effective_wilson_min is not None
+        else defaults.effective_wilson_min,
+        utility_min_passing_units=args.utility_min_passing_units
+        if args.utility_min_passing_units is not None
+        else defaults.utility_min_passing_units,
     )
     return outcome_cmd.fork(target=args.target, out=args.out, config=config, json_output=args.json)
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import aboyeur, outcome, outcome_cmd, receipt_schema, runguard
+from brigade import aboyeur, outcome_cmd, receipt_schema, runguard
 from brigade.work_cmd import helpers, verification as verify_mod
 
 
@@ -378,42 +378,12 @@ def test_work_closeout_emits_schema_version(tmp_path, monkeypatch):
 
 
 def test_outcome_decision_emits_schema_version(tmp_path, monkeypatch):
-    def _fake_execute(_target, _artifact_id, _action):
-        return "installed"
+    from tests.test_outcome_cmd import _write_registry_skill
+    from tests.test_scorecard_reconcile import _stub_execute, seed_registry_skill_scorecard_promotion
 
-    monkeypatch.setattr(outcome_cmd, "_execute_skill_decision", _fake_execute)
-    records_path = tmp_path / "memory" / "outcome" / "records.jsonl"
-    records_path.parent.mkdir(parents=True)
-    row = outcome_cmd._record_payload(
-        outcome.OutcomeRecord(
-            "skill-x",
-            "skill",
-            "",
-            "verify",
-            1,
-            "",
-            "2026-01-01T00:00:00+00:00",
-        )
-    )
-    records_path.write_text(json.dumps(row, sort_keys=True) + "\n")
-    records_path.write_text(
-        records_path.read_text()
-        + json.dumps(
-            outcome_cmd._record_payload(
-                outcome.OutcomeRecord(
-                    "skill-x",
-                    "skill",
-                    "",
-                    "verify",
-                    1,
-                    "",
-                    "2026-01-01T01:00:00+00:00",
-                )
-            ),
-            sort_keys=True,
-        )
-        + "\n"
-    )
+    _stub_execute(monkeypatch)
+    _write_registry_skill(tmp_path, "skill-x")
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     decision_path = next((tmp_path / "memory" / "outcome" / "decisions").glob("*.json"))
     decision = json.loads(decision_path.read_text())

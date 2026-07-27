@@ -1197,9 +1197,11 @@ An edited skill therefore earns its score back: once signals for the new text st
 
 The fingerprint sees the artifact's own files and the cards a card links, not the runtime harness around them, the same caveat CocoIndex documents for undecorated helpers: a hash cannot see a skill reaching into the wider workspace at run time, only the files it is made of.
 
-`brigade outcome reconcile` and `brigade outcome fork` score the same current cohort when they decide. The promote/rollback ratchet no longer folds over the full lifetime ledger: it scores the current-fingerprint cohort, so an edited skill must re-earn `install_min_helped` against the text that now ships instead of coasting on signals for text that no longer exists. The decision *rules* are untouched (thresholds, cooldown, and the forward-only ratchet are the same functions PR #163 left in place); only the score fed in narrows. Because grandfathering leaves a never-edited artifact with no proven-stale records, its `current` equals lifetime and its decision, receipt, and one-line output are byte-identical to the pre-fingerprint ratchet. When a decision does drop stale evidence, the decision receipt and `reconcile` output carry the audit fields (`content_fingerprint`, `lifetime_*`, `stale_records`, `legacy_records`) and a `scored current text only` tail.
+`brigade outcome rank` and `brigade outcome explain` retain those ledger cohorts for historical audit. Skill promotion does not use them. `brigade outcome reconcile` and `brigade outcome fork` project skill decisions only from current-fingerprint verifier receipts that pass the subject, patch or fixture identity, verifier ownership, check-role, digest, and failure-taxonomy gates. Legacy rows in `records.jsonl`, including grandfathered rows, cannot promote a skill. Cards continue to use the legacy ledger path.
 
-Two consequences worth stating. A candidate edited before it reaches the install threshold does not promote on the old text's signals; it holds until the new text earns its own. And an already-promoted skill that is edited keeps its `promoted` status until new evidence lands, rather than demoting on the edit alone: its score is now the near-zero current cohort, so it earns no `bump`, and the first verified regression on the new text rolls it back. Demoting purely on an edit would punish improvements, so the ratchet waits for a real signal.
+A candidate skill promotes only when both gates pass. Effectiveness requires at least `install_min_helped` independent passes, no trusted hurt, and a Wilson lower bound of at least 0.15. Utility requires two independent passing evidence units and no trusted failure for every verifier-manifest check marked `utility_guardrail`. Retries and `reused_from` copies do not add evidence units. Missing scorecards and incomplete utility evidence produce explicit hold reasons in reconcile and fork output.
+
+Promotion writes `route_policy.policy_version: scorecard.v1` into the status projection and decision receipt. The router grants full authority only when that marker, promoted status, a current scorecard, and zero trusted hurts agree. One trusted current-fingerprint hurt removes broad authority immediately, before cooldown and regardless of physical rollback success. Install and rollback remain side effects; a failed install does not write promoted status.
 
 ### Context eval metric
 
@@ -1210,6 +1212,46 @@ For example, `brief hit rate 0.50 (2/4 files, 2 missed)` means two of four struc
 `outcome capture --run-receipt` copies `context_eval` onto the hash-chained outcome record. `outcome rank` and dry-run `outcome reconcile` then surface the mean `brief_hit_rate` per skill (`brief_hit: 0.750 (n=2)` in text; `brief_hit_rate` / `brief_hit_samples` in JSON). Among artifacts with equal Wilson scores, a higher mean brief hit rate ranks first. Install and rollback thresholds still ignore brief hit rate: a skill that fails verify still demotes, and a skill that only has strong context coverage without verified exits does not auto-install.
 
 This is a coverage quality signal for skill and runbook ranking, not a claim that the context was useful, sufficient, or correct. Brief parsing is heuristic, and GraphTrail deltas only see structural code changes. Docs-only runs and runs without structural graph changes produce no context eval.
+
+### Receipt scorecard backfill
+
+`brigade outcome backfill scorecard` is a read-only audit of every verify receipt under `.brigade/work/verify-runs/*/receipt.json`. It never mutates `memory/outcome/records.jsonl`, never appends ledger rows, and never joins receipts to ledger `artifact_id` values. Use `--json` for machine-readable output.
+
+```bash
+brigade outcome backfill scorecard --target .
+brigade outcome backfill scorecard --target /path/to/repo --json
+```
+
+Each discovered `receipt.json` path is counted in `total_receipts`, including malformed files. When a file is unreadable or its JSON is not an object, the audit records one ineligible, unattributed row with stable reason `invalid_receipt_json`.
+
+Stable JSON fields:
+
+| Field | Meaning |
+| --- | --- |
+| `total_receipts` | Count of discovered `receipt.json` paths |
+| `eligible` | Receipts that pass scorecard eligibility rules |
+| `ineligible` | `total_receipts - eligible`; numerator for `ineligibility_rate` |
+| `attributed_ineligible` | Ineligible receipts that carry verifier `subject_binding` |
+| `unattributed` | Receipts without attributable `subject_binding` |
+| `attributed` | `total_receipts - unattributed` |
+| `ineligibility_rate` | `ineligible / total_receipts` (0.0 when empty) |
+| `ineligible_by_reason` | Map of stable reason codes to counts; values sum to `ineligible` |
+| `leading_ineligibility_reason` | Highest-count reason in `ineligible_by_reason` (ties break lexicographically) |
+| `exploration_bands` | Attributed subjects by `unseen`, `candidate`, `provisional`, or `promoted` |
+| `latest_receipt_window` | Rolling view of the latest 50 receipt audits |
+| `legacy_records_audit_only` | Always `true` for this command |
+| `legacy_records_note` | Explains ledger rows are not backfilled into scorecards |
+
+`eligible + ineligible` always equals `total_receipts`.
+
+`latest_receipt_window` sorts receipt audits by `started_at`, then `run_id`, then `receipt_path`, all descending (lexicographic). The first 50 audits in that order form the window regardless of eligibility. Nested fields include `limit` (50), `count`, `eligible`, `ineligible`, `ineligibility_rate`, and `leading_ineligibility_reason`.
+
+Operator surfaces reuse the same audit:
+
+- `brigade work brief` copies those fields under `outcome_loop`.
+- `brigade operator checkup --surface outcome` warns when the loop is half-fed (`outcome_loop_half_fed`) or when more than 50% of the latest 50 receipts are ineligible (`outcome_receipt_ineligibility_high`). Its JSON includes `eligible_receipt_count`, `ineligible_receipt_count`, `attributed_ineligible_receipt_count`, `unattributed_receipt_count`, `ineligibility_rate`, `exploration_bands`, and `latest_receipt_window`.
+
+The 1,601 legacy outcome ledger rows reported in the scorecard proposal are audit-only. They cannot be converted into receipt scorecards because scorecards require verifier-attributed verify receipts, not caller-supplied ledger `artifact_id` values.
 
 `brigade operator checkup` runs the six first-run doctors by default and reports optional loop station health alongside them. Missing optional stations warn and do not block the default ready verdict. Use repeatable `--surface` values to run only named checks, `--list-surfaces` to inspect the stable names, or `--preset evidence-loop` to gate only work receipt integrity and outcome capture, GraphTrail health and the latest work receipt delta, and MiseLedger work-receipt import state. Scoped JSON reports `selected_ready`, leaves `overall_ready` unevaluated, and includes selected, skipped, and per-surface elapsed data.
 
