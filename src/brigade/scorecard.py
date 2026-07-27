@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import statistics
 from collections import Counter, defaultdict
@@ -12,6 +13,7 @@ from typing import Any
 from . import outcome as outcome_core, outcome_cmd, verify_trial
 
 SCORECARD_POLICY_VERSION = "scorecard.v1"
+EFFECTIVE_WILSON_MIN = 0.15
 _UTILITY_REQUIRED_TRIALS = 2
 
 
@@ -590,3 +592,141 @@ def classify_band(
     from .route_policy import classify_band as _classify_band
 
     return _classify_band(card, persisted_status=persisted_status, policy_marker=policy_marker)
+
+
+def route_policy_marker_for_promotion() -> dict[str, str]:
+    """Persisted on promoted status so route_policy grants full authority (#503)."""
+    return {
+        "policy_version": SCORECARD_POLICY_VERSION,
+        "route_authority": "full",
+    }
+
+
+def utility_gate_reason(
+    card: SubjectScorecard,
+    *,
+    min_passing_units: int = _UTILITY_REQUIRED_TRIALS,
+) -> str | None:
+    """Return a withhold reason when utility guardrails fail, else None."""
+    utility = card.utility_guardrails
+    required_ids = utility.get("required_check_ids") or []
+    if not required_ids:
+        return None
+    per_check = utility.get("per_check") or {}
+    for check_id in required_ids:
+        check_stats = per_check.get(check_id) if isinstance(per_check, dict) else None
+        if not isinstance(check_stats, dict):
+            return f"withheld: utility_guardrail {check_id}"
+        failing = int(check_stats.get("failing_units", 0))
+        if failing > 0:
+            return f"withheld: utility_guardrail {check_id}"
+        passing = int(check_stats.get("passing_units", 0))
+        if passing < min_passing_units:
+            return f"withheld: utility_guardrail {check_id}"
+    return None
+
+
+def effectiveness_gate_reason(
+    card: SubjectScorecard,
+    *,
+    config: outcome_core.ReconcileConfig,
+) -> str | None:
+    """Return a withhold reason when effectiveness fails promotion, else None."""
+    effectiveness = card.dimensions.get("effectiveness", {})
+    helped = int(effectiveness.get("helped", 0))
+    hurt = int(effectiveness.get("hurt", 0))
+    trials = helped + hurt
+    wilson = outcome_core.wilson_lower_bound(helped, trials, config.z)
+    if hurt > 0:
+        return "withheld: verified regression present"
+    if helped < config.install_min_helped:
+        return "insufficient verified evidence"
+    wilson_min = config.effective_wilson_min
+    if wilson < wilson_min:
+        return f"withheld: effectiveness wilson below {wilson_min:g}"
+    return None
+
+
+def dual_gate_passes(
+    card: SubjectScorecard,
+    *,
+    config: outcome_core.ReconcileConfig,
+) -> tuple[bool, str]:
+    """Evaluate effectiveness AND utility promotion criteria (#503)."""
+    effectiveness_reason = effectiveness_gate_reason(card, config=config)
+    if effectiveness_reason is not None:
+        return False, effectiveness_reason
+    utility_reason = utility_gate_reason(card, min_passing_units=config.utility_min_passing_units)
+    if utility_reason is not None:
+        return False, utility_reason
+    return True, "verified helped, no regressions"
+
+
+def decide_scorecard(
+    card: SubjectScorecard | None,
+    *,
+    artifact_id: str,
+    current_status: str,
+    last_action_ts: dt.datetime | None,
+    now: dt.datetime,
+    config: outcome_core.ReconcileConfig,
+) -> outcome_core.Decision:
+    """Decide promote/hold/rollback from a receipt-only scorecard (#503)."""
+    if card is None:
+        if current_status == "promoted":
+            return outcome_core.Decision(
+                artifact_id,
+                "rollback",
+                "demoted",
+                "withheld: missing scorecard",
+            )
+        return outcome_core.Decision(artifact_id, "hold", current_status, "withheld: missing scorecard")
+
+    effectiveness = card.dimensions.get("effectiveness", {})
+    helped = int(effectiveness.get("helped", 0))
+    hurt = int(effectiveness.get("hurt", 0))
+
+    # Any trusted current-cohort hurt on a promoted skill demotes immediately,
+    # before cooldown and regardless of revert_min_hurt.
+    if current_status == "promoted" and hurt > 0:
+        return outcome_core.Decision(artifact_id, "rollback", "demoted", "verified regression measured")
+
+    if last_action_ts is not None and (now - last_action_ts).total_seconds() < config.cooldown_seconds:
+        return outcome_core.Decision(artifact_id, "hold", current_status, "cooldown active")
+
+    if current_status == "candidate":
+        if hurt > 0:
+            return outcome_core.Decision(artifact_id, "hold", "candidate", "withheld: verified regression present")
+        passes, reason = dual_gate_passes(card, config=config)
+        if passes:
+            return outcome_core.Decision(artifact_id, "install", "promoted", reason)
+        return outcome_core.Decision(artifact_id, "hold", "candidate", reason)
+
+    if current_status == "promoted":
+        if helped >= config.bump_min_helped:
+            passes, reason = dual_gate_passes(card, config=config)
+            if passes:
+                return outcome_core.Decision(artifact_id, "bump", "promoted", "sustained verified helped")
+        return outcome_core.Decision(artifact_id, "hold", "promoted", "no change")
+
+    return outcome_core.Decision(artifact_id, "hold", current_status, "terminal status")
+
+
+def project_scorecard_statuses(
+    scorecards: dict[str, SubjectScorecard],
+    *,
+    config: outcome_core.ReconcileConfig,
+    now: dt.datetime,
+) -> dict[str, outcome_core.Decision]:
+    """Fork primitive: project scorecard ratchet from a clean candidate baseline."""
+    return {
+        artifact_id: decide_scorecard(
+            card,
+            artifact_id=artifact_id,
+            current_status="candidate",
+            last_action_ts=None,
+            now=now,
+            config=config,
+        )
+        for artifact_id, card in scorecards.items()
+    }

@@ -55,10 +55,27 @@ def test_rebuild_status_detects_drift(tmp_path, capsys):
     assert any(d["artifact_id"] == "card-x" and d["issue"] == "mismatch" for d in payload["drift"])
 
 
+def test_rebuild_status_reproduces_promoted_route_policy(tmp_path, capsys, monkeypatch):
+    from tests.test_scorecard_reconcile import _stub_execute, seed_registry_skill_scorecard_promotion
+    from tests.test_outcome_cmd import _write_registry_skill
+
+    _stub_execute(monkeypatch)
+    _write_registry_skill(tmp_path, "skill-x")
+    seed_registry_skill_scorecard_promotion(tmp_path, "skill-x")
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
+    capsys.readouterr()
+
+    assert outcome_cmd.rebuild_status(target=tmp_path, check=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reproducible"] is True
+    entry = outcome_cmd.load_status(tmp_path)["skill-x"]
+    assert entry["route_policy"]["policy_version"] == "scorecard.v1"
+
+
 def test_fork_and_diff_reflect_config_sensitivity(tmp_path, capsys):
-    # skill-x has enough signal to install under any threshold; skill-y only
+    # card-x has enough signal to install under any threshold; card-y only
     # installs once the threshold drops to 1.
-    _seed(tmp_path, _helped("skill-x", "skill", 2) + _helped("skill-y", "skill", 1))
+    _seed(tmp_path, _helped("card-x", "card", 2) + _helped("card-y", "card", 1))
 
     fork_a = tmp_path / "A.json"
     fork_b = tmp_path / "B.json"
@@ -76,8 +93,8 @@ def test_fork_and_diff_reflect_config_sensitivity(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["identical"] is False
     changed = {c["artifact_id"]: c for c in payload["changed"]}
-    assert "skill-y" in changed  # hold@candidate under A, install@promoted under B
-    assert "skill-x" not in changed  # installs under both
+    assert "card-y" in changed  # hold@candidate under A, install@promoted under B
+    assert "card-x" not in changed  # installs under both
 
     # A fork is read-only: the live ledger has no status.json written by fork.
     assert not (tmp_path / "memory" / "outcome" / "status.json").exists()

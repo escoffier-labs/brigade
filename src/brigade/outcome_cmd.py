@@ -19,7 +19,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import localio, outcome as core, receipt_schema
+from . import localio, outcome as core, receipt_schema, scorecard as scorecard_mod
+
+
+@dataclasses.dataclass(frozen=True)
+class _ReconcileItem:
+    decision: core.Decision
+    prior_status: str
+    cohorts: core.FingerprintCohorts | None = None
+    scorecard: scorecard_mod.SubjectScorecard | None = None
 
 
 def _records_path(target: Path) -> Path:
@@ -388,6 +396,110 @@ def route_fingerprint(manifest: dict[str, Any]) -> str | None:
     return localio.canonical_json_digest(vector)
 
 
+def _scorecards_by_artifact(target: Path) -> dict[str, scorecard_mod.SubjectScorecard]:
+    return {card.subject.artifact_id: card for card in scorecard_mod.build_scorecards(target)}
+
+
+def _artifact_kinds(
+    records: list[core.OutcomeRecord],
+    status_map: dict[str, dict],
+    scorecards: dict[str, scorecard_mod.SubjectScorecard],
+) -> dict[str, str]:
+    kinds: dict[str, str] = {}
+    for record in records:
+        kinds.setdefault(record.artifact_id, record.artifact_kind or "skill")
+    for artifact_id in status_map:
+        kinds.setdefault(artifact_id, "skill")
+    for artifact_id, card in scorecards.items():
+        kinds.setdefault(artifact_id, card.subject.artifact_kind)
+    return kinds
+
+
+def _reconcile_artifact_ids(
+    kinds: dict[str, str],
+    status_map: dict[str, dict],
+    scorecards: dict[str, scorecard_mod.SubjectScorecard],
+    cohorts_by_artifact: dict[str, core.FingerprintCohorts],
+) -> list[str]:
+    artifact_ids: set[str] = set()
+    for artifact_id, kind in kinds.items():
+        if kind == "card":
+            if artifact_id in cohorts_by_artifact:
+                artifact_ids.add(artifact_id)
+            continue
+        if artifact_id in scorecards or artifact_id in status_map or artifact_id in cohorts_by_artifact:
+            artifact_ids.add(artifact_id)
+    return sorted(artifact_ids)
+
+
+def _decide_reconcile_item(
+    artifact_id: str,
+    artifact_kind: str,
+    *,
+    cohorts: core.FingerprintCohorts | None,
+    card: scorecard_mod.SubjectScorecard | None,
+    prior_status: str,
+    last_action_ts: Any,
+    now: Any,
+    config: core.ReconcileConfig,
+) -> core.Decision:
+    if artifact_kind == "card":
+        if cohorts is None:
+            return core.Decision(artifact_id, "hold", prior_status, "no scored evidence")
+        return core.decide(
+            cohorts.current,
+            current_status=prior_status,
+            last_action_ts=last_action_ts,
+            now=now,
+            config=config,
+        )
+    return scorecard_mod.decide_scorecard(
+        card,
+        artifact_id=artifact_id,
+        current_status=prior_status,
+        last_action_ts=last_action_ts,
+        now=now,
+        config=config,
+    )
+
+
+def _surface_hold_decision(decision: core.Decision, prior_status: str) -> bool:
+    """Whether a hold should appear in reconcile/fork output (fail-closed, auditable)."""
+    if decision.action != "hold":
+        return False
+    if prior_status != "candidate":
+        return False
+    return decision.reason != "cooldown active"
+
+
+def _scorecard_decision_fields(card: scorecard_mod.SubjectScorecard | None) -> dict[str, Any]:
+    if card is None:
+        return {}
+    return {
+        "policy_version": scorecard_mod.SCORECARD_POLICY_VERSION,
+        "scorecard": scorecard_mod.subject_scorecard_to_dict(card),
+    }
+
+
+def _status_entry_for_transition(
+    *,
+    new_status: str,
+    now: Any,
+    decision: core.Decision,
+    install_failed: bool,
+    artifact_kind: str,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {"status": new_status, "last_action_ts": now.isoformat()}
+    if (
+        artifact_kind == "skill"
+        and new_status == "promoted"
+        and not install_failed
+        and decision.action in {"install", "bump"}
+    ):
+        entry["route_policy"] = scorecard_mod.route_policy_marker_for_promotion()
+    return entry
+
+
 def _fingerprint_cohorts_by_artifact(
     target: Path, records: list[core.OutcomeRecord]
 ) -> dict[str, core.FingerprintCohorts]:
@@ -589,8 +701,16 @@ def load_transitions(target: Path) -> list[core.StatusTransition]:
         artifact_id = payload.get("artifact_id")
         new_status = payload.get("new_status")
         created_at = payload.get("created_at")
+        route_policy = payload.get("route_policy")
         if artifact_id and new_status and created_at:
-            transitions.append(core.StatusTransition(str(artifact_id), str(new_status), str(created_at)))
+            transitions.append(
+                core.StatusTransition(
+                    str(artifact_id),
+                    str(new_status),
+                    str(created_at),
+                    route_policy=route_policy if isinstance(route_policy, dict) else None,
+                )
+            )
     return transitions
 
 
@@ -651,33 +771,65 @@ def fork(
     config: core.ReconcileConfig | None = None,
     json_output: bool = False,
 ) -> int:
-    """Project what the ratchet would decide over the current signal log under a config.
+    """Project what the ratchet would decide under a hypothetical config (read-only).
 
-    A read-only fork: it replays ``records.jsonl`` through the scorer and the
-    ratchet from a clean baseline under the given config, writing the resulting
-    per-artifact projection to ``out``. It never reads or writes the live
-    status.json, so two forks under different configs can be compared with
-    ``outcome diff`` to see how a rule change would move promotions.
-
-    Uses the same current-fingerprint cohort score as ``reconcile``, so a fork
-    projection previews the ratchet the live command would actually run.
+    Skills use the receipt-only scorecard dual gate (#503); cards still replay
+    ``records.jsonl`` through the legacy scorer. Never reads or writes live
+    ``status.json``.
     """
     target = target.expanduser().resolve()
     config = config or core.ReconcileConfig()
-    cohorts_by_artifact = _fingerprint_cohorts_by_artifact(target, load_records(target))
-    scores = {artifact_id: cohorts.current for artifact_id, cohorts in cohorts_by_artifact.items()}
-    decisions = core.project_statuses(scores, config=config, now=localio.utc_now())
-    artifacts = {
-        artifact_id: {
+    records = load_records(target)
+    cohorts_by_artifact = _fingerprint_cohorts_by_artifact(target, records)
+    scorecards = _scorecards_by_artifact(target)
+    kinds = _artifact_kinds(records, {}, scorecards)
+    now = localio.utc_now()
+    skill_decisions = scorecard_mod.project_scorecard_statuses(scorecards, config=config, now=now)
+    card_decisions = core.project_statuses(
+        {artifact_id: cohorts.current for artifact_id, cohorts in cohorts_by_artifact.items()},
+        config=config,
+        now=now,
+    )
+    artifacts: dict[str, dict[str, Any]] = {}
+    for artifact_id, decision in sorted(skill_decisions.items()):
+        card = scorecards[artifact_id]
+        effectiveness = card.dimensions.get("effectiveness", {})
+        artifacts[artifact_id] = {
             "action": decision.action,
             "new_status": decision.new_status,
             "reason": decision.reason,
-            "score": scores[artifact_id].score,
-            "helped": scores[artifact_id].helped,
-            "hurt": scores[artifact_id].hurt,
+            "policy_version": scorecard_mod.SCORECARD_POLICY_VERSION,
+            "helped": int(effectiveness.get("helped", 0)),
+            "hurt": int(effectiveness.get("hurt", 0)),
+            "wilson": float(effectiveness.get("wilson", 0.0)),
+            "utility_guardrails": card.utility_guardrails,
+            "dimensions": card.dimensions,
         }
-        for artifact_id, decision in sorted(decisions.items())
-    }
+    for artifact_id in _reconcile_artifact_ids(kinds, {}, scorecards, cohorts_by_artifact):
+        if kinds.get(artifact_id, "skill") != "skill" or artifact_id in artifacts:
+            continue
+        artifacts[artifact_id] = {
+            "action": "hold",
+            "new_status": "candidate",
+            "reason": "withheld: missing scorecard",
+            "helped": 0,
+            "hurt": 0,
+            "wilson": 0.0,
+        }
+    for artifact_id, decision in sorted(card_decisions.items()):
+        if artifact_id in artifacts:
+            continue
+        if kinds.get(artifact_id, "skill") != "card":
+            continue
+        score_obj = cohorts_by_artifact[artifact_id].current
+        artifacts[artifact_id] = {
+            "action": decision.action,
+            "new_status": decision.new_status,
+            "reason": decision.reason,
+            "score": score_obj.score,
+            "helped": score_obj.helped,
+            "hurt": score_obj.hurt,
+        }
     projection = {
         "version": 1,
         "target": str(target),
@@ -1256,47 +1408,60 @@ def reconcile(
     transition, advances the persisted status, and performs the physical skill
     install/rollback. No human approval is consulted.
 
-    Fingerprint-aware: the promote/rollback decision scores the CURRENT-fingerprint
-    cohort, not the lifetime ledger, so an edited skill must re-earn its promotion
-    against the text that now ships instead of coasting on signals for text that no
-    longer exists. Grandfathering keeps this non-disruptive: a never-edited artifact
-    has no proven-stale records, so ``current`` equals lifetime and the decision is
-    byte-identical to the pre-fingerprint ratchet. The decision RULES (thresholds,
-    cooldown, forward-only ratchet) are untouched; only the score fed in narrows.
+    Skills promote only through the receipt scorecard dual gate (#503); legacy
+    ``records.jsonl`` signals never advance skill promotion. Cards still use the
+    legacy scorer. Routing authority is stamped via ``route_policy.policy_version``
+    on promotion; demotion drops broad authority even when physical rollback fails.
     """
     target = target.expanduser().resolve()
     config = config or core.ReconcileConfig()
     records = load_records(target)
     cohorts_by_artifact = _fingerprint_cohorts_by_artifact(target, records)
+    scorecards = _scorecards_by_artifact(target)
     graph_counts = _graph_delta_counts_by_artifact(records)
     brief_stats = _brief_hit_stats_by_artifact(records)
-    kinds: dict[str, str] = {}
-    for record in records:
-        kinds.setdefault(record.artifact_id, record.artifact_kind or "skill")
     status_map = load_status(target)
+    kinds = _artifact_kinds(records, status_map, scorecards)
     now = localio.utc_now()
 
-    results: list[tuple[core.Decision, core.FingerprintCohorts, str]] = []
-    for artifact_id, cohorts in sorted(cohorts_by_artifact.items()):
+    results: list[_ReconcileItem] = []
+    reported: list[_ReconcileItem] = []
+    for artifact_id in _reconcile_artifact_ids(kinds, status_map, scorecards, cohorts_by_artifact):
         entry = status_map.get(artifact_id) or {}
         prior_status = entry.get("status", "candidate")
         last_action_ts = localio.parse_iso_datetime(entry.get("last_action_ts"))
-        decision = core.decide(
-            cohorts.current,
-            current_status=prior_status,
+        artifact_kind = kinds.get(artifact_id, "skill")
+        cohorts = cohorts_by_artifact.get(artifact_id)
+        card = scorecards.get(artifact_id)
+        decision = _decide_reconcile_item(
+            artifact_id,
+            artifact_kind,
+            cohorts=cohorts,
+            card=card,
+            prior_status=prior_status,
             last_action_ts=last_action_ts,
             now=now,
             config=config,
         )
+        item = _ReconcileItem(
+            decision=decision,
+            prior_status=prior_status,
+            cohorts=cohorts,
+            scorecard=card,
+        )
         if decision.action != "hold":
-            results.append((decision, cohorts, prior_status))
+            results.append(item)
+        elif _surface_hold_decision(decision, prior_status):
+            reported.append(item)
 
     applied: list[str] = []
     executions: dict[str, str] = {}
     effective_status: dict[str, str] = {}
     if apply and results:
-        for decision, cohorts, prior_status in results:
-            score_obj = cohorts.current
+        for item in results:
+            decision = item.decision
+            cohorts = item.cohorts
+            prior_status = item.prior_status
             execution = "noop"
             if decision.action in ("install", "rollback"):
                 if kinds.get(decision.artifact_id, "skill") == "skill":
@@ -1304,19 +1469,26 @@ def reconcile(
                 else:
                     execution = "skipped: card execution is v1.1"
             executions[decision.artifact_id] = execution
-            # An install that did not physically install must not advance status to
-            # 'promoted'. The forward-only ratchet never re-emits install for a
-            # 'promoted' artifact, so a false promotion would permanently hide the
-            # failure. Keep it a 'candidate' (stamp last_action_ts for cooldown) so a
-            # later accept + reconcile retries. Cards are exempt: their promotion is
-            # status-only (physical card execution is v1.1), so a card never "fails".
             install_failed = (
                 decision.action == "install"
                 and kinds.get(decision.artifact_id, "skill") == "skill"
                 and execution != "installed"
             )
-            new_status = prior_status if install_failed else decision.new_status
+            # Rollback demotes routing authority immediately; physical revert is best-effort.
+            if decision.action == "rollback":
+                new_status = decision.new_status
+            else:
+                new_status = prior_status if install_failed else decision.new_status
             effective_status[decision.artifact_id] = new_status
+            if cohorts is not None:
+                score_payload: dict[str, Any] = dataclasses.asdict(cohorts.current)
+            elif item.scorecard is not None:
+                score_payload = {
+                    "dimensions": item.scorecard.dimensions,
+                    "utility_guardrails": item.scorecard.utility_guardrails,
+                }
+            else:
+                score_payload = {}
             receipt = {
                 "schema_version": receipt_schema.OUTCOME_DECISION_SCHEMA_VERSION,
                 "artifact_id": decision.artifact_id,
@@ -1325,37 +1497,61 @@ def reconcile(
                 "new_status": new_status,
                 "decided_status": decision.new_status,
                 "reason": decision.reason,
-                "score": dataclasses.asdict(score_obj),
+                "score": score_payload,
                 "execution": execution,
                 "created_at": now.isoformat(),
             }
-            receipt.update(_fingerprint_decision_fields(cohorts))
+            if cohorts is not None:
+                receipt.update(_fingerprint_decision_fields(cohorts))
+            receipt.update(_scorecard_decision_fields(item.scorecard))
+            if (
+                kinds.get(decision.artifact_id, "skill") == "skill"
+                and new_status == "promoted"
+                and not install_failed
+                and decision.action in {"install", "bump"}
+            ):
+                receipt["route_policy"] = scorecard_mod.route_policy_marker_for_promotion()
             localio.write_json(_decision_path(target, now, decision.artifact_id), receipt)
-            status_map[decision.artifact_id] = {"status": new_status, "last_action_ts": now.isoformat()}
+            status_map[decision.artifact_id] = _status_entry_for_transition(
+                new_status=new_status,
+                now=now,
+                decision=decision,
+                install_failed=install_failed,
+                artifact_kind=kinds.get(decision.artifact_id, "skill"),
+            )
             if not install_failed:
                 applied.append(decision.artifact_id)
         localio.write_json(_status_path(target), {"version": 1, "artifacts": status_map})
 
     decisions_payload = []
-    for decision, cohorts, prior_status in results:
-        item = {
+    for item in [*results, *reported]:
+        decision = item.decision
+        cohorts = item.cohorts
+        prior_status = item.prior_status
+        payload_item: dict[str, Any] = {
             "artifact_id": decision.artifact_id,
             "action": decision.action,
             "prior_status": prior_status,
             "new_status": effective_status.get(decision.artifact_id, decision.new_status),
             "decided_status": decision.new_status,
             "reason": decision.reason,
-            "score": cohorts.current.score,
             "execution": executions.get(decision.artifact_id, "dry-run"),
         }
-        item.update(_fingerprint_decision_fields(cohorts))
+        if cohorts is not None:
+            payload_item["score"] = cohorts.current.score
+            payload_item.update(_fingerprint_decision_fields(cohorts))
+        elif item.scorecard is not None:
+            payload_item["score"] = item.scorecard.dimensions.get("effectiveness", {}).get("wilson", 0.0)
+            payload_item["dimensions"] = item.scorecard.dimensions
+            payload_item["utility_guardrails"] = item.scorecard.utility_guardrails
+        payload_item.update(_scorecard_decision_fields(item.scorecard))
         counts = graph_counts.get(decision.artifact_id)
         if counts is not None:
-            item.update(counts)
+            payload_item.update(counts)
         stats = brief_stats.get(decision.artifact_id)
         if stats is not None:
-            item.update(stats)
-        decisions_payload.append(item)
+            payload_item.update(stats)
+        decisions_payload.append(payload_item)
     payload = {
         "target": str(target),
         "apply": apply,
@@ -1367,15 +1563,17 @@ def reconcile(
         return 0
     mode = "apply" if apply else "dry-run"
     print(f"outcome reconcile: {target} ({mode})")
-    if not results:
+    output_items = [*results, *reported]
+    if not output_items:
         print("decisions: none")
         return 0
-    for decision, cohorts, prior_status in results:
+    for item in output_items:
+        decision = item.decision
+        cohorts = item.cohorts
+        prior_status = item.prior_status
         shown_status = effective_status.get(decision.artifact_id, decision.new_status)
-        # On --apply, surface the physical execution so the output is never
-        # byte-identical to a dry-run that did nothing.
         tail = f" -> {executions[decision.artifact_id]}" if apply and decision.artifact_id in executions else ""
-        fingerprint_tail = _fingerprint_decision_suffix(cohorts)
+        fingerprint_tail = _fingerprint_decision_suffix(cohorts) if cohorts is not None else ""
         graph_tail = _graph_delta_human_suffix(graph_counts.get(decision.artifact_id))
         brief_tail = _brief_hit_human_suffix(brief_stats.get(decision.artifact_id))
         print(
