@@ -9,6 +9,7 @@ from . import agents
 from . import doctor as doctor_mod
 from . import model_inventory
 from . import roster as roster_mod
+from . import seat_health
 from . import templates
 from . import toml_compat
 
@@ -323,6 +324,7 @@ def doctor(
     *,
     roster_path: Path | None = None,
     probe: roster_mod.CapabilityProbe | None = None,
+    health_probe: seat_health.SeatHealthProbe | None = None,
 ) -> int:
     target = target.expanduser()
 
@@ -355,6 +357,20 @@ def doctor(
         checks.append((doctor_mod.OK, "roster: allow_models", ", ".join(loaded.allow_models)))
     else:
         checks.append((doctor_mod.WARN, "roster: allow_models", "not set; explicit model allow-list recommended"))
+
+    # Use the common coordinator for the health summary, but leave legacy
+    # capability and per-model labels below intact for one compatibility
+    # release.  Doctor never sends model smoke prompts.
+    shared_health = (health_probe or seat_health.SeatHealthProbe(collect_executable_version=False)).probe_roster(
+        loaded, workspace=target, allow_model_smoke=False
+    )
+    for result in shared_health:
+        status = doctor_mod.OK if result.status == "healthy" else doctor_mod.WARN
+        detail = (
+            "; ".join(f"{check.name}={check.status}" for check in result.checks if check.status != "passed")
+            or "all applicable checks passed"
+        )
+        checks.append((status, f"agent: {result.seat} health", detail))
 
     for name, agent in loaded.agents.items():
         if agent.stats is not None or name in local_stats:

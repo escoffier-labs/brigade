@@ -126,6 +126,24 @@ def test_roster_doctor_validates_agents(monkeypatch, tmp_target, capsys):
     assert "[warn]" in out
 
 
+def test_roster_doctor_renders_shared_health_without_replacing_legacy_labels(tmp_target, capsys):
+    from brigade.seat_health import SeatHealthCheck, SeatHealthProbe
+
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n[agents.chef]\nendpoint = "https://example.test/v1"\nmodel = "model"\nrole = "plan"\n',
+    )
+
+    class FakeHealth:
+        def check(self, name, **kwargs):
+            return SeatHealthCheck(name, "passed", "fixture")
+
+    assert roster_cmd.doctor(tmp_target, health_probe=SeatHealthProbe(adapter=FakeHealth())) == 0
+    out = capsys.readouterr().out
+    assert "agent: chef health" in out
+    assert "agent: chef" in out
+
+
 def test_roster_doctor_claude_missing_is_optional_warning(monkeypatch, tmp_target, capsys):
     path = tmp_target / ".brigade" / "roster.toml"
     path.parent.mkdir(parents=True)
