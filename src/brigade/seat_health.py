@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -268,7 +269,7 @@ class SeatHealthProbe:
                         results[name] = future.result()
                     except Exception as exc:  # adapter bugs must be receipted, not crash doctor
                         results[name] = _exception_result(name, roster, self._clock(), self._wall_clock(), exc)
-            except TimeoutError:
+            except FuturesTimeoutError:
                 pass
             for future, name in futures.items():
                 if name not in results:
