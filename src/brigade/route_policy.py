@@ -7,6 +7,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 from . import outcome_cmd, scorecard, verify_manifest
@@ -543,7 +544,7 @@ def _exploration_block_reason(
 
 def _reject_exploratory_pool(
     decision: RoutePolicyDecision,
-    pool: list[tuple[TrustedOptInEntry, Band]],
+    pool: Sequence[tuple[TrustedOptInEntry, Band]],
     *,
     reason: str,
 ) -> None:
@@ -604,16 +605,18 @@ def _select_shadow_exploratory(
         fixture_manifest = entry.manifest
         fixture_path = entry.manifest_path
     else:
-        fixture_manifest, fixture_path = _fixture_eval_manifest_for_skill(target, artifact_id)
-        if fixture_manifest is None:
+        resolved_manifest, resolved_path = _fixture_eval_manifest_for_skill(target, artifact_id)
+        if resolved_manifest is None or resolved_path is None:
             decision.accept_reject.append(
                 {
                     "artifact_id": artifact_id,
                     "accepted": False,
-                    "reason": fixture_path or "missing_fixture_eval_manifest",
+                    "reason": resolved_path or "missing_fixture_eval_manifest",
                 }
             )
             return None
+        fixture_manifest = resolved_manifest
+        fixture_path = resolved_path
     decision.accept_reject.append({"artifact_id": artifact_id, "accepted": True, "reason": "shadow_with_proven_route"})
     return SkillAssignment(
         artifact_id=artifact_id,

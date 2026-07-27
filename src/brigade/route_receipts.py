@@ -12,6 +12,14 @@ from .roster import Roster
 
 ROUTE_DECISION_SCHEMA_VERSION = "brigade.route-decision.v1"
 
+_POLICY_EXTENSION_KEYS = (
+    "decided_at",
+    "policy_version",
+    "score_inputs",
+    "skill_assignments",
+    "exploration",
+)
+
 
 class RouteDecisionArtifact(TypedDict, total=False):
     schema_version: str
@@ -24,6 +32,22 @@ class RouteDecisionArtifact(TypedDict, total=False):
     score_inputs: dict[str, Any]
     skill_assignments: list[dict[str, Any]]
     exploration: dict[str, Any]
+
+
+def _apply_policy_extensions(
+    payload: RouteDecisionArtifact,
+    extensions: dict[str, Any],
+) -> None:
+    if "decided_at" in extensions:
+        payload["decided_at"] = extensions["decided_at"]
+    if "policy_version" in extensions:
+        payload["policy_version"] = extensions["policy_version"]
+    if "score_inputs" in extensions:
+        payload["score_inputs"] = extensions["score_inputs"]
+    if "skill_assignments" in extensions:
+        payload["skill_assignments"] = extensions["skill_assignments"]
+    if "exploration" in extensions:
+        payload["exploration"] = extensions["exploration"]
 
 
 def admissible_seats(roster: Roster) -> list[str]:
@@ -65,7 +89,7 @@ def route_decision_payload(
         "admissible_seats": admissible_seats(roster),
     }
     if policy_extensions:
-        payload.update(policy_extensions)
+        _apply_policy_extensions(payload, policy_extensions)
     elif target is not None:
         from .route_policy import route_policy_payload
 
@@ -77,7 +101,7 @@ def route_decision_payload(
             runs_dir=runs_dir,
             exclude_decision_path=exclude_decision_path,
         )
-        payload.update(extensions)
+        _apply_policy_extensions(payload, extensions)
     return payload
 
 
@@ -107,13 +131,7 @@ def _existing_policy_extensions(decision_path: Path) -> dict[str, Any] | None:
     if not isinstance(existing, dict) or "policy_version" not in existing:
         return None
     extensions: dict[str, Any] = {}
-    for key in (
-        "decided_at",
-        "policy_version",
-        "score_inputs",
-        "skill_assignments",
-        "exploration",
-    ):
+    for key in _POLICY_EXTENSION_KEYS:
         if key in existing:
             extensions[key] = existing[key]
     return extensions or None
