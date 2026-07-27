@@ -390,7 +390,7 @@ authoritative outcome is routing authority:
 Read-only projection:
 
 ```
-brigade outcome backfill scorecard [--target PATH] [--dry-run] [--json]
+brigade outcome backfill scorecard [--target PATH] [--json]
 ```
 
 1. Walk `.brigade/work/verify-runs/*/receipt.json`.

@@ -1849,13 +1849,13 @@ def record(
 
 
 def health(target: Path) -> dict:
-    """Surface whether the verified-learning loop is actually being fed.
+    """Surface whether the receipt-only verified-learning loop is actually being fed.
 
-    The loop is invisible in ``brigade work brief`` otherwise: an adopter cannot
-    tell that verify runs are piling up while the outcome ledger stays empty
-    (loop half-fed) or that neither exists yet (loop dormant).
+    Scorecard eligibility is projected exclusively from verify receipts. Legacy
+    ``records.jsonl`` rows remain audit-only and are never joined for scoring.
     """
     target = target.expanduser().resolve()
+    from . import scorecard as scorecard_mod
     from .work_cmd import helpers as work_helpers
 
     records = load_records(target)
@@ -1864,34 +1864,85 @@ def health(target: Path) -> dict:
     verify_run_count = sum(1 for child in runs_root.iterdir() if child.is_dir()) if runs_root.is_dir() else 0
     record_count = len(records)
     promoted_count = sum(1 for entry in load_status(target).values() if entry.get("status") == "promoted")
+    receipt_audit = scorecard_mod.receipt_scorecard_audit(target)
 
     issues: list[dict] = []
-    if verify_run_count > 0 and record_count == 0:
+    if verify_run_count > 0 and receipt_audit["eligible"] == 0:
         issues.append(
             {
                 "status": "warn",
                 "name": "outcome_loop_half_fed",
                 "detail": (
-                    f"{verify_run_count} verify run(s) but 0 outcome record(s); "
-                    "run `brigade outcome capture <skill>` (or `verify run --capture <skill>`) after verifying"
+                    f"{verify_run_count} verify run(s) but 0 eligible receipt(s); "
+                    "run verification through a registered verifier manifest so receipts "
+                    "carry verifier-authored subject_binding and check_role"
                 ),
             }
         )
-    elif verify_run_count == 0 and record_count == 0:
+    elif verify_run_count == 0 and receipt_audit["total_receipts"] == 0:
         issues.append(
             {
                 "status": "warn",
                 "name": "outcome_loop_dormant",
-                "detail": "no verify runs or outcome records yet; the verified-learning loop is not running",
+                "detail": "no verify runs yet; the receipt-only verified-learning loop is not running",
             }
         )
     return {
         "records_path": str(_records_path(target)),
         "verify_run_count": verify_run_count,
         "record_count": record_count,
+        "legacy_records_audit_only": True,
+        "legacy_records_note": (
+            "Outcome ledger rows in records.jsonl are audit-only; they cannot be backfilled into receipt scorecards."
+        ),
         "scored_artifact_count": len(scores),
         "promoted_count": promoted_count,
+        "attributed_receipt_count": receipt_audit["attributed"],
+        "unattributed_receipt_count": receipt_audit["unattributed"],
+        "eligible_receipt_count": receipt_audit["eligible"],
+        "ineligible_receipt_count": receipt_audit["ineligible"],
+        "attributed_ineligible_receipt_count": receipt_audit["attributed_ineligible"],
+        "ineligibility_rate": receipt_audit["ineligibility_rate"],
+        "leading_ineligibility_reason": receipt_audit["leading_ineligibility_reason"],
+        "exploration_bands": receipt_audit["exploration_bands"],
+        "latest_receipt_window": receipt_audit["latest_receipt_window"],
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
         "issues": issues,
     }
+
+
+def backfill_scorecard(*, target: Path, json_output: bool = False) -> int:
+    """Read-only audit of verify receipts for scorecard eligibility (#574)."""
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    from . import scorecard as scorecard_mod
+
+    payload = scorecard_mod.backfill_scorecard_payload(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"outcome backfill scorecard: {target}")
+    print(
+        "receipts: "
+        f"total={payload['total_receipts']} "
+        f"eligible={payload['eligible']} "
+        f"unattributed={payload['unattributed']} "
+        f"ineligible={payload['ineligible']} "
+        f"ineligibility_rate={payload['ineligibility_rate']}"
+    )
+    bands = payload.get("exploration_bands") if isinstance(payload.get("exploration_bands"), dict) else {}
+    if bands:
+        print(
+            "exploration_bands: "
+            f"unseen={bands.get('unseen', 0)} "
+            f"candidate={bands.get('candidate', 0)} "
+            f"provisional={bands.get('provisional', 0)} "
+            f"promoted={bands.get('promoted', 0)}"
+        )
+    if payload.get("leading_ineligibility_reason"):
+        print(f"leading_ineligibility_reason: {payload['leading_ineligibility_reason']}")
+    print(payload["legacy_records_note"])
+    return 0

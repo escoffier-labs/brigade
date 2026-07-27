@@ -492,8 +492,19 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "records_path": outcome_health["records_path"],
             "verify_run_count": outcome_health["verify_run_count"],
             "record_count": outcome_health["record_count"],
+            "legacy_records_audit_only": outcome_health["legacy_records_audit_only"],
+            "legacy_records_note": outcome_health["legacy_records_note"],
             "scored_artifact_count": outcome_health["scored_artifact_count"],
             "promoted_count": outcome_health["promoted_count"],
+            "attributed_receipt_count": outcome_health["attributed_receipt_count"],
+            "unattributed_receipt_count": outcome_health["unattributed_receipt_count"],
+            "eligible_receipt_count": outcome_health["eligible_receipt_count"],
+            "ineligible_receipt_count": outcome_health["ineligible_receipt_count"],
+            "attributed_ineligible_receipt_count": outcome_health["attributed_ineligible_receipt_count"],
+            "ineligibility_rate": outcome_health["ineligibility_rate"],
+            "leading_ineligibility_reason": outcome_health["leading_ineligibility_reason"],
+            "exploration_bands": outcome_health["exploration_bands"],
+            "latest_receipt_window": outcome_health["latest_receipt_window"],
             "issue_count": outcome_health["issue_count"],
             "top_issue": outcome_health["top_issue"],
         },
@@ -583,10 +594,22 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(
             "outcome_loop: "
             f"verify_runs={outcome_loop.get('verify_run_count')} "
-            f"records={outcome_loop.get('record_count')} "
-            f"scored={outcome_loop.get('scored_artifact_count')} "
+            f"attributed_receipts={outcome_loop.get('attributed_receipt_count')} "
+            f"eligible={outcome_loop.get('eligible_receipt_count')} "
+            f"ineligible={outcome_loop.get('ineligible_receipt_count')} "
+            f"unattributed={outcome_loop.get('unattributed_receipt_count')} "
+            f"ineligibility_rate={outcome_loop.get('ineligibility_rate')} "
             f"promoted={outcome_loop.get('promoted_count')}"
         )
+        bands = outcome_loop.get("exploration_bands") if isinstance(outcome_loop.get("exploration_bands"), dict) else {}
+        if bands:
+            print(
+                "outcome_exploration_bands: "
+                f"unseen={bands.get('unseen', 0)} "
+                f"candidate={bands.get('candidate', 0)} "
+                f"provisional={bands.get('provisional', 0)} "
+                f"promoted={bands.get('promoted', 0)}"
+            )
         top_outcome = outcome_loop.get("top_issue") if isinstance(outcome_loop.get("top_issue"), dict) else None
         if top_outcome:
             print(f"outcome_loop_issue: {top_outcome.get('name')} {helpers._short(str(top_outcome.get('detail', '')))}")

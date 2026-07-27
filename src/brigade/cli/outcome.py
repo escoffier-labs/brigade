@@ -126,6 +126,26 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_record.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_record.set_defaults(func=_dispatch_record)
 
+    p_backfill = outcome_sub.add_parser(
+        "backfill",
+        help="Read-only verify-receipt scorecard audits (never mutates records.jsonl).",
+    )
+    backfill_sub = p_backfill.add_subparsers(dest="outcome_backfill_command", metavar="<backfill-command>")
+    backfill_sub.required = True
+    p_backfill_scorecard = backfill_sub.add_parser(
+        "scorecard",
+        help="Audit verify receipts for scorecard eligibility without ledger joins.",
+    )
+    p_backfill_scorecard.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_backfill_scorecard.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
+    p_backfill_scorecard.set_defaults(func=_dispatch_backfill_scorecard)
+
+
+def _dispatch_backfill_scorecard(args) -> int:
+    from .. import outcome_cmd
+
+    return outcome_cmd.backfill_scorecard(target=args.target, json_output=args.json)
+
 
 def _dispatch_score(args) -> int:
     from .. import outcome_cmd

@@ -15,6 +15,13 @@ from . import outcome as outcome_core, outcome_cmd, verify_trial
 SCORECARD_POLICY_VERSION = "scorecard.v1"
 EFFECTIVE_WILSON_MIN = 0.15
 _UTILITY_REQUIRED_TRIALS = 2
+LATEST_RECEIPT_WINDOW = 50
+"""Stable latest-receipt window for outcome checkup ineligibility warnings (#574).
+
+Receipts are ordered by ``started_at`` descending, then ``run_id``, then
+``receipt_path`` (all lexicographic, descending). The first 50 audits in that
+order form the window regardless of eligibility.
+"""
 
 
 @dataclass(frozen=True)
@@ -272,6 +279,23 @@ def _subject_ref(binding: dict[str, Any]) -> SubjectRef | None:
     if not isinstance(fingerprint, str) or not fingerprint:
         return None
     return SubjectRef(artifact_kind=artifact_kind, artifact_id=artifact_id, content_fingerprint=fingerprint)
+
+
+def _invalid_receipt_audit(receipt_path: Path) -> ReceiptAudit:
+    """Audit a discovered receipt path whose JSON is missing or not an object."""
+    return ReceiptAudit(
+        receipt_path=str(receipt_path),
+        run_id=None,
+        started_at=None,
+        eligible=False,
+        reason="invalid_receipt_json",
+        attributed=False,
+        subject_binding=None,
+        effectiveness=None,
+        verifier_cost_s=None,
+        reused=False,
+        evidence_unit_key=None,
+    )
 
 
 def _audit_receipt(
@@ -580,6 +604,113 @@ def explain_payload(target: Path, artifact_id: str, *, artifact_kind: str | None
     if card is None:
         return None
     return subject_scorecard_to_dict(card)
+
+
+def _receipt_audit_sort_key(audit: ReceiptAudit) -> tuple[str, str, str]:
+    return (audit.started_at or "", audit.run_id or "", audit.receipt_path)
+
+
+def audit_all_verify_receipts(target: Path) -> list[ReceiptAudit]:
+    """Project every verify receipt for scorecard eligibility without ledger joins."""
+    target = target.expanduser().resolve()
+    audits: list[ReceiptAudit] = []
+    for receipt_path in discover_verify_receipt_paths(target):
+        receipt = _load_receipt(receipt_path)
+        if receipt is None:
+            audits.append(_invalid_receipt_audit(receipt_path))
+            continue
+        audits.append(_audit_receipt(receipt_path=receipt_path, receipt=receipt, target=target))
+    return audits
+
+
+def latest_receipt_audits(
+    audits: list[ReceiptAudit],
+    *,
+    limit: int = LATEST_RECEIPT_WINDOW,
+) -> list[ReceiptAudit]:
+    ordered = sorted(audits, key=_receipt_audit_sort_key, reverse=True)
+    return ordered[:limit]
+
+
+def exploration_band_counts(target: Path) -> dict[str, int]:
+    """Count attributed scorecard subjects by exploration band."""
+    target = target.expanduser().resolve()
+    status_map = outcome_cmd.load_status(target)
+    counts = {"unseen": 0, "candidate": 0, "provisional": 0, "promoted": 0}
+    for card in build_scorecards(target):
+        entry = status_map.get(card.subject.artifact_id, {})
+        status = entry.get("status") if isinstance(entry, dict) else None
+        route_policy = entry.get("route_policy") if isinstance(entry, dict) else None
+        policy_marker = route_policy.get("policy_version") if isinstance(route_policy, dict) else None
+        band = classify_band(card, persisted_status=status, policy_marker=policy_marker)
+        counts[band] = counts.get(band, 0) + 1
+    return counts
+
+
+def receipt_scorecard_audit(target: Path) -> dict[str, Any]:
+    """Aggregate receipt-only scorecard eligibility for operator surfaces (#574)."""
+    target = target.expanduser().resolve()
+    audits = audit_all_verify_receipts(target)
+    total = len(audits)
+    eligible = sum(1 for audit in audits if audit.eligible)
+    unattributed = sum(1 for audit in audits if not audit.attributed)
+    ineligible = total - eligible
+    attributed_ineligible = sum(1 for audit in audits if audit.attributed and not audit.eligible)
+    attributed = total - unattributed
+    ineligible_by_reason = Counter(audit.reason for audit in audits if not audit.eligible)
+    ineligibility_rate = round(ineligible / total, 4) if total else 0.0
+    leading_reason = None
+    if ineligible_by_reason:
+        leading_reason = max(ineligible_by_reason.items(), key=lambda item: (item[1], item[0]))[0]
+
+    latest = latest_receipt_audits(audits)
+    latest_ineligible = sum(1 for audit in latest if not audit.eligible)
+    latest_ineligibility_rate = round(latest_ineligible / len(latest), 4) if latest else 0.0
+    latest_reasons = Counter(audit.reason for audit in latest if not audit.eligible)
+    latest_leading_reason = None
+    if latest_reasons:
+        latest_leading_reason = max(latest_reasons.items(), key=lambda item: (item[1], item[0]))[0]
+
+    return {
+        "total_receipts": total,
+        "eligible": eligible,
+        "unattributed": unattributed,
+        "ineligible": ineligible,
+        "attributed_ineligible": attributed_ineligible,
+        "attributed": attributed,
+        "ineligibility_rate": ineligibility_rate,
+        "ineligible_by_reason": dict(sorted(ineligible_by_reason.items())),
+        "leading_ineligibility_reason": leading_reason,
+        "exploration_bands": exploration_band_counts(target),
+        "latest_receipt_window": {
+            "limit": LATEST_RECEIPT_WINDOW,
+            "count": len(latest),
+            "eligible": sum(1 for audit in latest if audit.eligible),
+            "ineligible": latest_ineligible,
+            "ineligibility_rate": latest_ineligibility_rate,
+            "leading_ineligibility_reason": latest_leading_reason,
+            "sort": "started_at,run_id,receipt_path descending",
+        },
+    }
+
+
+def backfill_scorecard_payload(target: Path) -> dict[str, Any]:
+    """Read-only verify-receipt scorecard backfill audit (#574).
+
+    Legacy ``records.jsonl`` outcome rows are audit-only and are never joined
+    or backfilled into scorecards.
+    """
+    target = target.expanduser().resolve()
+    audit = receipt_scorecard_audit(target)
+    return {
+        "target": str(target),
+        "policy_version": SCORECARD_POLICY_VERSION,
+        "legacy_records_audit_only": True,
+        "legacy_records_note": (
+            "Outcome ledger rows in records.jsonl are audit-only; they cannot be backfilled into receipt scorecards."
+        ),
+        **audit,
+    }
 
 
 def classify_band(

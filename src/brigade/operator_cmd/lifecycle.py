@@ -858,7 +858,8 @@ def _surface_issue_count(payload: dict[str, Any]) -> int | None:
 
 CHECKUP_DEFAULT_SURFACES = ("doctor", "operator", "handoff", "tools", "skills", "security")
 CHECKUP_EVIDENCE_SURFACES = ("work", "graph", "ledger")
-CHECKUP_SURFACE_NAMES = (*CHECKUP_DEFAULT_SURFACES, *CHECKUP_EVIDENCE_SURFACES)
+CHECKUP_OPTIONAL_SURFACES = (*CHECKUP_EVIDENCE_SURFACES, "outcome")
+CHECKUP_SURFACE_NAMES = (*CHECKUP_DEFAULT_SURFACES, *CHECKUP_OPTIONAL_SURFACES)
 CHECKUP_PRESETS = {"evidence-loop": CHECKUP_EVIDENCE_SURFACES}
 
 
@@ -866,6 +867,7 @@ def checkup_catalog_payload() -> dict[str, Any]:
     return {
         "surface_names": list(CHECKUP_SURFACE_NAMES),
         "default_surfaces": list(CHECKUP_DEFAULT_SURFACES),
+        "optional_surfaces": list(CHECKUP_OPTIONAL_SURFACES),
         "presets": {name: list(values) for name, values in CHECKUP_PRESETS.items()},
     }
 
@@ -886,7 +888,7 @@ def _resolve_checkup_surfaces(surfaces: list[str] | None, preset: str | None) ->
             raise ValueError(f"unknown checkup surface: {', '.join(unknown)}")
         skipped = [name for name in CHECKUP_SURFACE_NAMES if name not in selected]
         return selected, skipped, True
-    return list(CHECKUP_DEFAULT_SURFACES), list(CHECKUP_EVIDENCE_SURFACES), False
+    return list(CHECKUP_DEFAULT_SURFACES), list(CHECKUP_OPTIONAL_SURFACES), False
 
 
 def _print_checkup_surface(payload: dict[str, Any], *, json_output: bool) -> None:
@@ -946,9 +948,9 @@ def _checkup_work(*, target: Path, json_output: bool = False) -> int:
         "next_command": (
             "brigade receipts verify --target ."
             if integrity_failures
-            else "brigade work verify run --target . --command '<check>' --capture brigade-work"
+            else "brigade work verify run --target . --manifest <verifier-manifest-id>"
             if latest is None
-            else "brigade outcome capture <skill-or-card-id> --run-id latest"
+            else "brigade work verify run --target . --manifest <verifier-manifest-id>"
             if outcome_issue_count
             else None
         ),
@@ -1048,6 +1050,66 @@ def _checkup_ledger(*, target: Path, json_output: bool = False) -> int:
         )
         if not ready
         else None,
+    }
+    _print_checkup_surface(payload, json_output=json_output)
+    return 0 if ready else 1
+
+
+def _checkup_outcome(*, target: Path, json_output: bool = False) -> int:
+    """Check receipt-only outcome loop health and latest-receipt eligibility (#574)."""
+    from .. import outcome_cmd, scorecard
+
+    health = outcome_cmd.health(target)
+    issues: list[dict[str, Any]] = []
+    top_issue = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else None
+    if top_issue and top_issue.get("name") == "outcome_loop_half_fed":
+        issues.append(top_issue)
+
+    latest_window = health.get("latest_receipt_window")
+    latest_window = latest_window if isinstance(latest_window, dict) else {}
+    latest_rate = float(latest_window.get("ineligibility_rate") or 0.0)
+    if latest_window.get("count", 0) and latest_rate > 0.5:
+        leading = latest_window.get("leading_ineligibility_reason") or "unknown"
+        issues.append(
+            {
+                "status": "warn",
+                "name": "outcome_receipt_ineligibility_high",
+                "detail": (
+                    f">{int(0.5 * 100)}% of the latest {scorecard.LATEST_RECEIPT_WINDOW} receipts are "
+                    f"ineligible (leading reason: {leading})"
+                ),
+            }
+        )
+
+    issue_count = len(issues)
+    ready = issue_count == 0
+    payload = {
+        "status": "ok" if ready else "warn",
+        "ready": ready,
+        "summary": (
+            "receipt-only outcome loop is healthy" if ready else f"receipt-only outcome loop has {issue_count} issue(s)"
+        ),
+        "issue_count": issue_count,
+        "issues": issues,
+        "verify_run_count": health.get("verify_run_count"),
+        "attributed_receipt_count": health.get("attributed_receipt_count"),
+        "unattributed_receipt_count": health.get("unattributed_receipt_count"),
+        "eligible_receipt_count": health.get("eligible_receipt_count"),
+        "ineligible_receipt_count": health.get("ineligible_receipt_count"),
+        "attributed_ineligible_receipt_count": health.get("attributed_ineligible_receipt_count"),
+        "ineligibility_rate": health.get("ineligibility_rate"),
+        "leading_ineligibility_reason": health.get("leading_ineligibility_reason"),
+        "exploration_bands": health.get("exploration_bands"),
+        "latest_receipt_window": latest_window,
+        "legacy_records_audit_only": health.get("legacy_records_audit_only"),
+        "legacy_records_note": health.get("legacy_records_note"),
+        "next_command": (
+            "brigade work verify run --target . --manifest <verifier-manifest-id>"
+            if top_issue and top_issue.get("name") == "outcome_loop_half_fed"
+            else "brigade outcome backfill scorecard --target . --json"
+            if issue_count
+            else None
+        ),
     }
     _print_checkup_surface(payload, json_output=json_output)
     return 0 if ready else 1
@@ -1173,6 +1235,7 @@ def checkup_payload(
         ("work", "brigade operator checkup --target . --surface work", _checkup_work, {"target": target}),
         ("graph", "brigade operator checkup --target . --surface graph", _checkup_graph, {"target": target}),
         ("ledger", "brigade operator checkup --target . --surface ledger", _checkup_ledger, {"target": target}),
+        ("outcome", "brigade operator checkup --target . --surface outcome", _checkup_outcome, {"target": target}),
     ]
     spec_by_name = {row[0]: row for row in spec}
     surface_results: list[dict[str, Any]] = []
@@ -1195,7 +1258,7 @@ def checkup_payload(
             "issue_count": _surface_issue_count(payload),
             "elapsed_seconds": elapsed,
         }
-        if name in CHECKUP_EVIDENCE_SURFACES:
+        if name in CHECKUP_OPTIONAL_SURFACES:
             result["details"] = payload
         surface_results.append(result)
     selected_ready = blocking == 0

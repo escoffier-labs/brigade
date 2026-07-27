@@ -42,7 +42,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade openclaw-fragments` (extras): 1 command path(s)
 - `brigade operator`: 24 command path(s)
-- `brigade outcome`: 10 command path(s)
+- `brigade outcome`: 11 command path(s)
 - `brigade pantry` (extras): 5 command path(s)
 - `brigade profiles`: 2 command path(s)
 - `brigade projects` (extras): 10 command path(s)
@@ -282,6 +282,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade operator sync-mcp`
 - `brigade operator sync-tools`
 - `brigade operator verify-harness`
+- `brigade outcome backfill scorecard`
 - `brigade outcome capture`
 - `brigade outcome diff`
 - `brigade outcome doctor`
