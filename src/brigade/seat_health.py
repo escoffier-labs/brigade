@@ -17,7 +17,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol
 from urllib.parse import urlsplit
@@ -693,7 +693,7 @@ def _probe_id(name: str, started: float) -> str:
 
 
 def _timestamp(value: float) -> str:
-    return datetime.fromtimestamp(value, UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return datetime.fromtimestamp(value, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _env_target(key: str) -> str:
