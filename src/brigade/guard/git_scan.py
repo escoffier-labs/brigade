@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 from .engine import scan_text
-from .policy import Policy, load_policy
+from .policy import Policy, default_policy, load_policy
 from .report import to_text
 
 
@@ -37,12 +38,28 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="scan content INTRODUCED across commit history (added lines), not just the current tip",
     )
-    parser.add_argument("--range", dest="rev_range", help="revision range for --history, e.g. origin/main..HEAD")
-    parser.add_argument("--all", action="store_true", help="with --history, scan all reachable commits")
+    history_source = parser.add_mutually_exclusive_group()
+    history_source.add_argument(
+        "--range", dest="rev_range", help="revision range for --history, e.g. origin/main..HEAD"
+    )
+    history_source.add_argument("--all", action="store_true", help="with --history, scan all reachable commits")
+    history_source.add_argument(
+        "--revs-stdin",
+        action="store_true",
+        help=(
+            "with --history, read the exact set of commit revisions to scan from "
+            "stdin (one full 40- or 64-character hex SHA per line) instead of "
+            "calling git rev-list. Lets a caller batch a precomputed revision "
+            "set into one scan process and keeps revisions off argv (no ARG_MAX "
+            "limit, no option injection)."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit JSON report")
     args = parser.parse_args(argv)
+    if args.revs_stdin and not args.history:
+        parser.error("--revs-stdin requires --history")
 
-    policy = load_policy(args.policy) if args.policy else _default_repo_policy()
+    policy = _load_repo_policy(args.policy)
     _merge_allow_values_from(policy, args.allow_values_from or [])
 
     if args.history:
@@ -146,6 +163,20 @@ def _scan_history(policy: Policy, args: argparse.Namespace) -> int:
 
 
 def _history_revs(args: argparse.Namespace) -> list[str]:
+    if getattr(args, "revs_stdin", False):
+        revs: list[str] = []
+        for line_number, line in enumerate(sys.stdin, start=1):
+            rev = line.strip()
+            if not rev:
+                continue
+            if re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", rev) is None:
+                print(
+                    f"invalid revision on stdin line {line_number}: expected a full 40- or 64-character hex SHA",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+            revs.append(rev.lower())
+        return revs
     if args.all:
         cmd = ["git", "rev-list", "--all"]
     elif args.rev_range:
@@ -167,7 +198,9 @@ def _added_lines(rev: str) -> str:
         check=False,
     )
     if proc.returncode != 0:
-        return ""
+        detail = (proc.stderr or "git show failed").strip()
+        print(f"cannot read commit {rev}: {detail}", file=sys.stderr)
+        raise SystemExit(2)
     out = []
     for line in proc.stdout.splitlines():
         if line.startswith("+") and not line.startswith("+++"):
@@ -217,6 +250,16 @@ def _default_repo_policy() -> Policy:
             "opf-pii": "warn",
         },
     )
+
+
+def _load_repo_policy(raw: str | None) -> Policy:
+    if raw is None:
+        return _default_repo_policy()
+    path = Path(raw)
+    if path.is_file() or path.parent != Path("."):
+        return load_policy(path)
+    name = path.name if path.suffix == ".json" else f"{path.name}.json"
+    return load_policy(default_policy(name))
 
 
 def _tracked_paths(*, all_tracked: bool, cwd: Path | None = None) -> list[Path]:

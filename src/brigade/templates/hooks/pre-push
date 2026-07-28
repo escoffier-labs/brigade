@@ -9,10 +9,37 @@
 #
 # Uses Brigade's embedded content guard. CONTENT_GUARD_DIR is an explicit
 # compatibility override for an older standalone checkout.
+#
+# Two scans run per policy:
+#   1. tracked tip   - working tree files (brigade scrub / content_guard scan)
+#   2. push history  - content INTRODUCED by the commits being pushed
+#                      (closes the forward-scrub gap: a clean tip can still
+#                      sit on top of commits that leak in their diffs)
+#
+# For brand-new branches (remote SHA all-zero) the history scan derives the
+# exclusion set from `git ls-remote <url>` rather than local tracking refs,
+# which can be stale. Only commits not reachable from any advertised ref are
+# scanned, batched into one guard history process per policy via --revs-stdin.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Git invokes pre-push as: pre-push <remote-name> <url>. The URL is the
+# destination actually being pushed to; it is the only source of truth for
+# what the remote currently advertises. Local remote-tracking refs
+# (refs/remotes/<name>/*) are NOT used to derive the exclusion set, because
+# they can be stale: a tracking ref can point at a commit the remote no
+# longer holds, or be absent for a commit the remote already holds. Using
+# them would over- or under-exclude and either miss a real leak or block on
+# already-public content. ${2:-} keeps `set -u` happy when a caller forgets
+# the URL (git always passes both).
+REMOTE_URL="${2:-}"
+
 rc=0
+PLUMBING_ERR=0
+STDIN_REFS="$(cat)"
+
 if [[ -n "${CONTENT_GUARD_DIR:-}" ]]; then
   POLICY="${CONTENT_GUARD_POLICY:-$CONTENT_GUARD_DIR/policies/public-repo.json}"
   if [[ ! -d "$CONTENT_GUARD_DIR" ]]; then
@@ -24,7 +51,21 @@ if [[ -n "${CONTENT_GUARD_DIR:-}" ]]; then
     exit 1
   fi
   echo "pre-push: scanning $REPO_ROOT with explicit content-guard compatibility override"
-  PYTHONPATH="$CONTENT_GUARD_DIR/src" python3 -m content_guard scan "$REPO_ROOT" --policy "$POLICY" || rc=$?
+  RUN_TIP() {
+    local pol="$1"
+    PYTHONPATH="$CONTENT_GUARD_DIR/src" python3 -m content_guard scan "$REPO_ROOT" --policy "$pol" || rc=$?
+  }
+  RUN_HISTORY() {
+    local pol="$1"
+    PYTHONPATH="$CONTENT_GUARD_DIR/src" python3 -m content_guard.git_scan \
+      --history --revs-stdin --policy "$pol" "${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}" || rc=$?
+  }
+  RUN_HISTORY_RANGE() {
+    local range="$1"
+    local pol="$2"
+    PYTHONPATH="$CONTENT_GUARD_DIR/src" python3 -m content_guard.git_scan \
+      --history --range "$range" --policy "$pol" "${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}" || rc=$?
+  }
 else
   POLICY="${CONTENT_GUARD_POLICY:-public-repo}"
   if ! command -v brigade >/dev/null 2>&1; then
@@ -32,14 +73,142 @@ else
     exit 1
   fi
   echo "pre-push: scanning $REPO_ROOT with Brigade's embedded guard"
-  brigade scrub --target "$REPO_ROOT" --policy "$POLICY" --no-receipt || rc=$?
+  RUN_TIP() {
+    local pol="$1"
+    brigade scrub --target "$REPO_ROOT" --policy "$pol" --no-receipt || rc=$?
+  }
+  RUN_HISTORY() {
+    local pol="$1"
+    brigade guard git --history --revs-stdin --policy "$pol" "${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}" || rc=$?
+  }
+  RUN_HISTORY_RANGE() {
+    local range="$1"
+    local pol="$2"
+    brigade guard git --history --range "$range" --policy "$pol" "${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}" || rc=$?
+  }
 fi
 
-if [[ "$rc" -eq 0 ]]; then
-  exit 0
+# Optional private policy (a private identifier denylist kept out of public
+# repos). If present, the hook runs a second scan pass against it.
+EXTRA_POLICY="${CONTENT_GUARD_EXTRA_POLICY:-$HOME/.config/content-guard/internal.json}"
+ALLOW_FROM=()
+[[ -f "$EXTRA_POLICY" ]] && ALLOW_FROM=(--allow-values-from "$EXTRA_POLICY")
+
+# Track the worst scanner outcome across all scans: BLOCKED (rc=1, a real
+# leak verdict) vs SCANNER_ERR (rc>1, the scanner failed to run). Issue #82:
+# never mislabel a scanner/plumbing failure as found violations.
+BLOCKED=0
+SCANNER_ERR=0
+note_rc() {
+  if (( rc > 1 )); then SCANNER_ERR=$rc; elif (( rc == 1 )); then BLOCKED=1; fi
+  rc=0
+}
+
+ADVERTISED_REFS=""
+REMOTE_ENUMERATED=0
+
+prepare_new_branch_ranges() {
+  local needs_remote=0
+  local _lref lsha _rref rsha
+  while read -r _lref lsha _rref rsha; do
+    [[ -z "${lsha:-}" || "$lsha" =~ ^0+$ ]] && continue
+    if [[ "$rsha" =~ ^0+$ ]]; then
+      needs_remote=1
+      break
+    fi
+  done < <(printf '%s\n' "$STDIN_REFS")
+  [[ "$needs_remote" -eq 1 ]] || return 0
+
+  if [[ -z "$REMOTE_URL" ]]; then
+    echo "pre-push: [history] cannot enumerate remote refs (no destination URL)" >&2
+    PLUMBING_ERR=1
+    return
+  fi
+
+  local advertised
+  # Keep peeled annotated-tag lines (`refs/tags/<name>^{}`), which --refs
+  # suppresses. The peeled commit can be present locally even when the tag
+  # object is not, and it still marks that commit as already public.
+  if ! advertised="$(GIT_TERMINAL_PROMPT=0 git ls-remote "$REMOTE_URL" 2>&1)"; then
+    echo "pre-push: [history] failed to enumerate advertised refs for $REMOTE_URL" >&2
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && echo "pre-push:   $line" >&2
+    done <<<"$advertised"
+    PLUMBING_ERR=1
+    return
+  fi
+  ADVERTISED_REFS="$advertised"
+  REMOTE_ENUMERATED=1
+}
+
+scan_with() {
+  local pol="$1"
+  local new_revs new_count range
+  RUN_TIP "$pol"
+  note_rc
+  while read -r _lref lsha _rref rsha; do
+    [[ -z "${lsha:-}" || "$lsha" =~ ^0+$ ]] && continue   # branch deletion
+    if [[ "$rsha" =~ ^0+$ ]]; then
+      [[ "$REMOTE_ENUMERATED" -eq 1 ]] || continue
+      if ! git rev-parse -q --verify "${lsha}^{commit}" >/dev/null; then
+        echo "pre-push: [history] local commit $lsha does not resolve" >&2
+        PLUMBING_ERR=1
+        continue
+      fi
+      if ! new_revs="$(
+        printf '%s\n' "$ADVERTISED_REFS" |
+          awk 'NF { print "^" $1 }' |
+          git rev-list --ignore-missing "$lsha" --stdin
+      )"; then
+        echo "pre-push: [history] failed to resolve local history for $lsha" >&2
+        PLUMBING_ERR=1
+        continue
+      fi
+      if [[ -z "$new_revs" ]]; then
+        echo "pre-push: [history] no new commits to scan for $lsha"
+        continue
+      fi
+      new_count="$(printf '%s\n' "$new_revs" | grep -c .)"
+      echo "pre-push: [history] scanning introduced content in $new_count new commit(s) for ${_lref:-$lsha}"
+      # Batch the exact new-commit set into ONE guard history process via
+      # --revs-stdin. Revisions are data on stdin, not argv: no shell
+      # splitting, no option injection, one process per policy regardless
+      # of how many commits are new.
+      RUN_HISTORY "$pol" <<<"$new_revs"
+      note_rc
+    else
+      range="$rsha..$lsha"
+      echo "pre-push: [history] scanning introduced content in $range"
+      RUN_HISTORY_RANGE "$range" "$pol"
+      note_rc
+    fi
+  done < <(printf '%s\n' "$STDIN_REFS")
+}
+
+prepare_new_branch_ranges
+scan_with "$POLICY"
+if [[ -n "$EXTRA_POLICY" && -f "$EXTRA_POLICY" ]]; then
+  scan_with "$EXTRA_POLICY"
 fi
 
-if [[ "$rc" -eq 1 ]]; then
+if (( SCANNER_ERR > 0 )); then
+  # Any non-1 exit code is the scanner failing to run (missing deps, bad
+  # policy, crash, or a plumbing failure surfaced as exit 2), not a leak
+  # verdict. Do not mislabel it as found violations (issue #82).
+  echo >&2
+  echo "pre-push: content-guard failed to run (exit code $SCANNER_ERR); this is a scanner error, not a leak verdict." >&2
+  echo "pre-push: re-run it directly to see the error, then push again once the scanner works." >&2
+  exit 1
+fi
+
+if (( PLUMBING_ERR > 0 )); then
+  echo >&2
+  echo "pre-push: remote history could not be determined; this is a git plumbing error, not a leak verdict." >&2
+  echo "pre-push: fix the remote or local Git state, then push again." >&2
+  exit 1
+fi
+
+if [[ "$BLOCKED" -ne 0 ]]; then
   echo >&2
   echo "pre-push: BLOCKED. content-guard found violations." >&2
   echo "pre-push: fix the leak, or add an inline allow-tag on the offending line:" >&2
@@ -47,9 +216,4 @@ if [[ "$rc" -eq 1 ]]; then
   exit 1
 fi
 
-# Any other exit code is the scanner failing to run (missing deps, bad policy,
-# crash), not a leak verdict. Do not mislabel it as found violations.
-echo >&2
-echo "pre-push: content-guard failed to run (exit code $rc); this is a scanner error, not a leak verdict." >&2
-echo "pre-push: re-run it directly to see the error, then push again once the scanner works." >&2
-exit 1
+exit 0
