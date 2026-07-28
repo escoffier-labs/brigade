@@ -10,7 +10,7 @@
 
 <p align="center">
   <strong>Built for coding agents to run end to end</strong> (install, setup, verify, handoffs), not as a human day-to-day terminal app.
-  When an agent says tests passed, you get a file with the real exit code, a <strong>code map</strong> of what changed (<code>brigade code</code>), and an <strong>evidence log</strong> you can search later (<code>brigade evidence</code>).
+  When an agent says tests passed, you get a file with the real exit code, a <strong>code graph</strong> of what changed (<code>brigade code</code>), and an <strong>evidence log</strong> you can search later (<code>brigade evidence</code>).
   Optional: one MCP and tools catalog across agents, and shared notes with a review gate.
   Local files. No daemon. No lock-in.
 </p>
@@ -24,16 +24,16 @@
   <img src="https://shieldcn.dev/pypi/v/brigade-cli.svg?label=pypi&size=xs" alt="PyPI version">
   <img src="https://shieldcn.dev/pypi/dm/brigade-cli.svg?size=xs" alt="PyPI downloads per month">
   <img src="https://shieldcn.dev/badge/python-3.10+-blue.svg?logo=python&logoColor=white&size=xs" alt="Python 3.10+">
-  <img src="https://shieldcn.dev/badge/rust-code_map-b7410e.svg?logo=rust&logoColor=white&size=xs" alt="Rust: code map engine">
+  <img src="https://shieldcn.dev/badge/rust-code_graph-b7410e.svg?logo=rust&logoColor=white&size=xs" alt="Rust: code graph engine">
   <img src="https://shieldcn.dev/badge/go-evidence_log-00add8.svg?logo=go&logoColor=white&size=xs" alt="Go: evidence log engine">
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
 <p align="center">
-  <img src="docs/assets/brigade-demo.svg" alt="Recording: an agent claims tests pass; a verify run writes a receipt with the real exit code, code impact shows what the change touched, evidence search finds the run in the ledger, and outcome rank scores the skill that did the work" width="800">
+  <img src="docs/assets/brigade-demo.svg" alt="Recording: an agent claims tests pass. A verify run writes a receipt with the real exit code, the code graph shows what the change touched, evidence search finds the run in the ledger, and outcome rank scores the skill that did the work" width="800">
 </p>
 
-<p align="center"><em>An agent said "tests pass." This is the claim becoming a record: receipt, code map, evidence log, rank.</em></p>
+<p align="center"><em>An agent said "tests pass." This is the claim becoming a record: receipt, code graph, evidence log, rank.</em></p>
 
 ## The loop
 
@@ -70,9 +70,9 @@ brigade setup             # install the verified native engines
 brigade operator quickstart --target ./my-repo --harnesses codex
 ```
 
-brigade prints a one-line notice when a new release is out (checked at most
-once a day via an anonymous request; set `BRIGADE_NO_UPDATE_CHECK=1` to
-disable - details in [docs/update-channels.md](docs/update-channels.md)).
+Brigade prints a one-line notice when a new release is out. It checks at most
+once a day through an anonymous request. Set `BRIGADE_NO_UPDATE_CHECK=1` to
+disable it. Details are in [docs/update-channels.md](docs/update-channels.md).
 
 Stable pinners may deliberately install an exact release with
 `pipx install brigade-cli==X.Y.Z` or refresh through
@@ -105,9 +105,9 @@ brigade work verify run --target . --command "pytest -q" --capture brigade-work
 
 Receipts land in the **evidence log** (`brigade evidence`), a Go engine installed by `brigade setup` (historically shipped as MiseLedger). Every consequential action elsewhere in Brigade (a memory write, a skill promotion, a sync) is logged the same way. `brigade evidence search` answers "what ran, when, and what did it change" from files, weeks later. Cross-model dispatches through `brigade run` carry the same paper trail. When someone asks what your agents did this week, the answer comes from receipts you can grep, not from scrollback. [Capability page](https://brigade.tools/evidence-memory).
 
-## Code map, built in
+## Code graph, built in
 
-The `code_graph_delta` line in that receipt comes from the **code map** (`brigade code`), a Rust engine installed by `brigade setup` (historically shipped as GraphTrail; digest-verified, no toolchain required). It indexes your repo once and keeps up incrementally. On this repository a sync pass over 652 files and 10,405 symbols reports in well under a second. A receipt names the exact symbols a change touched, and your agents stop grepping and start asking structural questions:
+The `code_graph_delta` line in that receipt comes from the **code graph** (`brigade code`), a Rust engine installed by `brigade setup` (historically shipped as GraphTrail, digest-verified, no toolchain required). It indexes your repo once and keeps up incrementally. On this repository a sync pass over 652 files and 10,405 symbols reports in well under a second. A receipt names the exact symbols a change touched, and your agents stop grepping and start asking structural questions:
 
 ```
 $ brigade code impact _write_receipt
@@ -196,7 +196,7 @@ The ledger is plain JSON and markdown under `memory/outcome/`, tracked in git, r
 
 | Surface | Commands | Notes |
 |---|---|---|
-| Code map | `brigade code …` | Callers, impact, context. Formerly GraphTrail. |
+| Code graph | `brigade code …` | Callers, impact, context. Formerly GraphTrail. |
 | Evidence log | `brigade evidence …` | Searchable ledger of runs and imports. Formerly MiseLedger. |
 | Content Guard | `brigade guard` / `brigade scrub` | Secrets and private detail before publish. |
 
@@ -208,9 +208,9 @@ The ledger is plain JSON and markdown under `memory/outcome/`, tracked in git, r
 | [Token Glace](https://github.com/escoffier-labs/token-glace) | `brigade add tokens` | Compact noisy tool output before it burns context |
 | [Skillet](https://github.com/escoffier-labs/skillet) | optional roster | Portable skills that reconcile can promote or roll back |
 | [Bootstrap Doctor](https://github.com/escoffier-labs/bootstrap-doctor) | `brigade add bootstrap-doctor` | Audit OpenClaw bootstrap files (SOUL.md, TOOLS.md, AGENTS.md, IDENTITY.md, MEMORY.md, and the rest of the set) and trim oversize detail into cards |
-| Notifications | `brigade add notifications` | Optional `agent-notify` binary for Discord, Telegram, or Signal; status and setup planning only until you wire hooks or pass an explicit `--send` |
+| Notifications | `brigade add notifications` | Optional `agent-notify` binary for Discord, Telegram, or Signal. Status and setup planning only until you wire hooks or pass an explicit `--send` |
 
-Upgrading from standalone GraphTrail or MiseLedger installs? `brigade setup` replaces both. The old `brigade add graphtrail` / `add evidence` paths remain as compatibility shims. Engine binaries and some paths still use the historical names; the operator surface is `brigade code` and `brigade evidence`. Details: [wiring guide](docs/wiring-graphtrail-miseledger.md), [station contract](docs/station-contract.md).
+Upgrading from standalone GraphTrail or MiseLedger installs? `brigade setup` replaces both. The old `brigade add graphtrail` / `add evidence` paths remain as compatibility shims. Engine binaries and some paths still use the historical names. The operator surface is `brigade code` and `brigade evidence`. Details: [wiring guide](docs/wiring-graphtrail-miseledger.md), [station contract](docs/station-contract.md).
 
 Beyond the daily loop, the same review-and-receipt pattern covers cross-model runs (`brigade run` dispatches one bounded task across your roster), security scans, friction mining, research reports, and fleet health. All of it stays behind `brigade extras on` until you ask. The full tour: [docs/overview.md](docs/overview.md).
 
@@ -248,12 +248,12 @@ I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions. 
 
 | What you type / say | Historical name | Notes |
 |---|---|---|
-| Code map · `brigade code` | GraphTrail | Built in via `brigade setup` |
+| Code graph · `brigade code` | GraphTrail | Built in via `brigade setup` |
 | Evidence log · `brigade evidence` | MiseLedger | Built in via `brigade setup` |
 | Content Guard · `brigade guard` / `scrub` | content-guard | Embedded |
 | Bootstrap Doctor | same | Full OpenClaw bootstrap set: SOUL, TOOLS, AGENTS, IDENTITY, MEMORY, and related session-start files |
 
-Kitchen language (*brigade de cuisine*, *mise en place*, station nicknames) is brand and deep docs. Commands and product surfaces stay plain: receipt, code map, evidence log, sync, handoff.
+Kitchen language (*brigade de cuisine*, *mise en place*, station nicknames) is brand and deep docs. Commands and product surfaces stay plain: receipt, code graph, evidence log, sync, handoff.
 
 **Who runs what:** agents install, set up, verify, and write handoffs. Humans set policy and review gates when something is ambiguous or risky. The CLI is the control plane the fleet drives, not a tool you are expected to operate by hand all day.
 
