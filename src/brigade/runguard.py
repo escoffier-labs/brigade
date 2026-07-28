@@ -389,6 +389,29 @@ def _owner_matches_run(owner: dict[str, object] | None, run_dir: Path) -> bool:
     return isinstance(recorded, str) and Path(recorded).expanduser().resolve() == run_dir
 
 
+def is_active_run_owner(workspace: Path, run_dir: Path) -> bool:
+    """True when the current process holds the active run lock for ``run_dir``.
+
+    Reads the run-lock owner metadata (``owner.json`` under the run lock for
+    ``workspace``) and matches the current pid and the exact resolved
+    ``run_dir``. Used by lifecycle journaling so appends happen only under the
+    active run lock, never from a pre-lock bootstrap or an unlocked writer.
+    The workspace is supplied by the caller (from the run receipt's
+    ``lock_workspace`` or ``cwd``), never derived from the run directory
+    layout, so a custom ``--output-dir`` run verifies against the same lock
+    the run holds and a mismatched workspace fails closed. Returns False when
+    the lock is absent or unreadable; it never raises.
+    """
+    path = lock_path(workspace)
+    owner = _read_lock_owner(path)
+    if owner is None:
+        return False
+    owner_pid = owner.get("pid")
+    if not isinstance(owner_pid, int) or owner_pid != os.getpid():
+        return False
+    return _owner_matches_run(owner, run_dir.expanduser().resolve())
+
+
 def _quarantine_unattributable(path: Path, claimed: Path) -> None:
     quarantined = path.with_name(f".{path.name}.{uuid4().hex}.orphaned")
     try:

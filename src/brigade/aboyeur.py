@@ -27,6 +27,7 @@ from . import graphtrail_delta
 from . import localio
 from . import proc, receipt_schema, runguard
 from . import run_control
+from . import run_lifecycle
 from .result_integrity import validate_final_output
 from .run_receipts import (
     agent_result_from_worker as _agent_result_from_worker,
@@ -489,6 +490,17 @@ def _write_json(path: Path, payload: object) -> None:
     # run.json is polled by `brigade runs watch/steer/interrupt` while the run
     # rewrites it, so the write must be atomic or a concurrent reader can
     # observe a truncated file.
+    if path.name == "run.json" and isinstance(payload, dict):
+        status = payload.get("status")
+        if isinstance(status, str) and status:
+            run_lifecycle.record_lifecycle_transition(
+                path.parent,
+                status=status,
+                # The receipt payload identifies the lock workspace
+                # (lock_workspace or cwd); the run directory layout does not.
+                workspace=runguard.resolve_run_lock_workspace(payload, path.parent),
+                incoming_snapshot=payload,
+            )
     localio.write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
@@ -1937,7 +1949,7 @@ def record_artifact_collection(
     payload["artifact_collection"] = collection
     try:
         _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
-    except OSError as exc:
+    except (OSError, run_lifecycle.LifecycleJournalError) as exc:
         raise runguard.RetainRunLockError(f"failed to update run receipt after artifact collection: {exc}") from exc
 
 
@@ -2010,7 +2022,7 @@ def record_run_termination(
             )
     try:
         _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
-    except OSError as exc:
+    except (OSError, run_lifecycle.LifecycleJournalError) as exc:
         raise runguard.RetainRunLockError(f"failed to write terminal run receipt: {exc}") from exc
 
 
@@ -2038,7 +2050,7 @@ def record_dispatch_stage(output_dir: Path, *, stage: int, seats: tuple[str, ...
     )
     try:
         _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
-    except OSError as exc:
+    except (OSError, run_lifecycle.LifecycleJournalError) as exc:
         raise runguard.RetainRunLockError(f"failed to write dispatch stage receipt: {exc}") from exc
 
 
@@ -2067,7 +2079,7 @@ def record_result_processing(output_dir: Path, *, seat: str) -> None:
     payload.pop("active_seats", None)
     try:
         _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
-    except OSError as exc:
+    except (OSError, run_lifecycle.LifecycleJournalError) as exc:
         raise runguard.RetainRunLockError(f"failed to record result-processing phase: {exc}") from exc
 
 
@@ -2148,6 +2160,7 @@ def _run_payload(
     include_git: bool = True,
     pre_run_snapshot: dict[str, object] | None = None,
     scheduler: dict[str, object] | None = None,
+    lifecycle_journal_requested: bool | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": receipt_schema.RUN_RECEIPT_SCHEMA,
@@ -2182,6 +2195,8 @@ def _run_payload(
         payload["cwd"] = str(cwd)
     if scheduler is not None:
         payload["scheduler"] = scheduler
+    if lifecycle_journal_requested:
+        payload["lifecycle_journal_requested"] = True
     if resolution := _roster_resolution_payload(roster):
         payload["roster"] = resolution
     if lock_workspace is not None:
@@ -2280,6 +2295,19 @@ def record_run_start(
     output_dir = output_dir.expanduser().resolve()
     started_at = started_at or datetime.now(timezone.utc)
     output_dir.mkdir(parents=True, exist_ok=True)
+    run_json = output_dir / "run.json"
+    run_json_exists = run_json.is_file()
+    existing_requested = False
+    if run_json_exists:
+        try:
+            existing = json.loads(run_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if isinstance(existing, dict) and existing.get("lifecycle_journal_requested") is True:
+            existing_requested = True
+    lifecycle_requested = existing_requested or (
+        not run_json_exists and run_lifecycle.is_lifecycle_journaling_enabled()
+    )
     _write_json(
         output_dir / "run.json",
         _run_payload(
@@ -2301,6 +2329,7 @@ def record_run_start(
             scheduler=(
                 {"requested": scheduler, "used": None, "fallback_reason": None} if scheduler is not None else None
             ),
+            lifecycle_journal_requested=True if lifecycle_requested else None,
         ),
     )
     _write_json(output_dir / "roster.json", _roster_payload(roster))
@@ -2488,6 +2517,15 @@ def run(
     def _payload(**kwargs: Any) -> dict[str, object]:
         if "skill_route_policy" not in kwargs and skill_policy is not None:
             kwargs["skill_route_policy"] = skill_policy
+        if output_dir is not None and "lifecycle_journal_requested" not in kwargs:
+            run_path = output_dir / "run.json"
+            if run_path.is_file():
+                try:
+                    existing = json.loads(run_path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    existing = None
+                if isinstance(existing, dict) and existing.get("lifecycle_journal_requested") is True:
+                    kwargs["lifecycle_journal_requested"] = True
         return _run_payload(
             lock_workspace=lock_workspace,
             pre_run_snapshot=pre_run_snapshot_payload,
