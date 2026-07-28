@@ -412,7 +412,7 @@ def test_posttooluse_ignores_concurrent_session_write_during_read_only_bash(tmp_
     )
 
 
-def test_posttooluse_snapshot_fails_open_when_state_cannot_be_inspected(tmp_path: Path, monkeypatch):
+def test_posttooluse_snapshot_fails_closed_when_state_cannot_be_inspected(tmp_path: Path, monkeypatch):
     target = _wired_claude(tmp_path)
     session_id = "snapshot-unavailable"
     monkeypatch.setattr(runtime, "repo_worktree_fingerprint", lambda repo: None)
@@ -424,11 +424,61 @@ def test_posttooluse_snapshot_fails_open_when_state_cannot_be_inspected(tmp_path
         tool_input={"command": f"{sys.executable} -c \"print('noop')\""},
     )
     assert runtime.handle_payload("PreToolUse", pretool) is None
-    assert runtime.read_session_state(target, session_id).get("pending_bash_fingerprint") is None
+    assert runtime.read_session_state(target, session_id).get("pending_bash_fingerprint") == "unavailable"
 
     succeeded = {**pretool, "hook_event_name": "PostToolUse"}
     assert runtime.handle_payload("PostToolUse", succeeded) is None
-    assert runtime.read_session_state(target, session_id)["write_observed"] is False
+    assert runtime.read_session_state(target, session_id)["write_observed"] is True
+    blocked = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    assert blocked["decision"] == "block"
+
+
+def test_posttooluse_fails_closed_when_post_command_snapshot_is_unavailable(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    session_id = "post-snapshot-unavailable"
+    fingerprint_calls = 0
+
+    def sequenced_fingerprint(repo: Path) -> str | None:
+        nonlocal fingerprint_calls
+        fingerprint_calls += 1
+        return "baseline" if fingerprint_calls < 4 else None
+
+    monkeypatch.setattr(runtime, "repo_worktree_fingerprint", sequenced_fingerprint)
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": f"{sys.executable} -c \"print('noop')\""},
+    )
+
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    assert runtime.read_session_state(target, session_id)["pending_bash_fingerprint"] == "baseline"
+    assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
+
+    assert runtime.read_session_state(target, session_id)["write_observed"] is True
+    blocked = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    assert blocked["decision"] == "block"
+
+
+@pytest.mark.parametrize("command", ["gh --version", "jq --version", "rg --version"])
+def test_posttooluse_unlisted_read_only_command_does_not_observe_write(tmp_path: Path, command: str):
+    target = _git_wired_claude(tmp_path)
+    session_id = f"read-only-{command.split()[0]}"
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": command},
+    )
+
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+    assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
+
+    state = runtime.read_session_state(target, session_id)
+    assert state["write_observed"] is False
+    assert "pending_bash_fingerprint" not in state
     assert (
         runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
     )
@@ -840,7 +890,7 @@ def test_repo_worktree_fingerprint_returns_none_when_hash_object_fails_for_untra
     assert runtime.repo_worktree_fingerprint(target) is None
 
 
-def test_posttooluse_does_not_record_bash_write_when_hash_object_fails_for_untracked(tmp_path: Path, monkeypatch):
+def test_posttooluse_fails_closed_when_untracked_state_check_fails(tmp_path: Path, monkeypatch):
     target = _git_wired_claude(tmp_path)
     session_id = "hash-object-fail"
     out_file = target / "new.txt"
@@ -864,15 +914,14 @@ def test_posttooluse_does_not_record_bash_write_when_hash_object_fails_for_untra
     assert runtime.handle_payload("PreToolUse", pretool) is None
     state = runtime.read_session_state(target, session_id)
     assert state["write_observed"] is False
-    assert "pending_bash_fingerprint" not in state
+    assert state["pending_bash_fingerprint"] == "unavailable"
 
     out_file.write_text("after")
     succeeded = {**pretool, "hook_event_name": "PostToolUse"}
     assert runtime.handle_payload("PostToolUse", succeeded) is None
-    assert runtime.read_session_state(target, session_id)["write_observed"] is False
-    assert (
-        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
-    )
+    assert runtime.read_session_state(target, session_id)["write_observed"] is True
+    blocked = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    assert blocked["decision"] == "block"
 
 
 def test_posttooluse_records_bash_write_on_dirty_tracked_same_size_rewrite(tmp_path: Path):
