@@ -1,5 +1,9 @@
 import datetime as dt
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 
 from brigade import cli, localio, outcome, outcome_cmd, receipts_cmd, scorecard, work_cmd
 
@@ -2128,3 +2132,172 @@ def test_route_breakdown_absent_on_pre_route_ledger(tmp_path, capsys):
     assert outcome_cmd.explain(target=tmp_path, artifact_id="brigade-work", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert "route_breakdown" not in payload
+
+
+def _write_legacy_decision_receipt(target, artifact_id, *, stamp="20260620-000000", new_status="promoted"):
+    """Write a receipt under the pre-#564 second-resolution filename scheme.
+
+    The slug-only, second-resolution name is exactly what collide-with-overwrite
+    used to produce. ``load_transitions`` must keep reading these so existing
+    ledgers survive the rollout unchanged.
+    """
+    decisions = target / "memory" / "outcome" / "decisions"
+    decisions.mkdir(parents=True, exist_ok=True)
+    slug = localio.slugify(artifact_id, fallback="artifact")
+    path = decisions / f"{stamp}-{slug}.json"
+    localio.write_json(
+        path,
+        {
+            "artifact_id": artifact_id,
+            "action": "install",
+            "new_status": new_status,
+            "created_at": "2026-06-20T00:00:00+00:00",
+        },
+    )
+    return path
+
+
+def test_decision_path_is_collision_safe_within_the_same_second(tmp_path, monkeypatch):
+    # The pre-#564 scheme returned the same path for the same (now, artifact_id),
+    # so two decisions in one second selected one file and the second write
+    # replaced the first. Use deterministic tokens to prove lossy-equivalent
+    # artifact ids still select distinct paths.
+    tokens = iter(("00000000", "00000001"))
+    monkeypatch.setattr(outcome_cmd.secrets, "token_hex", lambda _n: next(tokens))
+    now = dt.datetime(2026, 6, 20, 0, 0, 0, tzinfo=dt.timezone.utc)
+    a = outcome_cmd._decision_path(tmp_path, now, "Skill X")
+    b = outcome_cmd._decision_path(tmp_path, now, "skill-x")
+    assert a != b
+    assert a.parent == b.parent
+    assert a.name == "20260620-000000-000000-skill-x-00000000.json"
+    assert b.name == "20260620-000000-000000-skill-x-00000001.json"
+
+
+def test_write_json_exclusive_never_replaces_an_existing_receipt(tmp_path):
+    # O_EXCL: the second write to the same path raises and leaves the original
+    # file intact, so an existing receipt can never be overwritten.
+    path = tmp_path / "memory" / "outcome" / "decisions" / "receipt.json"
+    localio.write_json_exclusive(path, {"artifact_id": "first", "new_status": "promoted"})
+    with pytest.raises(FileExistsError):
+        localio.write_json_exclusive(path, {"artifact_id": "second", "new_status": "demoted"})
+    assert json.loads(path.read_text())["artifact_id"] == "first"
+
+
+def test_write_json_exclusive_publishes_only_complete_json(tmp_path, monkeypatch):
+    path = tmp_path / "memory" / "outcome" / "decisions" / "receipt.json"
+    publish_ready = threading.Event()
+    allow_publish = threading.Event()
+    real_link = localio.os.link
+
+    def paused_link(source, destination):
+        publish_ready.set()
+        assert allow_publish.wait(timeout=5)
+        real_link(source, destination)
+
+    monkeypatch.setattr(localio.os, "link", paused_link)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(localio.write_json_exclusive, path, {"artifact_id": "complete"})
+        assert publish_ready.wait(timeout=5)
+        assert not path.exists()
+        allow_publish.set()
+        future.result(timeout=5)
+
+    assert json.loads(path.read_text()) == {"artifact_id": "complete"}
+
+
+def test_write_json_exclusive_allows_exactly_one_concurrent_writer(tmp_path):
+    path = tmp_path / "memory" / "outcome" / "decisions" / "receipt.json"
+    writer_count = 8
+    ready = threading.Barrier(writer_count)
+
+    def write(index):
+        ready.wait()
+        try:
+            localio.write_json_exclusive(path, {"artifact_id": f"writer-{index}"})
+        except FileExistsError:
+            return None
+        return index
+
+    with ThreadPoolExecutor(max_workers=writer_count) as executor:
+        results = list(executor.map(write, range(writer_count)))
+
+    winners = [index for index in results if index is not None]
+    assert len(winners) == 1
+    assert json.loads(path.read_text()) == {"artifact_id": f"writer-{winners[0]}"}
+
+
+def test_concurrent_decision_writers_retry_one_shared_identity(tmp_path, monkeypatch):
+    first_draw = threading.local()
+    first_draw_ready = threading.Barrier(2)
+
+    def token(_n):
+        if not getattr(first_draw, "used", False):
+            first_draw.used = True
+            first_draw_ready.wait()
+            return "deadbeef"
+        return f"{threading.get_ident():x}"
+
+    monkeypatch.setattr(outcome_cmd.secrets, "token_hex", token)
+    now = dt.datetime(2026, 6, 20, 0, 0, 0, tzinfo=dt.timezone.utc)
+
+    def write(artifact_id):
+        return outcome_cmd._write_decision_receipt(
+            tmp_path,
+            now,
+            artifact_id,
+            {"artifact_id": artifact_id, "new_status": "promoted", "created_at": now.isoformat()},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        paths = list(executor.map(write, ("Skill X", "skill-x")))
+
+    assert paths[0] != paths[1]
+    assert {json.loads(path.read_text())["artifact_id"] for path in paths} == {"Skill X", "skill-x"}
+
+
+def test_write_decision_receipt_writes_two_distinct_files_for_colliding_ids(tmp_path, monkeypatch):
+    # Two artifact ids that slug to the same value ("Skill-X" and "skill-x" both
+    # lower-case to "skill-x") in the same second: the old scheme selected one
+    # path and the second write replaced the first receipt. The new writer draws
+    # a fresh token per call and opens with O_EXCL, so both receipts survive.
+    tokens = iter(("00000000", "00000001"))
+    monkeypatch.setattr(outcome_cmd.secrets, "token_hex", lambda _n: next(tokens))
+    now = dt.datetime(2026, 6, 20, 0, 0, 0, tzinfo=dt.timezone.utc)
+    path_a = outcome_cmd._write_decision_receipt(
+        tmp_path, now, "Skill X", {"artifact_id": "Skill X", "new_status": "promoted", "created_at": now.isoformat()}
+    )
+    path_b = outcome_cmd._write_decision_receipt(
+        tmp_path, now, "skill-x", {"artifact_id": "skill-x", "new_status": "promoted", "created_at": now.isoformat()}
+    )
+    assert path_a != path_b
+    assert path_a.is_file() and path_b.is_file()
+    assert json.loads(path_a.read_text())["artifact_id"] == "Skill X"
+    assert json.loads(path_b.read_text())["artifact_id"] == "skill-x"
+
+
+def test_write_decision_receipt_raises_when_no_unique_path_is_available(tmp_path, monkeypatch):
+    # Force every draw to return the same token, so after the first successful
+    # O_EXCL write every retry collides. The writer must surface FileExistsError
+    # rather than fall back to overwriting the existing receipt.
+    monkeypatch.setattr(outcome_cmd.secrets, "token_hex", lambda _n: "deadbeef")
+    now = dt.datetime(2026, 6, 20, 0, 0, 0, tzinfo=dt.timezone.utc)
+    outcome_cmd._write_decision_receipt(
+        tmp_path, now, "skill-x", {"artifact_id": "skill-x", "new_status": "promoted", "created_at": now.isoformat()}
+    )
+    with pytest.raises(FileExistsError):
+        outcome_cmd._write_decision_receipt(
+            tmp_path,
+            now,
+            "skill-x",
+            {"artifact_id": "skill-x", "new_status": "promoted", "created_at": now.isoformat()},
+        )
+
+
+def test_load_transitions_still_reads_legacy_second_resolution_receipts(tmp_path):
+    # Receipts written before #564 used `{stamp}-{slug}.json` with no microsecond
+    # or token. They must keep loading so an existing ledger survives the rollout.
+    _write_legacy_decision_receipt(tmp_path, "skill-legacy", new_status="promoted")
+    transitions = outcome_cmd.load_transitions(tmp_path)
+    assert len(transitions) == 1
+    assert transitions[0].artifact_id == "skill-legacy"
+    assert transitions[0].new_status == "promoted"

@@ -15,6 +15,7 @@ import io
 import json
 import os
 import platform as platform_mod
+import secrets
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,9 +40,29 @@ def _status_path(target: Path) -> Path:
 
 
 def _decision_path(target: Path, now, artifact_id: str) -> Path:
-    stamp = now.strftime("%Y%m%d-%H%M%S")
+    """Return a collision-resistant path for a new decision receipt."""
+    stamp = now.strftime("%Y%m%d-%H%M%S-%f")
     slug = localio.slugify(artifact_id, fallback="artifact")
-    return target / "memory" / "outcome" / "decisions" / f"{stamp}-{slug}.json"
+    token = secrets.token_hex(4)
+    return target / "memory" / "outcome" / "decisions" / f"{stamp}-{slug}-{token}.json"
+
+
+def _write_decision_receipt(
+    target: Path,
+    now,
+    artifact_id: str,
+    receipt: dict[str, Any],
+) -> Path:
+    """Write a decision receipt exclusively, retrying identity collisions."""
+    last_error: FileExistsError | None = None
+    for _ in range(8):
+        path = _decision_path(target, now, artifact_id)
+        try:
+            localio.write_json_exclusive(path, receipt)
+            return path
+        except FileExistsError as exc:
+            last_error = exc
+    raise FileExistsError(f"could not allocate a unique decision receipt path for {artifact_id}: {last_error}")
 
 
 def load_status(target: Path) -> dict[str, dict]:
@@ -1511,7 +1532,7 @@ def reconcile(
                 and decision.action in {"install", "bump"}
             ):
                 receipt["route_policy"] = scorecard_mod.route_policy_marker_for_promotion()
-            localio.write_json(_decision_path(target, now, decision.artifact_id), receipt)
+            _write_decision_receipt(target, now, decision.artifact_id, receipt)
             status_map[decision.artifact_id] = _status_entry_for_transition(
                 new_status=new_status,
                 now=now,

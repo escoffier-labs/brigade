@@ -85,6 +85,26 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def write_text_exclusive(path: Path, data: str) -> None:
+    """Publish complete data atomically without replacing an existing file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def write_json_exclusive(path: Path, payload: dict[str, Any]) -> None:
+    """Create path with a JSON payload without replacing an existing file."""
+    write_text_exclusive(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
 def read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
     """Read JSONL records from path, keeping only lines that parse to JSON objects."""
     if not path.is_file():
