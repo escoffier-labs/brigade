@@ -465,6 +465,10 @@ def test_writable_trials_use_fresh_isolated_worktrees(tmp_path, monkeypatch):
         run_cwds.append(kwargs["cwd"])
         assert kwargs["read_only"] is False
         assert kwargs["authorized_writable_worktree"] is True
+        # Contract: writable-worktree trials must forward the canonical checkout
+        # as lock_workspace so aboyeur.run's drift check compares against it
+        # rather than the per-trial worktree cwd.
+        assert kwargs["lock_workspace"] == workspace.resolve()
         out = kwargs["output_dir"]
         out.mkdir(parents=True, exist_ok=True)
         (out / "final.txt").write_text("hello\n")

@@ -2420,6 +2420,18 @@ def run(
     # rather than running without isolation attribution.
     try:
         pre_run_snapshot = runguard.capture_pre_run_snapshot(cwd)
+        # Branch/HEAD drift is checked against the resolved lock workspace, which
+        # may be a separate canonical checkout from the assigned cwd worktree.
+        # The cwd snapshot stays the ground-truth baseline for worker change
+        # attribution; a separate drift snapshot is captured from lock_workspace
+        # before dispatch when it differs, so movement of the canonical checkout
+        # is detected even though the assigned worktree never moved. When they
+        # are the same path, reuse the cwd snapshot to preserve explicit
+        # canonical-write behavior.
+        if lock_workspace != cwd:
+            drift_snapshot = runguard.capture_pre_run_snapshot(lock_workspace)
+        else:
+            drift_snapshot = pre_run_snapshot
     except runguard.RunGuardError as exc:
         print(f"error: pre-run snapshot failed: {exc}", file=sys.stderr)
         return 2
@@ -2429,11 +2441,12 @@ def run(
         """Centralized branch/HEAD drift check across every return path.
 
         Returns 2 (and records a run-isolation failure) when branch or HEAD
-        moved since the pre-run snapshot, else None so the caller can proceed.
-        Call this after planning, before any dry-run return, after worker
-        dispatch, after synthesis, and immediately before finalization.
+        moved since the drift snapshot taken from the lock workspace, else
+        None so the caller can proceed. Call this after planning, before any
+        dry-run return, after worker dispatch, after synthesis, and
+        immediately before finalization.
         """
-        detail = runguard.detect_branch_head_drift(cwd, pre_run_snapshot)
+        detail = runguard.detect_branch_head_drift(lock_workspace, drift_snapshot)
         if detail is None:
             return None
         if output_dir is not None:
