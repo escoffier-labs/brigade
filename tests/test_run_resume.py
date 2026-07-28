@@ -45,6 +45,15 @@ def _write_run_dir(tmp_path: Path, *, results: list[dict]) -> Path:
         json.dumps({"assignments": [{"stage": 1, "worker": "cook", "task": "write code"}]})
     )
     (run_dir / "worker-results.json").write_text(json.dumps({"results": results, "ground_truth": {}}))
+    (run_dir / "synthesis.json").write_text(
+        json.dumps(
+            {
+                "orchestrator": "chef",
+                "result": {"ok": False, "text": "stale synthesis"},
+                "ground_truth": {},
+            }
+        )
+    )
     return run_dir
 
 
@@ -163,6 +172,8 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
             },
         ],
     )
+    legacy_worker_results = json.loads((run_dir / "worker-results.json").read_text())
+    legacy_synthesis = json.loads((run_dir / "synthesis.json").read_text())
     recovered = json.loads((run_dir / "run.json").read_text())
     recovered.update(
         {
@@ -194,6 +205,14 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
     assert run_json["recovery_history"] == [recovered["failure"]]
     assert "failure_phase" not in run_json
     assert "failure" not in run_json
+    worker_revisions = sorted((run_dir / "revisions" / "worker-results").glob("*.json"))
+    synthesis_revisions = sorted((run_dir / "revisions" / "synthesis").glob("*.json"))
+    assert [path.name for path in worker_revisions] == ["000001.json", "000002.json"]
+    assert [path.name for path in synthesis_revisions] == ["000001.json", "000002.json"]
+    assert json.loads(worker_revisions[0].read_text()) == legacy_worker_results
+    assert json.loads(synthesis_revisions[0].read_text()) == legacy_synthesis
+    assert json.loads(worker_revisions[1].read_text()) == json.loads((run_dir / "worker-results.json").read_text())
+    assert json.loads(synthesis_revisions[1].read_text()) == json.loads((run_dir / "synthesis.json").read_text())
 
 
 def test_resume_with_nothing_resumable_reports_and_exits_2(tmp_path, capsys):

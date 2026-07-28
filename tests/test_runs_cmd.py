@@ -184,6 +184,7 @@ def test_runs_show_prints_summary(tmp_path, capsys):
     assert "  [ok] chef" in out
     assert "final:" in out
     assert "  final answer" in out
+    assert not (run_dir / "revisions").exists()
 
 
 def test_runs_show_reports_missing_run_json(tmp_path, capsys):

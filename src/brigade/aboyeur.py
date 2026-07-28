@@ -492,6 +492,92 @@ def _write_json(path: Path, payload: object) -> None:
     localio.write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def _revision_contains(revisions_dir: Path, projection: bytes) -> bool:
+    """Return whether a preserved sidecar revision matches ``projection``."""
+    if not revisions_dir.is_dir():
+        return False
+    for revision_path in revisions_dir.glob("*.json"):
+        try:
+            if revision_path.read_bytes() == projection:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _supports_directory_fsync() -> bool:
+    return os.name == "posix"
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist directory entries where the platform supports directory fsync."""
+    if not _supports_directory_fsync():
+        return
+    directory_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _ensure_directory_durable(path: Path) -> None:
+    """Create missing directory levels and persist each new parent entry."""
+    missing: list[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            if not directory.is_dir():
+                raise
+        else:
+            _fsync_directory(directory.parent)
+
+
+def _write_new_revision(revisions_dir: Path, encoded: bytes) -> None:
+    """Exclusively create the next immutable sidecar revision."""
+    _ensure_directory_durable(revisions_dir)
+    sequence = max(
+        (int(path.stem) for path in revisions_dir.glob("*.json") if path.stem.isascii() and path.stem.isdecimal()),
+        default=0,
+    )
+    while True:
+        sequence += 1
+        revision_path = revisions_dir / f"{sequence:06d}.json"
+        writer_acquired = False
+        try:
+            fd = os.open(revision_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            writer_acquired = True
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _fsync_directory(revisions_dir)
+        except FileExistsError:
+            continue
+        except BaseException:
+            if writer_acquired:
+                revision_path.unlink(missing_ok=True)
+            raise
+        return
+
+
+def write_sidecar_revision(run_dir: Path, filename: str, payload: object) -> None:
+    """Append an immutable sidecar revision, then update its compatibility file."""
+    projection_path = run_dir / filename
+    revisions_dir = run_dir / "revisions" / Path(filename).stem
+    if projection_path.exists():
+        legacy_projection = projection_path.read_bytes()
+        json.loads(legacy_projection)
+        if not _revision_contains(revisions_dir, legacy_projection):
+            _write_new_revision(revisions_dir, legacy_projection)
+    _write_new_revision(revisions_dir, (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    _write_json(projection_path, payload)
+
+
 def _utc_iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -1759,7 +1845,7 @@ def set_artifact_patch_ref(output_dir: Path, patch_ref: str = "changes.patch") -
         else:
             receipt_schema.stamp_synthesis_document(payload)
         try:
-            _write_json(path, payload)
+            write_sidecar_revision(output_dir, filename, payload)
         except OSError as exc:
             raise runguard.RunGuardError(f"failed to record artifact patch reference in {filename}: {exc}") from exc
 
@@ -2983,8 +3069,9 @@ def run(
     worker_results = _mark_noop_worker_results(worker_results, suspected_noop)
     if output_dir is not None:
         worker_results = _write_worker_logs(output_dir, worker_results)
-        _write_json(
-            output_dir / "worker-results.json",
+        write_sidecar_revision(
+            output_dir,
+            "worker-results.json",
             receipt_schema.worker_results_document(
                 _worker_payload(worker_results),
                 ground_truth=ground_truth,
@@ -3079,7 +3166,7 @@ def run(
                 ground_truth=ground_truth,
             )
         )
-        _write_json(output_dir / "synthesis.json", synthesis_payload)
+        write_sidecar_revision(output_dir, "synthesis.json", synthesis_payload)
     if not final.ok:
         if output_dir is not None:
             finished_at = datetime.now(timezone.utc)

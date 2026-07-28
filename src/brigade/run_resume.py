@@ -199,8 +199,9 @@ def _resume_locked(run_dir: Path) -> int:
         for r in results
     ]
     ground_truth = worker_data.get("ground_truth") or {}
-    aboyeur._write_json(
-        run_dir / "worker-results.json",
+    aboyeur.write_sidecar_revision(
+        run_dir,
+        "worker-results.json",
         receipt_schema.worker_results_document(
             aboyeur._worker_payload(worker_results),
             ground_truth=ground_truth,
@@ -226,8 +227,9 @@ def _resume_locked(run_dir: Path) -> int:
         reasoning=orchestrator.reasoning,
         env=dict(orchestrator.env) if orchestrator.env is not None else None,
     )
-    aboyeur._write_json(
-        run_dir / "synthesis.json",
+    aboyeur.write_sidecar_revision(
+        run_dir,
+        "synthesis.json",
         receipt_schema.synthesis_document(
             orchestrator=roster.orchestrator,
             result={"ok": final.ok, "detail": final.detail, "text": final.text},

@@ -1,6 +1,7 @@
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -29,6 +30,10 @@ def _roster():
         },
         max_workers=2,
     )
+
+
+def _sidecar_revisions(run_dir: Path, sidecar: str) -> list[Path]:
+    return sorted((run_dir / "revisions" / sidecar).glob("*.json"))
 
 
 def _roster_with_incapable_worker():
@@ -2613,6 +2618,206 @@ def test_run_writes_artifacts(monkeypatch, tmp_path):
     assert "Brigade-computed facts:" in calls[-1][1]
     assert "tracked.txt" in calls[-1][1]
     assert {call[2] for call in calls} == {run_cwd}
+    worker_revisions = _sidecar_revisions(output_dir, "worker-results")
+    synthesis_revisions = _sidecar_revisions(output_dir, "synthesis")
+    assert [path.name for path in worker_revisions] == ["000001.json"]
+    assert [path.name for path in synthesis_revisions] == ["000001.json"]
+    assert json.loads(worker_revisions[0].read_text()) == worker_results
+    assert json.loads(synthesis_revisions[0].read_text()) == synthesis
+
+
+def test_set_artifact_patch_ref_appends_immutable_sidecar_revisions(tmp_path):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    initial_worker = {
+        "results": [{"worker": "coder", "text": "initial"}],
+        "ground_truth": {"patch_ref": None},
+    }
+    initial_synthesis = {
+        "orchestrator": "chef",
+        "result": {"text": "initial"},
+        "ground_truth": {"patch_ref": None},
+    }
+    (output_dir / "worker-results.json").write_text(json.dumps(initial_worker) + "\n")
+    (output_dir / "synthesis.json").write_text(json.dumps(initial_synthesis) + "\n")
+
+    aboyeur.set_artifact_patch_ref(output_dir, "first.patch")
+    aboyeur.set_artifact_patch_ref(output_dir, "second.patch")
+
+    worker_revisions = _sidecar_revisions(output_dir, "worker-results")
+    synthesis_revisions = _sidecar_revisions(output_dir, "synthesis")
+    assert [path.name for path in worker_revisions] == ["000001.json", "000002.json", "000003.json"]
+    assert [path.name for path in synthesis_revisions] == ["000001.json", "000002.json", "000003.json"]
+    assert json.loads(worker_revisions[0].read_text()) == initial_worker
+    assert json.loads(synthesis_revisions[0].read_text()) == initial_synthesis
+    assert json.loads(worker_revisions[1].read_text())["ground_truth"]["patch_ref"] == "first.patch"
+    assert json.loads(synthesis_revisions[1].read_text())["ground_truth"]["patch_ref"] == "first.patch"
+    assert json.loads(worker_revisions[2].read_text())["ground_truth"]["patch_ref"] == "second.patch"
+    assert json.loads(synthesis_revisions[2].read_text())["ground_truth"]["patch_ref"] == "second.patch"
+    assert json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]["patch_ref"] == "second.patch"
+    assert json.loads((output_dir / "synthesis.json").read_text())["ground_truth"]["patch_ref"] == "second.patch"
+
+
+def test_patch_reference_projection_write_failure_keeps_old_file_after_recording_evidence(tmp_path, monkeypatch):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    worker_path = output_dir / "worker-results.json"
+    initial_worker = {
+        "results": [{"worker": "coder", "text": "initial"}],
+        "ground_truth": {"patch_ref": None},
+    }
+    worker_path.write_text(json.dumps(initial_worker) + "\n")
+    before = worker_path.read_bytes()
+    real_write_text_atomic = aboyeur.localio.write_text_atomic
+
+    def fail_worker_projection(path, text):
+        if path == worker_path:
+            raise OSError("projection disk full")
+        real_write_text_atomic(path, text)
+
+    monkeypatch.setattr(aboyeur.localio, "write_text_atomic", fail_worker_projection)
+
+    with pytest.raises(
+        runguard.RunGuardError,
+        match="failed to record artifact patch reference in worker-results.json",
+    ):
+        aboyeur.set_artifact_patch_ref(output_dir, "changes.patch")
+
+    revisions = _sidecar_revisions(output_dir, "worker-results")
+    assert worker_path.read_bytes() == before
+    assert [path.name for path in revisions] == ["000001.json", "000002.json"]
+    assert json.loads(revisions[0].read_text()) == initial_worker
+    assert json.loads(revisions[1].read_text())["ground_truth"]["patch_ref"] == "changes.patch"
+
+
+def test_write_sidecar_revision_preserves_legacy_worker_results_bytes(tmp_path):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    projection_path = output_dir / "worker-results.json"
+    legacy_bytes = b'{ "z": [3, 2], "a" : { "legacy": true } }\n'
+    projection_path.write_bytes(legacy_bytes)
+    payload = {"a": {"legacy": False}, "z": [1]}
+
+    aboyeur.write_sidecar_revision(output_dir, "worker-results.json", payload)
+
+    revisions = _sidecar_revisions(output_dir, "worker-results")
+    assert [path.name for path in revisions] == ["000001.json", "000002.json"]
+    assert revisions[0].read_bytes() == legacy_bytes
+    assert projection_path.read_text() == json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def test_write_sidecar_revision_creates_private_revision_under_umask_022(tmp_path):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    previous_umask = os.umask(0o022)
+    try:
+        aboyeur.write_sidecar_revision(output_dir, "worker-results.json", {"ok": True})
+    finally:
+        os.umask(previous_umask)
+
+    revision = _sidecar_revisions(output_dir, "worker-results")[0]
+    assert stat.S_IMODE(revision.stat().st_mode) == 0o600
+
+
+def test_write_sidecar_revision_fsyncs_revision_directory_before_projection_write(tmp_path, monkeypatch):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    projection_path = output_dir / "worker-results.json"
+    revisions_root = output_dir / "revisions"
+    revisions_dir = output_dir / "revisions" / "worker-results"
+    events: list[str] = []
+    directory_fds: dict[int, str] = {}
+    real_open = aboyeur.os.open
+    real_close = aboyeur.os.close
+    real_fsync = aboyeur.os.fsync
+
+    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        directory_names = {
+            output_dir: "run-directory",
+            revisions_root: "revisions-directory",
+            revisions_dir: "sidecar-directory",
+        }
+        if Path(path) in directory_names:
+            directory_fds[fd] = directory_names[Path(path)]
+        return fd
+
+    def recording_fsync(fd: int) -> None:
+        target = directory_fds.get(fd, "revision-file")
+        events.append(f"fsync:{target}")
+        real_fsync(fd)
+
+    def recording_close(fd: int) -> None:
+        directory_fds.pop(fd, None)
+        real_close(fd)
+
+    def recording_projection_write(path, text) -> None:
+        assert path == projection_path
+        events.append("projection-write")
+
+    monkeypatch.setattr(aboyeur.os, "open", recording_open)
+    monkeypatch.setattr(aboyeur.os, "close", recording_close)
+    monkeypatch.setattr(aboyeur.os, "fsync", recording_fsync)
+    monkeypatch.setattr(aboyeur.localio, "write_text_atomic", recording_projection_write)
+
+    aboyeur.write_sidecar_revision(output_dir, "worker-results.json", {"ok": True})
+
+    assert events == [
+        "fsync:run-directory",
+        "fsync:revisions-directory",
+        "fsync:revision-file",
+        "fsync:sidecar-directory",
+        "projection-write",
+    ]
+
+
+def test_write_sidecar_revision_skips_directory_fsync_off_posix(tmp_path, monkeypatch):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    revisions_dir = output_dir / "revisions" / "worker-results"
+    real_open = aboyeur.os.open
+
+    def reject_directory_open(path, flags, mode=0o777, *, dir_fd=None):
+        if Path(path) == revisions_dir:
+            pytest.fail("non-POSIX platforms must not open directories for fsync")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(aboyeur, "_supports_directory_fsync", lambda: False)
+    monkeypatch.setattr(aboyeur.os, "open", reject_directory_open)
+    monkeypatch.setattr(aboyeur.localio, "write_text_atomic", lambda *_args: None)
+
+    aboyeur.write_sidecar_revision(output_dir, "worker-results.json", {"ok": True})
+
+
+def test_write_sidecar_revision_removes_partial_revision_when_fsync_fails(tmp_path, monkeypatch):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    projection_path = output_dir / "worker-results.json"
+    old_projection = b'{ "status": "old", "items" : [] }\n'
+    projection_path.write_bytes(old_projection)
+    revisions_dir = output_dir / "revisions" / "worker-results"
+    revisions_dir.mkdir(parents=True)
+    earlier_revision = revisions_dir / "000001.json"
+    earlier_revision.write_bytes(old_projection)
+    earlier_bytes = earlier_revision.read_bytes()
+    partial_revision = revisions_dir / "000002.json"
+
+    def fail_revision_fsync(_fd: int) -> None:
+        assert partial_revision.read_bytes()
+        raise OSError("revision fsync failed")
+
+    def fail_projection_write(*_args, **_kwargs) -> None:
+        pytest.fail("projection write must not follow a failed revision fsync")
+
+    monkeypatch.setattr(aboyeur.os, "fsync", fail_revision_fsync)
+    monkeypatch.setattr(aboyeur.localio, "write_text_atomic", fail_projection_write)
+
+    with pytest.raises(OSError, match="revision fsync failed"):
+        aboyeur.write_sidecar_revision(output_dir, "worker-results.json", {"status": "new"})
+
+    assert projection_path.read_bytes() == old_projection
+    assert [path.name for path in _sidecar_revisions(output_dir, "worker-results")] == ["000001.json"]
+    assert earlier_revision.read_bytes() == earlier_bytes
 
 
 def test_run_marks_suspected_noop_for_ok_write_worker_with_no_non_brigade_changes(monkeypatch, tmp_path):
