@@ -1,0 +1,12 @@
+{
+  "schema": "brigade.trust-policy.v1",
+  "schema_version": 1,
+  "entitlements": {
+    "unknown": ["search", "show_metadata", "forensic_content_reveal"],
+    "untrusted": ["search", "show", "brief_wrapped"],
+    "reviewed": ["search", "show", "brief", "cite", "promote"],
+    "verified": ["search", "show", "brief", "cite", "promote"],
+    "quarantined": ["search_metadata", "show_metadata"]
+  },
+  "untrusted_caps": {"max_items": 2, "max_fraction": 0.5}
+}

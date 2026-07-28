@@ -1,0 +1,76 @@
+{
+  "schema": "brigade.provenance-envelope-fixtures.v1",
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "item_unicode_trailing_newline",
+      "scope": "item.text.utf8.v1",
+      "text": "café\n",
+      "envelope": {
+        "schema": "brigade.provenance-envelope.v1",
+        "schema_version": 1,
+        "source": {"system": "work-inbox", "kind": "context", "producer": "ledger._make_import"},
+        "origin": "workspace",
+        "repository": {"id": "escoffier-labs/brigade", "revision": null},
+        "session": {"id": "demo-session", "harness": "cursor"},
+        "collection_id": "demo-collection",
+        "item_id": "demo:item:1",
+        "locator": {"kind": "repo-relative", "value": "demo/item.txt"},
+        "attribution": "observed",
+        "modality": "tool-output",
+        "trust": {
+          "label": "untrusted",
+          "assigned_by": "ingest:ledger._make_import",
+          "assigned_at": "2026-07-26T21:31:37.123456+00:00",
+          "trust_policy": {"schema": "brigade.trust-policy.v1", "schema_version": 1},
+          "injection": {"status": "clean", "count": 0, "rules": []}
+        },
+        "hashes": {
+          "content_algorithm": "sha256",
+          "content_scope": "item.text.utf8.v1",
+          "content": "7b49b9e063bd91a4f9252b413261f5557b9c570aa61516989499f64a62dbcdd6",
+          "raw_algorithm": "sha256",
+          "raw_scope": "exact_bytes",
+          "raw": "7b49b9e063bd91a4f9252b413261f5557b9c570aa61516989499f64a62dbcdd6"
+        },
+        "captured_at": "2026-07-26T21:31:37+00:00",
+        "ingested_at": "2026-07-26T21:31:38+00:00"
+      }
+    },
+    {
+      "name": "message_distinct_bytes",
+      "scope": "message.text.utf8.v1",
+      "text": "worker-result: done",
+      "envelope": {
+        "schema": "brigade.provenance-envelope.v1",
+        "schema_version": 1,
+        "source": {"system": "receipts", "kind": "worker-result", "producer": "aboyeur._worker_prompt"},
+        "origin": "agent-session",
+        "repository": {"id": "escoffier-labs/brigade", "revision": "abc123def456"},
+        "session": {"id": "demo-run", "harness": "claude"},
+        "collection_id": "brigade_work_runs",
+        "item_id": "worker-result:demo",
+        "locator": {"kind": "repo-relative", "value": ".brigade/work/runs/demo.json"},
+        "attribution": "observed",
+        "modality": "model-generated",
+        "trust": {
+          "label": "untrusted",
+          "assigned_by": "ingest:aboyeur._worker_prompt",
+          "assigned_at": "2026-07-26T22:00:00+00:00",
+          "trust_policy": {"schema": "brigade.trust-policy.v1", "schema_version": 1},
+          "injection": {"status": "clean", "count": 0, "rules": []}
+        },
+        "hashes": {
+          "content_algorithm": "sha256",
+          "content_scope": "message.text.utf8.v1",
+          "content": "829cbcc2ac2c1ec278ecef0361e669309a1e18924bc17f100781580ef5fb8f08",
+          "raw_algorithm": "sha256",
+          "raw_scope": "exact_bytes",
+          "raw": "829cbcc2ac2c1ec278ecef0361e669309a1e18924bc17f100781580ef5fb8f08"
+        },
+        "captured_at": "2026-07-26T22:00:00+00:00",
+        "ingested_at": "2026-07-26T22:00:01+00:00"
+      }
+    }
+  ]
+}

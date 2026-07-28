@@ -56,7 +56,7 @@ Task-only optional fields:
 
 Task fields are valid only when `kind` is `task`. When a task import is promoted, Brigade preserves these fields on the local task ledger item and keeps source-specific details in `metadata`.
 
-Durable non-task imports with kind `decision`, `preference`, `link`, `command`, `finding`, or `incident` can be promoted into a local Memory Handoff draft. Promotion writes to the configured handoff inbox, runs handoff lint, then marks the import `promoted` only after the draft is valid. The promoted import stores `handoff_path`, `handoff_target_document`, `promoted_at`, and `handoff_source_fingerprint`. Review those drafts with `brigade handoff list`, `brigade handoff show`, and `brigade handoff archive`; those commands do not run the canonical ingestor or edit memory.
+Durable non-task imports with kind `decision`, `preference`, `link`, `command`, `finding`, or `incident` can be promoted into a local Memory Handoff draft. Promotion writes to the configured handoff inbox, runs handoff lint, then marks the import `promoted` only after the draft is valid. The promoted import stores `handoff_path`, `handoff_target_document`, `promoted_at`, and `handoff_source_fingerprint`. Review those drafts with `brigade handoff list`, `brigade handoff show`, and `brigade handoff archive`. Those commands do not run the canonical ingestor or edit memory.
 
 Recommended metadata keys:
 
@@ -133,9 +133,9 @@ Each candidate object has this exact schema:
 }
 ```
 
-`pattern_key` is computed from the normalized sequence templates joined with newline characters. Normalization replaces volatile tokens with fixed placeholders before hashing: run-id shapes become `<run-id>`, UUIDs and bare hex tokens of 12 or more characters become `<hex>`, ISO timestamps and dates become `<date>`, and absolute paths under `/tmp` or the user home become `<path>`. Repo-relative paths are kept as-is. The same workflow observed across runs that differ only by those tokens therefore produces the same `pattern_key`. The candidate `id` and `suggested_runbook_id` are both `workflow-<pattern_key>`. `sequence` holds the templates; `example_commands` holds the concrete commands from the most recent observation. `review_risk` is `high` when any example command matches the advisory destructive deny-list used by runbook policy, otherwise `normal`.
+`pattern_key` is computed from the normalized sequence templates joined with newline characters. Normalization replaces volatile tokens with fixed placeholders before hashing: run-id shapes become `<run-id>`, UUIDs and bare hex tokens of 12 or more characters become `<hex>`, ISO timestamps and dates become `<date>`, and absolute paths under `/tmp` or the user home become `<path>`. Repo-relative paths are kept as-is. The same workflow observed across runs that differ only by those tokens therefore produces the same `pattern_key`. The candidate `id` and `suggested_runbook_id` are both `workflow-<pattern_key>`. `sequence` holds the templates. `example_commands` holds the concrete commands from the most recent observation. `review_risk` is `high` when any example command matches the advisory destructive deny-list used by runbook policy, otherwise `normal`.
 
-`workflow propose-runbook` resolves an exact candidate id or a unique prefix against `.brigade/workflow/latest.json`. It writes or prints a runbook whose id is `suggested_runbook_id`, whose description names the scan candidate and provenance, whose `approved` field is false, whose `pins` list is empty, whose `allowed_commands` are sorted command names from `example_commands`, and whose steps use concrete runnable commands from `example_commands` with `timeout_seconds` set to 600. The generated payload is validated against `brigade runbook plan` policy before anything is written; when validation fails, the command reports the policy failures, writes nothing, and exits 1.
+`workflow propose-runbook` resolves an exact candidate id or a unique prefix against `.brigade/workflow/latest.json`. It writes or prints a runbook whose id is `suggested_runbook_id`, whose description names the scan candidate and provenance, whose `approved` field is false, whose `pins` list is empty, whose `allowed_commands` are sorted command names from `example_commands`, and whose steps use concrete runnable commands from `example_commands` with `timeout_seconds` set to 600. The generated payload is validated against `brigade runbook plan` policy before anything is written. When validation fails, the command reports the policy failures, writes nothing, and exits 1.
 
 Repo-fleet imports must use safe labels only. Do not copy full local paths, guidance file contents, private config values, raw logs, scanner output, owner names, exact private repo names, or raw evidence into import text or metadata.
 
@@ -245,6 +245,51 @@ brigade chat sweep ingest discord-export
 brigade chat sweep import-issues discord-export
 ```
 
-Each export finding must provide `provider`, `surface_id`, `issue_id`, `issue_type`, `priority`, `confidence`, `safe_summary`, `evidence_summary`, `suggested_task_text`, and `acceptance_criteria`. Supported provider families are `discord-export`, `slack-export`, `telegram-export`, `clickclack-export`, and `generic-jsonl`; aliases such as `discord`, `slack-json`, `telegram`, `clickclack`, `generic`, and `jsonl` are normalized to those canonical families.
+Each export finding must provide `provider`, `surface_id`, `issue_id`, `issue_type`, `priority`, `confidence`, `safe_summary`, `evidence_summary`, `suggested_task_text`, and `acceptance_criteria`. Supported provider families are `discord-export`, `slack-export`, `telegram-export`, `clickclack-export`, and `generic-jsonl`. Aliases such as `discord`, `slack-json`, `telegram`, `clickclack`, `generic`, and `jsonl` are normalized to those canonical families.
 
 `ingest` writes normalized sweep JSON under `.brigade/chat-memory-sweeps/`, and `import-issues` routes actionable items through the existing source `chat-memory-sweep` import path. Raw private chat fields such as `raw_text`, `raw_messages`, `message_text`, `messages`, and `transcript` are rejected by default. Use safe summaries, channel labels, message ranges, confidence, and local evidence paths instead.
+
+## Provenance Envelope
+
+New work import items will carry a `brigade.provenance-envelope.v1` envelope under `metadata.provenance`. The envelope records source, origin, trust, and an exact-byte SHA-256 content digest so consumers can derive entitlements from a shared trust policy. Slice 1 ships the schema, validator, and legacy read synthesis in `src/brigade/provenance.py`. Ingestion stamping and consumer enforcement land in later slices.
+
+### Location
+
+- Work imports: `metadata.provenance` on each inbox record.
+- Fixture/policy files ship as package data: `src/brigade/fixtures/provenance-envelope.v1.golden.json` and `src/brigade/fixtures/trust-policy.v1.json`.
+
+### Field sets
+
+Closed sets enforced by `validate_envelope`:
+
+- `origin`: `operator-input`, `workspace`, `agent-session`, `external-service`, `external-web`, `unknown`.
+- `modality`: `human-written`, `model-generated`, `tool-output`, `external-web`, `mixed`, `unknown`.
+- `attribution`: `observed`, `declared`, `inferred`.
+- `trust.label`: `unknown`, `untrusted`, `reviewed`, `verified`, `quarantined`.
+- `trust.injection.status`: `clean`, `flagged`, `pending`, `error`.
+- `locator.kind`: `repo-relative`, `uri`.
+- `hashes.content_scope`: `item.text.utf8.v1` (evidence items) and `message.text.utf8.v1` (inter-seat messages).
+
+### Exact-byte scopes
+
+`hashes.content` is the bare lowercase 64-char hex SHA-256 of the exact UTF-8 bytes of the persisted item `text` field. No trimming, newline normalization, or Unicode normalization. `hashes.raw`, when present, is the SHA-256 of the exact retained source bytes with `raw_scope = exact_bytes`. When `raw` is absent, `raw`, `raw_algorithm`, and `raw_scope` are all null. Both algorithms must be `sha256`.
+
+### Trust policy entitlements and caps
+
+`trust.trust_policy` stores only `schema = brigade.trust-policy.v1` and `schema_version = 1`. Consumers load `src/brigade/fixtures/trust-policy.v1.json` to derive entitlements per label: `unknown` (search, show_metadata, forensic_content_reveal), `untrusted` (search, show, brief_wrapped with caps), `reviewed`/`verified` (search, show, brief, cite, promote), `quarantined` (search_metadata, show_metadata). `untrusted_caps` are `max_items = 2` and `max_fraction = 0.5`.
+
+### Size ceiling
+
+The canonical compact JSON encoding (`ensure_ascii = False`, UTF-8, sorted keys, no whitespace) must be no greater than 4096 bytes. `validate_envelope` rejects larger envelopes with a `size`/`4096` error.
+
+### Absolute-path ban
+
+`locator.value` must be repo-relative or a non-file URI. `validate_envelope` rejects POSIX absolute paths (`/etc/passwd`), Windows drive paths (`C:\\Users\\foo`), UNC paths (`\\host\share\file`), and `file:` URIs.
+
+### Authority rule
+
+An inbound adapter envelope claiming `trust.label = reviewed` or `verified` must pass `authority_proof = {"assigned_by": <str>, "label": <str>}` with exactly those two keys, where `assigned_by` matches `trust.assigned_by` and `label` matches `trust.label`. Otherwise the ingester downgrades or rejects the assertion. An inbound adapter envelope is data, not authority.
+
+### Legacy banner
+
+When an item carries no provenance, `synthesize_legacy_provenance()` returns a non-null envelope with `origin = unknown`, `modality = unknown`, `attribution = inferred`, `trust.label = unknown`, null `repository`/`session`/`collection_id`/`item_id`/`locator`, and a null content digest. The display string is `UNKNOWN PROVENANCE - legacy item` (`provenance.LEGACY_DISPLAY`). A missing envelope is never treated as trusted.
