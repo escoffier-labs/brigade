@@ -4801,3 +4801,221 @@ def test_build_ground_truth_fails_closed_when_final_git_query_fails(tmp_path, mo
     assert "could not re-read tracked dirty files after run" in str(ground_truth["reason"])
     assert ground_truth["changed_files"] == []
     assert ground_truth["untracked_files"] == []
+
+
+def _canonical_and_assigned_worktree(tmp_path):
+    # Reproduce a Brigade-assigned detached worktree the way production does it
+    # (runguard.create_detached_worktree uses `git worktree add --detach`): a
+    # canonical checkout (the lock workspace) plus a linked worktree detached
+    # at canonical's current HEAD that Brigade hands to the worker as its cwd.
+    # The two paths share object storage but keep independent HEAD/branch state,
+    # so movement inside the assigned worktree must not be attributed to the
+    # canonical checkout and vice versa. Callers advance the canonical checkout
+    # before the run begins so the worktree's detach point becomes the stale
+    # baseline the worker rebases off of.
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    _init_git_repo(canonical)
+    (canonical / "tracked.txt").write_text("initial\n")
+    _commit_all(canonical)
+    worktree = tmp_path / "worktree"
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(worktree), "HEAD"],
+        cwd=canonical,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    return canonical, worktree
+
+
+def test_run_allows_authorized_worktree_head_move_with_separate_lock_workspace(monkeypatch, tmp_path, capsys):
+    # Contract (issue #597): when Brigade assigns a detached worktree to a
+    # worker, the worker is authorized to create branches, move HEAD, and
+    # rebase within that assigned worktree. The run-isolation drift check must
+    # compare against the canonical checkout (lock_workspace), not the assigned
+    # worktree (cwd), so authorized worktree movement alone is not classified
+    # as branch-head-drift.
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            # Authorized worker movement within the assigned worktree (cwd):
+            # the worktree was detached at a now-stale commit, so first move it
+            # onto the canonical checkout's current HEAD (the stable target
+            # baseline) by creating a worker branch and rebasing it, then
+            # commit the tracked change and leave an untracked artifact for
+            # ground-truth attribution. HEAD and branch move inside cwd; the
+            # canonical checkout (lock_workspace) is untouched.
+            canonical_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=lock_workspace,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "checkout", "-b", "worker/move"],
+                cwd=cwd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "rebase", canonical_head],
+                cwd=cwd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            (cwd / "tracked.txt").write_text("worker changed\n")
+            (cwd / "worker_new.txt").write_text("worker created\n")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=cwd, check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test User",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-m",
+                    "worker branch move",
+                ],
+                cwd=cwd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    lock_workspace, worktree = _canonical_and_assigned_worktree(tmp_path)
+    # Advance the canonical checkout before the run begins so its HEAD is the
+    # stable target baseline the worker rebases onto; the assigned worktree
+    # remains detached at the now-stale commit.
+    (lock_workspace / "tracked.txt").write_text("canonical baseline\n")
+    _commit_all(lock_workspace)
+    canonical_head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=lock_workspace,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    rc = aboyeur.run(
+        "build feature",
+        _roster(),
+        cwd=worktree,
+        lock_workspace=lock_workspace,
+        output_dir=output_dir,
+        code_graph_enabled=False,
+    )
+
+    # Authorized worktree movement alone must not fail the run as drift.
+    assert rc == 0, capsys.readouterr().err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "ok"
+    assert run_meta.get("failure") is None
+    assert run_meta.get("failure_kind") != "branch-head-drift"
+    assert run_meta.get("failure_phase") != "run-isolation"
+    # The worker's synthesized answer must have been finalized.
+    assert (output_dir / "final.txt").read_text() == "final answer\n"
+    # The canonical checkout (lock_workspace) HEAD captured before the run is
+    # unchanged afterward: the worker's branch/rebase movement happened inside
+    # the assigned worktree, not the canonical checkout.
+    canonical_head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=lock_workspace,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    assert canonical_head_after == canonical_head_before
+    # Ground truth remains attributed to the assigned worktree (cwd), not the
+    # canonical checkout, and includes the worker's untracked artifact.
+    ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
+    assert ground_truth["cwd"] == str(worktree.resolve())
+    assert "worker_new.txt" in ground_truth["untracked_files"]
+
+
+def test_run_fails_when_canonical_checkout_drifts_during_dispatch_with_separate_lock_workspace(
+    monkeypatch, tmp_path, capsys
+):
+    # Contract (issue #597): while cwd is the assigned detached worktree and
+    # lock_workspace is the separate canonical checkout, movement of the
+    # canonical checkout's branch or HEAD during dispatch is ground-truth
+    # drift. The run must fail with rc=2 and a run-isolation/branch-head-drift
+    # receipt preserving useful detail, even though the assigned worktree
+    # itself never moved.
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            # The worker edits within its assigned worktree (cwd) -- authorized.
+            (cwd / "tracked.txt").write_text("worker changed\n")
+            # Concurrent movement in the canonical checkout (lock_workspace):
+            # ground truth moves out from under the run while dispatch is live.
+            (lock_workspace / "tracked.txt").write_text("canonical drifted\n")
+            subprocess.run(
+                ["git", "add", "tracked.txt"],
+                cwd=lock_workspace,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test User",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-m",
+                    "canonical drift",
+                ],
+                cwd=lock_workspace,
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    lock_workspace, worktree = _canonical_and_assigned_worktree(tmp_path)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    rc = aboyeur.run(
+        "build feature",
+        _roster(),
+        cwd=worktree,
+        lock_workspace=lock_workspace,
+        output_dir=output_dir,
+        code_graph_enabled=False,
+    )
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "drifted" in err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure"]["kind"] == "branch-head-drift"
+    assert run_meta["failure"]["phase"] == "run-isolation"
+    # Useful detail must be preserved: the receipt carries a non-empty detail
+    # and the run receipt records the canonical checkout as the lock workspace.
+    assert run_meta["failure"].get("detail")
+    assert "drifted" in run_meta["failure"]["detail"]
+    assert run_meta["lock_workspace"] == str(lock_workspace)
+    # The worker result must not have been finalized on top of drifted state.
+    assert not (output_dir / "final.txt").exists()

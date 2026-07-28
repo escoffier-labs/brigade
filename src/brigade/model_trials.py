@@ -697,6 +697,7 @@ def execute(
                 route_enabled=False,
                 read_only=cell.execution_mode == "read-only",
                 authorized_writable_worktree=cell.execution_mode == "writable-worktree",
+                lock_workspace=workspace,
             )
             try:
                 text = (run_dir / "final.txt").read_text()
