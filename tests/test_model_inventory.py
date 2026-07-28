@@ -1,9 +1,12 @@
+import subprocess
+
 from brigade import agents, model_inventory
 
 
 def _cursor_listing(*ids: str) -> str:
     lines = ["Available models", ""]
     lines.extend(f"{model_id} - Label for {model_id}" for model_id in ids)
+    lines.extend(["", "Tip: use --model <id> to switch."])
     return "\n".join(lines) + "\n"
 
 
@@ -19,12 +22,12 @@ def _ollama_listing(*ids: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _patch_cursor_inventory(monkeypatch, result) -> None:
+    monkeypatch.setattr(model_inventory, "_run_cursor_inventory", lambda: result, raising=False)
+
+
 def test_cursor_inventory_exact_match(monkeypatch):
-    monkeypatch.setattr(
-        model_inventory.proc,
-        "run",
-        lambda argv, **kwargs: agents.proc.Result(0, _cursor_listing("composer-2.5"), ""),
-    )
+    _patch_cursor_inventory(monkeypatch, agents.proc.Result(0, _cursor_listing("composer-2.5"), ""))
 
     result = model_inventory.ModelInventoryInspector().inspect("cursor", "composer-2.5")
 
@@ -34,10 +37,9 @@ def test_cursor_inventory_exact_match(monkeypatch):
 
 
 def test_cursor_inventory_narrow_fuzzy_match(monkeypatch):
-    monkeypatch.setattr(
-        model_inventory.proc,
-        "run",
-        lambda argv, **kwargs: agents.proc.Result(
+    _patch_cursor_inventory(
+        monkeypatch,
+        agents.proc.Result(
             0,
             _cursor_listing("cursor-grok-4.5-low", "cursor-grok-4.5-high", "cursor-grok-4.6-high"),
             "",
@@ -52,10 +54,9 @@ def test_cursor_inventory_narrow_fuzzy_match(monkeypatch):
 
 
 def test_cursor_inventory_different_version_is_missing(monkeypatch):
-    monkeypatch.setattr(
-        model_inventory.proc,
-        "run",
-        lambda argv, **kwargs: agents.proc.Result(0, _cursor_listing("cursor-grok-4.6-high"), ""),
+    _patch_cursor_inventory(
+        monkeypatch,
+        agents.proc.Result(0, _cursor_listing("cursor-grok-4.6-high"), ""),
     )
 
     result = model_inventory.ModelInventoryInspector().inspect("cursor", "grok-4.5-xhigh")
@@ -66,10 +67,9 @@ def test_cursor_inventory_different_version_is_missing(monkeypatch):
 
 
 def test_cursor_inventory_requires_versioned_family_for_fuzzy_match(monkeypatch):
-    monkeypatch.setattr(
-        model_inventory.proc,
-        "run",
-        lambda argv, **kwargs: agents.proc.Result(0, _cursor_listing("cursor-auto-low"), ""),
+    _patch_cursor_inventory(
+        monkeypatch,
+        agents.proc.Result(0, _cursor_listing("cursor-auto-low"), ""),
     )
 
     result = model_inventory.ModelInventoryInspector().inspect("cursor", "auto-high")
@@ -80,11 +80,7 @@ def test_cursor_inventory_requires_versioned_family_for_fuzzy_match(monkeypatch)
 
 
 def test_cursor_inventory_command_failure_is_unavailable(monkeypatch):
-    monkeypatch.setattr(
-        model_inventory.proc,
-        "run",
-        lambda argv, **kwargs: agents.proc.Result(1, "", "not logged in"),
-    )
+    _patch_cursor_inventory(monkeypatch, agents.proc.Result(1, "", "not logged in"))
 
     result = model_inventory.ModelInventoryInspector().inspect("cursor", "composer-2.5")
 
@@ -94,11 +90,7 @@ def test_cursor_inventory_command_failure_is_unavailable(monkeypatch):
 
 
 def test_cursor_inventory_unrecognized_output_is_unavailable(monkeypatch):
-    monkeypatch.setattr(
-        model_inventory.proc,
-        "run",
-        lambda argv, **kwargs: agents.proc.Result(0, "model output changed\n", ""),
-    )
+    _patch_cursor_inventory(monkeypatch, agents.proc.Result(0, "model output changed\n", ""))
 
     result = model_inventory.ModelInventoryInspector().inspect("cursor", "composer-2.5")
 
@@ -108,11 +100,7 @@ def test_cursor_inventory_unrecognized_output_is_unavailable(monkeypatch):
 
 
 def test_cursor_inventory_error_shaped_success_is_unavailable(monkeypatch):
-    monkeypatch.setattr(
-        model_inventory.proc,
-        "run",
-        lambda argv, **kwargs: agents.proc.Result(0, "Warning - authentication required\n", ""),
-    )
+    _patch_cursor_inventory(monkeypatch, agents.proc.Result(0, "Warning - authentication required\n", ""))
 
     result = model_inventory.ModelInventoryInspector().inspect("cursor", "composer-2.5")
 
@@ -122,11 +110,7 @@ def test_cursor_inventory_error_shaped_success_is_unavailable(monkeypatch):
 
 def test_cursor_inventory_accepts_parameterized_exact_model(monkeypatch):
     base_model = "claude-opus-4-8-thinking-high"
-    monkeypatch.setattr(
-        model_inventory.proc,
-        "run",
-        lambda argv, **kwargs: agents.proc.Result(0, _cursor_listing(base_model), ""),
-    )
+    _patch_cursor_inventory(monkeypatch, agents.proc.Result(0, _cursor_listing(base_model), ""))
 
     result = model_inventory.ModelInventoryInspector().inspect(
         "cursor",
@@ -141,16 +125,104 @@ def test_cursor_inventory_accepts_parameterized_exact_model(monkeypatch):
 def test_cursor_inventory_is_loaded_once_for_repeated_seats(monkeypatch):
     calls = []
 
-    def fake_run(argv, **kwargs):
-        calls.append(argv)
+    def fake_run():
+        calls.append(["cursor-agent", "models"])
         return agents.proc.Result(0, _cursor_listing("composer-2.5", "gpt-5.5-high"), "")
 
-    monkeypatch.setattr(model_inventory.proc, "run", fake_run)
+    monkeypatch.setattr(model_inventory, "_run_cursor_inventory", fake_run, raising=False)
     inspector = model_inventory.ModelInventoryInspector()
 
     assert inspector.inspect("cursor", "composer-2.5").state == "exact"
     assert inspector.inspect("cursor", "gpt-5.5-high").state == "exact"
     assert calls == [["cursor-agent", "models"]]
+
+
+def test_cursor_inventory_uses_regular_file_capture(monkeypatch):
+    listing = _cursor_listing("composer-2.5", "kimi-k2.7-code", "glm-5.2-high")
+
+    def fake_run(argv, **kwargs):
+        assert kwargs["stdout"] is not subprocess.PIPE
+        kwargs["stdout"].write(listing.encode())
+        return subprocess.CompletedProcess(argv, 0, stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = model_inventory._run_cursor_inventory()
+
+    assert result.code == 0
+    assert result.stdout == listing
+
+
+def test_cursor_inventory_is_stable_across_repeated_probes(monkeypatch):
+    calls = []
+    listing = _cursor_listing("composer-2.5", "kimi-k2.7-code", "glm-5.2-high")
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        assert kwargs["stdout"] is not subprocess.PIPE
+        kwargs["stdout"].write(listing.encode())
+        return subprocess.CompletedProcess(argv, 0, stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    for requested in ("kimi-k2.7-code", "glm-5.2-high"):
+        for _ in range(3):
+            result = model_inventory.ModelInventoryInspector().inspect("cursor", requested)
+            assert result is not None
+            assert result.state == "exact"
+
+    assert calls == [["cursor-agent", "models"]] * 6
+
+
+def test_cursor_inventory_truncated_listing_is_unavailable(monkeypatch):
+    _patch_cursor_inventory(
+        monkeypatch,
+        agents.proc.Result(
+            0,
+            "Available models\n\ncomposer-2.5 - Composer 2.5\ngpt-5.",
+            "",
+        ),
+    )
+
+    result = model_inventory.ModelInventoryInspector().inspect("cursor", "kimi-k2.7-code")
+
+    assert result is not None
+    assert result.state == "unavailable"
+    assert "unrecognized inventory shape" in result.detail
+
+
+def test_cursor_inventory_completed_listing_with_malformed_row_is_unavailable(monkeypatch):
+    _patch_cursor_inventory(
+        monkeypatch,
+        agents.proc.Result(
+            0,
+            "Available models\n\ncomposer-2.5 - Composer 2.5\nbroken row\n\nTip: use --model <id> to switch.\n",
+            "",
+        ),
+    )
+
+    result = model_inventory.ModelInventoryInspector().inspect("cursor", "kimi-k2.7-code")
+
+    assert result is not None
+    assert result.state == "unavailable"
+    assert "unrecognized inventory shape" in result.detail
+
+
+def test_cursor_inventory_stderr_cannot_complete_truncated_stdout(monkeypatch):
+    _patch_cursor_inventory(
+        monkeypatch,
+        agents.proc.Result(
+            0,
+            "Available models\n\ncomposer-2.5 - Composer 2.5\ngpt-5.",
+            "Tip: use --model <id> to switch.\n",
+        ),
+    )
+
+    result = model_inventory.ModelInventoryInspector().inspect("cursor", "kimi-k2.7-code")
+
+    assert result is not None
+    assert result.state == "unavailable"
+    assert "unrecognized inventory shape" in result.detail
 
 
 def test_grok_inventory_parses_exact_and_fuzzy_models(monkeypatch):

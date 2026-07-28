@@ -38,6 +38,7 @@ _SNAPSHOT_IGNORE_DIRS = {
     "node_modules",
 }
 _SNAPSHOT_GIT_TIMEOUT_SECONDS = 3
+_UNAVAILABLE_FINGERPRINT = "unavailable"
 _BASH_WRITE_COMMANDS = {
     "apply_patch",
     "cp",
@@ -1588,8 +1589,12 @@ def _bash_write_detected(
 ) -> bool:
     if not isinstance(baseline, str) or not baseline:
         return False
+    if baseline == _UNAVAILABLE_FINGERPRINT:
+        return True
     current = repo_worktree_fingerprint(target)
-    if current is None or current == baseline:
+    if current is None:
+        return True
+    if current == baseline:
         return False
     started = localio.parse_iso_datetime(started_at)
     if started is None:
@@ -1757,10 +1762,9 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         tool_input: dict[str, Any] = raw_tool_input if isinstance(raw_tool_input, dict) else {}
         command = tool_input.get("command")
         baseline = repo_worktree_fingerprint(target)
-        if baseline is not None:
-            state["pending_bash_fingerprint"] = baseline
-            state["pending_bash_started_at"] = localio.utc_now_iso()
-            write_session_state(target, session_id, state)
+        state["pending_bash_fingerprint"] = baseline or _UNAVAILABLE_FINGERPRINT
+        state["pending_bash_started_at"] = localio.utc_now_iso()
+        write_session_state(target, session_id, state)
         if not is_raw_verification(command):
             return None
         state["verify_denied_count"] = int(state.get("verify_denied_count") or 0) + 1
