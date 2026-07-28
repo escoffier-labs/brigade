@@ -292,6 +292,45 @@ def test_prune_verify_runs_archive_failure_keeps_run_dir(tmp_path, monkeypatch):
     assert sorted(p.name for p in root.iterdir()) == names
 
 
+def test_prune_verify_runs_invalid_archive_config_keeps_run_dir(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+    _write_verify_retention_config(tmp_path, verify_archive_dir="")
+
+    removed = verification._prune_verify_runs(tmp_path, keep=1)
+
+    assert removed == 0
+    assert (root / "20260101-000001-a" / "receipt.json").is_file()
+
+
+@pytest.mark.parametrize("archive_location", ["equal", "ancestor", "descendant", "symlink-alias"])
+def test_prune_verify_runs_rejects_archive_overlap(tmp_path, archive_location):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+    if archive_location == "equal":
+        archive_root = root
+    elif archive_location == "ancestor":
+        archive_root = root.parent
+    elif archive_location == "descendant":
+        archive_root = root / "archive"
+    else:
+        archive_root = tmp_path / "archive-alias"
+        archive_root.symlink_to(root, target_is_directory=True)
+
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 0
+    assert (root / "20260101-000001-a" / "receipt.json").is_file()
+
+
 def test_prune_verify_runs_tampered_receipt_keeps_run_dir(tmp_path):
     from brigade.work_cmd import helpers, verification
 
@@ -330,6 +369,45 @@ def test_prune_verify_runs_archive_conflict_keeps_run_dir(tmp_path):
     assert (root / "20260101-000001-a").is_dir()
 
 
+def test_prune_verify_runs_partial_existing_archive_keeps_run_dir(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+
+    archive_root = tmp_path / "verify-archive"
+    archived = archive_root / run_dir.name
+    archived.mkdir(parents=True)
+    (archived / "receipt.json").write_bytes((run_dir / "receipt.json").read_bytes())
+
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 0
+    assert run_dir.is_dir()
+    assert not (archived / "command-1-stdout.log").exists()
+
+
+def test_prune_verify_runs_symlink_existing_archive_keeps_run_dir(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+
+    archive_root = tmp_path / "verify-archive"
+    archive_root.mkdir()
+    (archive_root / run_dir.name).symlink_to(run_dir, target_is_directory=True)
+
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 0
+    assert run_dir.is_dir()
+    assert (run_dir / "receipt.json").is_file()
+
+
 def test_prune_verify_runs_rearchive_identical_evidence_is_safe(tmp_path):
     from brigade.work_cmd import helpers, verification
 
@@ -351,6 +429,49 @@ def test_prune_verify_runs_rearchive_identical_evidence_is_safe(tmp_path):
     assert len(entries) == 1
     assert entries[0]["already_archived"] is True
     assert entries[0]["receipt_sha256"] == receipt["digests"]["receipt_sha256"]
+
+
+def test_prune_verify_runs_source_symlink_keeps_run_dir(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+    outside = tmp_path / "private.log"
+    outside.write_text("private evidence\n")
+    (run_dir / "linked.log").symlink_to(outside)
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 0
+    assert run_dir.is_dir()
+    assert not (archive_root / run_dir.name).exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX FIFO support")
+def test_prune_verify_runs_source_special_file_keeps_run_dir(tmp_path, monkeypatch):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+    os.mkfifo(run_dir / "stream")
+    copy_attempted = False
+
+    def _unexpected_copytree(*args, **kwargs):
+        nonlocal copy_attempted
+        copy_attempted = True
+        raise OSError("copytree must not receive special files")
+
+    monkeypatch.setattr(verification.shutil, "copytree", _unexpected_copytree)
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=tmp_path / "verify-archive")
+
+    assert removed == 0
+    assert copy_attempted is False
+    assert run_dir.is_dir()
 
 
 def test_prune_verify_runs_without_receipt_archives_with_null_metadata(tmp_path):

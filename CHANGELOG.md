@@ -17,7 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy is deleted. Archival re-verifies the copied receipt bytes and the
   receipt's self-declared `digests.receipt_sha256`; a run directory whose
   archival fails or whose receipt no longer re-hashes is kept locally, so
-  pruning never destroys unpreserved evidence. New `.brigade/config.json`
+  pruning never destroys unpreserved evidence. Archive paths that overlap the
+  local run root, partial or symlinked archive destinations, and source trees
+  containing symlinks or special files are rejected without pruning. New
+  `.brigade/config.json`
   keys: `verify_runs_keep` (default 50), `verify_archive_enabled` (default
   true), and `verify_archive_dir` (default `.brigade/work/verify-archive`).
 

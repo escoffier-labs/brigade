@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -438,11 +439,27 @@ VERIFY_ARCHIVE_INDEX_SCHEMA_VERSION = 1
 
 def _verify_archive_root(target: Path, archive_root: Path | None = None) -> Path | None:
     """Resolve the verify-evidence archive root, or None when archival is disabled."""
-    if archive_root is not None:
-        return archive_root
-    enabled, resolved = config.resolve_verify_archive(target)
-    if not enabled:
-        return None
+    if archive_root is None:
+        enabled, resolved = config.resolve_verify_archive(target)
+        if not enabled:
+            return None
+    else:
+        resolved = archive_root.expanduser()
+        if not resolved.is_absolute():
+            resolved = target / resolved
+    runs_root = helpers._verify_runs_root(target).resolve(strict=False)
+    resolved = resolved.resolve(strict=False)
+    try:
+        resolved.relative_to(runs_root)
+        overlaps = True
+    except ValueError:
+        try:
+            runs_root.relative_to(resolved)
+            overlaps = True
+        except ValueError:
+            overlaps = False
+    if overlaps:
+        raise ValueError(f"verify archive root overlaps verify runs root: {resolved}")
     return resolved
 
 
@@ -453,7 +470,7 @@ def _verify_archive_index_entry(
     *,
     already_archived: bool,
 ) -> dict[str, Any]:
-    receipt = _verify_read_receipt(run_dir)
+    receipt = _verify_read_receipt(dest)
     digests = receipt.get("digests") if receipt is not None and isinstance(receipt.get("digests"), dict) else {}
     return {
         "schema": VERIFY_ARCHIVE_INDEX_SCHEMA,
@@ -499,6 +516,41 @@ def _assert_archived_receipt_integrity(archived_receipt: Path) -> None:
         raise OSError(f"verify archive receipt digest mismatch: {archived_receipt}")
 
 
+def _verify_archive_tree_manifest(root: Path) -> dict[str, tuple[str, str | None]]:
+    """Hash one regular directory tree, rejecting links and special files."""
+    try:
+        root_stat = root.lstat()
+    except OSError as exc:
+        raise OSError(f"verify archive tree is unreadable: {root}: {exc}") from exc
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        raise OSError(f"verify archive tree is not a regular directory: {root}")
+    manifest: dict[str, tuple[str, str | None]] = {}
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            children = sorted(directory.iterdir(), key=lambda path: path.name)
+        except OSError as exc:
+            raise OSError(f"verify archive tree is unreadable: {directory}: {exc}") from exc
+        for child in children:
+            relative = child.relative_to(root).as_posix()
+            try:
+                child_stat = child.lstat()
+            except OSError as exc:
+                raise OSError(f"verify archive entry is unreadable: {child}: {exc}") from exc
+            if stat.S_ISLNK(child_stat.st_mode):
+                raise OSError(f"verify archive tree contains a symlink: {child}")
+            if stat.S_ISDIR(child_stat.st_mode):
+                manifest[relative] = ("directory", None)
+                pending.append(child)
+                continue
+            if stat.S_ISREG(child_stat.st_mode):
+                manifest[relative] = ("file", localio.file_sha256(child))
+                continue
+            raise OSError(f"verify archive tree contains a special file: {child}")
+    return manifest
+
+
 def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
     """Copy one run dir into the archive and append an index entry. Raises on failure.
 
@@ -509,31 +561,43 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
     """
     run_id = run_dir.name
     dest = archive_root / run_id
+    source_manifest = _verify_archive_tree_manifest(run_dir)
     receipt_path = run_dir / "receipt.json"
     source_receipt_sha = localio.file_sha256(receipt_path) if receipt_path.is_file() else None
+    if dest.is_symlink():
+        raise OSError(f"verify archive conflict: {dest} is a symlink")
     if dest.exists():
         # Re-archive of the same run id is only safe when the evidence is identical.
+        if _verify_archive_tree_manifest(dest) != source_manifest:
+            raise OSError(f"verify archive conflict: {dest} already exists with different evidence")
         dest_receipt = dest / "receipt.json"
         dest_sha = localio.file_sha256(dest_receipt) if dest_receipt.is_file() else None
-        if source_receipt_sha is None or dest_sha != source_receipt_sha:
+        if dest_sha != source_receipt_sha:
             raise OSError(f"verify archive conflict: {dest} already exists with different evidence")
-        entry = _verify_archive_index_entry(run_dir, dest, source_receipt_sha, already_archived=True)
+        if dest_sha is not None:
+            _assert_archived_receipt_integrity(dest_receipt)
+        entry = _verify_archive_index_entry(run_dir, dest, dest_sha, already_archived=True)
         _append_verify_archive_index(archive_root, entry)
         return entry
     archive_root.mkdir(parents=True, exist_ok=True)
     staging = archive_root / f".{run_id}.staging-{uuid4().hex[:8]}"
-    shutil.copytree(run_dir, staging)
+    shutil.copytree(run_dir, staging, symlinks=True)
     try:
+        if _verify_archive_tree_manifest(staging) != source_manifest:
+            raise OSError(f"verify archive copy tree mismatch: {run_id}")
         if source_receipt_sha is not None:
             copied_sha = localio.file_sha256(staging / "receipt.json")
             if copied_sha != source_receipt_sha:
                 raise OSError(f"verify archive copy integrity check failed: {run_id}")
             _assert_archived_receipt_integrity(staging / "receipt.json")
         os.rename(staging, dest)
+        if _verify_archive_tree_manifest(run_dir) != source_manifest:
+            raise OSError(f"verify archive source changed during copy: {run_id}")
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    entry = _verify_archive_index_entry(run_dir, dest, source_receipt_sha, already_archived=False)
+    archived_receipt_sha = localio.file_sha256(dest / "receipt.json") if source_receipt_sha is not None else None
+    entry = _verify_archive_index_entry(run_dir, dest, archived_receipt_sha, already_archived=False)
     _append_verify_archive_index(archive_root, entry)
     return entry
 
@@ -559,17 +623,12 @@ def _prune_verify_runs(target: Path, keep: int | None = None, archive_root: Path
     try:
         resolved_archive = _verify_archive_root(target, archive_root)
     except Exception:
-        resolved_archive = None
+        return 0
     run_dirs = sorted((child for child in root.iterdir() if child.is_dir()), key=lambda p: p.name, reverse=True)
     removed = 0
     # Oldest first so the append-only archive index grows in chronological order.
     for stale in reversed(run_dirs[keep:]):
         if resolved_archive is not None:
-            try:
-                resolved_archive.relative_to(stale)
-                continue  # the archive root itself lives under the runs root; never prune it
-            except ValueError:
-                pass
             try:
                 _archive_verify_run(stale, resolved_archive)
             except Exception:

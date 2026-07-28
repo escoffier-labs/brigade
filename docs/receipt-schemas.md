@@ -124,7 +124,10 @@ appended. A run directory whose archival fails is kept locally, so pruning never
 destroys receipt evidence that was not preserved first. Archival re-checks integrity
 both ways: the archived `receipt.json` bytes must hash to the source bytes, and a
 receipt carrying `digests.receipt_sha256` must still re-hash to that value after the
-copy.
+copy. The archive root must not overlap the local verify-runs root in either direction,
+including through a symlink alias. Source trees containing symlinks or special files
+are kept locally. An existing archive destination is reused only when it is a regular
+directory with the same files and file hashes as the source.
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
