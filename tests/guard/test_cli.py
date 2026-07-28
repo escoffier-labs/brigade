@@ -291,6 +291,7 @@ class CliTests(unittest.TestCase):
                     "-m",
                     "feat: example",
                     "-m",
+                    # content-guard: allow email
                     "Co-authored-by: Codex <codex@openai.com>",
                 ],
                 cwd=repo,
@@ -654,6 +655,221 @@ class CliTests(unittest.TestCase):
         payload = json.loads(proc.stdout)
         self.assertFalse(payload["ok"])
         self.assertIn("expected blocked", payload["fixtures"][0]["failures"][0])
+
+    def test_git_scan_revs_stdin_scans_exact_set(self) -> None:
+        # --revs-stdin with --history scans exactly the revisions fed on
+        # stdin, bypassing `git rev-list`. Lets the pre-push hook batch a
+        # precomputed new-commit set into one process without putting
+        # revisions on argv (no ARG_MAX, no option injection).
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            (repo / "clean.txt").write_text("clean\n")
+            subprocess.run(["git", "add", "clean.txt"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "feat: clean"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            # content-guard: allow api-key-assignment
+            (repo / "leak.txt").write_text('api_key = "AKIAIOSFODNN7EXAMPLE0123456789"\n')
+            subprocess.run(["git", "add", "leak.txt"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "feat: leak"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            leak_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+            ).stdout.strip()
+            clean_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD~1"], cwd=repo, capture_output=True, text=True, check=True
+            ).stdout.strip()
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "brigade.guard.git_scan",
+                    "--history",
+                    "--revs-stdin",
+                    "--policy",
+                    str(ROOT / "src" / "brigade" / "guard" / "policies" / "public-repo.json"),
+                    "--json",
+                ],
+                cwd=repo,
+                env={"PYTHONPATH": str(ROOT / "src")},
+                input=f"{leak_sha}\n{clean_sha}\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["blocked"])
+        self.assertEqual(payload["commits_scanned"], 2)
+        self.assertEqual(payload["commits_with_findings"], 1)
+        self.assertEqual(payload["commits"][0]["commit"], leak_sha)
+
+    def test_git_scan_revs_stdin_empty_input_scans_nothing(self) -> None:
+        # Empty stdin -> empty revision set -> clean, zero commits scanned.
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "brigade.guard.git_scan",
+                    "--history",
+                    "--revs-stdin",
+                    "--policy",
+                    str(ROOT / "src" / "brigade" / "guard" / "policies" / "public-repo.json"),
+                    "--json",
+                ],
+                cwd=repo,
+                env={"PYTHONPATH": str(ROOT / "src")},
+                input="",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertFalse(payload["blocked"])
+        self.assertEqual(payload["commits_scanned"], 0)
+
+    def test_git_scan_revs_stdin_rejects_non_sha_input(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "brigade.guard.git_scan",
+                    "--history",
+                    "--revs-stdin",
+                ],
+                cwd=repo,
+                env={"PYTHONPATH": str(ROOT / "src")},
+                input="--help\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(proc.returncode, 2, msg=proc.stdout + proc.stderr)
+        self.assertIn("expected a full 40- or 64-character hex SHA", proc.stderr)
+
+    def test_git_scan_revs_stdin_rejects_unknown_sha(self) -> None:
+        # A well-formed SHA that does not resolve locally must fail closed
+        # (exit 2) rather than be silently skipped as clean.
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "brigade.guard.git_scan",
+                    "--history",
+                    "--revs-stdin",
+                ],
+                cwd=repo,
+                env={"PYTHONPATH": str(ROOT / "src")},
+                input=f"{'0' * 40}\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(proc.returncode, 2, msg=proc.stdout + proc.stderr)
+        self.assertIn("cannot read commit", proc.stderr)
+
+    def test_git_scan_revs_stdin_requires_history(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, "-m", "brigade.guard.git_scan", "--revs-stdin"],
+            cwd=ROOT,
+            env={"PYTHONPATH": str(ROOT / "src")},
+            input="",
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 2, msg=proc.stdout + proc.stderr)
+        self.assertIn("--revs-stdin requires --history", proc.stderr)
+
+    def test_git_scan_revs_stdin_accepts_sha256(self) -> None:
+        # SHA-256 repos emit 64-character SHAs; --revs-stdin must accept them.
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(
+                ["git", "init", "--object-format=sha256"], cwd=repo, check=True, capture_output=True, text=True
+            )
+            subprocess.run(["git", "config", "user.name", "Example User"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "user@example"], cwd=repo, check=True)
+            (repo / "README.md").write_text("example\n")
+            subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "feat: example"], cwd=repo, check=True, capture_output=True, text=True
+            )
+            sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+            ).stdout.strip()
+            self.assertEqual(len(sha), 64)
+
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "brigade.guard.git_scan",
+                    "--history",
+                    "--revs-stdin",
+                    "--policy",
+                    str(ROOT / "src" / "brigade" / "guard" / "policies" / "public-repo.json"),
+                    "--json",
+                ],
+                cwd=repo,
+                env={"PYTHONPATH": str(ROOT / "src")},
+                input=f"{sha}\n",
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["commits_scanned"], 1)
+
+    def test_git_scan_accepts_packaged_policy_name(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "brigade.guard.git_scan",
+                    "--all-tracked",
+                    "--policy",
+                    "public-repo",
+                ],
+                cwd=repo,
+                env={"PYTHONPATH": str(ROOT / "src")},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
 
     def _init_repo(self, repo: Path) -> None:
         subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
