@@ -390,15 +390,18 @@ def test_roster_doctor_reuses_inventory_for_repeated_harness_seats(monkeypatch, 
     monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
     calls = []
 
-    def fake_run(argv, **kwargs):
-        calls.append(argv)
+    def fake_run():
+        calls.append(["cursor-agent", "models"])
         return agents.proc.Result(
             0,
-            "Available models\n\ncomposer-2.5 - Composer 2.5\ngpt-5.5-high - GPT-5.5 High\n",
+            "Available models\n\n"
+            "composer-2.5 - Composer 2.5\n"
+            "gpt-5.5-high - GPT-5.5 High\n\n"
+            "Tip: use --model <id> to switch.\n",
             "",
         )
 
-    monkeypatch.setattr(model_inventory.proc, "run", fake_run)
+    monkeypatch.setattr(model_inventory, "_run_cursor_inventory", fake_run)
 
     assert roster_cmd.doctor(tmp_target) == 0
     assert capsys.readouterr().out.count("model inventory") == 2

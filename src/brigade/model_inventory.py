@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Literal
 
@@ -15,6 +17,8 @@ _LIST_COMMANDS = {
     "grok": ["grok", "models"],
     "ollama": ["ollama", "list"],
 }
+_INVENTORY_TIMEOUT_SECONDS = 15.0
+_CURSOR_COMPLETION_PREFIX = "Tip: use --model <id>"
 _EFFORT_SUFFIX = re.compile(r"-(?:none|low|medium|high|xhigh|extra-high|max)$")
 _OLLAMA_OPERATIONAL_ERRORS = (
     "authentication",
@@ -107,12 +111,17 @@ class ModelInventoryInspector:
         cached = self._inventories.get(cli_ref)
         if cached is not None:
             return cached
-        result = proc.run(_LIST_COMMANDS[cli_ref], timeout=15.0)
+        result = (
+            _run_cursor_inventory()
+            if cli_ref == "cursor"
+            else proc.run(_LIST_COMMANDS[cli_ref], timeout=_INVENTORY_TIMEOUT_SECONDS)
+        )
         if result.code != 0:
             diagnostic = result.stderr.strip() or result.stdout.strip() or f"exit {result.code}"
             inventory = _HarnessInventory(error=diagnostic[:160])
         else:
-            recognized, models = _parse_model_list(cli_ref, f"{result.stdout}\n{result.stderr}")
+            output = result.stdout if cli_ref == "cursor" else f"{result.stdout}\n{result.stderr}"
+            recognized, models = _parse_model_list(cli_ref, output)
             if not recognized:
                 inventory = _HarnessInventory(error="command returned an unrecognized inventory shape")
             elif not models and cli_ref != "ollama":
@@ -161,17 +170,61 @@ class ModelInventoryInspector:
         return ModelInventoryResult(state, requested, (), diagnostic[:200])
 
 
+def _run_cursor_inventory() -> proc.Result:
+    """Capture Cursor inventory through a file because its pipe output truncates at 8 KiB."""
+    with tempfile.TemporaryFile() as stdout:
+        try:
+            completed = subprocess.run(
+                _LIST_COMMANDS["cursor"],
+                stdout=stdout,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                timeout=_INVENTORY_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout.seek(0)
+            output = stdout.read().decode("utf-8", errors="replace")
+            diagnostic = _decode_subprocess_output(exc.stderr)
+            if diagnostic and not diagnostic.endswith("\n"):
+                diagnostic += "\n"
+            return proc.Result(
+                124,
+                output,
+                f"{diagnostic}timeout after {_INVENTORY_TIMEOUT_SECONDS}s",
+            )
+        except OSError as exc:
+            return proc.Result(127 if isinstance(exc, FileNotFoundError) else 126, "", str(exc))
+        stdout.seek(0)
+        output = stdout.read().decode("utf-8", errors="replace")
+    return proc.Result(completed.returncode, output, _decode_subprocess_output(completed.stderr))
+
+
+def _decode_subprocess_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return value.decode("utf-8", errors="replace")
+
+
 def _parse_model_list(cli_ref: str, output: str) -> tuple[bool, tuple[str, ...]]:
     lines = output.splitlines()
     header_index = _inventory_header_index(cli_ref, lines)
     if header_index is None:
         return False, ()
     models: set[str] = set()
+    complete = cli_ref != "cursor"
     for line in lines[header_index + 1 :]:
         if cli_ref == "cursor":
-            if line.startswith("Tip:"):
+            if not line.strip():
+                continue
+            if line.startswith(_CURSOR_COMPLETION_PREFIX):
+                complete = True
                 break
             match = re.match(r"^([a-z0-9][a-z0-9._:/\[\],=-]*)\s+-\s+.+$", line)
+            if match is None:
+                return False, ()
         elif cli_ref == "grok":
             match = re.match(r"^\s*\*\s+([^\s(]+)", line)
         else:
@@ -184,7 +237,7 @@ def _parse_model_list(cli_ref: str, output: str) -> tuple[bool, tuple[str, ...]]
             continue
         if match is not None:
             models.add(match.group(1))
-    return True, tuple(sorted(models))
+    return complete, tuple(sorted(models))
 
 
 def _inventory_header_index(cli_ref: str, lines: list[str]) -> int | None:
