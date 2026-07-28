@@ -9,8 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from brigade import aboyeur, cli, proc
+from brigade import aboyeur, cli, proc, run_journal
 from brigade import roster as roster_mod
+from brigade import runguard
 from brigade.cli import run as run_cli
 
 
@@ -500,3 +501,102 @@ def test_run_detach_child_argv_preserves_worker(tmp_path):
     assert argv[argv.index("--wait") + 1] == "2.5"
     assert argv[argv.index("--resolved-roster-source") + 1] == "workspace"
     assert argv[argv.index("--resolved-roster-shadowed") + 1] == str(roster_resolution.shadowed[0])
+
+
+def _minimal_roster() -> roster_mod.Roster:
+    return roster_mod.Roster(
+        orchestrator="chef",
+        agents={"chef": roster_mod.Agent("chef", "codex", "plan")},
+    )
+
+
+def _journal_path(run_dir: Path) -> Path:
+    return run_dir / "events" / "lifecycle.jsonl"
+
+
+@pytest.fixture
+def lifecycle_enabled(monkeypatch):
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    yield
+    monkeypatch.delenv("BRIGADE_LIFECYCLE_JOURNAL", raising=False)
+
+
+def test_detach_lifecycle_parent_child_pre_lock_writes_request_not_journal(lifecycle_enabled, tmp_path):
+    """Detached parent/child split: request before lock, journal only after lock."""
+    repo = tmp_path / "workspace"
+    repo.mkdir()
+    _write_roster(repo)
+    roster = _minimal_roster()
+    run_dir = repo / ".brigade" / "runs" / "20260728-170000-detach01"
+    run_dir.mkdir(parents=True)
+
+    # Detached parent pre-lock bootstrap.
+    aboyeur.record_run_start(
+        run_dir,
+        task="do work",
+        cwd=repo,
+        roster=roster,
+        read_only=False,
+        lock_workspace=repo,
+    )
+    parent_meta = json.loads((run_dir / "run.json").read_text())
+    assert parent_meta["lifecycle_journal_requested"] is True
+    assert not (run_dir / "events").exists()
+
+    # Detached child pre-lock bootstrap before runguard.run_lock.
+    aboyeur.record_run_start(
+        run_dir,
+        task="do work",
+        cwd=repo,
+        roster=roster,
+        read_only=False,
+        lock_workspace=repo,
+    )
+    child_pre_meta = json.loads((run_dir / "run.json").read_text())
+    assert child_pre_meta["lifecycle_journal_requested"] is True
+    assert not (run_dir / "events").exists()
+
+    # Child in-lock start activates journaling and appends run.created.
+    with runguard.run_lock(repo, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="do work",
+            cwd=repo,
+            roster=roster,
+            read_only=False,
+            lock_workspace=repo,
+        )
+
+    assert _journal_path(run_dir).is_file()
+    journal_events = run_journal.read_journal(_journal_path(run_dir)).events
+    assert len(journal_events) == 1
+    assert journal_events[0].event_type == "run.created"
+
+
+def test_detach_lifecycle_pre_lock_sigterm_writes_terminal_without_journal(lifecycle_enabled, tmp_path, monkeypatch):
+    _write_roster(tmp_path)
+    real_write_json = aboyeur._write_json
+
+    def terminate_during_roster_write(path, payload):
+        if path.name == "roster.json":
+            signal.raise_signal(signal.SIGTERM)
+        return real_write_json(path, payload)
+
+    monkeypatch.setattr(aboyeur, "_write_json", terminate_during_roster_write)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["run", "do work", "--cwd", str(tmp_path), "--detach", "--worker", "coder"])
+
+    assert exc_info.value.code == 128 + signal.SIGTERM
+    run_dir = next((tmp_path / ".brigade" / "runs").iterdir())
+    receipt = json.loads((run_dir / "run.json").read_text())
+    assert receipt["schema"] == "brigade.run.v1"
+    assert receipt["status"] == "canceled"
+    assert receipt["lifecycle_journal_requested"] is True
+    assert receipt["failure"] == {
+        "phase": "startup",
+        "kind": "signal",
+        "detail": "run terminated by SIGTERM",
+        "seat": "coder",
+    }
+    assert not (run_dir / "events").exists()
