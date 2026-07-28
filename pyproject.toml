@@ -54,7 +54,7 @@ brigade = "brigade.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-brigade = ["py.typed", "templates/**/*", "guard/policies/*.json", "guard/examples/**/*.json"]
+brigade = ["py.typed", "templates/**/*", "guard/policies/*.json", "guard/examples/**/*.json", "fixtures/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
