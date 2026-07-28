@@ -19,6 +19,9 @@ WORKER_RESULTS_SCHEMA_VERSION = 1
 SYNTHESIS_SCHEMA = "brigade.synthesis.v1"
 SYNTHESIS_SCHEMA_VERSION = 1
 
+RUN_EVENT_SCHEMA = "brigade.run_event.v1"
+RUN_EVENT_SCHEMA_VERSION = 1
+
 
 def stamp_run_receipt(payload: dict[str, object]) -> dict[str, object]:
     payload.setdefault("schema", RUN_RECEIPT_SCHEMA)
