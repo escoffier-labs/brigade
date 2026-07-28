@@ -111,6 +111,44 @@ receipts or routing authority.
 
 ---
 
+## `brigade.verify_archive_index.v1`: `schema_version: 1`
+
+**Path:** `<verify-archive-root>/index.jsonl` (one JSON object per line, append-only,
+sorted keys per line). The default archive root is `.brigade/work/verify-archive`;
+`.brigade/config.json` keys `verify_archive_enabled` and `verify_archive_dir` override it.
+
+Retention prunes the local `.brigade/work/verify-runs/` directory down to the newest
+`verify_runs_keep` runs (default 50). Before any run directory is deleted it is copied
+into the archive root as `<verify-archive-root>/<run-id>/` and one index line is
+appended. A run directory whose archival fails is kept locally, so pruning never
+destroys receipt evidence that was not preserved first. Archival re-checks integrity
+both ways: the archived `receipt.json` bytes must hash to the source bytes, and a
+receipt carrying `digests.receipt_sha256` must still re-hash to that value after the
+copy. The archive root must not overlap the local verify-runs root in either direction,
+including through a symlink alias. Source trees containing symlinks or special files
+are kept locally. An existing archive destination is reused only when it is a regular
+directory with the same files and file hashes as the source.
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema` | string | yes | Always `brigade.verify_archive_index.v1` |
+| `schema_version` | integer | yes | Always `1` for this contract |
+| `run_id` | string | yes | Run directory name that was archived |
+| `archived_at` | string (ISO-8601) | yes | When the archival completed |
+| `source_run_dir` | string | yes | Original run directory path |
+| `archive_run_dir` | string | yes | Archived copy path |
+| `already_archived` | boolean | yes | `true` when an identical archive already existed |
+| `receipt_file_sha256` | string \| null | yes | SHA-256 of the archived `receipt.json` bytes; `null` when the run dir had no receipt |
+| `receipt_schema_version` | integer \| null | yes | The receipt's own `schema_version`; `null` for legacy receipts without one |
+| `receipt_sha256` | string \| null | yes | The receipt's self-declared canonical digest; `null` when absent |
+| `signature` | string \| null | yes | Receipt signature when the run was signed; `null` otherwise |
+| `key_id` | string \| null | yes | Signing key id paired with `signature`; `null` otherwise |
+| `status` | string \| null | yes | Receipt status at archival time |
+| `started_at` | string \| null | yes | Receipt start timestamp |
+| `completed_at` | string \| null | yes | Receipt completion timestamp |
+
+---
+
 ## `brigade.work_closeout`: `schema_version: 1`
 
 **Path:** `.brigade/work/closeouts/<closeout-id>/closeout.json`

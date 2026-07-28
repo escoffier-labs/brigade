@@ -194,6 +194,401 @@ def test_prune_verify_runs_keeps_newest(tmp_path):
     assert sorted(p.name for p in root.iterdir()) == ["20260101-000002-b", "20260101-000003-c"]
 
 
+def _write_verify_run_dir(root, name, *, schema_version=2, sign=False, tamper=False):
+    """Build a run dir whose receipt carries a self-consistent digests block."""
+    run_dir = root / name
+    run_dir.mkdir(parents=True)
+    log_path = run_dir / "command-1-stdout.log"
+    log_path.write_text(f"stdout for {name}\n")
+    receipt = {
+        "schema_version": schema_version,
+        "run_id": name,
+        "target": str(root),
+        "status": "completed",
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "completed_at": "2026-01-01T00:00:01+00:00",
+        "path": str(run_dir),
+        "commands": [],
+    }
+    digests = {
+        "algorithm": "sha256",
+        "logs": {"command-1-stdout.log": localio.file_sha256(log_path)},
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    if sign:
+        digests["signature"] = f"sig-{name}"
+        digests["key_id"] = "test-key"
+    if tamper:
+        digests["receipt_sha256"] = "0" * 64
+    receipt["digests"] = digests
+    (run_dir / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    return run_dir, receipt
+
+
+def _read_archive_index(archive_root):
+    return localio.read_jsonl_dicts(archive_root / "index.jsonl")
+
+
+def test_prune_verify_runs_archives_evidence_before_delete(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    names = ["20260101-000001-a", "20260101-000002-b", "20260101-000003-c", "20260101-000004-d"]
+    source_bytes = {}
+    receipts = {}
+    for name in names:
+        _, receipt = _write_verify_run_dir(root, name, sign=True)
+        receipts[name] = receipt
+        source_bytes[name] = (root / name / "receipt.json").read_bytes()
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=2, archive_root=archive_root)
+
+    assert removed == 2
+    assert sorted(p.name for p in root.iterdir()) == ["20260101-000003-c", "20260101-000004-d"]
+    # Evidence for the pruned runs survives in the archive, byte-identical.
+    for name in ("20260101-000001-a", "20260101-000002-b"):
+        archived = archive_root / name
+        assert (archived / "receipt.json").read_bytes() == source_bytes[name]
+        assert (archived / "command-1-stdout.log").is_file()
+    # The append-only index records one line per archived run, oldest first,
+    # carrying the receipt's integrity metadata and schema version.
+    entries = _read_archive_index(archive_root)
+    assert [entry["run_id"] for entry in entries] == ["20260101-000001-a", "20260101-000002-b"]
+    for entry in entries:
+        receipt = receipts[entry["run_id"]]
+        assert entry["schema"] == "brigade.verify_archive_index.v1"
+        assert entry["schema_version"] == 1
+        assert entry["already_archived"] is False
+        assert entry["receipt_schema_version"] == 2
+        assert entry["receipt_sha256"] == receipt["digests"]["receipt_sha256"]
+        assert entry["signature"] == receipt["digests"]["signature"]
+        assert entry["key_id"] == "test-key"
+        assert entry["receipt_file_sha256"] == hashlib.sha256(source_bytes[entry["run_id"]]).hexdigest()
+        assert entry["status"] == "completed"
+    # Archived receipts still verify against their own integrity metadata.
+    for name in ("20260101-000001-a", "20260101-000002-b"):
+        payload = json.loads((archive_root / name / "receipt.json").read_text())
+        assert localio.canonical_json_digest(payload, exclude_keys={"digests"}) == payload["digests"]["receipt_sha256"]
+
+
+def test_prune_verify_runs_archive_failure_keeps_run_dir(tmp_path, monkeypatch):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    names = ["20260101-000001-a", "20260101-000002-b", "20260101-000003-c"]
+    for name in names:
+        _write_verify_run_dir(root, name)
+
+    def _failing_archive(run_dir, archive_root):
+        raise OSError("archive destination unavailable")
+
+    monkeypatch.setattr(verification, "_archive_verify_run", _failing_archive)
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=tmp_path / "verify-archive")
+
+    assert removed == 0
+    assert sorted(p.name for p in root.iterdir()) == names
+
+
+def test_prune_verify_runs_invalid_archive_config_keeps_run_dir(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+    _write_verify_retention_config(tmp_path, verify_archive_dir="")
+
+    removed = verification._prune_verify_runs(tmp_path, keep=1)
+
+    assert removed == 0
+    assert (root / "20260101-000001-a" / "receipt.json").is_file()
+
+
+@pytest.mark.parametrize("archive_location", ["equal", "ancestor", "descendant", "symlink-alias"])
+def test_prune_verify_runs_rejects_archive_overlap(tmp_path, archive_location):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+    if archive_location == "equal":
+        archive_root = root
+    elif archive_location == "ancestor":
+        archive_root = root.parent
+    elif archive_location == "descendant":
+        archive_root = root / "archive"
+    else:
+        archive_root = tmp_path / "archive-alias"
+        archive_root.symlink_to(root, target_is_directory=True)
+
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 0
+    assert (root / "20260101-000001-a" / "receipt.json").is_file()
+
+
+def test_prune_verify_runs_tampered_receipt_keeps_run_dir(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    _write_verify_run_dir(root, "20260101-000001-a", tamper=True)
+    _write_verify_run_dir(root, "20260101-000002-b")
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    # The tampered receipt fails the post-copy integrity re-check, so its run
+    # dir is kept locally and no archive copy is left behind.
+    assert removed == 0
+    assert sorted(p.name for p in root.iterdir()) == ["20260101-000001-a", "20260101-000002-b"]
+    assert not (archive_root / "20260101-000001-a").exists()
+    assert _read_archive_index(archive_root) == []
+
+
+def test_prune_verify_runs_archive_conflict_keeps_run_dir(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+
+    archive_root = tmp_path / "verify-archive"
+    conflicting = archive_root / "20260101-000001-a"
+    conflicting.mkdir(parents=True)
+    (conflicting / "receipt.json").write_text('{"run_id": "different-evidence"}\n')
+
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 0
+    assert (root / "20260101-000001-a").is_dir()
+
+
+def test_prune_verify_runs_partial_existing_archive_keeps_run_dir(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+
+    archive_root = tmp_path / "verify-archive"
+    archived = archive_root / run_dir.name
+    archived.mkdir(parents=True)
+    (archived / "receipt.json").write_bytes((run_dir / "receipt.json").read_bytes())
+
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 0
+    assert run_dir.is_dir()
+    assert not (archived / "command-1-stdout.log").exists()
+
+
+def test_prune_verify_runs_symlink_existing_archive_keeps_run_dir(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+
+    archive_root = tmp_path / "verify-archive"
+    archive_root.mkdir()
+    (archive_root / run_dir.name).symlink_to(run_dir, target_is_directory=True)
+
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 0
+    assert run_dir.is_dir()
+    assert (run_dir / "receipt.json").is_file()
+
+
+def test_prune_verify_runs_rearchive_identical_evidence_is_safe(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, receipt = _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+
+    archive_root = tmp_path / "verify-archive"
+    import shutil as _shutil
+
+    _shutil.copytree(run_dir, archive_root / "20260101-000001-a")
+
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 1
+    assert not (root / "20260101-000001-a").exists()
+    entries = _read_archive_index(archive_root)
+    assert len(entries) == 1
+    assert entries[0]["already_archived"] is True
+    assert entries[0]["receipt_sha256"] == receipt["digests"]["receipt_sha256"]
+
+
+def test_prune_verify_runs_source_symlink_keeps_run_dir(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+    outside = tmp_path / "private.log"
+    outside.write_text("private evidence\n")
+    (run_dir / "linked.log").symlink_to(outside)
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 0
+    assert run_dir.is_dir()
+    assert not (archive_root / run_dir.name).exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX FIFO support")
+def test_prune_verify_runs_source_special_file_keeps_run_dir(tmp_path, monkeypatch):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a")
+    _write_verify_run_dir(root, "20260101-000002-b")
+    os.mkfifo(run_dir / "stream")
+    copy_attempted = False
+
+    def _unexpected_copytree(*args, **kwargs):
+        nonlocal copy_attempted
+        copy_attempted = True
+        raise OSError("copytree must not receive special files")
+
+    monkeypatch.setattr(verification.shutil, "copytree", _unexpected_copytree)
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=tmp_path / "verify-archive")
+
+    assert removed == 0
+    assert copy_attempted is False
+    assert run_dir.is_dir()
+
+
+def test_prune_verify_runs_without_receipt_archives_with_null_metadata(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    legacy = root / "20260101-000001-a"
+    legacy.mkdir()
+    (legacy / "command-1-stdout.log").write_text("partial run\n")
+    _write_verify_run_dir(root, "20260101-000002-b")
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 1
+    assert (archive_root / "20260101-000001-a" / "command-1-stdout.log").is_file()
+    entries = _read_archive_index(archive_root)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["run_id"] == "20260101-000001-a"
+    assert entry["receipt_file_sha256"] is None
+    assert entry["receipt_sha256"] is None
+    assert entry["receipt_schema_version"] is None
+    assert entry["signature"] is None
+    assert entry["status"] is None
+
+
+def _write_verify_retention_config(tmp_path, **overrides):
+    payload = {
+        "version": 1,
+        "depth": "repo",
+        "harnesses": ["claude"],
+        "owner": "claude",
+        "includes": [],
+    }
+    payload.update(overrides)
+    path = tmp_path / ".brigade" / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload) + "\n")
+
+
+def test_prune_verify_runs_respects_configured_keep_and_archive_dir(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    names = ["20260101-000001-a", "20260101-000002-b", "20260101-000003-c"]
+    for name in names:
+        _write_verify_run_dir(root, name)
+    _write_verify_retention_config(tmp_path, verify_runs_keep=1, verify_archive_dir="evidence/verify-archive")
+
+    removed = verification._prune_verify_runs(tmp_path)
+
+    assert removed == 2
+    assert sorted(p.name for p in root.iterdir()) == ["20260101-000003-c"]
+    archive_root = tmp_path / "evidence" / "verify-archive"
+    assert (archive_root / "20260101-000001-a" / "receipt.json").is_file()
+    assert (archive_root / "20260101-000002-b" / "receipt.json").is_file()
+    assert len(_read_archive_index(archive_root)) == 2
+
+
+def test_prune_verify_runs_defaults_archive_next_to_runs_root(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    for name in ("20260101-000001-a", "20260101-000002-b"):
+        _write_verify_run_dir(root, name)
+
+    removed = verification._prune_verify_runs(tmp_path, keep=1)
+
+    assert removed == 1
+    default_archive = tmp_path / ".brigade" / "work" / "verify-archive"
+    assert (default_archive / "20260101-000001-a" / "receipt.json").is_file()
+    assert len(_read_archive_index(default_archive)) == 1
+
+
+def test_prune_verify_runs_archive_disabled_matches_legacy_delete(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    names = ["20260101-000001-a", "20260101-000002-b", "20260101-000003-c"]
+    for name in names:
+        _write_verify_run_dir(root, name)
+    _write_verify_retention_config(tmp_path, verify_runs_keep=1, verify_archive_enabled=False)
+
+    removed = verification._prune_verify_runs(tmp_path)
+
+    assert removed == 2
+    assert sorted(p.name for p in root.iterdir()) == ["20260101-000003-c"]
+    assert not (tmp_path / ".brigade" / "work" / "verify-archive").exists()
+
+
+def test_verify_run_finalization_archives_pruned_runs(tmp_path):
+    from brigade.work_cmd import helpers
+
+    _init_git_repo(tmp_path)
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    # Seed the runs root at the retention cap so the new run triggers pruning.
+    for index in range(50):
+        _write_verify_run_dir(root, f"20260101-0000{index:02d}-seed")
+
+    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""]) == 0
+
+    run_dirs = sorted(p.name for p in root.iterdir())
+    assert len(run_dirs) == 50
+    assert "20260101-000000-seed" not in run_dirs
+    default_archive = tmp_path / ".brigade" / "work" / "verify-archive"
+    assert (default_archive / "20260101-000000-seed" / "receipt.json").is_file()
+    entries = _read_archive_index(default_archive)
+    assert [entry["run_id"] for entry in entries] == ["20260101-000000-seed"]
+    assert entries[0]["receipt_schema_version"] == 2
+
+
 def test_outcome_health_flags_dormant_then_half_fed(tmp_path):
     from brigade import outcome_cmd
 
