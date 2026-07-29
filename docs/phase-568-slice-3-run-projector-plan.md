@@ -26,7 +26,7 @@ Do not edit `src/brigade/aboyeur.py`, `src/brigade/run_lifecycle.py`, `src/briga
 
 ## Task 1: RED tests
 
-- [ ] Create `tests/test_run_projector.py` with exactly this content:
+- [x] Create `tests/test_run_projector.py` with the approved RED coverage:
 
 ```python
 """Tests for brigade.run_projector pure run snapshot projector (issue #568 slice 3).
@@ -347,7 +347,7 @@ def test_non_boolean_journal_present_raises_projection_input_error(value):
         run_projector.project_run_snapshot(_minimal_base(), [], journal_present=value)
 ```
 
-- [ ] Run the RED command and confirm the expected failure:
+- [x] Run the RED command and confirm the expected failure:
 
 ```bash
 python3 -m pytest tests/test_run_projector.py -q
