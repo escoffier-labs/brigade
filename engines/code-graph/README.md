@@ -31,28 +31,19 @@
 
 ## Install
 
-When using Brigade, install GraphTrail and `graphtrail-mcp` through Brigade's verified managed manifest:
+Install GraphTrail and `graphtrail-mcp` through Brigade's verified managed manifest:
 
 ```bash
 brigade setup
 ```
 
-For independent use, GraphTrail also supports a one-release compatibility installation. Rust 1.85 or newer is required. This does not replace `brigade setup`. The crates.io badge above is the source of truth for the version installed from the registry; a GitHub tag is not treated as registry-available until that exact version is verified. From [crates.io](https://crates.io/crates/graphtrail):
+The standalone GraphTrail repository was archived on 2026-07-21. For source
+development, Rust 1.85 or newer is required. Build the maintained copy in this
+repository:
 
 ```bash
-cargo install graphtrail
-```
-
-Independent development from git or a clone:
-
-```bash
-# Install the exact v0.4.0 GitHub release independently of registry availability.
-cargo install --git https://github.com/escoffier-labs/graphtrail --tag v0.4.0
-# Or install current master for development, not the default path.
-cargo install --git https://github.com/escoffier-labs/graphtrail
-# or
-git clone https://github.com/escoffier-labs/graphtrail.git
-cd graphtrail && cargo build --release
+cd engines/code-graph
+cargo build --release
 ```
 
 ## Release support
