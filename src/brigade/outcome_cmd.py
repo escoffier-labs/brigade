@@ -17,10 +17,22 @@ import os
 import platform as platform_mod
 import secrets
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from . import localio, outcome as core, receipt_schema, scorecard as scorecard_mod
+
+_LOCK_WAIT_SECONDS = 30.0
+_LOCK_SENTINEL_BYTE = b"\0"
+
+
+class OutcomeLedgerError(RuntimeError):
+    """Outcome ledger persistence failed; callers must not assume the append succeeded."""
+
+
+def _records_lock_path(target: Path) -> Path:
+    return _records_path(target).parent / ".records.lock"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -577,11 +589,191 @@ def load_records(target: Path) -> list[core.OutcomeRecord]:
 
 
 def _last_record_digest(path: Path) -> str | None:
-    for row in reversed(localio.read_jsonl_dicts(path)):
-        digest = row.get("digest")
-        if isinstance(digest, str) and digest:
-            return digest
-    return None
+    return _validate_completed_ledger(path)
+
+
+def _validate_completed_ledger(path: Path) -> str | None:
+    """Validate every completed ledger row and return the last signed digest."""
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise OutcomeLedgerError(f"could not read outcome ledger: {path}: {exc}") from exc
+    if not raw:
+        return None
+    if not raw.endswith(b"\n"):
+        raise OutcomeLedgerError(f"outcome ledger has incomplete trailing record: {path}")
+    previous_digest: str | None = None
+    for line_no, line in enumerate(raw.splitlines(), start=1):
+        if not line.strip():
+            raise OutcomeLedgerError(f"outcome ledger line {line_no} is empty: {path}")
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise OutcomeLedgerError(f"outcome ledger line {line_no} is not valid JSON: {path}: {exc}") from exc
+        if not isinstance(row, dict):
+            raise OutcomeLedgerError(f"outcome ledger line {line_no} is not an object: {path}")
+        recorded_digest = row.get("digest")
+        if not isinstance(recorded_digest, str) or not recorded_digest:
+            continue
+        recomputed = localio.canonical_json_digest(row, exclude_keys={"digest"})
+        if recomputed != recorded_digest:
+            raise OutcomeLedgerError(f"outcome ledger line {line_no} digest mismatch: {path}")
+        if "prev_digest" not in row:
+            previous_digest = recorded_digest
+            continue
+        actual_prev = row.get("prev_digest")
+        if actual_prev != previous_digest:
+            raise OutcomeLedgerError(f"outcome ledger line {line_no} digest chain break: {path}")
+        previous_digest = recorded_digest
+    return previous_digest
+
+
+def _windows_lock_seek(handle) -> None:
+    handle.seek(0)
+
+
+def _ensure_lock_sentinel(handle) -> None:
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(_LOCK_SENTINEL_BYTE)
+        handle.flush()
+
+
+def _acquire_file_lock(handle, *, wait_seconds: float) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        _windows_lock_seek(handle)
+        if wait_seconds <= 0:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+            except OSError as exc:
+                raise BlockingIOError from exc
+            return
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            _windows_lock_seek(handle)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError from None
+                time.sleep(0.01)
+    else:
+        import fcntl
+
+        flags = fcntl.LOCK_EX
+        if wait_seconds <= 0:
+            flags |= fcntl.LOCK_NB
+            fcntl.flock(handle.fileno(), flags)
+            return
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError from None
+                time.sleep(0.01)
+
+
+def _release_file_lock(handle) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        _windows_lock_seek(handle)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+        return
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _records_append_lock(lock_path: Path, *, wait_seconds: float | None = None):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    timeout = _LOCK_WAIT_SECONDS if wait_seconds is None else wait_seconds
+    try:
+        handle = lock_path.open("a+b")
+    except OSError as exc:
+        raise OutcomeLedgerError(f"could not open outcome ledger lock: {lock_path}: {exc}") from exc
+    acquired = False
+    try:
+        try:
+            _ensure_lock_sentinel(handle)
+            _acquire_file_lock(handle, wait_seconds=timeout)
+        except (BlockingIOError, TimeoutError) as exc:
+            raise OutcomeLedgerError(f"could not acquire outcome ledger lock: {lock_path}") from exc
+        except OSError as exc:
+            raise OutcomeLedgerError(f"could not acquire outcome ledger lock: {lock_path}: {exc}") from exc
+        acquired = True
+        yield
+    finally:
+        body_had_error = sys.exc_info()[0] is not None
+        cleanup_error: OutcomeLedgerError | None = None
+        if acquired:
+            try:
+                _release_file_lock(handle)
+            except OSError as exc:
+                cleanup_error = OutcomeLedgerError(f"could not release outcome ledger lock: {lock_path}: {exc}")
+                cleanup_error.__cause__ = exc
+        try:
+            handle.close()
+        except OSError as exc:
+            if cleanup_error is None:
+                cleanup_error = OutcomeLedgerError(f"could not close outcome ledger lock: {lock_path}: {exc}")
+                cleanup_error.__cause__ = exc
+        if not body_had_error and cleanup_error is not None:
+            raise cleanup_error
+
+
+def _recover_interrupted_append(path: Path) -> None:
+    """Drop a partial trailing JSONL line left by an interrupted append."""
+    if not path.is_file():
+        return
+    action = "recover"
+    try:
+        with path.open("r+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                return
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) == b"\n":
+                return
+            handle.seek(0)
+            data = handle.read()
+            last_newline = data.rfind(b"\n")
+            if last_newline < 0:
+                tail = data
+                truncate_to = 0
+            else:
+                tail = data[last_newline + 1 :]
+                truncate_to = last_newline + 1
+            if not tail:
+                return
+            try:
+                payload = json.loads(tail.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                action = "finalize"
+                handle.seek(0, os.SEEK_END)
+                handle.write(b"\n")
+            else:
+                handle.truncate(truncate_to)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        detail = (
+            "could not finalize interrupted outcome ledger row"
+            if action == "finalize"
+            else "could not recover interrupted outcome ledger write"
+        )
+        raise OutcomeLedgerError(f"{detail}: {path}: {exc}") from exc
 
 
 def _record_payload(record: core.OutcomeRecord) -> dict:
@@ -605,16 +797,33 @@ def _record_payload(record: core.OutcomeRecord) -> dict:
 
 
 def append_records(target: Path, records: list[core.OutcomeRecord]) -> None:
+    """Append outcome records under an exclusive lock with interrupted-write recovery.
+
+    Recovery is row-scoped, not transactional: every completed JSONL line that
+    ends with a newline remains durable and stays in the digest chain. Only an
+    incomplete trailing line is discarded or finalized on the next append.
+    A multi-record ``append_records`` call is therefore not all-or-nothing; an
+    interrupted batch may leave earlier rows from that call on disk while the
+    partial tail is removed before validation and the next append proceeds.
+    """
     path = _records_path(target)
+    lock_path = _records_lock_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
-    prev_digest = _last_record_digest(path)
-    with path.open("a", encoding="utf-8") as handle:
-        for record in records:
-            row = _record_payload(record)
-            row["prev_digest"] = prev_digest
-            row["digest"] = localio.canonical_json_digest(row, exclude_keys={"digest"})
-            handle.write(json.dumps(row, sort_keys=True) + "\n")
-            prev_digest = row["digest"]
+    with _records_append_lock(lock_path):
+        _recover_interrupted_append(path)
+        prev_digest = _validate_completed_ledger(path)
+        try:
+            with path.open("a", encoding="utf-8") as handle:
+                for record in records:
+                    row = _record_payload(record)
+                    row["prev_digest"] = prev_digest
+                    row["digest"] = localio.canonical_json_digest(row, exclude_keys={"digest"})
+                    handle.write(json.dumps(row, sort_keys=True) + "\n")
+                    prev_digest = row["digest"]
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise OutcomeLedgerError(f"could not append outcome ledger records: {path}: {exc}") from exc
 
 
 def _compact_code_graph_delta(receipt: dict) -> dict | None:

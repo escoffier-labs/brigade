@@ -1,7 +1,13 @@
 import datetime as dt
 import json
+import multiprocessing
+import os
+import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -2301,3 +2307,298 @@ def test_load_transitions_still_reads_legacy_second_resolution_receipts(tmp_path
     assert len(transitions) == 1
     assert transitions[0].artifact_id == "skill-legacy"
     assert transitions[0].new_status == "promoted"
+
+
+def _concurrent_append_worker(args: tuple[str, int, str]) -> None:
+    target_str, index, go_path_str = args
+    from brigade import outcome, outcome_cmd
+
+    go_path = Path(go_path_str)
+    while not go_path.exists():
+        time.sleep(0.001)
+    outcome_cmd.append_records(
+        Path(target_str),
+        [
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                f"t{index}",
+                "verify",
+                1,
+                f"ref-{index}",
+                f"2026-06-20T{index:02d}:00:00+00:00",
+            )
+        ],
+    )
+
+
+def _hold_records_lock_worker(lock_path_str: str, release_path_str: str, ready_path_str: str) -> None:
+    lock_path = Path(lock_path_str)
+    release_path = Path(release_path_str)
+    ready_path = Path(ready_path_str)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with outcome_cmd._records_append_lock(lock_path, wait_seconds=30.0):
+        ready_path.touch()
+        while not release_path.exists():
+            time.sleep(0.01)
+
+
+def test_concurrent_append_records_serialize_digest_chain(tmp_path):
+    seed = outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [seed])
+    sync_dir = tmp_path / "sync"
+    sync_dir.mkdir()
+    go_path = sync_dir / "go"
+    worker_count = 8
+    ctx = multiprocessing.get_context("spawn")
+    processes = [
+        ctx.Process(target=_concurrent_append_worker, args=((str(tmp_path), index, str(go_path)),))
+        for index in range(1, worker_count + 1)
+    ]
+    for proc in processes:
+        proc.start()
+    time.sleep(0.05)
+    go_path.touch()
+    for proc in processes:
+        proc.join(timeout=30)
+        assert proc.exitcode == 0, f"worker failed with exit code {proc.exitcode}"
+
+    path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert len(rows) == worker_count + 1
+    assert receipts_cmd.verify(target=tmp_path, json_output=True) == 0
+
+
+def test_append_records_recovers_interrupted_trailing_write(tmp_path):
+    first = outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [first])
+    path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"artifact_id": "skill-x", "signal_value": 1, "partial": true')
+
+    second = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref-1", "2026-06-20T01:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [second])
+
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert len(rows) == 2
+    assert rows[0]["evidence_ref"] == "ref-0"
+    assert rows[1]["evidence_ref"] == "ref-1"
+    assert rows[1]["prev_digest"] == rows[0]["digest"]
+    assert receipts_cmd.verify(target=tmp_path, json_output=True) == 0
+
+
+def test_recovery_mutation_failure_preserves_every_completed_byte_and_fails_closed(tmp_path, monkeypatch):
+    first = outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")
+    second = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref-1", "2026-06-20T01:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [first, second])
+    path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    with path.open("ab") as handle:
+        handle.write(b'{"artifact_id": "skill-x", "partial": true')
+    before = path.read_bytes()
+    real_open = Path.open
+
+    def guarded_open(self, mode="r", *args, **kwargs):
+        handle = real_open(self, mode, *args, **kwargs)
+        if self == path and mode == "r+b":
+
+            def fail_truncate(size=None):
+                raise OSError("simulated recovery truncate failure")
+
+            handle.truncate = fail_truncate
+        return handle
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    third = outcome.OutcomeRecord("skill-x", "skill", "t2", "verify", 1, "ref-2", "2026-06-20T02:00:00+00:00")
+    with pytest.raises(outcome_cmd.OutcomeLedgerError, match="could not recover interrupted outcome ledger write"):
+        outcome_cmd.append_records(tmp_path, [third])
+
+    assert path.read_bytes() == before
+    loaded = outcome_cmd.load_records(tmp_path)
+    assert [record.evidence_ref for record in loaded] == ["ref-0", "ref-1"]
+
+
+def test_append_fails_closed_on_malformed_terminated_json_without_changing_file(tmp_path):
+    path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    path.parent.mkdir(parents=True)
+    valid = {
+        "artifact_id": "skill-x",
+        "artifact_kind": "skill",
+        "task_id": "t0",
+        "source": "verify",
+        "signal_value": 1,
+        "evidence_ref": "ref-0",
+        "ts": "2026-06-20T00:00:00+00:00",
+    }
+    path.write_text(json.dumps(valid, sort_keys=True) + "\nnot-json-at-all\n")
+    before = path.read_bytes()
+    record = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref-1", "2026-06-20T01:00:00+00:00")
+
+    with pytest.raises(outcome_cmd.OutcomeLedgerError, match="is not valid JSON"):
+        outcome_cmd.append_records(tmp_path, [record])
+
+    assert path.read_bytes() == before
+
+
+def test_append_fails_closed_on_tampered_digest_chain_without_changing_file(tmp_path):
+    first = outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [first])
+    path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    row = json.loads(path.read_text().splitlines()[0])
+    row["digest"] = "tampered-digest"
+    path.write_text(json.dumps(row, sort_keys=True) + "\n")
+    before = path.read_bytes()
+    record = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref-1", "2026-06-20T01:00:00+00:00")
+
+    with pytest.raises(outcome_cmd.OutcomeLedgerError, match="digest mismatch"):
+        outcome_cmd.append_records(tmp_path, [record])
+
+    assert path.read_bytes() == before
+
+
+def test_windows_lock_helpers_use_existing_fixed_byte_at_offset_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    lock_path = tmp_path / "memory" / "outcome" / ".records.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    seek_positions: list[int] = []
+
+    fake_msvcrt = mock.Mock()
+    fake_msvcrt.LK_NBLCK = 1
+    fake_msvcrt.LK_UNLCK = 2
+
+    def spy_locking(fd, _mode, _nbytes):
+        seek_positions.append(os.lseek(fd, 0, os.SEEK_CUR))
+
+    fake_msvcrt.locking = spy_locking
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+
+    with outcome_cmd._records_append_lock(lock_path):
+        pass
+
+    assert lock_path.read_bytes()[:1] == b"\0"
+    assert seek_positions
+    assert all(position == 0 for position in seek_positions)
+
+
+def test_recovery_preserves_and_finalizes_complete_trailing_json_object(tmp_path):
+    first = outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [first])
+    path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    first_bytes = path.read_bytes()
+    second = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref-1", "2026-06-20T01:00:00+00:00")
+    row = outcome_cmd._record_payload(second)
+    row["prev_digest"] = json.loads(first_bytes.splitlines()[0].decode())["digest"]
+    row["digest"] = localio.canonical_json_digest(row, exclude_keys={"digest"})
+    trailing = json.dumps(row, sort_keys=True).encode("utf-8")
+    with path.open("ab") as handle:
+        handle.write(trailing)
+
+    third = outcome.OutcomeRecord("skill-x", "skill", "t2", "verify", 1, "ref-2", "2026-06-20T02:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [third])
+
+    data = path.read_bytes()
+    assert data.startswith(first_bytes)
+    assert first_bytes + trailing + b"\n" in data
+    rows = [json.loads(line) for line in data.splitlines() if line.strip()]
+    assert len(rows) == 3
+    assert rows[1]["evidence_ref"] == "ref-1"
+    assert rows[2]["evidence_ref"] == "ref-2"
+    assert rows[2]["prev_digest"] == rows[1]["digest"]
+
+
+def test_lock_release_failure_raises_outcome_ledger_error(tmp_path, monkeypatch):
+    def fail_release(_handle):
+        raise OSError("simulated lock release failure")
+
+    monkeypatch.setattr(outcome_cmd, "_release_file_lock", fail_release)
+    record = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref-1", "2026-06-20T01:00:00+00:00")
+    with pytest.raises(outcome_cmd.OutcomeLedgerError, match="could not release outcome ledger lock"):
+        outcome_cmd.append_records(tmp_path, [record])
+
+
+def test_lock_cleanup_preserves_body_error_when_release_fails(tmp_path, monkeypatch):
+    lock_path = outcome_cmd._records_lock_path(tmp_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    close_attempts: list[Path] = []
+    real_open = Path.open
+
+    def tracking_open(self, mode="r", *args, **kwargs):
+        handle = real_open(self, mode, *args, **kwargs)
+        if self == lock_path:
+            real_close = handle.close
+
+            def tracked_close():
+                close_attempts.append(self)
+                return real_close()
+
+            handle.close = tracked_close
+        return handle
+
+    def fail_release(_handle):
+        raise OSError("simulated lock release failure")
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    monkeypatch.setattr(outcome_cmd, "_release_file_lock", fail_release)
+    with pytest.raises(outcome_cmd.OutcomeLedgerError, match="simulated body failure"):
+        with outcome_cmd._records_append_lock(lock_path):
+            raise outcome_cmd.OutcomeLedgerError("simulated body failure")
+
+    assert close_attempts == [lock_path]
+
+
+def test_append_records_interrupted_multi_record_batch_preserves_completed_rows(tmp_path):
+    seed = outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [seed])
+    path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    seed_rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    prev_digest = seed_rows[-1]["digest"]
+
+    batch_first = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref-1", "2026-06-20T01:00:00+00:00")
+    batch_second = outcome.OutcomeRecord("skill-x", "skill", "t2", "verify", 1, "ref-2", "2026-06-20T02:00:00+00:00")
+    completed_row = outcome_cmd._record_payload(batch_first)
+    completed_row["prev_digest"] = prev_digest
+    completed_row["digest"] = localio.canonical_json_digest(completed_row, exclude_keys={"digest"})
+    partial_row = outcome_cmd._record_payload(batch_second)
+    partial_row["prev_digest"] = completed_row["digest"]
+    partial_row["digest"] = localio.canonical_json_digest(partial_row, exclude_keys={"digest"})
+    with path.open("ab") as handle:
+        handle.write(json.dumps(completed_row, sort_keys=True).encode("utf-8") + b"\n")
+        handle.write(json.dumps(partial_row, sort_keys=True).encode("utf-8")[:40])
+
+    before = path.read_bytes()
+    follow_up = outcome.OutcomeRecord("skill-x", "skill", "t3", "verify", 1, "ref-3", "2026-06-20T03:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [follow_up])
+
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert len(rows) == 3
+    assert path.read_bytes().startswith(before[: before.rfind(b"\n") + 1])
+    assert rows[1]["evidence_ref"] == "ref-1"
+    assert rows[1]["prev_digest"] == prev_digest
+    assert rows[2]["evidence_ref"] == "ref-3"
+    assert rows[2]["prev_digest"] == rows[1]["digest"]
+    assert receipts_cmd.verify(target=tmp_path, json_output=True) == 0
+
+
+def test_append_records_fails_closed_when_lock_is_held(tmp_path, monkeypatch):
+    monkeypatch.setattr(outcome_cmd, "_LOCK_WAIT_SECONDS", 0.5)
+    lock_path = outcome_cmd._records_lock_path(tmp_path)
+    release_path = tmp_path / "release-lock"
+    ready_path = tmp_path / "holder-ready"
+    ctx = multiprocessing.get_context("spawn")
+    holder = ctx.Process(
+        target=_hold_records_lock_worker,
+        args=(str(lock_path), str(release_path), str(ready_path)),
+    )
+    holder.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not ready_path.exists():
+            if time.monotonic() >= deadline:
+                pytest.fail("lock holder never acquired the records lock")
+            time.sleep(0.02)
+        record = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref-1", "2026-06-20T01:00:00+00:00")
+        with pytest.raises(outcome_cmd.OutcomeLedgerError, match="could not acquire outcome ledger lock"):
+            outcome_cmd.append_records(tmp_path, [record])
+    finally:
+        release_path.touch()
+        holder.join(timeout=10)
+        assert holder.exitcode == 0
