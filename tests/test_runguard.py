@@ -545,10 +545,10 @@ def test_run_lock_does_not_admit_new_owner_while_stale_recovery_is_in_progress(t
     second_entered = threading.Event()
     original_recover = runguard._recover_run_artifact
 
-    def paused_recover(owner):
+    def paused_recover(owner, *, persist_recovery_provenance=False):
         recovery_started.set()
         assert finish_recovery.wait(timeout=2.0)
-        return original_recover(owner)
+        return original_recover(owner, persist_recovery_provenance=persist_recovery_provenance)
 
     monkeypatch.setattr(runguard, "_recover_run_artifact", paused_recover)
 
@@ -1079,3 +1079,617 @@ def test_detect_branch_head_drift_no_snapshot_returns_none(tmp_path):
 
     assert runguard.detect_branch_head_drift(repo, None) is None
     assert runguard.detect_branch_head_drift(None, None) is None
+
+
+# --- Slice 5 Task 4: run_lock_state and before_terminalize callback ---
+
+
+def _write_lock_owner_metadata(lock_path, *, owner_token, pid, run_dir, acquired_at="2026-07-16T00:00:00+00:00"):
+    lock_path.mkdir(parents=True, exist_ok=True)
+    (lock_path / "pid").write_text(f"{pid}\n")
+    (lock_path / "owner.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run_lock.v1",
+                "owner_token": owner_token,
+                "pid": pid,
+                "run_dir": str(run_dir.resolve()) if run_dir is not None else None,
+                "acquired_at": acquired_at,
+            }
+        )
+    )
+
+
+def _activated_journal(run_dir):
+    events = run_dir / "events"
+    events.mkdir(parents=True, exist_ok=True)
+    journal = events / "lifecycle.jsonl"
+    journal.write_text("")
+    return journal
+
+
+def test_run_lock_state_absent(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    assert runguard.run_lock_state(repo, run_dir) == "absent"
+
+
+def test_run_lock_state_live_for_current_process(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="live", pid=os.getpid(), run_dir=run_dir)
+    assert runguard.run_lock_state(repo, run_dir) == "live"
+
+
+def test_run_lock_state_live_for_foreign_pid(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="live", pid=777777, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    assert runguard.run_lock_state(repo, run_dir) == "live"
+
+
+def test_run_lock_state_stale(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="dead", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert runguard.run_lock_state(repo, run_dir) == "stale"
+
+
+def test_run_lock_state_foreign(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    other_run = tmp_path / "other-run"
+    other_run.mkdir()
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="dead", pid=99999999, run_dir=other_run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert runguard.run_lock_state(repo, run_dir) == "foreign"
+
+
+def test_run_lock_state_live_when_owner_run_dir_mismatches_but_pid_is_live(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    other_run = tmp_path / "other-run"
+    other_run.mkdir()
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="live", pid=777777, run_dir=other_run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    assert runguard.run_lock_state(repo, run_dir) == "live"
+
+
+def test_run_lock_state_invalid_when_owner_metadata_missing(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text("99999999\n")
+    assert runguard.run_lock_state(repo, run_dir) == "invalid"
+
+
+def test_run_lock_state_invalid_when_owner_metadata_unparseable(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text("99999999\n")
+    (lock_path / "owner.json").write_text("not json")
+    assert runguard.run_lock_state(repo, run_dir) == "invalid"
+
+
+def test_run_lock_state_invalid_when_owner_metadata_is_non_utf8(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text("99999999\n")
+    (lock_path / "owner.json").write_bytes(b"\xff")
+    snapshot_paths = sorted(p.name for p in lock_path.iterdir())
+    snapshot_owner_bytes = (lock_path / "owner.json").read_bytes()
+
+    assert runguard.run_lock_state(repo, run_dir) == "invalid"
+
+    assert sorted(p.name for p in lock_path.iterdir()) == snapshot_paths
+    assert (lock_path / "owner.json").read_bytes() == snapshot_owner_bytes
+
+
+def test_run_lock_state_invalid_when_owner_metadata_is_deeply_nested(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text("99999999\n")
+    # Deeply nested valid JSON sufficient for json.loads to raise RecursionError.
+    depth = 10000
+    nested = "null"
+    for _ in range(depth):
+        nested = f"[{nested}]"
+    (lock_path / "owner.json").write_text(nested)
+    snapshot_paths = sorted(p.name for p in lock_path.iterdir())
+    snapshot_owner_bytes = (lock_path / "owner.json").read_bytes()
+
+    assert runguard.run_lock_state(repo, run_dir) == "invalid"
+
+    assert sorted(p.name for p in lock_path.iterdir()) == snapshot_paths
+    assert (lock_path / "owner.json").read_bytes() == snapshot_owner_bytes
+
+
+def test_run_lock_state_never_raises_and_never_mutates(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="dead", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    def boom(*args, **kwargs):
+        raise OSError("boom")
+
+    monkeypatch.setattr(runguard.shutil, "rmtree", boom)
+    monkeypatch.setattr(runguard, "_claim_stale_lock", boom)
+    monkeypatch.setattr(runguard, "_claim_existing_stale", boom)
+    monkeypatch.setattr(runguard, "_restore_claimed_lock", boom)
+
+    assert runguard.run_lock_state(repo, run_dir) == "stale"
+    assert lock_path.is_dir()
+    assert json.loads((lock_path / "owner.json").read_text())["owner_token"] == "dead"
+
+
+def test_run_lock_state_returns_invalid_when_inspection_helpers_raise(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="dead", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    def boom(*args, **kwargs):
+        raise ValueError("malformed owner run_dir resolution")
+
+    monkeypatch.setattr(runguard, "_owner_matches_run", boom)
+
+    assert runguard.run_lock_state(repo, run_dir) == "invalid"
+    assert lock_path.is_dir()
+    assert json.loads((lock_path / "owner.json").read_text())["owner_token"] == "dead"
+
+
+def test_run_lock_state_returns_invalid_for_cyclic_owner_run_dir(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    cyclic = tmp_path / "cyclic"
+    cyclic.symlink_to(cyclic, target_is_directory=True)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text("99999999\n")
+    (lock_path / "owner.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run_lock.v1",
+                "owner_token": "dead",
+                "pid": 99999999,
+                "run_dir": str(cyclic),
+                "acquired_at": "2026-07-16T00:00:00+00:00",
+            }
+        )
+    )
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    assert runguard.run_lock_state(repo, run_dir) == "invalid"
+    assert lock_path.is_dir()
+    assert json.loads((lock_path / "owner.json").read_text())["owner_token"] == "dead"
+
+
+def test_run_lock_state_returns_invalid_for_cyclic_requested_run_dir(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    cyclic = tmp_path / "cyclic"
+    cyclic.symlink_to(cyclic, target_is_directory=True)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text("99999999\n")
+    (lock_path / "owner.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run_lock.v1",
+                "owner_token": "dead",
+                "pid": 99999999,
+                "run_dir": str(cyclic),
+                "acquired_at": "2026-07-16T00:00:00+00:00",
+            }
+        )
+    )
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    snapshot_paths = sorted(p.name for p in lock_path.iterdir())
+    snapshot_owner_bytes = (lock_path / "owner.json").read_bytes()
+
+    assert runguard.run_lock_state(repo, cyclic) == "invalid"
+
+    assert sorted(p.name for p in lock_path.iterdir()) == snapshot_paths
+    assert (lock_path / "owner.json").read_bytes() == snapshot_owner_bytes
+
+
+def test_recover_stale_run_invokes_before_terminalize_after_token_check(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="dead-owner", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    finish_calls = []
+    callback_owners = []
+    original_finish = runguard._finish_claimed_recovery
+
+    def spy_finish(path, claimed, owner, *, persist_recovery_provenance=False):
+        finish_calls.append(owner)
+        return original_finish(path, claimed, owner, persist_recovery_provenance=persist_recovery_provenance)
+
+    monkeypatch.setattr(runguard, "_finish_claimed_recovery", spy_finish)
+
+    def before_terminalize(owner):
+        callback_owners.append(owner)
+
+    assert runguard.recover_stale_run(repo, run_dir, before_terminalize=before_terminalize) is True
+    assert len(callback_owners) == 1
+    assert callback_owners[0].get("owner_token") == "dead-owner"
+    assert len(finish_calls) == 1
+    assert finish_calls[0] is callback_owners[0]
+
+
+def test_recover_stale_run_invokes_callback_for_existing_pending_claim(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    lock_path = runguard.lock_path(repo)
+    claimed = lock_path.with_name(f".{lock_path.name}.crashed.stale")
+    _write_lock_owner_metadata(claimed, owner_token="dead-owner", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    callback_owners = []
+
+    def before_terminalize(owner):
+        callback_owners.append(owner)
+
+    assert runguard.recover_stale_run(repo, run_dir, before_terminalize=before_terminalize) is True
+    assert len(callback_owners) == 1
+    assert callback_owners[0].get("owner_token") == "dead-owner"
+    assert not claimed.exists()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+
+
+def test_recover_stale_run_callback_error_restores_claimed_lock_and_raises(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="dead-owner", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    restore_calls = []
+    original_restore = runguard._restore_claimed_lock
+
+    def spy_restore(target, claimed):
+        restore_calls.append((target, claimed))
+        return original_restore(target, claimed)
+
+    monkeypatch.setattr(runguard, "_restore_claimed_lock", spy_restore)
+
+    def before_terminalize(owner):
+        raise ValueError("checkpoint validation failed")
+
+    with pytest.raises(runguard.RunLockError, match="restored") as exc:
+        runguard.recover_stale_run(repo, run_dir, before_terminalize=before_terminalize)
+
+    assert len(restore_calls) == 1
+    assert restore_calls[0][0] == lock_path
+    assert str(lock_path) in str(exc.value)
+    assert lock_path.is_dir()
+    dangling = list(lock_path.parent.glob(f".{lock_path.name}.*.stale"))
+    assert dangling == []
+    assert json.loads((lock_path / "owner.json").read_text())["owner_token"] == "dead-owner"
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_recover_stale_run_callback_error_for_pending_claim_restores_and_raises(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    lock_path = runguard.lock_path(repo)
+    claimed = lock_path.with_name(f".{lock_path.name}.crashed.stale")
+    _write_lock_owner_metadata(claimed, owner_token="dead-owner", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    restore_calls = []
+    original_restore = runguard._restore_claimed_lock
+
+    def spy_restore(target, claimed_arg):
+        restore_calls.append((target, claimed_arg))
+        return original_restore(target, claimed_arg)
+
+    monkeypatch.setattr(runguard, "_restore_claimed_lock", spy_restore)
+
+    def before_terminalize(owner):
+        raise ValueError("checkpoint validation failed")
+
+    with pytest.raises(runguard.RunLockError, match="restored") as exc:
+        runguard.recover_stale_run(repo, run_dir, before_terminalize=before_terminalize)
+
+    assert len(restore_calls) == 1
+    assert restore_calls[0][0] == lock_path
+    assert str(lock_path) in str(exc.value)
+    assert lock_path.is_dir()
+    dangling = list(lock_path.parent.glob(f".{lock_path.name}.*.stale"))
+    assert dangling == []
+    assert json.loads((lock_path / "owner.json").read_text())["owner_token"] == "dead-owner"
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_pending_claim_token_race_restores_and_raises(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    lock_path = runguard.lock_path(repo)
+    stale = lock_path.with_name(f".{lock_path.name}.crashed.stale")
+    _write_lock_owner_metadata(stale, owner_token="original-token", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    original_claim = runguard._claim_existing_stale
+
+    def racing_claim(path, stale_arg):
+        result = original_claim(path, stale_arg)
+        if result is None:
+            return None
+        claimed, owner = result
+        raced = dict(owner)
+        raced["owner_token"] = "raced-token"
+        (claimed / "owner.json").write_text(json.dumps(raced))
+        return claimed, raced
+
+    monkeypatch.setattr(runguard, "_claim_existing_stale", racing_claim)
+
+    callback_calls = []
+    finish_calls = []
+    original_finish = runguard._finish_claimed_recovery
+
+    def spy_finish(*args, **kwargs):
+        finish_calls.append(args)
+        return original_finish(*args, **kwargs)
+
+    monkeypatch.setattr(runguard, "_finish_claimed_recovery", spy_finish)
+
+    def before_terminalize(owner):
+        callback_calls.append(owner)
+
+    with pytest.raises(runguard.RunLockError, match="owner changed during pending claim recovery") as exc:
+        runguard.recover_stale_run(repo, run_dir, before_terminalize=before_terminalize)
+
+    assert str(stale) in str(exc.value)
+    assert callback_calls == []
+    assert finish_calls == []
+    assert stale.is_dir()
+    dangling = [p for p in lock_path.parent.glob(f".{lock_path.name}.*.stale") if p != stale]
+    assert dangling == []
+    assert json.loads((stale / "owner.json").read_text())["owner_token"] == "raced-token"
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_pending_activated_claim_without_callback_requires_explicit_recovery(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    _activated_journal(run_dir)
+    lock_path = runguard.lock_path(repo)
+    claimed = lock_path.with_name(f".{lock_path.name}.crashed.stale")
+    _write_lock_owner_metadata(claimed, owner_token="dead-owner", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    with pytest.raises(runguard.RunLockError, match="explicit"):
+        runguard.recover_stale_run(repo, run_dir)
+
+    retained = list(lock_path.parent.glob(f".{lock_path.name}.*.stale"))
+    assert len(retained) == 1
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_generic_lock_acquisition_retains_activated_pending_claim(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    _activated_journal(run_dir)
+    lock_path = runguard.lock_path(repo)
+    claimed = lock_path.with_name(f".{lock_path.name}.crashed.stale")
+    _write_lock_owner_metadata(claimed, owner_token="dead-owner", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    with pytest.raises(runguard.RunLockError):
+        with runguard.run_lock(repo, run_dir=tmp_path / "new-run"):
+            pass
+
+    retained = list(lock_path.parent.glob(f".{lock_path.name}.*.stale"))
+    assert len(retained) == 1
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_recover_stale_run_without_callback_terminalizes_as_today(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="dead-owner", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    assert runguard.recover_stale_run(repo, run_dir) is True
+    assert not lock_path.exists()
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert "lock_workspace" not in recovered.get("failure", {})
+    assert "lock_acquired_at" not in recovered.get("failure", {})
+
+
+def test_recover_stale_run_refuses_live_owner_current_pid(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "active-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(json.dumps({"status": "dispatching"}))
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="live-owner", pid=os.getpid(), run_dir=run_dir)
+
+    with pytest.raises(runguard.RunLockError, match="another brigade run appears active"):
+        with runguard.run_lock(repo, run_dir=tmp_path / "new-run"):
+            pass
+
+    assert lock_path.is_dir()
+    assert json.loads((lock_path / "owner.json").read_text())["owner_token"] == "live-owner"
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_recover_stale_run_refuses_live_owner_foreign_pid(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "active-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(json.dumps({"status": "dispatching"}))
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="live-owner", pid=777777, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+
+    with pytest.raises(runguard.RunLockError, match="another brigade run appears active"):
+        with runguard.run_lock(repo, run_dir=tmp_path / "new-run"):
+            pass
+
+    assert lock_path.is_dir()
+    assert json.loads((lock_path / "owner.json").read_text())["owner_token"] == "live-owner"
+
+
+def test_recover_run_artifact_persists_lock_recovery_provenance(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    _activated_journal(run_dir)
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="dead-owner", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    def before_terminalize(owner):
+        return None
+
+    assert runguard.recover_stale_run(repo, run_dir, before_terminalize=before_terminalize) is True
+
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    failure = recovered["failure"]
+    assert failure["lock_workspace"] == str(repo.resolve())
+    assert failure["lock_acquired_at"] == "2026-07-16T00:00:00+00:00"
+
+
+def test_recover_run_artifact_persists_lock_recovery_provenance_omits_absent_owner_values(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    _activated_journal(run_dir)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text("99999999\n")
+    (lock_path / "owner.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run_lock.v1",
+                "owner_token": "dead-owner",
+                "pid": 99999999,
+                "run_dir": str(run_dir.resolve()),
+            }
+        )
+    )
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    def before_terminalize(owner):
+        return None
+
+    assert runguard.recover_stale_run(repo, run_dir, before_terminalize=before_terminalize) is True
+
+    recovered = json.loads((run_dir / "run.json").read_text())
+    failure = recovered["failure"]
+    assert "lock_workspace" in failure
+    assert "lock_acquired_at" not in failure
+
+
+def test_legacy_recover_run_artifact_does_not_add_recovery_provenance(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="dead-owner", pid=99999999, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    assert runguard.recover_stale_run(repo, run_dir) is True
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    failure = recovered["failure"]
+    assert "lock_workspace" not in failure
+    assert "lock_acquired_at" not in failure
+
+
+def test_is_active_run_owner_remains_current_process_only(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "active-run"
+    run_dir.mkdir()
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="live", pid=os.getpid(), run_dir=run_dir)
+    assert runguard.is_active_run_owner(repo, run_dir) is True
+
+    other_run = tmp_path / "other-run"
+    other_run.mkdir()
+    _write_lock_owner_metadata(lock_path, owner_token="live", pid=os.getpid(), run_dir=other_run)
+    assert runguard.is_active_run_owner(repo, run_dir) is False
+
+    foreign_pid = 777777
+    _write_lock_owner_metadata(lock_path, owner_token="live", pid=foreign_pid, run_dir=run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    assert runguard.is_active_run_owner(repo, run_dir) is False

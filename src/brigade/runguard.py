@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -191,7 +192,7 @@ def _lock_owner_payload(*, owner_token: str, run_dir: Path | None) -> dict[str, 
 def _read_lock_owner(path: Path) -> dict[str, object] | None:
     try:
         payload = json.loads((path / "owner.json").read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -276,7 +277,7 @@ def _claim_existing_stale(path: Path, stale: Path) -> tuple[Path, dict[str, obje
     return claimed, _owner_with_workspace(_read_lock_owner(claimed), path)
 
 
-def _recover_run_artifact(owner: dict[str, object] | None) -> str:
+def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_provenance: bool = False) -> str:
     if owner is None:
         return "unattributable"
     raw_run_dir = owner.get("run_dir")
@@ -347,6 +348,22 @@ def _recover_run_artifact(owner: dict[str, object] | None) -> str:
     acquired_at = owner.get("acquired_at")
     if isinstance(acquired_at, str) and acquired_at:
         payload.setdefault("started_at", acquired_at)
+    failure_payload: dict[str, object] = {
+        "phase": "stale-lock-recovery",
+        "kind": "owner-process-exited",
+        "detail": detail,
+        "owner_pid": owner_pid,
+        "prior_status": prior_status,
+        "recovered_at": recovered_at,
+        **failure_attribution,
+    }
+    if persist_recovery_provenance:
+        provenance_workspace = owner.get("_lock_workspace")
+        if isinstance(provenance_workspace, str) and provenance_workspace:
+            failure_payload["lock_workspace"] = provenance_workspace
+        provenance_acquired_at = owner.get("acquired_at")
+        if isinstance(provenance_acquired_at, str) and provenance_acquired_at:
+            failure_payload["lock_acquired_at"] = provenance_acquired_at
     payload.update(
         {
             "status": "failed",
@@ -354,15 +371,7 @@ def _recover_run_artifact(owner: dict[str, object] | None) -> str:
             "finished_at": recovered_at,
             "error": detail,
             "failure_phase": "stale-lock-recovery",
-            "failure": {
-                "phase": "stale-lock-recovery",
-                "kind": "owner-process-exited",
-                "detail": detail,
-                "owner_pid": owner_pid,
-                "prior_status": prior_status,
-                "recovered_at": recovered_at,
-                **failure_attribution,
-            },
+            "failure": failure_payload,
         }
     )
     try:
@@ -420,8 +429,105 @@ def _quarantine_unattributable(path: Path, claimed: Path) -> None:
         pass
 
 
-def _finish_claimed_recovery(path: Path, claimed: Path, owner: dict[str, object] | None) -> str:
-    recovery = _recover_run_artifact(owner)
+def _retain_claim(path: Path, claimed: Path) -> Path:
+    """Rename a claimed lock to a persisted ``.stale`` path for explicit recovery.
+
+    The retained name carries no live pid prefix so a later
+    ``_recover_pending_claims``/``_claim_existing_stale`` pass does not treat the
+    current process as still recovering it.
+    """
+    retained = path.with_name(f".{path.name}.retained-{uuid4().hex}.stale")
+    try:
+        claimed.rename(retained)
+    except OSError:
+        return claimed
+    return retained
+
+
+def _claim_is_activated(owner: dict[str, object] | None) -> bool:
+    if owner is None:
+        return False
+    raw_run_dir = owner.get("run_dir")
+    if not isinstance(raw_run_dir, str) or not raw_run_dir:
+        return False
+    try:
+        journal = Path(raw_run_dir).expanduser().resolve() / "events" / "lifecycle.jsonl"
+    except OSError:
+        return False
+    return journal.is_file()
+
+
+def _invoke_before_terminalize(
+    path: Path,
+    claimed: Path,
+    owner: dict[str, object] | None,
+    before_terminalize: Callable[[dict[str, object] | None], None] | None,
+) -> None:
+    if before_terminalize is None:
+        if _claim_is_activated(owner):
+            retained = _retain_claim(path, claimed)
+            raise RunLockError(
+                f"activated-journal run lock requires explicit `brigade runs recover`; claim retained at {retained}"
+            )
+        _finish_claimed_recovery(path, claimed, owner)
+        return
+    try:
+        before_terminalize(owner)
+    except Exception:
+        restored = _restore_claimed_lock(path, claimed)
+        raise RunLockError(f"before_terminalize callback failed; lock restored at {restored}") from None
+    _finish_claimed_recovery(path, claimed, owner, persist_recovery_provenance=True)
+
+
+def run_lock_state(workspace: Path, run_dir: Path) -> str:
+    """Read-only lock-state predicate for doctor/operator inspection.
+
+    Returns exactly one of ``absent``, ``live``, ``stale``, ``foreign``, or
+    ``invalid``. Never raises and never mutates the lock directory or its
+    owner metadata. ``live`` covers both the current process and any live
+    foreign pid; ``stale`` requires a matching ``run_dir``; ``foreign`` is a
+    dead owner whose ``run_dir`` does not match.
+    """
+    try:
+        path = lock_path(workspace)
+    except RunGuardError:
+        return "absent"
+    try:
+        if not path.exists():
+            return "absent"
+        if not path.is_dir():
+            return "invalid"
+    except OSError:
+        return "invalid"
+    owner = _read_lock_owner(path)
+    if owner is None:
+        return "invalid"
+    owner_pid = owner.get("pid")
+    if not isinstance(owner_pid, int):
+        return "invalid"
+    try:
+        resolved_run_dir = run_dir.expanduser().resolve()
+    except (OSError, RuntimeError):
+        resolved_run_dir = run_dir
+    try:
+        matches_run = _owner_matches_run(owner, resolved_run_dir)
+        if _pid_is_active(owner_pid):
+            return "live"
+        if not matches_run:
+            return "foreign"
+        return "stale"
+    except Exception:
+        return "invalid"
+
+
+def _finish_claimed_recovery(
+    path: Path,
+    claimed: Path,
+    owner: dict[str, object] | None,
+    *,
+    persist_recovery_provenance: bool = False,
+) -> str:
+    recovery = _recover_run_artifact(owner, persist_recovery_provenance=persist_recovery_provenance)
     if recovery == "write-failed":
         retained = _restore_claimed_lock(path, claimed)
         raise RunLockError(f"could not preserve the stale run failure; lock retained at {retained}")
@@ -432,24 +538,41 @@ def _finish_claimed_recovery(path: Path, claimed: Path, owner: dict[str, object]
     return recovery
 
 
-def _recover_pending_claims(path: Path, *, run_dir: Path | None = None, required: bool = False) -> bool:
+def _recover_pending_claims(
+    path: Path,
+    *,
+    run_dir: Path | None = None,
+    required: bool = False,
+    before_terminalize: Callable[[dict[str, object] | None], None] | None = None,
+) -> bool:
     recovered = False
     for stale in _stale_claims(path):
-        owner = _read_lock_owner(stale)
-        if run_dir is not None and not _owner_matches_run(owner, run_dir):
+        pre_claim_owner = _read_lock_owner(stale)
+        if run_dir is not None and not _owner_matches_run(pre_claim_owner, run_dir):
             continue
         claimed_owner = _claim_existing_stale(path, stale)
         if claimed_owner is None:
             continue
         claimed, owner = claimed_owner
-        _finish_claimed_recovery(path, claimed, owner)
+        pre_token = pre_claim_owner.get("owner_token") if pre_claim_owner is not None else None
+        claimed_token = owner.get("owner_token") if owner is not None else None
+        if pre_token != claimed_token:
+            restored = _restore_claimed_lock(stale, claimed)
+            raise RunLockError(f"run lock owner changed during pending claim recovery; lock restored at {restored}")
+        _invoke_before_terminalize(path, claimed, owner, before_terminalize)
         recovered = True
     if required and not recovered:
         raise RunLockError(f"run lock not found for run: {run_dir}")
     return recovered
 
 
-def recover_stale_run(cwd: Path, run_dir: Path, *, required: bool = True) -> bool:
+def recover_stale_run(
+    cwd: Path,
+    run_dir: Path,
+    *,
+    required: bool = True,
+    before_terminalize: Callable[[dict[str, object] | None], None] | None = None,
+) -> bool:
     run_dir = run_dir.expanduser().resolve()
     path = lock_path(cwd)
     if path.exists() and not path.is_dir():
@@ -468,11 +591,11 @@ def recover_stale_run(cwd: Path, run_dir: Path, *, required: bool = True) -> boo
                 if claimed_owner is None or claimed_owner.get("owner_token") != owner.get("owner_token"):
                     retained = _restore_claimed_lock(path, claimed)
                     raise RunLockError(f"run lock owner changed during recovery; lock retained at {retained}")
-                _finish_claimed_recovery(path, claimed, claimed_owner)
+                _invoke_before_terminalize(path, claimed, claimed_owner, before_terminalize)
                 return True
         elif required:
             raise RunLockError(f"run lock belongs to a different run: {path}")
-    return _recover_pending_claims(path, run_dir=run_dir, required=required)
+    return _recover_pending_claims(path, run_dir=run_dir, required=required, before_terminalize=before_terminalize)
 
 
 def run_recovery_status(cwd: Path, run_dir: Path) -> str:
@@ -509,7 +632,7 @@ def _acquire_lock(path: Path, *, run_dir: Path | None = None) -> _LockOwnership:
                     f"another brigade run appears active: {path}. Remove the lock only if no run is active."
                 ) from None
             claimed, owner = stale
-            _finish_claimed_recovery(path, claimed, owner)
+            _invoke_before_terminalize(path, claimed, owner, None)
             continue
         pending = _stale_claims(path)
         if not pending:
