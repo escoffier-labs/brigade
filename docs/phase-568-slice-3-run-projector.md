@@ -27,6 +27,10 @@ Source contracts this spec builds on:
   (`_run_payload` plus the merge-write recorders) and the snapshot encoding
   in `_write_json` (`json.dumps(payload, indent=2, sort_keys=True) + "\n"`,
   UTF-8, atomic replace).
+- `src/brigade/run_resume.py`: writes the `resumed_at` and `recovery_history`
+  run.json fields during resume.
+- `src/brigade/runguard.py`: writes the `recovery_preserved_artifact`
+  run.json field during guarded recovery.
 
 Standard library only. Brigade is zero-runtime-dependency.
 
@@ -69,7 +73,7 @@ PROJECTOR_VERSION: int = 1
 # in exactly one of these two sets. See the ownership inventory below.
 DERIVED_FIELDS: frozenset[str]      # {"status", "projector_version", "journal_present",
                                     #  "journal_last_sequence", "journal_last_event_digest"}
-PRESERVED_FIELDS: frozenset[str]    # the 41 remaining current run.json keys
+PRESERVED_FIELDS: frozenset[str]    # the 44 remaining current run.json keys
 OWNED_FIELDS: frozenset[str]        # DERIVED_FIELDS | PRESERVED_FIELDS
 
 # Static event_type -> run.json status mappings (payload-independent rows of
@@ -162,7 +166,10 @@ Run configuration: `dry_run`, `read_only`, `cwd`, `lock_workspace`,
 `codex_transport`, `lifecycle_journal_requested`.
 
 Timing: `started_at`, `status_started_at`, `finished_at`,
-`duration_seconds`.
+`duration_seconds`, `resumed_at`.
+
+Recovery (written by `run_resume.py` and `runguard.py`):
+`recovery_history`, `recovery_preserved_artifact`.
 
 Briefs and routing telemetry: `code_graph_brief`, `drift_impact_brief`,
 `evidence_brief`, `brief_budget`, `route`, `skill_route_policy`,
@@ -179,11 +186,13 @@ Outcome and failure: `error`, `failure_phase`, `failure_kind`, `failure`,
 
 Artifact references: `artifacts`, `handoff`.
 
-That is 41 preserved fields plus 5 derived fields, 46 owned keys total.
+That is 44 preserved fields plus 5 derived fields, 49 owned keys total.
 This inventory mirrors `_run_payload` and the merge-write recorders in
-`aboyeur.py` as of this spec. Any future writer that adds a `run.json` field
-must extend the ownership map in the same change. The projector's rejection
-of unmapped fields is the enforcement mechanism.
+`aboyeur.py` as of this spec, plus the recovery writers `run_resume.py`
+(`resumed_at`, `recovery_history`) and `runguard.py`
+(`recovery_preserved_artifact`). Any future writer that adds a `run.json`
+field must extend the ownership map in the same change. The projector's
+rejection of unmapped fields is the enforcement mechanism.
 
 ## Event-to-status mapping
 
@@ -278,8 +287,9 @@ Fixtures (under `tests/fixtures/run-lifecycle/`, alongside the existing
 
 - `golden-projection.base.json`: a base snapshot exercising the ownership
   map, including nested objects (`failure`, `code_graph_brief`,
-  `control_transport`), lists (`active_seats`), and optional fields
-  (`scheduler`, `handoff`, `artifact_collection`).
+  `control_transport`), lists (`active_seats`, `resumed_at`,
+  `recovery_history`), and optional fields (`scheduler`, `handoff`,
+  `artifact_collection`, `recovery_preserved_artifact`).
 - `golden-projection.expected.json`: the exact expected projected bytes for
   that base plus the full `golden-lifecycle.jsonl` sequence.
 
@@ -311,18 +321,19 @@ Tests in `tests/test_run_projector.py`:
     mixed run_id each raise `EventChainError` and produce no output.
 13. Invalid envelope mapping (for example an unknown event type, which
     fails `run_events.validate_event`) raises `EventChainError`.
-14. A mutated typed `RunEvent` replacement whose envelope digest or ID does
+14. Invalid-envelope diagnostics do not include rejected envelope values.
+15. A mutated typed `RunEvent` replacement whose envelope digest or ID does
     not validate raises `EventChainError`.
-15. Preservation: every preserved field in a full-coverage base deep-equals
+16. Preservation: every preserved field in a full-coverage base deep-equals
     the output, including nested objects, and no preserved key appears or
     disappears.
-16. Re-projection idempotence: feeding a projected snapshot back as the
+17. Re-projection idempotence: feeding a projected snapshot back as the
     base with the same events yields byte-identical output.
-17. Encoding parity: `to_bytes()` equals
+18. Encoding parity: `to_bytes()` equals
     `json.dumps(snapshot, indent=2, sort_keys=True) + "\n"` encoded UTF-8.
-18. A non-JSON or circular preserved value raises `SnapshotEncodingError`
+19. A non-JSON or circular preserved value raises `SnapshotEncodingError`
     with a bounded category-only diagnostic.
-19. A non-boolean `journal_present` value raises `ProjectionInputError`.
+20. A non-boolean `journal_present` value raises `ProjectionInputError`.
 
 The golden expected file is generated once by the implementation and
 reviewed by hand before commit, the same convention as
@@ -343,7 +354,7 @@ reviewed by hand before commit, the same convention as
    payload status rules and the empty-sequence preservation rule.
 5. Implement `encode_snapshot_bytes` and `RunProjection.to_bytes()`.
 6. Add the two golden fixtures under `tests/fixtures/run-lifecycle/`.
-7. Add `tests/test_run_projector.py` with the 19 tests above.
+7. Add `tests/test_run_projector.py` with the 20 tests above.
 8. No changes to `aboyeur.py`, `run_lifecycle.py`, `run_journal.py`,
    `run_events.py`, any CLI module, or any writer path.
 

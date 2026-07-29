@@ -23,6 +23,18 @@
   "status_started_at": "2026-07-27T15:30:49.000000+00:00",
   "finished_at": "2026-07-27T15:30:50.000000+00:00",
   "duration_seconds": 4.877,
+  "resumed_at": [
+    "2026-07-27T15:31:00.000000+00:00",
+    "2026-07-27T15:32:00.000000+00:00"
+  ],
+  "recovery_history": [
+    {
+      "kind": "worker-error",
+      "at": "2026-07-27T15:31:30.000000+00:00",
+      "seat": "coder"
+    }
+  ],
+  "recovery_preserved_artifact": "/work/repo/.brigade/runs/20260727-153045-a1b2c3d4/run.json.corrupt",
   "code_graph_brief": {
     "attached": true,
     "bytes": 2048

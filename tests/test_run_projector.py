@@ -103,6 +103,9 @@ def _full_base_snapshot() -> dict:
         "status_started_at": "2026-07-27T15:30:00.000000Z",
         "finished_at": None,
         "duration_seconds": 0,
+        "resumed_at": ["2026-07-27T15:31:00.000000Z"],
+        "recovery_history": [{"kind": "worker-error"}],
+        "recovery_preserved_artifact": "/tmp/run.json.corrupt",
         "code_graph_brief": {"entries": []},
         "drift_impact_brief": {"entries": []},
         "evidence_brief": {"entries": []},
@@ -388,7 +391,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 41
+    assert len(PRESERVED_FIELDS) == 44
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",
@@ -408,6 +411,7 @@ def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
         assert field in projection.snapshot
         assert projection.snapshot[field] == base[field]
     assert projection.snapshot["failure"] is not base["failure"]
+    assert projection.snapshot["recovery_history"] is not base["recovery_history"]
     assert projection.snapshot["active_seats"] is not base["active_seats"]
     assert projection.snapshot["code_graph_brief"] is not base["code_graph_brief"]
     assert set(projection.snapshot.keys()) <= OWNED_FIELDS

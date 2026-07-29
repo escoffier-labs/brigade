@@ -73,6 +73,18 @@
   },
   "projector_version": 1,
   "read_only": false,
+  "recovery_history": [
+    {
+      "at": "2026-07-27T15:31:30.000000+00:00",
+      "kind": "worker-error",
+      "seat": "coder"
+    }
+  ],
+  "recovery_preserved_artifact": "/work/repo/.brigade/runs/20260727-153045-a1b2c3d4/run.json.corrupt",
+  "resumed_at": [
+    "2026-07-27T15:31:00.000000+00:00",
+    "2026-07-27T15:32:00.000000+00:00"
+  ],
   "roster": {
     "path": ".brigade/roster.toml",
     "shadowed": [],

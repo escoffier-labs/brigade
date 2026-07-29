@@ -1,18 +1,18 @@
 # Issue #568 Slice 3: Run Snapshot Projector - Execution Plan
 
-Goal: implement the approved spec at `docs/phase-568-slice-3-run-projector.md` by adding one pure projector module (`src/brigade/run_projector.py`), its 19 tests, and two golden fixtures, with zero changes to any existing writer, reader, or CLI path.
+Goal: implement the approved spec at `docs/phase-568-slice-3-run-projector.md` by adding one pure projector module (`src/brigade/run_projector.py`), its 20 tests, and two golden fixtures, with zero changes to any existing writer, reader, or CLI path.
 
-Architecture: `project_run_snapshot(base_snapshot, events, *, journal_present)` re-validates every envelope through `run_events.validate_event`, re-verifies the chain (contiguous sequence from 1, digest linkage, single `run_id`), then derives exactly five fields (`status`, `projector_version`, `journal_present`, `journal_last_sequence`, `journal_last_event_digest`) while deep-copying the 41 preserved fields verbatim from the base. Output bytes come from the single encoding path `(json.dumps(snapshot, indent=2, sort_keys=True) + "\n").encode("utf-8")`, matching `aboyeur._write_json` byte for byte. The module performs no I/O, reads no clock or environment, and nothing in the runtime calls it in this slice.
+Architecture: `project_run_snapshot(base_snapshot, events, *, journal_present)` re-validates every envelope through `run_events.validate_event`, re-verifies the chain (contiguous sequence from 1, digest linkage, single `run_id`), then derives exactly five fields (`status`, `projector_version`, `journal_present`, `journal_last_sequence`, `journal_last_event_digest`) while deep-copying the 44 preserved fields verbatim from the base. Output bytes come from the single encoding path `(json.dumps(snapshot, indent=2, sort_keys=True) + "\n").encode("utf-8")`, matching `aboyeur._write_json` byte for byte. The module performs no I/O, reads no clock or environment, and nothing in the runtime calls it in this slice.
 
-The spec is the authority. This plan quotes the spec's API and the real source contracts in `src/brigade/run_events.py`, `src/brigade/run_journal.py`, `src/brigade/run_lifecycle.py`, and `src/brigade/aboyeur.py` as of the base commit. If any quoted contract disagrees with the checked-out code, stop and re-read the code. Do not improvise.
+The spec is the authority. This plan quotes the spec's API and the real source contracts in `src/brigade/run_events.py`, `src/brigade/run_journal.py`, `src/brigade/run_lifecycle.py`, `src/brigade/aboyeur.py`, `src/brigade/run_resume.py`, and `src/brigade/runguard.py` as of the base commit. If any quoted contract disagrees with the checked-out code, stop and re-read the code. Do not improvise.
 
 ## File map
 
 | Path | Action |
 | --- | --- |
-| `tests/test_run_projector.py` | Create first (RED). 19 test functions, listed below |
+| `tests/test_run_projector.py` | Create first (RED). 20 test functions, listed below |
 | `src/brigade/run_projector.py` | Create. The entire production surface of this slice |
-| `tests/fixtures/run-lifecycle/golden-projection.base.json` | Create. Hand-authored base snapshot carrying all 41 preserved fields |
+| `tests/fixtures/run-lifecycle/golden-projection.base.json` | Create. Hand-authored base snapshot carrying all 44 preserved fields |
 | `tests/fixtures/run-lifecycle/golden-projection.expected.json` | Create. Generated once by the implementation, reviewed by hand before commit |
 
 Do not edit `src/brigade/aboyeur.py`, `src/brigade/run_lifecycle.py`, `src/brigade/run_journal.py`, `src/brigade/run_events.py`, any CLI module, `pyproject.toml`, or any other existing file. The existing fixture `tests/fixtures/run-lifecycle/golden-lifecycle.jsonl` is read, never modified.
@@ -289,6 +289,15 @@ def test_invalid_envelope_mapping_raises_event_chain_error():
         run_projector.project_run_snapshot(_minimal_base(), [env], journal_present=True)
 
 
+def test_invalid_envelope_diagnostic_excludes_rejected_value():
+    private_marker = "private-marker-568"
+    env = dict(_build_chain([("run.created", {"status": "started"})])[0])
+    env["recorded_at"] = private_marker
+    with pytest.raises(run_projector.EventChainError) as excinfo:
+        run_projector.project_run_snapshot(_minimal_base(), [env], journal_present=True)
+    assert private_marker not in excinfo.value.diagnostic
+
+
 def test_mutated_typed_run_event_raises_event_chain_error():
     env = _build_chain([("run.created", {"status": "started"})])[0]
     event = run_journal.RunEvent(**env)
@@ -307,6 +316,7 @@ def test_full_coverage_base_preservation_deep_equals():
     preserved_in_output = set(snapshot.keys()) & run_projector.PRESERVED_FIELDS
     assert preserved_in_output == set(base.keys()) & run_projector.PRESERVED_FIELDS
     assert snapshot["failure"] is not base["failure"]
+    assert snapshot["recovery_history"] is not base["recovery_history"]
     assert snapshot["active_seats"] is not base["active_seats"]
 
 
@@ -366,7 +376,7 @@ Derives a complete ``run.json`` snapshot from a base snapshot plus a verified
 lifecycle event sequence. The projector owns exactly five derived fields
 (``status``, ``projector_version``, ``journal_present``,
 ``journal_last_sequence``, ``journal_last_event_digest``) and deep-copies the
-41 preserved fields of the current ``run.json`` contract verbatim from the
+44 preserved fields of the current ``run.json`` contract verbatim from the
 base. Every envelope is re-validated through ``run_events.validate_event``
 and the chain is re-verified (contiguous sequence from 1, previous-digest
 linkage, single run_id) even when the caller already read the events through
@@ -424,6 +434,10 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "status_started_at",
         "finished_at",
         "duration_seconds",
+        "resumed_at",
+        # Recovery
+        "recovery_history",
+        "recovery_preserved_artifact",
         # Briefs and routing telemetry
         "code_graph_brief",
         "drift_impact_brief",
@@ -691,7 +705,7 @@ Observed: 22 passed, 1 failed. The only failure was `Failed: missing golden base
 
 ## Task 3: golden base fixture
 
-- [x] Create `tests/fixtures/run-lifecycle/golden-projection.base.json` with exactly this content (all 41 preserved fields, nested objects, lists, and optional fields, plus the derived `status` key the live writer always carries):
+- [x] Create `tests/fixtures/run-lifecycle/golden-projection.base.json` with exactly this content (all 44 preserved fields, nested objects, lists, and optional fields, plus the derived `status` key the live writer always carries):
 
 ```json
 {
@@ -719,6 +733,18 @@ Observed: 22 passed, 1 failed. The only failure was `Failed: missing golden base
   "status_started_at": "2026-07-27T15:30:49.000000+00:00",
   "finished_at": "2026-07-27T15:30:50.000000+00:00",
   "duration_seconds": 4.877,
+  "resumed_at": [
+    "2026-07-27T15:31:00.000000+00:00",
+    "2026-07-27T15:32:00.000000+00:00"
+  ],
+  "recovery_history": [
+    {
+      "kind": "worker-error",
+      "at": "2026-07-27T15:31:30.000000+00:00",
+      "seat": "coder"
+    }
+  ],
+  "recovery_preserved_artifact": "/work/repo/.brigade/runs/20260727-153045-a1b2c3d4/run.json.corrupt",
   "code_graph_brief": {
     "attached": true,
     "bytes": 2048
@@ -819,7 +845,7 @@ print(f"base fixture covers all {len(run_projector.PRESERVED_FIELDS)} preserved 
 PY
 ```
 
-Expected output: `base fixture covers all 41 preserved fields`.
+Expected output: `base fixture covers all 44 preserved fields`.
 
 - [x] Run the focused suite and confirm the expected intermediate state:
 
@@ -861,7 +887,7 @@ from pathlib import Path
 raw = Path("tests/fixtures/run-lifecycle/golden-projection.expected.json").read_bytes()
 assert raw.endswith(b"\n") and not raw.endswith(b"\n\n"), "exactly one trailing newline"
 data = json.loads(raw)
-assert len(data) == 46, f"expected 46 owned keys, got {len(data)}"
+assert len(data) == 49, f"expected 49 owned keys, got {len(data)}"
 assert list(data) == sorted(data), "keys must be sorted"
 assert data["status"] == "ok"
 assert data["projector_version"] == 1
@@ -876,7 +902,7 @@ print("golden expected fixture reviewed ok")
 PY
 ```
 
-Also read the file top to bottom and confirm by eye: two-space indent, preserved nested values (`failure`, `code_graph_brief`, `control_transport`, `active_seats`) match the base verbatim, and no key outside the 46 owned fields appears. Expected output: `golden expected fixture reviewed ok`.
+Also read the file top to bottom and confirm by eye: two-space indent, preserved nested values (`failure`, `code_graph_brief`, `control_transport`, `active_seats`) match the base verbatim, and no key outside the 49 owned fields appears. Expected output: `golden expected fixture reviewed ok`.
 
 - [x] Run the focused suite to green:
 
@@ -941,4 +967,4 @@ mypy, and the full pytest suite with its coverage floor. Atomic
 `--capture brigade-work` records the outcome once. Do not run a second
 `brigade outcome capture` for the same receipt.
 
-- [x] Receipt `20260729-022905-work-verify-88c06d` completed: ruff lint and format passed, version `0.25.1` was synchronized across 13 locations, mypy passed 331 source files, and pytest finished with 4864 passed, 3 skipped, and 82.95% coverage.
+- [x] Receipt `20260729-024813-work-verify-0a6ae6` completed after the review fix: ruff lint and format passed, version `0.25.1` was synchronized across 13 locations, mypy passed 331 source files, and pytest finished with 4864 passed, 3 skipped, and 82.95% coverage.

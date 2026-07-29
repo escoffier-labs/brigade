@@ -63,6 +63,10 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "status_started_at",
         "finished_at",
         "duration_seconds",
+        "resumed_at",
+        # Recovery (written by run_resume.py and runguard.py)
+        "recovery_history",
+        "recovery_preserved_artifact",
         # Briefs and routing telemetry
         "code_graph_brief",
         "drift_impact_brief",
