@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from brigade import run_events, run_journal
+from brigade import run_checkpoint
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "run-lifecycle"
 GOLDEN_LIFECYCLE_PATH = FIXTURES / "golden-lifecycle.jsonl"
@@ -930,3 +931,106 @@ def test_fallback_enforce_dir_mode_skips_open_without_o_directory(tmp_path, monk
 
     assert journal_path.is_file()
     assert stat.S_IMODE(events_dir.stat().st_mode) == 0o700
+
+
+# -- read_journal_bounded (issue #568 slice 5, Task 1) ------------------------
+
+
+def test_read_journal_bounded_matches_read_journal_on_complete_journal(tmp_path):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+    _append_second_event(journal_path)
+
+    bounded = run_journal.read_journal_bounded(journal_path)
+    plain = run_journal.read_journal(journal_path)
+
+    assert bounded.partial_tail == plain.partial_tail
+    assert bounded.chain_errors == plain.chain_errors
+    assert [e.event_id for e in bounded.events] == [e.event_id for e in plain.events]
+
+
+def test_read_journal_bounded_refuses_oversize_journal_before_allocation(tmp_path, monkeypatch):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+
+    real_open = os.open
+    opened: list[tuple] = []
+
+    def tracking_open(path, flags, mode=0o777, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd) if dir_fd is not None else real_open(path, flags, mode)
+        opened.append((Path(path), flags))
+        return fd
+
+    monkeypatch.setattr(os, "open", tracking_open)
+
+    # Pretend fstat reports a journal larger than MAX_JOURNAL_BYTES.
+    real_fstat = os.fstat
+
+    def big_fstat(fd):
+        st = real_fstat(fd)
+        st = os.stat_result(
+            (
+                st.st_mode,
+                st.st_ino,
+                st.st_dev,
+                st.st_nlink,
+                st.st_uid,
+                st.st_gid,
+                run_checkpoint.MAX_JOURNAL_BYTES + 1,  # st_size
+                st.st_atime,
+                st.st_mtime,
+                st.st_ctime,
+            )
+        )
+        return st
+
+    monkeypatch.setattr(os, "fstat", big_fstat)
+
+    with pytest.raises(run_journal.RunJournalError) as excinfo:
+        run_journal.read_journal_bounded(journal_path)
+
+    assert "bound exceeded" in excinfo.value.diagnostic
+    # No whole-file allocation: the only open is the no-follow read fd.
+    assert all(p.name == "lifecycle.jsonl" for p, _ in opened)
+
+
+def test_read_journal_bounded_refuses_event_sequence_513(tmp_path):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_digest: str | None = None
+    for sequence in range(1, 514):
+        event_type = "run.planning.started" if sequence % 2 == 0 else "run.dispatch.observed"
+        payload = (
+            {"detail": "n"} if event_type == "run.planning.started" else {"seat": "c", "attempt": 1, "detail": "n"}
+        )
+        env = run_events.build_event(
+            run_id=RUN_ID,
+            sequence=sequence,
+            event_type=event_type,
+            payload=payload,
+            idempotency_key=f"ev-{sequence}",
+            recorded_at="2026-07-27T15:30:45.000000Z",
+            previous_digest=previous_digest,
+        )
+        with journal_path.open("ab") as handle:
+            handle.write(run_events.canonical_bytes(env) + b"\n")
+        previous_digest = env["event_digest"]
+
+    with pytest.raises(run_journal.RunJournalError) as excinfo:
+        run_journal.read_journal_bounded(journal_path)
+
+    assert "bound exceeded" in excinfo.value.diagnostic
+
+
+def test_read_journal_stays_compatible_after_bounded_reader(tmp_path):
+    """read_journal must still parse a journal that read_journal_bounded refuses on bounds."""
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+    _append_second_event(journal_path)
+
+    # read_journal_bounded succeeds on a small journal.
+    bounded = run_journal.read_journal_bounded(journal_path)
+    assert len(bounded.events) == 2
+    # read_journal stays compatible on the same journal.
+    plain = run_journal.read_journal(journal_path)
+    assert len(plain.events) == 2
