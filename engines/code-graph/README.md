@@ -38,7 +38,8 @@ brigade setup
 ```
 
 The standalone GraphTrail repository was archived on 2026-07-21. For source
-development, build the maintained copy in this repository:
+development, Rust 1.85 or newer is required. Build the maintained copy in this
+repository:
 
 ```bash
 cd engines/code-graph
