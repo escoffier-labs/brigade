@@ -66,11 +66,13 @@ Fetch `origin/main`, confirm its declared version, create an annotated tag on th
 )
 ```
 
-The publish workflow builds `graphtrail`, `graphtrail-mcp`, `miseledger`, and `sessionfind` for
-`linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`, and `windows-amd64`. It creates one
-Brigade release with exactly 20 native assets, `component-manifest-v1.json`, and `checksums.txt`.
-The release body names `brigade-cli==<version>`. Rust builds run on the exact native runner for
-each platform; Go builds are pure-Go cross builds with `CGO_ENABLED=0`.
+The publish workflow builds the five managed components (`agent-notify`, `graphtrail`,
+`graphtrail-mcp`, `miseledger`, and `sessionfind`) for `linux-amd64`, `linux-arm64`,
+`darwin-amd64`, `darwin-arm64`, and `windows-amd64`. It creates one Brigade release with
+exactly 25 native assets (5 components × 5 platforms) and exactly 27 total GitHub release files,
+counting the 25 native assets plus `component-manifest-v1.json` and `checksums.txt`.
+The release body names `brigade-cli==<version>`. Rust builds run on the exact native runner
+for each platform; Go builds are pure-Go cross builds with `CGO_ENABLED=0`.
 
 The generated manifest and all component URLs must point to
 `escoffier-labs/brigade` at the exact tag. The workflow fails before PyPI publication if inventory,

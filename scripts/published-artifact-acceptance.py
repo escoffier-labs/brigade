@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -358,7 +359,7 @@ def smoke_managed_components(
     validate_agent_notify_version_payload(agent_notify_payload, version)
 
 
-def smoke_rosetta_darwin_amd64(native_paths: Mapping[str, Mapping[str, Path]], *, runner: Runner) -> None:
+def smoke_rosetta_darwin_amd64(native_paths: Mapping[str, Mapping[str, Path]], *, runner: Runner, version: str) -> None:
     if sys.platform != "darwin":
         raise AcceptanceError("--rosetta-darwin-amd64 requires macOS")
     paths = {component: native_paths[component]["darwin-amd64"] for component in COMPONENT_IDS}
@@ -378,11 +379,40 @@ def smoke_rosetta_darwin_amd64(native_paths: Mapping[str, Mapping[str, Path]], *
         raise AcceptanceError("Rosetta graphtrail-mcp smoke returned invalid JSON-RPC")
     run_checked(["arch", "-x86_64", paths["miseledger"], "version"], runner=runner)
     run_checked(["arch", "-x86_64", paths["sessionfind"], "--help"], runner=runner)
+    agent_notify = run_checked(["arch", "-x86_64", paths["agent-notify"], "version", "--json"], runner=runner)
+    try:
+        agent_notify_payload = json.loads(agent_notify.stdout)
+    except json.JSONDecodeError as exc:
+        raise AcceptanceError("Rosetta agent-notify smoke returned malformed JSON") from exc
+    validate_agent_notify_version_payload(agent_notify_payload, version)
 
 
 def assert_no_poison_invocation(marker: Path) -> None:
     if marker.exists() and marker.read_text().strip():
         raise AcceptanceError(f"poison component binary was invoked: {marker.read_text().strip()}")
+
+
+def build_go_free_path(original_path: str, poison_dir: Path, pipx_bin: Path) -> str:
+    """Build a Unix PATH that keeps the poison and pipx entries plus every system
+    directory from ``original_path`` while dropping any directory that ships a
+    ``go`` binary. Managed setup must download release assets instead of building
+    the Go components from source, so the toolchain has to be unreachable.
+    """
+    entries: list[str] = [str(poison_dir), str(pipx_bin)]
+    for entry in original_path.split(os.pathsep):
+        if not entry or entry in entries:
+            continue
+        if (Path(entry) / "go").exists():
+            continue
+        entries.append(entry)
+    return os.pathsep.join(entries)
+
+
+def assert_go_unavailable(*, env: Mapping[str, str]) -> None:
+    """Prove ``go`` cannot resolve from the published-acceptance ``PATH``."""
+    resolved = shutil.which("go", path=env.get("PATH", ""))
+    if resolved is not None:
+        raise AcceptanceError(f"go must be absent from PATH for published acceptance, but it resolves to {resolved}")
 
 
 def _write_poison_binaries(poison_dir: Path, marker: Path) -> None:
@@ -421,7 +451,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
                 "XDG_CACHE_HOME": str(root / "xdg-cache"),
                 "PIPX_HOME": str(pipx_home),
                 "PIPX_BIN_DIR": str(pipx_bin),
-                "PATH": os.pathsep.join((str(poison_dir), env.get("PATH", ""))),
+                "PATH": build_go_free_path(env.get("PATH", ""), poison_dir, pipx_bin),
             }
         )
         managed_brigade = pipx_bin / "brigade"
@@ -435,6 +465,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
             version_output = run_checked([managed_brigade, "--version"], runner=runner, env=env).stdout.strip()
             if version_output != f"brigade {version}":
                 raise AcceptanceError(f"installed brigade version mismatch: expected {version}, got {version_output}")
+            assert_go_unavailable(env=env)
             run_checked([managed_brigade, "setup"], runner=runner, env=env)
             run_checked([managed_brigade, "setup", "--offline"], runner=runner, env=env)
             report_output = run_checked([managed_brigade, "version", "--components", "--json"], runner=runner, env=env)
@@ -444,9 +475,10 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
                 raise AcceptanceError("brigade version --components --json returned malformed JSON") from exc
             managed_paths = validate_component_report(report, managed_bin_path(data_home, profile))
             verify_managed_component_digests(release["manifest"], managed_paths, host_platform_key())
+            assert_go_unavailable(env=env)
             smoke_managed_components(managed_paths, version=version, runner=runner, env=env)
             if rosetta_darwin_amd64:
-                smoke_rosetta_darwin_amd64(release["native_paths"], runner=runner)
+                smoke_rosetta_darwin_amd64(release["native_paths"], runner=runner, version=version)
         finally:
             assert_no_poison_invocation(marker)
 
