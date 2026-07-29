@@ -1,6 +1,7 @@
 import importlib.util
 import hashlib
 import json
+import os
 import stat
 import subprocess
 from pathlib import Path
@@ -486,3 +487,148 @@ def test_smoke_managed_components_requires_version_keyword(acceptance_module, tm
     signature = inspect.signature(acceptance_module.smoke_managed_components)
     assert "version" in signature.parameters
     assert signature.parameters["version"].kind == inspect.Parameter.KEYWORD_ONLY
+
+
+def _rosetta_native_paths(acceptance_module, tmp_path):
+    native = {}
+    for component_id in acceptance_module.COMPONENT_IDS:
+        executable = tmp_path / f"{component_id}-darwin-amd64"
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+        native[component_id] = {"darwin-amd64": executable}
+    return native
+
+
+def _rosetta_runner(tmp_path, agent_notify_stdout):
+    def runner(argv, **kwargs):
+        # argv is ["arch", "-x86_64", <path>, ...args]
+        assert argv[0] == "arch"
+        assert argv[1] == "-x86_64"
+        name = Path(argv[2]).name
+        if name.startswith("graphtrail-mcp"):
+            return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
+        if name.startswith("sessionfind"):
+            return subprocess.CompletedProcess(argv, 0, "usage: sessionfind", "")
+        if name.startswith("agent-notify"):
+            return subprocess.CompletedProcess(argv, 0, agent_notify_stdout, "")
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    return runner
+
+
+def test_smoke_rosetta_darwin_amd64_requires_version_keyword(acceptance_module):
+    import inspect
+
+    signature = inspect.signature(acceptance_module.smoke_rosetta_darwin_amd64)
+    assert "version" in signature.parameters
+    assert signature.parameters["version"].kind == inspect.Parameter.KEYWORD_ONLY
+
+
+def test_smoke_rosetta_darwin_amd64_smokes_agent_notify_via_arch_x86_64(acceptance_module, tmp_path, monkeypatch):
+    monkeypatch.setattr(acceptance_module.sys, "platform", "darwin")
+    native = _rosetta_native_paths(acceptance_module, tmp_path)
+    payload = '{"version":"1.2.3","commit":"abc123def456","build_date":"2026-07-22T13:29:00Z"}'
+    runner = _rosetta_runner(tmp_path, payload)
+
+    acceptance_module.smoke_rosetta_darwin_amd64(native, runner=runner, version="1.2.3")
+
+
+def test_smoke_rosetta_darwin_amd64_rejects_malformed_agent_notify_json(acceptance_module, tmp_path, monkeypatch):
+    monkeypatch.setattr(acceptance_module.sys, "platform", "darwin")
+    native = _rosetta_native_paths(acceptance_module, tmp_path)
+    runner = _rosetta_runner(tmp_path, "not-json")
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="malformed JSON"):
+        acceptance_module.smoke_rosetta_darwin_amd64(native, runner=runner, version="1.2.3")
+
+
+def test_smoke_rosetta_darwin_amd64_rejects_agent_notify_version_mismatch(acceptance_module, tmp_path, monkeypatch):
+    monkeypatch.setattr(acceptance_module.sys, "platform", "darwin")
+    native = _rosetta_native_paths(acceptance_module, tmp_path)
+    payload = '{"version":"1.2.4","commit":"abc123def456","build_date":"2026-07-22T13:29:00Z"}'
+    runner = _rosetta_runner(tmp_path, payload)
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="version mismatch"):
+        acceptance_module.smoke_rosetta_darwin_amd64(native, runner=runner, version="1.2.3")
+
+
+def test_assert_go_unavailable_passes_when_go_is_not_on_path(acceptance_module, tmp_path):
+    acceptance_module.assert_go_unavailable(env={"PATH": str(tmp_path)})
+
+
+def test_assert_go_unavailable_fails_when_go_resolves_from_path(acceptance_module, tmp_path):
+    go = tmp_path / "go"
+    go.write_text("#!/bin/sh\nexit 1\n")
+    go.chmod(go.stat().st_mode | stat.S_IXUSR)
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="go must be absent from PATH"):
+        acceptance_module.assert_go_unavailable(env={"PATH": str(tmp_path)})
+
+
+def test_build_go_free_path_drops_directories_containing_go_but_keeps_system_dirs(acceptance_module, tmp_path):
+    go_dir = tmp_path / "go-bin"
+    go_dir.mkdir()
+    (go_dir / "go").write_text("#!/bin/sh\nexit 0\n")
+    (go_dir / "gofmt").write_text("#!/bin/sh\nexit 0\n")
+    safe_dir = tmp_path / "safe-bin"
+    safe_dir.mkdir()
+    (safe_dir / "ls").write_text("#!/bin/sh\nexit 0\n")
+    poison_dir = tmp_path / "poison-bin"
+    poison_dir.mkdir()
+    pipx_bin = tmp_path / "pipx-bin"
+    pipx_bin.mkdir()
+    original = os.pathsep.join((str(go_dir), str(safe_dir), str(tmp_path / "missing")))
+
+    path = acceptance_module.build_go_free_path(original, poison_dir, pipx_bin)
+
+    entries = path.split(os.pathsep)
+    # poison and pipx entries come first so a stray component name resolves to the poison binary.
+    assert entries[0] == str(poison_dir)
+    assert entries[1] == str(pipx_bin)
+    assert str(go_dir) not in entries
+    assert str(safe_dir) in entries
+    # A missing directory is harmless and is preserved so required system executables stay reachable.
+    assert str(tmp_path / "missing") in entries
+
+
+def test_build_go_free_path_drops_go_symlink_directory(acceptance_module, tmp_path):
+    go_dir = tmp_path / "go-bin"
+    go_dir.mkdir()
+    (go_dir / "go").symlink_to("/usr/bin/true")
+    poison_dir = tmp_path / "poison-bin"
+    poison_dir.mkdir()
+    pipx_bin = tmp_path / "pipx-bin"
+    pipx_bin.mkdir()
+    original = os.pathsep.join((str(go_dir), "/usr/bin"))
+
+    path = acceptance_module.build_go_free_path(original, poison_dir, pipx_bin)
+
+    assert str(go_dir) not in path.split(os.pathsep)
+
+
+def test_run_acceptance_proves_go_unavailable_immediately_before_setup_and_smoke(acceptance_module):
+    """run_acceptance must prove `go` is unavailable immediately before the managed
+    brigade setup call and immediately before smoke_managed_components, using a PATH
+    that excludes Go."""
+    source = SCRIPT.read_text()
+    run_acceptance_body = source[source.index("def run_acceptance(") :]
+    setup_call = run_acceptance_body.index('run_checked([managed_brigade, "setup"], runner=runner, env=env)')
+    smoke_call = run_acceptance_body.index(
+        "smoke_managed_components(managed_paths, version=version, runner=runner, env=env)"
+    )
+
+    before_setup = run_acceptance_body.index("assert_go_unavailable(env=env)")
+    before_smoke = run_acceptance_body.rindex("assert_go_unavailable(env=env)")
+
+    assert before_setup < setup_call
+    # No other run_checked/brigade call sits between the go proof and the setup call.
+    between = run_acceptance_body[before_setup:setup_call]
+    assert "run_checked(" not in between
+    assert "smoke_managed_components" not in between
+
+    assert before_smoke < smoke_call
+    # No smoke invocation sits between the go proof and the smoke call.
+    between_smoke = run_acceptance_body[before_smoke + len("assert_go_unavailable(env=env)") : smoke_call]
+    assert "smoke_managed_components" not in between_smoke
+    # The PATH used in run_acceptance is built through build_go_free_path so Go is excluded.
+    assert "build_go_free_path(" in run_acceptance_body

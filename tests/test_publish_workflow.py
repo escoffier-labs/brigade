@@ -188,7 +188,13 @@ def test_publish_workflow_builds_five_agent_notify_binaries_with_release_metadat
     assert "${AGENT_NOTIFY_TAG#v}" in section
     assert "${{ github.sha }}" in section
     assert "AGENT_NOTIFY_COMMIT" in section
-    assert "date -u +%Y-%m-%dT%H:%M:%SZ" in section
+    # BUILD_DATE is derived deterministically from the tagged commit's committer
+    # timestamp, not from wall-clock time, so re-runs reproduce the same metadata.
+    assert "git show -s --format=%ct" in section
+    assert 'date -u -d "@$(git show -s --format=%ct ${AGENT_NOTIFY_COMMIT})" +%Y-%m-%dT%H:%M:%SZ' in section
+    # The wall-clock form must be absent so a re-run cannot drift the build date.
+    assert 'BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"' not in section
+    assert "date -u +%Y-%m-%dT%H:%M:%SZ" not in section
     assert "actions/upload-artifact@v4" in section
     assert "if-no-files-found: error" in section
 

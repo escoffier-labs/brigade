@@ -34,3 +34,16 @@ def test_release_checklist_verifies_pypi_version():
 
     assert tag_push < workflow_wait < pypi_check
     assert "published != expected" in text
+
+
+def test_release_checklist_documents_five_components_25_native_assets_27_release_files():
+    text = (ROOT / "RELEASE.md").read_text()
+
+    for component in ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"):
+        assert component in text
+    assert "25 native assets" in text
+    assert "27 total GitHub release files" in text
+    assert "component-manifest-v1.json" in text
+    assert "checksums.txt" in text
+    # The stale 20-asset count must be gone.
+    assert "20 native assets" not in text
