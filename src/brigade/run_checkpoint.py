@@ -22,7 +22,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-from brigade import run_events, run_journal
+from brigade import run_events, run_journal, runguard
 from brigade.run_events import _HEX64, _bound
 
 CHECKPOINT_EVENT_TYPE = "run.snapshot.checkpointed"
@@ -36,6 +36,7 @@ MAX_JOURNAL_EVENTS = 512
 _CHECKPOINT_PAYLOAD_KEYS = frozenset(
     {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type"}
 )
+_CHECKPOINT_IDEMPOTENCY_PREFIX = "checkpoint"
 
 
 class CheckpointError(RuntimeError):
@@ -488,3 +489,107 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
         raise cleanup_err from None
 
     return final_path
+
+
+# -- Checkpoint coordinator (issue #568 slice 5, Task 2) ----------------------
+
+
+def _checkpoint_payload(run_json_bytes: bytes, *, paired_event_type: str | None) -> dict[str, Any]:
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+    return {
+        "path": f"events/{CHECKPOINT_DIR_NAME}/{sha}.json",
+        "sha256": sha,
+        "media_type": CHECKPOINT_MEDIA_TYPE,
+        "byte_size": len(run_json_bytes),
+        "privacy_class": CHECKPOINT_PRIVACY_CLASS,
+        "paired_event_type": paired_event_type,
+    }
+
+
+def _checkpoint_idempotency_key(sha: str, *, paired_event_type: str | None) -> str:
+    paired = paired_event_type if paired_event_type is not None else "none"
+    key = f"{_CHECKPOINT_IDEMPOTENCY_PREFIX}:{sha}:{paired}"
+    if len(key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN:
+        return key
+    # Bound the paired-event-type tail so the key stays within the envelope
+    # limit regardless of event_type length; the sha and prefix are fixed.
+    budget = run_events.MAX_IDEMPOTENCY_KEY_LEN - len(_CHECKPOINT_IDEMPOTENCY_PREFIX) - 1 - len(sha) - 1
+    if budget < 0:
+        # Pathological: prefix+sha already overflow the bound. Fall back to a
+        # digest of the paired type so the key is still unique and bounded.
+        paired_digest = hashlib.sha256(paired.encode("utf-8")).hexdigest()[:16]
+        return f"{_CHECKPOINT_IDEMPOTENCY_PREFIX}:{sha}:{paired_digest}"
+    return f"{_CHECKPOINT_IDEMPOTENCY_PREFIX}:{sha}:{paired[:budget]}"
+
+
+def write_checkpoint(
+    run_dir: Path,
+    run_json_bytes: bytes,
+    *,
+    workspace: Path | None = None,
+    paired_event_type: str | None,
+) -> "run_journal.RunEvent | None":
+    """Publish a crash-safe recovery checkpoint and append the checkpoint event.
+
+    Called from ``aboyeur._write_json`` BEFORE ``record_lifecycle_transition``
+    and the ``run.json`` atomic replacement. Idempotently activates the
+    lifecycle journal (``run_lifecycle.prepare_lifecycle_journal``), publishes
+    ``run_json_bytes`` to the content-addressed checkpoint file
+    (``publish_checkpoint_file``), and appends one
+    ``run.snapshot.checkpointed`` event to the lifecycle journal with
+    idempotency key ``checkpoint:<sha256>:<paired-event-type-or-none>``.
+
+    No-op (no file, no event) when the journal is not active for the run.
+    When the journal is active but the caller does not hold the matching active
+    run lock, the coordinator fails closed with a bounded
+    ``LifecycleJournalError`` BEFORE any publish or append: a lock-less writer
+    on an active journal must never advance the journal or the snapshot, for
+    any status (mapped or unmapped). Raises ``CheckpointError`` on any bounded
+    checkpoint publish failure; the failure surfaces BEFORE the lifecycle
+    status append and BEFORE the ``run.json`` replacement. Raises
+    ``LifecycleJournalError`` on a bounded journal read failure.
+
+    ``run_lifecycle`` is imported lazily inside this function so the lifecycle
+    layer may depend on this checkpoint substrate without a circular import.
+    """
+    from brigade import run_lifecycle  # lazy: avoid circular import
+
+    run_dir = Path(run_dir).expanduser().resolve()
+    run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+    journal_path = run_lifecycle._journal_path(run_dir)
+    if not journal_path.is_file():
+        return None
+    # Journal active: every publish/append must come from the process holding
+    # the matching active run lock. A lock-less writer fails closed before any
+    # checkpoint/status append and before run.json changes, for every status.
+    if workspace is None or not runguard.is_active_run_owner(workspace, run_dir):
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("lifecycle journal append requires the active run lock for this run")
+        )
+    run_json_bytes = bytes(run_json_bytes)
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+    payload = _checkpoint_payload(run_json_bytes, paired_event_type=paired_event_type)
+    # Crash-safe publish FIRST. A CheckpointError here fails before the
+    # lifecycle status append and before run.json replacement.
+    publish_checkpoint_file(run_dir, run_json_bytes)
+    try:
+        report = run_journal.read_journal(journal_path)
+        if report.partial_tail is not None or report.chain_errors:
+            raise run_journal.ChainIntegrityError(run_events._bound(run_lifecycle._CHAIN_CATEGORY))
+        idempotency_key = _checkpoint_idempotency_key(sha, paired_event_type=paired_event_type)
+        return run_journal.append_event(
+            journal_path,
+            run_id=run_lifecycle._run_id_from_dir(run_dir),
+            event_type=CHECKPOINT_EVENT_TYPE,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            expected_previous_sequence=report.events[-1].sequence if report.events else 0,
+        )
+    except CheckpointError:
+        raise
+    except run_journal.RunJournalError as exc:
+        raise run_lifecycle._bound_journal_failure(exc) from exc
+    except run_events.CanonicalizationError as exc:
+        raise run_lifecycle._bound_journal_failure(exc) from exc
+    except OSError as exc:
+        raise run_lifecycle._bound_journal_failure(exc) from exc

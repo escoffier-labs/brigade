@@ -13,10 +13,13 @@ Activation model
   until journaling activates.
 - Legacy ``run.json`` with no request field stays snapshot-only even if the
   environment flag is later enabled.
-- Once the matching run lock is held, the first mapped-status write with a
-  pending request creates the journal (0o700 directory, 0o600 file) and
-  appends ``run.created``. Journal existence is the durable activated fact
-  after that point.
+- ``prepare_lifecycle_journal`` (called by ``aboyeur._write_json`` before
+  every ``run.json`` write, and by ``run_checkpoint.write_checkpoint``) idempotently creates
+  the journal (0o700 directory, 0o600 file) the first time the matching run
+  lock is held AND the run carries a pending ``lifecycle_journal_requested``
+  marker. Journal existence is the durable activated fact after that point.
+  ``record_lifecycle_transition`` no longer creates the journal; it requires
+  the journal to already exist and skips (returns ``None``) when it does not.
 - Once the journal exists, later transitions remain journaled even if a
   resumed process lacks the environment flag.
 
@@ -75,7 +78,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from brigade import run_events, run_journal, runguard
+from brigade import run_checkpoint, run_events, run_journal, runguard
 
 _FLAG_ENV = "BRIGADE_LIFECYCLE_JOURNAL"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -84,6 +87,7 @@ _REQUEST_FIELD = "lifecycle_journal_requested"
 _IDEMPOTENCY_PREFIX = "lifecycle"
 _IO_CATEGORY = "lifecycle journal I/O failure"
 _CANONICALIZATION_CATEGORY = "lifecycle journal canonicalization failure"
+_CHAIN_CATEGORY = "lifecycle journal is not derivable"
 
 # Map of current run.json status values to the allowlisted run_event.v1
 # event_type that records that transition. Statuses without a mapping
@@ -180,6 +184,55 @@ def _allowlisted_payload(event_type: str, *, status: str) -> dict[str, Any]:
     return payload
 
 
+def _bound_journal_failure(exc: BaseException) -> LifecycleJournalError:
+    if isinstance(exc, run_journal.RunJournalError):
+        return LifecycleJournalError(run_events._bound(exc.diagnostic))
+    if isinstance(exc, run_events.CanonicalizationError):
+        return LifecycleJournalError(_CANONICALIZATION_CATEGORY)
+    if isinstance(exc, OSError):
+        return LifecycleJournalError(f"{_IO_CATEGORY} ({type(exc).__name__})")
+    return LifecycleJournalError(run_events._bound(str(exc)))
+
+
+def prepare_lifecycle_journal(
+    run_dir: Path,
+    *,
+    workspace: Path | None = None,
+    incoming_snapshot: Mapping[str, Any] | None = None,
+) -> None:
+    """Idempotently activate the per-run lifecycle journal under the matching lock.
+
+    Creates ``events/`` (0o700) and ``lifecycle.jsonl`` (0o600) only when ALL of:
+    - the journal does not already exist (idempotent no-op otherwise),
+    - the run has durably requested journaling (``lifecycle_journal_requested``
+      in ``run.json`` or ``incoming_snapshot``), and
+    - the caller holds the matching active run lock for ``run_dir`` (verified
+      via ``runguard.is_active_run_owner`` against ``workspace``, never
+      derived from the run directory layout).
+
+    No-op when the journal already exists, when journaling was never requested,
+    or when the matching lock is not held. Raises a bounded
+    ``LifecycleJournalError`` (generic category; the raw ``OSError`` text can
+    carry a path or private value) on any ``ensure_journal`` failure.
+    """
+    run_dir = Path(run_dir).expanduser().resolve()
+    journal_path = _journal_path(run_dir)
+    if journal_path.is_file():
+        return
+    if not _journal_requested(run_dir, incoming=incoming_snapshot):
+        return
+    if workspace is None or not runguard.is_active_run_owner(workspace, run_dir):
+        return
+    try:
+        run_journal.ensure_journal(journal_path)
+    except run_journal.RunJournalError as exc:
+        raise _bound_journal_failure(exc) from exc
+    except run_events.CanonicalizationError as exc:
+        raise _bound_journal_failure(exc) from exc
+    except OSError as exc:
+        raise _bound_journal_failure(exc) from exc
+
+
 def record_lifecycle_transition(
     run_dir: Path,
     *,
@@ -192,12 +245,18 @@ def record_lifecycle_transition(
     Called BEFORE the existing ``run.json`` snapshot refresh. Returns the
     appended (or replayed) ``RunEvent`` when journaling is active and the
     status transition is recorded; ``None`` when the status is unmapped, the
-    run is not activated, journaling is only requested but the matching lock
-    is not yet held, or the call only recorded the per-run request. Raises
-    ``LifecycleJournalError`` on any bounded journal failure, or when
-    journaling is active but the caller does not hold the matching active run
-    lock, so the caller does not write ``run.json`` past an uncommitted or
-    unowned transition.
+    run is a legacy/no-request run that never opted in, or journaling is only
+    requested but the matching lock is not yet held (the pre-lock bootstrap).
+    Raises ``LifecycleJournalError`` when journaling is active but the caller
+    does not hold the matching active run lock, and when journaling was
+    requested and the matching lock is held but the journal is absent after
+    preparation (a broken activation flow), so the caller never writes
+    ``run.json`` past an unowned or uncommitted transition.
+
+    This function does not create the journal; ``prepare_lifecycle_journal``
+    (called by ``aboyeur._write_json`` and ``run_checkpoint.write_checkpoint``)
+    owns activation. The skip rules (unmapped status, legacy/no-request,
+    requested-but-not-yet-locked) are retained.
 
     ``workspace`` identifies the run lock to verify ownership against; pass
     the workspace from the run receipt payload (``lock_workspace`` or
@@ -213,20 +272,19 @@ def record_lifecycle_transition(
     if not run_events._RUN_ID_RE.match(run_id):
         raise LifecycleJournalError(run_events._bound(f"invalid run_id from run_dir: {run_id!r}"))
     journal_path = _journal_path(run_dir)
-    requested = _journal_requested(run_dir, incoming=incoming_snapshot)
     if not journal_path.is_file():
-        if not requested:
-            return None
-        if workspace is None or not runguard.is_active_run_owner(workspace, run_dir):
-            return None
-        try:
-            run_journal.ensure_journal(journal_path)
-        except run_journal.RunJournalError as exc:
-            raise LifecycleJournalError(run_events._bound(exc.diagnostic)) from exc
-        except run_events.CanonicalizationError as exc:
-            raise LifecycleJournalError(_CANONICALIZATION_CATEGORY) from exc
-        except OSError as exc:
-            raise LifecycleJournalError(f"{_IO_CATEGORY} ({type(exc).__name__})") from exc
+        # Journal absent. Two legitimate skip paths remain: a legacy/no-request
+        # run that never opted in, and a requested run whose activation could
+        # not yet happen because the matching lock is not held (the pre-lock
+        # bootstrap). When journaling WAS requested AND the matching lock IS
+        # held, prepare_lifecycle_journal should already have activated the
+        # journal; its absence after preparation is a broken flow that must
+        # fail closed rather than silently advancing run.json.
+        if _journal_requested(run_dir, incoming=incoming_snapshot) and (
+            workspace is not None and runguard.is_active_run_owner(workspace, run_dir)
+        ):
+            raise LifecycleJournalError(run_events._bound("lifecycle journal requested but not activated"))
+        return None
 
     # The journal exists: journaling is active for this run, with or without
     # the env flag. Every append must come from the process holding the
@@ -236,17 +294,19 @@ def record_lifecycle_transition(
         raise LifecycleJournalError("lifecycle journal append requires the active run lock for this run")
 
     try:
-        run_journal.ensure_journal(journal_path)
         report = run_journal.read_journal(journal_path)
         if report.partial_tail is not None or report.chain_errors:
-            raise run_journal.ChainIntegrityError(run_events._bound("lifecycle journal is not derivable"))
+            raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
         prior_status, prior_digest = _run_snapshot_state(run_dir)
         payload = _allowlisted_payload(event_type, status=status)
         # Status transitions, not detail refreshes: a same-status refresh
-        # appends nothing once any event is committed, even when error/detail
-        # fields changed.
-        if prior_status == status and report.events:
-            return report.events[-1]
+        # appends nothing once a status event is already committed, even when
+        # error/detail fields changed. Recovery checkpoint events are not
+        # status events, so a first mapped-status write still appends its
+        # status event after the checkpoint event.
+        status_events = [e for e in report.events if e.event_type != run_checkpoint.CHECKPOINT_EVENT_TYPE]
+        if prior_status == status and status_events:
+            return status_events[-1]
         # Real transition: the idempotency key binds the prior snapshot digest
         # to the target event request. A crash/retry after the journal fsync
         # but before the run.json replacement sees the unchanged prior
@@ -273,16 +333,17 @@ def record_lifecycle_transition(
             expected_previous_sequence=report.events[-1].sequence if report.events else 0,
         )
     except run_journal.RunJournalError as exc:
-        raise LifecycleJournalError(run_events._bound(exc.diagnostic)) from exc
+        raise _bound_journal_failure(exc) from exc
     except run_events.CanonicalizationError as exc:
-        raise LifecycleJournalError(_CANONICALIZATION_CATEGORY) from exc
+        raise _bound_journal_failure(exc) from exc
     except OSError as exc:
-        raise LifecycleJournalError(f"{_IO_CATEGORY} ({type(exc).__name__})") from exc
+        raise _bound_journal_failure(exc) from exc
 
 
 __all__ = [
     "LifecycleJournalError",
     "STATUS_EVENT_TYPE",
     "is_lifecycle_journaling_enabled",
+    "prepare_lifecycle_journal",
     "record_lifecycle_transition",
 ]

@@ -15,7 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from brigade import run_checkpoint, run_events, run_journal
+from brigade import run_checkpoint, run_events, run_journal, run_lifecycle, runguard
+from brigade import localio
 
 RUN_ID = "20260727-153045-a1b2c3d4"
 
@@ -1258,3 +1259,119 @@ def test_validate_checkpoint_translates_recursion_error_on_writer_canonical_dump
     diagnostic = str(err)
     assert diagnostic == err.diagnostic
     assert len(diagnostic) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+# -- Issue #568 slice 5 Task 2: run_checkpoint.write_checkpoint coordinator ----
+
+
+_REQUEST_FIELD = "lifecycle_journal_requested"
+
+
+def _workspace(tmp_path: Path) -> Path:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    return workspace
+
+
+def _journal_path(run_dir: Path) -> Path:
+    return run_dir / "events" / "lifecycle.jsonl"
+
+
+def _checkpoint_dir(run_dir: Path) -> Path:
+    return run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+
+
+def _events(run_dir: Path) -> list[run_journal.RunEvent]:
+    return run_journal.read_journal(_journal_path(run_dir)).events
+
+
+def _checkpoint_events(run_dir: Path) -> list[run_journal.RunEvent]:
+    return [e for e in _events(run_dir) if e.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE]
+
+
+def _bootstrap_request(run_dir: Path, status: str = "started") -> None:
+    """Pre-lock bootstrap: write run.json with the durable request, no journal."""
+    localio.write_json(
+        run_dir / "run.json",
+        {"schema": "brigade.run.v1", "status": status, _REQUEST_FIELD: True},
+    )
+
+
+@pytest.fixture
+def enabled(monkeypatch):
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    yield
+    monkeypatch.delenv("BRIGADE_LIFECYCLE_JOURNAL", raising=False)
+
+
+def test_write_checkpoint_append_then_replay(enabled, tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    run_json_bytes = _writer_bytes({"schema": "brigade.run.v1", "status": "planning"})
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_checkpoint.write_checkpoint(
+            run_dir, run_json_bytes, workspace=workspace, paired_event_type="run.planning.started"
+        )
+    events_after_first = _events(run_dir)
+    files_after_first = sorted(_checkpoint_dir(run_dir).iterdir())
+    journal_after_first = _journal_path(run_dir).read_bytes()
+
+    # Replay: same bytes + same pairing derive the same idempotency key, so
+    # no new file and no new event.
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_checkpoint.write_checkpoint(
+            run_dir, run_json_bytes, workspace=workspace, paired_event_type="run.planning.started"
+        )
+
+    assert _events(run_dir) == events_after_first
+    assert sorted(_checkpoint_dir(run_dir).iterdir()) == files_after_first
+    assert _journal_path(run_dir).read_bytes() == journal_after_first
+
+
+def test_write_checkpoint_same_bytes_different_pairing_distinct_events(enabled, tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    run_json_bytes = _writer_bytes({"schema": "brigade.run.v1", "status": "planning"})
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        first = run_checkpoint.write_checkpoint(
+            run_dir, run_json_bytes, workspace=workspace, paired_event_type="run.planning.started"
+        )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        second = run_checkpoint.write_checkpoint(
+            run_dir, run_json_bytes, workspace=workspace, paired_event_type="run.dispatch.requested"
+        )
+
+    checkpoints = _checkpoint_events(run_dir)
+    assert len(checkpoints) == 2
+    assert [e.sequence for e in checkpoints] == [1, 2]
+    assert first.event_id == checkpoints[0].event_id
+    assert second.event_id == checkpoints[1].event_id
+    assert first.idempotency_key != second.idempotency_key
+    assert first.idempotency_key.endswith(":run.planning.started")
+    assert second.idempotency_key.endswith(":run.dispatch.requested")
+    # Same bytes -> same content-addressed file (collision-noop), one file.
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+    assert sorted(p.name for p in _checkpoint_dir(run_dir).iterdir()) == [f"{sha}.json"]
+
+
+def test_write_checkpoint_noop_when_journal_not_active(enabled, tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)  # pre-lock bootstrap: request only, no journal
+
+    run_json_bytes = _writer_bytes({"schema": "brigade.run.v1", "status": "planning"})
+    # No lock held: prepare is a no-op, the journal stays absent, and
+    # write_checkpoint no-ops (no file, no event).
+    result = run_checkpoint.write_checkpoint(
+        run_dir, run_json_bytes, workspace=workspace, paired_event_type="run.planning.started"
+    )
+    assert result is None
+    assert not (run_dir / "events").exists()
