@@ -137,8 +137,7 @@ def validate_models(data: dict[str, Any]) -> None:
         require(
             all(
                 cell["expected_findings_total"] == TASK_FINDINGS[cell["task"]]
-                and cell["expected_findings_found"]
-                <= cell["expected_findings_total"]
+                and cell["expected_findings_found"] <= cell["expected_findings_total"]
                 for cell in cells
             ),
             f"{model_id}: impossible or task-inconsistent finding recall",
@@ -147,22 +146,16 @@ def validate_models(data: dict[str, Any]) -> None:
         summary = model["summary"]
         require(summary["cells"] == len(cells), f"{model_id}: cell count mismatch")
         sums = {
-            "expected_findings_found": sum(
-                cell["expected_findings_found"] for cell in cells
-            ),
-            "expected_findings_total": sum(
-                cell["expected_findings_total"] for cell in cells
-            ),
-            "output_contract_passes": sum(
-                cell["output_contract_valid"] for cell in cells
-            ),
+            "expected_findings_found": sum(cell["expected_findings_found"] for cell in cells),
+            "expected_findings_total": sum(cell["expected_findings_total"] for cell in cells),
+            "output_contract_passes": sum(cell["output_contract_valid"] for cell in cells),
             "refusals": sum(cell["refused"] for cell in cells),
         }
         for key, value in sums.items():
             require(summary[key] == value, f"{model_id}: {key} mismatch")
-        mean = (
-            sum(Decimal(str(cell["latency_seconds"])) for cell in cells) / len(cells)
-        ).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+        mean = (sum(Decimal(str(cell["latency_seconds"])) for cell in cells) / len(cells)).quantize(
+            Decimal("0.001"), rounding=ROUND_HALF_UP
+        )
         require(
             Decimal(str(summary["mean_latency_seconds"])) == mean,
             f"{model_id}: mean latency mismatch",
@@ -213,8 +206,7 @@ def validate_roster() -> None:
     require(roster.max_workers == 2, "per-run worker limit mismatch")
     require(roster.sandbox == "read-only", "roster sandbox mismatch")
     require(
-        roster.agents["go_minimax_m3_primary"].fallback
-        == ("go_glm_52_worker_fallback",),
+        roster.agents["go_minimax_m3_primary"].fallback == ("go_glm_52_worker_fallback",),
         "MiniMax fallback topology mismatch",
     )
 
@@ -238,15 +230,12 @@ def validate_trial(data: dict[str, Any], artifacts: Path | None) -> None:
     synthesis = load_json(artifacts / "synthesis.json")
     enforcement = load_json(artifacts / "read-only-enforcement.json")
     final = (artifacts / "final.txt").read_text()
-    worker_stderr = (
-        artifacts / "logs/worker-001-minimax_coder.stderr.log"
-    ).read_text()
+    worker_stderr = (artifacts / "logs/worker-001-minimax_coder.stderr.log").read_text()
     synthesis_stderr = (artifacts / "logs/synthesis.stderr.log").read_text()
 
     require(run["status"] == trial["status"], "artifact run status mismatch")
     require(
-        Decimal(str(run["duration_seconds"]))
-        == Decimal(str(trial["duration_seconds"])),
+        Decimal(str(run["duration_seconds"])) == Decimal(str(trial["duration_seconds"])),
         "artifact duration mismatch",
     )
     require(run["read_only"] is True, "artifact run was not read-only")
@@ -265,14 +254,12 @@ def validate_trial(data: dict[str, Any], artifacts: Path | None) -> None:
         "worker resolved model mismatch",
     )
     require(
-        Decimal(str(worker["duration_seconds"]))
-        == Decimal(str(trial["worker"]["latency_seconds"])),
+        Decimal(str(worker["duration_seconds"])) == Decimal(str(trial["worker"]["latency_seconds"])),
         "worker latency mismatch",
     )
     require(worker["transport"] == "cli" and worker["exit_code"] == 0, "worker exit")
     require(
-        workers["ground_truth"]["changed_files"] == []
-        and workers["ground_truth"]["untracked_files"] == [],
+        workers["ground_truth"]["changed_files"] == [] and workers["ground_truth"]["untracked_files"] == [],
         "worker changed or untracked files",
     )
 
@@ -295,8 +282,7 @@ def validate_trial(data: dict[str, Any], artifacts: Path | None) -> None:
         "synthesis exit",
     )
     require(
-        synthesis["ground_truth"]["changed_files"] == []
-        and synthesis["ground_truth"]["untracked_files"] == [],
+        synthesis["ground_truth"]["changed_files"] == [] and synthesis["ground_truth"]["untracked_files"] == [],
         "synthesis changed or untracked files",
     )
     require(trial["final_contains"] in final, "final marker absent")
