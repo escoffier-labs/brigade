@@ -70,6 +70,10 @@ def _validate_payload(payload: Any) -> None:
     if not isinstance(payload, Mapping):
         raise CheckpointError(_bound("checkpoint payload must be an object"), category="payload-shape")
 
+    for key in payload.keys():
+        if not isinstance(key, str):
+            raise CheckpointError(_bound("payload keys must be strings"), category="payload-keys")
+
     keys = set(payload.keys())
     if keys != _CHECKPOINT_PAYLOAD_KEYS:
         missing = sorted(_CHECKPOINT_PAYLOAD_KEYS - keys)
@@ -130,14 +134,71 @@ def _writer_canonical_bytes(obj: Any) -> bytes:
     return (json.dumps(obj, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
+def _read_bounded(fd: int, expected_size: int) -> bytes:
+    """Read exactly ``expected_size`` bytes from ``fd``, then one extra byte.
+
+    Rejects growth after ``fstat`` (the extra byte is non-empty) and short
+    reads (file shrank or returned fewer than ``expected_size`` bytes). Never
+    accumulates beyond ``MAX_CHECKPOINT_BYTES``. Raises ``CheckpointError``
+    with category ``size-mismatch`` on any bound violation, or ``read`` on a
+    raw ``OSError`` from ``os.read``.
+    """
+    if expected_size < 0 or expected_size > MAX_CHECKPOINT_BYTES:
+        raise CheckpointError(_bound("checkpoint size out of range"), category="byte-size")
+    chunks: list[bytes] = []
+    remaining = expected_size
+    try:
+        while remaining > 0:
+            chunk = os.read(fd, min(run_journal._READ_CHUNK, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError as exc:
+        raise CheckpointError(_bound("checkpoint read failed"), category="read") from exc
+    data = b"".join(chunks)
+    if len(data) != expected_size:
+        raise CheckpointError(_bound("checkpoint size mismatch"), category="size-mismatch")
+    try:
+        extra = os.read(fd, 1)
+    except OSError as exc:
+        raise CheckpointError(_bound("checkpoint read failed"), category="read") from exc
+    if extra:
+        raise CheckpointError(_bound("checkpoint grew after fstat"), category="size-mismatch")
+    return data
+
+
+def _close_guarded(fd: int, primary: CheckpointError | None, *, category: str = "close") -> CheckpointError | None:
+    """Close ``fd``, translating an ``OSError`` into a bounded ``CheckpointError``.
+
+    Returns the error to raise (or ``None``). A close failure never masks a
+    prior ``primary`` failure: when ``primary`` is set it is returned
+    unchanged and the close error is suppressed; when ``primary`` is ``None``
+    a new bounded ``CheckpointError`` is returned. The fd is best-effort closed
+    even on a first close failure.
+    """
+    close_err: CheckpointError | None = None
+    try:
+        os.close(fd)
+    except OSError:
+        if primary is None:
+            close_err = CheckpointError(_bound("checkpoint close failed"), category=category)
+    return primary if primary is not None else close_err
+
+
 def validate_checkpoint(run_dir: Path, event: Any) -> bytes:
     """Validate a checkpoint payload, then open and verify the referenced file.
 
     Accepts either a payload Mapping or a ``run_journal.RunEvent`` whose
     ``payload`` is the checkpoint payload. Returns the verified checkpoint
-    bytes. Raises ``CheckpointError`` on any validation failure.
+    bytes. Raises ``CheckpointError`` on any validation failure. Raw
+    ``OSError`` from ``run_journal._open_nofollow`` (including missing file
+    and permission denial), ``fstat``, bounded ``os.read``, and ``os.close``
+    is translated into a bounded categorized ``CheckpointError``; an earlier
+    validation failure is preserved over a close failure.
     """
     run_dir = Path(run_dir)
+    payload: Mapping[str, Any]
     if isinstance(event, run_journal.RunEvent):
         payload = event.payload
     elif isinstance(event, Mapping):
@@ -155,21 +216,21 @@ def validate_checkpoint(run_dir: Path, event: Any) -> bytes:
         fd = run_journal._open_nofollow(final_path, os.O_RDONLY)
     except run_journal.RunJournalError as exc:
         raise CheckpointError(_bound(f"cannot open checkpoint: {exc.diagnostic}"), category="open-fd") from exc
+    except OSError as exc:
+        raise CheckpointError(_bound("cannot open checkpoint"), category="open-fd") from exc
+    primary: CheckpointError | None = None
     try:
-        info = os.fstat(fd)
+        try:
+            info = os.fstat(fd)
+        except OSError as exc:
+            raise CheckpointError(_bound("checkpoint fstat failed"), category="fstat") from exc
         if not stat.S_ISREG(info.st_mode):
             raise CheckpointError(_bound("checkpoint path is not a regular file"), category="not-regular")
         if info.st_nlink != 1:
             raise CheckpointError(_bound("checkpoint link count is not one"), category="link-count")
         if info.st_size != byte_size:
             raise CheckpointError(_bound("checkpoint size mismatch"), category="size-mismatch")
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(fd, run_journal._READ_CHUNK)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        data = b"".join(chunks)
+        data = _read_bounded(fd, byte_size)
         actual_sha = hashlib.sha256(data).hexdigest()
         if actual_sha != sha:
             raise CheckpointError(_bound("checkpoint digest mismatch"), category="digest-mismatch")
@@ -181,43 +242,68 @@ def validate_checkpoint(run_dir: Path, event: Any) -> bytes:
             obj = json.loads(text)
         except (json.JSONDecodeError, ValueError) as exc:
             raise CheckpointError(_bound("checkpoint is not valid JSON"), category="json-object") from exc
+        except RecursionError as exc:
+            raise CheckpointError(_bound("checkpoint JSON nesting too deep"), category="json-object") from exc
         if not isinstance(obj, dict):
             raise CheckpointError(_bound("checkpoint is not a JSON object"), category="json-object")
-        if _writer_canonical_bytes(obj) != data:
+        try:
+            canonical = _writer_canonical_bytes(obj)
+        except RecursionError as exc:
+            raise CheckpointError(
+                _bound("checkpoint canonical re-encode nesting too deep"), category="writer-bytes"
+            ) from exc
+        if canonical != data:
             raise CheckpointError(_bound("checkpoint bytes differ from writer canonical form"), category="writer-bytes")
         return data
+    except CheckpointError as exc:
+        primary = exc
+        raise
     finally:
-        os.close(fd)
+        close_err = _close_guarded(fd, primary)
+        if close_err is not None and primary is None:
+            raise close_err
 
 
 def _verify_collision(final_path: Path, expected_bytes: bytes, expected_sha: str) -> None:
     """Open an existing final path no-follow and require byte+digest equality.
 
     Raises ``CheckpointError`` with category ``collision-unsafe`` for a
-    symlink, non-regular inode, or link count above one, or
-    ``collision-mismatch`` for byte or digest inequality.
+    symlink, non-regular inode, link count above one, or a raw ``OSError``
+    from ``run_journal._open_nofollow`` (including missing file and
+    permission denial), or ``collision-mismatch`` for byte or digest
+    inequality. Raw ``OSError`` from ``fstat``, bounded ``os.read``, and
+    ``os.close`` is translated into a bounded categorized
+    ``CheckpointError``; an earlier collision failure is preserved over a
+    close failure.
     """
     try:
         fd = run_journal._open_nofollow(final_path, os.O_RDONLY)
     except run_journal.RunJournalError as exc:
         raise CheckpointError(_bound(f"collision-unsafe: {exc.diagnostic}"), category="collision-unsafe") from exc
+    except OSError as exc:
+        raise CheckpointError(_bound("collision-unsafe: open failed"), category="collision-unsafe") from exc
+    primary: CheckpointError | None = None
     try:
-        info = os.fstat(fd)
+        try:
+            info = os.fstat(fd)
+        except OSError as exc:
+            raise CheckpointError(_bound("collision-unsafe: fstat failed"), category="fstat") from exc
         if not stat.S_ISREG(info.st_mode):
             raise CheckpointError(_bound("collision-unsafe: not a regular file"), category="collision-unsafe")
         if info.st_nlink != 1:
             raise CheckpointError(_bound("collision-unsafe: link count above one"), category="collision-unsafe")
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(fd, run_journal._READ_CHUNK)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        data = b"".join(chunks)
+        if info.st_size != len(expected_bytes):
+            raise CheckpointError(_bound("collision-mismatch: bytes differ"), category="collision-mismatch")
+        data = _read_bounded(fd, len(expected_bytes))
         if data != expected_bytes or hashlib.sha256(data).hexdigest() != expected_sha:
             raise CheckpointError(_bound("collision-mismatch: bytes differ"), category="collision-mismatch")
+    except CheckpointError as exc:
+        primary = exc
+        raise
     finally:
-        os.close(fd)
+        close_err = _close_guarded(fd, primary)
+        if close_err is not None and primary is None:
+            raise close_err
 
 
 def _supports_directory_fsync() -> bool:
@@ -225,13 +311,88 @@ def _supports_directory_fsync() -> bool:
 
 
 def _fsync_directory(path: Path) -> None:
+    """Open ``path`` no-follow as a directory, fsync the descriptor, then close.
+
+    The directory is opened via ``run_journal._open_nofollow`` with
+    ``O_RDONLY | O_DIRECTORY`` so a raced-in symlink or non-directory inode
+    is rejected before any fsync occurs (never fsync an attacker-selected
+    target). The opened descriptor is ``fstat``-ed and required to be a
+    directory, then ``fsync``-ed. Raises ``CheckpointError`` with category
+    ``dir-fsync`` on any ``OSError`` from open, fstat, fsync, or close; a
+    close failure is suppressed when an earlier open/fstat/fsync failure
+    already raised (bounded error-precedence).
+    """
     if not _supports_directory_fsync():
         return
-    fd = os.open(path, os.O_RDONLY)
+    dir_flags = os.O_RDONLY | run_journal._O_DIRECTORY
     try:
-        os.fsync(fd)
+        fd = run_journal._open_nofollow(path, dir_flags)
+    except run_journal.RunJournalError as exc:
+        raise CheckpointError(
+            _bound(f"checkpoint directory fsync failed: {exc.diagnostic}"), category="dir-fsync"
+        ) from exc
+    except OSError as exc:
+        raise CheckpointError(_bound("checkpoint directory fsync failed"), category="dir-fsync") from exc
+    primary: CheckpointError | None = None
+    try:
+        try:
+            info = os.fstat(fd)
+        except OSError as exc:
+            raise CheckpointError(_bound("checkpoint directory fsync failed"), category="dir-fsync") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise CheckpointError(_bound("checkpoint directory fsync failed"), category="dir-fsync")
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            raise CheckpointError(_bound("checkpoint directory fsync failed"), category="dir-fsync") from exc
+    except CheckpointError as exc:
+        primary = exc
+        raise
     finally:
-        os.close(fd)
+        close_err = _close_guarded(fd, primary, category="dir-fsync")
+        if close_err is not None and primary is None:
+            raise close_err
+
+
+def _cleanup_temp(tmp_path: Path, cp_dir: Path, primary: CheckpointError | None) -> CheckpointError | None:
+    """Unlink the temp and fsync the checkpoint directory after a temp deletion.
+
+    Used on the success, collision, and error paths so every successful temp
+    deletion is followed by a checkpoint-directory fsync on POSIX. Returns the
+    error to raise (or ``primary`` unchanged). A cleanup unlink or cleanup
+    fsync failure never replaces a prior ``primary`` safety failure: when
+    ``primary`` is set it is returned unchanged and cleanup errors are
+    suppressed (the directory fsync still runs best-effort so the unlink is
+    durable). When ``primary`` is ``None``, a cleanup-only failure returns a
+    new bounded ``CheckpointError`` (``unlink`` or ``dir-fsync``).
+    """
+    cleanup_err: CheckpointError | None = None
+    unlinked = False
+    try:
+        tmp_path.unlink(missing_ok=True)
+        unlinked = True
+    except OSError:
+        if primary is None:
+            cleanup_err = CheckpointError(_bound("checkpoint temp cleanup failed"), category="unlink")
+    if unlinked:
+        try:
+            _fsync_directory(cp_dir)
+        except CheckpointError as exc:
+            if primary is None and cleanup_err is None:
+                cleanup_err = exc
+    return primary if primary is not None else cleanup_err
+
+
+def _abort_with_cleanup(
+    tmp_path: Path, cp_dir: Path, primary: CheckpointError, *, cause: BaseException | None = None
+) -> None:
+    """Run temp cleanup, then raise ``primary`` (or a cleanup-only error)."""
+    cleanup_err = _cleanup_temp(tmp_path, cp_dir, primary)
+    if cleanup_err is not None and primary is None:
+        raise cleanup_err from None
+    if cause is not None:
+        raise primary from cause
+    raise primary
 
 
 def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
@@ -240,10 +401,16 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
     Creates the 0o700 ``recovery-checkpoints`` directory (no-follow mkdir),
     writes to a 0o600 same-directory temp, fsyncs, publishes by atomic
     no-replace ``os.link``, applies POSIX-guarded directory fsync, and unlinks
-    the temp. On ``EEXIST`` the existing final file is opened through the same
-    no-follow regular single-link fd hardening and required to be byte and
-    digest equal (a safe matching collision is a no-op); an unsafe inode or
-    mismatched collision raises ``CheckpointError``.
+    the temp followed by another directory fsync. On ``EEXIST`` the existing
+    final file is opened through the same no-follow regular single-link fd
+    hardening and required to be byte and digest equal (a safe matching
+    collision is a no-op that still unlinks the temp and fsyncs the
+    directory); an unsafe inode or mismatched collision raises
+    ``CheckpointError``. Every successful temp deletion (new-publish, EEXIST
+    collision, and all error paths) is followed by a checkpoint-directory
+    fsync on POSIX. The mkstemp fd is always closed, even when chmod fails; a
+    close failure is translated to a bounded ``CheckpointError`` only when no
+    earlier failure exists and never masks chmod/write/fsync failures.
     """
     run_dir = Path(run_dir)
     if not isinstance(run_json_bytes, (bytes, bytearray)):
@@ -254,27 +421,70 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
         raise CheckpointError(_bound("checkpoint bytes exceed MAX_CHECKPOINT_BYTES"), category="byte-size")
     sha = hashlib.sha256(run_json_bytes).hexdigest()
     cp_dir = checkpoint_dir(run_dir)
-    run_journal._mkdir_private(cp_dir)
+    try:
+        run_journal._mkdir_private(cp_dir)
+    except run_journal.RunJournalError as exc:
+        raise CheckpointError(
+            _bound(f"cannot create checkpoint directory: {exc.diagnostic}"), category="mkdir"
+        ) from exc
+    except OSError as exc:
+        raise CheckpointError(_bound("cannot create checkpoint directory"), category="mkdir") from exc
     final_path = checkpoint_path(run_dir, sha)
 
-    fd, tmp_name = tempfile.mkstemp(dir=cp_dir, prefix=".checkpoint.", suffix=".tmp")
-    tmp_path = Path(tmp_name)
     try:
-        os.fchmod(fd, run_journal._FILE_MODE)
-        written = os.write(fd, run_json_bytes)
-        if written != len(run_json_bytes):
-            raise CheckpointError(_bound("checkpoint temp write was partial"), category="io")
-        os.fsync(fd)
+        fd, tmp_name = tempfile.mkstemp(dir=cp_dir, prefix=".checkpoint.", suffix=".tmp")
+    except OSError as exc:
+        raise CheckpointError(_bound("cannot create checkpoint temp"), category="temp-create") from exc
+    tmp_path = Path(tmp_name)
+    primary: CheckpointError | None = None
+    try:
+        try:
+            run_journal._chmod_fd_or_path(fd, tmp_path, run_journal._FILE_MODE)
+        except run_journal.RunJournalError as exc:
+            raise CheckpointError(_bound("checkpoint temp chmod failed"), category="chmod") from exc
+        except OSError as exc:
+            raise CheckpointError(_bound("checkpoint temp chmod failed"), category="chmod") from exc
+        try:
+            written = os.write(fd, run_json_bytes)
+            if written != len(run_json_bytes):
+                raise CheckpointError(_bound("checkpoint temp write was partial"), category="io")
+            os.fsync(fd)
+        except CheckpointError:
+            raise
+        except OSError as exc:
+            raise CheckpointError(_bound("checkpoint temp write failed"), category="io") from exc
+    except CheckpointError as exc:
+        primary = exc
     finally:
-        os.close(fd)
+        close_err = _close_guarded(fd, primary)
+        if close_err is not None and primary is None:
+            primary = close_err
+
+    if primary is not None:
+        _abort_with_cleanup(tmp_path, cp_dir, primary)
 
     try:
         os.link(tmp_path, final_path)
     except FileExistsError:
-        _verify_collision(final_path, run_json_bytes, sha)
-        tmp_path.unlink(missing_ok=True)
+        try:
+            _verify_collision(final_path, run_json_bytes, sha)
+        except CheckpointError as exc:
+            _abort_with_cleanup(tmp_path, cp_dir, exc)
+        cleanup_err = _cleanup_temp(tmp_path, cp_dir, None)
+        if cleanup_err is not None:
+            raise cleanup_err from None
         return final_path
-    else:
+    except OSError as exc:
+        primary = CheckpointError(_bound("checkpoint link failed"), category="link")
+        _abort_with_cleanup(tmp_path, cp_dir, primary, cause=exc)
+
+    try:
         _fsync_directory(cp_dir)
-        tmp_path.unlink(missing_ok=True)
-        return final_path
+    except CheckpointError as exc:
+        _abort_with_cleanup(tmp_path, cp_dir, exc)
+
+    cleanup_err = _cleanup_temp(tmp_path, cp_dir, None)
+    if cleanup_err is not None:
+        raise cleanup_err from None
+
+    return final_path

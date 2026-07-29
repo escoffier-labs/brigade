@@ -652,12 +652,16 @@ def read_journal_bounded(journal_path: Path) -> JournalReport:
 
     expected_sequence = 1
     expected_previous: str | None = None
+    complete_count = 0
     for complete, partial in _iter_lines(raw_bytes):
         if partial is not None:
             report.partial_tail = partial
             continue
         if complete is None:
             continue
+        complete_count += 1
+        if complete_count > MAX_JOURNAL_EVENTS:
+            raise RunJournalError(_bound("bound exceeded: journal complete records above MAX_JOURNAL_EVENTS"))
         try:
             env = _parse_canonical_line(complete)
         except RunJournalError as exc:

@@ -5,10 +5,12 @@ Issue #568 slice 5, Task 1 (RED-first). Standard library only.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import stat
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -324,3 +326,935 @@ def test_publish_checkpoint_file_refuses_oversize_bytes(tmp_path):
     with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
         run_checkpoint.publish_checkpoint_file(run_dir, oversize)
     assert excinfo.value.category == "byte-size"
+
+
+# -- Finding 1: post-unlink directory fsync ---------------------------------
+
+
+def test_publish_checkpoint_file_fsyncs_directory_after_temp_unlink(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started", "task": "demo"})
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+
+    real_open = os.open
+    real_fsync = os.fsync
+    real_unlink = os.unlink
+    call_log: list[tuple[str, bool]] = []
+
+    def tracking_unlink(path):
+        call_log.append(("unlink", False))
+        return real_unlink(path)
+
+    def tracking_open(path, flags, mode=0o666, *, dir_fd=None):
+        return real_open(path, flags, mode, dir_fd=dir_fd) if dir_fd is not None else real_open(path, flags, mode)
+
+    def tracking_fsync(fd):
+        # Prove the descriptor passed to fsync refers to the checkpoint
+        # directory itself (not merely that any fsync occurred later), while
+        # the directory descriptor is still open.
+        call_log.append(("fsync", _refers_to_cp_dir(fd, cp_dir)))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "unlink", tracking_unlink)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    monkeypatch.setattr(os, "open", tracking_open)
+
+    run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+
+    # A directory fsync on the checkpoint directory must occur after the
+    # legitimate temp unlink. The outer finally also unlinks (missing_ok
+    # no-op) as a safety net, so look for any unlink followed by a later
+    # fsync whose descriptor refers to the checkpoint directory.
+    unlink_indices = [i for i, (kind, _) in enumerate(call_log) if kind == "unlink"]
+    assert unlink_indices, "temp was never unlinked"
+    first_unlink = unlink_indices[0]
+    dir_fsyncs_after = [
+        i for i, (kind, refers_cp) in enumerate(call_log) if kind == "fsync" and refers_cp and i > first_unlink
+    ]
+    assert dir_fsyncs_after, "no checkpoint-directory fsync after temp unlink"
+
+
+# -- Finding 2: failure paths must not leak temps ----------------------------
+
+
+def _list_temps(cp_dir: Path) -> list[Path]:
+    if not cp_dir.is_dir():
+        return []
+    return [p for p in cp_dir.iterdir() if p.name.startswith(".checkpoint.") and p.name.endswith(".tmp")]
+
+
+def test_publish_checkpoint_file_removes_temp_when_chmod_fails(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+
+    def fail_chmod_fd_or_path(fd, path, mode):
+        raise OSError(errno.EPERM, "chmod denied")
+
+    monkeypatch.setattr(run_journal, "_chmod_fd_or_path", fail_chmod_fd_or_path)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "chmod"
+    assert _list_temps(cp_dir) == []
+
+
+@pytest.mark.parametrize("has_fchmod", [True, False])
+def test_publish_checkpoint_file_removes_temp_when_chmod_fails_under_both_backends(tmp_path, monkeypatch, has_fchmod):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+
+    monkeypatch.setattr(run_journal, "_HAS_FCHMOD", has_fchmod)
+
+    def fail_chmod_fd_or_path(fd, path, mode):
+        raise OSError(errno.EPERM, "chmod denied")
+
+    monkeypatch.setattr(run_journal, "_chmod_fd_or_path", fail_chmod_fd_or_path)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "chmod"
+    assert _list_temps(cp_dir) == []
+
+
+def test_publish_checkpoint_file_removes_temp_when_write_raises(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+
+    def fail_write(fd, data):
+        raise OSError(errno.EIO, "write denied")
+
+    monkeypatch.setattr(os, "write", fail_write)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "io"
+    assert _list_temps(cp_dir) == []
+
+
+def test_publish_checkpoint_file_removes_temp_when_fsync_fails(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+
+    def fail_fsync(fd):
+        raise OSError(errno.EIO, "fsync denied")
+
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "io"
+    assert _list_temps(cp_dir) == []
+
+
+def test_publish_checkpoint_file_removes_temp_when_link_raises_nonexist(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+
+    def fail_link(src, dst):
+        raise OSError(errno.EACCES, "link denied")
+
+    monkeypatch.setattr(os, "link", fail_link)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "link"
+    assert _list_temps(cp_dir) == []
+
+
+def test_publish_checkpoint_file_removes_temp_when_collision_verify_raises(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+    # Pre-place a mismatched collision so _verify_collision raises collision-mismatch.
+    final = cp_dir / f"{sha}.json"
+    cp_dir.mkdir(parents=True, exist_ok=True)
+    final.write_bytes(_writer_bytes({"status": "different"}))
+    os.chmod(final, 0o600)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "collision-mismatch"
+    assert _list_temps(cp_dir) == []
+
+
+def test_publish_checkpoint_file_removes_temp_when_collision_open_fails_raw(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+    # Pre-place a matching collision so os.link raises FileExistsError and the
+    # collision-race path invokes _verify_collision.
+    final = cp_dir / f"{sha}.json"
+    cp_dir.mkdir(parents=True, exist_ok=True)
+    final.write_bytes(run_json_bytes)
+    os.chmod(final, 0o600)
+
+    real_open = os.open
+
+    def fail_collision_open(path, flags, mode=0o666, *, dir_fd=None):
+        if Path(path) == final:
+            raise OSError(errno.EACCES, "collision open denied")
+        return real_open(path, flags, mode, dir_fd=dir_fd) if dir_fd is not None else real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", fail_collision_open)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "collision-unsafe"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    assert _list_temps(cp_dir) == []
+
+
+def test_publish_checkpoint_file_removes_temp_when_dir_fsync_fails(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+
+    real_fsync = os.fsync
+    call_count = {"n": 0}
+
+    def fail_dir_fsync(fd):
+        call_count["n"] += 1
+        # Let the temp-file fsync succeed; fail the directory fsync.
+        # Distinguish by attempting fstat: directories and files both are fstat-able,
+        # so we fail on every fsync call after the first.
+        if call_count["n"] > 1:
+            raise OSError(errno.EIO, "dir fsync denied")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_dir_fsync)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "dir-fsync"
+    assert _list_temps(cp_dir) == []
+
+
+def test_publish_checkpoint_file_cleanup_failure_is_bounded_when_no_primary(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+
+    def fail_unlink(path):
+        raise OSError(errno.EACCES, "unlink denied")
+
+    monkeypatch.setattr(os, "unlink", fail_unlink)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "unlink"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_publish_checkpoint_file_preserves_primary_when_cleanup_also_fails(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+
+    real_fsync = os.fsync
+    fsync_count = {"n": 0}
+
+    def fail_dir_fsync(fd):
+        fsync_count["n"] += 1
+        if fsync_count["n"] > 1:
+            raise OSError(errno.EIO, "dir fsync denied")
+        return real_fsync(fd)
+
+    def fail_unlink(path):
+        raise OSError(errno.EACCES, "unlink denied")
+
+    monkeypatch.setattr(os, "fsync", fail_dir_fsync)
+    monkeypatch.setattr(os, "unlink", fail_unlink)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    # Primary is the dir-fsync failure, not the cleanup unlink failure.
+    assert excinfo.value.category == "dir-fsync"
+
+
+# -- Finding 3: no unconditional fchmod -------------------------------------
+
+
+def test_publish_checkpoint_file_succeeds_without_fchmod(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_journal, "_HAS_FCHMOD", False)
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+
+    final = run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+
+    assert final.is_file()
+    assert stat.S_IMODE(final.stat().st_mode) == 0o600
+    assert final.read_bytes() == run_json_bytes
+
+
+def test_publish_checkpoint_file_does_not_call_fchmod_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_journal, "_HAS_FCHMOD", False)
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+
+    # If the code path still called os.fchmod it would raise AttributeError on
+    # hosts without it; we simulate by removing the attribute entirely. Let
+    # monkeypatch manage state without reading the attribute first so the test
+    # is portable on hosts where os.fchmod is initially absent.
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+
+
+# -- Finding 4: non-string payload keys + raw OSError translation ------------
+
+
+def test_validate_checkpoint_rejects_non_string_payload_key_before_sort(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    good_bytes = _writer_bytes({"status": "started"})
+    good_payload = _checkpoint_payload(good_bytes)
+    bad = dict(good_payload)
+    bad["unexpected"] = "string extra"  # type: ignore[dict-item]
+    bad[1] = "non-string key"  # type: ignore[dict-item]
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, bad)
+    assert excinfo.value.category == "payload-keys"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_publish_checkpoint_file_translates_raw_oserror_on_mkdir(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+
+    def fail_mkdir(path, *, parents=False, exist_ok=False, mode=0o777):
+        raise OSError(errno.EACCES, "mkdir denied")
+
+    monkeypatch.setattr(Path, "mkdir", fail_mkdir)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "mkdir"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_publish_checkpoint_file_translates_raw_oserror_on_mkstemp(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+
+    def fail_mkstemp(*args, **kwargs):
+        raise OSError(errno.EACCES, "mkstemp denied")
+
+    monkeypatch.setattr(tempfile, "mkstemp", fail_mkstemp)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "temp-create"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+# -- Finding 5: bounded reads, reject growth after fstat --------------------
+
+
+def test_validate_checkpoint_rejects_growth_after_fstat(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    final = _place_checkpoint_file(run_dir, run_json_bytes)
+    payload = _checkpoint_payload(run_json_bytes)
+
+    real_fstat = os.fstat
+    extra = b"\n" * 64
+
+    def extending_fstat(fd):
+        st = real_fstat(fd)
+        # Extend the same inode through a separate handle AFTER fstat returns
+        # the declared size, simulating concurrent growth on the open inode.
+        with open(final, "ab") as handle:
+            handle.write(extra)
+        return st
+
+    monkeypatch.setattr(os, "fstat", extending_fstat)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "size-mismatch"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_rejects_growth_after_fstat_via_collision(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    final = _place_checkpoint_file(run_dir, run_json_bytes)
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+
+    real_fstat = os.fstat
+    extra = b"\n" * 64
+
+    def extending_fstat(fd):
+        st = real_fstat(fd)
+        with open(final, "ab") as handle:
+            handle.write(extra)
+        return st
+
+    monkeypatch.setattr(os, "fstat", extending_fstat)
+
+    # Drive _verify_collision directly: a matching-collision path that must
+    # also bound its reads.
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._verify_collision(final, run_json_bytes, sha)
+    assert excinfo.value.category == "size-mismatch"
+
+
+# -- Re-review Finding 1: centralized cleanup fsyncs on every path -----------
+
+
+def _refers_to_cp_dir(fd, cp_dir: Path) -> bool:
+    try:
+        st = os.fstat(fd)
+        cp_st = cp_dir.stat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_ino == cp_st.st_ino and st.st_dev == cp_st.st_dev
+
+
+def test_publish_checkpoint_file_fsyncs_directory_after_collision_unlink(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    _place_checkpoint_file(run_dir, run_json_bytes)
+
+    real_open = os.open
+    real_fsync = os.fsync
+    real_unlink = os.unlink
+    call_log: list[tuple[str, bool]] = []
+
+    def tracking_unlink(path):
+        call_log.append(("unlink", False))
+        return real_unlink(path)
+
+    def tracking_open(path, flags, mode=0o666, *, dir_fd=None):
+        return real_open(path, flags, mode, dir_fd=dir_fd) if dir_fd is not None else real_open(path, flags, mode)
+
+    def tracking_fsync(fd):
+        call_log.append(("fsync", _refers_to_cp_dir(fd, cp_dir)))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "unlink", tracking_unlink)
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+
+    run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+
+    unlink_indices = [i for i, (kind, _) in enumerate(call_log) if kind == "unlink"]
+    assert unlink_indices, "temp was never unlinked on collision path"
+    first_unlink = unlink_indices[0]
+    dir_fsyncs_after = [
+        i for i, (kind, refers_cp) in enumerate(call_log) if kind == "fsync" and refers_cp and i > first_unlink
+    ]
+    assert dir_fsyncs_after, "no checkpoint-directory fsync after collision temp unlink"
+
+
+def test_publish_checkpoint_file_fsyncs_directory_after_error_path_cleanup(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+
+    real_open = os.open
+    real_fsync = os.fsync
+    real_unlink = os.unlink
+    call_log: list[tuple[str, bool]] = []
+
+    def fail_link(src, dst):
+        raise OSError(errno.EACCES, "link denied")
+
+    def tracking_unlink(path):
+        call_log.append(("unlink", False))
+        return real_unlink(path)
+
+    def tracking_open(path, flags, mode=0o666, *, dir_fd=None):
+        return real_open(path, flags, mode, dir_fd=dir_fd) if dir_fd is not None else real_open(path, flags, mode)
+
+    def tracking_fsync(fd):
+        call_log.append(("fsync", _refers_to_cp_dir(fd, cp_dir)))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "link", fail_link)
+    monkeypatch.setattr(os, "unlink", tracking_unlink)
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "link"
+
+    unlink_indices = [i for i, (kind, _) in enumerate(call_log) if kind == "unlink"]
+    assert unlink_indices, "temp was never cleaned up on the error path"
+    first_unlink = unlink_indices[0]
+    dir_fsyncs_after = [
+        i for i, (kind, refers_cp) in enumerate(call_log) if kind == "fsync" and refers_cp and i > first_unlink
+    ]
+    assert dir_fsyncs_after, "no checkpoint-directory fsync after error-path cleanup unlink"
+
+
+def test_publish_checkpoint_file_cleanup_dir_fsync_failure_is_bounded_when_no_primary(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+
+    real_fsync = os.fsync
+    fsync_count = {"n": 0}
+
+    def fail_dir_fsync(fd):
+        fsync_count["n"] += 1
+        # temp-file fsync (#1) and post-publish dir fsync (#2) succeed; the
+        # post-cleanup dir fsync (#3) is the only failure.
+        if fsync_count["n"] >= 3:
+            raise OSError(errno.EIO, "cleanup dir fsync denied")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_dir_fsync)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "dir-fsync"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+# -- Re-review Finding 2: fd always closed, close error precedence ----------
+
+
+def test_publish_checkpoint_file_closes_fd_when_chmod_fails(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+
+    real_mkstemp = tempfile.mkstemp
+    real_close = os.close
+    opened_fds: list[int] = []
+    closed_fds: list[int] = []
+
+    def tracking_mkstemp(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        opened_fds.append(fd)
+        return fd, name
+
+    def fail_chmod_fd_or_path(fd, path, mode):
+        raise OSError(errno.EPERM, "chmod denied")
+
+    def tracking_close(fd):
+        closed_fds.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr(tempfile, "mkstemp", tracking_mkstemp)
+    monkeypatch.setattr(run_journal, "_chmod_fd_or_path", fail_chmod_fd_or_path)
+    monkeypatch.setattr(os, "close", tracking_close)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "chmod"
+    assert opened_fds, "mkstemp fd was never opened"
+    mkstemp_fd = opened_fds[0]
+    assert mkstemp_fd in closed_fds, "mkstemp fd was leaked when chmod failed"
+    with pytest.raises(OSError) as fd_exc:
+        os.fstat(mkstemp_fd)
+    assert fd_exc.value.errno == errno.EBADF
+
+
+def test_publish_checkpoint_file_chmod_failure_preserved_when_close_also_fails(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+
+    real_mkstemp = tempfile.mkstemp
+    real_close = os.close
+    opened_fds: list[int] = []
+
+    def tracking_mkstemp(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        opened_fds.append(fd)
+        return fd, name
+
+    def fail_chmod_fd_or_path(fd, path, mode):
+        raise OSError(errno.EPERM, "chmod denied")
+
+    def fail_close(fd):
+        if opened_fds and fd == opened_fds[0]:
+            real_close(fd)
+            raise OSError(errno.EBADF, "close denied")
+        real_close(fd)
+
+    monkeypatch.setattr(tempfile, "mkstemp", tracking_mkstemp)
+    monkeypatch.setattr(run_journal, "_chmod_fd_or_path", fail_chmod_fd_or_path)
+    monkeypatch.setattr(os, "close", fail_close)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "chmod"
+
+
+def test_publish_checkpoint_file_close_failure_is_bounded_when_no_primary(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+
+    real_mkstemp = tempfile.mkstemp
+    real_close = os.close
+    opened_fds: list[int] = []
+
+    def tracking_mkstemp(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        opened_fds.append(fd)
+        return fd, name
+
+    def fail_close(fd):
+        if opened_fds and fd == opened_fds[0]:
+            real_close(fd)
+            raise OSError(errno.EBADF, "close denied")
+        real_close(fd)
+
+    monkeypatch.setattr(tempfile, "mkstemp", tracking_mkstemp)
+    monkeypatch.setattr(os, "close", fail_close)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
+    assert excinfo.value.category == "close"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+# -- Re-review Finding 3: raw OSError translation in validate/verify --------
+
+
+def _tracking_open_factory(monkeypatch):
+    real_open = os.open
+    opened: list[int] = []
+
+    def tracking_open(path, flags, mode=0o666, *, dir_fd=None):
+        fd = real_open(path, flags, mode, dir_fd=dir_fd) if dir_fd is not None else real_open(path, flags, mode)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    return opened
+
+
+def _fail_last_close_factory(opened: list[int], monkeypatch):
+    real_close = os.close
+
+    def fail_close(fd):
+        if opened and fd == opened[-1]:
+            real_close(fd)
+            raise OSError(errno.EBADF, "close denied")
+        real_close(fd)
+
+    monkeypatch.setattr(os, "close", fail_close)
+    return fail_close
+
+
+def test_validate_checkpoint_translates_raw_oserror_on_fstat(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    _place_checkpoint_file(run_dir, run_json_bytes)
+    payload = _checkpoint_payload(run_json_bytes)
+
+    monkeypatch.setattr(os, "fstat", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "fstat denied")))
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "fstat"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_translates_raw_oserror_on_open_missing(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    payload = _checkpoint_payload(run_json_bytes)
+    # Do NOT place the checkpoint file: _open_nofollow raises raw FileNotFoundError.
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "open-fd"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_translates_raw_oserror_on_open_denied(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    _place_checkpoint_file(run_dir, run_json_bytes)
+    payload = _checkpoint_payload(run_json_bytes)
+    final_path = run_checkpoint.checkpoint_path(run_dir, hashlib.sha256(run_json_bytes).hexdigest())
+
+    real_open = os.open
+
+    def fail_open(path, flags, mode=0o666, *, dir_fd=None):
+        if Path(path) == final_path:
+            raise OSError(errno.EACCES, "open denied")
+        return real_open(path, flags, mode, dir_fd=dir_fd) if dir_fd is not None else real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", fail_open)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "open-fd"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_translates_raw_oserror_on_read(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    _place_checkpoint_file(run_dir, run_json_bytes)
+    payload = _checkpoint_payload(run_json_bytes)
+
+    monkeypatch.setattr(os, "read", lambda fd, n: (_ for _ in ()).throw(OSError(errno.EIO, "read denied")))
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "read"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_translates_raw_oserror_on_close(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    _place_checkpoint_file(run_dir, run_json_bytes)
+    payload = _checkpoint_payload(run_json_bytes)
+
+    opened = _tracking_open_factory(monkeypatch)
+    monkeypatch.setattr(os, "close", _fail_last_close_factory(opened, monkeypatch))
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "close"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_preserves_primary_when_close_also_fails(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    real = cp_dir / f"{sha}.json"
+    real.write_bytes(_writer_bytes({"status": "started", "extra": "diff"}))
+    os.chmod(real, 0o600)
+    payload = _checkpoint_payload(run_json_bytes)
+
+    opened = _tracking_open_factory(monkeypatch)
+    monkeypatch.setattr(os, "close", _fail_last_close_factory(opened, monkeypatch))
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "size-mismatch"
+
+
+def test_verify_collision_translates_raw_oserror_on_fstat(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    final = _place_checkpoint_file(run_dir, run_json_bytes)
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+
+    monkeypatch.setattr(os, "fstat", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "fstat denied")))
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._verify_collision(final, run_json_bytes, sha)
+    assert excinfo.value.category == "fstat"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_verify_collision_translates_raw_oserror_on_read(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    final = _place_checkpoint_file(run_dir, run_json_bytes)
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+
+    monkeypatch.setattr(os, "read", lambda fd, n: (_ for _ in ()).throw(OSError(errno.EIO, "read denied")))
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._verify_collision(final, run_json_bytes, sha)
+    assert excinfo.value.category == "read"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_verify_collision_translates_raw_oserror_on_close(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    final = _place_checkpoint_file(run_dir, run_json_bytes)
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+
+    opened = _tracking_open_factory(monkeypatch)
+    monkeypatch.setattr(os, "close", _fail_last_close_factory(opened, monkeypatch))
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._verify_collision(final, run_json_bytes, sha)
+    assert excinfo.value.category == "close"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_verify_collision_translates_raw_oserror_on_open(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    final = _place_checkpoint_file(run_dir, run_json_bytes)
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+
+    real_open = os.open
+
+    def fail_open(path, flags, mode=0o666, *, dir_fd=None):
+        if Path(path) == final:
+            raise OSError(errno.EACCES, "open denied")
+        return real_open(path, flags, mode, dir_fd=dir_fd) if dir_fd is not None else real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", fail_open)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._verify_collision(final, run_json_bytes, sha)
+    assert excinfo.value.category == "collision-unsafe"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_verify_collision_preserves_primary_when_close_also_fails(tmp_path, monkeypatch):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    final = cp_dir / f"{sha}.json"
+    final.write_bytes(_writer_bytes({"status": "different"}))
+    os.chmod(final, 0o600)
+
+    opened = _tracking_open_factory(monkeypatch)
+    monkeypatch.setattr(os, "close", _fail_last_close_factory(opened, monkeypatch))
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._verify_collision(final, run_json_bytes, sha)
+    assert excinfo.value.category == "collision-mismatch"
+
+
+# -- Finding: _fsync_directory no-follow hardening --------------------------
+
+
+def test_fsync_directory_refuses_symlink(tmp_path):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    symlink = tmp_path / "link"
+    symlink.symlink_to(real_dir)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._fsync_directory(symlink)
+    assert excinfo.value.category == "dir-fsync"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_fsync_directory_refuses_non_directory(tmp_path):
+    file_path = tmp_path / "file"
+    file_path.write_bytes(b"x")
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._fsync_directory(file_path)
+    assert excinfo.value.category == "dir-fsync"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_fsync_directory_translates_raw_oserror_on_open(tmp_path, monkeypatch):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    real_open = os.open
+
+    def fail_open(path, flags, mode=0o666, *, dir_fd=None):
+        if path == real_dir:
+            raise OSError(errno.EACCES, "open denied")
+        return real_open(path, flags, mode, dir_fd=dir_fd) if dir_fd is not None else real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", fail_open)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._fsync_directory(real_dir)
+    assert excinfo.value.category == "dir-fsync"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_fsync_directory_translates_raw_oserror_on_fstat(tmp_path, monkeypatch):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    monkeypatch.setattr(os, "fstat", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "fstat denied")))
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._fsync_directory(real_dir)
+    assert excinfo.value.category == "dir-fsync"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_fsync_directory_translates_raw_oserror_on_close(tmp_path, monkeypatch):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    opened = _tracking_open_factory(monkeypatch)
+    monkeypatch.setattr(os, "close", _fail_last_close_factory(opened, monkeypatch))
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._fsync_directory(real_dir)
+    assert excinfo.value.category == "dir-fsync"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_fsync_directory_preserves_primary_when_close_also_fails(tmp_path, monkeypatch):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+
+    def fail_fsync(fd):
+        raise OSError(errno.EIO, "fsync denied")
+
+    opened = _tracking_open_factory(monkeypatch)
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+    monkeypatch.setattr(os, "close", _fail_last_close_factory(opened, monkeypatch))
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._fsync_directory(real_dir)
+    assert excinfo.value.category == "dir-fsync"
+
+
+# -- Issue #568 slice 5 Task 1: RecursionError translation at both boundaries --
+
+
+def _place_deep_checkpoint(run_dir: Path, deep_json: bytes) -> tuple[Path, dict]:
+    sha = hashlib.sha256(deep_json).hexdigest()
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True, exist_ok=True)
+    final = cp_dir / f"{sha}.json"
+    final.write_bytes(deep_json)
+    os.chmod(final, 0o600)
+    return final, _checkpoint_payload(deep_json)
+
+
+def test_validate_checkpoint_translates_recursion_error_on_json_loads(tmp_path):
+    """RecursionError from json.loads on very deep valid JSON -> json-object."""
+    run_dir = _run_dir(tmp_path)
+    # Depth that exhausts the JSON decoder's recursion capacity: a deeply
+    # nested but otherwise valid JSON array. Byte size is well under
+    # MAX_CHECKPOINT_BYTES; the digest and UTF-8 checks pass, then
+    # json.loads raises RecursionError (not a ValueError subclass).
+    depth = 20000
+    deep_json = b"[" * depth + b"]" * depth
+    _final, payload = _place_deep_checkpoint(run_dir, deep_json)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    err = excinfo.value
+    assert err.category == "json-object", f"expected json-object, got {err.category}"
+    assert isinstance(err, run_checkpoint.CheckpointError)
+    diagnostic = str(err)
+    assert diagnostic == err.diagnostic
+    assert len(diagnostic) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_translates_recursion_error_on_writer_canonical_dumps(tmp_path):
+    """RecursionError from canonical json.dumps re-encoding -> writer-bytes."""
+    run_dir = _run_dir(tmp_path)
+    # A deeply nested JSON *object* (top-level dict): the C JSON decoder
+    # handles this depth (json.loads succeeds and returns a dict, so the
+    # isinstance(obj, dict) gate passes), but the recursive canonical
+    # re-encoder (json.dumps with indent=2, sort_keys=True) cannot, raising
+    # RecursionError from _writer_canonical_bytes.
+    depth = 3000
+    deep_json = (b'{"a":' * depth) + b"1" + (b"}" * depth)
+    _final, payload = _place_deep_checkpoint(run_dir, deep_json)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    err = excinfo.value
+    assert err.category == "writer-bytes", f"expected writer-bytes, got {err.category}"
+    assert isinstance(err, run_checkpoint.CheckpointError)
+    diagnostic = str(err)
+    assert diagnostic == err.diagnostic
+    assert len(diagnostic) <= run_events.MAX_DIAGNOSTIC_LEN

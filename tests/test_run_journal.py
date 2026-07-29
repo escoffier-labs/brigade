@@ -1034,3 +1034,49 @@ def test_read_journal_stays_compatible_after_bounded_reader(tmp_path):
     # read_journal stays compatible on the same journal.
     plain = run_journal.read_journal(journal_path)
     assert len(plain.events) == 2
+
+
+# -- Finding 6: read_journal_bounded must count complete records, not trust sequence --
+
+
+def test_read_journal_bounded_rejects_complete_record_513_even_with_repeated_sequence(tmp_path):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_digest: str | None = None
+    for sequence in range(1, 513):
+        event_type = "run.planning.started" if sequence % 2 == 0 else "run.dispatch.observed"
+        payload = (
+            {"detail": "n"} if event_type == "run.planning.started" else {"seat": "c", "attempt": 1, "detail": "n"}
+        )
+        env = run_events.build_event(
+            run_id=RUN_ID,
+            sequence=sequence,
+            event_type=event_type,
+            payload=payload,
+            idempotency_key=f"ev-{sequence}",
+            recorded_at="2026-07-27T15:30:45.000000Z",
+            previous_digest=previous_digest,
+        )
+        with journal_path.open("ab") as handle:
+            handle.write(run_events.canonical_bytes(env) + b"\n")
+        previous_digest = env["event_digest"]
+
+    # 513th complete record: its envelope repeats sequence 1 (and a matching
+    # previous_digest is null), so a sequence-trusting reader would treat it as
+    # a duplicate/chain break rather than a bound excess.
+    env_513 = run_events.build_event(
+        run_id=RUN_ID,
+        sequence=1,
+        event_type="run.created",
+        payload={"status": "started"},
+        idempotency_key="ev-513-repeated",
+        recorded_at="2026-07-27T15:30:45.000000Z",
+        previous_digest=None,
+    )
+    with journal_path.open("ab") as handle:
+        handle.write(run_events.canonical_bytes(env_513) + b"\n")
+
+    with pytest.raises(run_journal.RunJournalError) as excinfo:
+        run_journal.read_journal_bounded(journal_path)
+
+    assert "bound exceeded" in excinfo.value.diagnostic
