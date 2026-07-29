@@ -1,0 +1,801 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brigade.tools/schemas/model-fitness.v1.json",
+  "title": "Brigade model fitness benchmark",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema",
+    "benchmark_id",
+    "generated_at",
+    "catalog_discovery",
+    "provider_behavior",
+    "methodology",
+    "tasks",
+    "models",
+    "rankings",
+    "multi_seat_trial",
+    "receipts",
+    "limitations"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schema": {
+      "const": "brigade.model_fitness.v1"
+    },
+    "benchmark_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "catalog_discovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "subscription_provider",
+        "subscription_model_ids",
+        "separate_free_provider",
+        "api_key_provider_scope"
+      ],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "subscription_provider": {
+          "const": "opencode-go"
+        },
+        "subscription_model_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^opencode-go/"
+          }
+        },
+        "separate_free_provider": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "description"],
+          "properties": {
+            "provider": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "api_key_provider_scope": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "provider_behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "new_probe_runs",
+        "auth_failures",
+        "entitlement_failures",
+        "rate_limit_failures",
+        "provider_failures",
+        "multi_seat_trial_failures"
+      ],
+      "properties": {
+        "new_probe_runs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "auth_failures": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "entitlement_failures": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rate_limit_failures": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_failures": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "multi_seat_trial_failures": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "methodology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "execution_path",
+        "opencode_version",
+        "read_only",
+        "max_live_processes_observed",
+        "roster_max_workers_per_run",
+        "host_process_limit_policy",
+        "ranking_order",
+        "graphtrail"
+      ],
+      "properties": {
+        "execution_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "opencode_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "read_only": {
+          "type": "string",
+          "minLength": 1
+        },
+        "max_live_processes_observed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "roster_max_workers_per_run": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "host_process_limit_policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ranking_order": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "graphtrail": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/task"
+      }
+    },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/model"
+      }
+    },
+    "rankings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "new_three_task_matrix",
+        "earlier_two_task_screen",
+        "role_selections"
+      ],
+      "properties": {
+        "new_three_task_matrix": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ranking"
+          }
+        },
+        "earlier_two_task_screen": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ranking"
+          }
+        },
+        "role_selections": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "primary_cheap_coder_reviewer",
+            "security_capable_reviewer",
+            "cross_file_canary",
+            "promotion_gate",
+            "deferred"
+          ],
+          "properties": {
+            "primary_cheap_coder_reviewer": {
+              "type": "string",
+              "pattern": "^opencode-go/"
+            },
+            "security_capable_reviewer": {
+              "type": "string",
+              "pattern": "^opencode-go/"
+            },
+            "cross_file_canary": {
+              "type": "string",
+              "pattern": "^opencode-go/"
+            },
+            "promotion_gate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "model_id",
+                "status",
+                "required_shadow_runs",
+                "current_fallback_during_shadow"
+              ],
+              "properties": {
+                "model_id": {
+                  "type": "string",
+                  "pattern": "^opencode-go/"
+                },
+                "status": {
+                  "const": "post-shadow-candidate"
+                },
+                "required_shadow_runs": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "current_fallback_during_shadow": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "deferred": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^opencode-go/"
+              }
+            }
+          }
+        }
+      }
+    },
+    "multi_seat_trial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "duration_seconds",
+        "orchestrator",
+        "worker",
+        "plan_assignments",
+        "final_contains",
+        "changed_file_count",
+        "artifact_path"
+      ],
+      "properties": {
+        "status": {
+          "const": "ok"
+        },
+        "duration_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "orchestrator": {
+          "$ref": "#/$defs/trial_orchestrator"
+        },
+        "worker": {
+          "$ref": "#/$defs/trial_worker"
+        },
+        "plan_assignments": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "final_contains": {
+          "type": "string",
+          "minLength": 1
+        },
+        "changed_file_count": {
+          "const": 0
+        },
+        "artifact_path": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "receipts": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/receipt"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "$defs": {
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "expected_findings", "output_contract"],
+      "properties": {
+        "id": {
+          "enum": ["routine", "contract_drift", "security_review"]
+        },
+        "expected_findings": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "output_contract": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "output", "cache_read"],
+      "properties": {
+        "input": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_read": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cells",
+        "expected_findings_found",
+        "expected_findings_total",
+        "output_contract_passes",
+        "refusals",
+        "mean_latency_seconds"
+      ],
+      "properties": {
+        "cells": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 3
+        },
+        "expected_findings_found": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expected_findings_total": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "output_contract_passes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "refusals": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "mean_latency_seconds": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "usage_value": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exposed",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "cost_usd"
+      ],
+      "properties": {
+        "exposed": {
+          "type": "boolean"
+        },
+        "input_tokens": {
+          "$ref": "#/$defs/usage_value"
+        },
+        "output_tokens": {
+          "$ref": "#/$defs/usage_value"
+        },
+        "cached_tokens": {
+          "$ref": "#/$defs/usage_value"
+        },
+        "cost_usd": {
+          "type": ["number", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task",
+        "requested_model",
+        "resolved_model",
+        "resolved_model_marker",
+        "executor_command_shape",
+        "transport",
+        "fallback_used",
+        "exit_code",
+        "timed_out",
+        "latency_seconds",
+        "output_contract_valid",
+        "expected_findings_found",
+        "expected_findings_total",
+        "refused",
+        "changed_file_count",
+        "failure_class",
+        "failure_cause",
+        "usage"
+      ],
+      "properties": {
+        "task": {
+          "enum": ["routine", "contract_drift", "security_review"]
+        },
+        "requested_model": {
+          "type": "string",
+          "pattern": "^opencode-go/"
+        },
+        "resolved_model": {
+          "type": "string",
+          "pattern": "^opencode-go/"
+        },
+        "resolved_model_marker": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executor_command_shape": {
+          "type": "string",
+          "minLength": 1
+        },
+        "transport": {
+          "const": "cli"
+        },
+        "fallback_used": {
+          "type": "boolean"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "latency_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "output_contract_valid": {
+          "type": "boolean"
+        },
+        "expected_findings_found": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expected_findings_total": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "refused": {
+          "type": "boolean"
+        },
+        "changed_file_count": {
+          "const": 0
+        },
+        "failure_class": {
+          "type": ["string", "null"]
+        },
+        "failure_cause": {
+          "type": ["string", "null"]
+        },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_id",
+        "variant",
+        "evidence_tier",
+        "catalog_cost_usd_per_million",
+        "summary",
+        "cells"
+      ],
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "pattern": "^opencode-go/"
+        },
+        "variant": {
+          "type": ["string", "null"]
+        },
+        "evidence_tier": {
+          "enum": ["new-three-task-matrix", "earlier-two-task-screen"]
+        },
+        "catalog_cost_usd_per_million": {
+          "$ref": "#/$defs/cost"
+        },
+        "summary": {
+          "$ref": "#/$defs/summary"
+        },
+        "cells": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/cell"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "evidence_tier": {
+                "const": "new-three-task-matrix"
+              }
+            },
+            "required": ["evidence_tier"]
+          },
+          "then": {
+            "properties": {
+              "cells": {
+                "minItems": 3,
+                "maxItems": 3,
+                "allOf": [
+                  {
+                    "contains": {
+                      "properties": {
+                        "task": {
+                          "const": "routine"
+                        }
+                      },
+                      "required": ["task"]
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
+                  },
+                  {
+                    "contains": {
+                      "properties": {
+                        "task": {
+                          "const": "contract_drift"
+                        }
+                      },
+                      "required": ["task"]
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
+                  },
+                  {
+                    "contains": {
+                      "properties": {
+                        "task": {
+                          "const": "security_review"
+                        }
+                      },
+                      "required": ["task"]
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
+                  }
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "cells": {
+                "minItems": 2,
+                "maxItems": 2,
+                "allOf": [
+                  {
+                    "contains": {
+                      "properties": {
+                        "task": {
+                          "const": "routine"
+                        }
+                      },
+                      "required": ["task"]
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
+                  },
+                  {
+                    "contains": {
+                      "properties": {
+                        "task": {
+                          "const": "contract_drift"
+                        }
+                      },
+                      "required": ["task"]
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ranking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rank", "model_id", "basis"],
+      "properties": {
+        "rank": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "model_id": {
+          "type": "string",
+          "pattern": "^opencode-go/"
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "trial_base": {
+      "type": "object",
+      "required": [
+        "seat",
+        "requested_model",
+        "resolved_model",
+        "resolved_model_marker",
+        "transport",
+        "fallback_used",
+        "exit_code"
+      ],
+      "properties": {
+        "seat": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requested_model": {
+          "type": "string",
+          "pattern": "^opencode-go/"
+        },
+        "resolved_model": {
+          "type": "string",
+          "pattern": "^opencode-go/"
+        },
+        "resolved_model_marker": {
+          "type": "string",
+          "minLength": 1
+        },
+        "transport": {
+          "const": "cli"
+        },
+        "fallback_used": {
+          "type": "boolean"
+        },
+        "exit_code": {
+          "type": "integer"
+        }
+      }
+    },
+    "trial_orchestrator": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/trial_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["synthesis_latency_seconds"],
+          "properties": {
+            "seat": true,
+            "requested_model": true,
+            "resolved_model": true,
+            "resolved_model_marker": true,
+            "transport": true,
+            "fallback_used": true,
+            "exit_code": true,
+            "synthesis_latency_seconds": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "trial_worker": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/trial_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["latency_seconds"],
+          "properties": {
+            "seat": true,
+            "requested_model": true,
+            "resolved_model": true,
+            "resolved_model_marker": true,
+            "transport": true,
+            "fallback_used": true,
+            "exit_code": true,
+            "latency_seconds": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "miseledger_evidence_id", "scope"],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "miseledger_evidence_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{24}$"
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
