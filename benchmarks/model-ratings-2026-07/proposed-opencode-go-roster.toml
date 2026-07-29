@@ -1,0 +1,40 @@
+# Post-shadow proposal only. Do not treat this file as an active Brigade roster.
+
+orchestrator = "go_glm_52_security"
+
+[agents.go_glm_52_security]
+cli = "opencode"
+model = "opencode-go/glm-5.2"
+reasoning = "high"
+role = "Review security-sensitive and cross-file work, then synthesize worker findings."
+timeout_seconds = 180
+fallback = ["go_kimi_k3_canary"]
+
+[agents.go_minimax_m3_primary]
+cli = "opencode"
+model = "opencode-go/minimax-m3"
+reasoning = "thinking"
+role = "Handle short read-only coding analysis and structured first-pass review."
+timeout_seconds = 120
+fallback = ["go_glm_52_worker_fallback"]
+
+[agents.go_glm_52_worker_fallback]
+cli = "opencode"
+model = "opencode-go/glm-5.2"
+reasoning = "high"
+role = "Replace the MiniMax worker when its seat is unavailable."
+timeout_seconds = 180
+
+[agents.go_kimi_k3_canary]
+cli = "opencode"
+model = "opencode-go/kimi-k3"
+reasoning = "max"
+role = "Canary difficult read-only cross-file work before a Claude or GPT-5.6 final review."
+timeout_seconds = 240
+fallback = []
+
+[limits]
+max_workers = 2
+timeout_seconds = 240
+sandbox = "read-only"
+allow_models = ["opencode"]

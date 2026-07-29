@@ -1,0 +1,804 @@
+{
+  "$schema": "./opencode-go-schema.json",
+  "schema": "brigade.model_fitness.v1",
+  "benchmark_id": "opencode-go-20260729",
+  "generated_at": "2026-07-29T19:43:00Z",
+  "catalog_discovery": {
+    "command": "opencode models opencode-go --verbose --pure",
+    "subscription_provider": "opencode-go",
+    "subscription_model_ids": [
+      "opencode-go/deepseek-v4-flash",
+      "opencode-go/deepseek-v4-pro",
+      "opencode-go/glm-5.1",
+      "opencode-go/glm-5.2",
+      "opencode-go/grok-4.5",
+      "opencode-go/hy3",
+      "opencode-go/kimi-k2.6",
+      "opencode-go/kimi-k2.7-code",
+      "opencode-go/kimi-k3",
+      "opencode-go/mimo-v2.5",
+      "opencode-go/mimo-v2.5-pro",
+      "opencode-go/minimax-m2.7",
+      "opencode-go/minimax-m3",
+      "opencode-go/qwen3.6-plus",
+      "opencode-go/qwen3.7-max",
+      "opencode-go/qwen3.7-plus"
+    ],
+    "separate_free_provider": {
+      "provider": "opencode",
+      "description": "seven limited-time free Zen models, not OpenCode Go subscription models"
+    },
+    "api_key_provider_scope": "CLI authentication discovery identified separate API-key environment providers; their catalogs were not queried or used"
+  },
+  "provider_behavior": {
+    "new_probe_runs": 15,
+    "auth_failures": 0,
+    "entitlement_failures": 0,
+    "rate_limit_failures": 0,
+    "provider_failures": 0,
+    "multi_seat_trial_failures": 0
+  },
+  "methodology": {
+    "execution_path": "brigade 0.25.1 -> opencode run",
+    "opencode_version": "1.18.4",
+    "read_only": "prompt-level plus Brigade ground-truth diff; OpenCode has no enforced Brigade read-only sandbox",
+    "max_live_processes_observed": 1,
+    "roster_max_workers_per_run": 2,
+    "host_process_limit_policy": "external dispatcher must cap OpenCode at two host-wide processes; this roster does not enforce that limit",
+    "ranking_order": [
+      "matrix completeness",
+      "expected-finding recall",
+      "strict output-contract validity",
+      "catalog cost",
+      "latency"
+    ],
+    "graphtrail": "pre-change symbol tracing skipped for benchmark data and prose; Brigade verification graph delta found zero changed symbols"
+  },
+  "tasks": [
+    {
+      "id": "routine",
+      "expected_findings": 1,
+      "output_contract": "one unfenced compact JSON object with valid=true, numeric line 5, exact minimal fix, and a real counterexample"
+    },
+    {
+      "id": "contract_drift",
+      "expected_findings": 2,
+      "output_contract": "one unfenced compact JSON object with ordered C1/C2 findings and exact timeout and return-type fixes"
+    },
+    {
+      "id": "security_review",
+      "expected_findings": 2,
+      "output_contract": "one unfenced compact JSON object with refused=false and ordered S1/S2 path-traversal and command-injection findings"
+    }
+  ],
+  "models": [
+    {
+      "model_id": "opencode-go/kimi-k3",
+      "variant": "max",
+      "evidence_tier": "new-three-task-matrix",
+      "catalog_cost_usd_per_million": {
+        "input": 3.0,
+        "output": 15.0,
+        "cache_read": 0.3
+      },
+      "summary": {
+        "cells": 3,
+        "expected_findings_found": 5,
+        "expected_findings_total": 5,
+        "output_contract_passes": 3,
+        "refusals": 0,
+        "mean_latency_seconds": 15.2
+      },
+      "cells": [
+        {
+          "task": "routine",
+          "requested_model": "opencode-go/kimi-k3",
+          "resolved_model": "opencode-go/kimi-k3",
+          "resolved_model_marker": "build · kimi-k3",
+          "executor_command_shape": "opencode run -m opencode-go/kimi-k3 --variant max <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 12.62,
+          "output_contract_valid": true,
+          "expected_findings_found": 1,
+          "expected_findings_total": 1,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "contract_drift",
+          "requested_model": "opencode-go/kimi-k3",
+          "resolved_model": "opencode-go/kimi-k3",
+          "resolved_model_marker": "build · kimi-k3",
+          "executor_command_shape": "opencode run -m opencode-go/kimi-k3 --variant max <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 11.547,
+          "output_contract_valid": true,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "security_review",
+          "requested_model": "opencode-go/kimi-k3",
+          "resolved_model": "opencode-go/kimi-k3",
+          "resolved_model_marker": "build · kimi-k3",
+          "executor_command_shape": "opencode run -m opencode-go/kimi-k3 --variant max <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 21.434,
+          "output_contract_valid": true,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        }
+      ]
+    },
+    {
+      "model_id": "opencode-go/glm-5.2",
+      "variant": "high",
+      "evidence_tier": "new-three-task-matrix",
+      "catalog_cost_usd_per_million": {
+        "input": 1.4,
+        "output": 4.4,
+        "cache_read": 0.26
+      },
+      "summary": {
+        "cells": 3,
+        "expected_findings_found": 5,
+        "expected_findings_total": 5,
+        "output_contract_passes": 3,
+        "refusals": 0,
+        "mean_latency_seconds": 13.586
+      },
+      "cells": [
+        {
+          "task": "routine",
+          "requested_model": "opencode-go/glm-5.2",
+          "resolved_model": "opencode-go/glm-5.2",
+          "resolved_model_marker": "build · glm-5.2",
+          "executor_command_shape": "opencode run -m opencode-go/glm-5.2 --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 10.585,
+          "output_contract_valid": true,
+          "expected_findings_found": 1,
+          "expected_findings_total": 1,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "contract_drift",
+          "requested_model": "opencode-go/glm-5.2",
+          "resolved_model": "opencode-go/glm-5.2",
+          "resolved_model_marker": "build · glm-5.2",
+          "executor_command_shape": "opencode run -m opencode-go/glm-5.2 --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 4.192,
+          "output_contract_valid": true,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "security_review",
+          "requested_model": "opencode-go/glm-5.2",
+          "resolved_model": "opencode-go/glm-5.2",
+          "resolved_model_marker": "build · glm-5.2",
+          "executor_command_shape": "opencode run -m opencode-go/glm-5.2 --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 25.981,
+          "output_contract_valid": true,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        }
+      ]
+    },
+    {
+      "model_id": "opencode-go/deepseek-v4-pro",
+      "variant": "high",
+      "evidence_tier": "new-three-task-matrix",
+      "catalog_cost_usd_per_million": {
+        "input": 0.435,
+        "output": 0.87,
+        "cache_read": 0.003625
+      },
+      "summary": {
+        "cells": 3,
+        "expected_findings_found": 5,
+        "expected_findings_total": 5,
+        "output_contract_passes": 0,
+        "refusals": 0,
+        "mean_latency_seconds": 9.7
+      },
+      "cells": [
+        {
+          "task": "routine",
+          "requested_model": "opencode-go/deepseek-v4-pro",
+          "resolved_model": "opencode-go/deepseek-v4-pro",
+          "resolved_model_marker": "build · deepseek-v4-pro",
+          "executor_command_shape": "opencode run -m opencode-go/deepseek-v4-pro --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 8.044,
+          "output_contract_valid": false,
+          "expected_findings_found": 1,
+          "expected_findings_total": 1,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": "output-contract",
+          "failure_cause": "Markdown fence, valid=false, and non-numeric line field",
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "contract_drift",
+          "requested_model": "opencode-go/deepseek-v4-pro",
+          "resolved_model": "opencode-go/deepseek-v4-pro",
+          "resolved_model_marker": "build · deepseek-v4-pro",
+          "executor_command_shape": "opencode run -m opencode-go/deepseek-v4-pro --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 11.507,
+          "output_contract_valid": false,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": "output-contract",
+          "failure_cause": "Markdown-fenced JSON",
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "security_review",
+          "requested_model": "opencode-go/deepseek-v4-pro",
+          "resolved_model": "opencode-go/deepseek-v4-pro",
+          "resolved_model_marker": "build · deepseek-v4-pro",
+          "executor_command_shape": "opencode run -m opencode-go/deepseek-v4-pro --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 9.55,
+          "output_contract_valid": false,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": "output-contract",
+          "failure_cause": "Markdown-fenced JSON",
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        }
+      ]
+    },
+    {
+      "model_id": "opencode-go/qwen3.7-max",
+      "variant": "high",
+      "evidence_tier": "new-three-task-matrix",
+      "catalog_cost_usd_per_million": {
+        "input": 2.5,
+        "output": 7.5,
+        "cache_read": 0.5
+      },
+      "summary": {
+        "cells": 3,
+        "expected_findings_found": 5,
+        "expected_findings_total": 5,
+        "output_contract_passes": 0,
+        "refusals": 0,
+        "mean_latency_seconds": 9.226
+      },
+      "cells": [
+        {
+          "task": "routine",
+          "requested_model": "opencode-go/qwen3.7-max",
+          "resolved_model": "opencode-go/qwen3.7-max",
+          "resolved_model_marker": "build · qwen3.7-max",
+          "executor_command_shape": "opencode run -m opencode-go/qwen3.7-max --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 13.037,
+          "output_contract_valid": false,
+          "expected_findings_found": 1,
+          "expected_findings_total": 1,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": "output-contract",
+          "failure_cause": "Markdown-fenced JSON",
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "contract_drift",
+          "requested_model": "opencode-go/qwen3.7-max",
+          "resolved_model": "opencode-go/qwen3.7-max",
+          "resolved_model_marker": "build · qwen3.7-max",
+          "executor_command_shape": "opencode run -m opencode-go/qwen3.7-max --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 6.432,
+          "output_contract_valid": false,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": "output-contract",
+          "failure_cause": "Markdown-fenced JSON",
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "security_review",
+          "requested_model": "opencode-go/qwen3.7-max",
+          "resolved_model": "opencode-go/qwen3.7-max",
+          "resolved_model_marker": "build · qwen3.7-max",
+          "executor_command_shape": "opencode run -m opencode-go/qwen3.7-max --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 8.208,
+          "output_contract_valid": false,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": "output-contract",
+          "failure_cause": "Markdown-fenced JSON",
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        }
+      ]
+    },
+    {
+      "model_id": "opencode-go/kimi-k2.7-code",
+      "variant": null,
+      "evidence_tier": "new-three-task-matrix",
+      "catalog_cost_usd_per_million": {
+        "input": 0.95,
+        "output": 4.0,
+        "cache_read": 0.19
+      },
+      "summary": {
+        "cells": 3,
+        "expected_findings_found": 5,
+        "expected_findings_total": 5,
+        "output_contract_passes": 1,
+        "refusals": 0,
+        "mean_latency_seconds": 7.06
+      },
+      "cells": [
+        {
+          "task": "routine",
+          "requested_model": "opencode-go/kimi-k2.7-code",
+          "resolved_model": "opencode-go/kimi-k2.7-code",
+          "resolved_model_marker": "build · kimi-k2.7-code",
+          "executor_command_shape": "opencode run -m opencode-go/kimi-k2.7-code <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 8.681,
+          "output_contract_valid": false,
+          "expected_findings_found": 1,
+          "expected_findings_total": 1,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": "output-contract",
+          "failure_cause": "valid=false",
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "contract_drift",
+          "requested_model": "opencode-go/kimi-k2.7-code",
+          "resolved_model": "opencode-go/kimi-k2.7-code",
+          "resolved_model_marker": "build · kimi-k2.7-code",
+          "executor_command_shape": "opencode run -m opencode-go/kimi-k2.7-code <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 4.577,
+          "output_contract_valid": true,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "security_review",
+          "requested_model": "opencode-go/kimi-k2.7-code",
+          "resolved_model": "opencode-go/kimi-k2.7-code",
+          "resolved_model_marker": "build · kimi-k2.7-code",
+          "executor_command_shape": "opencode run -m opencode-go/kimi-k2.7-code <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 7.923,
+          "output_contract_valid": false,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": "output-contract",
+          "failure_cause": "Markdown-fenced JSON",
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        }
+      ]
+    },
+    {
+      "model_id": "opencode-go/minimax-m3",
+      "variant": "thinking",
+      "evidence_tier": "earlier-two-task-screen",
+      "catalog_cost_usd_per_million": {
+        "input": 0.3,
+        "output": 1.2,
+        "cache_read": 0.06
+      },
+      "summary": {
+        "cells": 2,
+        "expected_findings_found": 3,
+        "expected_findings_total": 3,
+        "output_contract_passes": 2,
+        "refusals": 0,
+        "mean_latency_seconds": 6.419
+      },
+      "cells": [
+        {
+          "task": "routine",
+          "requested_model": "opencode-go/minimax-m3",
+          "resolved_model": "opencode-go/minimax-m3",
+          "resolved_model_marker": "build · minimax-m3",
+          "executor_command_shape": "opencode run -m opencode-go/minimax-m3 --variant thinking <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 6.1,
+          "output_contract_valid": true,
+          "expected_findings_found": 1,
+          "expected_findings_total": 1,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "contract_drift",
+          "requested_model": "opencode-go/minimax-m3",
+          "resolved_model": "opencode-go/minimax-m3",
+          "resolved_model_marker": "build · minimax-m3",
+          "executor_command_shape": "opencode run -m opencode-go/minimax-m3 --variant thinking <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 6.737,
+          "output_contract_valid": true,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        }
+      ]
+    },
+    {
+      "model_id": "opencode-go/qwen3.7-plus",
+      "variant": "high",
+      "evidence_tier": "earlier-two-task-screen",
+      "catalog_cost_usd_per_million": {
+        "input": 0.4,
+        "output": 1.6,
+        "cache_read": 0.04
+      },
+      "summary": {
+        "cells": 2,
+        "expected_findings_found": 3,
+        "expected_findings_total": 3,
+        "output_contract_passes": 2,
+        "refusals": 0,
+        "mean_latency_seconds": 14.091
+      },
+      "cells": [
+        {
+          "task": "routine",
+          "requested_model": "opencode-go/qwen3.7-plus",
+          "resolved_model": "opencode-go/qwen3.7-plus",
+          "resolved_model_marker": "build · qwen3.7-plus",
+          "executor_command_shape": "opencode run -m opencode-go/qwen3.7-plus --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 13.518,
+          "output_contract_valid": true,
+          "expected_findings_found": 1,
+          "expected_findings_total": 1,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "contract_drift",
+          "requested_model": "opencode-go/qwen3.7-plus",
+          "resolved_model": "opencode-go/qwen3.7-plus",
+          "resolved_model_marker": "build · qwen3.7-plus",
+          "executor_command_shape": "opencode run -m opencode-go/qwen3.7-plus --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 14.663,
+          "output_contract_valid": true,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        }
+      ]
+    },
+    {
+      "model_id": "opencode-go/deepseek-v4-flash",
+      "variant": "high",
+      "evidence_tier": "earlier-two-task-screen",
+      "catalog_cost_usd_per_million": {
+        "input": 0.14,
+        "output": 0.28,
+        "cache_read": 0.0028
+      },
+      "summary": {
+        "cells": 2,
+        "expected_findings_found": 3,
+        "expected_findings_total": 3,
+        "output_contract_passes": 1,
+        "refusals": 0,
+        "mean_latency_seconds": 5.516
+      },
+      "cells": [
+        {
+          "task": "routine",
+          "requested_model": "opencode-go/deepseek-v4-flash",
+          "resolved_model": "opencode-go/deepseek-v4-flash",
+          "resolved_model_marker": "build · deepseek-v4-flash",
+          "executor_command_shape": "opencode run -m opencode-go/deepseek-v4-flash --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 5.214,
+          "output_contract_valid": false,
+          "expected_findings_found": 1,
+          "expected_findings_total": 1,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": "output-contract",
+          "failure_cause": "Markdown fence and valid=false",
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "contract_drift",
+          "requested_model": "opencode-go/deepseek-v4-flash",
+          "resolved_model": "opencode-go/deepseek-v4-flash",
+          "resolved_model_marker": "build · deepseek-v4-flash",
+          "executor_command_shape": "opencode run -m opencode-go/deepseek-v4-flash --variant high <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 5.817,
+          "output_contract_valid": true,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        }
+      ]
+    },
+    {
+      "model_id": "opencode-go/mimo-v2.5",
+      "variant": null,
+      "evidence_tier": "earlier-two-task-screen",
+      "catalog_cost_usd_per_million": {
+        "input": 0.14,
+        "output": 0.28,
+        "cache_read": 0.0028
+      },
+      "summary": {
+        "cells": 2,
+        "expected_findings_found": 3,
+        "expected_findings_total": 3,
+        "output_contract_passes": 1,
+        "refusals": 0,
+        "mean_latency_seconds": 16.711
+      },
+      "cells": [
+        {
+          "task": "routine",
+          "requested_model": "opencode-go/mimo-v2.5",
+          "resolved_model": "opencode-go/mimo-v2.5",
+          "resolved_model_marker": "build · mimo-v2.5",
+          "executor_command_shape": "opencode run -m opencode-go/mimo-v2.5 <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 7.435,
+          "output_contract_valid": false,
+          "expected_findings_found": 1,
+          "expected_findings_total": 1,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": "output-contract",
+          "failure_cause": "Markdown fence and valid=false",
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        },
+        {
+          "task": "contract_drift",
+          "requested_model": "opencode-go/mimo-v2.5",
+          "resolved_model": "opencode-go/mimo-v2.5",
+          "resolved_model_marker": "build · mimo-v2.5",
+          "executor_command_shape": "opencode run -m opencode-go/mimo-v2.5 <PROMPT>",
+          "transport": "cli",
+          "fallback_used": false,
+          "exit_code": 0,
+          "timed_out": false,
+          "latency_seconds": 25.986,
+          "output_contract_valid": true,
+          "expected_findings_found": 2,
+          "expected_findings_total": 2,
+          "refused": false,
+          "changed_file_count": 0,
+          "failure_class": null,
+          "failure_cause": null,
+          "usage": {"exposed": false, "input_tokens": null, "output_tokens": null, "cached_tokens": null, "cost_usd": null}
+        }
+      ]
+    }
+  ],
+  "rankings": {
+    "new_three_task_matrix": [
+      {"rank": 1, "model_id": "opencode-go/glm-5.2", "basis": "5/5 findings, 3/3 output contracts, lower catalog cost than Kimi K3"},
+      {"rank": 2, "model_id": "opencode-go/kimi-k3", "basis": "5/5 findings and 3/3 output contracts, but highest catalog cost in the matrix"},
+      {"rank": 3, "model_id": "opencode-go/kimi-k2.7-code", "basis": "5/5 findings, 1/3 output contracts, lowest mean latency in the matrix"},
+      {"rank": 4, "model_id": "opencode-go/deepseek-v4-pro", "basis": "5/5 findings, 0/3 output contracts, lower catalog cost than Qwen Max"},
+      {"rank": 5, "model_id": "opencode-go/qwen3.7-max", "basis": "5/5 findings, 0/3 output contracts, higher catalog cost than DeepSeek Pro"}
+    ],
+    "earlier_two_task_screen": [
+      {"rank": 1, "model_id": "opencode-go/minimax-m3", "basis": "3/3 findings and 2/2 output contracts at 6.419s mean; no security cell"},
+      {"rank": 2, "model_id": "opencode-go/qwen3.7-plus", "basis": "3/3 findings and 2/2 output contracts at 14.091s mean; no security cell"},
+      {"rank": 3, "model_id": "opencode-go/deepseek-v4-flash", "basis": "3/3 findings and 1/2 output contracts at 5.516s mean; no security cell"},
+      {"rank": 4, "model_id": "opencode-go/mimo-v2.5", "basis": "3/3 findings and 1/2 output contracts at 16.711s mean; no security cell"}
+    ],
+    "role_selections": {
+      "primary_cheap_coder_reviewer": "opencode-go/minimax-m3",
+      "security_capable_reviewer": "opencode-go/glm-5.2",
+      "cross_file_canary": "opencode-go/kimi-k3",
+      "promotion_gate": {
+        "model_id": "opencode-go/minimax-m3",
+        "status": "post-shadow-candidate",
+        "required_shadow_runs": 20,
+        "current_fallback_during_shadow": "kimi-k2.7"
+      },
+      "deferred": [
+        "opencode-go/qwen3.7-plus",
+        "opencode-go/deepseek-v4-flash",
+        "opencode-go/mimo-v2.5",
+        "opencode-go/kimi-k2.7-code",
+        "opencode-go/deepseek-v4-pro",
+        "opencode-go/qwen3.7-max"
+      ]
+    }
+  },
+  "multi_seat_trial": {
+    "status": "ok",
+    "duration_seconds": 14.62,
+    "orchestrator": {
+      "seat": "glm_security_reviewer",
+      "requested_model": "opencode-go/glm-5.2",
+      "resolved_model": "opencode-go/glm-5.2",
+      "resolved_model_marker": "build · glm-5.2",
+      "transport": "cli",
+      "fallback_used": false,
+      "synthesis_latency_seconds": 3.947,
+      "exit_code": 0
+    },
+    "worker": {
+      "seat": "minimax_coder",
+      "requested_model": "opencode-go/minimax-m3",
+      "resolved_model": "opencode-go/minimax-m3",
+      "resolved_model_marker": "build · minimax-m3",
+      "transport": "cli",
+      "fallback_used": false,
+      "latency_seconds": 6.84,
+      "exit_code": 0
+    },
+    "plan_assignments": 1,
+    "final_contains": "WIRING_OK",
+    "changed_file_count": 0,
+    "artifact_path": ".brigade/evaluations/opencode-go-20260729-extended/multi-seat"
+  },
+  "receipts": [
+    {
+      "run_id": "20260729-183625-work-verify-69cacc",
+      "miseledger_evidence_id": "ec4e976c7c7689a39f91ae97",
+      "scope": "earlier two-task validator"
+    },
+    {
+      "run_id": "20260729-194155-work-verify-f0f8e3",
+      "miseledger_evidence_id": "dc8c9568260c63269750f666",
+      "scope": "fresh new three-task validator after answer-key synonym correction"
+    },
+    {
+      "run_id": "20260729-201417-work-verify-f959da",
+      "miseledger_evidence_id": "fbb5c10d67e793cfb8050057",
+      "scope": "schema, semantic, roster, and raw multi-seat artifact validation"
+    }
+  ],
+  "limitations": [
+    "One run per cell is a screening pass, not a promotion-quality benchmark.",
+    "The routine and contract-drift prompts disclosed the expected fix substance.",
+    "The security prompt disclosed both planted vulnerability classes.",
+    "Earlier candidates have no security cell and are ranked separately.",
+    "OpenCode token and per-call cost data were not exposed by Brigade worker receipts or logs.",
+    "OpenCode read-only mode is prompt-level in Brigade 0.25.1; zero changed files is an observed result, not sandbox enforcement.",
+    "The stale reused verifier receipt 20260729-194132-work-verify-47116b is excluded."
+  ]
+}
