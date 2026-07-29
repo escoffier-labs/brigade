@@ -368,6 +368,16 @@ def test_invalid_raw_envelope_raises_event_chain_error():
     _assert_bounded_projection_error(excinfo)
 
 
+def test_invalid_envelope_diagnostic_excludes_rejected_value():
+    private_marker = "private-marker-568"
+    created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
+    invalid = {**created, "recorded_at": private_marker}
+    with pytest.raises(EventChainError) as excinfo:
+        project_run_snapshot(_minimal_base_snapshot(), [invalid], journal_present=True)
+    _assert_bounded_projection_error(excinfo)
+    assert private_marker not in excinfo.value.diagnostic
+
+
 def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_error():
     event = _golden_events()[0]
     mutated = replace(event, event_type="run.planning.started")

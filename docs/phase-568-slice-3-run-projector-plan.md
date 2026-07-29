@@ -357,7 +357,7 @@ Expected: collection fails with `ModuleNotFoundError: No module named 'brigade.r
 
 ## Task 2: production module
 
-- [ ] Create `src/brigade/run_projector.py` with exactly this content:
+- [x] Create `src/brigade/run_projector.py` with exactly this content:
 
 ```python
 """Pure run snapshot projector (issue #568, slice 3).
@@ -681,13 +681,13 @@ Implementation notes that resolve the spec's implicit corners (these are decisio
 - Every event in the sequence must map to a status. The mapping walk computes each event's status (raising `UnmappedEventTypeError` or `EventPayloadError` on the offending event) and keeps the final one, matching the spec's "nothing is skipped silently" rule.
 - Diagnostics follow the spec's bounded-error table: categories plus field names, event types, sequences, and expected value sets only. Raw payload values, envelope bytes, paths, and snapshot contents never appear. Bounding reuses `run_events._bound` (240 chars, ellipsis), the same cross-module reuse `run_lifecycle.py` already makes.
 
-- [ ] Run the focused suite and confirm the expected intermediate state:
+- [x] Run the focused suite and confirm the expected intermediate state:
 
 ```bash
 python3 -m pytest tests/test_run_projector.py -q
 ```
 
-Expected: 17 passed, 5 failed, and every failure is `Failed: missing golden fixture: .../golden-projection.base.json` from tests 1, 2, 5, 15, and 16. (Two tests are parametrized, so the 19 test functions collect as 22 items.) Any other failure is a real bug in the module. Fix it before continuing.
+Observed: 22 passed, 1 failed. The only failure was `Failed: missing golden base fixture: .../golden-projection.base.json` from the golden replay test. Any other failure is a real bug in the module.
 
 ## Task 3: golden base fixture
 
