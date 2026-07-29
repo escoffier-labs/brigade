@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
-from brigade import aboyeur, localio, proc, run_journal, run_lifecycle, runguard
+from brigade import aboyeur, localio, proc, run_checkpoint, run_journal, run_lifecycle, runguard
 from brigade import roster as roster_mod
 from brigade import run_projector
 from brigade import run_shadow  # RED: module does not exist yet
@@ -116,6 +117,75 @@ def _events(run_dir: Path) -> list[run_journal.RunEvent]:
     return run_journal.read_journal(_journal_path(run_dir)).events
 
 
+def _minimal_event_payload(event_type: str) -> dict[str, object]:
+    if event_type == "run.created":
+        return {"status": "started"}
+    if event_type == "run.completed":
+        return {"status": "ok"}
+    if event_type == "run.failed":
+        return {"status": "failed", "detail": "failed"}
+    if event_type == "run.interrupted":
+        return {"status": "canceled"}
+    return {}
+
+
+def _append_forged_checkpoint_status_pair(
+    repo: Path,
+    run_dir: Path,
+    *,
+    paired_event_type: str | None,
+    status_event_type: str,
+    snapshot_status: str,
+) -> None:
+    """Append a checkpoint+status pair that advances the tail by exactly two."""
+    with runguard.run_lock(repo, run_dir=run_dir):
+        report = run_journal.read_journal(_journal_path(run_dir))
+        prev_seq = report.events[-1].sequence
+        run_json_bytes = (run_dir / "run.json").read_bytes()
+        sha = hashlib.sha256(run_json_bytes).hexdigest()
+        paired = paired_event_type if paired_event_type is not None else "none"
+        checkpoint_payload = {
+            "path": f"events/{run_checkpoint.CHECKPOINT_DIR_NAME}/{sha}.json",
+            "sha256": sha,
+            "media_type": run_checkpoint.CHECKPOINT_MEDIA_TYPE,
+            "byte_size": len(run_json_bytes),
+            "privacy_class": run_checkpoint.CHECKPOINT_PRIVACY_CLASS,
+            "paired_event_type": paired_event_type,
+        }
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=_RUN_ID,
+            event_type=run_checkpoint.CHECKPOINT_EVENT_TYPE,
+            payload=checkpoint_payload,
+            idempotency_key=f"checkpoint-forged:{sha}:{paired}",
+            expected_previous_sequence=prev_seq,
+        )
+        report = run_journal.read_journal(_journal_path(run_dir))
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=_RUN_ID,
+            event_type=status_event_type,
+            payload=_minimal_event_payload(status_event_type),
+            idempotency_key=f"lifecycle:forged:{status_event_type}",
+            expected_previous_sequence=report.events[-1].sequence,
+        )
+        localio.write_json(
+            run_dir / "run.json",
+            _apply_lifecycle_request(run_dir, _run_payload(snapshot_status)),
+        )
+
+
+def _gap_records(data: dict[str, object]) -> list[dict[str, object]]:
+    recent = data.get("recent_records")
+    if not isinstance(recent, list):
+        return []
+    return [
+        record
+        for record in recent
+        if isinstance(record, dict) and record.get("outcome") == "error" and record.get("category") == "comparison-gap"
+    ]
+
+
 @pytest.fixture
 def enabled(monkeypatch):
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
@@ -175,7 +245,7 @@ def test_first_locked_write_records_match(enabled, tmp_path):
     assert data["mismatches"] == 0
     assert data["lags"] == 0
     assert data["errors"] == 0
-    assert data["last_compared_sequence"] == 1
+    assert data["last_compared_sequence"] == 2
     assert data["last_outcome"] == "match"
     assert data["last_shadow_digest"] == data["last_projected_digest"]
     assert data["last_differing_fields"] == []
@@ -209,8 +279,8 @@ def test_unmapped_status_after_handoff_is_lag(enabled, tmp_path):
     assert data["errors"] == 0
     assert data["last_outcome"] == "lag"
     assert data["last_differing_fields"] == ["status"]
-    # journal sequence unchanged by the unmapped write (slice 2 skips it)
-    assert data["last_compared_sequence"] == 6
+    # unmapped write appends a checkpoint event; status event is skipped
+    assert data["last_compared_sequence"] == 13
     report = run_shadow.check_projection_readiness(run_dir)
     assert report.ready is False
     assert REASON_STATUS_LAG_CURRENT in report.reasons
@@ -343,8 +413,8 @@ def test_crash_window_records_comparison_gap(enabled, tmp_path):
     run_dir = _run_dir(repo)
 
     _write_run_json(run_dir, "started")
-    _write_run_json_locked(repo, run_dir, "started")  # run.created, seq 1
-    _write_run_json_locked(repo, run_dir, "planning")  # run.planning.started, seq 2
+    _write_run_json_locked(repo, run_dir, "started")  # checkpoint seq 1, run.created seq 2
+    _write_run_json_locked(repo, run_dir, "planning")  # checkpoint seq 3, planning seq 4
 
     # Simulate a crash: append run.dispatch.requested (seq 3) directly to the
     # journal, write run.json directly so the shadow hook does NOT run, then
@@ -369,8 +439,8 @@ def test_crash_window_records_comparison_gap(enabled, tmp_path):
             },
         )
 
-    # Later locked write: shadow hook runs and detects the gap (tail seq 4
-    # vs prior last_compared_sequence 2, advanced by more than one).
+    # Later locked write: shadow hook runs and detects the gap (tail seq 7
+    # vs prior last_compared_sequence 4, advanced by more than one checkpoint+status write).
     _write_run_json_locked(repo, run_dir, "result-processing")
 
     data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
@@ -393,8 +463,8 @@ def test_absent_prior_evidence_with_tail_above_one_records_gap(enabled, tmp_path
     # Build a journal with two events but no shadow artifact, simulating a
     # crash that lost the first comparison.
     _write_run_json(run_dir, "started")
-    _write_run_json_locked(repo, run_dir, "started")  # run.created, seq 1
-    _write_run_json_locked(repo, run_dir, "planning")  # run.planning.started, seq 2
+    _write_run_json_locked(repo, run_dir, "started")  # checkpoint seq 1, run.created seq 2
+    _write_run_json_locked(repo, run_dir, "planning")  # checkpoint seq 3, planning seq 4
     # Remove the artifact so the next comparison sees no prior evidence.
     run_shadow.shadow_artifact_path(run_dir).unlink()
     # Advance the journal one more step without the hook running.
@@ -418,7 +488,7 @@ def test_absent_prior_evidence_with_tail_above_one_records_gap(enabled, tmp_path
             },
         )
 
-    # Direct call: prior evidence absent, tail seq == 3 > 1 -> comparison-gap.
+    # Direct call: prior evidence absent, tail seq == 5 > 2 -> comparison-gap.
     run_shadow.record_shadow_comparison(
         run_dir,
         {
@@ -534,12 +604,14 @@ def test_gate_reason_coverage(tmp_path):
     data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
     data["schema"] = "brigade.run_shadow.v1"
     data["run_id"] = "other"
+    data["projector_version"] = 2
     run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
     assert REASON_EVIDENCE_SCHEMA_MISMATCH in run_shadow.check_projection_readiness(run_dir).reasons
 
     # Zero comparisons.
     data["run_id"] = _RUN_ID
     data["comparisons"] = 0
+    data["projector_version"] = 2
     run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
     assert REASON_NO_COMPARISONS in run_shadow.check_projection_readiness(run_dir).reasons
 
@@ -585,8 +657,8 @@ def test_changed_preserved_detail_records_fresh_match_at_same_tail(enabled, tmp_
     run_dir = _run_dir(repo)
 
     _write_run_json(run_dir, "started")
-    _write_run_json_locked(repo, run_dir, "started")  # run.created, seq 1
-    _write_run_json_locked(repo, run_dir, "planning")  # run.planning.started, seq 2
+    _write_run_json_locked(repo, run_dir, "started")  # checkpoint seq 1, run.created seq 2
+    _write_run_json_locked(repo, run_dir, "planning")  # checkpoint seq 3, planning seq 4
     artifact = run_shadow.shadow_artifact_path(run_dir)
     bytes_before = artifact.read_bytes()
     digests_before = (
@@ -607,7 +679,7 @@ def test_changed_preserved_detail_records_fresh_match_at_same_tail(enabled, tmp_
     data = json.loads(artifact.read_text())
     assert data["comparisons"] == 3
     assert data["matches"] == 3
-    assert data["last_compared_sequence"] == 2  # journal tail unchanged
+    assert data["last_compared_sequence"] == 5  # checkpoint appended for detail refresh
     assert (data["last_shadow_digest"], data["last_projected_digest"]) != digests_before
     assert data["last_shadow_digest"] == data["last_projected_digest"]
 
@@ -627,7 +699,7 @@ def test_full_mapped_chain_records_seven_matches(enabled, tmp_path):
     assert data["mismatches"] == 0
     assert data["lags"] == 0
     assert data["errors"] == 0
-    assert data["last_compared_sequence"] == 7
+    assert data["last_compared_sequence"] == 14
     assert data["last_outcome"] == "match"
     report = run_shadow.check_projection_readiness(run_dir)
     assert report.ready is True
@@ -744,7 +816,7 @@ def test_run_journal_error_in_shadow_is_contained(enabled, tmp_path, monkeypatch
 
     def raising_read(path):
         calls["n"] += 1
-        if calls["n"] >= 2:
+        if calls["n"] >= 3:
             raise run_journal.RunJournalError("simulated chain failure")
         return original_read(path)
 
@@ -888,7 +960,7 @@ def test_same_tail_different_unmapped_status_counts_distinct_lags(enabled, tmp_p
     data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
     assert data["lags"] == 2
     assert data["last_outcome"] == "lag"
-    assert data["last_compared_sequence"] == 6
+    assert data["last_compared_sequence"] == 12
 
 
 def test_non_run_json_write_leaves_artifact_untouched(enabled, tmp_path):
@@ -904,3 +976,154 @@ def test_non_run_json_write_leaves_artifact_untouched(enabled, tmp_path):
     aboyeur._write_json(run_dir / "roster.json", {"orchestrator": "chef"})
 
     assert artifact.read_bytes() == bytes_before
+
+
+def test_invalid_plus_two_suffix_null_paired_records_comparison_gap(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+    _append_forged_checkpoint_status_pair(
+        repo,
+        run_dir,
+        paired_event_type=None,
+        status_event_type="run.planning.started",
+        snapshot_status="planning",
+    )
+
+    run_shadow.record_shadow_comparison(
+        run_dir,
+        {
+            "schema": "brigade.run.v1",
+            "schema_version": 1,
+            "status": "planning",
+            "task": "forged-null-paired",
+        },
+    )
+
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert _gap_records(data)
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_ERROR_RECORDED in report.reasons
+
+
+def test_invalid_plus_two_suffix_mismatched_paired_records_comparison_gap(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+    _append_forged_checkpoint_status_pair(
+        repo,
+        run_dir,
+        paired_event_type="run.planning.started",
+        status_event_type="run.dispatch.requested",
+        snapshot_status="dispatching",
+    )
+
+    run_shadow.record_shadow_comparison(
+        run_dir,
+        {
+            "schema": "brigade.run.v1",
+            "schema_version": 1,
+            "status": "dispatching",
+            "task": "forged-mismatched-paired",
+        },
+    )
+
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert _gap_records(data)
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_ERROR_RECORDED in report.reasons
+
+
+def test_invalid_plus_two_suffix_unmapped_successor_records_comparison_gap(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+    _append_forged_checkpoint_status_pair(
+        repo,
+        run_dir,
+        paired_event_type="run.created",
+        status_event_type="run.paused",
+        snapshot_status="planning",
+    )
+
+    run_shadow.record_shadow_comparison(
+        run_dir,
+        {
+            "schema": "brigade.run.v1",
+            "schema_version": 1,
+            "status": "planning",
+            "task": "forged-unmapped-successor",
+        },
+    )
+
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert _gap_records(data)
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_ERROR_RECORDED in report.reasons
+
+
+def test_second_mapped_write_does_not_record_comparison_gap(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # checkpoint seq 1, run.created seq 2
+    _write_run_json_locked(repo, run_dir, "planning")  # checkpoint seq 3, planning seq 4
+
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    gap_records = [r for r in data["recent_records"] if r["outcome"] == "error" and r["category"] == "comparison-gap"]
+    assert not gap_records
+    assert data["errors"] == 0
+    assert data["matches"] == 2
+    assert data["last_compared_sequence"] == 4
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is True
+    assert report.reasons == ()
+
+
+def test_version_one_shadow_artifact_is_stale(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    data = json.loads(artifact.read_text())
+    data["projector_version"] = 1
+    artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_EVIDENCE_SCHEMA_MISMATCH in report.reasons
+
+
+def test_version_two_artifact_with_checkpoint_tail_reads_ready_when_bytes_match(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+
+    events = _events(run_dir)
+    assert events[-1].event_type == "run.created"
+    assert events[0].event_type == "run.snapshot.checkpointed"
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    data = json.loads(artifact.read_text())
+    assert data["projector_version"] == 2
+    assert data["last_compared_sequence"] == 2
+    assert data["last_outcome"] == "match"
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is True
+    assert report.reasons == ()

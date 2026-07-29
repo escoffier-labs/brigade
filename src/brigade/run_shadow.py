@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from brigade import localio, run_events, run_journal, run_lifecycle, run_projector
+from brigade import localio, run_checkpoint, run_events, run_journal, run_lifecycle, run_projector
 
 SHADOW_SCHEMA: str = "brigade.run_shadow.v1"
 SHADOW_SCHEMA_VERSION: int = 1
@@ -159,6 +159,53 @@ def _append_evidence_unreadable(data: dict[str, Any], tail_seq: int | None, tail
     )
 
 
+def _checkpoint_status_write_gap(
+    run_dir: Path,
+    *,
+    prior_seq: int | None,
+    tail_seq: int,
+) -> bool:
+    """Return True when ``tail_seq`` advanced by exactly one checkpoint+status write.
+
+    A normal activated-journal mapped transition appends ``run.snapshot.checkpointed``
+    immediately before the mapped status event, so the journal tail can jump by two
+    sequences between comparisons without a skipped shadow step.
+    """
+    if prior_seq is None:
+        if tail_seq != 2:
+            return False
+        expected_checkpoint_seq = 1
+        expected_status_seq = 2
+    elif tail_seq != prior_seq + 2:
+        return False
+    else:
+        expected_checkpoint_seq = prior_seq + 1
+        expected_status_seq = tail_seq
+    try:
+        journal_report = run_journal.read_journal(run_lifecycle._journal_path(run_dir))
+    except (OSError, run_journal.RunJournalError):
+        return False
+    if journal_report.partial_tail is not None or journal_report.chain_errors:
+        return False
+    events = journal_report.events
+    if len(events) < expected_status_seq:
+        return False
+    checkpoint = events[expected_checkpoint_seq - 1]
+    status_event = events[expected_status_seq - 1]
+    if checkpoint.sequence != expected_checkpoint_seq:
+        return False
+    if checkpoint.event_type != run_checkpoint.CHECKPOINT_EVENT_TYPE:
+        return False
+    if status_event.sequence != expected_status_seq:
+        return False
+    paired_event_type = checkpoint.payload.get("paired_event_type")
+    if not isinstance(paired_event_type, str):
+        return False
+    if status_event.event_type != paired_event_type:
+        return False
+    return paired_event_type in run_lifecycle.STATUS_EVENT_TYPE.values()
+
+
 def _append_gap_record(data: dict[str, Any], tail_seq: int, tail_digest: str | None) -> None:
     now = localio.utc_now_iso()
     data["comparisons"] = int(data.get("comparisons", 0) or 0) + 1
@@ -220,9 +267,12 @@ def _record_outcome(
     # the tail is already beyond the first transition.
     prior_seq = data.get("last_compared_sequence")
     if isinstance(tail_seq, int):
+        gap = False
         if isinstance(prior_seq, int) and tail_seq > prior_seq + 1:
-            _append_gap_record(data, tail_seq, tail_digest)
+            gap = not _checkpoint_status_write_gap(run_dir, prior_seq=prior_seq, tail_seq=tail_seq)
         elif prior_seq is None and tail_seq > 1:
+            gap = not _checkpoint_status_write_gap(run_dir, prior_seq=None, tail_seq=tail_seq)
+        if gap:
             _append_gap_record(data, tail_seq, tail_digest)
     data["comparisons"] = int(data.get("comparisons", 0) or 0) + 1
     if outcome == OUTCOME_MATCH:
@@ -440,6 +490,7 @@ def check_projection_readiness(run_dir: Path) -> ReadinessReport:
             data.get("schema") != SHADOW_SCHEMA
             or data.get("schema_version") != SHADOW_SCHEMA_VERSION
             or data.get("run_id") != run_dir.name
+            or data.get("projector_version") != run_projector.PROJECTOR_VERSION
             or data.get("last_outcome") not in _OUTCOMES
         ):
             return ReadinessReport(ready=False, reasons=(REASON_EVIDENCE_SCHEMA_MISMATCH,))

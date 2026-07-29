@@ -24,9 +24,9 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from brigade import run_events, run_journal
+from brigade import run_checkpoint, run_events, run_journal
 
-PROJECTOR_VERSION: int = 1
+PROJECTOR_VERSION: int = 2
 
 # Field ownership over the run.json contract. Every current run.json key is
 # in exactly one of these two sets; see the ownership inventory in
@@ -248,10 +248,14 @@ def _derive_status(envelopes: list[Mapping[str, Any]], base_status: Any) -> str:
         if not isinstance(base_status, str):
             raise ProjectionInputError(_bound("base snapshot status must be a string when the event sequence is empty"))
         return base_status
-    status = ""
+    if not isinstance(base_status, str):
+        raise ProjectionInputError(_bound("base snapshot status must be a string when projecting events"))
+    status = base_status
     for env in envelopes:
         event_type = env["event_type"]
         sequence = env["sequence"]
+        if event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE:
+            continue
         if event_type in EVENT_STATUS:
             status = EVENT_STATUS[event_type]
             continue
