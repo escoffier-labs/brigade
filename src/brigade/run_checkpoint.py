@@ -21,6 +21,7 @@ import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping
+from uuid import uuid4
 
 from brigade import run_events, run_journal, runguard
 from brigade.run_events import _HEX64, _bound
@@ -593,3 +594,255 @@ def write_checkpoint(
         raise run_lifecycle._bound_journal_failure(exc) from exc
     except OSError as exc:
         raise run_lifecycle._bound_journal_failure(exc) from exc
+
+
+# -- Checkpoint-backed recovery (issue #568 slice 5, Task 5) -------------------
+
+
+def latest_checkpoint_event(events: list["run_journal.RunEvent"]) -> "run_journal.RunEvent | None":
+    """Select the highest-sequence ``run.snapshot.checkpointed`` event.
+
+    Returns ``None`` when ``events`` is empty or contains no checkpoint
+    events. Otherwise returns the checkpoint event with the largest
+    ``sequence`` value. Sequence uniqueness is enforced by the journal
+    reader, so a tie is not a concern here.
+    """
+    latest: run_journal.RunEvent | None = None
+    for event in events:
+        if event.event_type != CHECKPOINT_EVENT_TYPE:
+            continue
+        if latest is None or event.sequence > latest.sequence:
+            latest = event
+    return latest
+
+
+def _restore_run_json_from_checkpoint(
+    run_dir: Path,
+    checkpoint_bytes: bytes,
+    *,
+    run_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Restore ``run.json`` from verified checkpoint bytes when needed.
+
+    Restores only when ``run_meta`` is ``None`` (run.json missing or
+    unparseable). A present-but-corrupt run.json is preserved by renaming
+    it to ``run.json.corrupt-<uuid>`` before the atomic replacement; a
+    rename ``OSError`` is translated to a bounded ``CheckpointError``
+    with category ``preserve-corrupt`` so the corrupt original is never
+    silently overwritten. The restore uses ``localio.write_text_atomic``
+    so a reader never observes a half-written file. Returns the parsed
+    checkpoint mapping. When ``run_meta`` is already a dict the run.json
+    is left untouched and the parsed checkpoint mapping is returned.
+    """
+    from brigade import localio  # lazy: keep the import local for stdlib-only surface
+
+    try:
+        repaired = json.loads(checkpoint_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise CheckpointError(_bound("checkpoint bytes are not valid JSON"), category="json-object") from exc
+    if not isinstance(repaired, dict):
+        raise CheckpointError(_bound("checkpoint is not a JSON object"), category="json-object")
+    if run_meta is not None:
+        return repaired
+    run_json = run_dir / "run.json"
+    if run_json.is_file():
+        # Preserve the corrupt original before replacing it.
+        backup = run_json.with_name(f"run.json.corrupt-{uuid4().hex}")
+        try:
+            run_json.rename(backup)
+        except OSError as exc:
+            raise CheckpointError(_bound("could not preserve corrupt run.json"), category="preserve-corrupt") from exc
+    try:
+        localio.write_text_atomic(run_json, checkpoint_bytes.decode("utf-8"))
+    except OSError as exc:
+        raise CheckpointError(_bound("could not restore run.json from checkpoint"), category="restore-write") from exc
+    return repaired
+
+
+def _parse_checkpoint_object(checkpoint_bytes: bytes) -> dict[str, Any]:
+    """Parse verified checkpoint bytes into a dict for coverage derivation.
+
+    ``validate_checkpoint`` already proved the bytes are valid UTF-8 JSON
+    equal to the writer canonical encoding, so this parse cannot fail on
+    well-formed input. A defensive failure (e.g. concurrent in-place
+    mutation between validate and parse on a path that bypassed the
+    single-link fd check) surfaces a bounded ``CheckpointError`` rather
+    than a raw ``ValueError``. Returns the parsed mapping.
+    """
+    try:
+        obj = json.loads(checkpoint_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise CheckpointError(_bound("checkpoint bytes are not valid JSON"), category="json-object") from exc
+    if not isinstance(obj, dict):
+        raise CheckpointError(_bound("checkpoint is not a JSON object"), category="json-object")
+    return obj
+
+
+def _paired_event_derived_status(event: "run_journal.RunEvent") -> str | None:
+    """Derive the run.json status a paired lifecycle status event carries.
+
+    Reuses the canonical ``run_projector`` event-to-status tables
+    (``EVENT_STATUS`` and ``_PAYLOAD_STATUS_RULES``) with no duplicate
+    mapping. Returns the derived status, or ``None`` when the event has no
+    derivable status (an unmapped type or a payload-driven row whose
+    payload status is missing/disallowed). A ``None`` result means the
+    paired event cannot match any checkpoint status, so the caller treats
+    it as an uncovered tail.
+    """
+    from brigade import run_projector  # lazy: avoid import cycle
+
+    event_type = event.event_type
+    if event_type in run_projector.EVENT_STATUS:
+        return run_projector.EVENT_STATUS[event_type]
+    rule = run_projector._PAYLOAD_STATUS_RULES.get(event_type)
+    if rule is None:
+        return None
+    allowed, derived = rule
+    payload_status = event.payload.get("status") if isinstance(event.payload, Mapping) else None
+    if payload_status not in allowed:
+        return None
+    return derived if derived is not None else payload_status
+
+
+def _verify_coverage(
+    events: list["run_journal.RunEvent"],
+    latest: "run_journal.RunEvent",
+    checkpoint_obj: Mapping[str, Any],
+) -> None:
+    """Verify the latest checkpoint covers the journal tail (issue #568 slice 5).
+
+    The latest checkpoint event at sequence N covers either itself as the
+    tail, or exactly one immediately following event at N+1 whose
+    ``event_type`` equals the checkpoint's ``paired_event_type`` and whose
+    derived status equals the status in the validated checkpoint bytes.
+    When ``paired_event_type`` is null, the checkpoint covers only itself
+    as the tail. Anything else fails uncovered-tail. ``checkpoint_obj`` is
+    the parsed validated checkpoint bytes; its ``status`` is the authoritative
+    status the paired event must derive to.
+    """
+    paired_event_type = latest.payload.get("paired_event_type")
+    tail = events[-1]
+    if latest.sequence == tail.sequence:
+        # Checkpoint is the tail. Covered for both null and non-null
+        # paired_event_type (a crash before the paired status append).
+        return
+    if paired_event_type is None:
+        # Null pairing covers only checkpoint-at-tail; any following event
+        # is uncovered.
+        raise CheckpointError(_bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail")
+    # Exactly one immediately following event must exist at N+1.
+    following = [e for e in events if e.sequence == latest.sequence + 1]
+    if len(following) != 1 or following[0].sequence != tail.sequence:
+        # Two or more events after the checkpoint (or a non-contiguous tail).
+        raise CheckpointError(_bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail")
+    paired = following[0]
+    if paired.event_type != paired_event_type:
+        raise CheckpointError(_bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail")
+    derived = _paired_event_derived_status(paired)
+    checkpoint_status = checkpoint_obj.get("status")
+    if not isinstance(checkpoint_status, str) or derived != checkpoint_status:
+        raise CheckpointError(_bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail")
+
+
+def recover_from_checkpoint(
+    run_dir: Path,
+    run_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Validate the lifecycle journal and restore run.json from the latest checkpoint.
+
+    Reads the journal with byte/event bounds (``read_journal_bounded``),
+    quarantining a partial tail via ``recover_partial_tail`` and re-reading
+    before any derivation. Enforces a gap-free, contiguous sequence
+    starting at 1 with correct previous-digest chaining (reported by the
+    bounded reader as ``chain_errors``), a single journal ``run_id``
+    equal to the run directory name across every envelope, highest
+    checkpoint validity (``validate_checkpoint``), event/checkpoint/
+    directory ``run_id`` equality, and checkpoint coverage of the journal
+    tail. The checkpoint bytes are validated before their status is used.
+    The latest checkpoint event at sequence N covers itself as the tail,
+    or exactly one immediately following event at N+1 whose ``event_type``
+    equals the checkpoint's ``paired_event_type`` and whose derived status
+    equals the status in the validated checkpoint bytes. A null
+    ``paired_event_type`` covers only checkpoint-at-tail. Anything else
+    fails uncovered-tail.
+
+    Restores ``run.json`` only when it is missing or unparseable
+    (``run_meta is None``); a corrupt original is preserved by rename and
+    the restore uses ``localio.write_text_atomic``. Returns the repaired
+    validated mapping parsed from the verified checkpoint bytes. Raises
+    ``CheckpointError`` (bounded, categorized) on any validation or
+    restoration failure; nothing is restored on failure.
+    """
+    from brigade import localio  # noqa: F401  (kept for symmetry with the restore helper)
+    from brigade import run_lifecycle  # lazy: avoid circular import
+
+    try:
+        run_dir = Path(run_dir).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise CheckpointError(_bound("could not resolve run directory"), category="path-resolve") from exc
+    run_id = run_dir.name
+    journal_path = run_lifecycle._journal_path(run_dir)
+    if not journal_path.is_file():
+        raise CheckpointError(_bound("lifecycle journal not found"), category="no-journal")
+
+    try:
+        report = run_journal.read_journal_bounded(journal_path)
+    except run_journal.RunJournalError as exc:
+        raise CheckpointError(_bound(f"could not read journal: {exc.diagnostic}"), category="journal-read") from exc
+    except OSError as exc:
+        raise CheckpointError(_bound("could not read journal"), category="journal-read") from exc
+    if report.partial_tail is not None:
+        quarantine_dir = run_dir / "events" / "quarantine"
+        try:
+            run_journal.recover_partial_tail(journal_path, quarantine_dir)
+        except run_journal.RunJournalError as exc:
+            raise CheckpointError(
+                _bound(f"could not quarantine partial tail: {exc.diagnostic}"), category="partial-tail"
+            ) from exc
+        except OSError as exc:
+            raise CheckpointError(_bound("could not quarantine partial tail"), category="partial-tail") from exc
+        try:
+            report = run_journal.read_journal_bounded(journal_path)
+        except run_journal.RunJournalError as exc:
+            raise CheckpointError(
+                _bound(f"could not reread journal: {exc.diagnostic}"), category="journal-read"
+            ) from exc
+        except OSError as exc:
+            raise CheckpointError(_bound("could not reread journal"), category="journal-read") from exc
+        if report.partial_tail is not None:
+            raise CheckpointError(_bound("partial tail persisted after quarantine"), category="partial-tail")
+    if report.chain_errors:
+        raise CheckpointError(_bound("journal chain is not derivable"), category="chain")
+    if not report.events:
+        raise CheckpointError(_bound("journal has no events"), category="empty-journal")
+
+    expected_sequence = 1
+    expected_previous: str | None = None
+    for event in report.events:
+        if event.sequence != expected_sequence:
+            raise CheckpointError(_bound("journal sequence break"), category="chain")
+        if event.sequence == 1:
+            if event.previous_digest is not None:
+                raise CheckpointError(_bound("sequence 1 previous_digest must be null"), category="chain")
+        elif event.previous_digest != expected_previous:
+            raise CheckpointError(_bound("journal previous_digest does not link"), category="chain")
+        if event.run_id != run_id:
+            raise CheckpointError(_bound("journal run_id does not match run directory"), category="run-id-mismatch")
+        expected_sequence = event.sequence + 1
+        expected_previous = event.event_digest
+
+    latest = latest_checkpoint_event(report.events)
+    if latest is None:
+        raise CheckpointError(_bound("no checkpoint event in journal"), category="no-checkpoint")
+    if latest.run_id != run_id:
+        raise CheckpointError(_bound("checkpoint run_id does not match run directory"), category="run-id-mismatch")
+
+    # Validate the checkpoint bytes BEFORE using their status. The coverage
+    # check reads the status from the checkpointed run.json bytes, so the
+    # bytes must be verified first. Restoration stays validation-before-
+    # mutation: every validation (payload, fd, chain, coverage) completes
+    # before the only mutation (the restore write).
+    checkpoint_bytes = validate_checkpoint(run_dir, latest)
+    checkpoint_obj = _parse_checkpoint_object(checkpoint_bytes)
+    _verify_coverage(report.events, latest, checkpoint_obj)
+    return _restore_run_json_from_checkpoint(run_dir, checkpoint_bytes, run_meta=run_meta)

@@ -1,9 +1,14 @@
+import errno
 import json
 import os
 import time as system_time
 from pathlib import Path
 
 from brigade import cli
+from brigade import run_checkpoint
+from brigade import run_events
+from brigade import run_journal
+from brigade import run_lifecycle
 from brigade import runguard
 from brigade import runs_cmd
 
@@ -1030,3 +1035,626 @@ def test_runs_show_without_ground_truth_stays_quiet(tmp_path, capsys):
 
     assert runs_cmd.show(run_dir) == 0
     assert "ground truth" not in capsys.readouterr().out
+
+
+# -- Issue #568 slice 5 Task 5: checkpoint-backed runs recover integration --
+
+
+_RUN_ID = "20260727-153045-a1b2c3d4"
+_RECORDED_AT = "2026-07-27T15:30:45.123456Z"
+
+
+def _writer_bytes(obj: dict) -> bytes:
+    return (json.dumps(obj, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _activate_journal_with_checkpoint(
+    workspace: Path,
+    run_dir: Path,
+    run_json_obj: dict,
+    *,
+    paired_event_type: str | None = "run.planning.started",
+) -> None:
+    """Build an activated lifecycle journal ending in a checkpoint event.
+
+    Bootstraps run.json with the durable request, then under a live run lock
+    activates the journal and appends one ``run.snapshot.checkpointed``
+    event (the recoverable state: crash after the checkpoint publish+append
+    but before the paired status append). Finally replaces the lock owner
+    with a dead pid so ``runs_cmd.recover`` sees a stale matching lock.
+    """
+    runs_dir = run_dir.parent
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    localio = _localio()
+    localio.write_json(
+        run_dir / "run.json",
+        {"schema": "brigade.run.v1", **run_json_obj, "lifecycle_journal_requested": True},
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            _writer_bytes(run_json_obj),
+            workspace=workspace,
+            paired_event_type=paired_event_type,
+        )
+    _write_lock_owner(workspace, run_dir, pid=99999999)
+
+
+def _localio():
+    from brigade import localio
+
+    return localio
+
+
+def _journal_path(run_dir: Path) -> Path:
+    return run_dir / "events" / "lifecycle.jsonl"
+
+
+def _events(run_dir: Path) -> list:
+    return run_journal.read_journal(_journal_path(run_dir)).events
+
+
+def _overwrite_lock_owner(workspace, run_dir, *, pid, owner_token="owner"):
+    """Overwrite an existing run.lock's owner metadata in place (no mkdir)."""
+    lock_path = workspace / ".brigade" / "run.lock"
+    (lock_path / "pid").write_text(f"{pid}\n")
+    _write_json(
+        lock_path / "owner.json",
+        {
+            "schema": "brigade.run_lock.v1",
+            "owner_token": owner_token,
+            "pid": pid,
+            "run_dir": str(run_dir.resolve()),
+            "acquired_at": "2026-07-16T00:00:00+00:00",
+        },
+    )
+    return lock_path
+
+
+def test_runs_recover_restores_missing_run_json_from_latest_checkpoint(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {
+        "status": "planning",
+        "task": "demo task",
+        "cwd": str(workspace),
+        "orchestrator": "chef",
+    }
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    assert not (run_dir / "run.json").exists()
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure_phase"] == "stale-lock-recovery"
+    # Restored receipt fields are preserved through terminalization.
+    assert recovered["task"] == "demo task"
+    assert recovered["orchestrator"] == "chef"
+    assert f"recovered: {run_dir}" in capsys.readouterr().out
+
+
+def test_runs_recover_preserves_corrupt_run_json_and_restores_from_checkpoint(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo task", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").write_text("not json")
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["task"] == "demo task"
+    preserved = list(run_dir.glob("run.json.corrupt-*"))
+    assert len(preserved) == 1
+    assert preserved[0].read_text() == "not json"
+
+
+def test_runs_recover_terminalization_preserves_restored_receipt_fields(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {
+        "status": "dispatching",
+        "task": "inspect",
+        "cwd": str(workspace),
+        "orchestrator": "chef",
+        "active_seats": ["coder"],
+        "duration_seconds": 5,
+    }
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure_phase"] == "stale-lock-recovery"
+    assert recovered["task"] == "inspect"
+    assert recovered["orchestrator"] == "chef"
+    assert recovered["duration_seconds"] == 5
+    assert recovered["failure"]["prior_status"] == "dispatching"
+
+
+def test_runs_recover_quarantines_partial_journal_tail_then_verifies(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    journal = _journal_path(run_dir)
+    partial = b'{"schema":"brigade.run_event.v1","event_type":"run.plan'
+    journal.write_bytes(journal.read_bytes() + partial)
+    complete_bytes = journal.read_bytes()[: -len(partial)]
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    assert journal.read_bytes() == complete_bytes
+    quarantine = list((run_dir / "events" / "quarantine").iterdir())
+    assert quarantine, "partial tail was not quarantined"
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+
+
+def test_runs_recover_fails_closed_on_invalid_latest_checkpoint(tmp_path, capsys):
+    import hashlib
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    sha = hashlib.sha256(_writer_bytes(run_json_obj)).hexdigest()
+    cp_file = run_checkpoint.checkpoint_path(run_dir, sha)
+    cp_file.write_bytes(b"x" * len(_writer_bytes(run_json_obj)))
+    os.chmod(cp_file, 0o600)
+    lock_path = workspace / ".brigade" / "run.lock"
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert not (run_dir / "run.json").exists()
+    # The dead lock is restored (callback failed; lock restored by runguard).
+    assert lock_path.is_dir()
+
+
+def test_runs_recover_accepts_covered_paired_status_event_and_preserves_fields(tmp_path, capsys):
+    """CLI recovery accepts a checkpoint N plus matching status N+1 and preserves fields.
+
+    The checkpoint at N carries ``paired_event_type`` for the checkpointed
+    status, and the N+1 event is the matching paired status event whose
+    derived status equals the checkpoint status. Per the slice-5 coverage
+    semantics this is a covered tail, so recovery restores the checkpoint
+    bytes and terminalizes, preserving the restored receipt fields
+    (``task``, ``orchestrator``, ``cwd``, ``active_seats``,
+    ``duration_seconds``) and stamping the stale-lock-recovery failure.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {
+        "status": "dispatching",
+        "task": "inspect",
+        "cwd": str(workspace),
+        "orchestrator": "chef",
+        "active_seats": ["coder"],
+        "duration_seconds": 5,
+    }
+    # Build the journal with a checkpoint AND its matching paired status event
+    # (covered tail) under a live lock, then replace the owner with a dead pid.
+    runs_dir = run_dir.parent
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _localio().write_json(
+        run_dir / "run.json",
+        {"schema": "brigade.run.v1", **run_json_obj, "lifecycle_journal_requested": True},
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            _writer_bytes(run_json_obj),
+            workspace=workspace,
+            paired_event_type="run.dispatch.requested",
+        )
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=_RUN_ID,
+            event_type="run.dispatch.requested",
+            payload={"detail": "dispatching"},
+            idempotency_key="dispatch-req-1",
+            expected_previous_sequence=1,
+            recorded_at="2026-07-27T15:30:46.000000Z",
+        )
+    _write_lock_owner(workspace, run_dir, pid=99999999)
+    (run_dir / "run.json").unlink()
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure_phase"] == "stale-lock-recovery"
+    # Restoration and terminalization field preservation.
+    assert recovered["task"] == "inspect"
+    assert recovered["orchestrator"] == "chef"
+    assert recovered["cwd"] == str(workspace)
+    assert recovered["active_seats"] == ["coder"]
+    assert recovered["duration_seconds"] == 5
+    assert recovered["failure"]["prior_status"] == "dispatching"
+    assert f"recovered: {run_dir}" in capsys.readouterr().out
+
+
+def test_runs_recover_fails_closed_on_uncovered_tail_wrong_event_type(tmp_path, capsys):
+    """CLI recovery fails closed when the N+1 event_type is not the checkpoint's pair.
+
+    A checkpoint at N with ``paired_event_type`` set, followed by an N+1
+    event whose ``event_type`` is not the paired type, is an uncovered tail.
+    Recovery exits 2, restores no run.json, and the runguard claim is
+    restored (lock dir remains).
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    runs_dir = run_dir.parent
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _localio().write_json(
+        run_dir / "run.json",
+        {"schema": "brigade.run.v1", **run_json_obj, "lifecycle_journal_requested": True},
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            _writer_bytes(run_json_obj),
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+        )
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=_RUN_ID,
+            event_type="run.dispatch.requested",
+            payload={"detail": "dispatching"},
+            idempotency_key="dispatch-1",
+            expected_previous_sequence=1,
+            recorded_at="2026-07-27T15:30:46.000000Z",
+        )
+    _write_lock_owner(workspace, run_dir, pid=99999999)
+    (run_dir / "run.json").unlink()
+    lock_path = workspace / ".brigade" / "run.lock"
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert not (run_dir / "run.json").exists()
+    assert lock_path.is_dir()
+
+
+def test_runs_recover_fails_closed_on_uncovered_tail_with_parseable_run_json(tmp_path, capsys):
+    """An uncovered tail fails closed even when run.json is parseable; run.json is untouched."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    runs_dir = run_dir.parent
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _localio().write_json(
+        run_dir / "run.json",
+        {"schema": "brigade.run.v1", **run_json_obj, "lifecycle_journal_requested": True},
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            _writer_bytes(run_json_obj),
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+        )
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=_RUN_ID,
+            event_type="run.dispatch.requested",
+            payload={"detail": "dispatching"},
+            idempotency_key="dispatch-1",
+            expected_previous_sequence=1,
+            recorded_at="2026-07-27T15:30:46.000000Z",
+        )
+    _write_lock_owner(workspace, run_dir, pid=99999999)
+    parseable = {"schema": "brigade.run.v1", "status": "planning", "task": "different", "cwd": str(workspace)}
+    _write_json(run_dir / "run.json", parseable)
+    before = (run_dir / "run.json").read_bytes()
+    lock_path = workspace / ".brigade" / "run.lock"
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert (run_dir / "run.json").read_bytes() == before
+    assert lock_path.is_dir()
+    assert not list(run_dir.glob("run.json.corrupt-*"))
+
+
+def test_runs_recover_fails_closed_on_chain_break(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    journal = _journal_path(run_dir)
+    events = _events(run_dir)
+    env = events[0].to_dict()
+    env["sequence"] = 3
+    env["event_digest"] = run_events.compute_event_digest(env)
+    env["event_id"] = run_events.make_event_id(
+        run_id=env["run_id"], sequence=env["sequence"], event_digest=env["event_digest"]
+    )
+    journal.write_bytes(run_events.canonical_bytes(env) + b"\n")
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert not (run_dir / "run.json").exists()
+
+
+def test_runs_recover_fails_closed_on_envelope_run_id_mismatch(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    journal = _journal_path(run_dir)
+    events = _events(run_dir)
+    env = events[0].to_dict()
+    env["run_id"] = "a-different-run-id"
+    env["event_digest"] = run_events.compute_event_digest(env)
+    env["event_id"] = run_events.make_event_id(
+        run_id=env["run_id"], sequence=env["sequence"], event_digest=env["event_digest"]
+    )
+    journal.write_bytes(run_events.canonical_bytes(env) + b"\n")
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert not (run_dir / "run.json").exists()
+
+
+def test_runs_recover_refuses_live_owner_without_mutation_activated(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    # Replace the dead owner with the current live pid.
+    _overwrite_lock_owner(workspace, run_dir, pid=os.getpid())
+    before = (run_dir / "run.json").read_bytes()
+    lock_path = workspace / ".brigade" / "run.lock"
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert (run_dir / "run.json").read_bytes() == before
+    assert lock_path.is_dir()
+    assert "run owner process is still active" in capsys.readouterr().err
+
+
+def test_runs_recover_refuses_foreign_pid_without_mutation_activated(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    other_run = workspace / ".brigade" / "runs" / "other-run"
+    _overwrite_lock_owner(workspace, other_run, pid=99999999)
+    before = (run_dir / "run.json").read_bytes()
+    lock_path = workspace / ".brigade" / "run.lock"
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert (run_dir / "run.json").read_bytes() == before
+    assert lock_path.is_dir()
+    assert "run lock belongs to a different run" in capsys.readouterr().err
+
+
+def test_runs_recover_refuses_invalid_lock_without_mutation(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    # Corrupt the lock: remove owner.json so run_lock_state returns "invalid".
+    lock_path = workspace / ".brigade" / "run.lock"
+    (lock_path / "owner.json").unlink()
+    before = (run_dir / "run.json").read_bytes()
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert (run_dir / "run.json").read_bytes() == before
+    assert lock_path.is_dir()
+
+
+def test_runs_recover_terminal_run_with_activated_journal_unchanged(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    # Mark the run terminal with a stale-lock-recovery failure phase.
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update(
+        {
+            "status": "failed",
+            "failure_phase": "stale-lock-recovery",
+            "finished_at": "2026-07-27T15:31:00Z",
+            "failure": {
+                "phase": "stale-lock-recovery",
+                "kind": "owner-process-exited",
+                "detail": "run owner process 99999999 is no longer active",
+            },
+        }
+    )
+    _write_json(run_dir / "run.json", run_meta)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"already terminal: {run_dir} [failed]" in out
+
+
+def test_runs_recover_no_journal_legacy_dead_owner_marks_terminal(tmp_path, capsys):
+    # A nonterminal run with a dead matching lock but NO activated journal
+    # keeps the legacy recovery path (no checkpoint callback).
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "legacy"
+    _write_minimal_run(
+        run_dir,
+        task="legacy task",
+        status="dispatching",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["cwd"] = str(workspace)
+    _write_json(run_dir / "run.json", run_meta)
+    _write_lock_owner(workspace, run_dir)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+    assert f"recovered: {run_dir}" in capsys.readouterr().out
+
+
+# -- Issue #568 slice 5 Task 5 sendback: bounded checkpoint reason surfacing --
+
+
+def test_runs_recover_invalid_checkpoint_surfaces_bounded_reason_and_preserves_lock(tmp_path, capsys):
+    """Invalid checkpoint recovery surfaces the bounded checkpoint reason.
+
+    runguard wraps every ``before_terminalize`` callback exception into a
+    ``RunLockError`` after restoring the claimed lock, so
+    ``_recover_from_checkpoint`` cannot catch ``CheckpointError`` directly.
+    It must preserve the original bounded ``CheckpointError`` in a local holder,
+    catch the ``RunLockError``, and print the stored checkpoint diagnostic
+    while still returning exit 2 and leaving the lock restored.
+    """
+    import hashlib
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    sha = hashlib.sha256(_writer_bytes(run_json_obj)).hexdigest()
+    cp_file = run_checkpoint.checkpoint_path(run_dir, sha)
+    cp_file.write_bytes(b"x" * len(_writer_bytes(run_json_obj)))
+    os.chmod(cp_file, 0o600)
+    lock_path = workspace / ".brigade" / "run.lock"
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert not (run_dir / "run.json").exists()
+    # The dead lock is restored (callback failed; lock restored by runguard).
+    assert lock_path.is_dir()
+    # The specific bounded checkpoint reason is surfaced to stderr, not the
+    # generic runguard "before_terminalize callback failed" wrapper.
+    err = capsys.readouterr().err
+    assert "checkpoint digest mismatch" in err
+    assert "before_terminalize callback failed" not in err
+
+
+# -- Issue #568 slice 5 Task 5 second sendback: run.json input edges --
+
+
+def test_runs_recover_preserves_non_utf8_run_json_and_restores_from_checkpoint(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo task", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    corrupt_bytes = b"\xff\xfe not utf-8"
+    (run_dir / "run.json").write_bytes(corrupt_bytes)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["task"] == "demo task"
+    preserved = list(run_dir.glob("run.json.corrupt-*"))
+    assert len(preserved) == 1
+    assert preserved[0].read_bytes() == corrupt_bytes
+    assert f"recovered: {run_dir}" in capsys.readouterr().out
+
+
+def test_runs_recover_preserves_recursion_error_run_json_and_restores_from_checkpoint(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo task", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    depth = 20000
+    deep_json = ("[" * depth) + ("]" * depth)
+    (run_dir / "run.json").write_text(deep_json)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["task"] == "demo task"
+    preserved = list(run_dir.glob("run.json.corrupt-*"))
+    assert len(preserved) == 1
+    assert preserved[0].read_text() == deep_json
+    assert f"recovered: {run_dir}" in capsys.readouterr().out
+
+
+def test_runs_recover_run_json_read_oserror_exits_without_mutation(tmp_path, capsys, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    run_json = run_dir / "run.json"
+    before_run_json = run_json.read_bytes()
+    lock_path = workspace / ".brigade" / "run.lock"
+    lock_pid_before = (lock_path / "pid").read_text()
+    lock_owner_before = (lock_path / "owner.json").read_text()
+
+    real_read_text = Path.read_text
+
+    def fail_read_text(self, *args, **kwargs):
+        if self == run_json:
+            raise OSError(errno.EACCES, "read denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_read_text)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert run_json.read_bytes() == before_run_json
+    assert lock_path.is_dir()
+    assert (lock_path / "pid").read_text() == lock_pid_before
+    assert (lock_path / "owner.json").read_text() == lock_owner_before
+    assert "could not read run.json" in capsys.readouterr().err

@@ -636,67 +636,106 @@ def _print_terminal_guidance(run_dir: Path, run_meta: dict[str, Any]) -> None:
     _print_recovery_guidance(run_dir)
 
 
-def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
+def _journal_active(run_dir: Path) -> bool:
+    return (run_dir / "events" / "lifecycle.jsonl").is_file()
+
+
+def _read_run_json_state(run_dir: Path) -> tuple[bool, dict[str, Any] | None, str | None, bool]:
+    """Return (parseable, run_meta, read_error, read_oserror) for run.json.
+
+    ``parseable`` is True only when run.json exists and parses to a dict;
+    ``run_meta`` is that dict or None; ``read_error`` is a bounded message
+    describing why run.json could not be read (missing or corrupt).
+    When ``read_oserror`` is True a raw ``OSError`` prevented reading
+    run.json and recovery must fail closed before claiming the lock.
+    """
+    run_json = run_dir / "run.json"
+    if not run_json.exists():
+        return False, None, f"run.json not found in {run_dir}", False
+    try:
+        text = run_json.read_text(encoding="utf-8")
+    except OSError:
+        return False, None, "could not read run.json", True
+    except UnicodeDecodeError as exc:
+        return False, None, f"run.json is not valid UTF-8: {exc}", False
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return False, None, f"run.json is not valid JSON: {exc}", False
+    except RecursionError:
+        return False, None, "run.json JSON nesting too deep", False
+    if not isinstance(payload, dict):
+        return False, None, "run.json must contain a JSON object", False
+    return True, payload, None, False
+
+
+def _state_refusal_message(state: str, workspace: Path) -> str:
     from . import runguard
 
-    run_dir, error = _resolve_run_dir(run, cwd=cwd, runs_dir=runs_dir)
-    if error is not None:
-        print(error, file=sys.stderr)
-        return 2
-    assert run_dir is not None
-    recovered_unreadable_artifact = False
-    read_error: str | None = None
-    try:
-        run_meta = _read_json(run_dir / "run.json")
-    except ValueError as exc:
-        run_meta = None
-        read_error = str(exc)
-    else:
-        read_error = f"run.json not found in {run_dir}" if run_meta is None else None
-    if run_meta is None:
-        workspace = _lock_workspace(run_dir, {}, fallback=cwd)
-        assert workspace is not None
-        try:
-            runguard.recover_stale_run(workspace, run_dir)
-        except runguard.RunLockError as exc:
-            detail = read_error if str(exc).startswith("run lock not found for run:") else str(exc)
-            print(f"error: {detail}", file=sys.stderr)
+    lock = runguard.lock_path(workspace)
+    if state == "live":
+        return f"error: run owner process is still active: {lock}"
+    if state == "foreign":
+        return f"error: run lock belongs to a different run: {lock}"
+    return f"error: run lock is invalid: {lock}"
+
+
+def _recover_terminal(run_dir: Path, run_meta: dict[str, Any], cwd: Path) -> int:
+    from . import runguard
+
+    phase, _, _ = _failure_fields(run_meta)
+    if phase == "stale-lock-recovery":
+        workspace = _lock_workspace(run_dir, run_meta, fallback=cwd)
+        if workspace is None:
+            print(f"error: recovered run artifact has no workspace cwd: {run_dir}", file=sys.stderr)
             return 2
+        # An activated journal requires an explicit before_terminalize callback
+        # before runguard will clear the claimed lock; the run is already
+        # terminal so a no-op callback is sufficient (no run.json restoration).
+        callback: Any = None
+        if _journal_active(run_dir):
+            callback = lambda owner: None  # noqa: E731  (intentional no-op)
         try:
-            run_meta = _read_json(run_dir / "run.json")
-        except ValueError as exc:
+            runguard.recover_stale_run(workspace, run_dir, required=False, before_terminalize=callback)
+        except runguard.RunLockError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
-        if run_meta is None:
-            print(f"error: run.json not found in {run_dir} after recovery", file=sys.stderr)
-            return 2
-        recovered_unreadable_artifact = True
-    if recovered_unreadable_artifact:
-        print(f"recovered: {run_dir}")
-        _print_recovery_guidance(run_dir)
-        return 0
-    if _is_terminal(run_meta):
-        phase, _, _ = _failure_fields(run_meta)
-        if phase == "stale-lock-recovery":
-            workspace = _lock_workspace(run_dir, run_meta, fallback=cwd)
-            if workspace is None:
-                print(f"error: recovered run artifact has no workspace cwd: {run_dir}", file=sys.stderr)
-                return 2
-            try:
-                runguard.recover_stale_run(workspace, run_dir, required=False)
-            except runguard.RunLockError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
-        print(f"already terminal: {run_dir} [{run_meta.get('status', 'unknown')}]")
-        _print_recovery_guidance(run_dir)
-        return 0
-    workspace = _lock_workspace(run_dir, run_meta, fallback=cwd)
-    if workspace is None:
-        print(f"error: run artifact has no workspace cwd: {run_dir}", file=sys.stderr)
-        return 2
+    print(f"already terminal: {run_dir} [{run_meta.get('status', 'unknown')}]")
+    _print_recovery_guidance(run_dir)
+    return 0
+
+
+def _recover_from_checkpoint(
+    run_dir: Path,
+    workspace: Path,
+    parseable: bool,
+    run_meta: dict[str, Any] | None,
+    read_error: str | None,
+) -> int:
+    from . import run_checkpoint, runguard
+
+    # runguard wraps every before_terminalize callback exception into a
+    # RunLockError after restoring the claimed lock, so a CheckpointError raised
+    # inside the callback can never be caught directly here. Preserve the
+    # original bounded CheckpointError in this holder so the RunLockError
+    # handler below can surface the specific checkpoint reason instead of the
+    # generic runguard "before_terminalize callback failed" wrapper.
+    checkpoint_failure: run_checkpoint.CheckpointError | None = None
+
+    def before_terminalize(owner: dict[str, object] | None) -> None:
+        nonlocal checkpoint_failure
+        try:
+            run_checkpoint.recover_from_checkpoint(run_dir, run_meta if parseable else None)
+        except run_checkpoint.CheckpointError as exc:
+            checkpoint_failure = exc
+            raise
+
     try:
-        runguard.recover_stale_run(workspace, run_dir)
+        runguard.recover_stale_run(workspace, run_dir, before_terminalize=before_terminalize)
     except runguard.RunLockError as exc:
+        if checkpoint_failure is not None:
+            print(f"error: {checkpoint_failure}", file=sys.stderr)
+            return 2
         if str(exc).startswith("run lock not found for run:"):
             try:
                 concurrent_meta = _read_json(run_dir / "run.json")
@@ -711,6 +750,83 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
     print(f"recovered: {run_dir}")
     _print_recovery_guidance(run_dir)
     return 0
+
+
+def _recover_legacy(
+    run_dir: Path,
+    workspace: Path,
+    parseable: bool,
+    run_meta: dict[str, Any] | None,
+    read_error: str | None,
+) -> int:
+    from . import runguard
+
+    try:
+        runguard.recover_stale_run(workspace, run_dir)
+    except runguard.RunLockError as exc:
+        if str(exc).startswith("run lock not found for run:"):
+            try:
+                concurrent_meta = _read_json(run_dir / "run.json")
+            except ValueError:
+                concurrent_meta = None
+            if concurrent_meta is not None and _is_terminal(concurrent_meta):
+                print(f"already terminal: {run_dir} [{concurrent_meta.get('status', 'unknown')}]")
+                _print_recovery_guidance(run_dir)
+                return 0
+            detail = read_error if not parseable else str(exc)
+        else:
+            detail = str(exc)
+        print(f"error: {detail}", file=sys.stderr)
+        return 2
+    if not parseable:
+        try:
+            recovered_meta = _read_json(run_dir / "run.json")
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if recovered_meta is None:
+            print(f"error: run.json not found in {run_dir} after recovery", file=sys.stderr)
+            return 2
+    print(f"recovered: {run_dir}")
+    _print_recovery_guidance(run_dir)
+    return 0
+
+
+def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
+    run_dir, error = _resolve_run_dir(run, cwd=cwd, runs_dir=runs_dir)
+    if error is not None:
+        print(error, file=sys.stderr)
+        return 2
+    assert run_dir is not None
+
+    parseable, run_meta, read_error, read_oserror = _read_run_json_state(run_dir)
+    if read_oserror:
+        print(f"error: {read_error}", file=sys.stderr)
+        return 2
+
+    # Terminal runs keep the legacy behavior: tolerate foreign locks and only
+    # clear a matching stale lock when the failure phase is stale-lock-recovery.
+    if parseable and run_meta is not None and _is_terminal(run_meta):
+        return _recover_terminal(run_dir, run_meta, cwd)
+
+    # Entry gate for recovery (nonterminal or missing/corrupt run.json). Refuse
+    # live current/foreign/invalid locks without claiming or mutating anything.
+    workspace_meta: dict[str, Any] = run_meta if parseable and run_meta is not None else {}
+    workspace = _lock_workspace(run_dir, workspace_meta, fallback=cwd)
+    if workspace is None:
+        print(f"error: run artifact has no workspace cwd: {run_dir}", file=sys.stderr)
+        return 2
+
+    from . import runguard
+
+    state = runguard.run_lock_state(workspace, run_dir)
+    if state in {"live", "foreign", "invalid"}:
+        print(_state_refusal_message(state, workspace), file=sys.stderr)
+        return 2
+
+    if _journal_active(run_dir):
+        return _recover_from_checkpoint(run_dir, workspace, parseable, run_meta, read_error)
+    return _recover_legacy(run_dir, workspace, parseable, run_meta, read_error)
 
 
 def watch(

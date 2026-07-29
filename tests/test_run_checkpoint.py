@@ -1375,3 +1375,661 @@ def test_write_checkpoint_noop_when_journal_not_active(enabled, tmp_path):
     )
     assert result is None
     assert not (run_dir / "events").exists()
+
+
+# -- Issue #568 slice 5 Task 5: latest_checkpoint_event + recover_from_checkpoint --
+
+
+def _activated_journal_with_checkpoint(
+    workspace: Path,
+    run_dir: Path,
+    run_json_obj: dict,
+    *,
+    paired_event_type: str | None = "run.planning.started",
+) -> run_journal.RunEvent:
+    """Activate the journal under lock and append one checkpoint event.
+
+    The journal ends in the checkpoint event (the recoverable state: the
+    crash happened after the checkpoint publish+append but before the
+    paired status append). Returns the appended checkpoint RunEvent.
+    """
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_json_bytes = _writer_bytes(run_json_obj)
+        event = run_checkpoint.write_checkpoint(
+            run_dir, run_json_bytes, workspace=workspace, paired_event_type=paired_event_type
+        )
+    assert event is not None
+    return event
+
+
+def test_latest_checkpoint_event_returns_none_for_empty_list():
+    assert run_checkpoint.latest_checkpoint_event([]) is None
+
+
+def test_latest_checkpoint_event_returns_none_when_no_checkpoints(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=RUN_ID,
+            event_type="run.created",
+            payload={"status": "started"},
+            idempotency_key="create-1",
+            expected_previous_sequence=0,
+            recorded_at="2026-07-27T15:30:45.123456Z",
+        )
+    events = _events(run_dir)
+    assert all(e.event_type != run_checkpoint.CHECKPOINT_EVENT_TYPE for e in events)
+    assert run_checkpoint.latest_checkpoint_event(events) is None
+
+
+def test_latest_checkpoint_event_selects_highest_sequence(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    first_bytes = _writer_bytes({"schema": "brigade.run.v1", "status": "started"})
+    second_bytes = _writer_bytes({"schema": "brigade.run.v1", "status": "planning"})
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_checkpoint.write_checkpoint(run_dir, first_bytes, workspace=workspace, paired_event_type="run.created")
+        second = run_checkpoint.write_checkpoint(
+            run_dir, second_bytes, workspace=workspace, paired_event_type="run.planning.started"
+        )
+    events = _events(run_dir)
+    latest = run_checkpoint.latest_checkpoint_event(events)
+    assert latest is not None
+    assert latest.sequence == second.sequence
+    assert latest.event_id == second.event_id
+
+
+def test_recover_from_checkpoint_restores_missing_run_json_from_latest(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    # No run.json present (the crash lost it): drop the bootstrap request file.
+    (run_dir / "run.json").unlink()
+
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+    assert repaired == run_json_obj
+    restored_bytes = (run_dir / "run.json").read_bytes()
+    assert restored_bytes == _writer_bytes(run_json_obj)
+
+
+def test_recover_from_checkpoint_preserves_corrupt_run_json_and_replaces(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").write_text("not json")
+
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+    assert repaired == run_json_obj
+    assert (run_dir / "run.json").read_bytes() == _writer_bytes(run_json_obj)
+    preserved = list(run_dir.glob("run.json.corrupt-*"))
+    assert len(preserved) == 1
+    assert preserved[0].read_text() == "not json"
+
+
+def test_recover_from_checkpoint_leaves_parseable_run_json_untouched(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    parseable = {"schema": "brigade.run.v1", "status": "planning", "task": "different"}
+    _writer_bytes(parseable)
+    (run_dir / "run.json").write_text(json.dumps(parseable, indent=2, sort_keys=True) + "\n")
+    before = (run_dir / "run.json").read_bytes()
+
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, parseable)
+
+    assert repaired == run_json_obj
+    assert (run_dir / "run.json").read_bytes() == before
+    assert not list(run_dir.glob("run.json.corrupt-*"))
+
+
+def test_recover_from_checkpoint_quarantines_partial_tail_then_verifies(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    journal = _journal_path(run_dir)
+    partial = b'{"schema":"brigade.run_event.v1","event_type":"run.plan'
+    journal.write_bytes(journal.read_bytes() + partial)
+    complete_bytes = journal.read_bytes()[: -len(partial)]
+
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+    assert repaired == run_json_obj
+    assert journal.read_bytes() == complete_bytes
+    quarantine_files = [p for p in (run_dir / "events" / "quarantine").iterdir() if p.suffix == ".bin"]
+    assert quarantine_files, "partial tail was not quarantined"
+    assert quarantine_files[0].read_bytes() == partial
+
+
+def test_recover_from_checkpoint_fails_on_invalid_latest_checkpoint(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    # Corrupt the checkpoint file so validate_checkpoint fails (digest mismatch).
+    sha = hashlib.sha256(_writer_bytes(run_json_obj)).hexdigest()
+    cp_file = run_checkpoint.checkpoint_path(run_dir, sha)
+    cp_file.write_bytes(b"x" * len(_writer_bytes(run_json_obj)))
+    os.chmod(cp_file, 0o600)
+
+    with pytest.raises(run_checkpoint.CheckpointError):
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert not (run_dir / "run.json").exists()
+
+
+def test_recover_from_checkpoint_accepts_covered_paired_status_event(tmp_path):
+    """A checkpoint at N plus its matching paired status event at N+1 is covered.
+
+    The checkpoint's ``paired_event_type`` names the mapped lifecycle event
+    type for the checkpointed status, and the N+1 event's derived status
+    equals the status in the validated checkpoint bytes. Per the slice-5
+    coverage semantics this is a covered tail (crash after the paired
+    status append but before the run.json replace), so recovery restores
+    the checkpoint bytes without mutation beyond the restore.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            _writer_bytes(run_json_obj),
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+        )
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=RUN_ID,
+            event_type="run.planning.started",
+            payload={"detail": "planning"},
+            idempotency_key="plan-start-1",
+            expected_previous_sequence=1,
+            recorded_at="2026-07-27T15:30:46.000000Z",
+        )
+    (run_dir / "run.json").unlink()
+
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+    assert repaired == run_json_obj
+    assert (run_dir / "run.json").read_bytes() == _writer_bytes(run_json_obj)
+
+
+def _journal_with_checkpoint_and_trailing(
+    workspace: Path,
+    run_dir: Path,
+    run_json_obj: dict,
+    *,
+    paired_event_type: str | None,
+    trailing_events: list[tuple[str, dict, str, str]],
+) -> run_journal.RunEvent:
+    """Activate the journal, write one checkpoint, then append trailing events.
+
+    ``trailing_events`` is a list of ``(event_type, payload, idempotency_key,
+    recorded_at)`` tuples appended after the checkpoint, each linking to the
+    prior event. Returns the appended checkpoint RunEvent.
+    """
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_json_bytes = _writer_bytes(run_json_obj)
+        checkpoint = run_checkpoint.write_checkpoint(
+            run_dir, run_json_bytes, workspace=workspace, paired_event_type=paired_event_type
+        )
+        assert checkpoint is not None
+        prev_seq = checkpoint.sequence
+        for event_type, payload, key, recorded_at in trailing_events:
+            appended = run_journal.append_event(
+                _journal_path(run_dir),
+                run_id=RUN_ID,
+                event_type=event_type,
+                payload=payload,
+                idempotency_key=key,
+                expected_previous_sequence=prev_seq,
+                recorded_at=recorded_at,
+            )
+            prev_seq = appended.sequence
+    return checkpoint
+
+
+def test_recover_from_checkpoint_fails_on_wrong_paired_event_type(tmp_path):
+    """N+1 event_type differs from the checkpoint's paired_event_type -> uncovered."""
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _journal_with_checkpoint_and_trailing(
+        workspace,
+        run_dir,
+        run_json_obj,
+        paired_event_type="run.planning.started",
+        trailing_events=[
+            ("run.dispatch.requested", {"detail": "dispatching"}, "dispatch-1", "2026-07-27T15:30:46.000000Z"),
+        ],
+    )
+    (run_dir / "run.json").unlink()
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "uncovered-tail"
+    assert not (run_dir / "run.json").exists()
+
+
+def test_recover_from_checkpoint_fails_on_paired_derived_status_mismatch(tmp_path):
+    """N+1 event_type matches but its derived status differs from the checkpoint -> uncovered."""
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    # Checkpoint status "failed" pairs with run.failed; an N+1 run.failed
+    # event whose payload status is "timeout" derives "timeout" != "failed".
+    run_json_obj = {"schema": "brigade.run.v1", "status": "failed", "task": "demo"}
+    _journal_with_checkpoint_and_trailing(
+        workspace,
+        run_dir,
+        run_json_obj,
+        paired_event_type="run.failed",
+        trailing_events=[
+            ("run.failed", {"status": "timeout"}, "fail-1", "2026-07-27T15:30:46.000000Z"),
+        ],
+    )
+    (run_dir / "run.json").unlink()
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "uncovered-tail"
+    assert not (run_dir / "run.json").exists()
+
+
+def test_recover_from_checkpoint_fails_on_null_pairing_with_following_event(tmp_path):
+    """A null paired_event_type covers only checkpoint-at-tail; a following event is uncovered."""
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    # Same-status refresh: paired_event_type is null. Any following event is uncovered.
+    run_json_obj = {"schema": "brigade.run.v1", "status": "started", "task": "demo"}
+    _journal_with_checkpoint_and_trailing(
+        workspace,
+        run_dir,
+        run_json_obj,
+        paired_event_type=None,
+        trailing_events=[
+            ("run.created", {"status": "started"}, "create-1", "2026-07-27T15:30:46.000000Z"),
+        ],
+    )
+    (run_dir / "run.json").unlink()
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "uncovered-tail"
+    assert not (run_dir / "run.json").exists()
+
+
+def test_recover_from_checkpoint_fails_on_two_events_after_checkpoint(tmp_path):
+    """Two events after the latest checkpoint (even if the first matches) -> uncovered."""
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _journal_with_checkpoint_and_trailing(
+        workspace,
+        run_dir,
+        run_json_obj,
+        paired_event_type="run.planning.started",
+        trailing_events=[
+            ("run.planning.started", {"detail": "planning"}, "plan-start-1", "2026-07-27T15:30:46.000000Z"),
+            ("run.dispatch.requested", {"detail": "dispatching"}, "dispatch-1", "2026-07-27T15:30:47.000000Z"),
+        ],
+    )
+    (run_dir / "run.json").unlink()
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "uncovered-tail"
+    assert not (run_dir / "run.json").exists()
+
+
+def test_recover_from_checkpoint_fails_on_invalid_coverage_with_parseable_run_json(tmp_path):
+    """An uncovered tail fails closed even when run.json is parseable; it is left untouched.
+
+    The coverage check runs for every activated-journal run regardless of
+    whether run.json parses. A parseable run.json with an uncovered tail
+    must fail closed with no mutation to run.json (validation-before-
+    mutation: coverage validation completes before the restore).
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _journal_with_checkpoint_and_trailing(
+        workspace,
+        run_dir,
+        run_json_obj,
+        paired_event_type="run.planning.started",
+        trailing_events=[
+            ("run.dispatch.requested", {"detail": "dispatching"}, "dispatch-1", "2026-07-27T15:30:46.000000Z"),
+        ],
+    )
+    parseable = {"schema": "brigade.run.v1", "status": "planning", "task": "different"}
+    (run_dir / "run.json").write_text(json.dumps(parseable, indent=2, sort_keys=True) + "\n")
+    before = (run_dir / "run.json").read_bytes()
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, parseable)
+    assert excinfo.value.category == "uncovered-tail"
+    assert (run_dir / "run.json").read_bytes() == before
+    assert not list(run_dir.glob("run.json.corrupt-*"))
+
+
+def test_recover_from_checkpoint_fails_on_chain_break(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    # Rewrite the journal with a sequence gap by hand (sequence 1 then 3).
+    journal = _journal_path(run_dir)
+    events = _events(run_dir)
+    assert len(events) == 1
+    env = events[0].to_dict()
+    env["sequence"] = 3
+    env["previous_digest"] = events[0].previous_digest
+    # Recompute event_id and event_digest for the tampered envelope.
+    env["event_digest"] = run_events.compute_event_digest(env)
+    env["event_id"] = run_events.make_event_id(
+        run_id=env["run_id"], sequence=env["sequence"], event_digest=env["event_digest"]
+    )
+    journal.write_bytes(run_events.canonical_bytes(env) + b"\n")
+
+    with pytest.raises(run_checkpoint.CheckpointError):
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+
+def test_recover_from_checkpoint_fails_on_unknown_event(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    journal = _journal_path(run_dir)
+    events = _events(run_dir)
+    env = events[0].to_dict()
+    env["event_type"] = "run.not.a.real.event"
+    env["payload"] = {}
+    env["event_digest"] = run_events.compute_event_digest(env)
+    env["event_id"] = run_events.make_event_id(
+        run_id=env["run_id"], sequence=env["sequence"], event_digest=env["event_digest"]
+    )
+    journal.write_bytes(run_events.canonical_bytes(env) + b"\n")
+
+    with pytest.raises(run_checkpoint.CheckpointError):
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+
+def test_recover_from_checkpoint_fails_on_envelope_run_id_mismatch(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    journal = _journal_path(run_dir)
+    events = _events(run_dir)
+    env = events[0].to_dict()
+    env["run_id"] = "a-different-run-id"
+    env["event_digest"] = run_events.compute_event_digest(env)
+    env["event_id"] = run_events.make_event_id(
+        run_id=env["run_id"], sequence=env["sequence"], event_digest=env["event_digest"]
+    )
+    journal.write_bytes(run_events.canonical_bytes(env) + b"\n")
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "run-id-mismatch"
+
+
+def test_recover_from_checkpoint_fails_on_corrupt_rename_oserror(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").write_text("not json")
+
+    real_rename = Path.rename
+
+    def fail_rename_on_corrupt(self, target):
+        if str(target).startswith(str(run_dir / "run.json.corrupt-")):
+            raise OSError(errno.EACCES, "rename denied")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_rename_on_corrupt)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "preserve-corrupt"
+    # The corrupt original is still in place (rename failed).
+    assert (run_dir / "run.json").read_text() == "not json"
+
+
+# -- Issue #568 slice 5 Task 5 sendback: bounded journal-read normalization --
+
+
+def test_recover_from_checkpoint_normalizes_oversized_journal_to_checkpoint_error(tmp_path, monkeypatch):
+    """An oversized journal surfaces a bounded CheckpointError, not a raw RunJournalError.
+
+    ``read_journal_bounded`` raises ``RunJournalError`` when the journal exceeds
+    ``MAX_JOURNAL_BYTES``; ``recover_from_checkpoint`` must normalize that to a
+    bounded categorized ``CheckpointError`` as its public contract promises.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    # Force the bound check to fire on the existing (small) journal.
+    monkeypatch.setattr(run_checkpoint, "MAX_JOURNAL_BYTES", 8)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "journal-read"
+    assert not (run_dir / "run.json").exists()
+
+
+def test_recover_from_checkpoint_normalizes_raw_oserror_on_initial_journal_read(tmp_path, monkeypatch):
+    """A raw ``OSError`` from the initial bounded journal read is normalized.
+
+    ``read_journal_bounded`` can raise a raw ``OSError`` (e.g. permission denied
+    on ``_open_nofollow``); the public contract promises a bounded
+    ``CheckpointError``.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+
+    def raise_oserror(_journal_path):
+        raise OSError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(run_journal, "read_journal_bounded", raise_oserror)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "journal-read"
+    assert isinstance(excinfo.value.__cause__, OSError)
+
+
+def test_recover_from_checkpoint_normalizes_partial_tail_quarantine_raw_oserror(tmp_path, monkeypatch):
+    """A raw ``OSError`` from ``recover_partial_tail`` is normalized.
+
+    The quarantine step can raise a raw ``OSError`` (e.g. ``mkdir`` or temp
+    write failure); the contract promises a bounded ``CheckpointError``.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    journal = _journal_path(run_dir)
+    partial = b'{"schema":"brigade.run_event.v1","event_type":"run.plan'
+    journal.write_bytes(journal.read_bytes() + partial)
+
+    def raise_oserror(_journal_path, _quarantine_dir):
+        raise OSError(errno.EACCES, "quarantine mkdir denied")
+
+    monkeypatch.setattr(run_journal, "recover_partial_tail", raise_oserror)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "partial-tail"
+    assert isinstance(excinfo.value.__cause__, OSError)
+
+
+def test_recover_from_checkpoint_normalizes_reread_oserror_after_quarantine(tmp_path, monkeypatch):
+    """A raw ``OSError`` on the post-quarantine reread is normalized.
+
+    The reread path (after a successful quarantine) can raise a raw ``OSError``;
+    the contract promises a bounded ``CheckpointError``.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    journal = _journal_path(run_dir)
+    partial = b'{"schema":"brigade.run_event.v1","event_type":"run.plan'
+    journal.write_bytes(journal.read_bytes() + partial)
+
+    real_read = run_journal.read_journal_bounded
+    call_count = {"n": 0}
+
+    def fail_second_read(journal_path):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise OSError(errno.EIO, "reread io error")
+        return real_read(journal_path)
+
+    monkeypatch.setattr(run_journal, "read_journal_bounded", fail_second_read)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "journal-read"
+    assert isinstance(excinfo.value.__cause__, OSError)
+
+
+def test_recover_from_checkpoint_normalizes_restore_write_raw_oserror(tmp_path, monkeypatch):
+    """A raw ``OSError`` from the restoration atomic write is normalized.
+
+    ``localio.write_text_atomic`` can raise a raw ``OSError`` (mkstemp, fsync,
+    or ``os.replace`` failure); the contract promises a bounded
+    ``CheckpointError`` so a raw filesystem error never leaks out of
+    ``recover_from_checkpoint``.
+    """
+    from brigade import localio
+
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+
+    def raise_oserror(_path, _data):
+        raise OSError(errno.EACCES, "restore write denied")
+
+    monkeypatch.setattr(localio, "write_text_atomic", raise_oserror)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "restore-write"
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert not (run_dir / "run.json").exists()
+
+
+# -- Issue #568 slice 5 Task 5 second sendback: run.json input edges + path resolve --
+
+
+def test_recover_from_checkpoint_preserves_non_utf8_run_json_and_replaces(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    corrupt_bytes = b"\xff\xfe not utf-8"
+    (run_dir / "run.json").write_bytes(corrupt_bytes)
+
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+    assert repaired == run_json_obj
+    assert (run_dir / "run.json").read_bytes() == _writer_bytes(run_json_obj)
+    preserved = list(run_dir.glob("run.json.corrupt-*"))
+    assert len(preserved) == 1
+    assert preserved[0].read_bytes() == corrupt_bytes
+
+
+def test_recover_from_checkpoint_preserves_recursion_error_run_json_and_replaces(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    depth = 20000
+    deep_json = ("[" * depth) + ("]" * depth)
+    (run_dir / "run.json").write_text(deep_json)
+
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+    assert repaired == run_json_obj
+    assert (run_dir / "run.json").read_bytes() == _writer_bytes(run_json_obj)
+    preserved = list(run_dir.glob("run.json.corrupt-*"))
+    assert len(preserved) == 1
+    assert preserved[0].read_text() == deep_json
+
+
+def test_recover_from_checkpoint_normalizes_path_resolve_oserror(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+
+    real_resolve = Path.resolve
+
+    def fail_resolve(self):
+        if self == run_dir:
+            raise OSError(errno.EACCES, "resolve denied")
+        return real_resolve(self)
+
+    monkeypatch.setattr(Path, "resolve", fail_resolve)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "path-resolve"
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert not (run_dir / "run.json").exists()
+
+
+def test_recover_from_checkpoint_normalizes_path_resolve_runtime_error(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "planning", "task": "demo"}
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+
+    real_resolve = Path.resolve
+
+    def fail_resolve(self):
+        if self == run_dir:
+            raise RuntimeError("symlink cycle")
+        return real_resolve(self)
+
+    monkeypatch.setattr(Path, "resolve", fail_resolve)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "path-resolve"
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert not (run_dir / "run.json").exists()
