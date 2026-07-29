@@ -15,10 +15,7 @@ Conventions:
 - Run focused suites with `.venv/bin/python -m pytest -q <path>`. Run the full gate
   with `./scripts/verify`. This worktree has no `python` on `PATH`. Use the
   venv interpreter for every focused suite.
-- Every commit uses Conventional Commits and carries the two co-author
-  trailers required by the issue:
-  `Co-Authored-By: Cursor <cursoragent@cursor.com>` and
-  `Co-Authored-By: Codex <codex@openai.com>`.
+- Every commit uses Conventional Commits.
 
 ## Task 1 - RED: add the test module shell with the driving tests (import fails)
 
@@ -254,9 +251,6 @@ artifact unless the journal exists and the payload carries a non-empty
 string status). The check_projection_readiness gate is total and fail-closed with
 the no-journal short-circuit. No placeholder scaffolding is committed.
 Later tasks fill the comparison body and gate reason branches RED-first.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -479,9 +473,6 @@ an empty differing-field list. Only the first-match full-byte happy path and
 the ready=True gate result land here. Lag/mismatch/error classification,
 run-id mismatch, containment, idempotency, caps, gap, quarantine, and the
 failing gate reason branches each land RED-first in their own later tasks.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -516,9 +507,6 @@ test(runs): account for shadow artifact in events directory listing
 
 Slice 4: the locked write now also creates events/shadow-comparison.json,
 so the lifecycle test's events-directory assertion lists both files.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -572,9 +560,6 @@ test(runs): cover full mapped lifecycle chain parity
 
 Slice 4: drive a run through all seven mapped statuses and assert seven
 match records, a ready gate, and a last_compared_sequence of 7.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -695,9 +680,6 @@ changed preserved detail field also produces no new journal event, but the
 preserved field is copied from the base on both sides, so both encodings
 change in lockstep, the digests differ from the prior record, and a fresh
 match is recorded at the same journal tail.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -797,9 +779,6 @@ Slice 4: a byte divergence on status alone with an unmapped legacy status is
 classified lag (the slice-3 status lag, not a mapping defect). The gate
 reports status-lag-current while lag is the latest outcome, and a later
 mapped transition restores readiness.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -875,9 +854,6 @@ Slice 4: a legacy candidate whose mapped status disagrees with the journal
 tail produces a byte mismatch on status. The record is sticky (mismatches
 never decrease) and the gate reports mismatch-recorded. The legacy run.json
 bytes are untouched.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1016,9 +992,6 @@ projector raise UnmappedEventTypeError, classified
 projection-error:UnmappedEventTypeError. The legacy write still advances
 (fail open) and the gate reports error-recorded. A partial journal tail is
 classified journal-unreadable and the gate reports journal-unreadable.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1109,9 +1082,6 @@ Slice 4: when a committed transition's shadow step was skipped and a later
 transition runs the hook, the prior artifact's last_compared_sequence lags
 the journal tail by more than one. A comparison-gap error is recorded in the
 same atomic write as the main record and the gate closes permanently.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1200,9 +1170,6 @@ test(runs): absent prior evidence with advanced journal is a gap
 Slice 4: a first comparison that sees no prior artifact but a journal tail
 sequence greater than 1 missed at least one earlier transition. A
 comparison-gap error is recorded and the gate closes permanently.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1281,9 +1248,6 @@ Slice 4: a present-but-unparseable shadow-comparison.json is renamed to
 shadow-comparison.json.corrupt-* and treated as absent, with an
 evidence-unreadable error recorded alongside the new comparison. The gate
 closes permanently.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1354,9 +1318,6 @@ test(runs): gate detects journal-ahead-of-evidence
 Slice 4: check_projection_readiness re-reads the journal and compares its
 tail sequence and digest to the artifact's last_compared_*. A mismatch
 closes the gate with journal-ahead-of-evidence.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1455,9 +1416,6 @@ test(runs): gate reason coverage for schema, run_id, no-comparisons
 Slice 4: check_projection_readiness reports evidence-schema-mismatch on
 wrong schema/schema_version/run_id or an out-of-set last_outcome, and
 no-comparisons when comparisons is not a positive integer.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1515,9 +1473,6 @@ test(runs): gate is total on garbage artifact bytes
 
 Slice 4: check_projection_readiness never raises. Garbage artifact bytes
 yield evidence-unreadable from the outer containment.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1571,9 +1526,6 @@ test(runs): shadow artifact carries no raw status or error strings
 Slice 4: a run whose run.json carries a private marker in its error field
 completes failed as a match. The marker never appears in the artifact
 bytes. Divergences are recorded as field names plus digests, never values.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1628,9 +1580,6 @@ test(runs): shadow artifact permissions and encoding
 Slice 4: the artifact is 0o600 inside the 0o700 events directory, encoded
 with sorted keys, two-space indent, and exactly one trailing newline via
 localio.write_text_atomic.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1689,9 +1638,6 @@ test(runs): recent_records cap and counter coherence
 Slice 4: after 20 distinct comparisons the artifact's recent_records list
 caps at 16 while the four outcome counters stay cumulative and sum to
 comparisons.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1764,9 +1710,6 @@ test(runs): differing-field list caps at MAX_DIFFERING_FIELDS
 Slice 4: when the shadow and projected snapshots differ on more than 16
 fields, the differing-field list is capped at MAX_DIFFERING_FIELDS with the
 truncation token.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1863,9 +1806,6 @@ Slice 4: an OSError inside the shadow path is classified
 journal-unreadable and the legacy run.json write still advances. A failing
 evidence write is fully swallowed by the outer containment and the legacy
 writer is untouched.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1943,9 +1883,6 @@ test(runs): defense-in-depth journal run_id mismatch
 Slice 4: a journal whose first event run_id differs from the run directory
 name is classified journal-run-id-mismatch (unreachable through the normal
 write path, defense in depth for direct calls).
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -1990,9 +1927,6 @@ test(runs): non-run.json writes do not trigger shadow comparison
 
 Slice 4: the aboyeur._write_json hook guards on path.name == "run.json", so
 roster.json and other sidecar writes leave the shadow artifact untouched.
-
-Co-Authored-By: Cursor <cursoragent@cursor.com>
-Co-Authored-By: Codex <codex@openai.com>
 EOF
 )"
 ```
@@ -2063,8 +1997,8 @@ MiseLedger evidence imported, handoff drafted.
 
 ## Summary of commits
 
-Each task that adds code ends in a commit with the two required co-author
-trailers. The commits are intentionally small and ordered so every commit
+Each task that adds code ends in a commit. The commits are
+intentionally small and ordered so every commit
 leaves the repository compiling and the prior tests green. The only RED
 moment is Task 1's import failure, which is never committed red.
 
