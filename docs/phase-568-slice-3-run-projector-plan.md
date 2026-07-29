@@ -888,52 +888,44 @@ Observed: `23 passed` (20 test functions, one parametrized over four cases).
 
 ## Task 5: full verification
 
-- [ ] Focused suite plus the neighboring journal and lifecycle suites:
+- [x] Focused suite plus the neighboring journal and lifecycle suites:
 
 ```bash
 python3 -m pytest tests/test_run_projector.py tests/test_run_events.py tests/test_run_journal.py tests/test_run_lifecycle.py -q
 ```
 
-Expected: all passed, no regressions in the slice-1 and slice-2 suites.
+Observed: `132 passed`.
 
-- [ ] Full repository suite:
+- [x] Full repository suite:
 
 ```bash
 python3 -m pytest -q
 ```
 
-Expected: all passed.
+Observed through `./scripts/verify`: `4864 passed, 3 skipped`.
 
-- [ ] Lint and type gates:
+- [x] Lint and type gates:
 
 ```bash
 python3 -m ruff check src/brigade/run_projector.py tests/test_run_projector.py
 python3 -m mypy src/brigade/run_projector.py
 ```
 
-Expected: clean (no findings, `Success: no issues found`).
+Observed through `./scripts/verify`: ruff lint and format checks passed, and mypy reported `Success: no issues found in 331 source files`.
 
-- [ ] Diff review: confirm only the four new files exist in the change set and no existing file is modified:
+- [x] Diff review: confirm the slice adds only its module, tests, fixtures, specification, and plan:
 
 ```bash
 git status --porcelain
 ```
 
-Expected: exactly four new paths (`src/brigade/run_projector.py`, `tests/test_run_projector.py`, `tests/fixtures/run-lifecycle/golden-projection.base.json`, `tests/fixtures/run-lifecycle/golden-projection.expected.json`) plus any docs from this planning step. Zero `M` lines.
+Observed: exactly six new paths, the four implementation paths above plus this plan and `docs/phase-568-slice-3-run-projector.md`. No pre-existing path is modified relative to the slice branch point.
 
 ## Task 6: commit
 
-- [ ] Stage and commit with a conventional message:
+- [x] Commit each completed task checkpoint with a conventional message.
 
-```bash
-git add src/brigade/run_projector.py \
-  tests/test_run_projector.py \
-  tests/fixtures/run-lifecycle/golden-projection.base.json \
-  tests/fixtures/run-lifecycle/golden-projection.expected.json
-git commit -m "feat(runs): add pure run snapshot projector (#568)"
-```
-
-This is an in-house repo, so append the `Co-authored-by` trailer for the implementing seat per the trailer policy (for example `Co-authored-by: Codex <codex@openai.com>`), matching the #607 and #608 slice commits. Add a trailer only for a tool that did substantial work on the commit.
+The slice is split into specification, contract-test, projector, and fixture commits. This is an in-house repo, so each implementation commit carries a `Co-authored-by` trailer only for a tool that did substantial work on that commit.
 
 ## Task 7: Brigade verification
 
@@ -948,3 +940,5 @@ Expected: the receipt records ruff lint, ruff format check, version sync,
 mypy, and the full pytest suite with its coverage floor. Atomic
 `--capture brigade-work` records the outcome once. Do not run a second
 `brigade outcome capture` for the same receipt.
+
+- [x] Receipt `20260729-022905-work-verify-88c06d` completed: ruff lint and format passed, version `0.25.1` was synchronized across 13 locations, mypy passed 331 source files, and pytest finished with 4864 passed, 3 skipped, and 82.95% coverage.

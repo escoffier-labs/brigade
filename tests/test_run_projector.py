@@ -423,9 +423,7 @@ def test_reprojection_is_byte_idempotent():
 
 def test_to_bytes_and_encode_snapshot_bytes_match_sorted_two_space_json():
     projection = project_run_snapshot(_minimal_base_snapshot(), _golden_events(), journal_present=True)
-    expected = (
-        json.dumps(projection.snapshot, indent=2, sort_keys=True) + "\n"
-    ).encode("utf-8")
+    expected = (json.dumps(projection.snapshot, indent=2, sort_keys=True) + "\n").encode("utf-8")
     assert projection.to_bytes() == expected
     assert encode_snapshot_bytes(projection.snapshot) == expected
 

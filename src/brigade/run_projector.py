@@ -219,9 +219,7 @@ def _verify_chain(envelopes: list[Mapping[str, Any]]) -> None:
         elif env["run_id"] != run_id:
             raise EventChainError(_bound(f"event chain mixes run_id values at sequence {sequence}"))
         if sequence != expected_sequence:
-            raise EventChainError(
-                _bound(f"event chain sequence break: expected {expected_sequence}, got {sequence}")
-            )
+            raise EventChainError(_bound(f"event chain sequence break: expected {expected_sequence}, got {sequence}"))
         if sequence == 1:
             if env["previous_digest"] is not None:
                 raise EventChainError(_bound("event chain sequence 1 previous_digest must be null"))
@@ -263,10 +261,7 @@ def _derive_status(envelopes: list[Mapping[str, Any]], base_status: Any) -> str:
         payload_status = payload.get("status")
         if payload_status not in allowed:
             raise EventPayloadError(
-                _bound(
-                    f"event type {event_type!r} at sequence {sequence} requires payload status "
-                    f"in {sorted(allowed)}"
-                )
+                _bound(f"event type {event_type!r} at sequence {sequence} requires payload status in {sorted(allowed)}")
             )
         status = derived if derived is not None else payload_status
     return status
