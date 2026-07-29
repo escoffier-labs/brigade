@@ -1,0 +1,118 @@
+{
+  "schema": "brigade.run.v1",
+  "schema_version": 1,
+  "task": "Project the lifecycle journal",
+  "orchestrator": "chef",
+  "roster": {
+    "path": ".brigade/roster.toml",
+    "source": "project",
+    "shadowed": []
+  },
+  "worker": "coder",
+  "scheduler": {
+    "requested": "auto",
+    "used": "serial"
+  },
+  "dry_run": false,
+  "read_only": false,
+  "cwd": "/work/repo",
+  "lock_workspace": "/work/repo",
+  "codex_transport": "app-server",
+  "lifecycle_journal_requested": true,
+  "started_at": "2026-07-27T15:30:45.123456+00:00",
+  "status_started_at": "2026-07-27T15:30:49.000000+00:00",
+  "finished_at": "2026-07-27T15:30:50.000000+00:00",
+  "duration_seconds": 4.877,
+  "resumed_at": [
+    "2026-07-27T15:31:00.000000+00:00",
+    "2026-07-27T15:32:00.000000+00:00"
+  ],
+  "recovery_history": [
+    {
+      "kind": "worker-error",
+      "at": "2026-07-27T15:31:30.000000+00:00",
+      "seat": "coder"
+    }
+  ],
+  "recovery_preserved_artifact": "/work/repo/.brigade/runs/20260727-153045-a1b2c3d4/run.json.corrupt",
+  "code_graph_brief": {
+    "attached": true,
+    "bytes": 2048
+  },
+  "drift_impact_brief": {
+    "attached": false,
+    "bytes": 0,
+    "pending_count": 0
+  },
+  "evidence_brief": {
+    "attached": true,
+    "bytes": 512
+  },
+  "brief_budget": {
+    "bytes": 8192,
+    "attached": [
+      "code-graph"
+    ]
+  },
+  "route": {
+    "skill": "brigade-work",
+    "matched": [
+      "run"
+    ],
+    "score": 3
+  },
+  "skill_route_policy": {
+    "policy_applied": true,
+    "extensions": [
+      "force-verify"
+    ]
+  },
+  "pre_run_snapshot": {
+    "head": "abc123",
+    "dirty": false
+  },
+  "git": {
+    "head": "abc123",
+    "branch": "main",
+    "dirty": false
+  },
+  "code_graph_delta": {
+    "summary": "no drift",
+    "changed": 0
+  },
+  "context_eval": {
+    "verdict": "pass",
+    "score": 0.9
+  },
+  "suspected_noop": false,
+  "control_transport": {
+    "kind": "unix",
+    "path": "/run/brigade/ctl.sock"
+  },
+  "control_socket": "/run/brigade/ctl.sock",
+  "active_stage": 2,
+  "active_seats": [
+    "coder",
+    "reviewer"
+  ],
+  "phase_owner": "chef",
+  "error": null,
+  "failure_phase": null,
+  "failure_kind": null,
+  "failure": {
+    "phase": "dispatch",
+    "kind": "worker-error",
+    "detail": "bounded detail",
+    "seat": "coder"
+  },
+  "transport_warning": {
+    "kind": "retry",
+    "attempts": 1
+  },
+  "artifact_collection": {
+    "status": "ok"
+  },
+  "artifacts": "/work/repo/.brigade/runs/20260727-153045-a1b2c3d4",
+  "handoff": "/work/repo/.brigade/runs/20260727-153045-a1b2c3d4/handoff.md",
+  "status": "handoff"
+}

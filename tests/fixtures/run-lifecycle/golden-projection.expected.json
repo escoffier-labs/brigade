@@ -1,0 +1,122 @@
+{
+  "active_seats": [
+    "coder",
+    "reviewer"
+  ],
+  "active_stage": 2,
+  "artifact_collection": {
+    "status": "ok"
+  },
+  "artifacts": "/work/repo/.brigade/runs/20260727-153045-a1b2c3d4",
+  "brief_budget": {
+    "attached": [
+      "code-graph"
+    ],
+    "bytes": 8192
+  },
+  "code_graph_brief": {
+    "attached": true,
+    "bytes": 2048
+  },
+  "code_graph_delta": {
+    "changed": 0,
+    "summary": "no drift"
+  },
+  "codex_transport": "app-server",
+  "context_eval": {
+    "score": 0.9,
+    "verdict": "pass"
+  },
+  "control_socket": "/run/brigade/ctl.sock",
+  "control_transport": {
+    "kind": "unix",
+    "path": "/run/brigade/ctl.sock"
+  },
+  "cwd": "/work/repo",
+  "drift_impact_brief": {
+    "attached": false,
+    "bytes": 0,
+    "pending_count": 0
+  },
+  "dry_run": false,
+  "duration_seconds": 4.877,
+  "error": null,
+  "evidence_brief": {
+    "attached": true,
+    "bytes": 512
+  },
+  "failure": {
+    "detail": "bounded detail",
+    "kind": "worker-error",
+    "phase": "dispatch",
+    "seat": "coder"
+  },
+  "failure_kind": null,
+  "failure_phase": null,
+  "finished_at": "2026-07-27T15:30:50.000000+00:00",
+  "git": {
+    "branch": "main",
+    "dirty": false,
+    "head": "abc123"
+  },
+  "handoff": "/work/repo/.brigade/runs/20260727-153045-a1b2c3d4/handoff.md",
+  "journal_last_event_digest": "176259cd00408b637f1c13496fcdfafea7dd96753fb8a9e76dbea58817442fc7",
+  "journal_last_sequence": 6,
+  "journal_present": true,
+  "lifecycle_journal_requested": true,
+  "lock_workspace": "/work/repo",
+  "orchestrator": "chef",
+  "phase_owner": "chef",
+  "pre_run_snapshot": {
+    "dirty": false,
+    "head": "abc123"
+  },
+  "projector_version": 1,
+  "read_only": false,
+  "recovery_history": [
+    {
+      "at": "2026-07-27T15:31:30.000000+00:00",
+      "kind": "worker-error",
+      "seat": "coder"
+    }
+  ],
+  "recovery_preserved_artifact": "/work/repo/.brigade/runs/20260727-153045-a1b2c3d4/run.json.corrupt",
+  "resumed_at": [
+    "2026-07-27T15:31:00.000000+00:00",
+    "2026-07-27T15:32:00.000000+00:00"
+  ],
+  "roster": {
+    "path": ".brigade/roster.toml",
+    "shadowed": [],
+    "source": "project"
+  },
+  "route": {
+    "matched": [
+      "run"
+    ],
+    "score": 3,
+    "skill": "brigade-work"
+  },
+  "scheduler": {
+    "requested": "auto",
+    "used": "serial"
+  },
+  "schema": "brigade.run.v1",
+  "schema_version": 1,
+  "skill_route_policy": {
+    "extensions": [
+      "force-verify"
+    ],
+    "policy_applied": true
+  },
+  "started_at": "2026-07-27T15:30:45.123456+00:00",
+  "status": "ok",
+  "status_started_at": "2026-07-27T15:30:49.000000+00:00",
+  "suspected_noop": false,
+  "task": "Project the lifecycle journal",
+  "transport_warning": {
+    "attempts": 1,
+    "kind": "retry"
+  },
+  "worker": "coder"
+}
