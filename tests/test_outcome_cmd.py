@@ -2479,6 +2479,104 @@ def test_windows_lock_helpers_use_existing_fixed_byte_at_offset_zero(tmp_path, m
     assert all(position == 0 for position in seek_positions)
 
 
+def _append_incomplete_trailing_row(
+    path: Path, prev_digest: str | None, record: outcome.OutcomeRecord, **row_overrides
+):
+    row = outcome_cmd._record_payload(record)
+    row["prev_digest"] = prev_digest
+    row["digest"] = localio.canonical_json_digest(row, exclude_keys={"digest"})
+    row.update(row_overrides)
+    if row_overrides.get("digest") is None and "digest" in row_overrides:
+        row.pop("digest", None)
+    trailing = json.dumps(row, sort_keys=True).encode("utf-8")
+    with path.open("ab") as handle:
+        handle.write(trailing)
+    return trailing
+
+
+def _assert_recovery_truncates_invalid_tail_and_append_succeeds(
+    tmp_path,
+    path: Path,
+    *,
+    trailing: bytes,
+    prefix_evidence_ref: str,
+    follow_up_evidence_ref: str,
+):
+    follow_up = outcome.OutcomeRecord(
+        "skill-x", "skill", "t3", "verify", 1, follow_up_evidence_ref, "2026-06-20T03:00:00+00:00"
+    )
+    outcome_cmd.append_records(tmp_path, [follow_up])
+
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert len(rows) == 2
+    assert rows[0]["evidence_ref"] == prefix_evidence_ref
+    assert rows[1]["evidence_ref"] == follow_up_evidence_ref
+    assert rows[1]["prev_digest"] == rows[0]["digest"]
+    assert trailing not in path.read_bytes()
+    assert receipts_cmd.verify(target=tmp_path, json_output=True) == 0
+
+
+def test_recovery_truncates_parseable_tail_missing_digest(tmp_path):
+    first = outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [first])
+    path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    prev_digest = json.loads(path.read_text().splitlines()[0])["digest"]
+    trailing = _append_incomplete_trailing_row(
+        path,
+        prev_digest,
+        outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref-1", "2026-06-20T01:00:00+00:00"),
+        digest=None,
+    )
+
+    _assert_recovery_truncates_invalid_tail_and_append_succeeds(
+        tmp_path,
+        path,
+        trailing=trailing,
+        prefix_evidence_ref="ref-0",
+        follow_up_evidence_ref="ref-3",
+    )
+
+
+def test_recovery_truncates_parseable_tail_wrong_digest(tmp_path):
+    first = outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [first])
+    path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    prev_digest = json.loads(path.read_text().splitlines()[0])["digest"]
+    trailing = _append_incomplete_trailing_row(
+        path,
+        prev_digest,
+        outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref-1", "2026-06-20T01:00:00+00:00"),
+        digest="wrong-digest",
+    )
+
+    _assert_recovery_truncates_invalid_tail_and_append_succeeds(
+        tmp_path,
+        path,
+        trailing=trailing,
+        prefix_evidence_ref="ref-0",
+        follow_up_evidence_ref="ref-3",
+    )
+
+
+def test_recovery_truncates_parseable_tail_broken_prev_digest_chain(tmp_path):
+    first = outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")
+    outcome_cmd.append_records(tmp_path, [first])
+    path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    trailing = _append_incomplete_trailing_row(
+        path,
+        "broken-prev-digest",
+        outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref-1", "2026-06-20T01:00:00+00:00"),
+    )
+
+    _assert_recovery_truncates_invalid_tail_and_append_succeeds(
+        tmp_path,
+        path,
+        trailing=trailing,
+        prefix_evidence_ref="ref-0",
+        follow_up_evidence_ref="ref-3",
+    )
+
+
 def test_recovery_preserves_and_finalizes_complete_trailing_json_object(tmp_path):
     first = outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref-0", "2026-06-20T00:00:00+00:00")
     outcome_cmd.append_records(tmp_path, [first])

@@ -592,14 +592,8 @@ def _last_record_digest(path: Path) -> str | None:
     return _validate_completed_ledger(path)
 
 
-def _validate_completed_ledger(path: Path) -> str | None:
-    """Validate every completed ledger row and return the last signed digest."""
-    if not path.is_file():
-        return None
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise OutcomeLedgerError(f"could not read outcome ledger: {path}: {exc}") from exc
+def _validate_completed_ledger_bytes(raw: bytes, path: Path) -> str | None:
+    """Validate every completed ledger row in ``raw`` and return the last signed digest."""
     if not raw:
         return None
     if not raw.endswith(b"\n"):
@@ -628,6 +622,32 @@ def _validate_completed_ledger(path: Path) -> str | None:
             raise OutcomeLedgerError(f"outcome ledger line {line_no} digest chain break: {path}")
         previous_digest = recorded_digest
     return previous_digest
+
+
+def _validate_completed_ledger(path: Path) -> str | None:
+    """Validate every completed ledger row and return the last signed digest."""
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise OutcomeLedgerError(f"could not read outcome ledger: {path}: {exc}") from exc
+    return _validate_completed_ledger_bytes(raw, path)
+
+
+def _recoverable_trailing_record(payload: dict, prefix: bytes, path: Path) -> bool:
+    recorded_digest = payload.get("digest")
+    if not isinstance(recorded_digest, str) or not recorded_digest:
+        return False
+    if localio.canonical_json_digest(payload, exclude_keys={"digest"}) != recorded_digest:
+        return False
+    if "prev_digest" not in payload:
+        return False
+    try:
+        expected_prev = _validate_completed_ledger_bytes(prefix, path) if prefix else None
+    except OutcomeLedgerError:
+        return False
+    return payload.get("prev_digest") == expected_prev
 
 
 def _windows_lock_seek(handle) -> None:
@@ -759,7 +779,7 @@ def _recover_interrupted_append(path: Path) -> None:
                 payload = json.loads(tail.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 payload = None
-            if isinstance(payload, dict):
+            if isinstance(payload, dict) and _recoverable_trailing_record(payload, data[:truncate_to], path):
                 action = "finalize"
                 handle.seek(0, os.SEEK_END)
                 handle.write(b"\n")
