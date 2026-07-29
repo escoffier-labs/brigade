@@ -92,7 +92,411 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     if "hermes" in ctx.harnesses:
         checks.extend(_check_hermes(ctx.target))
     checks.extend(_check_orphan_inboxes(ctx.target, ctx.harnesses))
+    checks.append(_check_recovery_checkpoints(ctx.target))
     return checks
+
+
+_RECOVERY_CHECKPOINTS_NAME = "runs: recovery checkpoints"
+_RECOVERY_CHECKPOINTS_SCAN_LIMIT = 50
+_RECOVERY_CHECKPOINTS_FAIL_PREVIEW = 8
+
+
+def _check_recovery_checkpoints(target: Path, *, full: bool = False) -> CheckResult:
+    """Read-only aggregate verdict for activated-journal recovery checkpoints."""
+    runs_root = target / ".brigade" / "runs"
+    all_dirs, scan_omitted = _immediate_run_dirs(runs_root)
+    scanned = all_dirs[:_RECOVERY_CHECKPOINTS_SCAN_LIMIT]
+    scan_omitted += len(all_dirs) - len(scanned)
+
+    counts = {"ok": 0, "warn": 0, "fail": 0, "omitted": scan_omitted}
+    failing_runs: list[tuple[str, str]] = []
+
+    for run_dir in scanned:
+        verdict, reason = _recovery_checkpoint_run_verdict(target, run_dir)
+        if verdict == "omitted":
+            counts["omitted"] += 1
+        elif verdict == "ok":
+            counts["ok"] += 1
+        elif verdict == "warn":
+            counts["warn"] += 1
+        else:
+            counts["fail"] += 1
+            failing_runs.append((run_dir.name, reason))
+
+    if counts["fail"]:
+        status = FAIL
+    elif counts["warn"]:
+        status = WARN
+    else:
+        status = OK
+
+    preview_limit = len(failing_runs) if full else _RECOVERY_CHECKPOINTS_FAIL_PREVIEW
+    detail = f"ok={counts['ok']} warn={counts['warn']} fail={counts['fail']} omitted={counts['omitted']}"
+    if failing_runs:
+        shown = failing_runs[:preview_limit]
+        labels = [f"{name} ({reason})" for name, reason in shown]
+        detail = f"{detail}; failures: {', '.join(labels)}"
+        if not full and len(failing_runs) > preview_limit:
+            detail = f"{detail}, ... {len(failing_runs) - preview_limit} more"
+    return (status, _RECOVERY_CHECKPOINTS_NAME, detail)
+
+
+def _immediate_run_dirs(runs_root: Path) -> tuple[List[Path], int]:
+    """Return ``(run dirs sorted newest-first, omitted_count)``.
+
+    Guards ``iterdir``/``is_dir``/``is_symlink``/``stat`` races so a vanishing
+    or unreadable entry never crashes Doctor. Entries that vanish between
+    discovery and ``stat`` are counted as omitted where discoverable.
+    """
+    try:
+        if not runs_root.is_dir():
+            return [], 0
+    except OSError:
+        return [], 0
+    try:
+        entries = list(runs_root.iterdir())
+    except OSError:
+        return [], 0
+    sortable: list[tuple[float, str, Path]] = []
+    omitted = 0
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                continue
+            if not entry.is_dir():
+                continue
+        except OSError:
+            omitted += 1
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            omitted += 1
+            continue
+        sortable.append((mtime, entry.name, entry))
+    sortable.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in sortable], omitted
+
+
+def _recovery_checkpoint_run_verdict(target: Path, run_dir: Path) -> tuple[str, str]:
+    from brigade import run_checkpoint, run_journal, run_lifecycle, runguard
+
+    journal_path = run_lifecycle._journal_path(run_dir)
+    try:
+        if not journal_path.is_file():
+            return "omitted", "no-journal"
+    except OSError:
+        return "omitted", "no-journal"
+
+    # Resolve the live-owner workspace from parseable run metadata so a run
+    # launched with a custom --output-dir verifies against the lock its owner
+    # actually holds. Remain fail-safe for missing/unparseable metadata.
+    run_meta_preview = _read_run_meta_fail_safe(run_dir / "run.json")
+    live_workspace = target
+    if run_meta_preview is not None:
+        resolved = runguard.resolve_run_lock_workspace(run_meta_preview, run_dir, fallback=target)
+        if resolved is not None:
+            live_workspace = resolved
+    lock_state = runguard.run_lock_state(live_workspace, run_dir)
+    if lock_state == "live" and _recovery_run_has_live_owner(live_workspace, run_dir):
+        return "ok", "live owner"
+
+    run_id = run_dir.name
+    try:
+        report = run_journal.read_journal_bounded(journal_path)
+    except run_journal.RunJournalError as exc:
+        if "bound exceeded" in exc.diagnostic:
+            return "fail", "bound exceeded"
+        return "fail", exc.diagnostic
+    except OSError as exc:
+        return "fail", f"journal unreadable: {type(exc).__name__}"
+
+    chain_reason = _recovery_journal_chain_reason(report, run_id)
+    if chain_reason is not None:
+        return "fail", chain_reason
+
+    latest = run_checkpoint.latest_checkpoint_event(report.events)
+    if latest is None:
+        return "fail", "no checkpoint event in journal"
+    if latest.run_id != run_id:
+        return "fail", "run_id mismatch"
+
+    bound_reason = _recovery_checkpoint_bound_reason(run_dir, latest)
+    if bound_reason is not None:
+        return "fail", bound_reason
+
+    try:
+        checkpoint_bytes = run_checkpoint.validate_checkpoint(run_dir, latest)
+    except run_checkpoint.CheckpointError as exc:
+        if _recovery_checkpoint_error_is_bound_exceeded(exc):
+            return "fail", "bound exceeded"
+        return "fail", exc.diagnostic
+    except OSError as exc:
+        return "fail", f"checkpoint unreadable: {type(exc).__name__}"
+
+    try:
+        checkpoint_obj = run_checkpoint._parse_checkpoint_object(checkpoint_bytes)
+        run_checkpoint._verify_coverage(report.events, latest, checkpoint_obj)
+    except run_checkpoint.CheckpointError as exc:
+        return "fail", exc.diagnostic
+
+    run_json_path = run_dir / "run.json"
+    try:
+        run_json_present = run_json_path.is_file()
+    except OSError:
+        run_json_present = False
+    if not run_json_present:
+        return "warn", "run.json missing with valid checkpoint"
+
+    try:
+        run_bytes = run_json_path.read_bytes()
+    except OSError:
+        return "fail", "run.json present but unreadable"
+
+    try:
+        parsed = json.loads(run_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+        return "warn", "run.json unparseable with valid checkpoint"
+    run_meta = parsed if isinstance(parsed, dict) else None
+    if run_meta is None:
+        return "warn", "run.json unparseable with valid checkpoint"
+
+    if run_bytes == checkpoint_bytes:
+        return "ok", "checkpoint bytes match run.json"
+
+    expected = _reconstruct_stale_lock_recovery_receipt(checkpoint_obj, run_meta)
+    if expected is not None and expected == run_meta:
+        return "ok", "stale-lock-recovery receipt matches checkpoint reconstruction"
+
+    return "fail", "run.json does not match checkpoint"
+
+
+def _read_run_meta_fail_safe(run_json_path: Path) -> dict[str, object] | None:
+    """Best-effort read of ``run.json`` for live-owner workspace resolution.
+
+    Collapses every failure mode (missing, unreadable, unparseable) into
+    ``None`` so the caller can fall back to ``target``; the precise
+    missing/unreadable/unparseable verdict is handled later in the verdict.
+    """
+    try:
+        if not run_json_path.is_file():
+            return None
+    except OSError:
+        return None
+    try:
+        raw = run_json_path.read_bytes()
+    except OSError:
+        return None
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _recovery_run_has_live_owner(target: Path, run_dir: Path) -> bool:
+    from brigade import runguard
+
+    if runguard.run_lock_state(target, run_dir) != "live":
+        return False
+    try:
+        lock_path = runguard.lock_path(target)
+        owner = runguard._read_lock_owner(lock_path)
+    except runguard.RunGuardError:
+        return False
+    except OSError:
+        return False
+    try:
+        resolved = run_dir.expanduser().resolve()
+    except (OSError, RuntimeError):
+        resolved = run_dir
+    return runguard._owner_matches_run(owner, resolved)
+
+
+def _recovery_journal_chain_reason(report: object, run_id: str) -> str | None:
+    if report.partial_tail is not None:
+        return "partial tail"
+    if report.chain_errors:
+        return "malformed chain"
+    if not report.events:
+        return "empty journal"
+    expected_sequence = 1
+    expected_previous: str | None = None
+    for event in report.events:
+        if event.sequence != expected_sequence:
+            return "malformed chain"
+        if event.sequence == 1:
+            if event.previous_digest is not None:
+                return "malformed chain"
+        elif event.previous_digest != expected_previous:
+            return "malformed chain"
+        if event.run_id != run_id:
+            return "run_id mismatch"
+        expected_sequence = event.sequence + 1
+        expected_previous = event.event_digest
+    return None
+
+
+def _recovery_checkpoint_bound_reason(run_dir: Path, event: object) -> str | None:
+    import os
+
+    from brigade import run_checkpoint, run_journal
+
+    payload = event.payload if hasattr(event, "payload") else event
+    if not isinstance(payload, dict):
+        return None
+    byte_size = payload.get("byte_size")
+    if isinstance(byte_size, int) and byte_size > run_checkpoint.MAX_CHECKPOINT_BYTES:
+        return "bound exceeded"
+    sha = payload.get("sha256")
+    if not isinstance(sha, str):
+        return None
+    final_path = run_checkpoint.checkpoint_path(run_dir, sha)
+    if not final_path.exists():
+        return None
+    try:
+        fd = run_journal._open_nofollow(final_path, os.O_RDONLY)
+    except (run_journal.RunJournalError, OSError):
+        return None
+    try:
+        info = os.fstat(fd)
+        if info.st_size > run_checkpoint.MAX_CHECKPOINT_BYTES:
+            return "bound exceeded"
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    return None
+
+
+def _recovery_checkpoint_error_is_bound_exceeded(exc: object) -> bool:
+    from brigade import run_checkpoint
+
+    if not isinstance(exc, run_checkpoint.CheckpointError):
+        return False
+    if "bound exceeded" in exc.diagnostic:
+        return True
+    return exc.category == "byte-size"
+
+
+def _reconstruct_stale_lock_recovery_receipt(
+    checkpoint_obj: dict[str, object],
+    candidate: dict[str, object],
+) -> dict[str, object] | None:
+    """Pure replay of ``runguard._recover_run_artifact`` terminalization fields.
+
+    ``prior_status`` is derived from the checkpoint object's ``status`` exactly
+    as runguard derives it from the pre-terminalization run.json (with an
+    ``artifact-unavailable`` fallback when the status is absent/empty). The
+    candidate's ``failure.prior_status`` is never trusted; a forged value
+    diverges from the reconstruction and fails the verdict. A terminal
+    checkpoint status means runguard would have returned ``"terminal"`` and
+    never written a stale-lock-recovery receipt, so no reconstruction can
+    match.
+    """
+    from brigade import receipt_schema, runguard
+
+    failure = candidate.get("failure")
+    if not isinstance(failure, dict):
+        return None
+    if candidate.get("failure_phase") != "stale-lock-recovery":
+        return None
+    if candidate.get("status") != "failed":
+        return None
+
+    owner_pid = failure.get("owner_pid")
+    if isinstance(owner_pid, bool) or not isinstance(owner_pid, int):
+        return None
+    recovered_at = failure.get("recovered_at")
+    if not isinstance(recovered_at, str) or not recovered_at:
+        return None
+    try:
+        datetime.fromisoformat(recovered_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if candidate.get("status_started_at") != recovered_at or candidate.get("finished_at") != recovered_at:
+        return None
+
+    detail = f"run owner process {owner_pid} is no longer active"
+    if candidate.get("error") != detail:
+        return None
+    if failure.get("detail") != detail:
+        return None
+    if failure.get("phase") != "stale-lock-recovery":
+        return None
+    if failure.get("kind") != "owner-process-exited":
+        return None
+
+    try:
+        payload = json.loads(json.dumps(checkpoint_obj))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    raw_status = payload.get("status")
+    if isinstance(raw_status, str) and raw_status:
+        if raw_status not in runguard._NONTERMINAL_RUN_STATUSES:
+            return None
+        prior_status = raw_status
+    else:
+        prior_status = "artifact-unavailable"
+
+    failure_attribution: dict[str, object] = {}
+    stored_status = payload.get("status")
+    active_seats = payload.get("active_seats")
+    phase_owner = payload.get("phase_owner")
+    if stored_status == "dispatching" and isinstance(active_seats, list):
+        seats = [seat for seat in active_seats if isinstance(seat, str) and seat]
+        if len(seats) == 1:
+            failure_attribution["seat"] = seats[0]
+        elif seats:
+            failure_attribution["seats"] = seats
+    if not failure_attribution and isinstance(phase_owner, str) and phase_owner:
+        failure_attribution["seat"] = phase_owner
+    if not failure_attribution:
+        worker = payload.get("worker")
+        orchestrator = payload.get("orchestrator")
+        if isinstance(worker, str) and worker:
+            failure_attribution["seat"] = worker
+        elif isinstance(orchestrator, str) and orchestrator:
+            failure_attribution["seat"] = orchestrator
+
+    workspace = failure.get("lock_workspace")
+    if isinstance(workspace, str) and workspace:
+        payload.setdefault("cwd", workspace)
+        payload.setdefault("lock_workspace", workspace)
+    acquired_at = failure.get("lock_acquired_at")
+    if isinstance(acquired_at, str) and acquired_at:
+        payload.setdefault("started_at", acquired_at)
+
+    failure_payload: dict[str, object] = {
+        "phase": "stale-lock-recovery",
+        "kind": "owner-process-exited",
+        "detail": detail,
+        "owner_pid": owner_pid,
+        "prior_status": prior_status,
+        "recovered_at": recovered_at,
+        **failure_attribution,
+    }
+    if isinstance(workspace, str) and workspace:
+        failure_payload["lock_workspace"] = workspace
+    if isinstance(acquired_at, str) and acquired_at:
+        failure_payload["lock_acquired_at"] = acquired_at
+    payload.update(
+        {
+            "status": "failed",
+            "status_started_at": recovered_at,
+            "finished_at": recovered_at,
+            "error": detail,
+            "failure_phase": "stale-lock-recovery",
+            "failure": failure_payload,
+        }
+    )
+    return receipt_schema.stamp_run_receipt(payload)
 
 
 def _check_claude_work_loop(target: Path) -> CheckResult | None:
@@ -262,6 +666,8 @@ def run(
 ) -> int:
     ctx = build_context(target, harness)
     checks = _gather_checks(ctx)
+    if full:
+        checks = _replace_recovery_check_with_full(checks, ctx.target)
     if not operator:
         checks = _filter_target_scoped_checks(checks)
     if json_output:
@@ -279,6 +685,27 @@ def run(
     if not operator:
         print("  scope: target workspace only (pass --operator for host-global checks)")
     return _report(checks, full=full, target=ctx.target, operator=operator)
+
+
+def _replace_recovery_check_with_full(
+    checks: List[ScopedCheckResult],
+    target: Path,
+) -> List[ScopedCheckResult]:
+    """Swap the bounded recovery-checkpoint aggregate for the exhaustive one.
+
+    The public station callback always emits the bounded (8-preview) verdict so
+    its contract stays unchanged; ``run --full`` re-runs the check with
+    ``full=True`` and substitutes it in place, preserving the original scope.
+    """
+    full_status, _name, full_detail = _check_recovery_checkpoints(target, full=True)
+    replaced: List[ScopedCheckResult] = []
+    for check in checks:
+        status, name, detail, scope = _normalize_scoped_check(check)
+        if name == _RECOVERY_CHECKPOINTS_NAME:
+            replaced.append(_scoped_check(full_status, name, full_detail, scope))
+        else:
+            replaced.append((status, name, detail, scope))
+    return replaced
 
 
 def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
