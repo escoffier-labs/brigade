@@ -140,8 +140,10 @@ fn supported_toolchain_and_agent_workflow_are_documented() {
 
     let readme = repository_file("README.md");
     assert!(
-        readme.contains("Rust 1.85 or newer"),
-        "README must state the supported Rust version"
+        readme.contains(
+            "Install GraphTrail and `graphtrail-mcp` through Brigade's verified managed manifest"
+        ),
+        "README must direct installation through Brigade's managed manifest"
     );
     assert!(
         readme.contains("`refresh: true` starts an incremental graph-index write"),
@@ -449,10 +451,12 @@ fn release_publication_is_preflighted_protected_and_recoverable() {
         "README crate badge must reflect the registry dynamically"
     );
     assert!(
-        readme.contains(
-            "cargo install --git https://github.com/escoffier-labs/graphtrail --tag v0.4.0"
-        ),
-        "README must distinguish the v0.4.0 Git tag from the registry install"
+        readme.contains("The standalone GraphTrail repository was archived on 2026-07-21"),
+        "README must state that the standalone GraphTrail repository is archived"
+    );
+    assert!(
+        !readme.contains("cargo install"),
+        "README must not restore standalone Cargo install guidance"
     );
 
     let recovery = repository_file("docs/releasing.md");
