@@ -182,7 +182,10 @@ def test_no_journal_file_until_lock_held(enabled, tmp_path):
     _write_run_json_locked(repo, run_dir, "started")
 
     assert _journal_path(run_dir).is_file()
-    assert sorted(path.name for path in (run_dir / "events").iterdir()) == ["lifecycle.jsonl"]
+    assert sorted(path.name for path in (run_dir / "events").iterdir()) == [
+        "lifecycle.jsonl",
+        "shadow-comparison.json",
+    ]
 
 
 def test_in_lock_write_appends_run_created(enabled, tmp_path):

@@ -28,6 +28,7 @@ from . import localio
 from . import proc, receipt_schema, runguard
 from . import run_control
 from . import run_lifecycle
+from . import run_shadow
 from .result_integrity import validate_final_output
 from .run_receipts import (
     agent_result_from_worker as _agent_result_from_worker,
@@ -502,6 +503,8 @@ def _write_json(path: Path, payload: object) -> None:
                 incoming_snapshot=payload,
             )
     localio.write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    if path.name == "run.json" and isinstance(payload, dict):
+        run_shadow.record_shadow_comparison(path.parent, payload)
 
 
 def _revision_contains(revisions_dir: Path, projection: bytes) -> bool:
