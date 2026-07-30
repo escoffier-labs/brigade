@@ -210,9 +210,12 @@ def _validate_base_stripped_request_rules(obj: Mapping[str, Any]) -> None:
     (``lifecycle_journal_requested`` and ``run_journal_authority_requested``)
     set to the bool ``True`` (not merely present: a missing key, a False
     value, or a wrong-typed value all fail closed) and must exclude every
-    journal-derived metadata field. The caller passes the parsed object:
-    the original base on the write path (before stripping) and the stored
-    stripped bytes on the validate path. Any violation fails closed with
+    journal-derived metadata field. Validation runs on the stripped result:
+    the write path passes the parsed stripped object (after
+    ``_strip_journal_metadata_from_base``) and the validate path passes the
+    stored stripped bytes. Canonical metadata-bearing input is accepted on
+    the write path and stripped, so only the derived stored base must
+    exclude the journal metadata fields. Any violation fails closed with
     category ``base-stripped-requests``.
     """
     for field in _DURABLE_REQUEST_FIELDS:
@@ -688,29 +691,32 @@ def write_checkpoint(
 
     ``run_lifecycle`` is imported lazily inside this function so the lifecycle
     layer may depend on this checkpoint substrate without a circular import.
+
+    Validation-before-activation ordering: ``body_kind`` validation and, for
+    ``base-stripped``, all decoding, canonical-byte validation, stripping,
+    and durable-request validation run BEFORE
+    ``prepare_lifecycle_journal``. A rejected candidate therefore raises
+    before the lifecycle journal is activated, so an enrolled-but-inactive
+    run under the lock never gains an ``events/`` directory or
+    ``lifecycle.jsonl`` from a rejected write (the no-mutation precondition).
+    After successful preprocessing, the existing prepare, journal-active, and
+    owner checks run unchanged, and the crash-safe publish still precedes the
+    journal append. Canonical metadata-bearing input is accepted and stripped;
+    only the derived stored base must exclude the journal metadata fields.
     """
     from brigade import run_lifecycle  # lazy: avoid circular import
 
     run_dir = Path(run_dir).expanduser().resolve()
-    run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
-    journal_path = run_lifecycle._journal_path(run_dir)
-    if not journal_path.is_file():
-        return None
-    # Journal active: every publish/append must come from the process holding
-    # the matching active run lock. A lock-less writer fails closed before any
-    # checkpoint/status append and before run.json changes, for every status.
-    if workspace is None or not runguard.is_active_run_owner(workspace, run_dir):
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("lifecycle journal append requires the active run lock for this run")
-        )
     run_json_bytes = bytes(run_json_bytes)
     # Validate body_kind and, for base-stripped, strip the journal-derived
-    # metadata fields BEFORE SHA/payload/publish so the content-addressed
-    # snapshot is stable across projector re-derivations. The base-stripped
-    # invariants (both durable request fields present, no journal metadata)
-    # are enforced on the stripped result so the write path and the validate
-    # path agree: a base carrying metadata fields is stripped (not rejected),
-    # and a base missing a durable request field fails closed.
+    # metadata fields BEFORE SHA/payload/publish AND before
+    # prepare_lifecycle_journal, so the content-addressed snapshot is stable
+    # across projector re-derivations AND a rejected candidate never
+    # activates the journal. The base-stripped invariants (both durable
+    # request fields present, no journal metadata) are enforced on the
+    # stripped result so the write path and the validate path agree: a base
+    # carrying metadata fields is stripped (not rejected), and a base missing
+    # a durable request field fails closed.
     if body_kind is not None and body_kind != _BODY_KIND_BASE_STRIPPED:
         raise CheckpointError(_bound("body_kind must be base-stripped"), category="body-kind")
     if body_kind == _BODY_KIND_BASE_STRIPPED:
@@ -749,6 +755,17 @@ def write_checkpoint(
         _validate_base_stripped_request_rules(stripped_obj)
     else:
         publish_bytes = run_json_bytes
+    run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+    journal_path = run_lifecycle._journal_path(run_dir)
+    if not journal_path.is_file():
+        return None
+    # Journal active: every publish/append must come from the process holding
+    # the matching active run lock. A lock-less writer fails closed before any
+    # checkpoint/status append and before run.json changes, for every status.
+    if workspace is None or not runguard.is_active_run_owner(workspace, run_dir):
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("lifecycle journal append requires the active run lock for this run")
+        )
     sha = hashlib.sha256(publish_bytes).hexdigest()
     payload = _checkpoint_payload(publish_bytes, paired_event_type=paired_event_type, body_kind=body_kind)
     # Crash-safe publish FIRST. A CheckpointError here fails before the

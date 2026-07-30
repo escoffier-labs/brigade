@@ -2606,6 +2606,174 @@ def test_write_checkpoint_base_stripped_strips_metadata_fields_present(enabled, 
     assert run_checkpoint.checkpoint_path(run_dir, expected_sha).read_bytes() == expected_stripped
 
 
+def _bootstrap_authority_request(run_dir: Path, status: str = "planning") -> None:
+    """Pre-lock bootstrap: write run.json with BOTH durable request fields, no journal.
+
+    This is the enrolled-but-inactive state: the run has durably requested both
+    the lifecycle journal and the journal authority, but the events directory
+    and lifecycle.jsonl do not yet exist (prepare_lifecycle_journal has not
+    been called). Used by the preactivation regression tests below.
+    """
+    localio.write_json(
+        run_dir / "run.json",
+        {
+            "schema": "brigade.run.v1",
+            "status": status,
+            "lifecycle_journal_requested": True,
+            "run_journal_authority_requested": True,
+        },
+    )
+
+
+def test_write_checkpoint_base_stripped_preactivation_rejects_non_house_canonical_bytes(enabled, tmp_path):
+    """Validation before activation: rejected candidate bytes must not create the journal.
+
+    An enrolled-but-inactive run (both durable request fields True, no events
+    directory) holds the real workspace run lock. A base-stripped write with
+    non-house-canonical incoming bytes must fail closed with category
+    writer-bytes BEFORE prepare_lifecycle_journal activates the journal, so
+    the events directory, lifecycle.jsonl, and checkpoint files all remain
+    absent. Mutating the journal on a rejected candidate violates the
+    no-mutation precondition contract.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_authority_request(run_dir)
+    # No prior prepare_lifecycle_journal: the run is enrolled but inactive.
+
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+    }
+    # Compact encoding (no indent) is valid JSON but not writer canonical.
+    non_canonical = (json.dumps(base, sort_keys=True) + "\n").encode("utf-8")
+    assert non_canonical != _writer_bytes(base)
+
+    with runguard.run_lock(workspace, run_dir=run_dir), pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            non_canonical,
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+    assert excinfo.value.category == "writer-bytes"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    # No mutation: events directory, lifecycle journal, and checkpoint files absent.
+    assert not (run_dir / "events").exists()
+    assert not _journal_path(run_dir).exists()
+    assert not _checkpoint_dir(run_dir).exists()
+
+
+def test_write_checkpoint_base_stripped_preactivation_rejects_false_request_field(enabled, tmp_path):
+    """Validation before activation: a False durable request field must not create the journal.
+
+    Enrolled-but-inactive run under the lock; the candidate base carries a
+    present-but-False durable request field. The durable-request rule fails
+    closed with category base-stripped-requests BEFORE
+    prepare_lifecycle_journal, so no events directory, journal, or checkpoint
+    files are created.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_authority_request(run_dir)
+
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": False,
+    }
+    base_bytes = _writer_bytes(base)
+
+    with runguard.run_lock(workspace, run_dir=run_dir), pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            base_bytes,
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+    assert excinfo.value.category == "base-stripped-requests"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    assert not (run_dir / "events").exists()
+    assert not _journal_path(run_dir).exists()
+    assert not _checkpoint_dir(run_dir).exists()
+
+
+def test_write_checkpoint_base_stripped_preactivation_rejects_wrong_type_request_field(enabled, tmp_path):
+    """Validation before activation: a wrong-typed durable request field must not create the journal.
+
+    Enrolled-but-inactive run under the lock; the candidate base carries a
+    string durable request field. The durable-request rule fails closed with
+    category base-stripped-requests BEFORE prepare_lifecycle_journal, so no
+    events directory, journal, or checkpoint files are created.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_authority_request(run_dir)
+
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": "true",
+        "run_journal_authority_requested": True,
+    }
+    base_bytes = _writer_bytes(base)
+
+    with runguard.run_lock(workspace, run_dir=run_dir), pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            base_bytes,
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+    assert excinfo.value.category == "base-stripped-requests"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    assert not (run_dir / "events").exists()
+    assert not _journal_path(run_dir).exists()
+    assert not _checkpoint_dir(run_dir).exists()
+
+
+def test_write_checkpoint_invalid_body_kind_preactivation_must_not_create_journal(enabled, tmp_path):
+    """Validation before activation: an unknown body_kind must not create the journal.
+
+    Enrolled-but-inactive run under the lock; an unknown body_kind value
+    fails closed with category body-kind BEFORE prepare_lifecycle_journal
+    activates the journal, so no events directory, journal, or checkpoint
+    files are created. Pins the full validation surface ahead of activation.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_authority_request(run_dir)
+
+    base_bytes = _writer_bytes(
+        {
+            "schema": "brigade.run.v1",
+            "status": "planning",
+            "lifecycle_journal_requested": True,
+            "run_journal_authority_requested": True,
+        }
+    )
+
+    with runguard.run_lock(workspace, run_dir=run_dir), pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            base_bytes,
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="legacy-full",
+        )
+    assert excinfo.value.category == "body-kind"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    assert not (run_dir / "events").exists()
+    assert not _journal_path(run_dir).exists()
+    assert not _checkpoint_dir(run_dir).exists()
+
+
 # -- Issue #568 slice 6: authority-aware base-stripped recovery ----------------
 
 
