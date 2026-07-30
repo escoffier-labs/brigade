@@ -6,6 +6,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 import json
 
+import pytest
 
 from brigade import cli
 from brigade import doctor as doctor_mod
@@ -1361,6 +1362,7 @@ def _activate_recovery_journal_with_checkpoint(
     run_json_obj: dict,
     *,
     paired_event_type: str | None = "run.planning.started",
+    pairing_key: str | None = None,
     leave_stale_lock: bool = False,
 ) -> bytes:
     import shutil
@@ -1381,6 +1383,7 @@ def _activate_recovery_journal_with_checkpoint(
             checkpoint_bytes,
             workspace=workspace,
             paired_event_type=paired_event_type,
+            pairing_key=pairing_key,
         )
     lock_path = workspace / ".brigade" / "run.lock"
     if leave_stale_lock:
@@ -1419,6 +1422,80 @@ def _stale_recovery_receipt(
 
 def _recovery_check(target: Path, *, full: bool = False) -> tuple[str, str, str]:
     return doctor_mod._check_recovery_checkpoints(target, full=full)
+
+
+def test_doctor_validates_checkpoint_before_reporting_pending_dispatch(tmp_path: Path):
+    from brigade import run_checkpoint, run_journal, run_lifecycle, runguard
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "dispatch-pending"
+    run_meta = {"status": "dispatching", "task": "demo", "cwd": str(workspace)}
+    _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_meta)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=workspace,
+            event_type="run.dispatch.requested",
+            seat="coder",
+        )
+
+    verdict, reason = doctor_mod._recovery_checkpoint_run_verdict(workspace, run_dir)
+    assert verdict == "warn"
+    assert "at-least-once dispatch recovery required" in reason
+
+    (run_dir / "run.json").unlink()
+    verdict, reason = doctor_mod._recovery_checkpoint_run_verdict(workspace, run_dir)
+    assert verdict == "warn"
+    assert "run.json missing with valid checkpoint" in reason
+    assert "at-least-once dispatch recovery required" in reason
+
+    (run_dir / "run.json").write_text("not json")
+    verdict, reason = doctor_mod._recovery_checkpoint_run_verdict(workspace, run_dir)
+    assert verdict == "warn"
+    assert "run.json unparseable with valid checkpoint" in reason
+    assert "at-least-once dispatch recovery required" in reason
+
+    latest = run_checkpoint.latest_checkpoint_event(
+        run_journal.read_journal(run_lifecycle._journal_path(run_dir)).events
+    )
+    assert latest is not None
+    checkpoint_path = run_checkpoint.checkpoint_path(run_dir, latest.payload["sha256"])
+    checkpoint_path.write_bytes(b"x" * latest.payload["byte_size"])
+
+    verdict, reason = doctor_mod._recovery_checkpoint_run_verdict(workspace, run_dir)
+    assert verdict == "fail"
+    assert "at-least-once" not in reason
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "run.dispatch.requested",
+        "run.dispatch.observed",
+        "run.dispatch.completed",
+        "run.dispatch.failed",
+    ],
+)
+def test_doctor_fails_dispatch_pairing_checkpoint_at_tail_as_incomplete(tmp_path: Path, event_type: str):
+    from brigade import run_checkpoint
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / f"dispatch-incomplete-{event_type.rsplit('.', 1)[-1]}"
+    run_meta = {"status": "dispatching", "task": "demo", "cwd": str(workspace)}
+    _activate_recovery_journal_with_checkpoint(
+        workspace,
+        run_dir,
+        run_meta,
+        paired_event_type=event_type,
+        pairing_key=run_checkpoint.dispatch_pairing_key(event_type, "coder", 1),
+    )
+
+    verdict, reason = doctor_mod._recovery_checkpoint_run_verdict(workspace, run_dir)
+
+    assert verdict == "fail"
+    assert "incomplete" in reason
 
 
 def _snapshot_run_tree(run_dir: Path) -> dict[str, object]:

@@ -1158,6 +1158,48 @@ def test_run_direct_worker_skips_plan_and_synthesis(monkeypatch, capsys, tmp_pat
     assert run_meta["status"] == "ok"
 
 
+def test_lifecycle_run_dispatch_emits_only_identified_worker_dispatch_facts(monkeypatch, tmp_path):
+    from brigade import run_journal, run_lifecycle
+
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    monkeypatch.setattr(
+        aboyeur.agents,
+        "run_agent",
+        lambda *args, **kwargs: agents.AgentResult(text="worker final output", ok=True),
+    )
+    output_dir = tmp_path / "run"
+
+    with runguard.run_lock(tmp_path, run_dir=output_dir):
+        assert (
+            aboyeur.run(
+                "do exactly this",
+                _roster(),
+                worker="coder",
+                cwd=tmp_path,
+                output_dir=output_dir,
+                route_enabled=False,
+            )
+            == 0
+        )
+
+    events = run_journal.read_journal(run_lifecycle._journal_path(output_dir)).events
+    worker_facts = [event for event in events if event.event_type.startswith("run.dispatch.")]
+    assert {event.event_type for event in worker_facts} == {
+        "run.dispatch.requested",
+        "run.dispatch.observed",
+        "run.dispatch.completed",
+    }
+    assert all(
+        isinstance(event.payload.get("seat"), str)
+        and event.payload["seat"]
+        and isinstance(event.payload.get("attempt"), int)
+        and not isinstance(event.payload["attempt"], bool)
+        and event.payload["attempt"] > 0
+        for event in worker_facts
+    )
+    assert any(event.event_type == "run.dispatching.started" for event in events)
+
+
 def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_path):
     def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
         return agents.AgentResult(
@@ -1620,7 +1662,7 @@ def test_artifact_collection_failure_preserves_terminal_primary_receipt(tmp_path
 
 
 @pytest.mark.parametrize("escape", ["keyboard", "sigterm"])
-def test_post_dispatch_escape_uses_result_processing_phase_owner(monkeypatch, tmp_path, escape):
+def test_post_dispatch_escape_clears_worker_phase_owner(monkeypatch, tmp_path, escape):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(
         aboyeur,
@@ -1637,7 +1679,7 @@ def test_post_dispatch_escape_uses_result_processing_phase_owner(monkeypatch, tm
     def interrupt_after_dispatch(*args, **kwargs):  # noqa: ARG001
         receipt = json.loads((output_dir / "run.json").read_text())
         assert receipt["status"] == "result-processing"
-        assert receipt["phase_owner"] == "chef"
+        assert "phase_owner" not in receipt
         assert "active_stage" not in receipt
         assert "active_seats" not in receipt
         if escape == "sigterm":
@@ -1662,7 +1704,7 @@ def test_post_dispatch_escape_uses_result_processing_phase_owner(monkeypatch, tm
     assert receipt["status"] == "canceled"
     assert receipt["failure"]["phase"] == "result-processing"
     assert receipt["failure"]["kind"] == expected_kind
-    assert receipt["failure"]["seat"] == "chef"
+    assert receipt["failure"]["seat"] == "coder"
 
 
 @pytest.mark.skipif(not hasattr(time, "tzset"), reason="requires POSIX timezone control")
@@ -5595,16 +5637,17 @@ def test_run_preserves_authority_enrollment_through_first_follow_up_receipt_rewr
 
     monkeypatch.setattr(aboyeur, "_write_json", capture_write_json)
 
-    assert (
-        aboyeur.run(
-            "build feature",
-            _roster(),
-            cwd=run_cwd,
-            output_dir=output_dir,
-            code_graph_enabled=False,
+    with runguard.run_lock(run_cwd, run_dir=output_dir):
+        assert (
+            aboyeur.run(
+                "build feature",
+                _roster(),
+                cwd=run_cwd,
+                output_dir=output_dir,
+                code_graph_enabled=False,
+            )
+            == 0
         )
-        == 0
-    )
 
     # record_run_start produces the first run.json write; the next one is the
     # first follow-up receipt rewrite performed by aboyeur.run itself.
@@ -5622,10 +5665,10 @@ def test_run_preserves_authority_enrollment_through_first_follow_up_receipt_rewr
     assert final_meta[_LIFECYCLE_REQUEST_FIELD] is True
     assert final_meta[_AUTHORITY_REQUEST_FIELD] is True
 
-    # The run remains on the authority path: the durable authority request is
-    # still true and no projection metadata has been published yet, so
-    # _resolve_authority_state classifies it as authority-requested.
-    assert aboyeur._resolve_authority_state(output_dir) == "authority-requested"
+    # The run remains on the authority path. Under the real run lock, the
+    # lifecycle journal activates and the ready first comparison publishes
+    # projection metadata, so the completed run is authoritative.
+    assert aboyeur._resolve_authority_state(output_dir) == "authoritative"
 
 
 # -- Issue #568 slice 7 assignment 3: durable enrollment fail-closed ------------

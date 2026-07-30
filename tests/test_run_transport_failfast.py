@@ -110,3 +110,52 @@ def test_all_ok_stages_succeed_under_fail_fast(dispatch_harness):
     assert direct_calls == ["a", "b"]
     assert [result.ok for result in results] == [True, True]
     assert [result.text for result in results] == ["a ok", "b ok"]
+
+
+def test_dispatch_callbacks_follow_each_external_result_and_keep_attempt_identity(dispatch_harness):
+    assignments = [
+        Assignment(worker="a", task="first", stage=1),
+        Assignment(worker="a", task="second", stage=1),
+    ]
+    facts: list[tuple[str, str, int]] = []
+    next_attempt = 0
+
+    def requested(agent):
+        nonlocal next_attempt
+        next_attempt += 1
+        facts.append(("requested", agent.name, next_attempt))
+        return next_attempt
+
+    def observed(agent, attempt):
+        facts.append(("observed", agent.name, attempt))
+
+    def completed(agent, attempt):
+        facts.append(("completed", agent.name, attempt))
+
+    def failed(agent, attempt):
+        facts.append(("failed", agent.name, attempt))
+
+    results, direct_calls = dispatch_harness(
+        assignments,
+        {
+            "a": [
+                agents.AgentResult(text="first", ok=True),
+                agents.AgentResult(text="second", ok=False, detail="non-zero"),
+            ]
+        },
+        on_dispatch_requested=requested,
+        on_dispatch_observed=observed,
+        on_dispatch_completed=completed,
+        on_dispatch_failed=failed,
+    )
+
+    assert direct_calls == ["a", "a"]
+    assert [result.ok for result in results] == [True, False]
+    assert facts == [
+        ("requested", "a", 1),
+        ("observed", "a", 1),
+        ("completed", "a", 1),
+        ("requested", "a", 2),
+        ("observed", "a", 2),
+        ("failed", "a", 2),
+    ]

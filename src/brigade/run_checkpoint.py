@@ -37,7 +37,7 @@ MAX_JOURNAL_EVENTS = 512
 _CHECKPOINT_PAYLOAD_REQUIRED_KEYS = frozenset(
     {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type"}
 )
-_CHECKPOINT_PAYLOAD_OPTIONAL_KEYS = frozenset({"body_kind"})
+_CHECKPOINT_PAYLOAD_OPTIONAL_KEYS = frozenset({"body_kind", "pairing_key"})
 # Backwards-compatible alias kept for any external reader of the closed key set;
 # the validation logic now treats body_kind as optional.
 _CHECKPOINT_PAYLOAD_KEYS = _CHECKPOINT_PAYLOAD_REQUIRED_KEYS | _CHECKPOINT_PAYLOAD_OPTIONAL_KEYS
@@ -63,6 +63,14 @@ _JOURNAL_METADATA_FIELDS = frozenset(
 _DURABLE_REQUEST_FIELDS = frozenset({"lifecycle_journal_requested", "run_journal_authority_requested"})
 
 _BODY_KIND_BASE_STRIPPED = "base-stripped"
+_DISPATCH_FACT_EVENT_TYPES = frozenset(
+    {
+        "run.dispatch.requested",
+        "run.dispatch.observed",
+        "run.dispatch.completed",
+        "run.dispatch.failed",
+    }
+)
 _CHECKPOINT_IDEMPOTENCY_BASE_STRIPPED_PREFIX = f"{_CHECKPOINT_IDEMPOTENCY_PREFIX}:base-stripped"
 
 
@@ -122,6 +130,11 @@ def _validate_payload(payload: Any) -> None:
         if not isinstance(body_kind, str) or body_kind != _BODY_KIND_BASE_STRIPPED:
             raise CheckpointError(_bound("body_kind must be base-stripped"), category="body-kind")
 
+    if "pairing_key" in payload:
+        pairing_key = payload["pairing_key"]
+        if not isinstance(pairing_key, str) or not _HEX64.match(pairing_key):
+            raise CheckpointError(_bound("pairing_key must be 64-char lowercase hex"), category="pairing-key")
+
     if payload["media_type"] != CHECKPOINT_MEDIA_TYPE:
         raise CheckpointError(_bound("media_type mismatch"), category="media-type")
 
@@ -161,9 +174,9 @@ def _validate_payload(payload: Any) -> None:
         raise CheckpointError(_bound("paired_event_type must be null or a string"), category="paired-event-type")
     elif paired not in run_events.EVENT_TYPES:
         raise CheckpointError(_bound("paired_event_type not in registry"), category="paired-event-type")
-    elif paired not in _mapped_lifecycle_event_types():
+    elif paired not in _mapped_lifecycle_event_types() and paired not in _DISPATCH_FACT_EVENT_TYPES:
         raise CheckpointError(
-            _bound("paired_event_type is not a mapped lifecycle status event"),
+            _bound("paired_event_type is not a mapped lifecycle or dispatch fact event"),
             category="paired-event-type",
         )
 
@@ -608,6 +621,7 @@ def _checkpoint_payload(
     *,
     paired_event_type: str | None,
     body_kind: str | None = None,
+    pairing_key: str | None = None,
 ) -> dict[str, Any]:
     sha = hashlib.sha256(run_json_bytes).hexdigest()
     payload: dict[str, Any] = {
@@ -620,7 +634,16 @@ def _checkpoint_payload(
     }
     if body_kind is not None:
         payload["body_kind"] = body_kind
+    if pairing_key is not None:
+        payload["pairing_key"] = pairing_key
     return payload
+
+
+def dispatch_pairing_key(event_type: str, seat: str, attempt: int) -> str:
+    """Return the stable dispatch checkpoint identity for one worker action."""
+    return hashlib.sha256(
+        run_events.canonical_bytes({"event_type": event_type, "seat": seat, "attempt": attempt})
+    ).hexdigest()
 
 
 def _checkpoint_idempotency_key(
@@ -628,24 +651,35 @@ def _checkpoint_idempotency_key(
     *,
     paired_event_type: str | None,
     body_kind: str | None = None,
+    pairing_key: str | None = None,
 ) -> str:
     paired = paired_event_type if paired_event_type is not None else "none"
     if body_kind == _BODY_KIND_BASE_STRIPPED:
         prefix = _CHECKPOINT_IDEMPOTENCY_BASE_STRIPPED_PREFIX
     else:
         prefix = _CHECKPOINT_IDEMPOTENCY_PREFIX
-    key = f"{prefix}:{sha}:{paired}"
+    if pairing_key is None:
+        key = f"{prefix}:{sha}:{paired}"
+        if len(key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN:
+            return key
+        budget = run_events.MAX_IDEMPOTENCY_KEY_LEN - len(prefix) - 1 - len(sha) - 1
+        if budget < 0:
+            paired_digest = hashlib.sha256(paired.encode("utf-8")).hexdigest()[:16]
+            return f"{prefix}:{sha}:{paired_digest}"
+        return f"{prefix}:{sha}:{paired[:budget]}"
+
+    key = f"{prefix}:{sha}:{paired}:{pairing_key}"
     if len(key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN:
         return key
-    # Bound the paired-event-type tail so the key stays within the envelope
-    # limit regardless of event_type length; the prefix and sha are fixed.
-    budget = run_events.MAX_IDEMPOTENCY_KEY_LEN - len(prefix) - 1 - len(sha) - 1
+    # Bound the pairing identity so the key stays within the envelope limit
+    # regardless of event type length; the prefix and snapshot digest are fixed.
+    budget = run_events.MAX_IDEMPOTENCY_KEY_LEN - len(prefix) - 1 - len(sha) - 1 - len(paired) - 1
     if budget < 0:
         # Pathological: prefix+sha already overflow the bound. Fall back to a
         # digest of the paired type so the key is still unique and bounded.
-        paired_digest = hashlib.sha256(paired.encode("utf-8")).hexdigest()[:16]
-        return f"{prefix}:{sha}:{paired_digest}"
-    return f"{prefix}:{sha}:{paired[:budget]}"
+        identity_digest = hashlib.sha256(pairing_key.encode("utf-8")).hexdigest()[:16]
+        return f"{prefix}:{sha}:{identity_digest}"
+    return f"{prefix}:{sha}:{paired}:{pairing_key[:budget]}"
 
 
 def write_checkpoint(
@@ -655,6 +689,7 @@ def write_checkpoint(
     workspace: Path | None = None,
     paired_event_type: str | None,
     body_kind: str | None = None,
+    pairing_key: str | None = None,
 ) -> "run_journal.RunEvent | None":
     """Publish a crash-safe recovery checkpoint and append the checkpoint event.
 
@@ -708,6 +743,8 @@ def write_checkpoint(
 
     run_dir = Path(run_dir).expanduser().resolve()
     run_json_bytes = bytes(run_json_bytes)
+    if pairing_key is not None and (not isinstance(pairing_key, str) or not _HEX64.match(pairing_key)):
+        raise CheckpointError(_bound("pairing_key must be 64-char lowercase hex"), category="pairing-key")
     # Validate body_kind and, for base-stripped, strip the journal-derived
     # metadata fields BEFORE SHA/payload/publish AND before
     # prepare_lifecycle_journal, so the content-addressed snapshot is stable
@@ -767,7 +804,12 @@ def write_checkpoint(
             run_events._bound("lifecycle journal append requires the active run lock for this run")
         )
     sha = hashlib.sha256(publish_bytes).hexdigest()
-    payload = _checkpoint_payload(publish_bytes, paired_event_type=paired_event_type, body_kind=body_kind)
+    payload = _checkpoint_payload(
+        publish_bytes,
+        paired_event_type=paired_event_type,
+        body_kind=body_kind,
+        pairing_key=pairing_key,
+    )
     # Crash-safe publish FIRST. A CheckpointError here fails before the
     # lifecycle status append and before run.json replacement.
     publish_checkpoint_file(run_dir, publish_bytes)
@@ -775,7 +817,12 @@ def write_checkpoint(
         report = run_journal.read_journal(journal_path)
         if report.partial_tail is not None or report.chain_errors:
             raise run_journal.ChainIntegrityError(run_events._bound(run_lifecycle._CHAIN_CATEGORY))
-        idempotency_key = _checkpoint_idempotency_key(sha, paired_event_type=paired_event_type, body_kind=body_kind)
+        idempotency_key = _checkpoint_idempotency_key(
+            sha,
+            paired_event_type=paired_event_type,
+            body_kind=body_kind,
+            pairing_key=pairing_key,
+        )
         return run_journal.append_event(
             journal_path,
             run_id=run_lifecycle._run_id_from_dir(run_dir),
@@ -890,6 +937,8 @@ def _paired_event_derived_status(event: "run_journal.RunEvent") -> str | None:
     from brigade import run_projector  # lazy: avoid import cycle
 
     event_type = event.event_type
+    if event_type == "run.dispatch.completed" and not run_projector._has_dispatch_identity(event.payload):
+        return "result-processing"
     if event_type in run_projector.EVENT_STATUS:
         return run_projector.EVENT_STATUS[event_type]
     rule = run_projector._PAYLOAD_STATUS_RULES.get(event_type)
@@ -919,10 +968,20 @@ def _verify_coverage(
     status the paired event must derive to.
     """
     paired_event_type = latest.payload.get("paired_event_type")
+    pairing_key = latest.payload.get("pairing_key")
     tail = events[-1]
     if latest.sequence == tail.sequence:
-        # Checkpoint is the tail. Covered for both null and non-null
-        # paired_event_type (a crash before the paired status append).
+        # A dispatch pairing key promises a specific identity-bearing fact.
+        # A checkpoint at tail means that fact never committed, so recovery
+        # must surface the incomplete pair instead of treating the checkpoint
+        # as covered.
+        if pairing_key is not None:
+            raise CheckpointError(
+                _bound("dispatch checkpoint pair is incomplete"),
+                category="incomplete-pair",
+            )
+        # Legacy lifecycle checkpoints remain recoverable at tail after a
+        # crash before their paired status append.
         return
     if paired_event_type is None:
         # Null pairing covers only checkpoint-at-tail; any following event
@@ -936,6 +995,24 @@ def _verify_coverage(
     paired = following[0]
     if paired.event_type != paired_event_type:
         raise CheckpointError(_bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail")
+    if pairing_key is not None:
+        seat = paired.payload.get("seat")
+        attempt = paired.payload.get("attempt")
+        if (
+            paired.event_type not in _DISPATCH_FACT_EVENT_TYPES
+            or not isinstance(seat, str)
+            or not seat
+            or isinstance(attempt, bool)
+            or not isinstance(attempt, int)
+            or attempt < 1
+        ):
+            raise CheckpointError(_bound("checkpoint pairing identity is invalid"), category="pairing")
+        if pairing_key != dispatch_pairing_key(paired.event_type, seat, attempt):
+            raise CheckpointError(_bound("checkpoint pairing identity does not match event"), category="pairing")
+        # Identity-bearing dispatch facts are status-neutral. Their paired
+        # checkpoint preserves the aggregate status already in run.json, so
+        # no event-derived status comparison applies.
+        return
     derived = _paired_event_derived_status(paired)
     checkpoint_status = checkpoint_obj.get("status")
     if not isinstance(checkpoint_status, str) or derived != checkpoint_status:

@@ -1308,6 +1308,51 @@ def test_runs_recover_fails_closed_on_invalid_latest_checkpoint(tmp_path, capsys
     assert lock_path.is_dir()
 
 
+def _activate_pending_dispatch_recovery_run(workspace: Path, run_dir: Path) -> None:
+    run_json_obj = {"status": "dispatching", "task": "demo", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    shutil.rmtree(workspace / ".brigade" / "run.lock")
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=workspace,
+            event_type="run.dispatch.requested",
+            seat="coder",
+        )
+    _write_lock_owner(workspace, run_dir, pid=99999999)
+
+
+def test_runs_recover_prints_pending_dispatch_only_after_validated_recovery(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    _activate_pending_dispatch_recovery_run(workspace, run_dir)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"recovered: {run_dir}" in out
+    assert "dispatch recovery: at-least-once work required (seat=coder, attempt=1)" in out
+
+
+def test_runs_recover_invalid_pending_dispatch_checkpoint_prints_no_recovery_hint(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    _activate_pending_dispatch_recovery_run(workspace, run_dir)
+    latest = run_checkpoint.latest_checkpoint_event(run_journal.read_journal(_journal_path(run_dir)).events)
+    assert latest is not None
+    checkpoint_path = run_checkpoint.checkpoint_path(run_dir, latest.payload["sha256"])
+    checkpoint_path.write_bytes(b"x" * latest.payload["byte_size"])
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "dispatch recovery:" not in captured.out
+
+
 def test_runs_recover_accepts_covered_paired_status_event_and_preserves_fields(tmp_path, capsys):
     """CLI recovery accepts a checkpoint N plus matching status N+1 and preserves fields.
 

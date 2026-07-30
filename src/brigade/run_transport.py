@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
-from . import agents, proc, run_control
+from . import agents, proc, run_control, runguard
 from .roster import Agent, Roster, is_cli_allowed, timeout_for
 
 _GROK_CONTINUATION_PROMPT = (
@@ -265,6 +265,10 @@ def dispatch(
     on_stage_start: Callable[[int, tuple[str, ...]], None] | None = None,
     on_interrupt: Callable[[], None] | None = None,
     on_scheduler_resolved: Callable[[str, str | None], None] | None = None,
+    on_dispatch_requested: Callable[[Agent], int | None] | None = None,
+    on_dispatch_observed: Callable[[Agent, int], None] | None = None,
+    on_dispatch_completed: Callable[[Agent, int], None] | None = None,
+    on_dispatch_failed: Callable[[Agent, int], None] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
@@ -335,7 +339,7 @@ def dispatch(
         started = time.monotonic()
         effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
 
-        def invoke(
+        def _invoke_external(
             selected_agent: Agent,
             selected_prompt: str,
             *,
@@ -492,6 +496,30 @@ def dispatch(
                 reasoning=selected_agent.reasoning,
                 process_registry=process_registry,
             )
+
+        def invoke(
+            selected_agent: Agent,
+            selected_prompt: str,
+            *,
+            resume_session_id: str | None = None,
+        ) -> agents.AgentResult:
+            """Record transport facts around exactly one real external call."""
+            attempt = on_dispatch_requested(selected_agent) if on_dispatch_requested is not None else None
+            try:
+                result = _invoke_external(selected_agent, selected_prompt, resume_session_id=resume_session_id)
+            except BaseException:
+                if attempt is not None and on_dispatch_failed is not None:
+                    on_dispatch_failed(selected_agent, attempt)
+                raise
+            if attempt is not None:
+                if on_dispatch_observed is not None:
+                    on_dispatch_observed(selected_agent, attempt)
+                if result.ok:
+                    if on_dispatch_completed is not None:
+                        on_dispatch_completed(selected_agent, attempt)
+                elif on_dispatch_failed is not None:
+                    on_dispatch_failed(selected_agent, attempt)
+            return result
 
         def finish(
             result: agents.AgentResult,
@@ -690,6 +718,8 @@ def dispatch(
                 index = future_to_index[future]
                 try:
                     stage_results_by_index[index] = future.result()
+                except runguard.RetainRunLockError:
+                    raise
                 except Exception as exc:  # pragma: no cover - defensive boundary
                     assignment = stage_assignments[index]
                     stage_results_by_index[index] = WorkerResult(
@@ -848,6 +878,8 @@ def _dag_dispatch(
             try:
                 finished = done.result()
                 results[i] = finished
+            except runguard.RetainRunLockError:
+                raise
             except Exception as exc:
                 finished = WorkerResult(
                     worker=assignments[i].worker,

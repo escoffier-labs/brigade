@@ -73,10 +73,12 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     "run.planning.started": frozenset({"detail"}),
     "run.planning.completed": frozenset({"detail"}),
     "run.planning.failed": frozenset({"detail"}),
+    "run.dispatching.started": frozenset({"detail"}),
     "run.dispatch.requested": frozenset({"seat", "attempt", "detail"}),
     "run.dispatch.observed": frozenset({"seat", "attempt", "detail"}),
     "run.dispatch.completed": frozenset({"seat", "attempt", "detail"}),
     "run.dispatch.failed": frozenset({"seat", "attempt", "detail"}),
+    "run.result-processing.started": frozenset({"detail"}),
     "run.synthesis.started": frozenset({"detail"}),
     "run.synthesis.completed": frozenset({"detail"}),
     "run.synthesis.failed": frozenset({"detail"}),
@@ -93,7 +95,16 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     "run.failed": frozenset({"status", "detail"}),
     "run.interrupted": frozenset({"status", "detail"}),
     "run.snapshot.checkpointed": frozenset(
-        {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type", "body_kind"}
+        {
+            "path",
+            "sha256",
+            "media_type",
+            "byte_size",
+            "privacy_class",
+            "paired_event_type",
+            "body_kind",
+            "pairing_key",
+        }
     ),
     "run.artifact_collection.started": frozenset({"detail"}),
 }

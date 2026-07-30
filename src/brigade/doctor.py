@@ -268,13 +268,22 @@ def _recovery_checkpoint_run_verdict(target: Path, run_dir: Path) -> tuple[str, 
         except run_projector.ProjectionError:
             return "fail", "projection failed"
 
+    pending_dispatch = run_lifecycle.pending_dispatch_requests(report.events)
+
+    def warn_with_pending(reason: str) -> tuple[str, str]:
+        if not pending_dispatch:
+            return "warn", reason
+        seat, attempt = pending_dispatch[0]
+        attempt_text = str(attempt) if attempt is not None else "unknown"
+        return "warn", f"{reason}; at-least-once dispatch recovery required (seat={seat}, attempt={attempt_text})"
+
     run_json_path = run_dir / "run.json"
     try:
         run_json_present = run_json_path.is_file()
     except OSError:
         run_json_present = False
     if not run_json_present:
-        return "warn", "run.json missing with valid checkpoint"
+        return warn_with_pending("run.json missing with valid checkpoint")
 
     try:
         run_bytes = run_json_path.read_bytes()
@@ -284,30 +293,32 @@ def _recovery_checkpoint_run_verdict(target: Path, run_dir: Path) -> tuple[str, 
     try:
         parsed = json.loads(run_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
-        return "warn", "run.json unparseable with valid checkpoint"
+        return warn_with_pending("run.json unparseable with valid checkpoint")
     run_meta = parsed if isinstance(parsed, dict) else None
     if run_meta is None:
-        return "warn", "run.json unparseable with valid checkpoint"
+        return warn_with_pending("run.json unparseable with valid checkpoint")
 
     if run_bytes == compare_bytes:
+        success_reason = "projected snapshot matches run.json" if is_authority else "checkpoint bytes match run.json"
+    else:
+        expected = _reconstruct_stale_lock_recovery_receipt(compare_obj, run_meta)
+        if expected is not None and expected == run_meta:
+            success_reason = (
+                "stale-lock-recovery receipt matches projection reconstruction"
+                if is_authority
+                else "stale-lock-recovery receipt matches checkpoint reconstruction"
+            )
+        else:
+            success_reason = None
+    if success_reason is None:
         return (
-            "ok",
-            "projected snapshot matches run.json" if is_authority else "checkpoint bytes match run.json",
+            "fail",
+            "run.json does not match projected snapshot" if is_authority else "run.json does not match checkpoint",
         )
 
-    expected = _reconstruct_stale_lock_recovery_receipt(compare_obj, run_meta)
-    if expected is not None and expected == run_meta:
-        return (
-            "ok",
-            "stale-lock-recovery receipt matches projection reconstruction"
-            if is_authority
-            else "stale-lock-recovery receipt matches checkpoint reconstruction",
-        )
-
-    return (
-        "fail",
-        "run.json does not match projected snapshot" if is_authority else "run.json does not match checkpoint",
-    )
+    if pending_dispatch:
+        return warn_with_pending(success_reason)
+    return "ok", success_reason
 
 
 def _read_run_meta_fail_safe(run_json_path: Path) -> dict[str, object] | None:
