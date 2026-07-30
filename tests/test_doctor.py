@@ -2199,3 +2199,248 @@ def test_doctor_checkpoint_check_never_mutates_across_new_failures(tmp_path: Pat
         assert before == after, f"verdict mutated the run tree under {_label}"
         (run_dir / "run.json").write_bytes(checkpoint_bytes)
         monkeypatch.undo()
+
+
+# -- Issue #568 slice 6 Task 6: authority-aware reproject-before-compare -------
+
+
+def _activate_authority_recovery_journal_with_checkpoint(
+    workspace: Path,
+    run_dir: Path,
+    base_obj: dict,
+    *,
+    paired_event_type: str | None = "run.planning.started",
+    leave_stale_lock: bool = False,
+):
+    """Activate the journal and append one base-stripped authority checkpoint.
+
+    Bootstrap run.json carries only the lifecycle journal request; the
+    authority request lives in the checkpointed base (both durable request
+    fields True). The checkpoint is written with ``body_kind="base-stripped"``
+    so the stored bytes are the canonical stripped base and the journal
+    payload carries ``body_kind``. Returns the appended checkpoint RunEvent.
+    """
+    import shutil
+
+    from brigade import localio, run_checkpoint, run_lifecycle, runguard
+
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    base_bytes = _recovery_writer_bytes(base_obj)
+    localio.write_json(
+        run_dir / "run.json",
+        {"schema": "brigade.run.v1", **base_obj, "lifecycle_journal_requested": True},
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        event = run_checkpoint.write_checkpoint(
+            run_dir,
+            base_bytes,
+            workspace=workspace,
+            paired_event_type=paired_event_type,
+            body_kind="base-stripped",
+        )
+    assert event is not None
+    lock_path = workspace / ".brigade" / "run.lock"
+    if leave_stale_lock:
+        _recovery_write_lock_owner(workspace, run_dir)
+    elif lock_path.exists():
+        shutil.rmtree(lock_path)
+    return event
+
+
+def _authority_base(workspace: Path, **overrides) -> dict:
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "task": "demo",
+        "cwd": str(workspace),
+        "orchestrator": "chef",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+    }
+    base.update(overrides)
+    return base
+
+
+def _authority_projected(run_dir: Path, event):
+    """Reproject the stripped checkpoint base over the verified journal events."""
+    from brigade import run_checkpoint, run_journal, run_lifecycle, run_projector
+
+    stripped = run_checkpoint.checkpoint_path(run_dir, event.payload["sha256"]).read_bytes()
+    base = json.loads(stripped)
+    events = run_journal.read_journal(run_lifecycle._journal_path(run_dir)).events
+    projection = run_projector.project_run_snapshot(base, events, journal_present=True)
+    return projection
+
+
+def test_doctor_authority_base_stripped_matching_projection_is_ok(tmp_path: Path):
+    """A run.json equal to the projected snapshot is OK (not the stripped bytes)."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    base = _authority_base(workspace)
+    event = _activate_authority_recovery_journal_with_checkpoint(workspace, run_dir, base)
+    projected = _authority_projected(run_dir, event)
+    (run_dir / "run.json").write_bytes(projected.to_bytes())
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.OK, detail
+    assert "fail=0" in detail
+    # The stripped checkpoint bytes are NOT the projected bytes; the verdict
+    # must compare the projection, not the stripped body.
+    stripped = (
+        __import__("brigade.run_checkpoint", fromlist=["checkpoint_path"])
+        .checkpoint_path(run_dir, event.payload["sha256"])
+        .read_bytes()
+    )
+    assert stripped != projected.to_bytes()
+
+
+def test_doctor_authority_base_stripped_missing_run_json_is_warn(tmp_path: Path):
+    """A missing run.json is WARN only when projection succeeds."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    base = _authority_base(workspace)
+    _activate_authority_recovery_journal_with_checkpoint(workspace, run_dir, base)
+    (run_dir / "run.json").unlink()
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.WARN
+    assert "warn=1" in detail
+    assert "fail=0" in detail
+    assert not (run_dir / "run.json").exists()
+
+
+def test_doctor_authority_base_stripped_unparseable_run_json_is_warn(tmp_path: Path):
+    """An unparseable run.json is WARN only when projection succeeds."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    base = _authority_base(workspace)
+    _activate_authority_recovery_journal_with_checkpoint(workspace, run_dir, base)
+    (run_dir / "run.json").write_text("not json at all")
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.WARN
+    assert "warn=1" in detail
+    assert "fail=0" in detail
+
+
+def test_doctor_authority_base_stripped_projection_failure_is_fail(tmp_path: Path, monkeypatch):
+    """A projection failure is FAIL even when run.json would otherwise match."""
+    from brigade import run_projector
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    base = _authority_base(workspace)
+    event = _activate_authority_recovery_journal_with_checkpoint(workspace, run_dir, base)
+    projected = _authority_projected(run_dir, event)
+    (run_dir / "run.json").write_bytes(projected.to_bytes())
+
+    def boom(_base, _events, *, journal_present):
+        raise run_projector.ProjectionError("raw projector detail " + "x" * 500)
+
+    monkeypatch.setattr(run_projector, "project_run_snapshot", boom)
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert "projection failed" in detail
+    # run.json is untouched (doctor never writes).
+    assert (run_dir / "run.json").read_bytes() == projected.to_bytes()
+
+
+def test_doctor_authority_base_stripped_legacy_full_verbatim_is_ok(tmp_path: Path):
+    """Absent body_kind remains the legacy verbatim compare (no projection)."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_obj = {"status": "planning", "cwd": str(workspace), "task": "demo"}
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_obj)
+    (run_dir / "run.json").write_bytes(checkpoint_bytes)
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.OK, detail
+    assert "fail=0" in detail
+
+
+def test_doctor_authority_base_stripped_stale_lock_recovery_exact_reconstruction_is_ok(tmp_path: Path):
+    """A stale-lock-recovery receipt built from the projected base is OK."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    base = _authority_base(workspace)
+    event = _activate_authority_recovery_journal_with_checkpoint(workspace, run_dir, base)
+    projected = _authority_projected(run_dir, event)
+    receipt = _stale_recovery_receipt(
+        projected.snapshot,
+        lock_workspace=str(workspace),
+        lock_acquired_at="2026-07-16T00:00:00+00:00",
+    )
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(receipt))
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.OK, detail
+    assert "fail=0" in detail
+
+    bad_receipt = dict(receipt)
+    bad_receipt["error"] = "wrong detail"
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(bad_receipt))
+
+    status2, _name2, detail2 = _recovery_check(workspace)
+    assert status2 == doctor_mod.FAIL
+    assert _RUN_ID in detail2
+    assert "does not match" in detail2
+
+
+def test_doctor_authority_base_stripped_mismatch_is_fail(tmp_path: Path):
+    """A run.json that matches neither the projection nor a recovery receipt is FAIL."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    base = _authority_base(workspace)
+    _activate_authority_recovery_journal_with_checkpoint(workspace, run_dir, base)
+    mismatched = _authority_base(workspace, task="wrong-task")
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(mismatched))
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert _RUN_ID in detail
+    assert "does not match" in detail
+
+
+def test_doctor_authority_base_stripped_never_mutates_run_tree(tmp_path: Path, monkeypatch):
+    """The authority verdict stays read-only across matching, missing, unparseable, and projection-failure scenarios."""
+    from brigade import run_projector
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    base = _authority_base(workspace)
+    event = _activate_authority_recovery_journal_with_checkpoint(workspace, run_dir, base)
+    projected = _authority_projected(run_dir, event)
+    projected_bytes = projected.to_bytes()
+
+    scenarios = [
+        ("matching projection", lambda: (run_dir / "run.json").write_bytes(projected_bytes)),
+        ("missing run.json", lambda: (run_dir / "run.json").unlink()),
+        ("unparseable run.json", lambda: (run_dir / "run.json").write_text("not json")),
+        (
+            "projection failure",
+            lambda: monkeypatch.setattr(
+                run_projector,
+                "project_run_snapshot",
+                lambda _b, _e, *, journal_present: (_ for _ in ()).throw(run_projector.ProjectionError("boom")),
+            ),
+        ),
+    ]
+    for _label, scenario in scenarios:
+        scenario()
+        before = _snapshot_run_tree(run_dir)
+        _recovery_check(workspace)
+        after = _snapshot_run_tree(run_dir)
+        assert before == after, f"authority verdict mutated the run tree under {_label}"
+        (run_dir / "run.json").write_bytes(projected_bytes)
+        monkeypatch.undo()

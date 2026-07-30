@@ -1148,7 +1148,7 @@ Add the helper `_activate_authority_journal_with_checkpoint` to `tests/test_runs
 - Modify: `src/brigade/doctor.py:184-274` (`_recovery_checkpoint_run_verdict`)
 - Test: `tests/test_doctor.py`
 
-- [ ] Write the failing tests. Append to `tests/test_doctor.py`:
+- [x] Write the failing tests. Append to `tests/test_doctor.py`:
 
 ```python
 def test_doctor_reprojects_authority_requested_run_before_compare(tmp_path: Path):
@@ -1251,11 +1251,11 @@ def test_doctor_reproject_check_never_mutates(tmp_path: Path):
 
 Add a helper `_activate_authority_recovery_journal_with_checkpoint` to `tests/test_doctor.py` mirroring `_activate_recovery_journal_with_checkpoint` but bootstrapping `run.json` with both request fields true and passing `body_kind="base-stripped"` to `write_checkpoint`. Use it in the authority-requested tests above.
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_doctor.py tests/test_run_checkpoint.py" --capture brigade-work` - expect FAIL, `AttributeError` on the reproject branch in `_recovery_checkpoint_run_verdict`.
-- [ ] Implement the minimal change. In `doctor._recovery_checkpoint_run_verdict`, after validating the latest checkpoint, branch on `body_kind`. For `base-stripped` on an authority-requested run, parse the base, project with `run_projector.project_run_snapshot(parsed_base, report.events, journal_present=True)`, and compare the projected bytes to the current `run.json` bytes instead of comparing the checkpoint bytes directly. `OK` when they match. `WARN` when `run.json` is missing or unparseable but the projection succeeds. `FAIL` when the projection raises a `ProjectionError`, the chain or coverage check fails, the latest checkpoint is invalid, or any bound is exceeded. The stale-lock-recovery receipt reconstruction for a `base-stripped` run projects the base plus the journal plus the recovery provenance and requires exact equality. The 50-run scan limit, the newest-first ordering, the 8-name failure preview, the aggregate three-field `CheckResult`, and the read-only contract are unchanged. Doctor never quarantines, repairs, or mutates the journal, checkpoint files, or `run.json`.
+- [x] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_doctor.py tests/test_run_checkpoint.py" --capture brigade-work` - expect FAIL, `AttributeError` on the reproject branch in `_recovery_checkpoint_run_verdict`.
+- [x] Implement the minimal change. In `doctor._recovery_checkpoint_run_verdict`, after validating the latest checkpoint, branch on `body_kind`. For `base-stripped` on an authority-requested run, parse the base, project with `run_projector.project_run_snapshot(parsed_base, report.events, journal_present=True)`, and compare the projected bytes to the current `run.json` bytes instead of comparing the checkpoint bytes directly. `OK` when they match. `WARN` when `run.json` is missing or unparseable but the projection succeeds. `FAIL` when the projection raises a `ProjectionError`, the chain or coverage check fails, the latest checkpoint is invalid, or any bound is exceeded. The stale-lock-recovery receipt reconstruction for a `base-stripped` run projects the base plus the journal plus the recovery provenance and requires exact equality. The 50-run scan limit, the newest-first ordering, the 8-name failure preview, the aggregate three-field `CheckResult`, and the read-only contract are unchanged. Doctor never quarantines, repairs, or mutates the journal, checkpoint files, or `run.json`.
 
-- [ ] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_doctor.py tests/test_run_checkpoint.py" --capture brigade-work` - expect PASS.
-- [ ] Commit: `git add src/brigade/doctor.py tests/test_doctor.py && git commit -m "feat(doctor): reproject authority-requested runs before checkpoint comparison"`
+- [x] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_doctor.py tests/test_run_checkpoint.py" --capture brigade-work` - expect PASS.
+- [x] Commit: `git add src/brigade/doctor.py tests/test_doctor.py && git commit -m "feat(doctor): reproject authority-requested runs before checkpoint comparison"`
 
 ## Task 7: Enrollment flag and authoritative write path in aboyeur._write_json
 
