@@ -22,7 +22,6 @@ from brigade.run_shadow import (  # RED: constants land in Task 2
     REASON_NO_COMPARISONS,
     REASON_NO_EVIDENCE,
     REASON_NO_JOURNAL,
-    REASON_STATUS_LAG_CURRENT,
 )
 
 _REQUEST_FIELD = "lifecycle_journal_requested"
@@ -256,7 +255,7 @@ def test_first_locked_write_records_match(enabled, tmp_path):
     assert report.reasons == ()
 
 
-def test_unmapped_status_after_handoff_is_lag(enabled, tmp_path):
+def test_artifact_collection_after_handoff_is_mapped_no_lag(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
     chain = [
@@ -274,21 +273,24 @@ def test_unmapped_status_after_handoff_is_lag(enabled, tmp_path):
         _write_run_json_locked(repo, run_dir, status)
 
     data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
-    assert data["lags"] == 1
+    assert data["lags"] == 0
     assert data["mismatches"] == 0
     assert data["errors"] == 0
-    assert data["last_outcome"] == "lag"
-    assert data["last_differing_fields"] == ["status"]
-    # unmapped write appends a checkpoint event; status event is skipped
-    assert data["last_compared_sequence"] == 13
+    assert data["last_outcome"] == "match"
+    # artifact-collection is now mapped, so its write appends a checkpoint
+    # plus the run.artifact_collection.started status event: 7 mapped writes
+    # x (checkpoint + status) = 14 events at the tail.
+    assert data["last_compared_sequence"] == 14
     report = run_shadow.check_projection_readiness(run_dir)
-    assert report.ready is False
-    assert REASON_STATUS_LAG_CURRENT in report.reasons
+    assert report.ready is True
+    assert report.reasons == ()
 
 
 def test_mapped_ok_after_lag_restores_readiness(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
+    # "running" remains an unmapped status, so it produces a lag; the
+    # subsequent mapped "ok" restores readiness.
     chain = [
         "started",
         "planning",
@@ -296,7 +298,7 @@ def test_mapped_ok_after_lag_restores_readiness(enabled, tmp_path):
         "result-processing",
         "synthesizing",
         "handoff",
-        "artifact-collection",
+        "running",
         "ok",
     ]
 
@@ -919,7 +921,7 @@ def test_journal_run_id_mismatch_records_error(enabled, tmp_path):
     assert REASON_ERROR_RECORDED in report.reasons
 
 
-def test_same_tail_different_unmapped_status_counts_distinct_lags(enabled, tmp_path):
+def test_same_tail_distinct_unmapped_shadow_states_count_distinct_lags(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
     chain = [
@@ -934,17 +936,18 @@ def test_same_tail_different_unmapped_status_counts_distinct_lags(enabled, tmp_p
     for status in chain:
         _write_run_json_locked(repo, run_dir, status)
 
-    # Two distinct unmapped statuses with the same journal tail (seq 6). Each
-    # produces a different shadow_digest (the legacy status is preserved in
-    # the shadow candidate), so they are distinct lag states and must both be
-    # counted -- idempotency keys on (tail sequence, shadow digest, projected
-    # digest, outcome, category), not on the journal tail alone.
+    # "running" remains an unmapped status. Two shadow candidates with the
+    # same unmapped status but distinct preserved detail (task) produce
+    # distinct shadow_digests at the same journal tail (seq 12), so they are
+    # distinct lag states and must both be counted -- idempotency keys on
+    # (tail sequence, shadow digest, projected digest, outcome, category),
+    # not on the journal tail alone.
     run_shadow.record_shadow_comparison(
         run_dir,
         {
             "schema": "brigade.run.v1",
             "schema_version": 1,
-            "status": "artifact-collection",
+            "status": "running",
             "task": "direct-a",
         },
     )
@@ -953,7 +956,7 @@ def test_same_tail_different_unmapped_status_counts_distinct_lags(enabled, tmp_p
         {
             "schema": "brigade.run.v1",
             "schema_version": 1,
-            "status": "dry-run",
+            "status": "running",
             "task": "direct-b",
         },
     )

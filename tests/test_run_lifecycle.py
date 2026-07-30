@@ -448,17 +448,18 @@ def test_aba_recurrence_appends_all_three_occurrences(enabled, tmp_path):
     assert events[6].previous_digest == events[5].event_digest
 
 
-def test_unmapped_intermediate_status_still_appends_the_second_a(enabled, tmp_path):
+def test_artifact_collection_intermediate_appends_the_second_a(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
 
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")
     _write_run_json_locked(repo, run_dir, "dispatching")
-    # Unmapped status: no status event, but a checkpoint event still appends
-    # and run.json still advances to it.
+    # Mapped artifact-collection status: a checkpoint event appends (paired
+    # with run.artifact_collection.started) and the status event appends, and
+    # run.json still advances to it.
     _write_run_json_locked(repo, run_dir, "artifact-collection")
-    # A-unmapped-B-A: the second dispatching is a real transition from the
+    # A-B-A: the second dispatching is a real transition from the
     # artifact-collection snapshot and must append even though the journal
     # tail status payload matches.
     _write_run_json_locked(repo, run_dir, "dispatching")
@@ -468,26 +469,28 @@ def test_unmapped_intermediate_status_still_appends_the_second_a(enabled, tmp_pa
     assert [e.event_type for e in _status_events(run_dir)] == [
         "run.created",
         "run.dispatch.requested",
+        "run.artifact_collection.started",
         "run.dispatch.requested",
     ]
     events = _events(run_dir)
     # The second "dispatching" produces identical run.json bytes to the first,
-    # so its checkpoint replays; only the status event appends. The
-    # artifact-collection (unmapped) checkpoint uses a null paired_event_type.
+    # so its checkpoint replays; only the status event appends.
     assert [e.event_type for e in events] == [
         "run.snapshot.checkpointed",
         "run.created",
         "run.snapshot.checkpointed",
         "run.dispatch.requested",
         "run.snapshot.checkpointed",
+        "run.artifact_collection.started",
         "run.dispatch.requested",
     ]
-    assert [e.sequence for e in events] == [1, 2, 3, 4, 5, 6]
+    assert [e.sequence for e in events] == [1, 2, 3, 4, 5, 6, 7]
     # The second run.dispatch.requested links to the artifact-collection
-    # checkpoint immediately before it, not to the prior status event.
-    assert events[5].previous_digest == events[4].event_digest
-    # The artifact-collection checkpoint is paired with null (unmapped status).
-    assert events[4].payload["paired_event_type"] is None
+    # status event immediately before it (its checkpoint replayed, so no
+    # checkpoint sits between them).
+    assert events[6].previous_digest == events[5].event_digest
+    # The artifact-collection checkpoint is paired with run.artifact_collection.started.
+    assert events[4].payload["paired_event_type"] == "run.artifact_collection.started"
 
 
 def test_retry_after_interruption_reuses_committed_event(enabled, tmp_path):
@@ -571,7 +574,7 @@ def test_terminal_status_transitions_produce_allowlisted_events(enabled, tmp_pat
         assert f"boom {status}" not in _journal_path(run_dir).read_text()
 
 
-def test_unmapped_status_writes_run_json_without_status_event(enabled, tmp_path):
+def test_mapped_dry_run_and_artifact_collection_append_status_events(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
 
@@ -581,9 +584,13 @@ def test_unmapped_status_writes_run_json_without_status_event(enabled, tmp_path)
     _write_run_json_locked(repo, run_dir, "artifact-collection")
 
     assert (run_dir / "run.json").is_file()
-    # Unmapped statuses append no status event, but each distinct run.json
-    # snapshot still publishes a checkpoint event.
-    assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]
+    # dry-run and artifact-collection are now mapped: each appends its status
+    # event, and each distinct run.json snapshot still publishes a checkpoint.
+    assert [e.event_type for e in _status_events(run_dir)] == [
+        "run.created",
+        "run.completed",
+        "run.artifact_collection.started",
+    ]
     assert len(_checkpoint_events(run_dir)) == 3
 
 
@@ -750,13 +757,14 @@ def test_first_activated_mapped_write_checkpoint_seq1_then_status_seq2(enabled, 
     assert events[1].previous_digest == events[0].event_digest
 
 
-def test_unmapped_activated_write_checkpoint_seq1_no_status_event(enabled, tmp_path):
+def test_mapped_artifact_collection_activated_write_appends_status_event(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")  # activate + run.created
-    # An unmapped status under the active journal: checkpoint event appends
-    # (paired null), no status event.
+    # A mapped artifact-collection status under the active journal: checkpoint
+    # event appends (paired run.artifact_collection.started) and the status
+    # event appends.
     _write_run_json_locked(repo, run_dir, "artifact-collection")
 
     events = _events(run_dir)
@@ -764,10 +772,88 @@ def test_unmapped_activated_write_checkpoint_seq1_no_status_event(enabled, tmp_p
         "run.snapshot.checkpointed",
         "run.created",
         "run.snapshot.checkpointed",
+        "run.artifact_collection.started",
     ]
-    assert [e.sequence for e in events] == [1, 2, 3]
-    assert events[2].payload["paired_event_type"] is None
-    assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]
+    assert [e.sequence for e in events] == [1, 2, 3, 4]
+    assert events[2].payload["paired_event_type"] == "run.artifact_collection.started"
+    assert [e.event_type for e in _status_events(run_dir)] == [
+        "run.created",
+        "run.artifact_collection.started",
+    ]
+
+
+# -- Issue #568 slice 6 Task 2: STATUS_EVENT_TYPE rows for dry-run, incomplete,
+#    artifact-collection (previously unmapped, now mapped). --
+
+
+def test_status_event_type_maps_dry_run_incomplete_artifact_collection():
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("dry-run") == "run.completed"
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("incomplete") == "run.failed"
+    assert run_lifecycle.STATUS_EVENT_TYPE.get("artifact-collection") == "run.artifact_collection.started"
+
+
+def test_dry_run_status_appends_run_completed(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "dry-run")
+
+    status_events = _status_events(run_dir)
+    assert [e.event_type for e in status_events] == ["run.created", "run.completed"]
+    completed = [e for e in status_events if e.event_type == "run.completed"][0]
+    assert completed.payload == {"status": "dry-run", "detail": "dry-run"}
+
+
+def test_incomplete_status_appends_run_failed(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "incomplete", error="partial work")
+
+    status_events = _status_events(run_dir)
+    assert [e.event_type for e in status_events] == ["run.created", "run.failed"]
+    failed = [e for e in status_events if e.event_type == "run.failed"][0]
+    assert failed.payload == {"status": "incomplete", "detail": "incomplete"}
+    assert "partial work" not in _journal_path(run_dir).read_text()
+
+
+def test_artifact_collection_status_appends_run_artifact_collection_started(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "artifact-collection")
+
+    status_events = _status_events(run_dir)
+    assert [e.event_type for e in status_events] == [
+        "run.created",
+        "run.artifact_collection.started",
+    ]
+    started = [e for e in status_events if e.event_type == "run.artifact_collection.started"][0]
+    # run.artifact_collection.started allowlist is {"detail"} only (no status).
+    assert started.payload == {"detail": "artifact-collection"}
+
+
+def test_combined_no_longer_skip_chain_appends_all_three_status_events(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    chain = ["started", "dry-run", "started", "incomplete", "started", "artifact-collection"]
+
+    _write_run_json(run_dir, "started")
+    for status in chain:
+        _write_run_json_locked(repo, run_dir, status)
+
+    status_events = _status_events(run_dir)
+    assert [e.event_type for e in status_events] == [
+        "run.created",
+        "run.completed",
+        "run.created",
+        "run.failed",
+        "run.created",
+        "run.artifact_collection.started",
+    ]
 
 
 def test_checkpoint_failure_leaves_journal_and_run_json_unchanged(enabled, tmp_path, monkeypatch):

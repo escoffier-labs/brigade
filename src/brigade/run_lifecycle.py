@@ -91,10 +91,9 @@ _CHAIN_CATEGORY = "lifecycle journal is not derivable"
 
 # Map of current run.json status values to the allowlisted run_event.v1
 # event_type that records that transition. Statuses without a mapping
-# (e.g. "dry-run", "incomplete", "artifact-collection") are skipped: no event
-# is appended and the run.json snapshot refresh proceeds unchanged. This keeps
-# the integration to the current status transitions and the existing event
-# registry -- no new schemas.
+# (e.g. "running") are skipped: no event is appended and the run.json
+# snapshot refresh proceeds unchanged. This keeps the integration to the
+# current status transitions and the existing event registry -- no new schemas.
 STATUS_EVENT_TYPE: dict[str, str] = {
     "started": "run.created",
     "planning": "run.planning.started",
@@ -106,6 +105,9 @@ STATUS_EVENT_TYPE: dict[str, str] = {
     "failed": "run.failed",
     "canceled": "run.interrupted",
     "timeout": "run.failed",
+    "dry-run": "run.completed",
+    "incomplete": "run.failed",
+    "artifact-collection": "run.artifact_collection.started",
 }
 
 

@@ -426,7 +426,7 @@ In `src/brigade/run_projector.py` set `PROJECTOR_VERSION: int = 3`. Add `"run_jo
 
 The three statuses this task maps (`dry-run`, `incomplete`, `artifact-collection`) were previously unmapped, so four existing tests assert the unmapped behavior and must change in this same commit: `test_unmapped_status_after_handoff_is_lag` in `tests/test_run_shadow.py`, and `test_unmapped_intermediate_status_still_appends_the_second_a`, `test_unmapped_status_writes_run_json_without_status_event`, and `test_unmapped_activated_write_checkpoint_seq1_no_status_event` in `tests/test_run_lifecycle.py`. Each is renamed and rewritten below so no test keeps asserting unmapped behavior for a status this task maps.
 
-- [ ] Write the failing tests. Append to `tests/test_run_lifecycle.py`:
+- [x] Write the failing tests. Append to `tests/test_run_lifecycle.py`:
 
 ```python
 def test_status_event_type_maps_dry_run_to_run_completed():
@@ -623,8 +623,8 @@ def test_mapped_activated_artifact_collection_writes_status_event(enabled, tmp_p
     ]
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py tests/test_run_shadow.py" --capture brigade-work` - expect FAIL, `AssertionError` on the `status_events` assertions because `STATUS_EVENT_TYPE.get(status)` returns `None` for `dry-run`, `incomplete`, and `artifact-collection` so no status event appends and the appended-event list does not match, plus the four renamed tests fail because the unmapped behavior they no longer assert is gone and the mapped behavior they now assert is absent. No `KeyError` is raised: the slice-5 lookup uses `.get(status)` and returns `None`, so the failures are assertion failures from missing status events, never `KeyError`.
-- [ ] Implement the minimal change. In `src/brigade/run_lifecycle.py` add the three rows to `STATUS_EVENT_TYPE`:
+- [x] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py tests/test_run_shadow.py" --capture brigade-work` - expect FAIL, `AssertionError` on the `status_events` assertions because `STATUS_EVENT_TYPE.get(status)` returns `None` for `dry-run`, `incomplete`, and `artifact-collection` so no status event appends and the appended-event list does not match, plus the four renamed tests fail because the unmapped behavior they no longer assert is gone and the mapped behavior they now assert is absent. No `KeyError` is raised: the slice-5 lookup uses `.get(status)` and returns `None`, so the failures are assertion failures from missing status events, never `KeyError`.
+- [x] Implement the minimal change. In `src/brigade/run_lifecycle.py` add the three rows to `STATUS_EVENT_TYPE`:
 
 ```python
     "dry-run": "run.completed",
@@ -634,8 +634,8 @@ def test_mapped_activated_artifact_collection_writes_status_event(enabled, tmp_p
 
 `_allowlisted_payload` already builds the payload from the closed per-type allowlist, so `run.completed` and `run.failed` carry `payload.status` and `run.artifact_collection.started` carries `detail`. No change to the activation model, the skip rules for same-status writes, or the bounded-failure wrapping.
 
-- [ ] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py tests/test_run_shadow.py" --capture brigade-work` - expect PASS. Keep `test_first_activated_mapped_write_checkpoint_seq1_then_status_seq2` green unchanged.
-- [ ] Commit: `git add src/brigade/run_lifecycle.py tests/test_run_lifecycle.py tests/test_run_shadow.py && git commit -m "feat(run-lifecycle): map dry-run incomplete and artifact-collection status transitions"`
+- [x] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py tests/test_run_shadow.py" --capture brigade-work` - expect PASS. Keep `test_first_activated_mapped_write_checkpoint_seq1_then_status_seq2` green unchanged.
+- [x] Commit: `git add src/brigade/run_lifecycle.py tests/test_run_lifecycle.py tests/test_run_shadow.py && git commit -m "feat(run-lifecycle): map dry-run incomplete and artifact-collection status transitions"`
 
 ## Task 3: Stripped checkpoint base and body_kind payload key
 
