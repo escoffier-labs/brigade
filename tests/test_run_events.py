@@ -242,6 +242,13 @@ def test_event_type_registry_includes_run_created_with_status_only():
     assert run_events.EVENT_TYPES["run.created"] == frozenset({"status"})
 
 
+def test_checkpoint_event_type_registered_with_closed_payload_keys():
+    assert "run.snapshot.checkpointed" in run_events.EVENT_TYPES
+    assert run_events.EVENT_TYPES["run.snapshot.checkpointed"] == frozenset(
+        {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type"}
+    )
+
+
 def test_build_event_rejects_payload_with_non_integer_numbers():
     with pytest.raises(run_events.CanonicalizationError):
         run_events.build_event(

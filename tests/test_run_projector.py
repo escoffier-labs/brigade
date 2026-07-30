@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import run_events, run_journal
+from brigade import run_checkpoint, run_events, run_journal
 from brigade.run_projector import (
     DERIVED_FIELDS,
     EVENT_STATUS,
@@ -223,6 +223,35 @@ def _events_ending_with_interrupted(*, status: str) -> list[dict]:
     return [created, interrupted]
 
 
+def _build_checkpoint_event(
+    sequence: int,
+    previous_digest: str | None,
+    *,
+    paired_event_type: str | None = "run.created",
+    recorded_at: str = RECORDED_AT,
+) -> dict:
+    """Build a validated checkpoint envelope."""
+    sha = "a" * 64
+    payload = {
+        "path": f"events/recovery-checkpoints/{sha}.json",
+        "sha256": sha,
+        "media_type": run_checkpoint.CHECKPOINT_MEDIA_TYPE,
+        "byte_size": 128,
+        "privacy_class": run_checkpoint.CHECKPOINT_PRIVACY_CLASS,
+        "paired_event_type": paired_event_type,
+    }
+    paired = paired_event_type if paired_event_type is not None else "none"
+    return run_events.build_event(
+        run_id=RUN_ID,
+        sequence=sequence,
+        event_type=run_checkpoint.CHECKPOINT_EVENT_TYPE,
+        payload=payload,
+        idempotency_key=f"checkpoint:{sha}:{paired}",
+        recorded_at=recorded_at,
+        previous_digest=previous_digest,
+    )
+
+
 def _assert_bounded_projection_error(excinfo: pytest.ExceptionInfo[ProjectionError]) -> None:
     assert len(excinfo.value.diagnostic) <= run_events.MAX_DIAGNOSTIC_LEN
 
@@ -233,7 +262,9 @@ def test_golden_replay_matches_expected_bytes():
     if not GOLDEN_EXPECTED_PATH.is_file():
         pytest.fail(f"missing golden expected fixture: {GOLDEN_EXPECTED_PATH}")
     base = json.loads(GOLDEN_BASE_PATH.read_text())
-    expected = GOLDEN_EXPECTED_PATH.read_bytes()
+    expected_obj = json.loads(GOLDEN_EXPECTED_PATH.read_text())
+    expected_obj["projector_version"] = PROJECTOR_VERSION
+    expected = encode_snapshot_bytes(expected_obj)
     projection = project_run_snapshot(base, _golden_events(), journal_present=True)
     assert projection.to_bytes() == expected
 
@@ -452,3 +483,62 @@ def test_non_boolean_journal_present_raises_projection_input_error():
         with pytest.raises(ProjectionInputError) as excinfo:
             project_run_snapshot(_minimal_base_snapshot(), [], journal_present=value)
         _assert_bounded_projection_error(excinfo)
+
+
+def test_checkpoint_event_is_status_neutral_and_advances_chain_cursor():
+    created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
+    checkpoint = _build_checkpoint_event(
+        2,
+        created["event_digest"],
+        paired_event_type="run.planning.started",
+        recorded_at="2026-07-27T15:30:46.000000Z",
+    )
+    projection = project_run_snapshot(_minimal_base_snapshot(), [created, checkpoint], journal_present=True)
+    assert projection.status == "started"
+    assert projection.snapshot["status"] == "started"
+    assert projection.last_sequence == 2
+    assert projection.last_event_digest == checkpoint["event_digest"]
+    assert projection.snapshot["journal_last_sequence"] == 2
+    assert projection.snapshot["journal_last_event_digest"] == checkpoint["event_digest"]
+
+
+def test_checkpoint_first_event_derives_base_status():
+    checkpoint = _build_checkpoint_event(1, None, paired_event_type="run.created")
+    projection = project_run_snapshot(_minimal_base_snapshot(status="planning"), [checkpoint], journal_present=True)
+    assert projection.status == "planning"
+    assert projection.snapshot["status"] == "planning"
+    assert projection.last_sequence == 1
+    assert projection.last_event_digest == checkpoint["event_digest"]
+
+
+def test_checkpoint_after_unmapped_status_preserves_last_mapped_status():
+    created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
+    planning = _build_event(
+        2,
+        "run.planning.started",
+        {"detail": "planning"},
+        "plan-2",
+        "2026-07-27T15:30:46.000000Z",
+        created["event_digest"],
+    )
+    unmapped_checkpoint = _build_checkpoint_event(
+        3,
+        planning["event_digest"],
+        paired_event_type=None,
+        recorded_at="2026-07-27T15:30:47.000000Z",
+    )
+    projection = project_run_snapshot(
+        _minimal_base_snapshot(),
+        [created, planning, unmapped_checkpoint],
+        journal_present=True,
+    )
+    assert projection.status == "planning"
+    assert projection.snapshot["status"] == "planning"
+    assert projection.last_sequence == 3
+    assert projection.last_event_digest == unmapped_checkpoint["event_digest"]
+
+
+def test_projector_version_is_two():
+    projection = project_run_snapshot(_minimal_base_snapshot(), [], journal_present=False)
+    assert PROJECTOR_VERSION == 2
+    assert projection.snapshot["projector_version"] == 2

@@ -1320,3 +1320,882 @@ def test_doctor_no_collision_with_shipped_scanners_toml(tmp_target: Path, monkey
 
     results = _run_producer_collision_check(tmp_target)
     assert _producer_collision_checks(results) == []
+
+
+# -- Issue #568 slice 5 Task 6: read-only recovery checkpoint doctor check --
+
+
+_RUN_ID = "20260727-153045-a1b2c3d4"
+_RECOVERED_AT = "2026-07-27T15:31:00.123456+00:00"
+_OWNER_PID = 42424242
+
+
+def _recovery_writer_bytes(obj: dict) -> bytes:
+    return (json.dumps(obj, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _recovery_write_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _recovery_write_lock_owner(workspace: Path, run_dir: Path, *, pid: int = 99999999) -> Path:
+    lock_path = workspace / ".brigade" / "run.lock"
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text(f"{pid}\n")
+    _recovery_write_json(
+        lock_path / "owner.json",
+        {
+            "schema": "brigade.run_lock.v1",
+            "owner_token": "owner",
+            "pid": pid,
+            "run_dir": str(run_dir.resolve()),
+            "acquired_at": "2026-07-16T00:00:00+00:00",
+        },
+    )
+    return lock_path
+
+
+def _activate_recovery_journal_with_checkpoint(
+    workspace: Path,
+    run_dir: Path,
+    run_json_obj: dict,
+    *,
+    paired_event_type: str | None = "run.planning.started",
+    leave_stale_lock: bool = False,
+) -> bytes:
+    import shutil
+
+    from brigade import localio, run_checkpoint, run_lifecycle, runguard
+
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_bytes = _recovery_writer_bytes(run_json_obj)
+    localio.write_json(
+        run_dir / "run.json",
+        {"schema": "brigade.run.v1", **run_json_obj, "lifecycle_journal_requested": True},
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            checkpoint_bytes,
+            workspace=workspace,
+            paired_event_type=paired_event_type,
+        )
+    lock_path = workspace / ".brigade" / "run.lock"
+    if leave_stale_lock:
+        _recovery_write_lock_owner(workspace, run_dir)
+    elif lock_path.exists():
+        shutil.rmtree(lock_path)
+    return checkpoint_bytes
+
+
+def _stale_recovery_receipt(
+    checkpoint_obj: dict,
+    *,
+    owner_pid: int = _OWNER_PID,
+    recovered_at: str = _RECOVERED_AT,
+    lock_workspace: str | None = None,
+    lock_acquired_at: str | None = None,
+) -> dict:
+    from brigade import runguard
+
+    payload = json.loads(json.dumps(checkpoint_obj))
+    raw_status = payload.get("status")
+    if isinstance(raw_status, str) and raw_status:
+        prior_status = raw_status
+    else:
+        prior_status = "artifact-unavailable"
+    return runguard._build_stale_lock_recovery_receipt(
+        payload,
+        owner_pid=owner_pid,
+        recovered_at=recovered_at,
+        prior_status=prior_status,
+        lock_workspace=lock_workspace,
+        lock_acquired_at=lock_acquired_at,
+        persist_recovery_provenance=True,
+    )
+
+
+def _recovery_check(target: Path, *, full: bool = False) -> tuple[str, str, str]:
+    return doctor_mod._check_recovery_checkpoints(target, full=full)
+
+
+def _snapshot_run_tree(run_dir: Path) -> dict[str, object]:
+    from brigade import run_checkpoint
+
+    entries = sorted(p.name for p in run_dir.iterdir()) if run_dir.is_dir() else []
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    run_json = run_dir / "run.json"
+    checkpoint_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    checkpoint_bytes = (
+        {str(path.relative_to(run_dir)): path.read_bytes() for path in checkpoint_dir.rglob("*") if path.is_file()}
+        if checkpoint_dir.is_dir()
+        else {}
+    )
+    return {
+        "entries": entries,
+        "journal": journal.read_bytes() if journal.is_file() else b"",
+        "run_json": run_json.read_bytes() if run_json.is_file() else b"",
+        "checkpoints": checkpoint_bytes,
+    }
+
+
+def test_doctor_includes_recovery_checkpoints_check(tmp_path: Path):
+    from brigade.station import DoctorContext
+
+    ctx = DoctorContext(target=tmp_path, selection=None, harnesses=[])
+    checks = doctor_mod.core_station_checks(ctx)
+    recovery = [check for check in checks if check[1] == "runs: recovery checkpoints"]
+    assert len(recovery) == 1
+    status, name, detail = recovery[0]
+    assert len(recovery[0]) == 3
+    assert name == "runs: recovery checkpoints"
+    assert status in {doctor_mod.OK, doctor_mod.WARN, doctor_mod.FAIL}
+    assert "ok=" in detail and "omitted=" in detail
+
+
+def test_doctor_scans_at_most_50_immediate_run_dirs_newest_first(tmp_path: Path):
+    import os
+
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    base_mtime = 1_700_000_000.0
+    for index in range(55):
+        run_dir = runs_root / f"run-{index:03d}"
+        run_obj = {"status": "planning", "cwd": str(workspace), "task": f"t{index}"}
+        checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_obj)
+        (run_dir / "run.json").write_bytes(checkpoint_bytes)
+        os.utime(run_dir, (base_mtime + index, base_mtime + index))
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.OK
+    assert "ok=50" in detail
+    assert "omitted=5" in detail
+
+
+def test_doctor_fail_on_bound_exceeded_without_parsing_further(tmp_path: Path, monkeypatch):
+    import hashlib
+    import os
+
+    from brigade import run_checkpoint, run_journal, run_lifecycle, runguard
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "cwd": str(workspace), "task": "demo"}
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").write_bytes(checkpoint_bytes)
+    journal_path = run_lifecycle._journal_path(run_dir)
+
+    real_fstat = os.fstat
+
+    def big_journal_fstat(fd):
+        st = real_fstat(fd)
+        if st.st_size <= run_checkpoint.MAX_JOURNAL_BYTES:
+            return st
+        return os.stat_result(
+            (
+                st.st_mode,
+                st.st_ino,
+                st.st_dev,
+                st.st_nlink,
+                st.st_uid,
+                st.st_gid,
+                run_checkpoint.MAX_JOURNAL_BYTES + 1,
+                st.st_atime,
+                st.st_mtime,
+                st.st_ctime,
+            )
+        )
+
+    journal_path.write_bytes(journal_path.read_bytes() + b"x" * (run_checkpoint.MAX_JOURNAL_BYTES + 1))
+    monkeypatch.setattr(os, "fstat", big_journal_fstat)
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert "bound exceeded" in detail
+
+    run_dir2 = workspace / ".brigade" / "runs" / "big-checkpoint"
+    run_dir2.mkdir(parents=True)
+    with runguard.run_lock(workspace, run_dir=run_dir2):
+        run_lifecycle.prepare_lifecycle_journal(run_dir2, workspace=workspace)
+    sha = hashlib.sha256(checkpoint_bytes).hexdigest()
+    payload = {
+        "path": f"events/recovery-checkpoints/{sha}.json",
+        "sha256": sha,
+        "media_type": run_checkpoint.CHECKPOINT_MEDIA_TYPE,
+        "byte_size": run_checkpoint.MAX_CHECKPOINT_BYTES + 1,
+        "privacy_class": run_checkpoint.CHECKPOINT_PRIVACY_CLASS,
+        "paired_event_type": None,
+    }
+    journal2 = run_lifecycle._journal_path(run_dir2)
+    run_journal.append_event(
+        journal2,
+        run_id=run_dir2.name,
+        event_type=run_checkpoint.CHECKPOINT_EVENT_TYPE,
+        payload=payload,
+        idempotency_key=f"checkpoint:{sha}:none",
+        expected_previous_sequence=0,
+    )
+    (run_dir2 / "run.json").write_bytes(checkpoint_bytes)
+
+    status2, _name2, detail2 = _recovery_check(workspace)
+    assert status2 == doctor_mod.FAIL
+    assert "bound exceeded" in detail2
+
+
+def test_doctor_fail_on_partial_tail_without_quarantine(tmp_path: Path, monkeypatch):
+    from brigade import run_checkpoint, run_journal, run_lifecycle
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "cwd": str(workspace), "task": "demo"}
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").write_bytes(checkpoint_bytes)
+    journal = run_lifecycle._journal_path(run_dir)
+    partial = b'{"schema":"brigade.run_event.v1","event_type":"run.plan'
+    journal.write_bytes(journal.read_bytes() + partial)
+
+    def _forbid_recover_partial_tail(*_args, **_kwargs):
+        raise AssertionError("recover_partial_tail must not be called from doctor")
+
+    monkeypatch.setattr(run_journal, "recover_partial_tail", _forbid_recover_partial_tail)
+    monkeypatch.setattr(
+        run_checkpoint,
+        "recover_from_checkpoint",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("recover_from_checkpoint")),
+    )
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert _RUN_ID in detail
+
+
+def test_doctor_per_run_verdicts(tmp_path: Path):
+    import os
+
+    from brigade import runguard
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+
+    ok_dir = runs_root / "ok-run"
+    ok_obj = {"status": "planning", "cwd": str(workspace), "task": "ok"}
+    ok_bytes = _activate_recovery_journal_with_checkpoint(workspace, ok_dir, ok_obj)
+    (ok_dir / "run.json").write_bytes(ok_bytes)
+
+    warn_dir = runs_root / "warn-run"
+    warn_obj = {"status": "planning", "cwd": str(workspace), "task": "warn"}
+    _activate_recovery_journal_with_checkpoint(workspace, warn_dir, warn_obj)
+    (warn_dir / "run.json").unlink()
+
+    fail_dir = runs_root / "fail-run"
+    fail_obj = {"status": "planning", "cwd": str(workspace), "task": "fail"}
+    fail_bytes = _activate_recovery_journal_with_checkpoint(workspace, fail_dir, fail_obj)
+    mismatched = json.loads(fail_bytes.decode("utf-8"))
+    mismatched["task"] = "wrong-task"
+    (fail_dir / "run.json").write_bytes(_recovery_writer_bytes(mismatched))
+
+    legacy_dir = runs_root / "legacy-run"
+    legacy_dir.mkdir(parents=True)
+    _recovery_write_json(legacy_dir / "run.json", {"status": "ok", "cwd": str(workspace)})
+
+    live_dir = runs_root / "live-run"
+    live_obj = {"status": "planning", "cwd": str(workspace), "task": "live"}
+    live_bytes = _activate_recovery_journal_with_checkpoint(workspace, live_dir, live_obj)
+    (live_dir / "run.json").write_bytes(live_bytes)
+    _recovery_write_lock_owner(workspace, live_dir, pid=os.getpid())
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert "ok=2" in detail
+    assert "warn=1" in detail
+    assert "fail=1" in detail
+    assert "omitted=1" in detail
+    assert "fail-run (run.json does not match checkpoint)" in detail
+    assert runguard.run_lock_state(workspace, live_dir) == "live"
+
+
+def test_doctor_accepts_valid_stale_recovery_terminal_receipt(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    checkpoint_obj = {
+        "status": "dispatching",
+        "cwd": str(workspace),
+        "task": "inspect",
+        "orchestrator": "chef",
+        "active_seats": ["coder"],
+    }
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, checkpoint_obj)
+    receipt = _stale_recovery_receipt(
+        json.loads(checkpoint_bytes.decode("utf-8")),
+        lock_workspace=str(workspace),
+        lock_acquired_at="2026-07-16T00:00:00+00:00",
+    )
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(receipt))
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.OK
+    assert "fail=0" in detail
+
+    bad_receipt = dict(receipt)
+    bad_receipt["error"] = "wrong detail"
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(bad_receipt))
+
+    status2, _name2, detail2 = _recovery_check(workspace)
+    assert status2 == doctor_mod.FAIL
+    assert _RUN_ID in detail2
+    assert "run.json does not match checkpoint" in detail2
+
+
+def test_doctor_accepts_stale_recovery_receipt_with_orchestrator_attribution(tmp_path: Path):
+    """A planning checkpoint with no ``active_seats`` attributes the stale-lock
+    failure to the orchestrator, matching production ``_recover_run_artifact``.
+
+    The test helper ``_stale_recovery_receipt`` must apply the same
+    phase_owner -> worker -> orchestrator precedence as production and the
+    doctor reconstruction, or the candidate receipt diverges and the verdict
+    fails for the wrong reason.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    checkpoint_obj = {
+        "status": "planning",
+        "cwd": str(workspace),
+        "task": "inspect",
+        "orchestrator": "chef",
+    }
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, checkpoint_obj)
+    receipt = _stale_recovery_receipt(
+        json.loads(checkpoint_bytes.decode("utf-8")),
+        lock_workspace=str(workspace),
+        lock_acquired_at="2026-07-16T00:00:00+00:00",
+    )
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(receipt))
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.OK, detail
+    assert "fail=0" in detail
+
+
+def test_doctor_accepts_stale_recovery_receipt_with_phase_owner_attribution(tmp_path: Path):
+    """A result-processing checkpoint attributes the failure to ``phase_owner``,
+    taking precedence over worker/orchestrator, matching production precedence.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    checkpoint_obj = {
+        "status": "result-processing",
+        "cwd": str(workspace),
+        "task": "inspect",
+        "phase_owner": "reviewer",
+        "worker": "coder",
+        "orchestrator": "chef",
+    }
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, checkpoint_obj)
+    receipt = _stale_recovery_receipt(
+        json.loads(checkpoint_bytes.decode("utf-8")),
+        lock_workspace=str(workspace),
+        lock_acquired_at="2026-07-16T00:00:00+00:00",
+    )
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(receipt))
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.OK, detail
+    assert "fail=0" in detail
+
+
+def test_doctor_checkpoint_check_never_mutates(tmp_path: Path, monkeypatch):
+    from brigade import run_checkpoint, run_journal, run_lifecycle
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "cwd": str(workspace), "task": "demo"}
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").write_bytes(checkpoint_bytes)
+    journal = run_lifecycle._journal_path(run_dir)
+    journal.write_bytes(journal.read_bytes() + b'{"partial":')
+
+    before = _snapshot_run_tree(run_dir)
+
+    def _forbid_recover_partial_tail(*_args, **_kwargs):
+        raise AssertionError("recover_partial_tail must not be called from doctor")
+
+    monkeypatch.setattr(run_journal, "recover_partial_tail", _forbid_recover_partial_tail)
+    monkeypatch.setattr(
+        run_checkpoint,
+        "recover_from_checkpoint",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("recover_from_checkpoint")),
+    )
+
+    _recovery_check(workspace)
+    after = _snapshot_run_tree(run_dir)
+    assert before == after
+
+
+def test_doctor_recovery_failures_default_8_versus_full_all(tmp_path: Path):
+    import os
+
+    workspace = tmp_path / "workspace"
+    runs_root = workspace / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    base_mtime = 1_700_000_000.0
+    for index in range(12):
+        run_dir = runs_root / f"fail-{index:02d}"
+        run_obj = {"status": "planning", "cwd": str(workspace), "task": f"f{index}"}
+        checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_obj)
+        mismatched = json.loads(checkpoint_bytes.decode("utf-8"))
+        mismatched["task"] = f"wrong-{index}"
+        (run_dir / "run.json").write_bytes(_recovery_writer_bytes(mismatched))
+        os.utime(run_dir, (base_mtime + index, base_mtime + index))
+
+    _status, _name, default_detail = _recovery_check(workspace, full=False)
+    assert "fail=12" in default_detail
+    assert "failures:" in default_detail
+    assert "fail-11" in default_detail
+    assert "fail-03" not in default_detail
+    assert "4 more" in default_detail
+
+    _status2, _name2, full_detail = _recovery_check(workspace, full=True)
+    for index in range(12):
+        assert f"fail-{index:02d}" in full_detail
+    assert "more" not in full_detail
+
+
+# -- Sendback: independent-review blockers and lows for the Doctor diff --
+
+
+def _activate_mismatched_recovery_run(workspace: Path, run_dir: Path, run_obj: dict, *, task: str) -> None:
+    """Activate a journal+checkpoint, then overwrite run.json with a mismatched task."""
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_obj)
+    mismatched = json.loads(checkpoint_bytes.decode("utf-8"))
+    mismatched["task"] = task
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(mismatched))
+
+
+def _install_clean_workspace(target: Path) -> None:
+    install_selection(
+        target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+
+
+def test_doctor_run_full_false_previews_8_recovery_failures(tmp_path: Path, capsys):
+    """End-to-end ``doctor_mod.run(full=False)`` previews 8 of 12 failures."""
+    import os
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _install_clean_workspace(workspace)
+    runs_root = workspace / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    base_mtime = 1_700_000_000.0
+    for index in range(12):
+        run_dir = runs_root / f"fail-{index:02d}"
+        _activate_mismatched_recovery_run(
+            workspace,
+            run_dir,
+            {"status": "planning", "cwd": str(workspace), "task": f"f{index}"},
+            task=f"wrong-{index}",
+        )
+        os.utime(run_dir, (base_mtime + index, base_mtime + index))
+
+    capsys.readouterr()
+    rc = doctor_mod.run(target=workspace, harness="generic", full=False)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "runs: recovery checkpoints" in out
+    assert "fail=12" in out
+    assert "fail-11" in out
+    assert "fail-04" in out
+    assert "fail-03" not in out
+    assert "4 more" in out
+
+    capsys.readouterr()
+    doctor_mod.run(target=workspace, harness="generic", json_output=True, full=False)
+    payload = json.loads(capsys.readouterr().out)
+    recovery = next(c for c in payload["checks"] if c["name"] == "runs: recovery checkpoints")
+    assert recovery["status"] == "FAIL"
+    assert "fail=12" in recovery["detail"]
+    assert "fail-11" in recovery["detail"]
+    assert "fail-03" not in recovery["detail"]
+    assert "4 more" in recovery["detail"]
+
+
+def test_doctor_run_full_true_lists_every_recovery_failure(tmp_path: Path, capsys):
+    """End-to-end ``doctor_mod.run(full=True)`` lists every failure name."""
+    import os
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _install_clean_workspace(workspace)
+    runs_root = workspace / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    base_mtime = 1_700_000_000.0
+    for index in range(12):
+        run_dir = runs_root / f"fail-{index:02d}"
+        _activate_mismatched_recovery_run(
+            workspace,
+            run_dir,
+            {"status": "planning", "cwd": str(workspace), "task": f"f{index}"},
+            task=f"wrong-{index}",
+        )
+        os.utime(run_dir, (base_mtime + index, base_mtime + index))
+
+    capsys.readouterr()
+    rc = doctor_mod.run(target=workspace, harness="generic", full=True)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "fail=12" in out
+    for index in range(12):
+        assert f"fail-{index:02d}" in out
+    assert " more" not in out
+
+    capsys.readouterr()
+    doctor_mod.run(target=workspace, harness="generic", json_output=True, full=True)
+    payload = json.loads(capsys.readouterr().out)
+    recovery = next(c for c in payload["checks"] if c["name"] == "runs: recovery checkpoints")
+    assert recovery["status"] == "FAIL"
+    assert "fail=12" in recovery["detail"]
+    for index in range(12):
+        assert f"fail-{index:02d}" in recovery["detail"]
+    assert " more" not in recovery["detail"]
+
+
+def test_doctor_fails_on_forged_prior_status(tmp_path: Path):
+    """A stale-lock-recovery receipt with a forged ``prior_status`` must FAIL.
+
+    ``prior_status`` is derived from the checkpoint object's status exactly as
+    runguard derives it; the candidate's ``failure.prior_status`` is never
+    trusted. A forged value diverges from the reconstruction.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    checkpoint_obj = {
+        "status": "planning",
+        "cwd": str(workspace),
+        "task": "inspect",
+        "orchestrator": "chef",
+    }
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, checkpoint_obj)
+    receipt = _stale_recovery_receipt(
+        json.loads(checkpoint_bytes.decode("utf-8")),
+        lock_workspace=str(workspace),
+        lock_acquired_at="2026-07-16T00:00:00+00:00",
+    )
+    receipt["failure"]["prior_status"] = "forged-status"
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(receipt))
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert _RUN_ID in detail
+    assert "run.json does not match checkpoint" in detail
+
+
+def test_doctor_raw_journal_oserror_is_bounded_fail(tmp_path: Path, monkeypatch):
+    """A raw ``OSError`` from ``read_journal_bounded`` must be a bounded FAIL."""
+    from brigade import run_journal, run_lifecycle
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_obj = {"status": "planning", "cwd": str(workspace), "task": "demo"}
+    _activate_mismatched_recovery_run(workspace, run_dir, run_obj, task="wrong")
+
+    monkeypatch.setattr(run_journal, "read_journal_bounded", lambda _p: (_ for _ in ()).throw(OSError("simulated")))
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert "journal unreadable" in detail
+    journal = run_lifecycle._journal_path(run_dir)
+    assert journal.is_file()
+
+
+def test_doctor_run_json_present_but_unreadable_is_fail(tmp_path: Path, monkeypatch):
+    """A present-but-unreadable ``run.json`` must FAIL (not WARN)."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_obj = {"status": "planning", "cwd": str(workspace), "task": "demo"}
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_obj)
+    (run_dir / "run.json").write_bytes(checkpoint_bytes)
+
+    real_read_bytes = Path.read_bytes
+
+    def _unreadable_run_json(self: Path) -> bytes:
+        if self.name == "run.json":
+            raise OSError("permission denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _unreadable_run_json)
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert "run.json present but unreadable" in detail
+    assert (run_dir / "run.json").exists()
+
+
+def test_doctor_run_json_recursion_error_is_warn(tmp_path: Path):
+    """A ``RecursionError`` while parsing ``run.json`` is an unparseable WARN."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_obj = {"status": "planning", "cwd": str(workspace), "task": "demo"}
+    _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_obj)
+    nesting = 2000
+    blob = "{" * nesting + '"v":1' + "}" * nesting
+    (run_dir / "run.json").write_text(blob)
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.WARN
+    assert "warn=1" in detail
+    assert "fail=0" in detail
+
+
+def test_doctor_immediate_run_dir_stat_oserror_is_omitted(tmp_path: Path, monkeypatch):
+    """A vanishing/stat OSError during immediate run scanning must not crash Doctor."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runs_root = workspace / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    run_dir = runs_root / "fail-run"
+    run_obj = {"status": "planning", "cwd": str(workspace), "task": "demo"}
+    _activate_mismatched_recovery_run(workspace, run_dir, run_obj, task="wrong")
+
+    real_stat = Path.stat
+
+    def _flaky_stat(self: Path, *args, **kwargs):
+        if self == run_dir:
+            raise OSError("vanished mid-scan")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _flaky_stat)
+    status, _name, detail = _recovery_check(workspace)
+    assert status in {doctor_mod.OK, doctor_mod.WARN}
+    assert "omitted=1" in detail
+    assert "fail=0" in detail
+    monkeypatch.undo()
+
+    real_iterdir = Path.iterdir
+
+    def _flaky_iterdir(self: Path):
+        if self == runs_root:
+            raise OSError("iterdir boom")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _flaky_iterdir)
+    status2, _name2, detail2 = _recovery_check(workspace)
+    assert status2 in {doctor_mod.OK, doctor_mod.WARN}
+    assert "fail=0" in detail2
+    monkeypatch.undo()
+
+    real_is_dir = Path.is_dir
+
+    def _flaky_is_dir(self: Path, *args, **kwargs):
+        if self == runs_root:
+            raise OSError("is_dir boom")
+        return real_is_dir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_dir", _flaky_is_dir)
+    status3, _name3, detail3 = _recovery_check(workspace)
+    assert status3 in {doctor_mod.OK, doctor_mod.WARN}
+    assert "fail=0" in detail3
+
+
+def test_doctor_invalid_recovered_at_iso_is_fail(tmp_path: Path):
+    """An invalid ISO ``recovered_at`` must FAIL the stale-lock-recovery match."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    checkpoint_obj = {"status": "planning", "cwd": str(workspace), "task": "inspect"}
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, checkpoint_obj)
+    receipt = _stale_recovery_receipt(
+        json.loads(checkpoint_bytes.decode("utf-8")),
+        lock_workspace=str(workspace),
+        lock_acquired_at="2026-07-16T00:00:00+00:00",
+        recovered_at="not-a-timestamp",
+    )
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(receipt))
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert "run.json does not match checkpoint" in detail
+
+
+def test_doctor_513_events_fail_bound_exceeded_without_checkpoint_parsing(tmp_path: Path, monkeypatch):
+    """513 valid chained complete events must FAIL bound exceeded, no checkpoint parse."""
+    from brigade import run_checkpoint, run_journal, run_lifecycle, runguard
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True)
+    _recovery_write_json(
+        run_dir / "run.json",
+        {"schema": "brigade.run.v1", "status": "planning", "cwd": str(workspace), "task": "demo"},
+    )
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        journal = run_lifecycle._journal_path(run_dir)
+        prev_seq = 0
+        for index in range(513):
+            appended = run_journal.append_event(
+                journal,
+                run_id=_RUN_ID,
+                event_type="run.planning.started",
+                payload={"detail": f"step-{index}"},
+                idempotency_key=f"progress-{index}",
+                expected_previous_sequence=prev_seq,
+            )
+            prev_seq = appended.sequence
+
+    monkeypatch.setattr(
+        run_checkpoint,
+        "recover_from_checkpoint",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("recover_from_checkpoint")),
+    )
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert "bound exceeded" in detail
+
+
+def test_doctor_sparse_checkpoint_over_16mib_fail_bound_exceeded_before_body(tmp_path: Path):
+    """A real sparse checkpoint file > 16 MiB must FAIL bound exceeded before body parse."""
+    import hashlib
+    import os as _os
+
+    from brigade import run_checkpoint, run_journal
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_obj = {"status": "planning", "cwd": str(workspace), "task": "demo"}
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_obj)
+    (run_dir / "run.json").write_bytes(checkpoint_bytes)
+    sha = hashlib.sha256(checkpoint_bytes).hexdigest()
+    final_path = run_checkpoint.checkpoint_path(run_dir, sha)
+    assert final_path.is_file()
+    fd = run_journal._open_nofollow(final_path, _os.O_WRONLY)
+    try:
+        _os.ftruncate(fd, run_checkpoint.MAX_CHECKPOINT_BYTES + 1)
+    finally:
+        _os.close(fd)
+    assert final_path.stat().st_size == run_checkpoint.MAX_CHECKPOINT_BYTES + 1
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert "bound exceeded" in detail
+
+
+def test_doctor_declared_checkpoint_byte_size_bound_exceeded(tmp_path: Path):
+    """A checkpoint event declaring ``byte_size > MAX`` must FAIL bound exceeded."""
+    import hashlib
+
+    from brigade import run_checkpoint, run_journal, run_lifecycle
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "declared-bound"
+    run_obj = {"status": "planning", "cwd": str(workspace), "task": "demo"}
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_obj)
+    (run_dir / "run.json").write_bytes(checkpoint_bytes)
+    sha = hashlib.sha256(checkpoint_bytes).hexdigest()
+    payload = {
+        "path": f"events/{run_checkpoint.CHECKPOINT_DIR_NAME}/{sha}.json",
+        "sha256": sha,
+        "media_type": run_checkpoint.CHECKPOINT_MEDIA_TYPE,
+        "byte_size": run_checkpoint.MAX_CHECKPOINT_BYTES + 1,
+        "privacy_class": run_checkpoint.CHECKPOINT_PRIVACY_CLASS,
+        "paired_event_type": None,
+    }
+    journal = run_lifecycle._journal_path(run_dir)
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type=run_checkpoint.CHECKPOINT_EVENT_TYPE,
+        payload=payload,
+        idempotency_key=f"checkpoint:{sha}:none",
+        expected_previous_sequence=1,
+    )
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.FAIL
+    assert "bound exceeded" in detail
+
+
+def test_doctor_checkpoint_check_never_mutates_across_new_failures(tmp_path: Path, monkeypatch):
+    """The verdict must stay read-only across raw OSError, unreadable run.json, and recursion."""
+    from brigade import run_journal
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_obj = {"status": "planning", "cwd": str(workspace), "task": "demo"}
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, run_obj)
+    (run_dir / "run.json").write_bytes(checkpoint_bytes)
+
+    def _tree_snapshot() -> dict[str, object]:
+        # Read via builtin open() so a Path.read_bytes monkeypatch cannot mask reads.
+        from brigade import run_checkpoint as _rc
+
+        def _read_bytes(path: Path) -> bytes:
+            if not path.is_file():
+                return b""
+            with open(path, "rb") as fh:
+                return fh.read()
+
+        entries = sorted(p.name for p in run_dir.iterdir()) if run_dir.is_dir() else []
+        journal = run_dir / "events" / "lifecycle.jsonl"
+        run_json = run_dir / "run.json"
+        checkpoint_dir = run_dir / "events" / _rc.CHECKPOINT_DIR_NAME
+        checkpoints: dict[str, bytes] = {}
+        if checkpoint_dir.is_dir():
+            for p in checkpoint_dir.rglob("*"):
+                if p.is_file():
+                    checkpoints[str(p.relative_to(run_dir))] = _read_bytes(p)
+        return {
+            "entries": entries,
+            "journal": _read_bytes(journal),
+            "run_json": _read_bytes(run_json),
+            "checkpoints": checkpoints,
+        }
+
+    real_read_bytes = Path.read_bytes
+
+    def _unreadable_run_json(self: Path) -> bytes:
+        if self.name == "run.json":
+            raise OSError("permission denied")
+        return real_read_bytes(self)
+
+    nesting = 2000
+    recursion_blob = ("{" * nesting + '"v":1' + "}" * nesting).encode("utf-8")
+
+    scenarios = [
+        (
+            "raw journal OSError",
+            lambda: monkeypatch.setattr(
+                run_journal, "read_journal_bounded", lambda _p: (_ for _ in ()).throw(OSError("boom"))
+            ),
+        ),
+        ("unreadable run.json", lambda: monkeypatch.setattr(Path, "read_bytes", _unreadable_run_json)),
+        ("recursion run.json", lambda: (run_dir / "run.json").write_bytes(recursion_blob)),
+    ]
+    for _label, scenario in scenarios:
+        scenario()
+        before = _tree_snapshot()
+        _recovery_check(workspace)
+        after = _tree_snapshot()
+        assert before == after, f"verdict mutated the run tree under {_label}"
+        (run_dir / "run.json").write_bytes(checkpoint_bytes)
+        monkeypatch.undo()

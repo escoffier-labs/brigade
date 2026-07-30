@@ -92,6 +92,9 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     "run.completed": frozenset({"status", "detail"}),
     "run.failed": frozenset({"status", "detail"}),
     "run.interrupted": frozenset({"status", "detail"}),
+    "run.snapshot.checkpointed": frozenset(
+        {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type"}
+    ),
 }
 
 # Private-data exclusion list: these payload key names are never part of any

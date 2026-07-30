@@ -16,11 +16,21 @@ categories that block the snapshot. Every journaling append runs under the real
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
 
-from brigade import aboyeur, localio, proc, run_events, run_journal, run_lifecycle, runguard
+from brigade import (
+    aboyeur,
+    localio,
+    proc,
+    run_checkpoint,
+    run_events,
+    run_journal,
+    run_lifecycle,
+    runguard,
+)
 from brigade import roster as roster_mod
 
 _REQUEST_FIELD = "lifecycle_journal_requested"
@@ -135,6 +145,19 @@ def _events(run_dir: Path) -> list[run_journal.RunEvent]:
     return run_journal.read_journal(_journal_path(run_dir)).events
 
 
+def _status_events(run_dir: Path) -> list[run_journal.RunEvent]:
+    """Lifecycle status-transition events, excluding recovery checkpoint events."""
+    return [e for e in _events(run_dir) if e.event_type != run_checkpoint.CHECKPOINT_EVENT_TYPE]
+
+
+def _checkpoint_events(run_dir: Path) -> list[run_journal.RunEvent]:
+    return [e for e in _events(run_dir) if e.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE]
+
+
+def _checkpoint_dir(run_dir: Path) -> Path:
+    return run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+
+
 @pytest.fixture
 def enabled(monkeypatch):
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
@@ -184,6 +207,7 @@ def test_no_journal_file_until_lock_held(enabled, tmp_path):
     assert _journal_path(run_dir).is_file()
     assert sorted(path.name for path in (run_dir / "events").iterdir()) == [
         "lifecycle.jsonl",
+        "recovery-checkpoints",
         "shadow-comparison.json",
     ]
 
@@ -193,14 +217,14 @@ def test_in_lock_write_appends_run_created(enabled, tmp_path):
     run_dir = _run_dir(repo)
 
     _write_run_json(run_dir, "started")  # pre-lock bootstrap: request only
-    _write_run_json_locked(repo, run_dir, "started")  # in-lock: append run.created
+    _write_run_json_locked(repo, run_dir, "started")  # in-lock: checkpoint then run.created
 
     events = _events(run_dir)
-    assert len(events) == 1
-    assert events[0].event_type == "run.created"
-    assert events[0].payload == {"status": "started"}
-    assert events[0].sequence == 1
+    assert [e.event_type for e in events] == ["run.snapshot.checkpointed", "run.created"]
+    assert [e.sequence for e in events] == [1, 2]
+    assert events[1].payload == {"status": "started"}
     assert events[0].previous_digest is None
+    assert events[1].previous_digest == events[0].event_digest
 
 
 def test_recording_without_matching_lock_fails_closed(enabled, tmp_path):
@@ -208,18 +232,44 @@ def test_recording_without_matching_lock_fails_closed(enabled, tmp_path):
     run_dir = _run_dir(repo)
 
     _write_run_json(run_dir, "started")  # pre-lock bootstrap: request only
-    _write_run_json_locked(repo, run_dir, "started")  # in-lock: run.created
+    _write_run_json_locked(repo, run_dir, "started")  # in-lock: checkpoint + run.created
     run_before = (run_dir / "run.json").read_bytes()
     journal_before = _journal_path(run_dir).read_bytes()
 
     # Activated run, but no lock held: the write fails closed and neither the
-    # journal nor the run.json snapshot advances.
+    # journal nor the run.json snapshot advances. write_checkpoint skips its
+    # publish/append under the missing lock so no spurious checkpoint event
+    # is appended before record_lifecycle_transition raises.
     with pytest.raises(run_lifecycle.LifecycleJournalError):
         _write_run_json(run_dir, "planning")
 
     assert (run_dir / "run.json").read_bytes() == run_before
     assert _journal_path(run_dir).read_bytes() == journal_before
-    assert [e.event_type for e in _events(run_dir)] == ["run.created"]
+    assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]
+
+
+def test_unmapped_status_on_active_journal_without_lock_fails_closed(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # activate journal
+    run_before = (run_dir / "run.json").read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+    files_before = sorted(_checkpoint_dir(run_dir).iterdir())
+
+    # No lock held on the active journal. An unmapped status has no status
+    # event, but it must NOT mutate the snapshot unlocked: when the journal is
+    # active, missing matching ownership must fail closed for every status.
+    # The bounded error surfaces before any checkpoint/status append and before
+    # run.json changes.
+    with pytest.raises((run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError)):
+        _write_run_json(run_dir, "artifact-collection")
+
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+    assert sorted(_checkpoint_dir(run_dir).iterdir()) == files_before
+    assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]
 
 
 def test_custom_output_dir_appends_under_matching_lock(enabled, tmp_path):
@@ -234,7 +284,7 @@ def test_custom_output_dir_appends_under_matching_lock(enabled, tmp_path):
     _write_run_json_locked(repo, run_dir, "started", lock_workspace=repo)
 
     events = _events(run_dir)
-    assert [e.event_type for e in events] == ["run.created"]
+    assert [e.event_type for e in events] == ["run.snapshot.checkpointed", "run.created"]
 
 
 def test_long_custom_output_dir_final_component_journals(enabled, tmp_path):
@@ -247,10 +297,13 @@ def test_long_custom_output_dir_final_component_journals(enabled, tmp_path):
     _write_run_json_locked(repo, run_dir, "started", lock_workspace=repo)
 
     events = _events(run_dir)
-    assert len(events) == 1
-    assert events[0].event_type == "run.created"
-    assert len(events[0].idempotency_key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN
-    assert events[0].idempotency_key.startswith("lifecycle:")
+    assert [e.event_type for e in events] == ["run.snapshot.checkpointed", "run.created"]
+    created = [e for e in events if e.event_type == "run.created"][0]
+    assert len(created.idempotency_key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN
+    assert created.idempotency_key.startswith("lifecycle:")
+    checkpoint = [e for e in events if e.event_type == "run.snapshot.checkpointed"][0]
+    assert len(checkpoint.idempotency_key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN
+    assert checkpoint.idempotency_key.startswith("checkpoint:")
 
 
 def test_mismatched_workspace_skips_journal_until_correct_lock(enabled, tmp_path):
@@ -307,13 +360,12 @@ def test_activated_run_continues_without_env_flag(enabled, tmp_path, monkeypatch
     run_dir = _run_dir(repo)
 
     _write_run_json(run_dir, "started")  # pre-lock bootstrap: request only
-    _write_run_json_locked(repo, run_dir, "started")  # in-lock: run.created
+    _write_run_json_locked(repo, run_dir, "started")  # in-lock: checkpoint + run.created
 
     monkeypatch.delenv("BRIGADE_LIFECYCLE_JOURNAL", raising=False)
     _write_run_json_locked(repo, run_dir, "planning")
 
-    events = _events(run_dir)
-    assert [e.event_type for e in events] == ["run.created", "run.planning.started"]
+    assert [e.event_type for e in _status_events(run_dir)] == ["run.created", "run.planning.started"]
 
 
 def test_same_status_refresh_is_noop(enabled, tmp_path):
@@ -324,12 +376,16 @@ def test_same_status_refresh_is_noop(enabled, tmp_path):
     _write_run_json_locked(repo, run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")  # same-status refresh
 
+    # The status event does not repeat (same prior status), and the checkpoint
+    # replays: identical run.json bytes + identical paired_event_type derive
+    # the same checkpoint idempotency key, so no new file or event.
     events = _events(run_dir)
-    assert len(events) == 1
-    assert events[0].event_type == "run.created"
+    assert [e.event_type for e in events] == ["run.snapshot.checkpointed", "run.created"]
+    assert len(_checkpoint_events(run_dir)) == 1
+    assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]
 
 
-def test_same_status_with_changed_detail_appends_nothing(enabled, tmp_path):
+def test_same_status_with_changed_detail_appends_no_status_event(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
     secret_error = "SECRET_TOKEN=/super/private/path"
@@ -337,16 +393,18 @@ def test_same_status_with_changed_detail_appends_nothing(enabled, tmp_path):
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")
     _write_run_json_locked(repo, run_dir, "failed", error=secret_error)
-    journal_before = _journal_path(run_dir).read_bytes()
+    status_before = [e.event_type for e in _status_events(run_dir)]
 
-    # A detail refresh is not a status transition: the journal must not grow,
-    # but the run.json snapshot refresh still proceeds.
+    # A detail refresh is not a status transition: no new status event appends,
+    # but the run.json snapshot refresh still proceeds. The checkpoint event
+    # DOES append because the run.json bytes changed (new error string), so the
+    # full journal grows by one checkpoint event with a fresh content hash.
     _write_run_json_locked(repo, run_dir, "failed", error="different failure")
 
-    assert _journal_path(run_dir).read_bytes() == journal_before
-    events = _events(run_dir)
-    assert [e.event_type for e in events] == ["run.created", "run.failed"]
-    assert events[1].payload == {"status": "failed", "detail": "failed"}
+    assert [e.event_type for e in _status_events(run_dir)] == status_before
+    assert [e.event_type for e in _status_events(run_dir)] == ["run.created", "run.failed"]
+    failed = [e for e in _status_events(run_dir) if e.event_type == "run.failed"][0]
+    assert failed.payload == {"status": "failed", "detail": "failed"}
     journal_text = _journal_path(run_dir).read_text()
     assert secret_error not in journal_text
     assert "/super/private/path" not in journal_text
@@ -365,15 +423,29 @@ def test_aba_recurrence_appends_all_three_occurrences(enabled, tmp_path):
     _write_run_json_locked(repo, run_dir, "result-processing")
     _write_run_json_locked(repo, run_dir, "dispatching")  # A-B-A recurrence
 
-    events = _events(run_dir)
-    assert [e.event_type for e in events] == [
+    assert [e.event_type for e in _status_events(run_dir)] == [
         "run.created",
         "run.dispatch.requested",
         "run.dispatch.completed",
         "run.dispatch.requested",
     ]
-    assert [e.sequence for e in events] == [1, 2, 3, 4]
+    # Checkpoints interleave before each status event, but a checkpoint
+    # replays when the run.json bytes + paired_event_type repeat. The second
+    # "dispatching" write produces identical run.json bytes to the first, so
+    # its checkpoint replays and only the status event appends.
+    events = _events(run_dir)
+    assert [e.event_type for e in events] == [
+        "run.snapshot.checkpointed",
+        "run.created",
+        "run.snapshot.checkpointed",
+        "run.dispatch.requested",
+        "run.snapshot.checkpointed",
+        "run.dispatch.completed",
+        "run.dispatch.requested",
+    ]
+    assert [e.sequence for e in events] == [1, 2, 3, 4, 5, 6, 7]
     assert events[3].previous_digest == events[2].event_digest
+    assert events[6].previous_digest == events[5].event_digest
 
 
 def test_unmapped_intermediate_status_still_appends_the_second_a(enabled, tmp_path):
@@ -383,23 +455,39 @@ def test_unmapped_intermediate_status_still_appends_the_second_a(enabled, tmp_pa
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")
     _write_run_json_locked(repo, run_dir, "dispatching")
-    # Unmapped status: no event, but run.json still advances to it.
+    # Unmapped status: no status event, but a checkpoint event still appends
+    # and run.json still advances to it.
     _write_run_json_locked(repo, run_dir, "artifact-collection")
     # A-unmapped-B-A: the second dispatching is a real transition from the
     # artifact-collection snapshot and must append even though the journal
-    # tail payload matches.
+    # tail status payload matches.
     _write_run_json_locked(repo, run_dir, "dispatching")
 
     meta = json.loads((run_dir / "run.json").read_text())
     assert meta["status"] == "dispatching"
-    events = _events(run_dir)
-    assert [e.event_type for e in events] == [
+    assert [e.event_type for e in _status_events(run_dir)] == [
         "run.created",
         "run.dispatch.requested",
         "run.dispatch.requested",
     ]
-    assert [e.sequence for e in events] == [1, 2, 3]
-    assert events[2].previous_digest == events[1].event_digest
+    events = _events(run_dir)
+    # The second "dispatching" produces identical run.json bytes to the first,
+    # so its checkpoint replays; only the status event appends. The
+    # artifact-collection (unmapped) checkpoint uses a null paired_event_type.
+    assert [e.event_type for e in events] == [
+        "run.snapshot.checkpointed",
+        "run.created",
+        "run.snapshot.checkpointed",
+        "run.dispatch.requested",
+        "run.snapshot.checkpointed",
+        "run.dispatch.requested",
+    ]
+    assert [e.sequence for e in events] == [1, 2, 3, 4, 5, 6]
+    # The second run.dispatch.requested links to the artifact-collection
+    # checkpoint immediately before it, not to the prior status event.
+    assert events[5].previous_digest == events[4].event_digest
+    # The artifact-collection checkpoint is paired with null (unmapped status).
+    assert events[4].payload["paired_event_type"] is None
 
 
 def test_retry_after_interruption_reuses_committed_event(enabled, tmp_path):
@@ -424,9 +512,12 @@ def test_retry_after_interruption_reuses_committed_event(enabled, tmp_path):
 
     assert replay is not None
     events = _events(run_dir)
-    assert len(events) == 2
-    assert [e.event_type for e in events] == ["run.created", "run.dispatch.completed"]
-    assert replay.event_id == events[1].event_id
+    assert [e.event_type for e in events] == [
+        "run.snapshot.checkpointed",
+        "run.created",
+        "run.dispatch.completed",
+    ]
+    assert replay.event_id == events[2].event_id
     assert _journal_path(run_dir).read_bytes() == journal_before
 
 
@@ -440,11 +531,20 @@ def test_distinct_statuses_produce_distinct_sequence_linked_events(enabled, tmp_
     _write_run_json_locked(repo, run_dir, "failed", error="boom")
 
     events = _events(run_dir)
-    assert [e.sequence for e in events] == [1, 2, 3]
+    assert [e.event_type for e in events] == [
+        "run.snapshot.checkpointed",
+        "run.created",
+        "run.snapshot.checkpointed",
+        "run.planning.started",
+        "run.snapshot.checkpointed",
+        "run.failed",
+    ]
+    assert [e.sequence for e in events] == [1, 2, 3, 4, 5, 6]
     assert events[0].previous_digest is None
     assert events[1].previous_digest == events[0].event_digest
-    assert events[2].previous_digest == events[1].event_digest
-    assert events[2].payload == {"status": "failed", "detail": "failed"}
+    assert events[5].previous_digest == events[4].event_digest
+    failed = [e for e in events if e.event_type == "run.failed"][0]
+    assert failed.payload == {"status": "failed", "detail": "failed"}
     assert "boom" not in _journal_path(run_dir).read_text()
 
 
@@ -462,16 +562,16 @@ def test_terminal_status_transitions_produce_allowlisted_events(enabled, tmp_pat
         _write_run_json_locked(repo, run_dir, "started")
         _write_run_json_locked(repo, run_dir, status, error=f"boom {status}")
 
-        events = _events(run_dir)
-        assert [e.event_type for e in events] == ["run.created", expected_type]
-        tail = events[1]
+        status_events = _status_events(run_dir)
+        assert [e.event_type for e in status_events] == ["run.created", expected_type]
+        tail = status_events[1]
         assert tail.payload == {"status": status, "detail": status}
         allowed = run_events.EVENT_TYPES[expected_type]
         assert set(tail.payload.keys()) <= allowed
         assert f"boom {status}" not in _journal_path(run_dir).read_text()
 
 
-def test_unmapped_status_writes_run_json_without_journal_event(enabled, tmp_path):
+def test_unmapped_status_writes_run_json_without_status_event(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
 
@@ -481,7 +581,10 @@ def test_unmapped_status_writes_run_json_without_journal_event(enabled, tmp_path
     _write_run_json_locked(repo, run_dir, "artifact-collection")
 
     assert (run_dir / "run.json").is_file()
-    assert _events(run_dir) == [_events(run_dir)[0]]
+    # Unmapped statuses append no status event, but each distinct run.json
+    # snapshot still publishes a checkpoint event.
+    assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]
+    assert len(_checkpoint_events(run_dir)) == 3
 
 
 def test_recovery_writer_does_not_append(enabled, tmp_path):
@@ -518,8 +621,7 @@ def test_raw_oserror_is_bounded_and_blocks_run_json(enabled, tmp_path, monkeypat
     # generic bounded category surfaces.
     assert "simulated disk failure" not in str(excinfo.value)
     assert (run_dir / "run.json").read_bytes() == before
-    events = _events(run_dir)
-    assert [e.event_type for e in events] == ["run.created"]
+    assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]
 
 
 def test_canonicalization_error_is_bounded_and_blocks_run_json(enabled, tmp_path, monkeypatch):
@@ -542,8 +644,7 @@ def test_canonicalization_error_is_bounded_and_blocks_run_json(enabled, tmp_path
 
     assert "simulated canonicalization failure" not in str(excinfo.value)
     assert (run_dir / "run.json").read_bytes() == before
-    events = _events(run_dir)
-    assert [e.event_type for e in events] == ["run.created"]
+    assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]
 
 
 def test_journal_corruption_blocks_run_json_advance(enabled, tmp_path):
@@ -563,3 +664,210 @@ def test_journal_corruption_blocks_run_json_advance(enabled, tmp_path):
     assert (run_dir / "run.json").read_bytes() == before
     meta = json.loads((run_dir / "run.json").read_text())
     assert meta["status"] == "started"
+
+
+# -- Issue #568 slice 5 Task 2: prepare_lifecycle_journal / write_checkpoint --------
+
+
+def test_prepare_lifecycle_journal_private_journal_under_matching_held_run_lock(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    # Pre-lock bootstrap records the durable request without creating the journal.
+    _write_run_json(run_dir, "started")
+    assert not _journal_path(run_dir).exists()
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=repo, incoming_snapshot=None)
+
+    journal = _journal_path(run_dir)
+    assert journal.is_file()
+    assert stat.S_IMODE(journal.stat().st_mode) == 0o600
+    assert stat.S_IMODE(journal.parent.stat().st_mode) == 0o700
+    # prepare only activates; it appends no event.
+    assert _events(run_dir) == []
+
+
+def test_prepare_lifecycle_journal_noop_when_journal_exists(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+    with runguard.run_lock(repo, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=repo)
+    journal_before = _journal_path(run_dir).read_bytes()
+    mtime_before = _journal_path(run_dir).stat().st_mtime_ns
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=repo)
+
+    assert _journal_path(run_dir).read_bytes() == journal_before
+    assert _journal_path(run_dir).stat().st_mtime_ns == mtime_before
+
+
+def test_prepare_lifecycle_journal_bounded_io_error(enabled, tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+
+    def raise_oserror(path: Path) -> None:
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(run_journal, "ensure_journal", raise_oserror)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError) as excinfo:
+            run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=repo)
+    assert "simulated disk failure" not in str(excinfo.value)
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_record_lifecycle_transition_requires_existing_journal(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")  # request only, no journal
+
+    # Journaling was durably requested, the matching lock is held, so
+    # prepare_lifecycle_journal should have activated the journal. Its absence
+    # after preparation is a broken flow: record_lifecycle_transition must
+    # fail closed with a bounded LifecycleJournalError rather than silently
+    # returning None and letting run.json advance past an unowned transition.
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError) as excinfo:
+            run_lifecycle.record_lifecycle_transition(run_dir, status="planning", workspace=repo)
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    assert not _journal_path(run_dir).exists()
+
+
+def test_first_activated_mapped_write_checkpoint_seq1_then_status_seq2(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+
+    events = _events(run_dir)
+    assert [e.event_type for e in events] == ["run.snapshot.checkpointed", "run.created"]
+    assert [e.sequence for e in events] == [1, 2]
+    assert events[0].payload["paired_event_type"] == "run.created"
+    assert events[1].previous_digest == events[0].event_digest
+
+
+def test_unmapped_activated_write_checkpoint_seq1_no_status_event(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # activate + run.created
+    # An unmapped status under the active journal: checkpoint event appends
+    # (paired null), no status event.
+    _write_run_json_locked(repo, run_dir, "artifact-collection")
+
+    events = _events(run_dir)
+    assert [e.event_type for e in events] == [
+        "run.snapshot.checkpointed",
+        "run.created",
+        "run.snapshot.checkpointed",
+    ]
+    assert [e.sequence for e in events] == [1, 2, 3]
+    assert events[2].payload["paired_event_type"] is None
+    assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]
+
+
+def test_checkpoint_failure_leaves_journal_and_run_json_unchanged(enabled, tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # activate
+    run_before = (run_dir / "run.json").read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+
+    def raise_checkpoint(run_dir_arg, run_json_bytes):
+        raise run_checkpoint.CheckpointError("simulated publish failure", category="link")
+
+    monkeypatch.setattr(run_checkpoint, "publish_checkpoint_file", raise_checkpoint)
+
+    # CheckpointError fails BEFORE the lifecycle status append and BEFORE
+    # run.json replacement: neither the journal nor run.json advances.
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+            _write_run_json(run_dir, "planning")
+    assert excinfo.value.category == "link"
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+    assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]
+
+
+# -- Issue #568 slice 5 Task 2 sendback: CheckpointError -> RetainRunLockError ----
+
+
+_RECEIPT_UPDATE_HELPERS = [
+    "record_artifact_collection",
+    "record_run_termination",
+    "record_dispatch_stage",
+    "record_result_processing",
+]
+
+
+def _call_receipt_update_helper(helper_name: str, output_dir: Path) -> None:
+    if helper_name == "record_artifact_collection":
+        aboyeur.record_artifact_collection(
+            output_dir,
+            status="failed",
+            failure_phase="artifact-validation",
+            failure_kind="invalid-patch",
+            detail="changes.patch failed validation",
+        )
+    elif helper_name == "record_run_termination":
+        aboyeur.record_run_termination(
+            output_dir,
+            status="failed",
+            failure_phase="dispatch",
+            failure_kind="unexpected-error",
+            detail="provider failed",
+            seat="coder",
+        )
+    elif helper_name == "record_dispatch_stage":
+        aboyeur.record_dispatch_stage(output_dir, stage=1, seats=("coder",))
+    elif helper_name == "record_result_processing":
+        aboyeur.record_result_processing(output_dir, seat="coder")
+
+
+@pytest.mark.parametrize("helper_name", _RECEIPT_UPDATE_HELPERS)
+def test_receipt_update_helper_translates_checkpoint_error_to_retain_run_lock(
+    enabled, tmp_path, monkeypatch, helper_name
+):
+    """A CheckpointError during a terminal/phase receipt-update write inside a held
+    runguard.run_lock must surface as a bounded RetainRunLockError (never a raw
+    CheckpointError) and must retain the matching run lock, so a crash mid
+    receipt-update keeps the lock held for stale-lock recovery and the bounded
+    category diagnostic is all that escapes the public helper.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started", lock_workspace=repo)
+    _write_run_json_locked(repo, run_dir, "started", lock_workspace=repo)  # activate journal
+    run_before = (run_dir / "run.json").read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+
+    def raise_checkpoint(run_dir_arg: Path, run_json_bytes: bytes) -> Path:
+        raise run_checkpoint.CheckpointError("simulated publish failure", category="link")
+
+    monkeypatch.setattr(run_checkpoint, "publish_checkpoint_file", raise_checkpoint)
+
+    lock_path = runguard.lock_path(repo)
+    assert not lock_path.exists()
+
+    with pytest.raises(runguard.RetainRunLockError) as excinfo:
+        with runguard.run_lock(repo, run_dir=run_dir):
+            _call_receipt_update_helper(helper_name, run_dir)
+
+    # The public helper raises a bounded RetainRunLockError, never the raw
+    # CheckpointError type. The original bounded CheckpointError diagnostic is
+    # chained as the cause (preserved chaining behavior, matching the existing
+    # OSError / LifecycleJournalError translation at the same boundary).
+    assert not isinstance(excinfo.value, run_checkpoint.CheckpointError)
+    assert isinstance(excinfo.value.__cause__, run_checkpoint.CheckpointError)
+    assert excinfo.value.__cause__.category == "link"
+    # The matching run lock is retained for stale-lock recovery.
+    assert lock_path.is_dir()
+    # Neither the journal nor run.json advanced past the failure.
+    assert (run_dir / "run.json").read_bytes() == run_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+    assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]

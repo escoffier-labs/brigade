@@ -610,6 +610,84 @@ def read_journal(journal_path: Path) -> JournalReport:
     return report
 
 
+def read_journal_bounded(journal_path: Path) -> JournalReport:
+    """Read the journal with byte and event-count bounds (issue #568 slice 5).
+
+    Mirrors ``read_journal`` semantics but refuses journals above
+    ``MAX_JOURNAL_BYTES`` (8 MiB) via ``fstat`` before any whole-file
+    allocation, reads in bounded chunks, and fails closed at the first
+    complete event whose sequence exceeds ``MAX_JOURNAL_EVENTS`` (512).
+    A bound excess is reported as ``bound exceeded`` and not parsed further.
+    The existing ``read_journal`` stays compatible.
+    """
+    from brigade.run_checkpoint import MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS
+
+    journal_path = Path(journal_path)
+    report = JournalReport()
+    if os.path.lexists(journal_path) and not journal_path.exists():
+        raise RunJournalError(_bound(f"journal path is a dangling symlink: {journal_path.name}"))
+    if not journal_path.exists():
+        return report
+
+    fd = _open_nofollow(journal_path, os.O_RDONLY)
+    try:
+        info = os.fstat(fd)
+        if info.st_size > MAX_JOURNAL_BYTES:
+            raise RunJournalError(_bound("bound exceeded: journal above MAX_JOURNAL_BYTES"))
+        if not stat.S_ISREG(info.st_mode):
+            raise RunJournalError(_bound(f"journal path is not a regular file: {journal_path.name}"))
+
+        # Bounded chunk reads: never allocate the whole file at once.
+        raw = bytearray()
+        while True:
+            chunk = os.read(fd, _READ_CHUNK)
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > MAX_JOURNAL_BYTES:
+                raise RunJournalError(_bound("bound exceeded: journal above MAX_JOURNAL_BYTES"))
+        raw_bytes = bytes(raw)
+    finally:
+        os.close(fd)
+
+    expected_sequence = 1
+    expected_previous: str | None = None
+    complete_count = 0
+    for complete, partial in _iter_lines(raw_bytes):
+        if partial is not None:
+            report.partial_tail = partial
+            continue
+        if complete is None:
+            continue
+        complete_count += 1
+        if complete_count > MAX_JOURNAL_EVENTS:
+            raise RunJournalError(_bound("bound exceeded: journal complete records above MAX_JOURNAL_EVENTS"))
+        try:
+            env = _parse_canonical_line(complete)
+        except RunJournalError as exc:
+            report.chain_errors.append(exc.diagnostic)
+            break
+        event = _envelope_to_event(env)
+        if event.sequence > MAX_JOURNAL_EVENTS:
+            raise RunJournalError(_bound("bound exceeded: journal event sequence above MAX_JOURNAL_EVENTS"))
+        if event.sequence != expected_sequence:
+            report.chain_errors.append(
+                _bound(f"sequence gap/duplicate: expected {expected_sequence}, got {event.sequence}")
+            )
+            break
+        if event.sequence == 1:
+            if event.previous_digest is not None:
+                report.chain_errors.append("sequence 1 previous_digest must be null")
+                break
+        elif event.previous_digest != expected_previous:
+            report.chain_errors.append(_bound("previous_digest does not link to prior event_digest"))
+            break
+        report.events.append(event)
+        expected_sequence = event.sequence + 1
+        expected_previous = event.event_digest
+    return report
+
+
 def recover_partial_tail(journal_path: Path, quarantine_dir: Path) -> RecoveryReport:
     """Recovery-only: quarantine the partial suffix verbatim, then truncate.
 

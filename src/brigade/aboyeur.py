@@ -27,6 +27,7 @@ from . import graphtrail_delta
 from . import localio
 from . import proc, receipt_schema, runguard
 from . import run_control
+from . import run_checkpoint
 from . import run_lifecycle
 from . import run_shadow
 from .result_integrity import validate_final_output
@@ -494,14 +495,36 @@ def _write_json(path: Path, payload: object) -> None:
     if path.name == "run.json" and isinstance(payload, dict):
         status = payload.get("status")
         if isinstance(status, str) and status:
+            run_dir = path.parent
+            workspace = runguard.resolve_run_lock_workspace(payload, run_dir)
+            # Exact order: activate the journal, publish the recovery
+            # checkpoint, append the lifecycle status transition, then
+            # atomically replace run.json, then record the shadow comparison.
+            # A CheckpointError from write_checkpoint fails BEFORE the
+            # lifecycle append and BEFORE run.json replacement.
+            run_lifecycle.prepare_lifecycle_journal(
+                run_dir,
+                workspace=workspace,
+                incoming_snapshot=payload,
+            )
+            encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+            run_checkpoint.write_checkpoint(
+                run_dir,
+                encoded.encode("utf-8"),
+                workspace=workspace,
+                paired_event_type=run_lifecycle.STATUS_EVENT_TYPE.get(status),
+            )
             run_lifecycle.record_lifecycle_transition(
-                path.parent,
+                run_dir,
                 status=status,
                 # The receipt payload identifies the lock workspace
                 # (lock_workspace or cwd); the run directory layout does not.
-                workspace=runguard.resolve_run_lock_workspace(payload, path.parent),
+                workspace=workspace,
                 incoming_snapshot=payload,
             )
+            localio.write_text_atomic(path, encoded)
+            run_shadow.record_shadow_comparison(run_dir, payload)
+            return
     localio.write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     if path.name == "run.json" and isinstance(payload, dict):
         run_shadow.record_shadow_comparison(path.parent, payload)
@@ -1952,7 +1975,7 @@ def record_artifact_collection(
     payload["artifact_collection"] = collection
     try:
         _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
-    except (OSError, run_lifecycle.LifecycleJournalError) as exc:
+    except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
         raise runguard.RetainRunLockError(f"failed to update run receipt after artifact collection: {exc}") from exc
 
 
@@ -2025,7 +2048,7 @@ def record_run_termination(
             )
     try:
         _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
-    except (OSError, run_lifecycle.LifecycleJournalError) as exc:
+    except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
         raise runguard.RetainRunLockError(f"failed to write terminal run receipt: {exc}") from exc
 
 
@@ -2053,7 +2076,7 @@ def record_dispatch_stage(output_dir: Path, *, stage: int, seats: tuple[str, ...
     )
     try:
         _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
-    except (OSError, run_lifecycle.LifecycleJournalError) as exc:
+    except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
         raise runguard.RetainRunLockError(f"failed to write dispatch stage receipt: {exc}") from exc
 
 
@@ -2082,7 +2105,7 @@ def record_result_processing(output_dir: Path, *, seat: str) -> None:
     payload.pop("active_seats", None)
     try:
         _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
-    except (OSError, run_lifecycle.LifecycleJournalError) as exc:
+    except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
         raise runguard.RetainRunLockError(f"failed to record result-processing phase: {exc}") from exc
 
 
@@ -2311,30 +2334,41 @@ def record_run_start(
     lifecycle_requested = existing_requested or (
         not run_json_exists and run_lifecycle.is_lifecycle_journaling_enabled()
     )
-    _write_json(
-        output_dir / "run.json",
-        _run_payload(
-            task=task,
-            cwd=cwd,
-            lock_workspace=lock_workspace if lock_workspace is not None else cwd,
-            roster=roster,
-            dry_run=dry_run,
-            read_only=read_only,
-            status="started",
-            started_at=started_at,
-            output_dir=output_dir,
-            code_graph=CodeGraphBrief(attached=False),
-            drift_impact=DriftImpactBrief(attached=False),
-            evidence=EvidenceBrief(attached=False),
-            codex_transport=codex_transport or roster.codex_transport,
-            worker=worker,
-            include_git=False,
-            scheduler=(
-                {"requested": scheduler, "used": None, "fallback_reason": None} if scheduler is not None else None
+    # The first run.json write activates the lifecycle journal and publishes a
+    # recovery checkpoint BEFORE the atomic run.json replacement. If that final
+    # replacement fails, durable journal/checkpoint state already exists without
+    # a run.json, so ``_terminalize_run_lifecycle.terminate_existing`` cannot
+    # terminalize (run.json is absent) and the lock must be retained for
+    # ``brigade runs recover``. Translate the bounded lifecycle write failures
+    # to ``RetainRunLockError`` so ``runguard.run_lock`` keeps the lock instead
+    # of releasing it and orphaning the recovery state.
+    try:
+        _write_json(
+            output_dir / "run.json",
+            _run_payload(
+                task=task,
+                cwd=cwd,
+                lock_workspace=lock_workspace if lock_workspace is not None else cwd,
+                roster=roster,
+                dry_run=dry_run,
+                read_only=read_only,
+                status="started",
+                started_at=started_at,
+                output_dir=output_dir,
+                code_graph=CodeGraphBrief(attached=False),
+                drift_impact=DriftImpactBrief(attached=False),
+                evidence=EvidenceBrief(attached=False),
+                codex_transport=codex_transport or roster.codex_transport,
+                worker=worker,
+                include_git=False,
+                scheduler=(
+                    {"requested": scheduler, "used": None, "fallback_reason": None} if scheduler is not None else None
+                ),
+                lifecycle_journal_requested=True if lifecycle_requested else None,
             ),
-            lifecycle_journal_requested=True if lifecycle_requested else None,
-        ),
-    )
+        )
+    except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
+        raise runguard.RetainRunLockError(f"failed to write initial run receipt: {exc}") from exc
     _write_json(output_dir / "roster.json", _roster_payload(roster))
 
 

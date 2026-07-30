@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import aboyeur, cli, proc, run_journal
+from brigade import aboyeur, cli, proc, run_checkpoint, run_journal
 from brigade import roster as roster_mod
 from brigade import runguard
 from brigade.cli import run as run_cli
@@ -556,7 +556,7 @@ def test_detach_lifecycle_parent_child_pre_lock_writes_request_not_journal(lifec
     assert child_pre_meta["lifecycle_journal_requested"] is True
     assert not (run_dir / "events").exists()
 
-    # Child in-lock start activates journaling and appends run.created.
+    # Child in-lock start activates journaling, checkpoints, then appends run.created.
     with runguard.run_lock(repo, run_dir=run_dir):
         aboyeur.record_run_start(
             run_dir,
@@ -569,8 +569,11 @@ def test_detach_lifecycle_parent_child_pre_lock_writes_request_not_journal(lifec
 
     assert _journal_path(run_dir).is_file()
     journal_events = run_journal.read_journal(_journal_path(run_dir)).events
-    assert len(journal_events) == 1
-    assert journal_events[0].event_type == "run.created"
+    assert [event.sequence for event in journal_events] == [1, 2]
+    assert [event.event_type for event in journal_events] == [
+        run_checkpoint.CHECKPOINT_EVENT_TYPE,
+        "run.created",
+    ]
 
 
 def test_detach_lifecycle_pre_lock_sigterm_writes_terminal_without_journal(lifecycle_enabled, tmp_path, monkeypatch):
