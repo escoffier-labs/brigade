@@ -1378,7 +1378,7 @@ Re-running `brigade init` against an existing target is safe.
 It refuses to overwrite tracked files without `--force`.
 The managed `.gitignore` block is replaced between its markers without touching the rest of your file.
 
-See [QUICKSTART.md](QUICKSTART.md) for setup, verification, and the ingest flow.
+See [QUICKSTART.md](../QUICKSTART.md) for setup, verification, and the ingest flow.
 
 ## Managed stations
 
