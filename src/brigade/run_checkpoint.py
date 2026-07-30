@@ -947,10 +947,22 @@ def recover_from_checkpoint(
     ``paired_event_type`` covers only checkpoint-at-tail. Anything else
     fails uncovered-tail.
 
+    Restore-byte selection (issue #568 slice 6): when the latest checkpoint
+    payload carries ``body_kind`` ``"base-stripped"`` and the validated
+    checkpoint base carries ``run_journal_authority_requested`` set to True,
+    the canonical stripped base is parsed and projected with
+    ``run_projector.project_run_snapshot(base, events, journal_present=True)``;
+    the projector bytes are the intermediate recovery receipt. A
+    ``run_projector.ProjectionError`` is wrapped as a bounded
+    ``CheckpointError`` with category ``projection`` (the original preserved
+    as the cause); recovery never falls back to an earlier checkpoint or to
+    a legacy-full restore. When ``body_kind`` is absent the legacy-full
+    restore uses the verified checkpoint bytes verbatim.
+
     Restores ``run.json`` only when it is missing or unparseable
     (``run_meta is None``); a corrupt original is preserved by rename and
     the restore uses ``localio.write_text_atomic``. Returns the repaired
-    validated mapping parsed from the verified checkpoint bytes. Raises
+    validated mapping parsed from the selected restore bytes. Raises
     ``CheckpointError`` (bounded, categorized) on any validation or
     restoration failure; nothing is restored on failure.
     """
@@ -1026,4 +1038,23 @@ def recover_from_checkpoint(
     checkpoint_bytes = validate_checkpoint(run_dir, latest)
     checkpoint_obj = _parse_checkpoint_object(checkpoint_bytes)
     _verify_coverage(report.events, latest, checkpoint_obj)
-    return _restore_run_json_from_checkpoint(run_dir, checkpoint_bytes, run_meta=run_meta)
+    restore_bytes = checkpoint_bytes
+    if (
+        latest.payload.get("body_kind") == _BODY_KIND_BASE_STRIPPED
+        and checkpoint_obj.get("run_journal_authority_requested") is True
+    ):
+        # Authority path (issue #568 slice 6): the validated checkpoint body is
+        # the canonical stripped base and the base carries the journal-authority
+        # request, so the recovery receipt is the projector's re-derivation of
+        # the snapshot over the verified event sequence -- never the stripped
+        # bytes verbatim. A projection failure fails closed as a bounded
+        # CheckpointError: no fallback to an earlier checkpoint or to a
+        # legacy-full restore.
+        from brigade import run_projector  # lazy: avoid import cycle
+
+        try:
+            projection = run_projector.project_run_snapshot(checkpoint_obj, report.events, journal_present=True)
+            restore_bytes = projection.to_bytes()
+        except run_projector.ProjectionError as exc:
+            raise CheckpointError(_bound("projection failed"), category="projection") from exc
+    return _restore_run_json_from_checkpoint(run_dir, restore_bytes, run_meta=run_meta)

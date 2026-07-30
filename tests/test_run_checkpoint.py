@@ -2604,3 +2604,217 @@ def test_write_checkpoint_base_stripped_strips_metadata_fields_present(enabled, 
     assert event is not None
     assert event.payload["sha256"] == expected_sha
     assert run_checkpoint.checkpoint_path(run_dir, expected_sha).read_bytes() == expected_stripped
+
+
+# -- Issue #568 slice 6: authority-aware base-stripped recovery ----------------
+
+
+def _activated_authority_journal_with_checkpoint(
+    workspace: Path,
+    run_dir: Path,
+    base_obj: dict,
+    *,
+    paired_event_type: str | None = "run.planning.started",
+) -> run_journal.RunEvent:
+    """Activate the journal and append one base-stripped checkpoint event.
+
+    The run.json bootstrap carries only the lifecycle request; the authority
+    request signal lives in the checkpointed base (both durable request
+    fields True). The journal ends in the checkpoint event (the recoverable
+    state). Returns the appended checkpoint RunEvent.
+    """
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        event = run_checkpoint.write_checkpoint(
+            run_dir,
+            _writer_bytes(base_obj),
+            workspace=workspace,
+            paired_event_type=paired_event_type,
+            body_kind="base-stripped",
+        )
+    assert event is not None
+    return event
+
+
+def _authority_base(workspace: Path, **overrides) -> dict:
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "task": "demo",
+        "cwd": str(workspace),
+        "orchestrator": "chef",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_recover_from_checkpoint_base_stripped_authority_projects_snapshot(tmp_path):
+    """Base-stripped + authority request restores the projected snapshot.
+
+    The run.json bootstrap carries only the lifecycle request, so the
+    authority request comes from the validated checkpoint base (the
+    checkpoint request), not from run.json. With run.json missing, recovery
+    parses the canonical stripped base and projects it over the verified
+    journal events: preserved base fields survive, and the four journal
+    metadata fields are the CURRENT projector values (a verbatim restore of
+    the stripped body would have none of them).
+    """
+    from brigade import run_projector
+
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    base = _authority_base(
+        workspace,
+        # Stale journal metadata the live base carried; stripped at write and
+        # recomputed by the projector at recovery.
+        projector_version=1,
+        journal_present=False,
+        journal_last_sequence=0,
+        journal_last_event_digest=None,
+    )
+    _activated_authority_journal_with_checkpoint(workspace, run_dir, base)
+    (run_dir / "run.json").unlink()
+
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+    events = _events(run_dir)
+    stripped_base = {k: v for k, v in base.items() if k not in _JOURNAL_METADATA_FIELDS}
+    expected = run_projector.project_run_snapshot(stripped_base, events, journal_present=True)
+    assert repaired == expected.snapshot
+    # Preserved base fields survive the projection.
+    assert repaired["schema"] == "brigade.run.v1"
+    assert repaired["task"] == "demo"
+    assert repaired["cwd"] == str(workspace)
+    assert repaired["orchestrator"] == "chef"
+    assert repaired["lifecycle_journal_requested"] is True
+    assert repaired["run_journal_authority_requested"] is True
+    # Current projector metadata/status, not the stale base values.
+    assert repaired["status"] == "planning"
+    assert repaired["projector_version"] == run_projector.PROJECTOR_VERSION
+    assert repaired["journal_present"] is True
+    assert repaired["journal_last_sequence"] == events[-1].sequence
+    assert repaired["journal_last_event_digest"] == events[-1].event_digest
+    # The restored run.json is exactly the projector's canonical bytes.
+    assert (run_dir / "run.json").read_bytes() == expected.to_bytes()
+
+
+def test_recover_from_checkpoint_base_stripped_preserves_corrupt_run_json(tmp_path):
+    """Corrupt run.json is preserved by rename, then replaced by the projection."""
+    from brigade import run_projector
+
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    base = _authority_base(workspace)
+    _activated_authority_journal_with_checkpoint(workspace, run_dir, base)
+    (run_dir / "run.json").write_text("not json")
+
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+    preserved = list(run_dir.glob("run.json.corrupt-*"))
+    assert len(preserved) == 1
+    assert preserved[0].read_text() == "not json"
+    events = _events(run_dir)
+    expected = run_projector.project_run_snapshot(base, events, journal_present=True)
+    assert repaired == expected.snapshot
+    assert (run_dir / "run.json").read_bytes() == expected.to_bytes()
+
+
+def test_recover_from_checkpoint_base_stripped_leaves_parseable_run_json_untouched(tmp_path):
+    """A parseable run.json is never overwritten; the projected mapping is returned."""
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    base = _authority_base(workspace)
+    _activated_authority_journal_with_checkpoint(workspace, run_dir, base)
+    parseable = {"schema": "brigade.run.v1", "status": "planning", "task": "different"}
+    (run_dir / "run.json").write_text(json.dumps(parseable, indent=2, sort_keys=True) + "\n")
+    before = (run_dir / "run.json").read_bytes()
+
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, parseable)
+
+    # The returned receipt is the projected snapshot (journal metadata present),
+    # but the parseable run.json on disk is untouched.
+    assert repaired["journal_present"] is True
+    assert repaired["task"] == "demo"
+    assert (run_dir / "run.json").read_bytes() == before
+    assert not list(run_dir.glob("run.json.corrupt-*"))
+
+
+def test_recover_from_checkpoint_legacy_full_restores_checkpoint_bytes_verbatim(tmp_path):
+    """A checkpoint without body_kind restores the exact stored bytes.
+
+    The legacy-full body carries journal metadata fields whose values are
+    stale relative to the journal; recovery must NOT re-derive them. The
+    restore stays byte-identical to the validated checkpoint bytes.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "task": "demo",
+        "projector_version": 1,
+        "journal_present": False,
+        "journal_last_sequence": 99,
+        "journal_last_event_digest": "d" * 64,
+    }
+    event = _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    checkpoint_bytes = run_checkpoint.checkpoint_path(run_dir, event.payload["sha256"]).read_bytes()
+
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+    assert repaired == run_json_obj
+    assert (run_dir / "run.json").read_bytes() == checkpoint_bytes
+    assert (run_dir / "run.json").read_bytes() == _writer_bytes(run_json_obj)
+
+
+def test_recover_from_checkpoint_base_stripped_projection_failure_is_bounded(tmp_path, monkeypatch):
+    """A projector failure surfaces as a bounded CheckpointError, no fallback.
+
+    run_projector.ProjectionError is wrapped as a CheckpointError with
+    category ``projection``, the fixed bounded diagnostic, and the original
+    error preserved as the cause. Recovery never falls back to the earlier
+    valid legacy-full checkpoint or to a verbatim restore of the stripped
+    bytes: nothing is restored.
+    """
+    from brigade import run_projector
+
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    # An earlier, valid legacy-full checkpoint exists; recovery must not fall
+    # back to it when the latest base-stripped checkpoint fails to project.
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            _writer_bytes({"schema": "brigade.run.v1", "status": "started"}),
+            workspace=workspace,
+            paired_event_type="run.created",
+        )
+        event = run_checkpoint.write_checkpoint(
+            run_dir,
+            _writer_bytes(_authority_base(workspace)),
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+    assert event is not None
+    (run_dir / "run.json").unlink()
+
+    def boom(base_snapshot, events, *, journal_present):
+        raise run_projector.ProjectionError("raw projector detail " + "x" * 500)
+
+    monkeypatch.setattr(run_projector, "project_run_snapshot", boom)
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert excinfo.value.category == "projection"
+    assert excinfo.value.diagnostic == "projection failed"
+    assert len(excinfo.value.diagnostic) <= run_events.MAX_DIAGNOSTIC_LEN
+    assert isinstance(excinfo.value.__cause__, run_projector.ProjectionError)
+    # No restore, no fallback to the earlier legacy-full checkpoint.
+    assert not (run_dir / "run.json").exists()
