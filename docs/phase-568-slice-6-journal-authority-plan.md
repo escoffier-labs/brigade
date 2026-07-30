@@ -51,7 +51,7 @@ share write ownership.
 | `src/brigade/run_checkpoint.py` | `body_kind` on the payload, `write_checkpoint` `body_kind` parameter, stripped-base publish path, `validate_checkpoint` body-kind branch, `recover_from_checkpoint` authority-aware projection branch | 3, 5 |
 | `tests/test_run_checkpoint.py` | `body_kind`, stripped-base, idempotency-key, coverage, and recovery-projection assertions, plus the closed checkpoint payload-allowlist assertion widened in task 1 | 1, 3, 5 |
 | `src/brigade/run_shadow.py` | `REASON_EVIDENCE_PROJECTOR_VERSION_STALE`, version-door split in `check_projection_readiness`, stale-v2 quarantine in `record_shadow_comparison`, gap-baseline carry, bounded journal reads | 4 |
-| `tests/test_run_shadow.py` | Stale-v2, quarantine, gap-baseline, current-v3 non-reset, schema-mismatch split, bounded-read assertions, plus the `test_unmapped_status_after_handoff_is_lag` expectation updated in task 2 | 2, 4 |
+| `tests/test_run_shadow.py` | Stale-v2, quarantine, gap-baseline, current-v3 non-reset, schema-mismatch split, bounded-read assertions, plus the `test_unmapped_status_after_handoff_is_lag` expectation updated in task 2 and the `test_gate_reason_coverage` zero-comparisons projector-version bump plus the renamed current-version checkpoint-tail readiness test updated in task 1 | 1, 2, 4 |
 | `tests/test_runs_cmd.py` | Authority-requested recovery projection, corrupt-preserve, terminalization field preservation, fail-closed projection error, legacy-full verbatim restore | 5 |
 | `tests/test_runguard.py` | Kept green unchanged for the recovery plane | 5 |
 | `src/brigade/doctor.py` | Reproject-before-compare branch in `_recovery_checkpoint_run_verdict` for `base-stripped` authority-requested runs | 6 |
@@ -70,7 +70,7 @@ existing branch unchanged.
 Module ownership across the eight sequential tasks. Each task has exclusive
 write ownership for its stage.
 
-- Task 1: `src/brigade/run_events.py`, `src/brigade/run_projector.py`. `tests/test_run_events.py`, `tests/test_run_projector.py`, `tests/test_run_checkpoint.py` (the closed checkpoint payload-allowlist assertion in `test_checkpoint_event_type_registered_with_closed_payload_keys` only).
+- Task 1: `src/brigade/run_events.py`, `src/brigade/run_projector.py`. `tests/test_run_events.py`, `tests/test_run_projector.py`, `tests/test_run_checkpoint.py` (the closed checkpoint payload-allowlist assertion in `test_checkpoint_event_type_registered_with_closed_payload_keys` only), `tests/test_run_shadow.py` (the `test_gate_reason_coverage` zero-comparisons projector-version bump and the renamed `test_current_projector_version_artifact_with_checkpoint_tail_reads_ready_when_bytes_match` only, since both currently assert the slice-5 projector version 2 that this task bumps to 3).
 - Task 2: `src/brigade/run_lifecycle.py`. `tests/test_run_lifecycle.py`, `tests/test_run_shadow.py` (the `test_unmapped_status_after_handoff_is_lag` shadow expectation only, since `dry-run`, `incomplete`, and `artifact-collection` become mapped).
 - Task 3: `src/brigade/run_checkpoint.py`. `tests/test_run_checkpoint.py`.
 - Task 4: `src/brigade/run_shadow.py`. `tests/test_run_shadow.py`.
@@ -303,7 +303,95 @@ def test_projector_version_is_three():
 
 No second `test_projector_version_is_three` definition is appended. The rename above is the only definition.
 
-- [x] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py" --capture brigade-work` - expect FAIL, `AssertionError` on the new registry and version assertions, `CanonicalizationError` on `test_build_checkpoint_event_accepts_base_stripped_payload_with_body_kind` (the `body_kind` key is not yet in the allowlist), `AssertionError` on the widened allowlist in `test_checkpoint_event_type_registered_with_closed_payload_keys`, `AssertionError` on `len(PRESERVED_FIELDS) == 45` and the six-entry `EVENT_STATUS` map in `test_full_field_fixture_preserves_deep_equality_and_copies_nested_values`, plus the renamed `test_projector_version_is_three` failing on `assert PROJECTOR_VERSION == 3`.
+Update the existing `test_gate_reason_coverage` in `tests/test_run_shadow.py` (at `tests/test_run_shadow.py:565`) so the zero-comparisons artifact reaches `REASON_NO_COMPARISONS` instead of short-circuiting on the projector-version check. The slice-5 readiness gate folds a stale `projector_version` into `REASON_EVIDENCE_SCHEMA_MISMATCH`, so once this task bumps `PROJECTOR_VERSION` to 3 the zero-comparisons branch below never runs and the assertion fails (observed in Brigade failure receipt `20260730-074819-work-verify-e0e0f2`). The exact replacement body is:
+
+```python
+def test_gate_reason_coverage(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    # No journal at all.
+    assert REASON_NO_JOURNAL in run_shadow.check_projection_readiness(run_dir).reasons
+
+    # Journal present, no artifact.
+    run_dir.joinpath("events").mkdir()
+    run_lifecycle._journal_path(run_dir).write_text("")  # empty journal file
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert REASON_NO_EVIDENCE in report.reasons
+
+    # Wrong schema.
+    localio.write_json(
+        run_shadow.shadow_artifact_path(run_dir),
+        {
+            "schema": "brigade.other.v1",
+            "schema_version": 1,
+            "run_id": _RUN_ID,
+            "projector_version": run_projector.PROJECTOR_VERSION,
+            "comparisons": 1,
+            "matches": 1,
+            "mismatches": 0,
+            "lags": 0,
+            "errors": 0,
+            "last_outcome": "match",
+            "last_compared_sequence": None,
+            "last_compared_event_digest": None,
+            "last_shadow_digest": None,
+            "last_projected_digest": None,
+            "last_differing_fields": None,
+            "last_error_category": None,
+            "last_recorded_at": None,
+            "recent_records": [],
+        },
+    )
+    assert REASON_EVIDENCE_SCHEMA_MISMATCH in run_shadow.check_projection_readiness(run_dir).reasons
+
+    # Wrong run_id.
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    data["schema"] = "brigade.run_shadow.v1"
+    data["run_id"] = "other"
+    data["projector_version"] = run_projector.PROJECTOR_VERSION
+    run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    assert REASON_EVIDENCE_SCHEMA_MISMATCH in run_shadow.check_projection_readiness(run_dir).reasons
+
+    # Zero comparisons. Set projector_version to the current PROJECTOR_VERSION
+    # so the artifact passes the version door and reaches REASON_NO_COMPARISONS.
+    # Task 4 later owns genuinely stale v2 evidence and its own quarantine test.
+    data["run_id"] = _RUN_ID
+    data["schema"] = "brigade.run_shadow.v1"
+    data["comparisons"] = 0
+    data["projector_version"] = run_projector.PROJECTOR_VERSION
+    run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    assert REASON_NO_COMPARISONS in run_shadow.check_projection_readiness(run_dir).reasons
+```
+
+Rename the existing `test_version_two_artifact_with_checkpoint_tail_reads_ready_when_bytes_match` (at `tests/test_run_shadow.py:1110`) to `test_current_projector_version_artifact_with_checkpoint_tail_reads_ready_when_bytes_match` and update its body to assert the current projector version. The renamed body is:
+
+```python
+def test_current_projector_version_artifact_with_checkpoint_tail_reads_ready_when_bytes_match(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+
+    events = _events(run_dir)
+    assert events[-1].event_type == "run.created"
+    assert events[0].event_type == "run.snapshot.checkpointed"
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    data = json.loads(artifact.read_text())
+    assert data["projector_version"] == run_projector.PROJECTOR_VERSION
+    assert data["last_compared_sequence"] == 2
+    assert data["last_outcome"] == "match"
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is True
+    assert report.reasons == ()
+```
+
+Genuinely stale v2 evidence is owned by task 4 (`test_version_two_artifact_is_stale_not_permanently_closed` and the quarantine tests). Task 1 only retargets these two current-version expectations to the new `PROJECTOR_VERSION` 3 so the slice-5 readiness gate keeps reaching the named reason branches after the bump.
+
+- [x] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py tests/test_run_shadow.py::test_gate_reason_coverage tests/test_run_shadow.py::test_version_two_artifact_with_checkpoint_tail_reads_ready_when_bytes_match" --capture brigade-work` - expect FAIL, `AssertionError` on the new registry and version assertions, `CanonicalizationError` on `test_build_checkpoint_event_accepts_base_stripped_payload_with_body_kind` (the `body_kind` key is not yet in the allowlist), `AssertionError` on the widened allowlist in `test_checkpoint_event_type_registered_with_closed_payload_keys`, `AssertionError` on `len(PRESERVED_FIELDS) == 45` and the six-entry `EVENT_STATUS` map in `test_full_field_fixture_preserves_deep_equality_and_copies_nested_values`, plus the renamed `test_projector_version_is_three` failing on `assert PROJECTOR_VERSION == 3`, plus `test_gate_reason_coverage` failing on the zero-comparisons assertion because the stale `projector_version: 2` artifact short-circuits to `REASON_EVIDENCE_SCHEMA_MISMATCH` before reaching `REASON_NO_COMPARISONS`, plus `test_version_two_artifact_with_checkpoint_tail_reads_ready_when_bytes_match` failing on `assert data["projector_version"] == 2` because the live writer now records 3. The two `test_run_shadow.py` failures are observed verbatim in Brigade failure receipt `20260730-074819-work-verify-e0e0f2`.
 - [x] Implement the minimal change. In `src/brigade/run_events.py` add the row to `EVENT_TYPES`:
 
 ```python
@@ -327,8 +415,8 @@ In `src/brigade/run_projector.py` set `PROJECTOR_VERSION: int = 3`. Add `"run_jo
 
 `DERIVED_FIELDS`, `OWNED_FIELDS`, and `encode_snapshot_bytes` do not change. `run_journal_authority_requested` joins `PRESERVED_FIELDS` and therefore `OWNED_FIELDS`.
 
-- [x] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py" --capture brigade-work` - expect PASS, all collected tests pass. Keep `test_empty_events_no_journal_preserves_base_status_and_deep_copies` green unchanged.
-- [x] Commit: `git add src/brigade/run_events.py src/brigade/run_projector.py tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py && git commit -m "feat(run-projector): map dry-run incomplete artifact-collection and bump PROJECTOR_VERSION to 3"`
+- [x] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py tests/test_run_shadow.py::test_gate_reason_coverage tests/test_run_shadow.py::test_current_projector_version_artifact_with_checkpoint_tail_reads_ready_when_bytes_match" --capture brigade-work` - expect PASS, all collected tests pass. Keep `test_empty_events_no_journal_preserves_base_status_and_deep_copies` green unchanged.
+- [x] Commit: `git add src/brigade/run_events.py src/brigade/run_projector.py tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py tests/test_run_shadow.py && git commit -m "feat(run-projector): map dry-run incomplete artifact-collection and bump PROJECTOR_VERSION to 3"`
 
 ## Task 2: Lifecycle mapping for the three previously unmapped statuses
 
@@ -535,7 +623,7 @@ def test_mapped_activated_artifact_collection_writes_status_event(enabled, tmp_p
     ]
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py tests/test_run_shadow.py" --capture brigade-work` - expect FAIL, `KeyError: 'dry-run'` from `STATUS_EVENT_TYPE.get(status)` returning `None` so no event appends and the assertions on `status_events` fail, plus the four renamed tests fail because the unmapped behavior they no longer assert is gone and the mapped behavior they now assert is absent.
+- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py tests/test_run_shadow.py" --capture brigade-work` - expect FAIL, `AssertionError` on the `status_events` assertions because `STATUS_EVENT_TYPE.get(status)` returns `None` for `dry-run`, `incomplete`, and `artifact-collection` so no status event appends and the appended-event list does not match, plus the four renamed tests fail because the unmapped behavior they no longer assert is gone and the mapped behavior they now assert is absent. No `KeyError` is raised: the slice-5 lookup uses `.get(status)` and returns `None`, so the failures are assertion failures from missing status events, never `KeyError`.
 - [ ] Implement the minimal change. In `src/brigade/run_lifecycle.py` add the three rows to `STATUS_EVENT_TYPE`:
 
 ```python
@@ -1354,6 +1442,7 @@ def test_bounded_journal_failure_after_authority_fail_closed(tmp_path, monkeypat
     journal = _journal_path(run_dir)
     journal.write_bytes(journal.read_bytes() + b"x" * (run_checkpoint.MAX_JOURNAL_BYTES + 1))
     meta_before = (run_dir / "run.json").read_bytes()
+    journal_before = journal.read_bytes()
     with runguard.run_lock(repo, run_dir=run_dir):
         # Direct aboyeur._write_json authority failure surfaces as a bounded
         # LifecycleJournalError. Only high-level caller adapters (run_resume)
@@ -1361,6 +1450,72 @@ def test_bounded_journal_failure_after_authority_fail_closed(tmp_path, monkeypat
         with pytest.raises(run_lifecycle.LifecycleJournalError):
             _write_run_json_authority(run_dir, "dispatching")
     assert (run_dir / "run.json").read_bytes() == meta_before
+    # The bounded journal read fails before any append, so the journal bytes
+    # are unchanged and the failure is proven pre-append.
+    assert journal.read_bytes() == journal_before
+
+
+def test_authority_fail_closed_on_incomplete_projection_metadata(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    # An authoritative run carries all four projection metadata fields. Drop
+    # exactly one (journal_last_event_digest) so the saved metadata is
+    # incomplete: the run is past the not-yet-authoritative fallback but
+    # cannot verify, so the authority writer must fail closed.
+    run_json = run_dir / "run.json"
+    meta = json.loads(run_json.read_text())
+    del meta["journal_last_event_digest"]
+    run_json.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    meta_before = run_json.read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert run_json.read_bytes() == meta_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+
+
+def test_authority_fail_closed_on_saved_sequence_not_matching_verified_prefix(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    # The saved journal_last_sequence must match the event at that sequence in
+    # a bounded, chain-valid journal prefix. Corrupt only the saved cursor
+    # sequence on run.json (point it past the real tail) so the digest check
+    # cannot verify and the authority writer fails closed before any append.
+    run_json = run_dir / "run.json"
+    meta = json.loads(run_json.read_text())
+    meta["journal_last_sequence"] = meta["journal_last_sequence"] + 99
+    run_json.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    meta_before = run_json.read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert run_json.read_bytes() == meta_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+
+
+def test_authority_fail_closed_on_saved_digest_not_matching_verified_prefix(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    # Corrupt only the saved journal_last_event_digest on run.json so the
+    # cursor sequence still resolves but the digest verification fails and
+    # the authority writer fails closed before any append. Splitting cursor
+    # and digest mismatches keeps each failure mode unambiguous.
+    run_json = run_dir / "run.json"
+    meta = json.loads(run_json.read_text())
+    meta["journal_last_event_digest"] = "b" * 64
+    run_json.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    meta_before = run_json.read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert run_json.read_bytes() == meta_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
 
 
 def test_authoritative_write_order_checkpoint_lifecycle_parity_readiness_replace(tmp_path, monkeypatch):
@@ -1546,7 +1701,7 @@ def test_authority_resume_successful_synthesis_receipt_write_retains_lock(tmp_pa
     assert lock_path.exists()
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py tests/test_aboyeur.py tests/test_run_resume.py tests/test_run_shadow.py tests/test_run_checkpoint.py" --capture brigade-work` - expect FAIL, `AttributeError` on `is_run_journal_authority_enabled` and the authority branch in `_write_json`.
+- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py tests/test_aboyeur.py tests/test_run_resume.py tests/test_run_shadow.py tests/test_run_checkpoint.py" --capture brigade-work` - expect FAIL, `AttributeError` on `is_run_journal_authority_enabled` and the authority branch in `_write_json`, plus `DID NOT RAISE` on `test_authority_fail_closed_on_incomplete_projection_metadata`, `test_authority_fail_closed_on_saved_sequence_not_matching_verified_prefix`, and `test_authority_fail_closed_on_saved_digest_not_matching_verified_prefix` because the slice-5 writer has no authority-state resolver and writes the legacy body instead of failing closed, plus `test_bounded_journal_failure_after_authority_fail_closed` failing its new `journal.read_bytes() == journal_before` assertion for the same reason.
 
 - [ ] Implement the minimal change. In `src/brigade/aboyeur.py` add the constants `_AUTHORITY_FLAG_ENV = "BRIGADE_RUN_JOURNAL_AUTHORITY"` and `_AUTHORITY_REQUEST_FIELD = "run_journal_authority_requested"`, and the helper `is_run_journal_authority_enabled()` mirroring `run_lifecycle.is_lifecycle_journaling_enabled`. Add the parameter `run_journal_authority_requested: bool | None = None` to `_run_payload` and, when it is true, set `payload["run_journal_authority_requested"] = True` alongside the existing `lifecycle_journal_requested` block. In `record_run_start`, read an existing `run_journal_authority_requested: true` from `run.json` like the existing `lifecycle_journal_requested` read, and enroll a new run (no existing `run.json`) with `BRIGADE_RUN_JOURNAL_AUTHORITY` set by setting both request fields true. A later environment change never enrolls an existing run. The bootstrap never creates the journal and never appends.
 
