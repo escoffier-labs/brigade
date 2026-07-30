@@ -36,6 +36,53 @@ def _sidecar_revisions(run_dir: Path, sidecar: str) -> list[Path]:
     return sorted((run_dir / "revisions" / sidecar).glob("*.json"))
 
 
+def test_approval_handoff_selects_completed_requester_not_unrelated_workers(tmp_path):
+    results = [
+        aboyeur.WorkerResult(
+            worker="successful-other",
+            task="other success",
+            text="done",
+            ok=True,
+            thread_id="thread-success",
+            status="complete",
+        ),
+        aboyeur.WorkerResult(
+            worker="failed-other",
+            task="other failure",
+            text="",
+            ok=False,
+            thread_id="thread-failed",
+            status="failed",
+        ),
+        aboyeur.WorkerResult(
+            worker="requester",
+            task="request approval",
+            text="approval is required",
+            ok=True,
+            thread_id="thread-requester",
+            status="complete",
+        ),
+    ]
+
+    aboyeur.write_approval_resume_handoff(
+        tmp_path,
+        results,
+        requester_worker="requester",
+        requester_thread_id="thread-requester",
+    )
+
+    payload = json.loads((tmp_path / "worker-results.json").read_text())
+    assert payload["results"] == [
+        {
+            "ok": False,
+            "status": "interrupted",
+            "task": "request approval",
+            "thread_id": "thread-requester",
+            "worker": "requester",
+        }
+    ]
+
+
 def _roster_with_incapable_worker():
     return Roster(
         orchestrator="chef",

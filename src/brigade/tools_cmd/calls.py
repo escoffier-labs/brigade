@@ -5,11 +5,35 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .. import localio, runguard
 from ..render import emit
 from . import constants, helpers, paths, projections, runtimes, safety
+
+_APPROVAL_REFERENCE_FIELDS = (
+    "approval_id",
+    "source",
+    "fingerprint",
+    "source_fingerprint",
+    "contract_fingerprint",
+    "evidence_fingerprint",
+)
+
+
+class CallClaimError(RuntimeError):
+    """A Tool approval could not be claimed from its current stored state."""
+
+
+@dataclass(frozen=True)
+class CallClaim:
+    decided_at: str
+    claimed_at: str
+    already_claimed: bool
 
 
 def _describe_payload(target: Path, tool_id: str) -> dict[str, Any]:
@@ -189,6 +213,22 @@ def _call_plan_payload(
     }
 
 
+def _calls_lock_path(target: Path) -> Path:
+    path = paths.calls_path(target)
+    return path.with_name(f"{path.name}.lock")
+
+
+@contextmanager
+def _calls_store_lock(target: Path) -> Iterator[None]:
+    path = _calls_lock_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ownership = runguard._acquire_lock(path)
+    try:
+        yield
+    finally:
+        runguard._release_lock(path, ownership)
+
+
 def _read_calls(target: Path) -> list[dict[str, Any]]:
     path = paths.calls_path(target)
     if not path.is_file():
@@ -206,11 +246,16 @@ def _read_calls(target: Path) -> list[dict[str, Any]]:
     return calls
 
 
-def _write_calls(target: Path, calls: list[dict[str, Any]]) -> None:
+def _write_calls_unlocked(target: Path, calls: list[dict[str, Any]]) -> None:
     path = paths.calls_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     text = "".join(json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n" for item in calls)
-    path.write_text(text)
+    localio.write_text_atomic(path, text)
+
+
+def _write_calls(target: Path, calls: list[dict[str, Any]]) -> None:
+    with _calls_store_lock(target):
+        _write_calls_unlocked(target, calls)
 
 
 def _call_fingerprint(plan_payload: dict[str, Any]) -> str:
@@ -272,6 +317,148 @@ def _approval_fingerprint(call: dict[str, Any]) -> str:
             "source_fingerprint": call.get("source_fingerprint"),
         }
     )
+
+
+def _approval_claim_reference(call: Mapping[str, Any]) -> dict[str, str]:
+    components = {
+        "approval_id": call.get("id"),
+        "source": "tool",
+        "source_fingerprint": call.get("source_fingerprint") or helpers._stable_hash({"source": None}),
+        "contract_fingerprint": call.get("contract_fingerprint"),
+        "evidence_fingerprint": call.get("call_fingerprint"),
+    }
+    if any(not isinstance(value, str) or not value for value in components.values()):
+        raise CallClaimError("tool approval record is missing required fingerprints")
+    return {
+        **{key: str(value) for key, value in components.items()},
+        "fingerprint": helpers._stable_hash(components),
+    }
+
+
+def claim_for_run(
+    target: Path,
+    approval_id: str,
+    reference: Mapping[str, str],
+    run_id: str,
+) -> CallClaim:
+    """Atomically validate and claim one approved Tool call for a run."""
+    with _calls_store_lock(target):
+        call, calls, error = _resolve_call(target, approval_id)
+        if call is None:
+            raise CallClaimError(error or f"tool approval not found: {approval_id}")
+        actual = _approval_claim_reference(call)
+        if any(reference.get(field) != actual[field] for field in _APPROVAL_REFERENCE_FIELDS):
+            raise CallClaimError("tool approval fingerprints changed before claim")
+        status = str(call.get("status") or "")
+        consumed_by = call.get("run_id")
+        if status == "running" and consumed_by == run_id:
+            revalidation = dict(call)
+            revalidation["status"] = "approved"
+            revalidation["run_id"] = None
+            revalidation["started_at"] = None
+            revalidation["completed_at"] = None
+            blockers = _call_run_blockers(target, revalidation)
+            if blockers:
+                raise CallClaimError(f"tool approval is stale or blocked: {blockers[0]}")
+            decided_at = call.get("reviewed_at")
+            if not isinstance(decided_at, str) or not decided_at:
+                raise CallClaimError("tool approval decision has no review timestamp")
+            claimed_at = call.get("started_at")
+            if not isinstance(claimed_at, str) or not claimed_at:
+                raise CallClaimError("tool approval claim has no start timestamp")
+            return CallClaim(
+                decided_at=decided_at,
+                claimed_at=claimed_at,
+                already_claimed=True,
+            )
+        if status != "approved":
+            raise CallClaimError(f"tool approval is {status or 'pending'}")
+        blockers = _call_run_blockers(target, call)
+        if blockers:
+            raise CallClaimError(f"tool approval is stale or blocked: {blockers[0]}")
+        decided_at = call.get("reviewed_at")
+        if not isinstance(decided_at, str) or not decided_at:
+            raise CallClaimError("tool approval decision has no review timestamp")
+        claimed_at = helpers._now().isoformat()
+        call["status"] = "running"
+        call["started_at"] = claimed_at
+        call["completed_at"] = None
+        call["run_id"] = run_id
+        _write_calls_unlocked(target, calls)
+        return CallClaim(
+            decided_at=decided_at,
+            claimed_at=claimed_at,
+            already_claimed=False,
+        )
+
+
+def reserve_for_run(
+    target: Path,
+    approval_id: str,
+    reference: Mapping[str, str],
+    run_id: str,
+    token_fingerprint: str,
+) -> CallClaim:
+    """Reserve a rotatable one-shot Tool claim without changing call status."""
+    with _calls_store_lock(target):
+        call, calls, error = _resolve_call(target, approval_id)
+        if call is None:
+            raise CallClaimError(error or f"tool approval not found: {approval_id}")
+        actual = _approval_claim_reference(call)
+        if any(reference.get(field) != actual[field] for field in _APPROVAL_REFERENCE_FIELDS):
+            raise CallClaimError("tool approval fingerprints changed before reservation")
+        existing = call.get("approval_claim")
+        if existing is not None:
+            if not isinstance(existing, Mapping):
+                raise CallClaimError("tool approval claim is malformed")
+            existing_state = existing.get("state")
+            existing_run_id = existing.get("run_id")
+            if existing_state == "redeemed":
+                raise CallClaimError("tool approval claim is already redeemed")
+            if existing_state != "reserved" or not isinstance(existing_run_id, str):
+                raise CallClaimError("tool approval claim is malformed")
+            if existing_run_id != run_id:
+                raise CallClaimError(f"tool approval claim is reserved by {existing_run_id}")
+        if call.get("status") != "approved":
+            raise CallClaimError(f"tool approval is {call.get('status') or 'pending'}")
+        blockers = _call_run_blockers(target, call)
+        if blockers:
+            raise CallClaimError(f"tool approval is stale or blocked: {blockers[0]}")
+        decided_at = call.get("reviewed_at")
+        if not isinstance(decided_at, str) or not decided_at:
+            raise CallClaimError("tool approval decision has no review timestamp")
+        reserved_at = helpers._now().isoformat()
+        call["approval_claim"] = {
+            "run_id": run_id,
+            "state": "reserved",
+            "reserved_at": reserved_at,
+            "token_fingerprint": token_fingerprint,
+            "redeemed_at": None,
+        }
+        _write_calls_unlocked(target, calls)
+        return CallClaim(
+            decided_at=decided_at,
+            claimed_at=reserved_at,
+            already_claimed=isinstance(existing, Mapping),
+        )
+
+
+def redeem_for_run_unlocked(call: dict[str, Any], token: str) -> str:
+    """CAS a reserved Tool claim while the caller holds the call-store lock."""
+    from .. import runs_cmd
+
+    claim = call.get("approval_claim")
+    if not isinstance(claim, dict) or claim.get("state") != "reserved":
+        raise CallClaimError("tool approval claim is not reserved")
+    if claim.get("token_fingerprint") != runs_cmd._request_digest(token):
+        raise CallClaimError("tool approval claim token does not match")
+    run_id = claim.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise CallClaimError("tool approval claim has no run id")
+    redeemed_at = helpers._now().isoformat()
+    claim["state"] = "redeemed"
+    claim["redeemed_at"] = redeemed_at
+    return redeemed_at
 
 
 def _make_call_record(plan_payload: dict[str, Any]) -> dict[str, Any]:
@@ -340,46 +527,48 @@ def _queue_call_payload(
             "call": record,
             "reason": "blocked call plans require --include-blocked",
         }, 1
-    calls = _read_calls(target)
-    for existing in calls:
-        if existing.get("call_fingerprint") != record["call_fingerprint"]:
-            continue
-        if existing.get("status") in {"pending", "approved"}:
-            return {
-                "target": str(target),
-                "calls_path": str(paths.calls_path(target)),
-                "created": 0,
-                "skipped": 1,
-                "blocked": 0,
-                "call": existing,
-                "reason": f"equivalent call already {existing.get('status')}",
-            }, 0
-        if existing.get("status") == "rejected":
-            return {
-                "target": str(target),
-                "calls_path": str(paths.calls_path(target)),
-                "created": 0,
-                "skipped": 1,
-                "blocked": 0,
-                "call": existing,
-                "reason": "equivalent rejected call requires changed args or contract fingerprint",
-            }, 0
-    existing_ids = {str(existing.get("id")) for existing in calls}
-    if record["id"] in existing_ids:
-        record["id"] = (
-            f"{record['id']}-queued-{helpers._stable_hash({'created_at': record['created_at'], 'count': len(calls)})}"
-        )
-    calls.append(record)
-    _write_calls(target, calls)
-    return {
-        "target": str(target),
-        "calls_path": str(paths.calls_path(target)),
-        "created": 1,
-        "skipped": 0,
-        "blocked": 0,
-        "call": record,
-        "reason": None,
-    }, 0
+    with _calls_store_lock(target):
+        calls = _read_calls(target)
+        for existing in calls:
+            if existing.get("call_fingerprint") != record["call_fingerprint"]:
+                continue
+            if existing.get("status") in {"pending", "approved"}:
+                return {
+                    "target": str(target),
+                    "calls_path": str(paths.calls_path(target)),
+                    "created": 0,
+                    "skipped": 1,
+                    "blocked": 0,
+                    "call": existing,
+                    "reason": f"equivalent call already {existing.get('status')}",
+                }, 0
+            if existing.get("status") == "rejected":
+                return {
+                    "target": str(target),
+                    "calls_path": str(paths.calls_path(target)),
+                    "created": 0,
+                    "skipped": 1,
+                    "blocked": 0,
+                    "call": existing,
+                    "reason": "equivalent rejected call requires changed args or contract fingerprint",
+                }, 0
+        existing_ids = {str(existing.get("id")) for existing in calls}
+        if record["id"] in existing_ids:
+            record["id"] = (
+                f"{record['id']}-queued-"
+                f"{helpers._stable_hash({'created_at': record['created_at'], 'count': len(calls)})}"
+            )
+        calls.append(record)
+        _write_calls_unlocked(target, calls)
+        return {
+            "target": str(target),
+            "calls_path": str(paths.calls_path(target)),
+            "created": 1,
+            "skipped": 0,
+            "blocked": 0,
+            "call": record,
+            "reason": None,
+        }, 0
 
 
 def _resolve_call(target: Path, call_id: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str | None]:
@@ -743,27 +932,35 @@ def _call_review(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    call, calls, error = _resolve_call(target, call_id)
-    payload: dict[str, Any]
-    if call is None:
-        payload = {"target": str(target), "error": error}
-        if json_output:
-            print(json.dumps(payload, indent=2, sort_keys=True))
-        else:
-            print(f"error: {error}", file=sys.stderr)
-        return 1
-    if status == "approved" and call.get("blockers"):
-        payload = {"target": str(target), "error": "blocked calls cannot be approved", "call": call}
-        if json_output:
-            print(json.dumps(payload, indent=2, sort_keys=True))
-        else:
-            print("error: blocked calls cannot be approved", file=sys.stderr)
-        return 1
-    call["status"] = status
-    call["reviewed_at"] = helpers._now().isoformat()
-    call["review_reason"] = reason
-    call["approval_fingerprint"] = _approval_fingerprint(call) if status == "approved" else None
-    _write_calls(target, calls)
+    with _calls_store_lock(target):
+        call, calls, error = _resolve_call(target, call_id)
+        payload: dict[str, Any]
+        if call is None:
+            payload = {"target": str(target), "error": error}
+            if json_output:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(f"error: {error}", file=sys.stderr)
+            return 1
+        if call.get("status") == "running":
+            payload = {"target": str(target), "error": "running calls cannot be reviewed", "call": call}
+            if json_output:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print("error: running calls cannot be reviewed", file=sys.stderr)
+            return 1
+        if status == "approved" and call.get("blockers"):
+            payload = {"target": str(target), "error": "blocked calls cannot be approved", "call": call}
+            if json_output:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print("error: blocked calls cannot be approved", file=sys.stderr)
+            return 1
+        call["status"] = status
+        call["reviewed_at"] = helpers._now().isoformat()
+        call["review_reason"] = reason
+        call["approval_fingerprint"] = _approval_fingerprint(call) if status == "approved" else None
+        _write_calls_unlocked(target, calls)
     payload = {"target": str(target), "calls_path": str(paths.calls_path(target)), "call": call}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))

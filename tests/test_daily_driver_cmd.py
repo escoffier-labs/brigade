@@ -1,8 +1,27 @@
 import json
+import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
-from brigade import center_cmd, cli, daily_cmd, handoff_cmd, phases_cmd, release_cmd, repos_cmd, work_cmd
+import pytest
+
+from brigade import (
+    aboyeur,
+    center_cmd,
+    cli,
+    daily_cmd,
+    handoff_cmd,
+    phases_cmd,
+    release_cmd,
+    repos_cmd,
+    runguard,
+    run_journal,
+    run_resume,
+    runs_cmd,
+    work_cmd,
+)
+from brigade.roster import Agent, Roster
 
 
 def _write_command_inventory(path, capsys=None):
@@ -500,6 +519,298 @@ def test_daily_run_refuses_approval_required_import_and_promotes_when_approved(t
         "push" in command["command"] or "tag" in command["command"] for command in receipt["commands_invoked"]
     )
     assert work_cmd._pending_tasks(tmp_path)
+
+
+def test_daily_approval_boundary_does_not_request_pause_without_active_run(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    work_cmd._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Pause for review",
+                "kind": "task",
+                "source": "scanner",
+                "priority": "high",
+                "acceptance": ["Approval is recorded."],
+                "metadata": {"source_fingerprint": "pause-fp"},
+            }
+        ],
+    )
+    assert daily_cmd.run(target=tmp_path, json_output=True) == 1
+    blocked = json.loads(capsys.readouterr().out)
+
+    approval = daily_cmd._find_approval(tmp_path, blocked["approval_id"])
+    assert "brigade_approval_pause_request" not in approval
+
+
+def test_daily_approval_pauses_real_run_and_cli_resume_consumes_store_once(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _seed_ready_repo(tmp_path, capsys)
+    imported, _, _ = work_cmd._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Resume after review",
+                "kind": "task",
+                "source": "scanner",
+                "priority": "high",
+                "acceptance": ["The paused run resumes."],
+                "metadata": {"source_fingerprint": "resume-fp"},
+            }
+        ],
+    )
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    marker = "d" * 43
+    monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
+    run_dir = tmp_path / ".brigade" / "runs" / "daily-approval-run"
+    roster = Roster(
+        orchestrator="chef",
+        agents={"chef": Agent("chef", "codex", "plan")},
+    )
+
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="daily approval",
+            cwd=tmp_path,
+            roster=roster,
+            read_only=False,
+            lock_workspace=tmp_path,
+        )
+        assert daily_cmd.run(target=tmp_path, json_output=True) == 1
+        blocked = json.loads(capsys.readouterr().out)
+        assert runguard.is_active_run_owner(tmp_path, run_dir)
+        runs_cmd._bind_approval_pause_request(
+            tmp_path,
+            correlation_marker=marker,
+            worker="daily-worker",
+            thread_id="daily-thread",
+            turn_id="daily-turn",
+        )
+        reference = runs_cmd._approval_pause_reference_for_owned_run(tmp_path, run_dir)
+        assert reference["source"] == "daily"
+        assert reference["approval_id"] == blocked["approval_id"]
+        aboyeur.record_approval_pause(run_dir, reference)
+
+    assert runguard.run_lock_state(tmp_path, run_dir) == "absent"
+    paused = json.loads((run_dir / "run.json").read_text())
+    assert paused["status"] == "running"
+    assert paused["approval_reference"]["decision_state"] == "pending"
+    events = run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
+    assert [event.event_type for event in events][-4:] == [
+        "run.snapshot.checkpointed",
+        "approval.requested",
+        "run.snapshot.checkpointed",
+        "run.paused",
+    ]
+
+    approval_id = blocked["approval_id"]
+    assert daily_cmd.approvals_approve(target=tmp_path, approval_id=approval_id, json_output=True) == 0
+    capsys.readouterr()
+    continued = []
+    action_calls = []
+    original_promote = work_cmd.import_promote
+
+    def tracked_promote(*args, **kwargs):
+        action_calls.append((args, kwargs))
+        return original_promote(*args, **kwargs)
+
+    monkeypatch.setattr(work_cmd, "import_promote", tracked_promote)
+
+    def continue_daily(path, *, approval_resume, approval_token):
+        continued.append((path, approval_resume))
+        previous = os.environ.get(runs_cmd._APPROVAL_RESUME_TOKEN_ENV)
+        os.environ[runs_cmd._APPROVAL_RESUME_TOKEN_ENV] = approval_token
+        try:
+            assert daily_cmd.run(target=tmp_path, approval_id=approval_id, json_output=True) == 0
+            capsys.readouterr()
+            assert daily_cmd.run(target=tmp_path, approval_id=approval_id, json_output=True) == 1
+            capsys.readouterr()
+        finally:
+            if previous is None:
+                os.environ.pop(runs_cmd._APPROVAL_RESUME_TOKEN_ENV, None)
+            else:
+                os.environ[runs_cmd._APPROVAL_RESUME_TOKEN_ENV] = previous
+        runs_cmd._finalize_redeemed_approval(run_dir, tmp_path, reference)
+        return 0
+
+    monkeypatch.setattr(run_resume, "_resume_locked", continue_daily)
+
+    assert cli.main(["runs", "resume", str(run_dir)]) == 0
+    assert continued == [(run_dir, True)]
+    assert len(action_calls) == 1
+    consumed = daily_cmd._find_approval(tmp_path, approval_id)
+    assert consumed["status"] == "consumed"
+    assert consumed["consumed_run_id"] == run_dir.name
+    assert consumed["approval_claim"]["state"] == "redeemed"
+    event_types = [
+        event.event_type for event in run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
+    ]
+    for fact in ("approval.granted", "approval.consumed", "run.resumed"):
+        assert event_types.count(fact) == 1
+        fact_index = event_types.index(fact)
+        assert event_types[fact_index - 1] == "run.snapshot.checkpointed"
+
+
+@pytest.mark.parametrize("review_status", ["held", "rejected"])
+def test_daily_reserved_claim_rechecks_review_state_before_action(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    review_status,
+):
+    _seed_ready_repo(tmp_path, capsys)
+    work_cmd._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Review before redemption",
+                "kind": "task",
+                "source": "scanner",
+                "priority": "high",
+                "acceptance": ["Concurrent review prevents the action."],
+                "metadata": {"source_fingerprint": "redeem-review-fp"},
+            }
+        ],
+    )
+    assert daily_cmd.run(target=tmp_path, json_output=True) == 1
+    approval_id = json.loads(capsys.readouterr().out)["approval_id"]
+    assert daily_cmd.approvals_approve(target=tmp_path, approval_id=approval_id, json_output=True) == 0
+    capsys.readouterr()
+    approval = daily_cmd._find_approval(tmp_path, approval_id)
+    assert approval is not None
+    reference = runs_cmd._approval_reference_from_record("daily", approval)
+    token = "v" * 43
+    daily_cmd.approvals.reserve_for_run(
+        tmp_path,
+        approval_id,
+        reference,
+        "parent-run",
+        runs_cmd._request_digest(token),
+    )
+    original_lock = daily_cmd._approval_store_lock
+    review_injected = False
+
+    @contextmanager
+    def review_before_redeem(target, current_approval_id):
+        nonlocal review_injected
+        with original_lock(target, current_approval_id):
+            if not review_injected:
+                current = daily_cmd._find_approval(target, current_approval_id)
+                assert current is not None
+                current["status"] = review_status
+                current["reviewed_at"] = "2026-07-30T22:00:00+00:00"
+                current["review_reason"] = "concurrent review"
+                daily_cmd._write_approval_unlocked(target, current)
+                review_injected = True
+            yield
+
+    action_calls = []
+    original_promote = work_cmd.import_promote
+
+    def tracked_promote(*args, **kwargs):
+        action_calls.append((args, kwargs))
+        return original_promote(*args, **kwargs)
+
+    monkeypatch.setattr(daily_cmd, "_approval_store_lock", review_before_redeem)
+    monkeypatch.setattr(work_cmd, "import_promote", tracked_promote)
+    monkeypatch.setenv(runs_cmd._APPROVAL_RESUME_TOKEN_ENV, token)
+
+    with pytest.raises(daily_cmd.ApprovalClaimError, match=f"daily approval is {review_status}"):
+        daily_cmd.run(target=tmp_path, approval_id=approval_id, json_output=True)
+
+    assert review_injected is True
+    assert action_calls == []
+    stored = daily_cmd._find_approval(tmp_path, approval_id)
+    assert stored is not None
+    assert stored["status"] == review_status
+    assert stored["approval_claim"]["state"] == "reserved"
+
+
+def test_daily_rejected_pause_stays_rejected_after_store_is_approved(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _seed_ready_repo(tmp_path, capsys)
+    work_cmd._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Reject this resume",
+                "kind": "task",
+                "source": "scanner",
+                "priority": "high",
+                "acceptance": ["The rejected run remains rejected."],
+                "metadata": {"source_fingerprint": "reject-resume-fp"},
+            }
+        ],
+    )
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    marker = "e" * 43
+    monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
+    run_dir = tmp_path / ".brigade" / "runs" / "daily-rejected-approval-run"
+    roster = Roster(
+        orchestrator="chef",
+        agents={"chef": Agent("chef", "codex", "plan")},
+    )
+
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="daily rejection",
+            cwd=tmp_path,
+            roster=roster,
+            read_only=False,
+            lock_workspace=tmp_path,
+        )
+        assert daily_cmd.run(target=tmp_path, json_output=True) == 1
+        blocked = json.loads(capsys.readouterr().out)
+        runs_cmd._bind_approval_pause_request(
+            tmp_path,
+            correlation_marker=marker,
+            worker="daily-worker",
+            thread_id="daily-rejected-thread",
+            turn_id="daily-rejected-turn",
+        )
+        reference = runs_cmd._approval_pause_reference_for_owned_run(tmp_path, run_dir)
+        assert reference is not None
+        aboyeur.record_approval_pause(run_dir, reference)
+
+    approval_id = blocked["approval_id"]
+    assert (
+        daily_cmd.approvals_reject(
+            target=tmp_path,
+            approval_id=approval_id,
+            reason="denied",
+            json_output=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    continued = []
+    monkeypatch.setattr(
+        run_resume,
+        "_resume_locked",
+        lambda path, *, approval_resume, approval_token: continued.append((path, approval_resume, approval_token)) or 0,
+    )
+
+    assert cli.main(["runs", "resume", str(run_dir)]) == 2
+    capsys.readouterr()
+    rejected = json.loads((run_dir / "run.json").read_text())
+    assert rejected["approval_reference"]["decision_state"] == "rejected"
+
+    assert daily_cmd.approvals_approve(target=tmp_path, approval_id=approval_id, json_output=True) == 0
+    capsys.readouterr()
+    assert cli.main(["runs", "resume", str(run_dir)]) == 2
+    assert continued == []
+    still_rejected = json.loads((run_dir / "run.json").read_text())
+    assert still_rejected["approval_reference"]["decision_state"] == "rejected"
 
 
 def test_daily_approvals_list_show_review_and_no_execution(tmp_path, capsys):

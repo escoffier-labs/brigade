@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import secrets
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -234,7 +235,13 @@ class AppserverRunner(Protocol):
 
 class EventWriter(Protocol):
     def __call__(
-        self, events_dir: Path | None, worker: str, *, verbose: bool = False
+        self,
+        events_dir: Path | None,
+        worker: str,
+        *,
+        verbose: bool = False,
+        workspace: Path | None = None,
+        correlation_marker: str | None = None,
     ) -> Callable[[dict[str, Any]], None] | None: ...
 
 
@@ -338,6 +345,7 @@ def dispatch(
         )
         started = time.monotonic()
         effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
+        approval_correlation_marker = secrets.token_urlsafe(32)
 
         def _invoke_external(
             selected_agent: Agent,
@@ -395,18 +403,50 @@ def dispatch(
                     **env_kwargs,
                 )
             if selected_agent.cli == "codex" and appserver is not None:
-                on_event = event_writer(events_dir, selected_agent.name, verbose=verbose)
-                return run_appserver_worker(
+                approval_prompt = (
+                    f"{selected_prompt}\n\n"
+                    "Approval correlation rule: prefix every Brigade CLI command in this turn with "
+                    f"`BRIGADE_APPROVAL_CORRELATION={approval_correlation_marker}`. "
+                    "Do not print or return that marker."
+                )
+                try:
+                    on_event = event_writer(
+                        events_dir,
+                        selected_agent.name,
+                        verbose=verbose,
+                        workspace=cwd,
+                        correlation_marker=approval_correlation_marker,
+                    )
+                except TypeError as exc:
+                    if "workspace" not in str(exc) and "correlation_marker" not in str(exc):
+                        raise
+                    on_event = event_writer(events_dir, selected_agent.name, verbose=verbose)
+                result = run_appserver_worker(
                     appserver,
                     selected_agent,
                     selected_agent.name,
-                    selected_prompt,
+                    approval_prompt,
                     timeout=timeout_for(selected_agent, roster),
                     cwd=cwd,
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     registry=control_registry,
                     on_event=on_event,
+                )
+                return replace(
+                    result,
+                    text=result.text.replace(approval_correlation_marker, "[redacted]"),
+                    detail=result.detail.replace(approval_correlation_marker, "[redacted]"),
+                    stdout=(
+                        result.stdout.replace(approval_correlation_marker, "[redacted]")
+                        if result.stdout is not None
+                        else None
+                    ),
+                    stderr=(
+                        result.stderr.replace(approval_correlation_marker, "[redacted]")
+                        if result.stderr is not None
+                        else None
+                    ),
                 )
 
             timeout = timeout_for(selected_agent, roster)

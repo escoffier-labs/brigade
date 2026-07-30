@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import agents, codex_appserver, runguard, run_resume
+from brigade import agents, codex_appserver, runguard, run_resume, runs_cmd
 
 
 def _write_run_dir(tmp_path: Path, *, results: list[dict]) -> Path:
@@ -227,6 +227,136 @@ def test_resume_with_nothing_resumable_reports_and_exits_2(tmp_path, capsys):
     assert "cook" in err  # names the non-resumable failure
 
 
+def test_approval_resume_requires_reserved_snapshot_before_provider_start(tmp_path, monkeypatch):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "approval required",
+                "text": "",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            },
+        ],
+    )
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["status"] = "running"
+    meta["approval_reference"] = {
+        "approval_id": "approval-1",
+        "source": "daily",
+        "fingerprint": "approval-fingerprint",
+        "source_fingerprint": "source-fingerprint",
+        "contract_fingerprint": "contract-fingerprint",
+        "evidence_fingerprint": "evidence-fingerprint",
+        "decision_state": "approved",
+    }
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    writes = []
+    token = "a" * 43
+
+    def write_json(path, payload):
+        if path.name == "run.json":
+            writes.append(payload["status"])
+        path.write_text(json.dumps(payload))
+
+    class OrderedServer(_StubServer):
+        def __init__(self, *args, **kwargs):
+            assert kwargs["env"] == {runs_cmd._APPROVAL_RESUME_TOKEN_ENV: token}
+            super().__init__(*args, **kwargs)
+
+        def start(self):
+            assert writes == []
+
+        def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):
+            class TokenEchoThread(_StubThread):
+                def run_turn(self, prompt, *, timeout, on_event=None):
+                    result = super().run_turn(prompt, timeout=timeout, on_event=on_event)
+                    return codex_appserver.TurnResult(
+                        text=f"{result.text} {token}",
+                        ok=result.ok,
+                        status=result.status,
+                        thread_id=result.thread_id,
+                    )
+
+            return TokenEchoThread(thread_id)
+
+    monkeypatch.setattr(run_resume.aboyeur, "_write_json", write_json)
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", OrderedServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *args, **kwargs: agents.AgentResult(text="approved result", ok=True),
+    )
+    monkeypatch.setattr(runs_cmd, "_finalize_redeemed_approval", lambda *args, **kwargs: None)
+
+    assert run_resume._resume_locked(run_dir, approval_resume=True, approval_token=token) == 0
+    assert writes == ["ok"]
+    worker_results = (run_dir / "worker-results.json").read_text()
+    assert token not in worker_results
+    assert "[redacted]" in worker_results
+
+
+def test_approval_resume_retries_after_app_server_start_failure_without_provider_duplication(
+    tmp_path,
+    monkeypatch,
+):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "approval required",
+                "text": "",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            },
+        ],
+    )
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["status"] = "running"
+    meta["approval_reference"] = {
+        "approval_id": "approval-1",
+        "source": "daily",
+        "fingerprint": "approval-fingerprint",
+        "source_fingerprint": "source-fingerprint",
+        "contract_fingerprint": "contract-fingerprint",
+        "evidence_fingerprint": "evidence-fingerprint",
+        "decision_state": "approved",
+    }
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    starts = []
+    provider_calls = []
+    token = "b" * 43
+
+    class FlakyServer(_StubServer):
+        def start(self):
+            starts.append("start")
+            if len(starts) == 1:
+                raise codex_appserver.AppServerError("not ready")
+
+        def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):
+            provider_calls.append(thread_id)
+            return super().resume_thread(thread_id, cwd=cwd, model=model, sandbox=sandbox)
+
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", FlakyServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *args, **kwargs: agents.AgentResult(text="approved result", ok=True),
+    )
+    monkeypatch.setattr(runs_cmd, "_finalize_redeemed_approval", lambda *args, **kwargs: None)
+
+    assert run_resume._resume_locked(run_dir, approval_resume=True, approval_token=token) == 2
+    assert run_resume._resume_locked(run_dir, approval_resume=True, approval_token=token) == 0
+    assert starts == ["start", "start"]
+    assert provider_calls == ["t-1"]
+
+
 def test_resume_missing_artifacts_errors(tmp_path, capsys):
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -366,9 +496,10 @@ def test_resume_infers_lock_workspace_for_legacy_worktree_run(tmp_path, monkeypa
 
 def test_runs_resume_cli_dispatches(tmp_path, monkeypatch):
     from brigade import cli
+    from brigade import runs_cmd
 
     seen = {}
-    monkeypatch.setattr(run_resume, "resume", lambda run_dir: seen.update(run_dir=run_dir) or 0)
+    monkeypatch.setattr(runs_cmd, "resume", lambda run_dir: seen.update(run_dir=run_dir) or 0)
     rc = cli.main(["runs", "resume", str(tmp_path)])
     assert rc == 0
     assert seen["run_dir"] == tmp_path

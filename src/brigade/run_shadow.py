@@ -347,6 +347,8 @@ def _checkpoint_status_write_gap(
         ):
             return False
         return pairing_key == run_checkpoint.dispatch_pairing_key(status_event.event_type, seat, attempt)
+    if status_event.event_type in run_checkpoint._status_neutral_event_types():
+        return True
     return run_checkpoint._paired_event_derived_status(status_event) is not None
 
 

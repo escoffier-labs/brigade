@@ -149,9 +149,7 @@ def dispatch(args) -> int:
     if args.runs_command == "recover":
         return runs_cmd.recover(args.run, cwd=args.cwd, runs_dir=args.runs_dir)
     if args.runs_command == "resume":
-        from .. import run_resume
-
-        return run_resume.resume(args.run_dir)
+        return runs_cmd.resume(args.run_dir)
     args._brigade_parser.error(f"unknown runs command: {args.runs_command}")
     return 2
 

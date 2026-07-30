@@ -3,17 +3,29 @@ import os
 import socket
 import subprocess
 import sys
+from contextlib import contextmanager, redirect_stdout
 from datetime import date, datetime, timezone
+from io import StringIO
 from pathlib import Path
 
+import pytest
+
+from brigade import aboyeur
+from brigade import agents
 from brigade import cli
 from brigade import dogfood_cmd
 from brigade import localio
 from brigade import repos_cmd
 from brigade import roadmap_cmd
+from brigade import runguard
+from brigade import run_journal
+from brigade import run_resume
+from brigade import runs_cmd
 from brigade import security_cmd
 from brigade import tools_cmd
 from brigade import work_cmd
+from brigade.roster import Agent, Roster
+from brigade.tools_cmd import calls as tool_calls_mod
 
 from tests.work_cmd_test_helpers import (
     _write_json,
@@ -28,6 +40,32 @@ from tests.work_cmd_test_helpers import (
     _fake_mcp_server_script,
     _queue_and_approve_mcp,
 )
+
+
+def _inject_call_update_on_next_store_lock(
+    monkeypatch,
+    target: Path,
+    call_id: str,
+    *,
+    field: str,
+    value: object,
+) -> None:
+    original_lock = tool_calls_mod._calls_store_lock
+    injected = False
+
+    @contextmanager
+    def interleaved_lock(current_target):
+        nonlocal injected
+        with original_lock(current_target):
+            if not injected:
+                calls = tool_calls_mod._read_calls(target)
+                call = next(item for item in calls if item["id"] == call_id)
+                call[field] = value
+                tool_calls_mod._write_calls_unlocked(target, calls)
+                injected = True
+            yield
+
+    monkeypatch.setattr(tool_calls_mod, "_calls_store_lock", interleaved_lock)
 
 
 def test_tools_init_list_show_search_doctor_and_json(tmp_path, monkeypatch, capsys):
@@ -1030,6 +1068,56 @@ supported_harnesses = []
     assert payload["call"]["review_reason"] == "not needed"
 
 
+def test_tools_call_review_preserves_update_completed_before_store_lock(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _init_git_repo(tmp_path)
+    _write_script_tool_config(tmp_path, script='print("ok")\n')
+    assert (
+        tools_cmd.call_queue(
+            target=tmp_path,
+            tool_id="runner",
+            args='{"path":"reviewed"}',
+            json_output=True,
+        )
+        == 0
+    )
+    reviewed = json.loads(capsys.readouterr().out)["call"]
+    assert (
+        tools_cmd.call_queue(
+            target=tmp_path,
+            tool_id="runner",
+            args='{"path":"concurrent"}',
+            json_output=True,
+        )
+        == 0
+    )
+    concurrent = json.loads(capsys.readouterr().out)["call"]
+    _inject_call_update_on_next_store_lock(
+        monkeypatch,
+        tmp_path,
+        concurrent["id"],
+        field="review_reason",
+        value="concurrent update",
+    )
+
+    assert (
+        tools_cmd.call_approve(
+            target=tmp_path,
+            call_id=reviewed["id"],
+            json_output=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    stored = {item["id"]: item for item in tools_cmd._read_calls(tmp_path)}
+    assert stored[reviewed["id"]]["status"] == "approved"
+    assert stored[concurrent["id"]]["review_reason"] == "concurrent update"
+
+
 def test_tools_call_queue_blocked_requires_include_blocked_and_cannot_approve(tmp_path, capsys):
     _init_git_repo(tmp_path)
     config = tmp_path / ".brigade" / "tools.toml"
@@ -1154,6 +1242,47 @@ def test_tools_call_run_approved_script_writes_receipt_and_redacts_output(tmp_pa
     assert "status: completed" in out
 
 
+def test_tools_call_run_preserves_update_completed_before_store_lock(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _init_git_repo(tmp_path)
+    _write_script_tool_config(tmp_path, script='print("ok")\n')
+    runnable = _queue_and_approve_runner(tmp_path, capsys, args='{"path":"runnable"}')
+    assert (
+        tools_cmd.call_queue(
+            target=tmp_path,
+            tool_id="runner",
+            args='{"path":"concurrent"}',
+            json_output=True,
+        )
+        == 0
+    )
+    concurrent = json.loads(capsys.readouterr().out)["call"]
+    _inject_call_update_on_next_store_lock(
+        monkeypatch,
+        tmp_path,
+        concurrent["id"],
+        field="review_reason",
+        value="concurrent update",
+    )
+
+    assert (
+        tools_cmd.call_run(
+            target=tmp_path,
+            call_id=runnable["id"],
+            json_output=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    stored = {item["id"]: item for item in tools_cmd._read_calls(tmp_path)}
+    assert stored[runnable["id"]]["status"] == "completed"
+    assert stored[concurrent["id"]]["review_reason"] == "concurrent update"
+
+
 def test_tools_call_run_refuses_non_runnable_statuses_and_stale_records(tmp_path, capsys):
     _init_git_repo(tmp_path)
     _write_script_tool_config(tmp_path, script='print("ok")\n')
@@ -1216,6 +1345,694 @@ supported_harnesses = []
     capsys.readouterr()
     assert tools_cmd.call_run(target=tmp_path, call_id=completed["id"], json_output=True) == 1
     assert "completed calls cannot be run again" in " ".join(json.loads(capsys.readouterr().out)["blockers"])
+
+
+def test_tools_pending_approval_boundary_does_not_request_pause_without_active_run(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    _write_script_tool_config(tmp_path, script='print("ok")\n')
+    assert tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"pending"}', json_output=True) == 0
+    pending = json.loads(capsys.readouterr().out)["call"]
+    assert tools_cmd.call_run(target=tmp_path, call_id=pending["id"], json_output=True) == 1
+    capsys.readouterr()
+
+    stored = next(item for item in tools_cmd._read_calls(tmp_path) if item["id"] == pending["id"])
+    assert "brigade_approval_pause_request" not in stored
+
+
+def test_tools_child_process_requests_owner_process_pause_and_releases_parent_lock(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _init_git_repo(tmp_path)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    _write_script_tool_config(
+        tmp_path,
+        script=(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "path = Path(sys.argv[1])\n"
+            "count = int(path.read_text()) if path.exists() else 0\n"
+            "path.write_text(str(count + 1))\n"
+            "print('executed')\n"
+        ),
+    )
+    assert (
+        tools_cmd.call_queue(
+            target=tmp_path,
+            tool_id="runner",
+            args='{"path":"private-argument-value"}',
+            json_output=True,
+        )
+        == 0
+    )
+    pending = json.loads(capsys.readouterr().out)["call"]
+    (tmp_path / ".brigade" / "roster.toml").write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+"""
+    )
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "test fixture"], cwd=tmp_path, check=True)
+
+    child_pid_path = tmp_path.parent / f"{tmp_path.name}-approval-child.pid"
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    correlation_marker = "c" * 43
+    run_dir = tmp_path / ".brigade" / "runs" / "tool-child-approval-run"
+
+    def dispatch_with_approval_request(*args, **kwargs):
+        child_code = (
+            "import os,sys\n"
+            "from pathlib import Path\n"
+            "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            "from brigade import cli\n"
+            "raise SystemExit(cli.main(sys.argv[2:]))\n"
+        )
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = str(source_root)
+        environment[runs_cmd._APPROVAL_CORRELATION_ENV] = correlation_marker
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                child_code,
+                str(child_pid_path),
+                "tools",
+                "call",
+                "run",
+                pending["id"],
+                "--target",
+                str(tmp_path),
+                "--json",
+            ],
+            cwd=tmp_path,
+            env=environment,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert completed.returncode == 1
+        writer = aboyeur._worker_event_writer(
+            run_dir / "events",
+            "coder",
+            workspace=tmp_path,
+            correlation_marker=correlation_marker,
+        )
+        assert writer is not None
+        writer(
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "tool-approval-thread",
+                    "turnId": "tool-approval-turn",
+                    "item": {
+                        "id": "command-approval",
+                        "type": "commandExecution",
+                        "command": (
+                            f"{runs_cmd._APPROVAL_CORRELATION_ENV}={correlation_marker} "
+                            f"brigade tools call run {pending['id']}"
+                        ),
+                    },
+                },
+            }
+        )
+        return [
+            aboyeur.WorkerResult(
+                worker="unrelated-success",
+                task="other",
+                text="done",
+                ok=True,
+                thread_id="unrelated-thread",
+                status="complete",
+            ),
+            aboyeur.WorkerResult(
+                worker="unrelated-failure",
+                task="other failure",
+                text="",
+                ok=False,
+                thread_id="unrelated-failed-thread",
+                status="failed",
+            ),
+            aboyeur.WorkerResult(
+                worker="coder",
+                task="request tool approval",
+                text="approval is required",
+                ok=True,
+                thread_id="tool-approval-thread",
+                status="complete",
+            ),
+        ]
+
+    monkeypatch.setattr(aboyeur, "dispatch", dispatch_with_approval_request)
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "request tool approval",
+                "--cwd",
+                str(tmp_path),
+                "--output-dir",
+                str(run_dir),
+                "--worker",
+                "coder",
+                "--no-code-graph",
+                "--no-evidence",
+                "--no-route",
+            ]
+        )
+        == 0
+    )
+
+    assert int(child_pid_path.read_text()) != os.getpid()
+    assert runguard.run_lock_state(tmp_path, run_dir) == "absent"
+    paused = json.loads((run_dir / "run.json").read_text())
+    assert paused["status"] == "running"
+    assert paused["approval_reference"]["decision_state"] == "pending"
+    assert paused["approval_reference"]["approval_id"] == pending["id"]
+    journal_path = run_dir / "events" / "lifecycle.jsonl"
+    events = run_journal.read_journal(journal_path).events
+    assert [event.event_type for event in events][-4:] == [
+        "run.snapshot.checkpointed",
+        "approval.requested",
+        "run.snapshot.checkpointed",
+        "run.paused",
+    ]
+    assert "private-argument-value" not in journal_path.read_text()
+    assert (run_dir / "worker-results.json").is_file()
+    handoff = json.loads((run_dir / "worker-results.json").read_text())
+    assert handoff["results"] == [
+        {
+            "worker": "coder",
+            "task": "request tool approval",
+            "ok": False,
+            "thread_id": "tool-approval-thread",
+            "status": "interrupted",
+        }
+    ]
+    assert not (run_dir / "logs").exists()
+    handoff_paths = [
+        run_dir / "worker-results.json",
+        *sorted((run_dir / "revisions" / "worker-results").glob("*.json")),
+    ]
+    assert len(handoff_paths) == 2
+    assert all("private-argument-value" not in path.read_text() for path in handoff_paths)
+
+    resume_tokens = []
+
+    class ResumedThread:
+        def __init__(self, token):
+            self.token = token
+
+        def run_turn(self, prompt, *, timeout):
+            assert "request tool approval" in prompt
+            resume_tokens.append(self.token)
+            previous = os.environ.get(runs_cmd._APPROVAL_RESUME_TOKEN_ENV)
+            os.environ[runs_cmd._APPROVAL_RESUME_TOKEN_ENV] = self.token
+            try:
+                with redirect_stdout(StringIO()):
+                    assert tools_cmd.call_run(target=tmp_path, call_id=pending["id"], json_output=True) == 0
+                    assert tools_cmd.call_run(target=tmp_path, call_id=pending["id"], json_output=True) == 1
+            finally:
+                if previous is None:
+                    os.environ.pop(runs_cmd._APPROVAL_RESUME_TOKEN_ENV, None)
+                else:
+                    os.environ[runs_cmd._APPROVAL_RESUME_TOKEN_ENV] = previous
+            assert (tmp_path / "private-argument-value").read_text() == "1"
+            return run_resume.codex_appserver.TurnResult(
+                text="approval continuation complete",
+                ok=True,
+                status="complete",
+                thread_id="tool-approval-thread",
+            )
+
+    class ResumeServer:
+        def __init__(self, *args, **kwargs):
+            self.token = kwargs["env"][runs_cmd._APPROVAL_RESUME_TOKEN_ENV]
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+        def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):
+            assert thread_id == "tool-approval-thread"
+            assert cwd == tmp_path
+            return ResumedThread(self.token)
+
+    assert tools_cmd.call_approve(target=tmp_path, call_id=pending["id"], json_output=True) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *args, **kwargs: agents.AgentResult(text="resumed synthesis", ok=True),
+    )
+
+    start_failure_tokens = []
+
+    class StartFailureServer:
+        def __init__(self, *args, **kwargs):
+            start_failure_tokens.append(kwargs["env"][runs_cmd._APPROVAL_RESUME_TOKEN_ENV])
+
+        def start(self):
+            raise run_resume.codex_appserver.AppServerError("injected start failure")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", StartFailureServer)
+    assert cli.main(["runs", "resume", str(run_dir)]) == 2
+    reserved = next(item for item in tools_cmd._read_calls(tmp_path) if item["id"] == pending["id"])
+    assert reserved["status"] == "approved"
+    assert reserved["approval_claim"]["state"] == "reserved"
+    assert start_failure_tokens[0] not in json.dumps(reserved)
+
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", ResumeServer)
+    assert cli.main(["runs", "resume", str(run_dir)]) == 0
+    assert (run_dir / "final.txt").read_text().strip() == "resumed synthesis"
+    resumed = json.loads((run_dir / "run.json").read_text())
+    assert resumed["status"] == "ok"
+    assert len(resume_tokens) == 1
+    assert resume_tokens[0] != start_failure_tokens[0]
+    stored_call = next(item for item in tools_cmd._read_calls(tmp_path) if item["id"] == pending["id"])
+    assert stored_call["status"] == "completed"
+    assert stored_call["approval_claim"]["state"] == "redeemed"
+    assert stored_call["approval_claim"]["run_id"] == run_dir.name
+    serialized_artifacts = "\n".join(
+        path.read_text(errors="replace")
+        for path in [
+            run_dir / "run.json",
+            run_dir / "worker-results.json",
+            journal_path,
+            tmp_path / ".brigade" / "tools" / "calls.jsonl",
+        ]
+    )
+    assert correlation_marker not in serialized_artifacts
+    assert resume_tokens[0] not in serialized_artifacts
+
+
+def test_tools_resume_claim_rechecks_store_after_authorization(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _init_git_repo(tmp_path)
+    _write_script_tool_config(tmp_path, script='print("ok")\n')
+    assert tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"pending"}', json_output=True) == 0
+    pending = json.loads(capsys.readouterr().out)["call"]
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    marker = "q" * 43
+    monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
+    run_dir = tmp_path / ".brigade" / "runs" / "tool-claim-race-run"
+    roster = Roster(
+        orchestrator="chef",
+        agents={"chef": Agent("chef", "codex", "plan")},
+    )
+
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="tool claim race",
+            cwd=tmp_path,
+            roster=roster,
+            read_only=False,
+            lock_workspace=tmp_path,
+        )
+        assert tools_cmd.call_run(target=tmp_path, call_id=pending["id"], json_output=True) == 1
+        capsys.readouterr()
+        runs_cmd._bind_approval_pause_request(
+            tmp_path,
+            correlation_marker=marker,
+            worker="coder",
+            thread_id="tool-race-thread",
+            turn_id="tool-race-turn",
+        )
+        reference = runs_cmd._approval_pause_reference_for_owned_run(tmp_path, run_dir)
+        assert reference is not None
+        aboyeur.record_approval_pause(run_dir, reference)
+
+    assert tools_cmd.call_approve(target=tmp_path, call_id=pending["id"], json_output=True) == 0
+    capsys.readouterr()
+    original_load = runs_cmd._load_approval_authorization
+
+    def authorize_then_hold(workspace, reference, *, run_id):
+        authorization = original_load(workspace, reference, run_id=run_id)
+        assert (
+            tools_cmd.call_hold(
+                target=tmp_path,
+                call_id=pending["id"],
+                reason="concurrent review",
+                json_output=True,
+            )
+            == 0
+        )
+        capsys.readouterr()
+        return authorization
+
+    continued = []
+    monkeypatch.setattr(runs_cmd, "_load_approval_authorization", authorize_then_hold)
+    monkeypatch.setattr(
+        run_resume,
+        "_resume_locked",
+        lambda path, *, approval_resume, approval_token: continued.append((path, approval_resume, approval_token)) or 0,
+    )
+
+    assert cli.main(["runs", "resume", str(run_dir)]) == 2
+    assert continued == []
+    stored = next(item for item in tools_cmd._read_calls(tmp_path) if item["id"] == pending["id"])
+    assert stored["status"] == "held"
+    event_types = [
+        event.event_type for event in run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
+    ]
+    assert "approval.granted" not in event_types
+
+
+def test_tools_reserved_claim_rechecks_contract_before_redemption_and_action(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _init_git_repo(tmp_path)
+    _write_script_tool_config(
+        tmp_path,
+        script=(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "path = Path(sys.argv[1])\n"
+            "count = int(path.read_text()) if path.exists() else 0\n"
+            "path.write_text(str(count + 1))\n"
+        ),
+    )
+    assert (
+        tools_cmd.call_queue(
+            target=tmp_path,
+            tool_id="runner",
+            args='{"path":"stale-redeem-count"}',
+            json_output=True,
+        )
+        == 0
+    )
+    pending = json.loads(capsys.readouterr().out)["call"]
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    marker = "s" * 43
+    monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
+    run_dir = tmp_path / ".brigade" / "runs" / "tool-stale-redemption-run"
+    roster = Roster(orchestrator="chef", agents={"chef": Agent("chef", "codex", "plan")})
+
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="tool stale redemption",
+            cwd=tmp_path,
+            roster=roster,
+            read_only=False,
+            lock_workspace=tmp_path,
+        )
+        assert tools_cmd.call_run(target=tmp_path, call_id=pending["id"], json_output=True) == 1
+        capsys.readouterr()
+        runs_cmd._bind_approval_pause_request(
+            tmp_path,
+            correlation_marker=marker,
+            worker="coder",
+            thread_id="stale-redemption-thread",
+            turn_id="stale-redemption-turn",
+        )
+        reference = runs_cmd._approval_pause_reference_for_owned_run(tmp_path, run_dir)
+        assert reference is not None
+        aboyeur.record_approval_pause(run_dir, reference)
+
+    assert tools_cmd.call_approve(target=tmp_path, call_id=pending["id"], json_output=True) == 0
+    capsys.readouterr()
+
+    def stale_before_redeem(path, *, approval_resume, approval_token):
+        assert path == run_dir
+        assert approval_resume is True
+        (tmp_path / "tools" / "input.schema.json").write_text(
+            json.dumps(
+                {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "mode": {"type": "string"},
+                    },
+                }
+            )
+        )
+        previous = os.environ.get(runs_cmd._APPROVAL_RESUME_TOKEN_ENV)
+        os.environ[runs_cmd._APPROVAL_RESUME_TOKEN_ENV] = approval_token
+        try:
+            with redirect_stdout(StringIO()):
+                assert tools_cmd.call_run(target=tmp_path, call_id=pending["id"], json_output=True) == 1
+        finally:
+            if previous is None:
+                os.environ.pop(runs_cmd._APPROVAL_RESUME_TOKEN_ENV, None)
+            else:
+                os.environ[runs_cmd._APPROVAL_RESUME_TOKEN_ENV] = previous
+        runs_cmd._finalize_redeemed_approval(run_dir, tmp_path, reference)
+        return 0
+
+    monkeypatch.setattr(run_resume, "_resume_locked", stale_before_redeem)
+
+    assert cli.main(["runs", "resume", str(run_dir)]) == 2
+    assert not (tmp_path / "stale-redeem-count").exists()
+    stored = next(item for item in tools_cmd._read_calls(tmp_path) if item["id"] == pending["id"])
+    assert stored["status"] == "approved"
+    assert stored["approval_claim"]["state"] == "reserved"
+    event_types = [
+        event.event_type for event in run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
+    ]
+    assert event_types.count("approval.granted") == 1
+    assert "approval.consumed" not in event_types
+    assert "run.resumed" not in event_types
+
+
+def test_tools_redeemed_action_crash_fails_closed_without_second_execution(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _init_git_repo(tmp_path)
+    _write_script_tool_config(
+        tmp_path,
+        script=(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "path = Path(sys.argv[1])\n"
+            "count = int(path.read_text()) if path.exists() else 0\n"
+            "path.write_text(str(count + 1))\n"
+        ),
+    )
+    assert (
+        tools_cmd.call_queue(
+            target=tmp_path,
+            tool_id="runner",
+            args='{"path":"redeemed-count"}',
+            json_output=True,
+        )
+        == 0
+    )
+    pending = json.loads(capsys.readouterr().out)["call"]
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    marker = "r" * 43
+    monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
+    run_dir = tmp_path / ".brigade" / "runs" / "tool-redeemed-crash-run"
+    roster = Roster(orchestrator="chef", agents={"chef": Agent("chef", "codex", "plan")})
+
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="tool redeemed crash",
+            cwd=tmp_path,
+            roster=roster,
+            read_only=False,
+            lock_workspace=tmp_path,
+        )
+        assert tools_cmd.call_run(target=tmp_path, call_id=pending["id"], json_output=True) == 1
+        capsys.readouterr()
+        runs_cmd._bind_approval_pause_request(
+            tmp_path,
+            correlation_marker=marker,
+            worker="coder",
+            thread_id="redeemed-thread",
+            turn_id="redeemed-turn",
+        )
+        reference = runs_cmd._approval_pause_reference_for_owned_run(tmp_path, run_dir)
+        assert reference is not None
+        aboyeur.write_approval_resume_handoff(
+            run_dir,
+            [
+                aboyeur.WorkerResult(
+                    worker="coder",
+                    task="run approved tool",
+                    text="approval required",
+                    ok=True,
+                    thread_id="redeemed-thread",
+                    status="complete",
+                )
+            ],
+            requester_worker="coder",
+            requester_thread_id="redeemed-thread",
+        )
+        aboyeur.record_approval_pause(run_dir, reference)
+
+    assert tools_cmd.call_approve(target=tmp_path, call_id=pending["id"], json_output=True) == 0
+    capsys.readouterr()
+    provider_calls = []
+    raw_tokens = []
+
+    def redeem_then_crash(path, *, approval_resume, approval_token):
+        provider_calls.append(path)
+        raw_tokens.append(approval_token)
+        previous = os.environ.get(runs_cmd._APPROVAL_RESUME_TOKEN_ENV)
+        os.environ[runs_cmd._APPROVAL_RESUME_TOKEN_ENV] = approval_token
+        try:
+            with redirect_stdout(StringIO()):
+                assert tools_cmd.call_run(target=tmp_path, call_id=pending["id"], json_output=True) == 0
+        finally:
+            if previous is None:
+                os.environ.pop(runs_cmd._APPROVAL_RESUME_TOKEN_ENV, None)
+            else:
+                os.environ[runs_cmd._APPROVAL_RESUME_TOKEN_ENV] = previous
+        raise runs_cmd.ApprovalResumeError("injected outcome persistence crash")
+
+    monkeypatch.setattr(run_resume, "_resume_locked", redeem_then_crash)
+
+    assert cli.main(["runs", "resume", str(run_dir)]) == 2
+    assert (tmp_path / "redeemed-count").read_text() == "1"
+    assert cli.main(["runs", "resume", str(run_dir)]) == 2
+    assert (tmp_path / "redeemed-count").read_text() == "1"
+    assert provider_calls == [run_dir]
+    stored = next(item for item in tools_cmd._read_calls(tmp_path) if item["id"] == pending["id"])
+    assert stored["approval_claim"]["state"] == "redeemed"
+    assert raw_tokens[0] not in json.dumps(stored)
+    assert "outcome reconciliation is required" in capsys.readouterr().err
+
+
+def test_tools_approval_pauses_real_run_and_cli_resume_consumes_store_once(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _init_git_repo(tmp_path)
+    _write_script_tool_config(
+        tmp_path,
+        script=(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "path = Path(sys.argv[1])\n"
+            "count = int(path.read_text()) if path.exists() else 0\n"
+            "path.write_text(str(count + 1))\n"
+        ),
+    )
+    assert (
+        tools_cmd.call_queue(
+            target=tmp_path,
+            tool_id="runner",
+            args='{"path":"tool-approval-count"}',
+            json_output=True,
+        )
+        == 0
+    )
+    pending = json.loads(capsys.readouterr().out)["call"]
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    marker = "t" * 43
+    monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
+    run_dir = tmp_path / ".brigade" / "runs" / "tool-approval-run"
+    roster = Roster(
+        orchestrator="chef",
+        agents={"chef": Agent("chef", "codex", "plan")},
+    )
+
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="tool approval",
+            cwd=tmp_path,
+            roster=roster,
+            read_only=False,
+            lock_workspace=tmp_path,
+        )
+        assert tools_cmd.call_run(target=tmp_path, call_id=pending["id"], json_output=True) == 1
+        capsys.readouterr()
+        assert runguard.is_active_run_owner(tmp_path, run_dir)
+        runs_cmd._bind_approval_pause_request(
+            tmp_path,
+            correlation_marker=marker,
+            worker="coder",
+            thread_id="tool-approval-thread",
+            turn_id="tool-approval-turn",
+        )
+        reference = runs_cmd._approval_pause_reference_for_owned_run(tmp_path, run_dir)
+        assert reference["source"] == "tool"
+        assert reference["approval_id"] == pending["id"]
+        aboyeur.record_approval_pause(run_dir, reference)
+
+    assert runguard.run_lock_state(tmp_path, run_dir) == "absent"
+    paused = json.loads((run_dir / "run.json").read_text())
+    assert paused["status"] == "running"
+    assert paused["approval_reference"]["decision_state"] == "pending"
+    events = run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
+    assert [event.event_type for event in events][-4:] == [
+        "run.snapshot.checkpointed",
+        "approval.requested",
+        "run.snapshot.checkpointed",
+        "run.paused",
+    ]
+
+    assert tools_cmd.call_approve(target=tmp_path, call_id=pending["id"], json_output=True) == 0
+    capsys.readouterr()
+    continued = []
+
+    def continue_tool(path, *, approval_resume, approval_token):
+        continued.append((path, approval_resume))
+        previous = os.environ.get(runs_cmd._APPROVAL_RESUME_TOKEN_ENV)
+        os.environ[runs_cmd._APPROVAL_RESUME_TOKEN_ENV] = approval_token
+        try:
+            with redirect_stdout(StringIO()):
+                assert tools_cmd.call_run(target=tmp_path, call_id=pending["id"], json_output=True) == 0
+                assert tools_cmd.call_run(target=tmp_path, call_id=pending["id"], json_output=True) == 1
+        finally:
+            if previous is None:
+                os.environ.pop(runs_cmd._APPROVAL_RESUME_TOKEN_ENV, None)
+            else:
+                os.environ[runs_cmd._APPROVAL_RESUME_TOKEN_ENV] = previous
+        runs_cmd._finalize_redeemed_approval(run_dir, tmp_path, reference)
+        return 0
+
+    monkeypatch.setattr(run_resume, "_resume_locked", continue_tool)
+
+    assert cli.main(["runs", "resume", str(run_dir)]) == 0
+    assert continued == [(run_dir, True)]
+    assert (tmp_path / "tool-approval-count").read_text() == "1"
+    consumed = next(item for item in tools_cmd._read_calls(tmp_path) if item["id"] == pending["id"])
+    assert consumed["status"] == "completed"
+    assert consumed["approval_claim"]["state"] == "redeemed"
+    assert consumed["approval_claim"]["run_id"] == run_dir.name
+    assert consumed["run_id"] != run_dir.name
+    event_types = [
+        event.event_type for event in run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
+    ]
+    for fact in ("approval.granted", "approval.consumed", "run.resumed"):
+        assert event_types.count(fact) == 1
+        fact_index = event_types.index(fact)
+        assert event_types[fact_index - 1] == "run.snapshot.checkpointed"
 
 
 def test_tools_run_history_list_show_latest_and_json(tmp_path, capsys):
@@ -1411,6 +2228,133 @@ def test_tools_checkpoint_approve_reject_and_successful_resume(tmp_path, capsys)
     payload = json.loads(capsys.readouterr().out)
     assert payload["checkpoint"]["status"] == "rejected"
     assert payload["checkpoint"]["review_reason"] == "not now"
+
+
+def test_tools_checkpoint_review_preserves_update_completed_before_store_lock(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _init_git_repo(tmp_path)
+    _, checkpoint_id, _ = _create_waiting_checkpoint(tmp_path, capsys)
+    assert (
+        tools_cmd.call_queue(
+            target=tmp_path,
+            tool_id="runner",
+            args='{"path":"concurrent"}',
+            json_output=True,
+        )
+        == 0
+    )
+    concurrent = json.loads(capsys.readouterr().out)["call"]
+    _inject_call_update_on_next_store_lock(
+        monkeypatch,
+        tmp_path,
+        concurrent["id"],
+        field="review_reason",
+        value="concurrent update",
+    )
+
+    assert (
+        tools_cmd.checkpoint_approve(
+            target=tmp_path,
+            checkpoint_id=checkpoint_id,
+            choice="continue",
+            json_output=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    stored = {item["id"]: item for item in tools_cmd._read_calls(tmp_path)}
+    assert stored[concurrent["id"]]["review_reason"] == "concurrent update"
+
+
+@pytest.mark.parametrize("changed_status", ["running", "rejected"])
+def test_tools_checkpoint_approve_cas_refuses_changed_linked_call_without_mutation(
+    tmp_path,
+    capsys,
+    changed_status,
+):
+    _init_git_repo(tmp_path)
+    call, checkpoint_id, _ = _create_waiting_checkpoint(tmp_path, capsys)
+    checkpoint_path = tmp_path / ".brigade" / "tools" / "checkpoints" / f"{checkpoint_id}.json"
+    checkpoint_before = checkpoint_path.read_bytes()
+    calls = tools_cmd._read_calls(tmp_path)
+    stored = next(item for item in calls if item["id"] == call["id"])
+    stored["status"] = changed_status
+    stored["approval_fingerprint"] = tools_cmd._approval_fingerprint(stored)
+    tools_cmd._write_calls(tmp_path, calls)
+    call_before = next(item for item in tools_cmd._read_calls(tmp_path) if item["id"] == call["id"])
+
+    assert (
+        tools_cmd.checkpoint_approve(
+            target=tmp_path,
+            checkpoint_id=checkpoint_id,
+            choice="continue",
+            json_output=True,
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "checkpoint or linked call state changed before review"
+    assert checkpoint_path.read_bytes() == checkpoint_before
+    assert next(item for item in tools_cmd._read_calls(tmp_path) if item["id"] == call["id"]) == call_before
+
+
+def test_tools_checkpoint_approve_wins_before_stale_reject_under_shared_lock(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    _init_git_repo(tmp_path)
+    call, checkpoint_id, _ = _create_waiting_checkpoint(tmp_path, capsys)
+    original_lock = tool_calls_mod._calls_store_lock
+    winner = []
+
+    @contextmanager
+    def approve_before_reject(target):
+        if not winner:
+            monkeypatch.setattr(tool_calls_mod, "_calls_store_lock", original_lock)
+            try:
+                assert (
+                    tools_cmd.checkpoint_approve(
+                        target=tmp_path,
+                        checkpoint_id=checkpoint_id,
+                        choice="continue",
+                        json_output=True,
+                    )
+                    == 0
+                )
+                capsys.readouterr()
+                winner.append("approved")
+            finally:
+                monkeypatch.setattr(tool_calls_mod, "_calls_store_lock", approve_before_reject)
+        with original_lock(target):
+            yield
+
+    monkeypatch.setattr(tool_calls_mod, "_calls_store_lock", approve_before_reject)
+
+    assert (
+        tools_cmd.checkpoint_reject(
+            target=tmp_path,
+            checkpoint_id=checkpoint_id,
+            reason="stale rejection",
+            json_output=True,
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "checkpoint state changed before review"
+    checkpoint, error = tools_cmd._resolve_checkpoint(tmp_path, checkpoint_id)
+    assert error is None
+    assert checkpoint is not None
+    assert checkpoint["status"] == "approved"
+    assert checkpoint["selected_choice"] == "continue"
+    stored_call = next(item for item in tools_cmd._read_calls(tmp_path) if item["id"] == call["id"])
+    assert stored_call["status"] == "resume-pending"
+    assert stored_call["checkpoint_id"] == checkpoint_id
+    assert winner == ["approved"]
 
 
 def test_tools_checkpoint_resume_refuses_unapproved_expired_stale_blocked_and_policy_denied(tmp_path, capsys):

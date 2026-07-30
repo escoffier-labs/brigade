@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import re
+import secrets
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping
 
 _NONTERMINAL_STATUSES = frozenset(
     {
@@ -22,6 +27,73 @@ _NONTERMINAL_STATUSES = frozenset(
     }
 )
 _SUCCESS_STATUSES = frozenset({"ok", "dry-run"})
+_APPROVAL_REFERENCE_FIELDS = (
+    "approval_id",
+    "source",
+    "fingerprint",
+    "source_fingerprint",
+    "contract_fingerprint",
+    "evidence_fingerprint",
+)
+_APPROVAL_PAUSE_REQUEST_FIELD = "brigade_approval_pause_request"
+_APPROVAL_PAUSE_REQUEST_SCHEMA = "brigade.approval_pause_request.v2"
+_APPROVAL_PAUSE_REQUEST_FIELDS = frozenset(
+    {
+        "schema",
+        "run_id",
+        "run_dir_fingerprint",
+        "owner_fingerprint",
+        "correlation_fingerprint",
+        "requester_worker",
+        "requester_thread_id",
+        "requester_turn_id",
+        "approval_reference",
+    }
+)
+_APPROVAL_CORRELATION_ENV = "BRIGADE_APPROVAL_CORRELATION"
+_APPROVAL_RESUME_TOKEN_ENV = "BRIGADE_APPROVAL_RESUME_TOKEN"
+_APPROVAL_MARKER_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+_REQUESTER_COORDINATE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+class ApprovalResumeError(RuntimeError):
+    """An approval-paused run cannot safely resume."""
+
+
+class _ApprovalPauseReference(dict[str, str]):
+    """Closed approval reference with its in-memory requester correlation."""
+
+    requester_worker: str
+    requester_thread_id: str
+    requester_turn_id: str
+
+    def __init__(
+        self,
+        reference: Mapping[str, str],
+        *,
+        requester_worker: str,
+        requester_thread_id: str,
+        requester_turn_id: str,
+    ) -> None:
+        super().__init__(reference)
+        self.requester_worker = requester_worker
+        self.requester_thread_id = requester_thread_id
+        self.requester_turn_id = requester_turn_id
+
+
+@dataclass(frozen=True)
+class _ApprovalAuthorization:
+    status: str
+    decided_at: str | None
+    consumed_by: str | None
+    claimed_at: str | None = None
+
+
+@dataclass(frozen=True)
+class _ApprovalReservation:
+    decided_at: str
+    reserved_at: str
+    token: str
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -203,6 +275,796 @@ def _is_terminal(meta: dict[str, Any]) -> bool:
     if meta.get("finished_at"):
         return True
     return isinstance(status, str) and status not in _NONTERMINAL_STATUSES
+
+
+def _approval_resume_state(meta: Mapping[str, Any]) -> str | None:
+    reference = meta.get("approval_reference")
+    if not isinstance(reference, Mapping):
+        return None
+    state = reference.get("decision_state")
+    if meta.get("status") == "paused" and state is None:
+        return "pending"
+    if meta.get("status") == "running" and isinstance(state, str) and state:
+        return str(state)
+    return None
+
+
+def _is_intentional_approval_pause(meta: Mapping[str, Any]) -> bool:
+    state = _approval_resume_state(meta)
+    return state is not None and state != "consumed"
+
+
+def _approval_needs_reconciliation(meta: Mapping[str, Any]) -> bool:
+    return _approval_resume_state(meta) == "consumed"
+
+
+def _approval_reference_from_record(source: str, record: Mapping[str, Any]) -> dict[str, str]:
+    """Build the closed reference shape from an existing approval record."""
+    approval_id: object
+    source_fingerprint: object
+    contract_fingerprint: object
+    evidence_fingerprint: object
+    fingerprint_fn: Callable[[Any], str]
+    if source == "daily":
+        from .daily_cmd import config as daily_config
+
+        approval_id = record.get("approval_id")
+        source_fingerprint = record.get("source_fingerprint")
+        contract_fingerprint = record.get("config_fingerprint")
+        evidence_fingerprint = daily_config._fingerprint(record.get("evidence_refs", []))
+        fingerprint_fn = daily_config._fingerprint
+    elif source == "tool":
+        from .tools_cmd import helpers as tool_helpers
+
+        approval_id = record.get("id")
+        source_fingerprint = record.get("source_fingerprint") or tool_helpers._stable_hash({"source": None})
+        contract_fingerprint = record.get("contract_fingerprint")
+        evidence_fingerprint = record.get("call_fingerprint")
+        fingerprint_fn = tool_helpers._stable_hash
+    else:
+        raise ApprovalResumeError(f"unsupported approval source: {source}")
+    components = {
+        "approval_id": approval_id,
+        "source": source,
+        "source_fingerprint": source_fingerprint,
+        "contract_fingerprint": contract_fingerprint,
+        "evidence_fingerprint": evidence_fingerprint,
+    }
+    if any(not isinstance(value, str) or not value for value in components.values()):
+        raise ApprovalResumeError(f"{source} approval record is missing required fingerprints")
+    reference = {
+        **components,
+        "fingerprint": fingerprint_fn(components),
+    }
+    return {key: str(value) for key, value in reference.items()}
+
+
+def _reference_matches_record(reference: Mapping[str, str], record: Mapping[str, Any]) -> None:
+    actual = _approval_reference_from_record(reference["source"], record)
+    if any(reference.get(field) != actual[field] for field in _APPROVAL_REFERENCE_FIELDS):
+        raise ApprovalResumeError("approval fingerprints changed after the run paused")
+
+
+def _request_digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _active_run_request_binding(workspace: Path) -> tuple[Path, str] | None:
+    """Return the live run and lock token visible to a child process."""
+    from . import runguard
+
+    workspace = workspace.expanduser().resolve()
+    owner = runguard._read_lock_owner(runguard.lock_path(workspace))
+    if owner is None:
+        return None
+    raw_run_dir = owner.get("run_dir")
+    owner_token = owner.get("owner_token")
+    if not isinstance(raw_run_dir, str) or not raw_run_dir:
+        return None
+    if not isinstance(owner_token, str) or not owner_token:
+        return None
+    try:
+        run_dir = Path(raw_run_dir).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+    if runguard.run_lock_state(workspace, run_dir) != "live":
+        return None
+    return run_dir, owner_token
+
+
+def _approval_marker_from_env(name: str) -> str | None:
+    value = os.environ.get(name)
+    if not isinstance(value, str) or not _APPROVAL_MARKER_RE.fullmatch(value):
+        return None
+    return value
+
+
+def _attach_approval_pause_request(workspace: Path, source: str, record: dict[str, Any]) -> bool:
+    """Attach a bounded request to an existing approval artifact.
+
+    The child never appends to the parent journal. The active owner later
+    validates this request against its exact lock acquisition and records the
+    pause itself.
+    """
+    binding = _active_run_request_binding(workspace)
+    correlation_marker = _approval_marker_from_env(_APPROVAL_CORRELATION_ENV)
+    if binding is None or correlation_marker is None:
+        return False
+    run_dir, owner_token = binding
+    reference = _approval_reference_from_record(source, record)
+    record[_APPROVAL_PAUSE_REQUEST_FIELD] = {
+        "schema": _APPROVAL_PAUSE_REQUEST_SCHEMA,
+        "run_id": run_dir.name,
+        "run_dir_fingerprint": _request_digest(str(run_dir)),
+        "owner_fingerprint": _request_digest(owner_token),
+        "correlation_fingerprint": _request_digest(correlation_marker),
+        "requester_worker": None,
+        "requester_thread_id": None,
+        "requester_turn_id": None,
+        "approval_reference": reference,
+    }
+    return True
+
+
+def _request_matches_active_binding(
+    request: Mapping[str, Any],
+    *,
+    run_dir: Path,
+    owner_token: str,
+) -> bool:
+    return (
+        set(request) == _APPROVAL_PAUSE_REQUEST_FIELDS
+        and request.get("schema") == _APPROVAL_PAUSE_REQUEST_SCHEMA
+        and request.get("run_id") == run_dir.name
+        and request.get("run_dir_fingerprint") == _request_digest(str(run_dir))
+        and request.get("owner_fingerprint") == _request_digest(owner_token)
+    )
+
+
+def _unbound_request_for_update(
+    workspace: Path,
+    request: object,
+    *,
+    source: str,
+    record: Mapping[str, Any],
+    run_dir: Path,
+    owner_token: str,
+    correlation_fingerprint: str,
+) -> dict[str, Any]:
+    """Revalidate one scanned request under its source-store lock."""
+    current_binding = _active_run_request_binding(workspace)
+    if current_binding != (run_dir, owner_token):
+        raise ApprovalResumeError("approval pause active binding changed before requester update")
+    if (
+        not isinstance(request, dict)
+        or not _request_matches_active_binding(request, run_dir=run_dir, owner_token=owner_token)
+        or request.get("correlation_fingerprint") != correlation_fingerprint
+    ):
+        raise ApprovalResumeError("approval pause request changed before requester update")
+    raw_reference = request.get("approval_reference")
+    if not isinstance(raw_reference, Mapping):
+        raise ApprovalResumeError("approval pause request lost its approval reference")
+    from . import run_lifecycle
+
+    try:
+        request_reference = run_lifecycle.normalize_approval_reference(raw_reference)
+    except run_lifecycle.LifecycleJournalError as exc:
+        raise ApprovalResumeError("approval pause request reference changed before requester update") from exc
+    if request_reference != _approval_reference_from_record(source, record):
+        raise ApprovalResumeError("approval pause request reference changed before requester update")
+    coordinate_fields = ("requester_worker", "requester_thread_id", "requester_turn_id")
+    if any(request.get(field) is not None for field in coordinate_fields):
+        raise ApprovalResumeError("approval pause request is already bound")
+    return request
+
+
+def _bind_approval_pause_request(
+    workspace: Path,
+    *,
+    correlation_marker: str,
+    worker: str,
+    thread_id: str,
+    turn_id: str,
+) -> None:
+    """Atomically bind one child request to its completed command coordinates."""
+    coordinates = (worker, thread_id, turn_id)
+    if not _APPROVAL_MARKER_RE.fullmatch(correlation_marker) or any(
+        not _REQUESTER_COORDINATE_RE.fullmatch(value) for value in coordinates
+    ):
+        raise ApprovalResumeError("approval pause requester binding is invalid")
+    binding = _active_run_request_binding(workspace)
+    if binding is None:
+        raise ApprovalResumeError("approval pause requester binding requires an active run")
+    run_dir, owner_token = binding
+    correlation_fingerprint = _request_digest(correlation_marker)
+    from .daily_cmd import approvals as daily_approvals
+    from .tools_cmd import calls as tool_calls
+
+    candidates: list[tuple[str, str]] = []
+    daily_records, _ = daily_approvals._read_approvals(workspace)
+    for daily_record in daily_records:
+        request = daily_record.get(_APPROVAL_PAUSE_REQUEST_FIELD)
+        if (
+            isinstance(request, Mapping)
+            and _request_matches_active_binding(request, run_dir=run_dir, owner_token=owner_token)
+            and request.get("correlation_fingerprint") == correlation_fingerprint
+        ):
+            candidates.append(("daily", str(daily_record.get("approval_id") or "")))
+    for tool_record in tool_calls._read_calls(workspace):
+        request = tool_record.get(_APPROVAL_PAUSE_REQUEST_FIELD)
+        if (
+            isinstance(request, Mapping)
+            and _request_matches_active_binding(request, run_dir=run_dir, owner_token=owner_token)
+            and request.get("correlation_fingerprint") == correlation_fingerprint
+        ):
+            candidates.append(("tool", str(tool_record.get("id") or "")))
+    if len(candidates) != 1 or not candidates[0][1]:
+        raise ApprovalResumeError("approval pause correlation did not match exactly one request")
+    source, approval_id = candidates[0]
+    coordinate_fields = ("requester_worker", "requester_thread_id", "requester_turn_id")
+    if source == "daily":
+        with daily_approvals._approval_store_lock(workspace, approval_id):
+            bound_daily_record = daily_approvals._find_approval(workspace, approval_id)
+            if bound_daily_record is None:
+                raise ApprovalResumeError("daily approval disappeared during requester binding")
+            request = _unbound_request_for_update(
+                workspace,
+                bound_daily_record.get(_APPROVAL_PAUSE_REQUEST_FIELD),
+                source=source,
+                record=bound_daily_record,
+                run_dir=run_dir,
+                owner_token=owner_token,
+                correlation_fingerprint=correlation_fingerprint,
+            )
+            request.update(dict(zip(coordinate_fields, coordinates, strict=True)))
+            daily_approvals._write_approval_unlocked(workspace, bound_daily_record)
+        return
+    with tool_calls._calls_store_lock(workspace):
+        bound_tool_record, calls, error = tool_calls._resolve_call(workspace, approval_id)
+        if bound_tool_record is None:
+            raise ApprovalResumeError(error or "tool approval disappeared during requester binding")
+        request = _unbound_request_for_update(
+            workspace,
+            bound_tool_record.get(_APPROVAL_PAUSE_REQUEST_FIELD),
+            source=source,
+            record=bound_tool_record,
+            run_dir=run_dir,
+            owner_token=owner_token,
+            correlation_fingerprint=correlation_fingerprint,
+        )
+        request.update(dict(zip(coordinate_fields, coordinates, strict=True)))
+        tool_calls._write_calls_unlocked(workspace, calls)
+
+
+def _request_reference_for_owned_run(
+    request: object,
+    *,
+    source: str,
+    record: Mapping[str, Any],
+    run_dir: Path,
+    owner_token: str,
+) -> _ApprovalPauseReference | None:
+    from . import run_lifecycle
+
+    if not isinstance(request, Mapping):
+        return None
+    if request.get("run_id") != run_dir.name:
+        return None
+    if set(request) != _APPROVAL_PAUSE_REQUEST_FIELDS:
+        raise ApprovalResumeError("approval pause request has an invalid shape")
+    if request.get("schema") != _APPROVAL_PAUSE_REQUEST_SCHEMA:
+        raise ApprovalResumeError("approval pause request has an unsupported schema")
+    if request.get("run_dir_fingerprint") != _request_digest(str(run_dir)):
+        raise ApprovalResumeError("approval pause request targets a different run directory")
+    if request.get("owner_fingerprint") != _request_digest(owner_token):
+        raise ApprovalResumeError("approval pause request targets a different lock acquisition")
+    correlation_fingerprint = request.get("correlation_fingerprint")
+    if not isinstance(correlation_fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", correlation_fingerprint):
+        raise ApprovalResumeError("approval pause request has an invalid correlation fingerprint")
+    requester_worker = request.get("requester_worker")
+    requester_thread_id = request.get("requester_thread_id")
+    requester_turn_id = request.get("requester_turn_id")
+    if any(
+        not isinstance(value, str) or not _REQUESTER_COORDINATE_RE.fullmatch(value)
+        for value in (requester_worker, requester_thread_id, requester_turn_id)
+    ):
+        raise ApprovalResumeError("approval pause request is not bound to a valid requester")
+    raw_reference = request.get("approval_reference")
+    if not isinstance(raw_reference, Mapping):
+        raise ApprovalResumeError("approval pause request has no approval reference")
+    try:
+        reference = run_lifecycle.normalize_approval_reference(raw_reference)
+    except run_lifecycle.LifecycleJournalError as exc:
+        raise ApprovalResumeError(f"approval pause request reference is invalid: {exc}") from exc
+    if reference["source"] != source:
+        raise ApprovalResumeError("approval pause request source does not match its artifact")
+    _reference_matches_record(reference, record)
+    assert isinstance(requester_worker, str)
+    assert isinstance(requester_thread_id, str)
+    assert isinstance(requester_turn_id, str)
+    return _ApprovalPauseReference(
+        reference,
+        requester_worker=requester_worker,
+        requester_thread_id=requester_thread_id,
+        requester_turn_id=requester_turn_id,
+    )
+
+
+def _approval_pause_reference_for_owned_run(workspace: Path, run_dir: Path) -> _ApprovalPauseReference | None:
+    """Resolve one child request while the current process owns the run lock."""
+    from . import runguard
+    from .daily_cmd import approvals as daily_approvals
+    from .tools_cmd import calls as tool_calls
+
+    workspace = workspace.expanduser().resolve()
+    run_dir = run_dir.expanduser().resolve()
+    if not runguard.is_active_run_owner(workspace, run_dir):
+        raise ApprovalResumeError("approval pause request requires the active run owner")
+    owner = runguard._read_lock_owner(runguard.lock_path(workspace))
+    owner_token = owner.get("owner_token") if owner is not None else None
+    if not isinstance(owner_token, str) or not owner_token:
+        raise ApprovalResumeError("active run lock has no owner token")
+
+    candidates: list[_ApprovalPauseReference] = []
+    daily_records, _ = daily_approvals._read_approvals(workspace)
+    for record in daily_records:
+        reference = _request_reference_for_owned_run(
+            record.get(_APPROVAL_PAUSE_REQUEST_FIELD),
+            source="daily",
+            record=record,
+            run_dir=run_dir,
+            owner_token=owner_token,
+        )
+        if reference is not None:
+            candidates.append(reference)
+    for record in tool_calls._read_calls(workspace):
+        reference = _request_reference_for_owned_run(
+            record.get(_APPROVAL_PAUSE_REQUEST_FIELD),
+            source="tool",
+            record=record,
+            run_dir=run_dir,
+            owner_token=owner_token,
+        )
+        if reference is not None:
+            candidates.append(reference)
+    if not candidates:
+        return None
+    unique = {
+        (
+            json.dumps(reference, sort_keys=True),
+            reference.requester_worker,
+            reference.requester_thread_id,
+            reference.requester_turn_id,
+        )
+        for reference in candidates
+    }
+    if len(unique) != 1:
+        raise ApprovalResumeError("multiple approval pause requests target the active run")
+    return candidates[0]
+
+
+def _daily_authorization(
+    workspace: Path,
+    reference: Mapping[str, str],
+    *,
+    run_id: str,
+) -> _ApprovalAuthorization:
+    from .daily_cmd import approvals as daily_approvals
+    from .daily_cmd import config as daily_config
+
+    approval = daily_approvals._find_approval(workspace, reference["approval_id"])
+    if not isinstance(approval, dict):
+        raise ApprovalResumeError(f"daily approval not found: {reference['approval_id']}")
+    _reference_matches_record(reference, approval)
+    status = str(approval.get("status") or "")
+    decided_at = approval.get("reviewed_at")
+    decided_text = decided_at if isinstance(decided_at, str) and decided_at else None
+    consumed = approval.get("consumed_run_id")
+    consumed_by = consumed if isinstance(consumed, str) and consumed else None
+    claim = approval.get("approval_claim")
+    if isinstance(claim, Mapping):
+        claim_run_id = claim.get("run_id")
+        claim_state = claim.get("state")
+        claim_time = claim.get("redeemed_at") if claim_state == "redeemed" else claim.get("reserved_at")
+        return _ApprovalAuthorization(
+            status=str(claim_state or ""),
+            decided_at=decided_text,
+            consumed_by=claim_run_id if isinstance(claim_run_id, str) else None,
+            claimed_at=claim_time if isinstance(claim_time, str) else None,
+        )
+    if status == "approved":
+        config, _ = daily_config._load_config(workspace)
+        blockers = daily_approvals._approval_blockers(workspace, approval, config)
+        if blockers:
+            raise ApprovalResumeError(f"daily approval is stale or blocked: {blockers[0]}")
+        return _ApprovalAuthorization(
+            status=status,
+            decided_at=decided_text,
+            consumed_by=None,
+        )
+    if status == "consumed" and consumed_by == run_id:
+        config, _ = daily_config._load_config(workspace)
+        revalidation = dict(approval)
+        revalidation["status"] = "approved"
+        revalidation["consumed_run_id"] = None
+        blockers = daily_approvals._approval_blockers(workspace, revalidation, config)
+        if blockers:
+            raise ApprovalResumeError(f"daily approval is stale or blocked: {blockers[0]}")
+    return _ApprovalAuthorization(
+        status=status,
+        decided_at=decided_text,
+        consumed_by=consumed_by,
+    )
+
+
+def _tool_authorization(
+    workspace: Path,
+    reference: Mapping[str, str],
+    *,
+    run_id: str,
+) -> _ApprovalAuthorization:
+    from .tools_cmd import calls as tool_calls
+
+    call, _calls, error = tool_calls._resolve_call(workspace, reference["approval_id"])
+    if call is None:
+        raise ApprovalResumeError(error or f"tool approval not found: {reference['approval_id']}")
+    _reference_matches_record(reference, call)
+    status = str(call.get("status") or "")
+    decided_at = call.get("reviewed_at")
+    decided_text = decided_at if isinstance(decided_at, str) and decided_at else None
+    stored_run_id = call.get("run_id")
+    consumed_by = stored_run_id if isinstance(stored_run_id, str) and stored_run_id else None
+    claim = call.get("approval_claim")
+    if isinstance(claim, Mapping):
+        claim_run_id = claim.get("run_id")
+        claim_state = claim.get("state")
+        claim_time = claim.get("redeemed_at") if claim_state == "redeemed" else claim.get("reserved_at")
+        return _ApprovalAuthorization(
+            status=str(claim_state or ""),
+            decided_at=decided_text,
+            consumed_by=claim_run_id if isinstance(claim_run_id, str) else None,
+            claimed_at=claim_time if isinstance(claim_time, str) else None,
+        )
+    if status == "approved":
+        blockers = tool_calls._call_run_blockers(workspace, call)
+        if blockers:
+            raise ApprovalResumeError(f"tool approval is stale or blocked: {blockers[0]}")
+
+        return _ApprovalAuthorization(
+            status=status,
+            decided_at=decided_text,
+            consumed_by=None,
+        )
+    if status == "running":
+        if consumed_by == run_id:
+            revalidation = dict(call)
+            revalidation["status"] = "approved"
+            revalidation["run_id"] = None
+            revalidation["started_at"] = None
+            revalidation["completed_at"] = None
+            blockers = tool_calls._call_run_blockers(workspace, revalidation)
+            if blockers:
+                raise ApprovalResumeError(f"tool approval is stale or blocked: {blockers[0]}")
+        status = "consumed"
+    return _ApprovalAuthorization(
+        status=status,
+        decided_at=decided_text,
+        consumed_by=consumed_by,
+    )
+
+
+def _load_approval_authorization(
+    workspace: Path,
+    reference: Mapping[str, str],
+    *,
+    run_id: str,
+) -> _ApprovalAuthorization:
+    source = reference["source"]
+    if source == "daily":
+        return _daily_authorization(workspace, reference, run_id=run_id)
+    if source == "tool":
+        return _tool_authorization(workspace, reference, run_id=run_id)
+    raise ApprovalResumeError(f"unsupported approval source: {source}")
+
+
+def _reserve_approval(
+    workspace: Path,
+    reference: Mapping[str, str],
+    *,
+    run_id: str,
+) -> _ApprovalReservation:
+    token = secrets.token_urlsafe(32)
+    token_fingerprint = _request_digest(token)
+    source = reference["source"]
+    if source == "daily":
+        from .daily_cmd import approvals as daily_approvals
+
+        try:
+            claim = daily_approvals.reserve_for_run(
+                workspace,
+                reference["approval_id"],
+                reference,
+                run_id,
+                token_fingerprint,
+            )
+        except daily_approvals.ApprovalClaimError as exc:
+            raise ApprovalResumeError(str(exc)) from exc
+        return _ApprovalReservation(
+            decided_at=claim.decided_at,
+            reserved_at=claim.claimed_at,
+            token=token,
+        )
+    elif source == "tool":
+        from .tools_cmd import calls as tool_calls
+
+        try:
+            tool_claim = tool_calls.reserve_for_run(
+                workspace,
+                reference["approval_id"],
+                reference,
+                run_id,
+                token_fingerprint,
+            )
+        except tool_calls.CallClaimError as exc:
+            raise ApprovalResumeError(str(exc)) from exc
+        return _ApprovalReservation(
+            decided_at=tool_claim.decided_at,
+            reserved_at=tool_claim.claimed_at,
+            token=token,
+        )
+    raise ApprovalResumeError(f"unsupported approval source: {source}")
+
+
+def _record_approval_decision(
+    run_dir: Path,
+    workspace: Path,
+    reference: Mapping[str, str],
+    authorization: _ApprovalAuthorization,
+) -> None:
+    from . import run_lifecycle
+
+    if authorization.decided_at is None:
+        raise ApprovalResumeError("approval decision has no review timestamp")
+    event_decision = "granted" if authorization.status == "approved" else authorization.status
+    run_lifecycle.record_lifecycle_event(
+        run_dir,
+        event_type=f"approval.{event_decision}",
+        payload={
+            "approval_id": reference["approval_id"],
+            "decided_at": authorization.decided_at,
+            "decision_state": authorization.status,
+        },
+        idempotency_key=run_lifecycle.approval_idempotency_key(
+            reference["approval_id"],
+            event_decision,
+        ),
+        workspace=workspace,
+    )
+
+
+def _refresh_paused_snapshot(
+    run_dir: Path,
+    meta: Mapping[str, Any],
+    reference: Mapping[str, str],
+    *,
+    decision_state: str = "pending",
+    decided_at: str | None = None,
+) -> None:
+    from . import aboyeur, receipt_schema
+
+    refreshed = dict(meta)
+    refreshed["status"] = "running"
+    refreshed_reference = {
+        **reference,
+        "decision_state": decision_state,
+    }
+    if decided_at is not None:
+        refreshed_reference["decided_at"] = decided_at
+    refreshed["approval_reference"] = refreshed_reference
+    aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(refreshed))
+
+
+def _refresh_resumed_snapshot(
+    run_dir: Path,
+    meta: Mapping[str, Any],
+    reference: Mapping[str, str],
+    *,
+    decided_at: str | None,
+    claimed_at: str,
+) -> None:
+    from . import aboyeur, receipt_schema
+
+    refreshed = dict(meta)
+    refreshed["status"] = "running"
+    refreshed["status_started_at"] = claimed_at
+    refreshed.pop("finished_at", None)
+    refreshed.pop("duration_seconds", None)
+    resumed_reference = {
+        **reference,
+        "decision_state": "consumed",
+        "consuming_run_id": run_dir.name,
+    }
+    if decided_at is not None:
+        resumed_reference["decided_at"] = decided_at
+    refreshed["approval_reference"] = resumed_reference
+    aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(refreshed))
+
+
+def _finalize_redeemed_approval(
+    run_dir: Path,
+    workspace: Path,
+    reference: Mapping[str, str],
+) -> None:
+    """Commit consumed/resumed facts only after the source CAS redeemed."""
+    from . import run_lifecycle
+
+    run_id = run_dir.name
+    source = reference["source"]
+    record: Mapping[str, Any] | None
+    if source == "daily":
+        from .daily_cmd import approvals as daily_approvals
+
+        record = daily_approvals._find_approval(workspace, reference["approval_id"])
+    elif source == "tool":
+        from .tools_cmd import calls as tool_calls
+
+        record, _calls, _error = tool_calls._resolve_call(workspace, reference["approval_id"])
+    else:
+        raise ApprovalResumeError(f"unsupported approval source: {source}")
+    if not isinstance(record, Mapping):
+        raise ApprovalResumeError("approval source record disappeared after resumed action")
+    _reference_matches_record(reference, record)
+    claim = record.get("approval_claim")
+    if (
+        not isinstance(claim, Mapping)
+        or claim.get("run_id") != run_id
+        or claim.get("state") != "redeemed"
+        or not isinstance(claim.get("redeemed_at"), str)
+    ):
+        raise ApprovalResumeError("approval action did not redeem its reserved claim")
+    run_lifecycle.record_lifecycle_event(
+        run_dir,
+        event_type="approval.consumed",
+        payload={
+            "approval_id": reference["approval_id"],
+            "consuming_run_id": run_id,
+        },
+        idempotency_key=run_lifecycle.approval_idempotency_key(
+            reference["approval_id"],
+            "consumed",
+            scope=run_id,
+        ),
+        workspace=workspace,
+    )
+    run_lifecycle.record_lifecycle_event(
+        run_dir,
+        event_type="run.resumed",
+        payload={"approval_id": reference["approval_id"]},
+        idempotency_key=run_lifecycle.approval_idempotency_key(
+            reference["approval_id"],
+            "resumed",
+            scope=run_id,
+        ),
+        workspace=workspace,
+    )
+    meta = _read_json(run_dir / "run.json")
+    if meta is None:
+        raise ApprovalResumeError("approval run receipt disappeared after resumed action")
+    decided_at = record.get("reviewed_at")
+    _refresh_resumed_snapshot(
+        run_dir,
+        meta,
+        reference,
+        decided_at=decided_at if isinstance(decided_at, str) else None,
+        claimed_at=str(claim["redeemed_at"]),
+    )
+
+
+def resume(run_dir: Path) -> int:
+    """Resume a legacy run or consume an approval before a paused continuation."""
+    from . import run_lifecycle, run_resume, runguard
+
+    run_dir = run_dir.expanduser().resolve()
+    try:
+        meta = _read_json(run_dir / "run.json")
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if meta is None or _approval_resume_state(meta) is None:
+        return run_resume.resume(run_dir)
+    raw_reference = meta.get("approval_reference")
+    if not isinstance(raw_reference, Mapping):
+        print("error: approval-paused run has no approval reference", file=sys.stderr)
+        return 2
+    try:
+        reference = run_lifecycle.normalize_approval_reference(raw_reference)
+    except run_lifecycle.LifecycleJournalError as exc:
+        print(f"error: invalid approval reference: {exc}", file=sys.stderr)
+        return 2
+    workspace = runguard.resolve_run_lock_workspace(meta, run_dir)
+    if workspace is None:
+        print("error: run artifact has no workspace cwd; cannot acquire resume lock", file=sys.stderr)
+        return 2
+    state = runguard.run_lock_state(workspace, run_dir)
+    if state != "absent":
+        print(
+            f"error: approval-paused run requires an absent lock before resume; found {state}",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            current = _read_json(run_dir / "run.json")
+            if current is None or _approval_resume_state(current) is None:
+                raise ApprovalResumeError("approval-paused run changed before resume lock acquisition")
+            current_raw_reference = current.get("approval_reference")
+            if not isinstance(current_raw_reference, Mapping):
+                raise ApprovalResumeError("approval-paused run lost its approval reference")
+            current_reference = run_lifecycle.normalize_approval_reference(current_raw_reference)
+            if current_reference != reference:
+                raise ApprovalResumeError("approval reference changed before resume lock acquisition")
+            current_decision_state = _approval_resume_state(current)
+            if current_decision_state == "rejected":
+                raise ApprovalResumeError("approval is rejected")
+            authorization = _load_approval_authorization(
+                workspace,
+                reference,
+                run_id=run_dir.name,
+            )
+            if authorization.status in {"rejected", "held"}:
+                _record_approval_decision(run_dir, workspace, reference, authorization)
+                _refresh_paused_snapshot(
+                    run_dir,
+                    current,
+                    reference,
+                    decision_state=authorization.status,
+                    decided_at=authorization.decided_at,
+                )
+                raise ApprovalResumeError(f"approval is {authorization.status}")
+            if authorization.status == "redeemed":
+                raise ApprovalResumeError("approval claim is already redeemed; outcome reconciliation is required")
+            if authorization.status in {"consumed", "reserved"}:
+                if authorization.consumed_by != run_dir.name:
+                    owner = authorization.consumed_by or "another run"
+                    raise ApprovalResumeError(f"approval was already consumed by {owner}")
+            elif authorization.status != "approved":
+                raise ApprovalResumeError(f"approval is {authorization.status or 'pending'}")
+            reservation = _reserve_approval(
+                workspace,
+                reference,
+                run_id=run_dir.name,
+            )
+            _record_approval_decision(
+                run_dir,
+                workspace,
+                reference,
+                _ApprovalAuthorization(
+                    status="approved",
+                    decided_at=reservation.decided_at,
+                    consumed_by=run_dir.name,
+                ),
+            )
+            _refresh_paused_snapshot(
+                run_dir,
+                current,
+                reference,
+                decision_state="approved",
+                decided_at=reservation.decided_at,
+            )
+            return run_resume._resume_locked(
+                run_dir,
+                approval_resume=True,
+                approval_token=reservation.token,
+            )
+    except (
+        ApprovalResumeError,
+        ValueError,
+        OSError,
+        runguard.RunGuardError,
+        run_lifecycle.LifecycleJournalError,
+    ) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 def _failure_fields(meta: dict[str, Any]) -> tuple[object, object, object]:
@@ -842,6 +1704,21 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
     from . import runguard
 
     state = runguard.run_lock_state(workspace, run_dir)
+    if parseable and run_meta is not None and _approval_resume_state(run_meta) is not None:
+        if state == "live":
+            print(_state_refusal_message(state, workspace), file=sys.stderr)
+            return 2
+        if _approval_needs_reconciliation(run_meta):
+            print(
+                f"error: approval resume requires reconciliation; run `brigade runs resume {run_dir}`",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"error: approval wait is intentional; run `brigade runs resume {run_dir}` after review",
+                file=sys.stderr,
+            )
+        return 2
     if state in {"foreign", "invalid"}:
         # A foreign or invalid current lock must not block recovery of a
         # matching persistent .stale claim: runguard.recover_stale_run skips
@@ -919,6 +1796,34 @@ def watch(
                     if "owner process is still active" not in detail and "recovery is still active" not in detail:
                         print(f"error: artifact-collection recovery failed: {detail}", file=sys.stderr)
                         return 2
+        approval_state = _approval_resume_state(run_meta)
+        if approval_state is not None:
+            workspace = _lock_workspace(run_dir, run_meta, fallback=cwd)
+            if workspace is None:
+                print(f"error: approval run has no workspace cwd: {run_dir}", file=sys.stderr)
+                return 2
+            from . import runguard
+
+            lock_state = runguard.run_lock_state(workspace, run_dir)
+            if lock_state == "live":
+                time.sleep(interval)
+                continue
+            if _approval_needs_reconciliation(run_meta):
+                print(
+                    f"error: approval resume requires reconciliation; run `brigade runs resume {run_dir}`",
+                    file=sys.stderr,
+                )
+                return 2
+            if lock_state != "absent":
+                print(
+                    f"error: approval wait has unexpected run lock state {lock_state}",
+                    file=sys.stderr,
+                )
+                return 2
+            if not summary_emitted:
+                _emit_summary(run_dir, run_meta, json_output=json_output)
+                summary_emitted = True
+            return _watch_return_code(run_meta.get("status"))
         if _is_terminal(run_meta):
             if not summary_emitted:
                 _emit_summary(run_dir, run_meta, json_output=json_output)

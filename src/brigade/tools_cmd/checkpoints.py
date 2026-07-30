@@ -170,38 +170,42 @@ def _resume_checkpoint_payload(target: Path, checkpoint_id: str) -> tuple[dict[s
     checkpoint, error = checkpoint_store._resolve_checkpoint(target, checkpoint_id)
     if checkpoint is None:
         return {"target": str(target), "checkpoints_path": str(paths.checkpoints_path(target)), "error": error}, 1
-    blockers, call, calls = _checkpoint_resume_blockers(target, checkpoint)
-    if blockers or call is None:
-        return {
-            "target": str(target),
-            "checkpoints_path": str(paths.checkpoints_path(target)),
-            "checkpoint": checkpoint_store._checkpoint_public_summary(checkpoint),
-            "blockers": blockers,
-            "error": "checkpoint is not resumable",
-        }, 1
-    raw_contract = call.get("contract")
-    contract = raw_contract if isinstance(raw_contract, dict) else {}
-    cwd_value = contract.get("cwd")
-    cwd = helpers._as_path(target, cwd_value) if cwd_value else target
-    assert cwd is not None
-    argv = safety._command_parts(call.get("command"))
-    raw_arguments = call.get("arguments")
-    arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
-    for key in sorted(arguments.keys()):
-        value = arguments[key]
-        if value is None:
-            continue
-        argv.extend(shlex.split(str(value)))
-    started_at = helpers._now().isoformat()
-    run_id = calls_mod._run_id_for_call({**call, "id": f"{call.get('id')}:resume:{checkpoint.get('id')}"}, started_at)
-    receipt_path = paths.runs_path(target) / f"{run_id}.json"
-    call["status"] = "running"
-    call["started_at"] = started_at
-    call["completed_at"] = None
-    call["run_id"] = run_id
-    call["receipt_path"] = str(receipt_path)
-    call["exit_code"] = None
-    calls_mod._write_calls(target, calls)
+    with calls_mod._calls_store_lock(target):
+        blockers, call, calls = _checkpoint_resume_blockers(target, checkpoint)
+        if blockers or call is None:
+            return {
+                "target": str(target),
+                "checkpoints_path": str(paths.checkpoints_path(target)),
+                "checkpoint": checkpoint_store._checkpoint_public_summary(checkpoint),
+                "blockers": blockers,
+                "error": "checkpoint is not resumable",
+            }, 1
+        raw_contract = call.get("contract")
+        contract = raw_contract if isinstance(raw_contract, dict) else {}
+        cwd_value = contract.get("cwd")
+        cwd = helpers._as_path(target, cwd_value) if cwd_value else target
+        assert cwd is not None
+        argv = safety._command_parts(call.get("command"))
+        raw_arguments = call.get("arguments")
+        arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
+        for key in sorted(arguments.keys()):
+            value = arguments[key]
+            if value is None:
+                continue
+            argv.extend(shlex.split(str(value)))
+        started_at = helpers._now().isoformat()
+        run_id = calls_mod._run_id_for_call(
+            {**call, "id": f"{call.get('id')}:resume:{checkpoint.get('id')}"},
+            started_at,
+        )
+        receipt_path = paths.runs_path(target) / f"{run_id}.json"
+        call["status"] = "running"
+        call["started_at"] = started_at
+        call["completed_at"] = None
+        call["run_id"] = run_id
+        call["receipt_path"] = str(receipt_path)
+        call["exit_code"] = None
+        calls_mod._write_calls_unlocked(target, calls)
 
     timeout = contract.get("timeout")
     timeout_value = float(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else None
@@ -274,13 +278,27 @@ def _resume_checkpoint_payload(target: Path, checkpoint_id: str) -> tuple[dict[s
             },
         },
     )
-    call["status"] = status
-    call["completed_at"] = completed_at
-    call["exit_code"] = exit_code
-    call["timed_out"] = timed_out
-    call["receipt_path"] = receipt["receipt_path"]
-    call["resume_checkpoint_id"] = checkpoint.get("id")
-    calls_mod._write_calls(target, calls)
+    with calls_mod._calls_store_lock(target):
+        current, current_calls, call_error = calls_mod._resolve_call(target, str(call.get("id") or ""))
+        if current is None or current.get("status") != "running" or current.get("run_id") != run_id:
+            return {
+                "target": str(target),
+                "calls_path": str(paths.calls_path(target)),
+                "checkpoints_path": str(paths.checkpoints_path(target)),
+                "runs_path": str(paths.runs_path(target)),
+                "checkpoint": checkpoint_store._checkpoint_public_summary(checkpoint),
+                "call": current or call,
+                "receipt": receipt,
+                "error": call_error or "call state changed while checkpoint resume was running",
+            }, 1
+        current["status"] = status
+        current["completed_at"] = completed_at
+        current["exit_code"] = exit_code
+        current["timed_out"] = timed_out
+        current["receipt_path"] = receipt["receipt_path"]
+        current["resume_checkpoint_id"] = checkpoint.get("id")
+        calls_mod._write_calls_unlocked(target, current_calls)
+        call = current
     checkpoint["status"] = "resumed" if status == "resumed" else "failed"
     checkpoint["resume_run_id"] = run_id
     checkpoint_store._write_checkpoint(target, checkpoint)
@@ -372,35 +390,69 @@ def _checkpoint_review(
         else:
             print(f"error: {error}", file=sys.stderr)
         return 1
-    if status == "approved":
-        choices = [str(item) for item in checkpoint.get("choices", []) if isinstance(item, str)]
-        if choices and choice not in choices:
+    call: dict[str, Any] | None = None
+    with calls_mod._calls_store_lock(target):
+        checkpoint, error = checkpoint_store._resolve_checkpoint(target, checkpoint_id)
+        if checkpoint is None:
+            payload = {"target": str(target), "error": error or "checkpoint disappeared during review"}
+            if json_output:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(f"error: {payload['error']}", file=sys.stderr)
+            return 1
+        if checkpoint.get("status") != "pending":
             payload = {
                 "target": str(target),
-                "error": "choice is not allowed",
+                "error": "checkpoint state changed before review",
                 "checkpoint": checkpoint_store._checkpoint_public_summary(checkpoint),
             }
             if json_output:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             else:
-                print("error: choice is not allowed", file=sys.stderr)
+                print(f"error: {payload['error']}", file=sys.stderr)
             return 1
-    checkpoint["status"] = status
-    checkpoint["reviewed_at"] = helpers._now().isoformat()
-    checkpoint["review_reason"] = reason
-    if status == "approved":
-        checkpoint["selected_choice"] = choice
-    checkpoint_store._write_checkpoint(target, checkpoint)
-    call: dict[str, Any] | None = None
-    calls: list[dict[str, Any]] = []
-    call_id = checkpoint.get("call_id")
-    if isinstance(call_id, str) and call_id:
-        call, calls, _ = calls_mod._resolve_call(target, call_id)
-    if call is not None and status == "approved":
-        call["status"] = "resume-pending"
-        call["checkpoint_id"] = checkpoint.get("id")
-        call["approval_fingerprint"] = calls_mod._approval_fingerprint(call)
-        calls_mod._write_calls(target, calls)
+        if status == "approved":
+            choices = [str(item) for item in checkpoint.get("choices", []) if isinstance(item, str)]
+            if choices and choice not in choices:
+                payload = {
+                    "target": str(target),
+                    "error": "choice is not allowed",
+                    "checkpoint": checkpoint_store._checkpoint_public_summary(checkpoint),
+                }
+                if json_output:
+                    print(json.dumps(payload, indent=2, sort_keys=True))
+                else:
+                    print("error: choice is not allowed", file=sys.stderr)
+                return 1
+        calls: list[dict[str, Any]] = []
+        call_id = checkpoint.get("call_id")
+        if isinstance(call_id, str) and call_id:
+            call, calls, _ = calls_mod._resolve_call(target, call_id)
+            expected_checkpoint_id = checkpoint.get("id")
+            if call is None or call.get("status") != "waiting" or call.get("checkpoint_id") != expected_checkpoint_id:
+                payload = {
+                    "target": str(target),
+                    "error": "checkpoint or linked call state changed before review",
+                    "checkpoint": checkpoint_store._checkpoint_public_summary(checkpoint),
+                    "call": call,
+                }
+                if json_output:
+                    print(json.dumps(payload, indent=2, sort_keys=True))
+                else:
+                    print(f"error: {payload['error']}", file=sys.stderr)
+                return 1
+        checkpoint["status"] = status
+        checkpoint["reviewed_at"] = helpers._now().isoformat()
+        checkpoint["review_reason"] = reason
+        if status == "approved":
+            checkpoint["selected_choice"] = choice
+        checkpoint_store._write_checkpoint(target, checkpoint)
+        if call is not None and status == "approved":
+            expected_checkpoint_id = checkpoint.get("id")
+            call["status"] = "resume-pending"
+            call["checkpoint_id"] = expected_checkpoint_id
+            call["approval_fingerprint"] = calls_mod._approval_fingerprint(call)
+            calls_mod._write_calls_unlocked(target, calls)
     payload = {
         "target": str(target),
         "checkpoints_path": str(paths.checkpoints_path(target)),

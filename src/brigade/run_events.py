@@ -108,6 +108,12 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     ),
     "run.artifact_collection.started": frozenset({"detail"}),
 }
+APPROVAL_DECISION_STATES = frozenset({"pending", "approved", "rejected", "held", "consumed"})
+APPROVAL_DECISION_EVENT_STATES = {
+    "approval.granted": "approved",
+    "approval.rejected": "rejected",
+    "approval.held": "held",
+}
 
 # Private-data exclusion list: these payload key names are never part of any
 # allowlist and are rejected explicitly if a caller attempts to set them.
@@ -206,6 +212,23 @@ def request_digest(*, event_type: str, payload: Mapping[str, Any], idempotency_k
     return _sha256_hex(canonical_bytes(request))
 
 
+def validate_event_request(
+    *,
+    event_type: str,
+    payload: Mapping[str, Any],
+    idempotency_key: str,
+) -> None:
+    """Validate a caller request before any journal-side mutation."""
+    if event_type not in EVENT_TYPES:
+        raise CanonicalizationError(_bound(f"unknown event_type {event_type!r}"))
+    if not isinstance(idempotency_key, str) or not idempotency_key:
+        raise CanonicalizationError("idempotency_key must be a non-empty string")
+    if len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LEN:
+        raise CanonicalizationError(_bound(f"idempotency_key exceeds {MAX_IDEMPOTENCY_KEY_LEN} chars"))
+    _validate_payload(event_type, payload)
+    request_digest(event_type=event_type, payload=payload, idempotency_key=idempotency_key)
+
+
 def compute_event_digest(envelope: Mapping[str, Any]) -> str:
     """SHA-256 of the canonical envelope excluding ``event_digest`` and ``event_id``.
 
@@ -242,12 +265,11 @@ def build_event(
         raise CanonicalizationError(_bound(f"invalid run_id {run_id!r}"))
     if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
         raise CanonicalizationError(_bound(f"invalid sequence {sequence!r}"))
-    if event_type not in EVENT_TYPES:
-        raise CanonicalizationError(_bound(f"unknown event_type {event_type!r}"))
-    if not isinstance(idempotency_key, str) or not idempotency_key:
-        raise CanonicalizationError("idempotency_key must be a non-empty string")
-    if len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LEN:
-        raise CanonicalizationError(_bound(f"idempotency_key exceeds {MAX_IDEMPOTENCY_KEY_LEN} chars"))
+    validate_event_request(
+        event_type=event_type,
+        payload=payload,
+        idempotency_key=idempotency_key,
+    )
     if not is_valid_recorded_at(recorded_at):
         raise CanonicalizationError(_bound(f"invalid recorded_at {recorded_at!r}"))
     if previous_digest is not None and not (isinstance(previous_digest, str) and bool(_HEX64.match(previous_digest))):
@@ -256,8 +278,6 @@ def build_event(
         raise CanonicalizationError("previous_digest must be null at sequence 1")
     if sequence > 1 and previous_digest is None:
         raise CanonicalizationError("previous_digest must not be null after sequence 1")
-
-    _validate_payload(event_type, payload)
 
     rd = request_digest_value or request_digest(event_type=event_type, payload=payload, idempotency_key=idempotency_key)
     if not (isinstance(rd, str) and bool(_HEX64.match(rd))):
@@ -308,6 +328,9 @@ def _validate_payload(event_type: str, payload: Any) -> None:
                 raise CanonicalizationError(_bound(f"payload {key!r} exceeds {MAX_PAYLOAD_STR_LEN} chars"))
             continue
         raise CanonicalizationError(_bound(f"payload {key!r} has unsupported type {type(value).__name__}"))
+    expected_decision = APPROVAL_DECISION_EVENT_STATES.get(event_type)
+    if expected_decision is not None and payload.get("decision_state") != expected_decision:
+        raise CanonicalizationError(_bound(f"{event_type} requires decision_state {expected_decision!r}"))
 
 
 def validate_event(env: Any) -> list[str]:
@@ -396,6 +419,9 @@ def validate_event(env: Any) -> list[str]:
                     errors.append(_bound(f"payload {key!r} exceeds {MAX_PAYLOAD_STR_LEN} chars"))
             else:
                 errors.append(_bound(f"payload {key!r} has unsupported type"))
+        expected_decision = APPROVAL_DECISION_EVENT_STATES.get(str(event_type))
+        if expected_decision is not None and payload.get("decision_state") != expected_decision:
+            errors.append(_bound(f"{event_type} requires decision_state {expected_decision!r}"))
 
     if errors:
         return errors
