@@ -34,7 +34,10 @@ import errno
 import hashlib
 import json
 import os
+import signal
 import stat
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
@@ -56,6 +59,81 @@ if _HAS_O_NOFOLLOW:
     _OPEN_FLAGS |= _O_NOFOLLOW
 _READ_CHUNK = 65536
 _MAX_QUARANTINE_ATTEMPTS = 16
+
+# SIGTERM deferral plus a process-wide lock around the append critical section.
+# ``signal.pthread_sigmask`` is thread-local, so deferral alone cannot stop a
+# main-thread handler from appending from a stale tail while a worker thread is
+# mid-append. A process lock guards the full read-check-build-write-fsync window;
+# it is acquired inside ``_defer_sigterm`` so the lock is released before the
+# prior signal mask is restored. On hosts without ``pthread_sigmask`` (or without
+# ``SIG_BLOCK``/``SIG_SETMASK``) deferral is a no-op and same-thread recursive
+# entry is rejected with a bounded error instead of deadlocking on the lock.
+_HAS_PTHREAD_SIGMASK = (
+    hasattr(signal, "pthread_sigmask") and hasattr(signal, "SIG_BLOCK") and hasattr(signal, "SIG_SETMASK")
+)
+_DEFERRED_SIGNALS = frozenset({signal.SIGTERM}) if _HAS_PTHREAD_SIGMASK else frozenset()
+_APPEND_LOCK = threading.Lock()
+_APPEND_TLS = threading.local()
+
+
+@contextmanager
+def _defer_sigterm() -> Iterator[None]:
+    """Defer SIGTERM delivery around a critical section.
+
+    Blocks SIGTERM via ``pthread_sigmask(SIG_BLOCK, ...)`` on entry and restores
+    the exact prior signal mask in ``finally`` on every exit (normal return,
+    exception, or early return inside the block). A SIGTERM delivered while the
+    mask is in place stays pending and fires only after the prior mask is
+    restored, so a handler cannot run between tail derivation and durable
+    completion. On hosts without ``pthread_sigmask`` (or without
+    ``SIG_BLOCK``/``SIG_SETMASK``) this is a no-op and never fails at import or
+    runtime.
+    """
+    if not _HAS_PTHREAD_SIGMASK:
+        yield
+        return
+    try:
+        prior = signal.pthread_sigmask(signal.SIG_BLOCK, _DEFERRED_SIGNALS)
+    except OSError as exc:
+        raise RunJournalError(_bound("SIGTERM mask block failed")) from exc
+    primary: BaseException | None = None
+    try:
+        yield
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, prior)
+        except OSError as exc:
+            if primary is None:
+                raise RunJournalError(_bound("SIGTERM mask restoration failed")) from exc
+
+
+@contextmanager
+def _append_critical_section() -> Iterator[None]:
+    """Process-wide append guard with per-thread SIGTERM deferral.
+
+    ``pthread_sigmask`` is thread-local: a worker inside ``append_event`` does
+    not block SIGTERM delivery to the main thread, so a handler can recurse
+    into ``append_event`` from a stale tail unless the full read-check-build-
+    write-fsync window is also guarded by a process lock. The lock is acquired
+    inside ``_defer_sigterm`` so it is released before the prior signal mask is
+    restored; a pending main-thread SIGTERM then runs only after the lock is
+    free. On hosts without ``pthread_sigmask``, same-thread recursive entry is
+    rejected with a bounded error instead of deadlocking on the lock.
+    """
+    with _defer_sigterm():
+        if not _HAS_PTHREAD_SIGMASK:
+            if getattr(_APPEND_TLS, "in_append", False):
+                raise RunJournalError(_bound("recursive append during signal delivery"))
+            _APPEND_TLS.in_append = True
+        try:
+            with _APPEND_LOCK:
+                yield
+        finally:
+            if not _HAS_PTHREAD_SIGMASK:
+                _APPEND_TLS.in_append = False
 
 
 class RunJournalError(RuntimeError):
@@ -198,6 +276,67 @@ def _chmod_fd_or_path(fd: int, path: Path, mode: int) -> None:
     os.chmod(path, mode)
 
 
+def _close_guarded(fd: int, primary: RunJournalError | None) -> RunJournalError | None:
+    """Close ``fd``, translating an ``OSError`` into a bounded ``RunJournalError``.
+
+    Returns the error to raise (or ``None``). A close failure never masks a
+    prior ``primary`` failure: when ``primary`` is set it is returned
+    unchanged and the close error is suppressed; when ``primary`` is ``None``
+    a new bounded ``RunJournalError`` is returned.
+    """
+    close_err: RunJournalError | None = None
+    try:
+        os.close(fd)
+    except OSError:
+        if primary is None:
+            close_err = RunJournalError(_bound("journal close failed"))
+    return primary if primary is not None else close_err
+
+
+def _supports_directory_fsync() -> bool:
+    return os.name == "posix"
+
+
+def _fsync_directory(path: Path) -> None:
+    """Open ``path`` no-follow as a directory, fsync the descriptor, then close.
+
+    The directory is opened via ``_open_nofollow`` with ``O_RDONLY |
+    O_DIRECTORY`` so a raced-in symlink or non-directory inode is rejected
+    before any fsync occurs. The opened descriptor is ``fstat``-ed and required
+    to be a directory, then ``fsync``-ed. Raises ``RunJournalError`` on any
+    ``OSError`` from open, fstat, fsync, or close; a close failure is
+    suppressed when an earlier open/fstat/fsync failure already raised.
+    """
+    if not _supports_directory_fsync():
+        return
+    dir_flags = os.O_RDONLY | _O_DIRECTORY if _HAS_O_DIRECTORY else os.O_RDONLY
+    try:
+        fd = _open_nofollow(path, dir_flags)
+    except RunJournalError:
+        raise
+    except OSError as exc:
+        raise RunJournalError(_bound("journal directory fsync failed")) from exc
+    primary: RunJournalError | None = None
+    try:
+        try:
+            info = os.fstat(fd)
+        except OSError as exc:
+            raise RunJournalError(_bound("journal directory fsync failed")) from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise RunJournalError(_bound("journal directory fsync failed"))
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            raise RunJournalError(_bound("journal directory fsync failed")) from exc
+    except RunJournalError as exc:
+        primary = exc
+        raise
+    finally:
+        close_err = _close_guarded(fd, primary)
+        if close_err is not None and primary is None:
+            raise close_err
+
+
 def _open_nofollow(path: Path, flags: int, mode: int = 0o666) -> int:
     """Open a path without following a symlinked final component.
 
@@ -324,11 +463,16 @@ def ensure_journal(journal_path: Path) -> None:
     inode identity verification, and path ``chmod``.
     """
     journal_path = Path(journal_path)
-    _mkdir_private(journal_path.parent)
+    events_dir = journal_path.parent
+    _mkdir_private(events_dir)
+    created = False
     if not journal_path.exists():
         fd = _open_nofollow(journal_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, _FILE_MODE)
         os.close(fd)
+        created = True
     _enforce_file_mode(journal_path)
+    if created:
+        _fsync_directory(events_dir)
 
 
 class _DuplicateKeyError(ValueError):
@@ -389,8 +533,8 @@ def _parse_canonical_line(line: bytes) -> dict[str, Any]:
 
 def _read_tail_state(
     journal_path: Path,
-) -> tuple[int, str | None, dict[str, dict[str, Any]], bytes | None]:
-    """Return (last_sequence, last_event_digest, idempotency_index, partial_tail).
+) -> tuple[int, str | None, dict[str, dict[str, Any]], bytes | None, int]:
+    """Return (last_sequence, last_event_digest, idempotency_index, partial_tail, journal_bytes).
 
     Fail closed: every complete line must be a validated canonical envelope
     (see ``_parse_canonical_line``) continuing a strict, gap-free,
@@ -403,23 +547,58 @@ def _read_tail_state(
     newline is returned as ``partial_tail`` so the append path can refuse to
     write over it (appending over a partial tail would glue the new line to
     the partial bytes and corrupt the journal).
+
+    Applies the same ``MAX_JOURNAL_BYTES`` and ``MAX_JOURNAL_EVENTS`` bounds
+    as ``read_journal_bounded``: refuses oversize journals via ``fstat`` before
+    allocation, reads in bounded chunks, and fails closed when complete-record
+    or sequence limits are exceeded.
     """
+    from brigade.run_checkpoint import MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS
+
     last_sequence = 0
     last_digest: str | None = None
     index: dict[str, dict[str, Any]] = {}
     partial_tail: bytes | None = None
+    journal_bytes = 0
     if os.path.lexists(journal_path) and not journal_path.exists():
         raise RunJournalError(_bound(f"journal path is a dangling symlink: {journal_path.name}"))
     if not journal_path.exists():
-        return last_sequence, last_digest, index, partial_tail
-    raw = _read_bytes_nofollow(journal_path)
-    segments = raw.split(b"\n")
+        return last_sequence, last_digest, index, partial_tail, journal_bytes
+
+    fd = _open_nofollow(journal_path, os.O_RDONLY)
+    try:
+        info = os.fstat(fd)
+        if info.st_size > MAX_JOURNAL_BYTES:
+            raise RunJournalError(_bound("bound exceeded: journal above MAX_JOURNAL_BYTES"))
+        if not stat.S_ISREG(info.st_mode):
+            raise RunJournalError(_bound(f"journal path is not a regular file: {journal_path.name}"))
+
+        raw = bytearray()
+        while True:
+            chunk = os.read(fd, _READ_CHUNK)
+            if not chunk:
+                break
+            raw.extend(chunk)
+            if len(raw) > MAX_JOURNAL_BYTES:
+                raise RunJournalError(_bound("bound exceeded: journal above MAX_JOURNAL_BYTES"))
+        raw_bytes = bytes(raw)
+    finally:
+        os.close(fd)
+
+    journal_bytes = len(raw_bytes)
+    segments = raw_bytes.split(b"\n")
     # A non-empty final segment after the last newline is a partial tail.
     if segments[-1]:
         partial_tail = segments[-1]
+    complete_count = 0
     for line in segments[:-1]:
+        complete_count += 1
+        if complete_count > MAX_JOURNAL_EVENTS:
+            raise RunJournalError(_bound("bound exceeded: journal complete records above MAX_JOURNAL_EVENTS"))
         env = _parse_canonical_line(line)
         sequence = env["sequence"]
+        if sequence > MAX_JOURNAL_EVENTS:
+            raise RunJournalError(_bound("bound exceeded: journal event sequence above MAX_JOURNAL_EVENTS"))
         if sequence != last_sequence + 1:
             raise ChainIntegrityError(_bound(f"journal sequence break: expected {last_sequence + 1}, got {sequence}"))
         if sequence > 1 and env["previous_digest"] != last_digest:
@@ -430,7 +609,7 @@ def _read_tail_state(
         index[key] = env
         last_sequence = sequence
         last_digest = env["event_digest"]
-    return last_sequence, last_digest, index, partial_tail
+    return last_sequence, last_digest, index, partial_tail, journal_bytes
 
 
 def _envelope_to_event(env: dict[str, Any]) -> RunEvent:
@@ -487,58 +666,66 @@ def append_event(
 
     rd = run_events.request_digest(event_type=event_type, payload=payload, idempotency_key=idempotency_key)
 
-    last_sequence, last_digest, index, partial_tail = _read_tail_state(journal_path)
+    with _append_critical_section():
+        last_sequence, last_digest, index, partial_tail, journal_bytes = _read_tail_state(journal_path)
 
-    if partial_tail is not None:
-        raise PartialTailError(_bound("journal ends in a partial line; run recover_partial_tail before appending"))
+        if partial_tail is not None:
+            raise PartialTailError(_bound("journal ends in a partial line; run recover_partial_tail before appending"))
 
-    existing = index.get(idempotency_key)
-    if existing is not None:
-        existing_rd = existing.get("request_digest")
-        if not isinstance(existing_rd, str):
-            raise ChainIntegrityError(_bound("indexed journal event is missing request_digest"))
-        if existing_rd == rd:
-            return _envelope_to_event(existing)
-        existing_event_id = existing.get("event_id")
-        if not isinstance(existing_event_id, str):
-            raise ChainIntegrityError(_bound("indexed journal event is missing event_id"))
-        raise IdempotencyConflict(
-            _bound(f"idempotency key {idempotency_key!r} conflict"),
-            existing_event_id=existing_event_id,
-            request_digest=rd,
-            existing_request_digest=existing_rd,
+        existing = index.get(idempotency_key)
+        if existing is not None:
+            existing_rd = existing.get("request_digest")
+            if not isinstance(existing_rd, str):
+                raise ChainIntegrityError(_bound("indexed journal event is missing request_digest"))
+            if existing_rd == rd:
+                return _envelope_to_event(existing)
+            existing_event_id = existing.get("event_id")
+            if not isinstance(existing_event_id, str):
+                raise ChainIntegrityError(_bound("indexed journal event is missing event_id"))
+            raise IdempotencyConflict(
+                _bound(f"idempotency key {idempotency_key!r} conflict"),
+                existing_event_id=existing_event_id,
+                request_digest=rd,
+                existing_request_digest=existing_rd,
+            )
+
+        if expected_previous_sequence != last_sequence:
+            raise StaleSequenceError(
+                _bound(f"stale sequence: expected previous {expected_previous_sequence}, actual {last_sequence}")
+            )
+
+        sequence = last_sequence + 1
+        envelope = run_events.build_event(
+            run_id=run_id,
+            sequence=sequence,
+            event_type=event_type,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            recorded_at=recorded_at,
+            previous_digest=last_digest,
+            request_digest_value=rd,
         )
 
-    if expected_previous_sequence != last_sequence:
-        raise StaleSequenceError(
-            _bound(f"stale sequence: expected previous {expected_previous_sequence}, actual {last_sequence}")
-        )
+        line = canonical_bytes(envelope) + b"\n"
+        if len(line) > run_events.MAX_LINE_BYTES:
+            raise CanonicalizationError(_bound(f"canonical line exceeds {run_events.MAX_LINE_BYTES} bytes"))
 
-    sequence = last_sequence + 1
-    envelope = run_events.build_event(
-        run_id=run_id,
-        sequence=sequence,
-        event_type=event_type,
-        payload=payload,
-        idempotency_key=idempotency_key,
-        recorded_at=recorded_at,
-        previous_digest=last_digest,
-        request_digest_value=rd,
-    )
+        from brigade.run_checkpoint import MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS
 
-    line = canonical_bytes(envelope) + b"\n"
-    if len(line) > run_events.MAX_LINE_BYTES:
-        raise CanonicalizationError(_bound(f"canonical line exceeds {run_events.MAX_LINE_BYTES} bytes"))
+        if sequence > MAX_JOURNAL_EVENTS:
+            raise RunJournalError(_bound("bound exceeded: journal event sequence above MAX_JOURNAL_EVENTS"))
+        if journal_bytes + len(line) > MAX_JOURNAL_BYTES:
+            raise RunJournalError(_bound("bound exceeded: journal above MAX_JOURNAL_BYTES"))
 
-    fd = _open_nofollow(journal_path, _OPEN_FLAGS, _FILE_MODE)
-    try:
-        _chmod_fd_or_path(fd, journal_path, _FILE_MODE)
-        written = os.write(fd, line)
-        if written != len(line):
-            raise PartialWriteError(_bound(f"partial write: wrote {written} of {len(line)} bytes"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        fd = _open_nofollow(journal_path, _OPEN_FLAGS, _FILE_MODE)
+        try:
+            _chmod_fd_or_path(fd, journal_path, _FILE_MODE)
+            written = os.write(fd, line)
+            if written != len(line):
+                raise PartialWriteError(_bound(f"partial write: wrote {written} of {len(line)} bytes"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     return _envelope_to_event(envelope)
 
@@ -742,6 +929,8 @@ def recover_partial_tail(journal_path: Path, quarantine_dir: Path) -> RecoveryRe
         break
     if quarantine_path is None:
         raise RunJournalError(_bound("no collision-free quarantine name available"))
+
+    _fsync_directory(quarantine_dir)
 
     jfd = _open_nofollow(journal_path, os.O_RDWR)
     try:

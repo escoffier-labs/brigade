@@ -2738,14 +2738,23 @@ def record_run_start(
     existing_authority_requested = False
     if run_json_exists:
         try:
-            existing = json.loads(run_json.read_text())
-        except (OSError, json.JSONDecodeError):
-            existing = None
-        if isinstance(existing, dict):
-            if existing.get("lifecycle_journal_requested") is True:
-                existing_lifecycle_requested = True
-            if existing.get(_AUTHORITY_REQUEST_FIELD) is True:
-                existing_authority_requested = True
+            existing = json.loads(run_json.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+            raise runguard.RetainRunLockError(
+                "existing run.json is unreadable as JSON; refusing to overwrite unknown durable enrollment state"
+            ) from exc
+        except OSError as exc:
+            raise runguard.RetainRunLockError(
+                "failed to read existing run.json; refusing to overwrite unknown durable enrollment state"
+            ) from exc
+        if not isinstance(existing, dict):
+            raise runguard.RetainRunLockError(
+                "existing run.json is not a JSON object; refusing to overwrite unknown durable enrollment state"
+            )
+        if existing.get("lifecycle_journal_requested") is True:
+            existing_lifecycle_requested = True
+        if existing.get(_AUTHORITY_REQUEST_FIELD) is True:
+            existing_authority_requested = True
     # A new run enrolls in lifecycle journaling when the lifecycle-journal flag
     # is set OR when the authority opt-in is set: BRIGADE_RUN_JOURNAL_AUTHORITY=1
     # implies lifecycle journaling even when BRIGADE_LIFECYCLE_JOURNAL is unset,

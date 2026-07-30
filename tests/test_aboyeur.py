@@ -5626,3 +5626,197 @@ def test_run_preserves_authority_enrollment_through_first_follow_up_receipt_rewr
     # still true and no projection metadata has been published yet, so
     # _resolve_authority_state classifies it as authority-requested.
     assert aboyeur._resolve_authority_state(output_dir) == "authority-requested"
+
+
+# -- Issue #568 slice 7 assignment 3: durable enrollment fail-closed ------------
+
+_CORRUPT_RUN_JSON_CASES = [
+    pytest.param(
+        "{not valid json",
+        id="invalid-json",
+    ),
+    pytest.param(
+        '{"schema": "brigade.run.v1", "status": "start',
+        id="truncated-json",
+    ),
+    pytest.param(
+        '["not", "an", "object"]',
+        id="non-object-json",
+    ),
+    pytest.param(
+        '"a bare json string"',
+        id="non-object-json-string",
+    ),
+    pytest.param(
+        None,
+        id="read-oserror",
+    ),
+]
+
+
+def _corrupt_run_dir(tmp_path: Path) -> tuple[Path, Path]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "20260730-123000-deadbeef"
+    run_dir.mkdir(parents=True)
+    return workspace, run_dir
+
+
+@pytest.mark.parametrize("corrupt_content", _CORRUPT_RUN_JSON_CASES)
+def test_record_run_start_retains_lock_on_corrupt_existing_run_json(tmp_path, monkeypatch, corrupt_content):
+    """Issue #568 slice 7 assignment 3: an existing run.json that exists but
+    cannot be read and parsed as a dict carries unknown durable enrollment
+    state. Environment flags cannot infer that state. record_run_start must
+    raise runguard.RetainRunLockError BEFORE rewriting run.json, preserve the
+    readable original bytes on disk, and must not create roster.json. The
+    diagnostic must be bounded and must not echo corrupt content.
+    """
+    workspace, run_dir = _corrupt_run_dir(tmp_path)
+
+    if corrupt_content is None:
+        # Simulate a read OSError (e.g. permission denied) on run.json only.
+        original_read_text = Path.read_text
+        written_bytes = '{"schema": "brigade.run.v1"}'
+        (run_dir / "run.json").write_text(written_bytes)
+        original_bytes = written_bytes
+
+        def failing_read_text(self, *args, **kwargs):
+            if self == run_dir / "run.json":
+                raise OSError("permission denied")
+            return original_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", failing_read_text)
+    else:
+        (run_dir / "run.json").write_text(corrupt_content)
+        original_bytes = corrupt_content
+
+    # Environment flags are set to prove they cannot infer unknown durable
+    # state and rescue a corrupt run.json.
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+
+    with pytest.raises(runguard.RetainRunLockError):
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            aboyeur.record_run_start(
+                run_dir,
+                task="resume run",
+                cwd=workspace,
+                roster=_roster(),
+                read_only=False,
+                lock_workspace=workspace,
+            )
+
+    # The readable original bytes are preserved on disk (no overwrite). Use
+    # read_bytes (never patched) so the read-oserror case still verifies.
+    assert (run_dir / "run.json").read_bytes().decode() == original_bytes
+
+    # roster.json must not have been created: the run never enrolled.
+    assert not (run_dir / "roster.json").exists()
+
+    # The lock is retained (not released) so recovery can intervene.
+    assert runguard.lock_path(workspace).is_dir()
+
+
+def test_record_run_start_retains_lock_on_invalid_utf8_existing_run_json(tmp_path, monkeypatch):
+    """Invalid UTF-8 leaves durable enrollment unknown and must fail closed."""
+    workspace, run_dir = _corrupt_run_dir(tmp_path)
+    original_bytes = b'{"schema":"brigade.run.v1","lifecycle_journal_requested":true}\xff'
+    (run_dir / "run.json").write_bytes(original_bytes)
+
+    # Neither environment flag may replace the unreadable durable state with
+    # inferred enrollment during a re-record attempt.
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+
+    with pytest.raises(
+        runguard.RetainRunLockError,
+        match=("existing run.json is unreadable as JSON; refusing to overwrite unknown durable enrollment state"),
+    ):
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            aboyeur.record_run_start(
+                run_dir,
+                task="resume run",
+                cwd=workspace,
+                roster=_roster(),
+                read_only=False,
+                lock_workspace=workspace,
+            )
+
+    assert (run_dir / "run.json").read_bytes() == original_bytes
+    assert not (run_dir / "roster.json").exists()
+    assert runguard.lock_path(workspace).is_dir()
+
+
+@pytest.mark.parametrize(
+    "parse_error",
+    [
+        pytest.param(ValueError, id="value-error"),
+        pytest.param(RecursionError, id="recursion-error"),
+    ],
+)
+def test_record_run_start_retains_lock_on_other_json_parse_failures(tmp_path, monkeypatch, parse_error):
+    """Parser limits and recursion failures leave enrollment unknown too.
+
+    Monkeypatching keeps this independent of JSON parser limits that differ
+    across supported Python versions.
+    """
+    workspace, run_dir = _corrupt_run_dir(tmp_path)
+    original_bytes = b'{"schema":"brigade.run.v1","lifecycle_journal_requested":true}\n'
+    (run_dir / "run.json").write_bytes(original_bytes)
+
+    def failing_loads(*args, **kwargs):
+        raise parse_error("synthetic JSON parser failure")
+
+    monkeypatch.setattr(aboyeur.json, "loads", failing_loads)
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+
+    with pytest.raises(
+        runguard.RetainRunLockError,
+        match=("existing run.json is unreadable as JSON; refusing to overwrite unknown durable enrollment state"),
+    ):
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            aboyeur.record_run_start(
+                run_dir,
+                task="resume run",
+                cwd=workspace,
+                roster=_roster(),
+                read_only=False,
+                lock_workspace=workspace,
+            )
+
+    assert (run_dir / "run.json").read_bytes() == original_bytes
+    assert not (run_dir / "roster.json").exists()
+    assert runguard.lock_path(workspace).is_dir()
+
+
+def test_record_run_start_preserves_valid_legacy_existing_run_enrollment(tmp_path, monkeypatch):
+    """Control: a valid existing legacy run.json object (no durable opt-in
+    fields) is still treated as unenrolled, but record_run_start must NOT
+    raise. It rewrites run.json preserving the no-later-opt-in behavior: no
+    lifecycle_journal_requested, no run_journal_authority_requested, and no
+    roster.json durable enrollment flip from environment flags alone on an
+    existing run. This is the existing legacy-object control kept green.
+    """
+    workspace, run_dir = _corrupt_run_dir(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps(_legacy_status_payload("started")))
+
+    # Environment flags are set, but an existing run never enrolls from
+    # environment changes alone.
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="legacy run",
+            cwd=workspace,
+            roster=_roster(),
+            read_only=False,
+            lock_workspace=workspace,
+        )
+
+    receipt = json.loads((run_dir / "run.json").read_text())
+    assert _LIFECYCLE_REQUEST_FIELD not in receipt
+    assert _AUTHORITY_REQUEST_FIELD not in receipt
+    assert (run_dir / "roster.json").is_file()

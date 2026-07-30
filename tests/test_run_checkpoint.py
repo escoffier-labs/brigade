@@ -9,8 +9,12 @@ import errno
 import hashlib
 import json
 import os
+import signal
 import stat
+import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -2986,3 +2990,150 @@ def test_recover_from_checkpoint_base_stripped_projection_failure_is_bounded(tmp
     assert isinstance(excinfo.value.__cause__, run_projector.ProjectionError)
     # No restore, no fallback to the earlier legacy-full checkpoint.
     assert not (run_dir / "run.json").exists()
+
+
+# -- Issue #568 slice 7 assignment 6: localio.write_text_atomic SIGKILL crash window --
+
+
+_CHILD_WRITE_ATOMIC_CRASH_SCRIPT = """
+import sys
+from pathlib import Path
+
+from brigade import localio
+
+target = Path(sys.argv[1])
+ready = Path(sys.argv[2])
+new_text = Path(sys.argv[3]).read_text(encoding="utf-8")
+
+ready.write_text("ready", encoding="utf-8")
+while True:
+    localio.write_text_atomic(target, new_text)
+"""
+
+
+def _write_text_atomic_temp_paths(run_dir: Path, target_name: str = "run.json") -> list[Path]:
+    prefix = f".{target_name}."
+    return sorted(
+        path
+        for path in run_dir.iterdir()
+        if path.is_file() and path.name.startswith(prefix) and path.name.endswith(".tmp")
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SIGKILL crash window requires os.kill")
+def test_write_text_atomic_sigkill_during_temp_window_preserves_one_valid_payload(tmp_path):
+    """A real SIGKILL during the temp-file window leaves one valid run.json.
+
+    Exercises ``localio.write_text_atomic`` (write -> fsync -> replace) in a child
+    subprocess without monkeypatching ``os.write``, ``os.fsync``, ``os.replace``,
+    ``tempfile``, or ``localio``. A successful attempt must leave the real
+    ``.run.json.*.tmp`` sibling after the killed child is reaped. That proves
+    ``SIGKILL`` landed before ``os.replace`` or exception cleanup could remove
+    the temp file. Fresh-directory retries keep the scheduling stress bounded.
+    """
+    old_obj = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "task": "crash-window",
+        "run_id": RUN_ID,
+    }
+    old_bytes = _writer_bytes(old_obj)
+
+    new_obj = {
+        "schema": "brigade.run.v1",
+        "status": "running",
+        "task": "crash-window",
+        "run_id": RUN_ID,
+        "padding": "x" * (2 * 1024 * 1024),
+    }
+    new_bytes = _writer_bytes(new_obj)
+    new_text_path = tmp_path / "new_payload.json"
+    new_text_path.write_bytes(new_bytes)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(repo_root / "src")
+
+    successful_leftovers: list[str] = []
+    attempt_diagnostics: list[str] = []
+    attempt_run_dirs: list[Path] = []
+    for attempt in range(1, 6):
+        run_dir = _run_dir(tmp_path / f"attempt-{attempt}")
+        attempt_run_dirs.append(run_dir)
+        target = run_dir / "run.json"
+        target.write_bytes(old_bytes)
+        ready_path = run_dir / "child.ready"
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                _CHILD_WRITE_ATOMIC_CRASH_SCRIPT,
+                str(target),
+                str(ready_path),
+                str(new_text_path),
+            ],
+            env=child_env,
+        )
+        try:
+            ready_deadline = time.monotonic() + 2
+            while not ready_path.is_file():
+                if proc.poll() is not None:
+                    pytest.fail(f"child exited before signaling ready: returncode={proc.returncode}")
+                if time.monotonic() >= ready_deadline:
+                    pytest.fail("timed out waiting for child ready signal")
+                time.sleep(0.001)
+
+            temp_observed = False
+            kill_deadline = time.monotonic() + 2
+            while time.monotonic() < kill_deadline:
+                if proc.poll() is not None:
+                    break
+                if _write_text_atomic_temp_paths(run_dir):
+                    temp_observed = True
+                    os.kill(proc.pid, signal.SIGKILL)
+                    break
+                time.sleep(0.001)
+            if not temp_observed and proc.poll() is None:
+                os.kill(proc.pid, signal.SIGKILL)
+
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+                pytest.fail("child did not exit after SIGKILL")
+
+            assert proc.returncode == -signal.SIGKILL, (
+                f"expected SIGKILL exit (-{signal.SIGKILL}), got {proc.returncode}"
+            )
+
+            assert target.is_file(), "authoritative run.json disappeared after crash"
+            actual = target.read_bytes()
+            assert actual in (old_bytes, new_bytes), (
+                "run.json bytes are neither the complete old payload nor the complete new payload"
+            )
+            parsed = json.loads(actual.decode("utf-8"))
+            assert parsed["schema"] == "brigade.run.v1"
+            assert parsed["task"] == "crash-window"
+            assert parsed["run_id"] == RUN_ID
+            assert parsed["status"] in ("planning", "running")
+
+            leftovers = _write_text_atomic_temp_paths(run_dir)
+            attempt_diagnostics.append(
+                f"attempt={attempt} observed={temp_observed} leftovers={[path.name for path in leftovers]!r}"
+            )
+            if leftovers:
+                successful_leftovers = [path.name for path in leftovers]
+                break
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=2)
+            for leftover in _write_text_atomic_temp_paths(run_dir):
+                leftover.unlink()
+
+    assert successful_leftovers, (
+        f"SIGKILL never left a crash-window temp file after child reaping; attempts={attempt_diagnostics!r}"
+    )
+    for run_dir in attempt_run_dirs:
+        assert _write_text_atomic_temp_paths(run_dir) == []

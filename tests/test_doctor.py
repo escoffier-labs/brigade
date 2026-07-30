@@ -2033,7 +2033,7 @@ def test_doctor_invalid_recovered_at_iso_is_fail(tmp_path: Path):
 
 def test_doctor_513_events_fail_bound_exceeded_without_checkpoint_parsing(tmp_path: Path, monkeypatch):
     """513 valid chained complete events must FAIL bound exceeded, no checkpoint parse."""
-    from brigade import run_checkpoint, run_journal, run_lifecycle, runguard
+    from brigade import run_checkpoint, run_events, run_lifecycle
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -2044,25 +2044,27 @@ def test_doctor_513_events_fail_bound_exceeded_without_checkpoint_parsing(tmp_pa
         run_dir / "run.json",
         {"schema": "brigade.run.v1", "status": "planning", "cwd": str(workspace), "task": "demo"},
     )
-    with runguard.run_lock(workspace, run_dir=run_dir):
-        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
-        journal = run_lifecycle._journal_path(run_dir)
-        prev_seq = 0
+    journal = run_lifecycle._journal_path(run_dir)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    previous_digest: str | None = None
+    with journal.open("ab") as handle:
         for index in range(513):
-            appended = run_journal.append_event(
-                journal,
+            env = run_events.build_event(
                 run_id=_RUN_ID,
+                sequence=index + 1,
                 event_type="run.planning.started",
                 payload={"detail": f"step-{index}"},
                 idempotency_key=f"progress-{index}",
-                expected_previous_sequence=prev_seq,
+                recorded_at="2026-07-27T15:30:45.000000Z",
+                previous_digest=previous_digest,
             )
-            prev_seq = appended.sequence
+            handle.write(run_events.canonical_bytes(env) + b"\n")
+            previous_digest = env["event_digest"]
 
     monkeypatch.setattr(
         run_checkpoint,
-        "recover_from_checkpoint",
-        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("recover_from_checkpoint")),
+        "validate_checkpoint",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("validate_checkpoint")),
     )
 
     status, _name, detail = _recovery_check(workspace)
