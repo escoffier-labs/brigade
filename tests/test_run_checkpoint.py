@@ -2032,3 +2032,575 @@ def test_recover_from_checkpoint_normalizes_path_resolve_runtime_error(tmp_path,
     assert excinfo.value.category == "path-resolve"
     assert isinstance(excinfo.value.__cause__, RuntimeError)
     assert not (run_dir / "run.json").exists()
+
+
+# -- Issue #568 slice 6 Task 3: stripped checkpoint base and body_kind ----------
+
+
+_DURABLE_REQUEST_FIELDS = ("lifecycle_journal_requested", "run_journal_authority_requested")
+_JOURNAL_METADATA_FIELDS = (
+    "projector_version",
+    "journal_present",
+    "journal_last_sequence",
+    "journal_last_event_digest",
+)
+
+
+def _base_stripped_payload(run_json_bytes: bytes, *, paired_event_type: str | None = None) -> dict:
+    payload = _checkpoint_payload(run_json_bytes, paired_event_type=paired_event_type)
+    payload["body_kind"] = "base-stripped"
+    return payload
+
+
+# -- _JOURNAL_METADATA_FIELDS constant ----------------------------------------
+
+
+def test_journal_metadata_fields_constant_has_approved_values():
+    assert run_checkpoint._JOURNAL_METADATA_FIELDS == frozenset(_JOURNAL_METADATA_FIELDS)
+
+
+# -- _strip_journal_metadata_from_base helper --------------------------------
+
+
+def test_strip_journal_metadata_removes_exactly_the_four_metadata_fields():
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "task": "demo",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+        "projector_version": 3,
+        "journal_present": True,
+        "journal_last_sequence": 7,
+        "journal_last_event_digest": "a" * 64,
+    }
+    base_bytes = _writer_bytes(base)
+
+    stripped_bytes = run_checkpoint._strip_journal_metadata_from_base(base_bytes)
+
+    stripped = json.loads(stripped_bytes)
+    for field in _JOURNAL_METADATA_FIELDS:
+        assert field not in stripped
+    # status and other fields retained
+    assert stripped["status"] == "planning"
+    assert stripped["task"] == "demo"
+    assert stripped["schema"] == "brigade.run.v1"
+    assert stripped["lifecycle_journal_requested"] is True
+    assert stripped["run_journal_authority_requested"] is True
+    assert len(stripped) == len(base) - 4
+
+
+def test_strip_journal_metadata_canonicalizes_to_writer_form():
+    # Non-canonical input bytes (compact, no trailing newline) must come back
+    # in the aboyeur writer canonical encoding.
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "projector_version": 3,
+        "journal_present": True,
+        "journal_last_sequence": 1,
+        "journal_last_event_digest": "b" * 64,
+    }
+    raw = (json.dumps(base, sort_keys=True) + "\n").encode("utf-8")  # compact, no indent
+    assert raw != _writer_bytes(base)
+
+    stripped_bytes = run_checkpoint._strip_journal_metadata_from_base(raw)
+
+    expected_obj = {k: v for k, v in base.items() if k not in _JOURNAL_METADATA_FIELDS}
+    assert stripped_bytes == _writer_bytes(expected_obj)
+
+
+def test_strip_journal_metadata_is_idempotent():
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "task": "demo",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+        "projector_version": 3,
+        "journal_present": True,
+        "journal_last_sequence": 7,
+        "journal_last_event_digest": "a" * 64,
+    }
+    base_bytes = _writer_bytes(base)
+
+    once = run_checkpoint._strip_journal_metadata_from_base(base_bytes)
+    twice = run_checkpoint._strip_journal_metadata_from_base(once)
+
+    assert twice == once
+
+
+def test_strip_journal_metadata_bounds_non_utf8_as_utf8():
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._strip_journal_metadata_from_base(b"\xff\xfe not utf-8")
+    assert excinfo.value.category == "utf8"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_strip_journal_metadata_bounds_non_json_as_json_object():
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._strip_journal_metadata_from_base(b"not json at all")
+    assert excinfo.value.category == "json-object"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_strip_journal_metadata_bounds_non_object_as_json_object():
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint._strip_journal_metadata_from_base(b"[1, 2, 3]\n")
+    assert excinfo.value.category == "json-object"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+# -- payload validation: body_kind -------------------------------------------
+
+
+def test_validate_checkpoint_missing_body_kind_validates_as_legacy_full(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    _place_checkpoint_file(run_dir, run_json_bytes)
+    payload = _checkpoint_payload(run_json_bytes)  # no body_kind key
+    assert run_checkpoint.validate_checkpoint(run_dir, payload) == run_json_bytes
+
+
+def test_validate_checkpoint_unknown_body_kind_rejects_with_body_kind_category(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    _place_checkpoint_file(run_dir, run_json_bytes)
+    payload = _checkpoint_payload(run_json_bytes)
+    payload["body_kind"] = "legacy-full"
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "body-kind"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_explicit_null_body_kind_rejects_with_body_kind_category(tmp_path):
+    """An explicitly present body_kind with null must fail category body-kind.
+
+    Missing body_kind is legacy-full, but any *present* value must equal
+    base-stripped; an explicit null is a present value that is not
+    base-stripped, so it fails closed with category body-kind (not silently
+    treated as legacy-full).
+    """
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "started"})
+    _place_checkpoint_file(run_dir, run_json_bytes)
+    payload = _checkpoint_payload(run_json_bytes)
+    payload["body_kind"] = None  # explicitly present null
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "body-kind"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_accepts_base_stripped_body_kind(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+    }
+    stripped_bytes = _writer_bytes(base)
+    _place_checkpoint_file(run_dir, stripped_bytes)
+    payload = _base_stripped_payload(stripped_bytes)
+    assert run_checkpoint.validate_checkpoint(run_dir, payload) == stripped_bytes
+
+
+def test_validate_checkpoint_base_stripped_requires_both_durable_request_fields(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    # missing run_journal_authority_requested
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": True,
+    }
+    stripped_bytes = _writer_bytes(base)
+    _place_checkpoint_file(run_dir, stripped_bytes)
+    payload = _base_stripped_payload(stripped_bytes)
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "base-stripped-requests"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_base_stripped_excludes_journal_metadata_fields(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    # contains a metadata field that should have been stripped
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+        "projector_version": 3,
+    }
+    stripped_bytes = _writer_bytes(base)
+    _place_checkpoint_file(run_dir, stripped_bytes)
+    payload = _base_stripped_payload(stripped_bytes)
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "base-stripped-requests"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_base_stripped_rejects_false_lifecycle_journal_requested(tmp_path):
+    """A present-but-False durable request field fails closed.
+
+    The base-stripped durable-request rule requires the field to be True,
+    not merely present; a False value fails category base-stripped-requests.
+    """
+    run_dir = _run_dir(tmp_path)
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": False,
+        "run_journal_authority_requested": True,
+    }
+    stripped_bytes = _writer_bytes(base)
+    _place_checkpoint_file(run_dir, stripped_bytes)
+    payload = _base_stripped_payload(stripped_bytes)
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "base-stripped-requests"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_base_stripped_rejects_false_run_journal_authority_requested(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": False,
+    }
+    stripped_bytes = _writer_bytes(base)
+    _place_checkpoint_file(run_dir, stripped_bytes)
+    payload = _base_stripped_payload(stripped_bytes)
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "base-stripped-requests"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_base_stripped_rejects_wrong_type_lifecycle_journal_requested(tmp_path):
+    """A wrong-typed durable request field (e.g. string) fails closed.
+
+    The base-stripped durable-request rule requires the field to be True
+    (bool), not merely present; a string "true" fails category
+    base-stripped-requests.
+    """
+    run_dir = _run_dir(tmp_path)
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": "true",
+        "run_journal_authority_requested": True,
+    }
+    stripped_bytes = _writer_bytes(base)
+    _place_checkpoint_file(run_dir, stripped_bytes)
+    payload = _base_stripped_payload(stripped_bytes)
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "base-stripped-requests"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_validate_checkpoint_base_stripped_rejects_wrong_type_run_journal_authority_requested(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": "true",
+    }
+    stripped_bytes = _writer_bytes(base)
+    _place_checkpoint_file(run_dir, stripped_bytes)
+    payload = _base_stripped_payload(stripped_bytes)
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+    assert excinfo.value.category == "base-stripped-requests"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+# -- idempotency keys --------------------------------------------------------
+
+
+def test_checkpoint_idempotency_key_legacy_remains_checkpoint_sha_paired():
+    sha = "a" * 64
+    # paired present
+    key = run_checkpoint._checkpoint_idempotency_key(sha, paired_event_type="run.created")
+    assert key == f"checkpoint:{sha}:run.created"
+    # paired absent -> "none"
+    key_none = run_checkpoint._checkpoint_idempotency_key(sha, paired_event_type=None)
+    assert key_none == f"checkpoint:{sha}:none"
+
+
+def test_checkpoint_idempotency_key_base_stripped_is_checkpoint_base_stripped_sha_paired():
+    sha = "a" * 64
+    key = run_checkpoint._checkpoint_idempotency_key(sha, paired_event_type="run.created", body_kind="base-stripped")
+    assert key == f"checkpoint:base-stripped:{sha}:run.created"
+    # paired absent -> "none"
+    key_none = run_checkpoint._checkpoint_idempotency_key(sha, paired_event_type=None, body_kind="base-stripped")
+    assert key_none == f"checkpoint:base-stripped:{sha}:none"
+
+
+def test_checkpoint_idempotency_key_base_stripped_is_bounded():
+    sha = "a" * 64
+    long_paired = "x" * 500
+    key = run_checkpoint._checkpoint_idempotency_key(sha, paired_event_type=long_paired, body_kind="base-stripped")
+    assert len(key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN
+    assert key.startswith(f"checkpoint:base-stripped:{sha}:")
+
+
+# -- write_checkpoint with body_kind ------------------------------------------
+
+
+def test_write_checkpoint_base_stripped_stores_stripped_body_and_payload_body_kind(enabled, tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "task": "demo",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+        "projector_version": 3,
+        "journal_present": True,
+        "journal_last_sequence": 7,
+        "journal_last_event_digest": "c" * 64,
+    }
+    base_bytes = _writer_bytes(base)
+    expected_stripped = _writer_bytes({k: v for k, v in base.items() if k not in _JOURNAL_METADATA_FIELDS})
+    expected_sha = hashlib.sha256(expected_stripped).hexdigest()
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        event = run_checkpoint.write_checkpoint(
+            run_dir,
+            base_bytes,
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+
+    assert event is not None
+    # payload carries body_kind
+    assert event.payload["body_kind"] == "base-stripped"
+    # SHA is over the stripped bytes
+    assert event.payload["sha256"] == expected_sha
+    assert event.payload["byte_size"] == len(expected_stripped)
+    assert event.payload["path"] == f"events/recovery-checkpoints/{expected_sha}.json"
+    # idempotency key is the base-stripped form
+    assert event.idempotency_key == f"checkpoint:base-stripped:{expected_sha}:run.planning.started"
+    # the stored checkpoint file holds the stripped bytes
+    stored = run_checkpoint.checkpoint_path(run_dir, expected_sha)
+    assert stored.read_bytes() == expected_stripped
+    # validate_checkpoint round-trips
+    assert run_checkpoint.validate_checkpoint(run_dir, event.payload) == expected_stripped
+
+
+def test_write_checkpoint_default_legacy_full_omits_body_kind(enabled, tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    run_json_bytes = _writer_bytes({"schema": "brigade.run.v1", "status": "planning"})
+    sha = hashlib.sha256(run_json_bytes).hexdigest()
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        event = run_checkpoint.write_checkpoint(
+            run_dir,
+            run_json_bytes,
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+        )
+
+    assert event is not None
+    assert "body_kind" not in event.payload
+    assert event.payload["sha256"] == sha
+    assert event.idempotency_key == f"checkpoint:{sha}:run.planning.started"
+
+
+def test_write_checkpoint_base_stripped_rejects_missing_request_field(enabled, tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    # bootstrap writes only lifecycle_journal_requested; authority missing
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": True,
+        # run_journal_authority_requested absent
+        "projector_version": 3,
+    }
+    base_bytes = _writer_bytes(base)
+
+    with runguard.run_lock(workspace, run_dir=run_dir), pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            base_bytes,
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+    assert excinfo.value.category == "base-stripped-requests"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_write_checkpoint_base_stripped_rejects_false_request_field(enabled, tmp_path):
+    """Write path: a present-but-False durable request field fails closed.
+
+    The write-path base-stripped rule requires the field to be True, not
+    merely present; a False value fails category base-stripped-requests
+    before stripping, SHA, payload, publish, or append.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": False,
+    }
+    base_bytes = _writer_bytes(base)
+
+    with runguard.run_lock(workspace, run_dir=run_dir), pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            base_bytes,
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+    assert excinfo.value.category == "base-stripped-requests"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    # No checkpoint file published, no checkpoint event appended.
+    assert not _checkpoint_dir(run_dir).exists()
+    assert _checkpoint_events(run_dir) == []
+
+
+def test_write_checkpoint_base_stripped_rejects_wrong_type_request_field(enabled, tmp_path):
+    """Write path: a wrong-typed durable request field fails closed.
+
+    A string "true" is not the bool True, so the write-path base-stripped
+    rule rejects it with category base-stripped-requests before stripping,
+    SHA, payload, publish, or append.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": "true",
+        "run_journal_authority_requested": True,
+    }
+    base_bytes = _writer_bytes(base)
+
+    with runguard.run_lock(workspace, run_dir=run_dir), pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            base_bytes,
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+    assert excinfo.value.category == "base-stripped-requests"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    assert not _checkpoint_dir(run_dir).exists()
+    assert _checkpoint_events(run_dir) == []
+
+
+def test_write_checkpoint_base_stripped_rejects_non_house_canonical_bytes(enabled, tmp_path):
+    """Write path: non-house-canonical incoming bytes fail category writer-bytes.
+
+    A base-stripped write must reject incoming bytes that are valid JSON but
+    not the aboyeur writer canonical encoding, with category writer-bytes,
+    BEFORE stripping, SHA, payload, publish, or append. The standalone
+    stripping helper may still canonicalize valid noncanonical JSON, but the
+    write path must not. No checkpoint file or journal append on this failure.
+    """
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+    }
+    # Compact encoding (no indent) is valid JSON but not writer canonical.
+    non_canonical = (json.dumps(base, sort_keys=True) + "\n").encode("utf-8")
+    assert non_canonical != _writer_bytes(base)
+
+    journal_before = _journal_path(run_dir).read_bytes()
+
+    with runguard.run_lock(workspace, run_dir=run_dir), pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            non_canonical,
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+    assert excinfo.value.category == "writer-bytes"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    # No checkpoint file published.
+    assert not _checkpoint_dir(run_dir).exists()
+    # No journal append: bytes unchanged and no checkpoint events.
+    assert _journal_path(run_dir).read_bytes() == journal_before
+    assert _checkpoint_events(run_dir) == []
+
+
+def test_write_checkpoint_base_stripped_strips_metadata_fields_present(enabled, tmp_path):
+    """A base carrying the four journal metadata fields is stripped, not rejected."""
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    _bootstrap_request(run_dir)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+
+    base = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+        "projector_version": 3,
+        "journal_present": True,
+        "journal_last_sequence": 7,
+        "journal_last_event_digest": "d" * 64,
+    }
+    base_bytes = _writer_bytes(base)
+    expected_stripped = _writer_bytes({k: v for k, v in base.items() if k not in _JOURNAL_METADATA_FIELDS})
+    expected_sha = hashlib.sha256(expected_stripped).hexdigest()
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        event = run_checkpoint.write_checkpoint(
+            run_dir,
+            base_bytes,
+            workspace=workspace,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+
+    assert event is not None
+    assert event.payload["sha256"] == expected_sha
+    assert run_checkpoint.checkpoint_path(run_dir, expected_sha).read_bytes() == expected_stripped

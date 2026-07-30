@@ -643,7 +643,7 @@ def test_mapped_activated_artifact_collection_writes_status_event(enabled, tmp_p
 - Modify: `src/brigade/run_checkpoint.py:37-39` (`_CHECKPOINT_PAYLOAD_KEYS`), `src/brigade/run_checkpoint.py:70-131` (`_validate_payload`), `src/brigade/run_checkpoint.py:503-528` (`_checkpoint_payload`, `_checkpoint_idempotency_key`), `src/brigade/run_checkpoint.py:531-601` (`write_checkpoint`), `src/brigade/run_checkpoint.py:191-266` (`validate_checkpoint`)
 - Test: `tests/test_run_checkpoint.py`
 
-- [ ] Write the failing tests. Append to `tests/test_run_checkpoint.py`:
+- [x] Write the failing tests. Append to `tests/test_run_checkpoint.py`:
 
 ```python
 def _stripped_base_obj(status: str = "planning") -> dict:
@@ -778,8 +778,8 @@ def test_write_checkpoint_legacy_full_omits_body_kind_from_payload(enabled, tmp_
     assert "body_kind" not in event.payload
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_checkpoint.py" --capture brigade-work` - expect FAIL, `TypeError: write_checkpoint() got an unexpected keyword argument 'body_kind'` on the stripped-base write, plus `AssertionError` on the key-shape and idempotency assertions.
-- [ ] Implement the minimal change. In `src/brigade/run_checkpoint.py` add `"body_kind"` to `_CHECKPOINT_PAYLOAD_KEYS`. Define the exact stripping constant and helper before any SHA, payload, or publish work:
+- [x] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_checkpoint.py" --capture brigade-work` - expect FAIL, `TypeError: write_checkpoint() got an unexpected keyword argument 'body_kind'` on the stripped-base write, plus `AssertionError` on the key-shape and idempotency assertions.
+- [x] Implement the minimal change. In `src/brigade/run_checkpoint.py` add `"body_kind"` to `_CHECKPOINT_PAYLOAD_KEYS`. Define the exact stripping constant and helper before any SHA, payload, or publish work:
 
 ```python
 _JOURNAL_METADATA_FIELDS = (
@@ -832,8 +832,8 @@ For a `legacy-full` body (absent `body_kind`), the slice-5 path runs unchanged. 
 
 Update `_checkpoint_payload` to accept `body_kind: str | None = None` and include the key only when it is not `None`. Update `_checkpoint_idempotency_key` to accept `body_kind: str | None = None` and, when it is `"base-stripped"`, build `f"{_CHECKPOINT_IDEMPOTENCY_PREFIX}:base-stripped:{sha}:{paired}"` with the same paired-tail budget logic bounded to `MAX_IDEMPOTENCY_KEY_LEN`. Update `write_checkpoint` to accept `body_kind: str | None = None` and pass it through to `_checkpoint_payload` and `_checkpoint_idempotency_key`. The default call (no `body_kind`) keeps the exact slice-5 idempotency key `checkpoint:<sha256>:<paired-event-type-or-none>` and omits the key from the payload.
 
-- [ ] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_checkpoint.py" --capture brigade-work` - expect PASS. Keep `test_write_checkpoint_append_then_replay` and `test_first_activated_mapped_write_checkpoint_seq1_then_status_seq2` green unchanged for the default `legacy-full` path.
-- [ ] Commit: `git add src/brigade/run_checkpoint.py tests/test_run_checkpoint.py && git commit -m "feat(run-checkpoint): strip journal metadata from checkpoint base and add body_kind"`
+- [x] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_checkpoint.py" --capture brigade-work` - expect PASS. Keep `test_write_checkpoint_append_then_replay` and `test_first_activated_mapped_write_checkpoint_seq1_then_status_seq2` green unchanged for the default `legacy-full` path.
+- [x] Commit: `git add src/brigade/run_checkpoint.py tests/test_run_checkpoint.py && git commit -m "feat(run-checkpoint): strip journal metadata from checkpoint base and add body_kind"`
 
 ## Task 4: Readiness gate version-door split
 
