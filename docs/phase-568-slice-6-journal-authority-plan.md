@@ -1760,7 +1760,7 @@ Translate an authority readiness or projection failure into a bounded `run_lifec
 - Create: `scripts/measure_run_journal.py`, `tests/test_run_journal_measurement.py`
 - Test: `tests/test_run_journal_measurement.py`
 
-- [ ] Write the failing tests. Create `tests/test_run_journal_measurement.py` (loads the script via `importlib.util.spec_from_file_location`, matching the `tests/test_version_sync_script.py` pattern, since `scripts/` is not a package):
+- [x] Write the failing tests. Create `tests/test_run_journal_measurement.py` (loads the script via `importlib.util.spec_from_file_location`, matching the `tests/test_version_sync_script.py` pattern, since `scripts/` is not a package):
 
 ```python
 import importlib.util
@@ -1846,8 +1846,8 @@ def test_cli_writes_report_to_exact_output_path(tmp_path):
     assert "threshold" not in json.dumps(written)
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_journal_measurement.py" --capture brigade-work` - expect FAIL, `FileNotFoundError` for `scripts/measure_run_journal.py`.
-- [ ] Implement the minimal change. Create `scripts/measure_run_journal.py` as a stdlib-only module exposing two functions and a CLI:
+- [x] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_journal_measurement.py" --capture brigade-work` - expect FAIL, `FileNotFoundError` for `scripts/measure_run_journal.py`.
+- [x] Implement the minimal change. Create `scripts/measure_run_journal.py` as a stdlib-only module exposing two functions and a CLI:
 
 ```python
 def measure_runs(runs: int, root: Path) -> dict:
@@ -1871,8 +1871,8 @@ def write_report(report: dict, output: Path) -> None:
 
 The `__main__` entry point uses argparse with `--runs` (default `1000`) and `--output` (required, an exact file path). It calls `measure_runs(runs, root=Path.cwd())` then `write_report(report, Path(args.output))`. `_environment_metadata()` returns Python version, platform, filesystem type, and directory-fsync support. Filesystem type is resolved by a stdlib `/proc/self/mountinfo` deepest-mount parser. Parse each mountinfo line, find the mount whose mountpoint is the longest path-prefix of the run directory, and return its `fstype` field, which is the column after the separator ` - `. Fall back to the string `"unknown"` when `/proc/self/mountinfo` is absent or no entry matches. Directory-fsync support is determined by generating a temporary directory under `root`, opening it with `os.open(..., os.O_RDONLY|os.O_DIRECTORY)`, calling `os.fsync(fd)` inside a `try/except OSError`, and recording `True` when `fsync` returns or `False` when it raises. The harness records no invented pass threshold.
 
-- [ ] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_journal_measurement.py" --capture brigade-work` - expect PASS. The default suite invokes the harness with a small run count so its schema and mechanics are always tested.
-- [ ] Commit: `git add scripts/measure_run_journal.py tests/test_run_journal_measurement.py && git commit -m "feat(run-journal): add stdlib-only 1,000-run measurement harness without a pass threshold"`
+- [x] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_journal_measurement.py" --capture brigade-work` - expect PASS. The default suite invokes the harness with a small run count so its schema and mechanics are always tested.
+- [x] Commit: `git add scripts/measure_run_journal.py tests/test_run_journal_measurement.py && git commit -m "feat(run-journal): add stdlib-only 1,000-run measurement harness without a pass threshold"`
 
 ## Closeout: full verification, measurement, independent review, MiseLedger export, memory handoff
 
