@@ -1741,6 +1741,60 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
     return _recover_legacy(run_dir, workspace, parseable, run_meta, read_error)
 
 
+def redact(
+    run: str | Path,
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    sequence_start: int | None = None,
+    sequence_end: int | None = None,
+    reason: str | None = None,
+    operator_confirmed: bool = False,
+    cleanup_operation: str | None = None,
+) -> int:
+    """Run the explicit operator procedure for lifecycle journal redaction."""
+    run_dir, error = _resolve_run_dir(run, cwd=cwd, runs_dir=runs_dir)
+    if error is not None:
+        print(error, file=sys.stderr)
+        return 2
+    assert run_dir is not None
+
+    from . import run_redaction
+
+    try:
+        if cleanup_operation is not None:
+            if sequence_start is not None or sequence_end is not None or reason is not None:
+                raise run_redaction.RedactionError("cleanup cannot include a sequence range or reason code")
+            report = run_redaction.cleanup_redaction_quarantine(
+                run_dir,
+                operation_id=cleanup_operation,
+                operator_confirmed=operator_confirmed,
+            )
+            print(f"redaction cleanup: {report.operation_id}")
+            print("quarantine: removed")
+            return 0
+        if sequence_start is None or sequence_end is None or reason is None:
+            raise run_redaction.RedactionError("redaction requires a sequence range and reason code")
+        report = run_redaction.redact_journal(
+            run_dir,
+            sequence_start=sequence_start,
+            sequence_end=sequence_end,
+            reason=reason,
+            operator_confirmed=operator_confirmed,
+        )
+    except run_redaction.RedactionError as exc:
+        print(f"error: redaction failed: {exc.diagnostic}", file=sys.stderr)
+        return 2
+    print(f"redaction: {report.operation_id}")
+    print(f"sequences: {report.sequence_start}-{report.sequence_end}")
+    print(f"record: {report.record_path}")
+    if report.cleaned:
+        print("quarantine: removed")
+    else:
+        print(f"quarantine: retained at {report.quarantine_path}")
+    return 0
+
+
 def watch(
     run: str | Path,
     *,
