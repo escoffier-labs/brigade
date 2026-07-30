@@ -371,11 +371,16 @@ def _cleanup_temp(tmp_path: Path, cp_dir: Path, primary: CheckpointError | None)
     cleanup_err: CheckpointError | None = None
     unlinked = False
     try:
-        tmp_path.unlink(missing_ok=True)
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        # Preserve Path.unlink(missing_ok=True) semantics while using the
+        # same os.unlink boundary on every supported Python version.
         unlinked = True
     except OSError:
         if primary is None:
             cleanup_err = CheckpointError(_bound("checkpoint temp cleanup failed"), category="unlink")
+    else:
+        unlinked = True
     if unlinked:
         try:
             _fsync_directory(cp_dir)

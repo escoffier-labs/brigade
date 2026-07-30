@@ -363,8 +363,7 @@ def test_publish_checkpoint_file_fsyncs_directory_after_temp_unlink(tmp_path, mo
     run_checkpoint.publish_checkpoint_file(run_dir, run_json_bytes)
 
     # A directory fsync on the checkpoint directory must occur after the
-    # legitimate temp unlink. The outer finally also unlinks (missing_ok
-    # no-op) as a safety net, so look for any unlink followed by a later
+    # legitimate temp unlink, so look for an unlink followed by a later
     # fsync whose descriptor refers to the checkpoint directory.
     unlink_indices = [i for i, (kind, _) in enumerate(call_log) if kind == "unlink"]
     assert unlink_indices, "temp was never unlinked"
