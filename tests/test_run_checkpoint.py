@@ -1239,17 +1239,17 @@ def test_validate_checkpoint_translates_recursion_error_on_json_loads(tmp_path):
     assert len(diagnostic) <= run_events.MAX_DIAGNOSTIC_LEN
 
 
-def test_validate_checkpoint_translates_recursion_error_on_writer_canonical_dumps(tmp_path):
+def test_validate_checkpoint_translates_recursion_error_on_writer_canonical_dumps(tmp_path, monkeypatch):
     """RecursionError from canonical json.dumps re-encoding -> writer-bytes."""
     run_dir = _run_dir(tmp_path)
-    # A deeply nested JSON *object* (top-level dict): the C JSON decoder
-    # handles this depth (json.loads succeeds and returns a dict, so the
-    # isinstance(obj, dict) gate passes), but the recursive canonical
-    # re-encoder (json.dumps with indent=2, sort_keys=True) cannot, raising
-    # RecursionError from _writer_canonical_bytes.
-    depth = 3000
-    deep_json = (b'{"a":' * depth) + b"1" + (b"}" * depth)
-    _final, payload = _place_deep_checkpoint(run_dir, deep_json)
+    canonical = _writer_bytes({"status": "running"})
+    _place_checkpoint_file(run_dir, canonical)
+    payload = _checkpoint_payload(canonical)
+
+    def fail_writer_canonical_bytes(_obj):
+        raise RecursionError("canonical writer nesting too deep")
+
+    monkeypatch.setattr(run_checkpoint, "_writer_canonical_bytes", fail_writer_canonical_bytes)
 
     with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
         run_checkpoint.validate_checkpoint(run_dir, payload)
