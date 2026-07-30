@@ -5545,3 +5545,84 @@ def test_legacy_status_write_tolerates_corrupt_existing_run_json(tmp_path, monke
     assert _AUTHORITY_REQUEST_FIELD not in written
     for field in _PROJECTION_METADATA_FIELDS:
         assert field not in written
+
+
+def test_run_preserves_authority_enrollment_through_first_follow_up_receipt_rewrite(monkeypatch, tmp_path):
+    """Blocker #2: a new run enrolled via BRIGADE_RUN_JOURNAL_AUTHORITY=1 (with
+    BRIGADE_LIFECYCLE_JOURNAL unset) carries BOTH durable request fields on its
+    initial run.json. The first follow-up receipt rewrite that aboyeur.run
+    performs after record_run_start (the nested run._payload rebuild) must
+    preserve BOTH durable fields, not just lifecycle_journal_requested.
+    Without that, _write_json classifies the rewrite as legacy and the legacy
+    fast path overwrites run_journal_authority_requested away, silently
+    dropping the run off the authority path before any status transition is
+    recorded.
+    """
+    import copy
+
+    monkeypatch.setenv(_AUTHORITY_ENV, "1")
+    monkeypatch.delenv(_LIFECYCLE_ENV, raising=False)
+
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt, cwd))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            (cwd / "tracked.txt").write_text("changed by worker\n")
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    run_cwd = tmp_path / "work"
+    run_cwd.mkdir()
+    _init_git_repo(run_cwd)
+    (run_cwd / "tracked.txt").write_text("initial\n")
+    _commit_all(run_cwd)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    run_json_writes: list[dict[str, object]] = []
+    real_write_json = aboyeur._write_json
+
+    def capture_write_json(path, payload):
+        if Path(path).name == "run.json" and isinstance(payload, dict):
+            run_json_writes.append(copy.deepcopy(payload))
+        return real_write_json(path, payload)
+
+    monkeypatch.setattr(aboyeur, "_write_json", capture_write_json)
+
+    assert (
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            cwd=run_cwd,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+        )
+        == 0
+    )
+
+    # record_run_start produces the first run.json write; the next one is the
+    # first follow-up receipt rewrite performed by aboyeur.run itself.
+    assert len(run_json_writes) >= 2, "expected at least record_run_start plus one follow-up receipt rewrite"
+    first_follow_up = run_json_writes[1]
+    assert first_follow_up[_LIFECYCLE_REQUEST_FIELD] is True
+    assert first_follow_up[_AUTHORITY_REQUEST_FIELD] is True, (
+        "first follow-up receipt rewrite must preserve the durable authority "
+        "request field; dropping it lets the legacy fast path overwrite away "
+        "authority enrollment"
+    )
+
+    # The durable enrollment survives to the final on-disk receipt.
+    final_meta = json.loads((output_dir / "run.json").read_text())
+    assert final_meta[_LIFECYCLE_REQUEST_FIELD] is True
+    assert final_meta[_AUTHORITY_REQUEST_FIELD] is True
+
+    # The run remains on the authority path: the durable authority request is
+    # still true and no projection metadata has been published yet, so
+    # _resolve_authority_state classifies it as authority-requested.
+    assert aboyeur._resolve_authority_state(output_dir) == "authority-requested"

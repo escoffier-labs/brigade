@@ -2979,15 +2979,26 @@ def run(
     def _payload(**kwargs: Any) -> dict[str, object]:
         if "skill_route_policy" not in kwargs and skill_policy is not None:
             kwargs["skill_route_policy"] = skill_policy
-        if output_dir is not None and "lifecycle_journal_requested" not in kwargs:
+        if output_dir is not None and (
+            "lifecycle_journal_requested" not in kwargs or "run_journal_authority_requested" not in kwargs
+        ):
             run_path = output_dir / "run.json"
             if run_path.is_file():
                 try:
                     existing = json.loads(run_path.read_text())
                 except (OSError, json.JSONDecodeError):
                     existing = None
-                if isinstance(existing, dict) and existing.get("lifecycle_journal_requested") is True:
-                    kwargs["lifecycle_journal_requested"] = True
+                if isinstance(existing, dict):
+                    if (
+                        "lifecycle_journal_requested" not in kwargs
+                        and existing.get("lifecycle_journal_requested") is True
+                    ):
+                        kwargs["lifecycle_journal_requested"] = True
+                    if (
+                        "run_journal_authority_requested" not in kwargs
+                        and existing.get("run_journal_authority_requested") is True
+                    ):
+                        kwargs["run_journal_authority_requested"] = True
         return _run_payload(
             lock_workspace=lock_workspace,
             pre_run_snapshot=pre_run_snapshot_payload,
