@@ -1,8 +1,11 @@
 import errno
 import json
 import os
+import shutil
 import time as system_time
 from pathlib import Path
+
+import pytest
 
 from brigade import cli
 from brigade import run_checkpoint
@@ -422,6 +425,44 @@ def test_runs_recover_treats_lost_concurrent_claim_as_already_terminal(tmp_path,
 
     assert runs_cmd.recover(str(run_dir), cwd=workspace) == 0
     assert f"already terminal: {run_dir} [failed]" in capsys.readouterr().out
+
+
+def test_runs_recover_lost_claim_with_invalid_utf8_run_json_is_bounded(tmp_path, capsys):
+    """Invalid UTF-8 in run.json must not escape the concurrent-terminal
+    fallback as a raw ``UnicodeDecodeError``; recovery stays bounded at rc=2."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "orphan"
+    _activate_journal_with_checkpoint(workspace, run_dir, {"status": "planning", "task": "demo", "cwd": str(workspace)})
+    # A concurrent recovery already cleared the matching lock.
+    shutil.rmtree(workspace / ".brigade" / "run.lock")
+    # run.json is corrupt: invalid UTF-8 bytes.
+    (run_dir / "run.json").write_bytes(b"\xff\xfe invalid utf8 \x00")
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+
+
+def test_runs_recover_lost_claim_with_deeply_nested_run_json_is_bounded(tmp_path, capsys):
+    """A ``RecursionError`` from deeply nested run.json must not escape the
+    concurrent-terminal fallback; recovery stays bounded at rc=2."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "orphan"
+    _activate_journal_with_checkpoint(workspace, run_dir, {"status": "planning", "task": "demo", "cwd": str(workspace)})
+    shutil.rmtree(workspace / ".brigade" / "run.lock")
+    # Valid but deeply nested JSON: json.loads recurses and raises RecursionError.
+    nesting = 10000
+    (run_dir / "run.json").write_text('{"a":' * nesting + "1" + "}" * nesting)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
 
 
 def test_runs_recover_terminal_run_ignores_foreign_workspace_lock(tmp_path, capsys):
@@ -1658,3 +1699,190 @@ def test_runs_recover_run_json_read_oserror_exits_without_mutation(tmp_path, cap
     assert (lock_path / "pid").read_text() == lock_pid_before
     assert (lock_path / "owner.json").read_text() == lock_owner_before
     assert "could not read run.json" in capsys.readouterr().err
+
+
+def test_runs_recover_proceeds_under_foreign_lock_with_matching_stale_claim(tmp_path, capsys):
+    """CLI recovery proceeds under a foreign current lock when a matching persistent
+    ``.stale`` claim exists, recovering only the matching claim via the checkpoint
+    path and leaving the foreign lock byte-for-byte and path-state unchanged.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo task", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    lock_path = workspace / ".brigade" / "run.lock"
+    # Relocate the matching dead lock to a persistent .stale claim.
+    stale = lock_path.with_name(f".{lock_path.name}.crashed.stale")
+    lock_path.rename(stale)
+    # Install a FOREIGN dead lock at the lock path (different run_dir).
+    foreign_run = workspace / ".brigade" / "runs" / "foreign-run"
+    foreign_run.mkdir(parents=True)
+    _write_lock_owner(workspace, foreign_run, pid=99999999, owner_token="foreign")
+    foreign_owner_bytes = (lock_path / "owner.json").read_bytes()
+    foreign_pid_bytes = (lock_path / "pid").read_bytes()
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"recovered: {run_dir}" in out
+    # The foreign lock is byte-for-byte and path-state unchanged.
+    assert lock_path.is_dir()
+    assert (lock_path / "owner.json").read_bytes() == foreign_owner_bytes
+    assert (lock_path / "pid").read_bytes() == foreign_pid_bytes
+    # The matching .stale claim was cleared.
+    assert not stale.exists()
+    # The run was terminalized via the checkpoint recovery path.
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure_phase"] == "stale-lock-recovery"
+    assert recovered["task"] == "demo task"
+
+
+def test_runs_recover_proceeds_under_invalid_lock_with_matching_stale_claim(tmp_path, capsys):
+    """CLI recovery proceeds under an invalid current lock when a matching persistent
+    ``.stale`` claim exists, recovering only the matching claim and leaving the invalid
+    lock path-state unchanged (still a directory with no owner.json).
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo task", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    lock_path = workspace / ".brigade" / "run.lock"
+    stale = lock_path.with_name(f".{lock_path.name}.crashed.stale")
+    lock_path.rename(stale)
+    # Install an INVALID lock at the lock path: directory with no owner.json.
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text(f"{os.getpid()}\n")
+    invalid_pid_bytes = (lock_path / "pid").read_bytes()
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"recovered: {run_dir}" in out
+    # The invalid lock is path-state unchanged.
+    assert lock_path.is_dir()
+    assert not (lock_path / "owner.json").exists()
+    assert (lock_path / "pid").read_bytes() == invalid_pid_bytes
+    assert not stale.exists()
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure_phase"] == "stale-lock-recovery"
+    assert recovered["task"] == "demo task"
+
+
+def test_runs_recover_lost_matching_claim_under_foreign_lock_is_bounded(tmp_path, monkeypatch, capsys):
+    """When the matching ``.stale`` claim disappears between preflight and recovery,
+    CLI recovery returns bounded rc=2 without mutating the foreign lock or run.json.
+    """
+    import shutil
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo task", "cwd": str(workspace)}
+    _activate_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    lock_path = workspace / ".brigade" / "run.lock"
+    stale = lock_path.with_name(f".{lock_path.name}.crashed.stale")
+    lock_path.rename(stale)
+    foreign_run = workspace / ".brigade" / "runs" / "foreign-run"
+    foreign_run.mkdir(parents=True)
+    _write_lock_owner(workspace, foreign_run, pid=99999999, owner_token="foreign")
+    foreign_owner_bytes = (lock_path / "owner.json").read_bytes()
+    run_json_before = (run_dir / "run.json").read_bytes()
+
+    real_recover = runguard.recover_stale_run
+
+    def lose_claim(cwd, requested_run, **kwargs):
+        if stale.exists():
+            shutil.rmtree(stale, ignore_errors=True)
+        return real_recover(cwd, requested_run, **kwargs)
+
+    monkeypatch.setattr(runguard, "recover_stale_run", lose_claim)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert (lock_path / "owner.json").read_bytes() == foreign_owner_bytes
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+    err = capsys.readouterr().err
+    assert "run lock not found for run:" in err
+    assert "Traceback" not in err
+
+
+def test_runs_recover_restores_from_retained_lock_after_initial_run_json_write_failure(tmp_path, monkeypatch, capsys):
+    """``runs_cmd.recover`` restores a run whose first ``run.json`` write failed
+    after checkpoint publication, leaving the lock retained with durable
+    journal/checkpoint state but no ``run.json``.
+
+    This is the end-to-end recovery assertion for the
+    ``RetainRunLockError`` translation in ``aboyeur.record_run_start``: the lock
+    is retained (not orphaned), the lifecycle journal and recovery checkpoint
+    survive, and ``runs_cmd.recover`` terminalizes the run from the retained
+    state.
+    """
+    from brigade import aboyeur
+    from brigade.roster import Agent, Roster
+
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_dir.mkdir(parents=True)
+
+    real_write_text_atomic = aboyeur.localio.write_text_atomic
+
+    def fail_run_json_write(path, text):
+        if Path(path).name == "run.json":
+            raise OSError("receipt disk full")
+        return real_write_text_atomic(path, text)
+
+    monkeypatch.setattr(aboyeur.localio, "write_text_atomic", fail_run_json_write)
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "codex", "plan and synthesize"),
+            "coder": Agent("coder", "ollama:llama3.3", "write code"),
+        },
+        max_workers=1,
+    )
+
+    with pytest.raises(runguard.RetainRunLockError):
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            aboyeur.record_run_start(
+                run_dir,
+                task="demo task",
+                cwd=workspace,
+                roster=roster,
+                read_only=False,
+                lock_workspace=workspace,
+            )
+
+    # Pre-conditions: lock retained, run.json absent, durable state present.
+    lock_path = workspace / ".brigade" / "run.lock"
+    assert lock_path.is_dir()
+    assert not (run_dir / "run.json").is_file()
+    assert run_lifecycle._journal_path(run_dir).is_file()
+    assert any(run_checkpoint.checkpoint_dir(run_dir).glob("*.json"))
+
+    # Mark the retained lock owner dead so recovery can claim it.
+    _overwrite_lock_owner(workspace, run_dir, pid=99999999)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    # Stop failing the write so recovery can write the terminal receipt.
+    monkeypatch.setattr(aboyeur.localio, "write_text_atomic", real_write_text_atomic)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"recovered: {run_dir}" in out
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure_phase"] == "stale-lock-recovery"
+    assert recovered["task"] == "demo task"
+    assert not lock_path.exists()

@@ -416,7 +416,7 @@ def test_crash_window_records_comparison_gap(enabled, tmp_path):
     _write_run_json_locked(repo, run_dir, "started")  # checkpoint seq 1, run.created seq 2
     _write_run_json_locked(repo, run_dir, "planning")  # checkpoint seq 3, planning seq 4
 
-    # Simulate a crash: append run.dispatch.requested (seq 3) directly to the
+    # Simulate a crash: append run.dispatch.requested (seq 5) directly to the
     # journal, write run.json directly so the shadow hook does NOT run, then
     # trigger a later locked write that does run the hook.
     with runguard.run_lock(repo, run_dir=run_dir):

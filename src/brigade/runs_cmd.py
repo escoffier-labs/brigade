@@ -621,6 +621,21 @@ def _lock_recovery_status(run_dir: Path, run_meta: dict[str, Any]) -> str:
     return runguard.run_recovery_status(workspace, run_dir)
 
 
+def _concurrent_terminal_meta(run_dir: Path) -> dict[str, Any] | None:
+    """Return the terminal run.json meta if a concurrent recovery already finished it.
+
+    Used in the "run lock not found for run" fallback: another process claimed and
+    terminalized the run while this recovery was racing for the lock. Uses
+    ``_read_run_json_state`` so invalid UTF-8, deep JSON nesting (RecursionError),
+    or a raw OSError stay bounded (the caller returns rc=2) instead of escaping as
+    raw exceptions from ``_read_json``.
+    """
+    parseable, meta, _error, _oserror = _read_run_json_state(run_dir)
+    if parseable and meta is not None and _is_terminal(meta):
+        return meta
+    return None
+
+
 def _print_terminal_guidance(run_dir: Path, run_meta: dict[str, Any]) -> None:
     phase, _, _ = _failure_fields(run_meta)
     if phase != "stale-lock-recovery":
@@ -737,11 +752,8 @@ def _recover_from_checkpoint(
             print(f"error: {checkpoint_failure}", file=sys.stderr)
             return 2
         if str(exc).startswith("run lock not found for run:"):
-            try:
-                concurrent_meta = _read_json(run_dir / "run.json")
-            except ValueError:
-                concurrent_meta = None
-            if concurrent_meta is not None and _is_terminal(concurrent_meta):
+            concurrent_meta = _concurrent_terminal_meta(run_dir)
+            if concurrent_meta is not None:
                 print(f"already terminal: {run_dir} [{concurrent_meta.get('status', 'unknown')}]")
                 _print_recovery_guidance(run_dir)
                 return 0
@@ -765,11 +777,8 @@ def _recover_legacy(
         runguard.recover_stale_run(workspace, run_dir)
     except runguard.RunLockError as exc:
         if str(exc).startswith("run lock not found for run:"):
-            try:
-                concurrent_meta = _read_json(run_dir / "run.json")
-            except ValueError:
-                concurrent_meta = None
-            if concurrent_meta is not None and _is_terminal(concurrent_meta):
+            concurrent_meta = _concurrent_terminal_meta(run_dir)
+            if concurrent_meta is not None:
                 print(f"already terminal: {run_dir} [{concurrent_meta.get('status', 'unknown')}]")
                 _print_recovery_guidance(run_dir)
                 return 0
@@ -820,7 +829,17 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
     from . import runguard
 
     state = runguard.run_lock_state(workspace, run_dir)
-    if state in {"live", "foreign", "invalid"}:
+    if state in {"foreign", "invalid"}:
+        # A foreign or invalid current lock must not block recovery of a
+        # matching persistent .stale claim: runguard.recover_stale_run skips
+        # the live lock without mutating it and recovers only the matching
+        # claim. When no matching claim exists, keep the existing refusal
+        # and no-mutation behavior. Live (active-owner) locks always refuse
+        # so same-run ownership stays intact.
+        if not runguard.has_matching_stale_claim(workspace, run_dir):
+            print(_state_refusal_message(state, workspace), file=sys.stderr)
+            return 2
+    elif state == "live":
         print(_state_refusal_message(state, workspace), file=sys.stderr)
         return 2
 

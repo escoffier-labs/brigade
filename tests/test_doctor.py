@@ -1402,12 +1402,24 @@ def _stale_recovery_receipt(
 
     payload = json.loads(json.dumps(checkpoint_obj))
     failure_attribution: dict[str, object] = {}
-    if payload.get("status") == "dispatching":
-        seats = [seat for seat in payload.get("active_seats", []) if isinstance(seat, str) and seat]
+    stored_status = payload.get("status")
+    active_seats = payload.get("active_seats")
+    if stored_status == "dispatching" and isinstance(active_seats, list):
+        seats = [seat for seat in active_seats if isinstance(seat, str) and seat]
         if len(seats) == 1:
             failure_attribution["seat"] = seats[0]
         elif seats:
             failure_attribution["seats"] = seats
+    phase_owner = payload.get("phase_owner")
+    if not failure_attribution and isinstance(phase_owner, str) and phase_owner:
+        failure_attribution["seat"] = phase_owner
+    if not failure_attribution:
+        worker = payload.get("worker")
+        orchestrator = payload.get("orchestrator")
+        if isinstance(worker, str) and worker:
+            failure_attribution["seat"] = worker
+        elif isinstance(orchestrator, str) and orchestrator:
+            failure_attribution["seat"] = orchestrator
     failure: dict[str, object] = {
         "phase": "stale-lock-recovery",
         "kind": "owner-process-exited",
@@ -1672,6 +1684,65 @@ def test_doctor_accepts_valid_stale_recovery_terminal_receipt(tmp_path: Path):
     assert status2 == doctor_mod.FAIL
     assert _RUN_ID in detail2
     assert "run.json does not match checkpoint" in detail2
+
+
+def test_doctor_accepts_stale_recovery_receipt_with_orchestrator_attribution(tmp_path: Path):
+    """A planning checkpoint with no ``active_seats`` attributes the stale-lock
+    failure to the orchestrator, matching production ``_recover_run_artifact``.
+
+    The test helper ``_stale_recovery_receipt`` must apply the same
+    phase_owner -> worker -> orchestrator precedence as production and the
+    doctor reconstruction, or the candidate receipt diverges and the verdict
+    fails for the wrong reason.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    checkpoint_obj = {
+        "status": "planning",
+        "cwd": str(workspace),
+        "task": "inspect",
+        "orchestrator": "chef",
+    }
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, checkpoint_obj)
+    receipt = _stale_recovery_receipt(
+        json.loads(checkpoint_bytes.decode("utf-8")),
+        lock_workspace=str(workspace),
+        lock_acquired_at="2026-07-16T00:00:00+00:00",
+    )
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(receipt))
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.OK, detail
+    assert "fail=0" in detail
+
+
+def test_doctor_accepts_stale_recovery_receipt_with_phase_owner_attribution(tmp_path: Path):
+    """A result-processing checkpoint attributes the failure to ``phase_owner``,
+    taking precedence over worker/orchestrator, matching production precedence.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    checkpoint_obj = {
+        "status": "result-processing",
+        "cwd": str(workspace),
+        "task": "inspect",
+        "phase_owner": "reviewer",
+        "worker": "coder",
+        "orchestrator": "chef",
+    }
+    checkpoint_bytes = _activate_recovery_journal_with_checkpoint(workspace, run_dir, checkpoint_obj)
+    receipt = _stale_recovery_receipt(
+        json.loads(checkpoint_bytes.decode("utf-8")),
+        lock_workspace=str(workspace),
+        lock_acquired_at="2026-07-16T00:00:00+00:00",
+    )
+    (run_dir / "run.json").write_bytes(_recovery_writer_bytes(receipt))
+
+    status, _name, detail = _recovery_check(workspace)
+    assert status == doctor_mod.OK, detail
+    assert "fail=0" in detail
 
 
 def test_doctor_checkpoint_check_never_mutates(tmp_path: Path, monkeypatch):

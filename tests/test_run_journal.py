@@ -990,7 +990,11 @@ def test_read_journal_bounded_refuses_oversize_journal_before_allocation(tmp_pat
         run_journal.read_journal_bounded(journal_path)
 
     assert "bound exceeded" in excinfo.value.diagnostic
-    # No whole-file allocation: the only open is the no-follow read fd.
+    # No whole-file allocation: the only open is the no-follow read fd. The
+    # ``opened`` list must be non-empty so the ``all(...)`` guard is non-vacuous
+    # (a regression that short-circuited before opening would pass vacuously
+    # otherwise).
+    assert opened, "read_journal_bounded must open the journal fd before the bound check"
     assert all(p.name == "lifecycle.jsonl" for p, _ in opened)
 
 

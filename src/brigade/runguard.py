@@ -452,9 +452,13 @@ def _claim_is_activated(owner: dict[str, object] | None) -> bool:
         return False
     try:
         journal = Path(raw_run_dir).expanduser().resolve() / "events" / "lifecycle.jsonl"
-    except OSError:
+        return journal.is_file()
+    except (RuntimeError, OSError):
+        # expanduser raises RuntimeError when it cannot determine the home
+        # directory; resolve/is_file can raise OSError on a vanishing or
+        # unreadable path. The activation probe is best-effort and must never
+        # escape the recovery gate.
         return False
-    return journal.is_file()
 
 
 def _invoke_before_terminalize(
@@ -520,6 +524,52 @@ def run_lock_state(workspace: Path, run_dir: Path) -> str:
         return "invalid"
 
 
+def has_matching_stale_claim(workspace: Path, run_dir: Path) -> bool:
+    """Read-only predicate: True when a persistent ``.run.lock.*.stale`` claim
+    exists whose owner metadata points at ``run_dir``.
+
+    Used by the CLI recovery preflight to relax the foreign/invalid lock
+    refusal: when a matching persistent stale claim exists, recovery may
+    proceed under a foreign or invalid current lock and recover only the
+    matching claim without mutating the current lock. Never raises and never
+    mutates the lock directory or any stale claim; a read failure on any
+    claim normalizes to ``False`` so the preflight fails closed.
+    """
+    try:
+        path = lock_path(workspace)
+    except (RunGuardError, OSError, RuntimeError):
+        # ``lock_path`` raises ``RunGuardError`` for a non-worktree git failure
+        # and ``OSError``/``RuntimeError`` from path resolution (``resolve``,
+        # or ``expanduser`` when HOME is unavailable) for a non-worktree
+        # workspace.
+        return False
+    try:
+        resolved_run_dir = run_dir.expanduser().resolve()
+    except (OSError, RuntimeError):
+        resolved_run_dir = run_dir
+    try:
+        claims = _stale_claims(path)
+    except OSError:
+        # The ``_stale_claims`` glob can raise ``OSError`` when the lock parent
+        # is unreadable or vanishes mid-probe; fail closed.
+        return False
+    for stale in claims:
+        owner = _read_lock_owner(stale)
+        if owner is None:
+            continue
+        try:
+            matches = _owner_matches_run(owner, resolved_run_dir)
+        except (OSError, RuntimeError):
+            # ``_owner_matches_run`` resolves the recorded run_dir via
+            # ``expanduser``/``resolve``; ``expanduser`` raises ``RuntimeError``
+            # when HOME is unavailable and ``resolve`` can raise ``OSError``.
+            # Fail closed for this claim without aborting the remaining claims.
+            continue
+        if matches:
+            return True
+    return False
+
+
 def _finish_claimed_recovery(
     path: Path,
     claimed: Path,
@@ -579,9 +629,7 @@ def recover_stale_run(
         raise RunLockError(f"malformed run lock is not a directory: {path}")
     if path.is_dir():
         owner = _read_lock_owner(path)
-        if owner is None:
-            raise RunLockError(f"run lock has no owner metadata: {path}")
-        if _owner_matches_run(owner, run_dir):
+        if owner is not None and _owner_matches_run(owner, run_dir):
             stale = _claim_stale_lock(path)
             if stale is None:
                 if path.exists():
@@ -593,8 +641,12 @@ def recover_stale_run(
                     raise RunLockError(f"run lock owner changed during recovery; lock retained at {retained}")
                 _invoke_before_terminalize(path, claimed, claimed_owner, before_terminalize)
                 return True
-        elif required:
-            raise RunLockError(f"run lock belongs to a different run: {path}")
+        # A foreign or invalid live lock (owner missing, owner pid missing,
+        # or owner pointing at a different run) must not be mutated, but it
+        # also must not block recovery of a matching persistent .stale claim.
+        # Fall through to _recover_pending_claims, which recovers matching
+        # .stale claims without touching the live lock and raises
+        # "run lock not found for run" only when nothing was recovered.
     return _recover_pending_claims(path, run_dir=run_dir, required=required, before_terminalize=before_terminalize)
 
 

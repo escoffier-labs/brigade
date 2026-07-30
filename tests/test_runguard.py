@@ -1693,3 +1693,193 @@ def test_is_active_run_owner_remains_current_process_only(tmp_path, monkeypatch)
     _write_lock_owner_metadata(lock_path, owner_token="live", pid=foreign_pid, run_dir=run_dir)
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
     assert runguard.is_active_run_owner(repo, run_dir) is False
+
+
+def _abandoned_run(tmp_path):
+    """A repo plus a non-terminal run dir holding a dispatching run.json."""
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "abandoned-run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps({"schema": "brigade.run.v1", "status": "dispatching", "task": "inspect"})
+    )
+    return repo, run_dir
+
+
+def _matching_stale_claim(repo, run_dir, *, owner_token="dead-owner", pid=99999999):
+    """Write a persistent ``.stale`` claim for ``run_dir`` next to the run lock."""
+    lock = runguard.lock_path(repo)
+    stale = lock.with_name(f".{lock.name}.crashed.stale")
+    _write_lock_owner_metadata(stale, owner_token=owner_token, pid=pid, run_dir=run_dir)
+    return stale
+
+
+def test_claim_is_activated_normalizes_runtime_error_from_expanduser(monkeypatch):
+    """A ``RuntimeError`` from ``expanduser`` (no HOME for a ``~`` run_dir) must
+    normalize to ``False``: the activation probe is best-effort and never raises."""
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    owner = {"run_dir": "~nope-nope-nope-nope/somerun", "pid": 99999999}
+    assert runguard._claim_is_activated(owner) is False
+
+
+def test_claim_is_activated_normalizes_oserror_from_is_file(monkeypatch, tmp_path):
+    """An ``OSError`` from ``is_file`` (a path component vanishing between
+    resolve and stat) must normalize to ``False`` rather than escape the probe."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    real_is_file = Path.is_file
+
+    def flaky_is_file(self, *args, **kwargs):
+        if str(self).endswith("lifecycle.jsonl"):
+            raise OSError("is_file boom")
+        return real_is_file(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", flaky_is_file)
+    owner = {"run_dir": str(run_dir), "pid": 99999999}
+    assert runguard._claim_is_activated(owner) is False
+
+
+def test_recover_stale_run_recovers_matching_stale_claim_despite_foreign_live_lock(tmp_path, monkeypatch):
+    """A matching persistent ``.stale`` claim stays recoverable under a foreign
+    live lock: the foreign lock is skipped without mutation and the claim is
+    recovered via ``_recover_pending_claims``."""
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+
+    # Foreign live lock: a different run owns the lock path with a live pid.
+    foreign_run = tmp_path / "foreign-run"
+    foreign_run.mkdir()
+    _write_lock_owner_metadata(lock_path, owner_token="foreign", pid=os.getpid(), run_dir=foreign_run)
+    stale = _matching_stale_claim(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid != 99999999)
+
+    assert runguard.recover_stale_run(repo, run_dir) is True
+    # The foreign live lock is untouched; the claim is cleared and the run terminalized.
+    assert lock_path.is_dir()
+    assert json.loads((lock_path / "owner.json").read_text())["owner_token"] == "foreign"
+    assert not stale.exists()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+
+
+def test_recover_stale_run_recovers_matching_stale_claim_despite_invalid_live_lock(tmp_path, monkeypatch):
+    """A matching persistent ``.stale`` claim stays recoverable when the live
+    lock is invalid (no owner metadata); the invalid lock is left unmutated."""
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+
+    # Invalid live lock: directory with no owner.json.
+    lock_path.mkdir(parents=True, exist_ok=True)
+    (lock_path / "pid").write_text(f"{os.getpid()}\n")
+    stale = _matching_stale_claim(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid != 99999999)
+
+    assert runguard.recover_stale_run(repo, run_dir) is True
+    assert lock_path.is_dir()
+    assert not (lock_path / "owner.json").exists()
+    assert not stale.exists()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+
+
+def test_recover_stale_run_still_raises_when_foreign_lock_and_no_matching_claim(tmp_path, monkeypatch):
+    """A foreign live lock with no matching ``.stale`` claim still raises, so the
+    caller's concurrent-terminal fallback can surface a bounded error; the
+    foreign lock is never mutated."""
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+
+    foreign_run = tmp_path / "foreign-run"
+    foreign_run.mkdir()
+    _write_lock_owner_metadata(lock_path, owner_token="foreign", pid=os.getpid(), run_dir=foreign_run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+
+    with pytest.raises(runguard.RunLockError, match="run lock not found for run:"):
+        runguard.recover_stale_run(repo, run_dir)
+    assert lock_path.is_dir()
+    assert json.loads((lock_path / "owner.json").read_text())["owner_token"] == "foreign"
+
+
+def test_has_matching_stale_claim_normalizes_oserror_from_stale_claims_glob(tmp_path, monkeypatch):
+    """An ``OSError`` from the ``_stale_claims`` glob (a vanished or unreadable
+    lock parent) must not escape the fail-closed predicate."""
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _matching_stale_claim(repo, run_dir, owner_token="dead")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    def boom(_path):
+        raise OSError("glob boom")
+
+    monkeypatch.setattr(runguard, "_stale_claims", boom)
+
+    assert runguard.has_matching_stale_claim(repo, run_dir) is False
+
+
+def test_has_matching_stale_claim_normalizes_runtime_error_from_owner_path_resolve(tmp_path, monkeypatch):
+    """A ``RuntimeError`` from ``_owner_matches_run`` path resolution
+    (``expanduser`` with no HOME) must not escape the fail-closed predicate."""
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _matching_stale_claim(repo, run_dir, owner_token="dead")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    def boom(_owner, _run_dir):
+        raise RuntimeError("expanduser boom")
+
+    monkeypatch.setattr(runguard, "_owner_matches_run", boom)
+
+    assert runguard.has_matching_stale_claim(repo, run_dir) is False
+
+
+@pytest.mark.parametrize("exc", [OSError("resolve boom"), RuntimeError("resolve boom")])
+def test_has_matching_stale_claim_normalizes_lock_path_errors(tmp_path, monkeypatch, exc):
+    """``OSError``/``RuntimeError`` from ``lock_path`` resolution must not
+    escape the fail-closed predicate."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    real_lock_path = runguard.lock_path
+
+    def boom(cwd):
+        if cwd == workspace:
+            raise exc
+        return real_lock_path(cwd)
+
+    monkeypatch.setattr(runguard, "lock_path", boom)
+
+    assert runguard.has_matching_stale_claim(workspace, run_dir) is False
+
+
+def test_has_matching_stale_claim_returns_false_for_foreign_stale_claim(tmp_path, monkeypatch):
+    """A persistent ``.stale`` claim pointing at a different run returns
+    ``False`` (fail closed)."""
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    other_run = tmp_path / "other-run"
+    other_run.mkdir()
+    _matching_stale_claim(repo, other_run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    assert runguard.has_matching_stale_claim(repo, run_dir) is False
+
+
+def test_has_matching_stale_claim_never_mutates_lock_or_stale_claims(tmp_path, monkeypatch):
+    """The predicate is read-only: neither the lock nor any claim is mutated."""
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    stale = _matching_stale_claim(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    snapshot_paths = sorted(p.name for p in stale.parent.iterdir())
+    stale_owner_bytes = (stale / "owner.json").read_bytes()
+
+    runguard.has_matching_stale_claim(repo, run_dir)
+
+    assert sorted(p.name for p in stale.parent.iterdir()) == snapshot_paths
+    assert (stale / "owner.json").read_bytes() == stale_owner_bytes

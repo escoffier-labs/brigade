@@ -5224,3 +5224,64 @@ def test_run_fails_when_canonical_checkout_drifts_during_dispatch_with_separate_
     assert run_meta["lock_workspace"] == str(lock_workspace)
     # The worker result must not have been finalized on top of drifted state.
     assert not (output_dir / "final.txt").exists()
+
+
+def test_record_run_start_run_json_write_failure_retains_lock_and_durable_state(tmp_path, monkeypatch):
+    """A run.json lifecycle write failure after checkpoint publication retains the lock.
+
+    The first run.json write activates the journal, publishes a recovery
+    checkpoint, and appends a lifecycle event, then the final atomic
+    ``run.json`` replacement fails. The raw ``OSError`` must be translated to
+    ``runguard.RetainRunLockError`` (carrying the original cause) so
+    ``runguard.run_lock`` retains the lock instead of releasing it and
+    orphaning the durable journal/checkpoint recovery state. The journal and
+    checkpoint artifacts must remain while ``run.json`` stays absent, so
+    ``brigade runs recover`` can restore from the retained state.
+    """
+    from brigade import run_checkpoint
+    from brigade import run_lifecycle
+
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "active"
+    run_dir.mkdir(parents=True)
+
+    real_write_text_atomic = aboyeur.localio.write_text_atomic
+
+    def fail_run_json_write(path, text):
+        if Path(path).name == "run.json":
+            raise OSError("receipt disk full")
+        return real_write_text_atomic(path, text)
+
+    monkeypatch.setattr(aboyeur.localio, "write_text_atomic", fail_run_json_write)
+
+    with pytest.raises(
+        runguard.RetainRunLockError, match="failed to write initial run receipt: receipt disk full"
+    ) as exc_info:
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            aboyeur.record_run_start(
+                run_dir,
+                task="demo task",
+                cwd=workspace,
+                roster=_roster(),
+                read_only=False,
+                lock_workspace=workspace,
+            )
+
+    # The original OSError is preserved as the cause.
+    assert isinstance(exc_info.value.__cause__, OSError)
+
+    # The lock is retained (not released) so recovery state is not orphaned.
+    assert runguard.lock_path(workspace).is_dir()
+
+    # run.json is absent (the final atomic write failed).
+    assert not (run_dir / "run.json").is_file()
+
+    # The durable recovery state survives: the lifecycle journal and the
+    # published recovery checkpoint remain on disk.
+    journal_path = run_lifecycle._journal_path(run_dir)
+    assert journal_path.is_file()
+    checkpoint_dir = run_checkpoint.checkpoint_dir(run_dir)
+    assert checkpoint_dir.is_dir()
+    assert any(checkpoint_dir.glob("*.json"))

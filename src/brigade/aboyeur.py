@@ -2334,30 +2334,41 @@ def record_run_start(
     lifecycle_requested = existing_requested or (
         not run_json_exists and run_lifecycle.is_lifecycle_journaling_enabled()
     )
-    _write_json(
-        output_dir / "run.json",
-        _run_payload(
-            task=task,
-            cwd=cwd,
-            lock_workspace=lock_workspace if lock_workspace is not None else cwd,
-            roster=roster,
-            dry_run=dry_run,
-            read_only=read_only,
-            status="started",
-            started_at=started_at,
-            output_dir=output_dir,
-            code_graph=CodeGraphBrief(attached=False),
-            drift_impact=DriftImpactBrief(attached=False),
-            evidence=EvidenceBrief(attached=False),
-            codex_transport=codex_transport or roster.codex_transport,
-            worker=worker,
-            include_git=False,
-            scheduler=(
-                {"requested": scheduler, "used": None, "fallback_reason": None} if scheduler is not None else None
+    # The first run.json write activates the lifecycle journal and publishes a
+    # recovery checkpoint BEFORE the atomic run.json replacement. If that final
+    # replacement fails, durable journal/checkpoint state already exists without
+    # a run.json, so ``_terminalize_run_lifecycle.terminate_existing`` cannot
+    # terminalize (run.json is absent) and the lock must be retained for
+    # ``brigade runs recover``. Translate the bounded lifecycle write failures
+    # to ``RetainRunLockError`` so ``runguard.run_lock`` keeps the lock instead
+    # of releasing it and orphaning the recovery state.
+    try:
+        _write_json(
+            output_dir / "run.json",
+            _run_payload(
+                task=task,
+                cwd=cwd,
+                lock_workspace=lock_workspace if lock_workspace is not None else cwd,
+                roster=roster,
+                dry_run=dry_run,
+                read_only=read_only,
+                status="started",
+                started_at=started_at,
+                output_dir=output_dir,
+                code_graph=CodeGraphBrief(attached=False),
+                drift_impact=DriftImpactBrief(attached=False),
+                evidence=EvidenceBrief(attached=False),
+                codex_transport=codex_transport or roster.codex_transport,
+                worker=worker,
+                include_git=False,
+                scheduler=(
+                    {"requested": scheduler, "used": None, "fallback_reason": None} if scheduler is not None else None
+                ),
+                lifecycle_journal_requested=True if lifecycle_requested else None,
             ),
-            lifecycle_journal_requested=True if lifecycle_requested else None,
-        ),
-    )
+        )
+    except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
+        raise runguard.RetainRunLockError(f"failed to write initial run receipt: {exc}") from exc
     _write_json(output_dir / "roster.json", _roster_payload(roster))
 
 
