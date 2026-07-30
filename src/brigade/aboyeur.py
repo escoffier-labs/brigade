@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import os
@@ -28,7 +29,10 @@ from . import localio
 from . import proc, receipt_schema, runguard
 from . import run_control
 from . import run_checkpoint
+from . import run_events
+from . import run_journal
 from . import run_lifecycle
+from . import run_projector
 from . import run_shadow
 from .result_integrity import validate_final_output
 from .run_receipts import (
@@ -56,6 +60,20 @@ DRIFT_IMPACT_HEADING = "## Upstream drift impact (Upstream Drift + GraphTrail, r
 DRIFT_IMPACT_LIMIT = 4000
 BRIEF_BUDGET_BYTES = 6000
 NOOP_DETAIL = "no-op"
+
+# Journal-authority opt-in (issue #568 slice 6). Per-run and durable, like the
+# lifecycle-journal flag, and requires lifecycle journaling: enrolling a new
+# run sets BOTH request fields true. Existing runs enroll only from their
+# durable run.json field, never a later environment change.
+_AUTHORITY_FLAG_ENV = "BRIGADE_RUN_JOURNAL_AUTHORITY"
+_AUTHORITY_REQUEST_FIELD = "run_journal_authority_requested"
+_AUTHORITY_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def is_run_journal_authority_enabled() -> bool:
+    """True when the opt-in journal-authority flag is set in the environment."""
+    return os.environ.get(_AUTHORITY_FLAG_ENV, "").strip().lower() in _AUTHORITY_TRUTHY
+
 
 # A plan-mode seat has no write tool, so any file it tries to create fails, and a
 # failed write is what invites harness hooks to hijack the seat's final message
@@ -488,6 +506,285 @@ def make_run_dir(base: Path, now: datetime | None = None) -> Path:
     return base / f"{stamp}-{uuid4().hex[:8]}"
 
 
+def _resolve_authority_state(run_dir: Path) -> str:
+    """Return one of 'legacy', 'authority-requested', 'authoritative'.
+
+    'legacy' only when no durable authority request is present
+    (run_journal_authority_requested is not true on run.json). 'authority-
+    requested' only when the durable authority request is true and NONE of the
+    four projection metadata fields is present on run.json (projector_version,
+    journal_present, journal_last_sequence, journal_last_event_digest). Once
+    ANY of the four projection metadata fields is present, the run is past the
+    not-yet-authoritative fallback: incomplete fields, a stale or wrong
+    projector version, a bounded read failure, a chain failure, a cursor
+    failure, or a digest failure all raise a bounded LifecycleJournalError and
+    never downgrade. 'authoritative' only when run.json carries all four
+    journal-metadata fields with projector_version == run_projector.
+    PROJECTOR_VERSION and its saved journal_last_sequence /
+    journal_last_event_digest verifies against the event at that sequence in a
+    bounded, chain-valid journal prefix. A bound failure or chain error on a
+    run with NO projection metadata fields returns 'authority-requested' (the
+    not-yet-authoritative fallback); it never authorizes projection.
+    """
+    run_json = run_dir / "run.json"
+    try:
+        raw = run_json.read_bytes()
+    except FileNotFoundError:
+        return "legacy"
+    try:
+        meta = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        meta = None
+    if not isinstance(meta, dict) or meta.get(_AUTHORITY_REQUEST_FIELD) is not True:
+        return "legacy"
+    metadata_fields = (
+        "projector_version",
+        "journal_present",
+        "journal_last_sequence",
+        "journal_last_event_digest",
+    )
+    present = [name for name in metadata_fields if name in meta]
+    if not present:
+        return "authority-requested"
+    # Past the not-yet-authoritative fallback: no downgrade is allowed.
+    missing = [name for name in metadata_fields if name not in meta]
+    if missing:
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound(f"authority run missing projection metadata: {sorted(missing)}")
+        )
+    if meta.get("projector_version") != run_projector.PROJECTOR_VERSION:
+        raise run_lifecycle.LifecycleJournalError(run_events._bound("authority run projector version is not current"))
+    # Finding 1: once any projection metadata exists, journal_present must be
+    # exactly True. A false or wrong-typed value is invalid authoritative
+    # metadata and must fail closed before the checkpoint/lifecycle append.
+    if meta.get("journal_present") is not True:
+        raise run_lifecycle.LifecycleJournalError(run_events._bound("authority run journal_present is not true"))
+    saved_seq = meta.get("journal_last_sequence")
+    saved_digest = meta.get("journal_last_event_digest")
+    if isinstance(saved_seq, bool) or not isinstance(saved_seq, int) or saved_seq < 1:
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("authority run saved journal_last_sequence is invalid")
+        )
+    if not isinstance(saved_digest, str):
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("authority run saved journal_last_event_digest is invalid")
+        )
+    journal_path = run_lifecycle._journal_path(run_dir)
+    try:
+        report = run_journal.read_journal_bounded(journal_path)
+    except (OSError, run_journal.RunJournalError) as exc:
+        raise run_lifecycle._bound_journal_failure(exc) from exc
+    if report.partial_tail is not None or report.chain_errors:
+        raise run_lifecycle.LifecycleJournalError(run_events._bound("authority run journal is not chain-valid"))
+    events = report.events
+    # Finding 2: the bounded verified prefix must reject ANY event whose run_id
+    # differs from run_dir.name, not only the event at the saved cursor. A
+    # chain-valid journal that mixes in a foreign-run-id event is not
+    # exclusively this run's and must fail closed.
+    for event in events:
+        if event.run_id != run_dir.name:
+            raise run_lifecycle.LifecycleJournalError(
+                run_events._bound("authority run journal contains an event with a foreign run_id")
+            )
+    if saved_seq > len(events):
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("authority run saved sequence is beyond the journal tail")
+        )
+    event = events[saved_seq - 1]
+    if event.event_digest != saved_digest:
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("authority run saved cursor does not verify against the journal")
+        )
+    return "authoritative"
+
+
+def _genuine_journal_ahead(run_dir: Path) -> bool:
+    """Return True only when the journal tail has genuinely advanced past a
+    real recorded comparison (not a forged cursor).
+
+    ``check_projection_readiness`` reports ``REASON_JOURNAL_AHEAD`` whenever
+    the artifact's ``last_compared_sequence``/``last_compared_event_digest``
+    does not match the journal tail, which conflates a real committed
+    transition whose shadow step has not run yet with a forged or stale
+    cursor. The journal-ahead exception may only authorize projection when the
+    artifact's cursor verifies against an actual event in a clean journal
+    prefix AND the tail has advanced past it; otherwise the evidence is
+    forged and the gate must fail closed.
+    """
+    artifact_path = run_shadow.shadow_artifact_path(run_dir)
+    try:
+        data = json.loads(artifact_path.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    baseline = run_shadow._verify_stale_baseline(
+        run_dir,
+        run_dir.name,
+        data.get("last_compared_sequence"),
+        data.get("last_compared_event_digest"),
+    )
+    if baseline is None:
+        return False
+    try:
+        journal_report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
+    except (OSError, run_journal.RunJournalError):
+        return False
+    if journal_report.partial_tail is not None or journal_report.chain_errors:
+        return False
+    if not journal_report.events:
+        return False
+    return journal_report.events[-1].sequence > baseline[0]
+
+
+def _authoritative_prior_decision(run_dir: Path) -> str:
+    """Resolve the prior authority gate for an authoritative run.
+
+    Returns ``"ready"`` when the prior committed state is ready, or
+    ``"journal-ahead"`` for the approved prior journal-ahead exception (a
+    genuine committed transition whose shadow step has not run yet). Any
+    other prior state raises a bounded ``LifecycleJournalError`` BEFORE the
+    checkpoint/lifecycle append, so forged evidence cannot authorize
+    projection and no unrelated prior reason piggybacks on the journal-ahead
+    exception. The decision is based on ``run_shadow.check_projection_readiness``
+    on the prior committed state, not this write's pre-parity ad hoc parsing.
+    """
+    report = run_shadow.check_projection_readiness(run_dir)
+    if report.ready:
+        return "ready"
+    if report.reasons == (run_shadow.REASON_JOURNAL_AHEAD,) and _genuine_journal_ahead(run_dir):
+        return "journal-ahead"
+    raise run_lifecycle.LifecycleJournalError(
+        run_events._bound("authoritative run prior gate not ready: " + ",".join(sorted(report.reasons)))
+    )
+
+
+def _project_authority_candidate(path: Path, run_dir: Path, candidate: dict[str, object]) -> None:
+    """Re-read the bounded journal, verify a clean chain, project the
+    candidate, and atomically replace run.json with the projected bytes."""
+    try:
+        journal_report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
+    except (OSError, run_journal.RunJournalError) as exc:
+        raise run_lifecycle._bound_journal_failure(exc) from exc
+    if journal_report.partial_tail is not None or journal_report.chain_errors:
+        raise run_lifecycle.LifecycleJournalError(run_events._bound("authority write journal is not chain-valid"))
+    try:
+        projection = run_projector.project_run_snapshot(candidate, journal_report.events, journal_present=True)
+    except run_projector.ProjectionError as exc:
+        raise run_lifecycle.LifecycleJournalError(run_events._bound(exc.diagnostic)) from exc
+    localio.write_text_atomic(path, projection.to_bytes().decode("utf-8"))
+
+
+def _validate_journal_ahead_projection(run_dir: Path, readiness: run_shadow.ReadinessReport) -> None:
+    """Validate the post-parity shadow artifact for the approved prior
+    journal-ahead exception (finding 3).
+
+    The exception may project only when the post-parity gate failure is
+    exactly the one comparison-gap error created by catching up a genuinely
+    ahead journal AND the current parity outcome is match. Any other
+    post-parity mismatch or error must fail closed with a bounded
+    ``LifecycleJournalError`` and no run.json replace, so the exception cannot
+    ignore an arbitrary post-parity defect.
+
+    The post-parity ``ReadinessReport`` is checked explicitly: its reasons must
+    be exactly ``(REASON_ERROR_RECORDED,)``. A forged extra reason such as
+    ``REASON_JOURNAL_UNREADABLE`` (set by forging the aggregate
+    ``last_error_category`` to ``"journal-unreadable"``) must fail closed even
+    when the recent_records pair still looks like comparison-gap then match.
+
+    The current shadow artifact is validated after parity: current
+    schema/version/run_id, current projector version, ``mismatches`` a
+    non-bool int equal to 0, ``errors`` a non-bool int equal to 1 (the
+    comparison-gap), ``last_error_category`` None on the final match
+    aggregate, last_outcome match, and the final two recent records are
+    comparison-gap error then match for the same current tail
+    sequence/digest. Strict integer semantics reject bool counters: ``False``
+    must not satisfy ``mismatches == 0`` and ``True`` must not satisfy
+    ``errors == 1``.
+    """
+    if readiness.reasons != (run_shadow.REASON_ERROR_RECORDED,):
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound(
+                "journal-ahead projection post-parity reasons are not exactly error-recorded: "
+                + ",".join(sorted(readiness.reasons))
+            )
+        )
+    artifact_path = run_shadow.shadow_artifact_path(run_dir)
+    try:
+        data = json.loads(artifact_path.read_text())
+    except (OSError, ValueError):
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("journal-ahead projection artifact unreadable")
+        ) from None
+    if not isinstance(data, dict):
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("journal-ahead projection artifact is not an object")
+        )
+    if (
+        data.get("schema") != run_shadow.SHADOW_SCHEMA
+        or data.get("schema_version") != run_shadow.SHADOW_SCHEMA_VERSION
+        or data.get("run_id") != run_dir.name
+    ):
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("journal-ahead projection artifact schema/run_id mismatch")
+        )
+    if data.get("projector_version") != run_projector.PROJECTOR_VERSION:
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("journal-ahead projection artifact projector version is not current")
+        )
+    mismatches = data.get("mismatches")
+    if isinstance(mismatches, bool) or not isinstance(mismatches, int) or mismatches != 0:
+        raise run_lifecycle.LifecycleJournalError(run_events._bound("journal-ahead projection recorded a mismatch"))
+    errors = data.get("errors")
+    if isinstance(errors, bool) or not isinstance(errors, int) or errors != 1:
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("journal-ahead projection must record exactly one comparison-gap error")
+        )
+    if data.get("last_error_category") is not None:
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("journal-ahead projection aggregate last_error_category is not none")
+        )
+    if data.get("last_outcome") != run_shadow.OUTCOME_MATCH:
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("journal-ahead projection current parity is not a match")
+        )
+    records = data.get("recent_records")
+    if not isinstance(records, list) or len(records) < 2:
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("journal-ahead projection artifact lacks the gap-then-match record pair")
+        )
+    gap_record = records[-2]
+    match_record = records[-1]
+    if (
+        not isinstance(gap_record, dict)
+        or gap_record.get("outcome") != run_shadow.OUTCOME_ERROR
+        or gap_record.get("category") != "comparison-gap"
+    ):
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("journal-ahead projection prior record is not a comparison-gap error")
+        )
+    if not isinstance(match_record, dict) or match_record.get("outcome") != run_shadow.OUTCOME_MATCH:
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("journal-ahead projection current record is not a match")
+        )
+    try:
+        journal_report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
+    except (OSError, run_journal.RunJournalError) as exc:
+        raise run_lifecycle._bound_journal_failure(exc) from exc
+    if journal_report.partial_tail is not None or journal_report.chain_errors or not journal_report.events:
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("journal-ahead projection journal is not chain-valid")
+        )
+    tail = journal_report.events[-1]
+    tail_seq = tail.sequence
+    tail_digest = tail.event_digest
+    for record in (gap_record, match_record):
+        if record.get("sequence") != tail_seq or record.get("event_digest") != tail_digest:
+            raise run_lifecycle.LifecycleJournalError(
+                run_events._bound("journal-ahead projection gap/match records do not match the current tail")
+            )
+
+
 def _write_json(path: Path, payload: object) -> None:
     # run.json is polled by `brigade runs watch/steer/interrupt` while the run
     # rewrites it, so the write must be atomic or a concurrent reader can
@@ -497,22 +794,61 @@ def _write_json(path: Path, payload: object) -> None:
         if isinstance(status, str) and status:
             run_dir = path.parent
             workspace = runguard.resolve_run_lock_workspace(payload, run_dir)
+            # Resolve the authority state BEFORE any new checkpoint or lifecycle
+            # append. The resolver raises a bounded LifecycleJournalError when
+            # projected metadata exists and validation fails, so the writer
+            # never observes an authoritative run downgrade. runguard recovery
+            # repair writes (no status) bypass this branch entirely.
+            authority_state = _resolve_authority_state(run_dir)
+            # Construct the canonical legacy candidate and the projection base
+            # exactly once. The base strips the four journal-derived metadata
+            # fields; the same object is the base-stripped checkpoint body
+            # whenever the resolved state is authority-requested or
+            # authoritative.
+            candidate = copy.deepcopy(payload)
+            for derived in (
+                "projector_version",
+                "journal_present",
+                "journal_last_sequence",
+                "journal_last_event_digest",
+            ):
+                candidate.pop(derived, None)
+            encoded_candidate = json.dumps(candidate, indent=2, sort_keys=True) + "\n"
+            base_bytes = encoded_candidate.encode("utf-8")
+            body_kind = (
+                run_checkpoint._BODY_KIND_BASE_STRIPPED
+                if authority_state in {"authority-requested", "authoritative"}
+                else None
+            )
+            # Prior authority gate (authoritative only): fail closed BEFORE
+            # the checkpoint/lifecycle append when the prior committed state
+            # is not ready and not a genuine journal-ahead. Legacy and
+            # authority-requested runs skip this gate; authority-requested
+            # bases projection on the post-parity readiness report, and legacy
+            # skips all prior-decision work (no shadow/journal reads).
+            prior_decision: str | None
+            if authority_state == "authoritative":
+                prior_decision = _authoritative_prior_decision(run_dir)
+            else:
+                prior_decision = None
             # Exact order: activate the journal, publish the recovery
-            # checkpoint, append the lifecycle status transition, then
-            # atomically replace run.json, then record the shadow comparison.
-            # A CheckpointError from write_checkpoint fails BEFORE the
-            # lifecycle append and BEFORE run.json replacement.
+            # checkpoint, append the lifecycle status transition, record the
+            # shadow parity, consult the post-parity readiness veto, then
+            # atomically replace run.json. A CheckpointError from
+            # write_checkpoint fails BEFORE the lifecycle append and BEFORE
+            # run.json replacement. The prior gate above raises BEFORE any
+            # append for an authoritative run with a real prior defect.
             run_lifecycle.prepare_lifecycle_journal(
                 run_dir,
                 workspace=workspace,
                 incoming_snapshot=payload,
             )
-            encoded = json.dumps(payload, indent=2, sort_keys=True) + "\n"
             run_checkpoint.write_checkpoint(
                 run_dir,
-                encoded.encode("utf-8"),
+                base_bytes,
                 workspace=workspace,
                 paired_event_type=run_lifecycle.STATUS_EVENT_TYPE.get(status),
+                body_kind=body_kind,
             )
             run_lifecycle.record_lifecycle_transition(
                 run_dir,
@@ -522,9 +858,43 @@ def _write_json(path: Path, payload: object) -> None:
                 workspace=workspace,
                 incoming_snapshot=payload,
             )
-            localio.write_text_atomic(path, encoded)
             run_shadow.record_shadow_comparison(run_dir, payload)
-            return
+            if authority_state == "legacy":
+                # Legacy runs skip the veto and write the legacy body (slice 5).
+                localio.write_text_atomic(path, encoded_candidate)
+                return
+            readiness = run_shadow.check_projection_readiness(run_dir)
+            if authority_state == "authority-requested":
+                # Authority-requested projection uses the POST-parity readiness
+                # report (a ready first comparison projects that same write),
+                # never the pre-parity decision. A not-ready gate falls back to
+                # the legacy body until a ready first comparison catches up.
+                if readiness.ready:
+                    _project_authority_candidate(path, run_dir, candidate)
+                else:
+                    localio.write_text_atomic(path, encoded_candidate)
+                return
+            # authoritative: prior_decision is "ready" or "journal-ahead".
+            if readiness.ready:
+                _project_authority_candidate(path, run_dir, candidate)
+                return
+            # Post-parity gate is not ready. For the approved prior
+            # journal-ahead exception, allow projection despite the current
+            # parity gap ONLY when the post-parity gate failure is exactly
+            # the one comparison-gap error created by catching up a genuinely
+            # ahead journal AND the current parity outcome is match (finding
+            # 3). Any other post-parity mismatch or error fails closed with no
+            # run.json replace. For a prior-ready normal write, require the
+            # post-parity report to remain ready; any other prior reason
+            # already failed closed at the prior gate, so nothing unrelated
+            # piggybacks here.
+            if prior_decision == "journal-ahead":
+                _validate_journal_ahead_projection(run_dir, readiness)
+                _project_authority_candidate(path, run_dir, candidate)
+                return
+            raise run_lifecycle.LifecycleJournalError(
+                run_events._bound("authoritative run gate not ready: " + ",".join(sorted(readiness.reasons)))
+            )
     localio.write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     if path.name == "run.json" and isinstance(payload, dict):
         run_shadow.record_shadow_comparison(path.parent, payload)
@@ -2187,6 +2557,7 @@ def _run_payload(
     pre_run_snapshot: dict[str, object] | None = None,
     scheduler: dict[str, object] | None = None,
     lifecycle_journal_requested: bool | None = None,
+    run_journal_authority_requested: bool | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": receipt_schema.RUN_RECEIPT_SCHEMA,
@@ -2223,6 +2594,8 @@ def _run_payload(
         payload["scheduler"] = scheduler
     if lifecycle_journal_requested:
         payload["lifecycle_journal_requested"] = True
+    if run_journal_authority_requested:
+        payload["run_journal_authority_requested"] = True
     if resolution := _roster_resolution_payload(roster):
         payload["roster"] = resolution
     if lock_workspace is not None:
@@ -2323,16 +2696,26 @@ def record_run_start(
     output_dir.mkdir(parents=True, exist_ok=True)
     run_json = output_dir / "run.json"
     run_json_exists = run_json.is_file()
-    existing_requested = False
+    existing_lifecycle_requested = False
+    existing_authority_requested = False
     if run_json_exists:
         try:
             existing = json.loads(run_json.read_text())
         except (OSError, json.JSONDecodeError):
             existing = None
-        if isinstance(existing, dict) and existing.get("lifecycle_journal_requested") is True:
-            existing_requested = True
-    lifecycle_requested = existing_requested or (
+        if isinstance(existing, dict):
+            if existing.get("lifecycle_journal_requested") is True:
+                existing_lifecycle_requested = True
+            if existing.get(_AUTHORITY_REQUEST_FIELD) is True:
+                existing_authority_requested = True
+    lifecycle_requested = existing_lifecycle_requested or (
         not run_json_exists and run_lifecycle.is_lifecycle_journaling_enabled()
+    )
+    # A new run enrolls in journal authority only when BOTH the authority and
+    # lifecycle-journal flags are set. An existing run enrolls only from its
+    # durable run.json field: a later environment change never enrolls it.
+    authority_requested = existing_authority_requested or (
+        not run_json_exists and is_run_journal_authority_enabled() and run_lifecycle.is_lifecycle_journaling_enabled()
     )
     # The first run.json write activates the lifecycle journal and publishes a
     # recovery checkpoint BEFORE the atomic run.json replacement. If that final
@@ -2365,6 +2748,7 @@ def record_run_start(
                     {"requested": scheduler, "used": None, "fallback_reason": None} if scheduler is not None else None
                 ),
                 lifecycle_journal_requested=True if lifecycle_requested else None,
+                run_journal_authority_requested=True if authority_requested else None,
             ),
         )
     except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:

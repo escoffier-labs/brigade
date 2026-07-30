@@ -957,3 +957,891 @@ def test_receipt_update_helper_translates_checkpoint_error_to_retain_run_lock(
     assert (run_dir / "run.json").read_bytes() == run_before
     assert _journal_path(run_dir).read_bytes() == journal_before
     assert [e.event_type for e in _status_events(run_dir)] == ["run.created"]
+
+
+# -- Issue #568 slice 6, Task 7: journal-authority enrollment and write path -----
+
+from brigade import run_shadow  # noqa: E402
+
+_AUTHORITY_FIELD = "run_journal_authority_requested"
+
+
+def _apply_authority_request(run_dir: Path, payload: dict[str, object]) -> dict[str, object]:
+    run_json = run_dir / "run.json"
+    if run_json.is_file():
+        existing = json.loads(run_json.read_text())
+        if existing.get(_AUTHORITY_FIELD) is True:
+            payload[_AUTHORITY_FIELD] = True
+        if existing.get(_REQUEST_FIELD) is True:
+            payload[_REQUEST_FIELD] = True
+    elif run_lifecycle.is_lifecycle_journaling_enabled():
+        payload[_REQUEST_FIELD] = True
+    return payload
+
+
+def _write_run_json_authority(run_dir: Path, status: str, **kwargs) -> None:
+    payload = _apply_authority_request(run_dir, _run_payload(status, **kwargs))
+    aboyeur._write_json(run_dir / "run.json", payload)
+
+
+def test_authority_enrollment_persists_run_journal_authority_requested(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="authority run",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["run_journal_authority_requested"] is True
+    assert meta["lifecycle_journal_requested"] is True
+    assert not _journal_path(run_dir).exists()
+
+
+def test_not_yet_authoritative_run_writes_legacy_body_when_gate_not_ready(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="authority run",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+    # Authority-requested projection uses the POST-parity readiness report
+    # (finding 2): a ready first comparison projects that same write, and a
+    # not-ready post-parity gate falls back to the legacy body. Force a
+    # genuine not-ready post-parity gate so the fallback path is exercised
+    # without relying on the old pre-parity decision.
+    monkeypatch.setattr(
+        run_shadow,
+        "check_projection_readiness",
+        lambda run_dir: run_shadow.ReadinessReport(ready=False, reasons=(run_shadow.REASON_MISMATCH_RECORDED,)),
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json_authority(run_dir, "planning")
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert "projector_version" not in meta
+    assert meta["status"] == "planning"
+
+
+def test_first_write_match_authorizes_first_projected_snapshot(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="authority run",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json_authority(run_dir, "started")
+        _write_run_json_authority(run_dir, "planning")
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["projector_version"] == 3
+    assert meta["journal_present"] is True
+    assert meta["status"] == "planning"
+
+
+def test_authoritative_run_fail_closed_on_projection_error(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="authority run",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json_authority(run_dir, "started")
+        _write_run_json_authority(run_dir, "planning")
+    meta_before = (run_dir / "run.json").read_bytes()
+    from brigade import run_projector
+
+    monkeypatch.setattr(
+        run_projector,
+        "project_run_snapshot",
+        lambda *_a, **_kw: (_ for _ in ()).throw(run_projector.EventPayloadError("forged")),
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert (run_dir / "run.json").read_bytes() == meta_before
+
+
+def test_legacy_run_unchanged_under_authority_flag_off(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.delenv("BRIGADE_RUN_JOURNAL_AUTHORITY", raising=False)
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="lifecycle only",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json(run_dir, "planning")
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert "run_journal_authority_requested" not in meta
+    assert "projector_version" not in meta
+
+
+def _enroll_and_authorize(repo, run_dir, monkeypatch):
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="authority run",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json_authority(run_dir, "started")
+        _write_run_json_authority(run_dir, "planning")
+    return json.loads((run_dir / "run.json").read_text())
+
+
+def test_journal_ahead_remains_authoritative(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    with runguard.run_lock(repo, run_dir=run_dir):
+        tail = run_journal.read_journal(_journal_path(run_dir)).events[-1].sequence
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=run_dir.name,
+            event_type="run.completed",
+            payload={"status": "ok", "detail": "ok"},
+            idempotency_key="complete-1",
+            expected_previous_sequence=tail,
+            recorded_at="2026-07-27T15:31:46.000000Z",
+        )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json_authority(run_dir, "ok")
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["projector_version"] == 3
+    assert meta["status"] == "ok"
+    assert meta["journal_present"] is True
+
+
+def test_current_version_mismatch_fail_closed(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    data = json.loads(artifact.read_text())
+    data["mismatches"] = 1
+    data["last_outcome"] = "mismatch"
+    artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    meta_before = (run_dir / "run.json").read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert (run_dir / "run.json").read_bytes() == meta_before
+
+
+def test_current_version_error_fail_closed(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    data = json.loads(artifact.read_text())
+    data["errors"] = 1
+    data["last_outcome"] = "error"
+    data["last_error_category"] = "journal-unreadable"
+    artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    meta_before = (run_dir / "run.json").read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert (run_dir / "run.json").read_bytes() == meta_before
+
+
+def test_bounded_journal_failure_after_authority_fail_closed(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    journal = _journal_path(run_dir)
+    journal.write_bytes(journal.read_bytes() + b"x" * (run_checkpoint.MAX_JOURNAL_BYTES + 1))
+    meta_before = (run_dir / "run.json").read_bytes()
+    journal_before = journal.read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert (run_dir / "run.json").read_bytes() == meta_before
+    assert journal.read_bytes() == journal_before
+
+
+def test_authority_fail_closed_on_incomplete_projection_metadata(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    run_json = run_dir / "run.json"
+    meta = json.loads(run_json.read_text())
+    del meta["journal_last_event_digest"]
+    run_json.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    meta_before = run_json.read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert run_json.read_bytes() == meta_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+
+
+def test_authority_fail_closed_on_saved_sequence_not_matching_verified_prefix(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    run_json = run_dir / "run.json"
+    meta = json.loads(run_json.read_text())
+    meta["journal_last_sequence"] = meta["journal_last_sequence"] + 99
+    run_json.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    meta_before = run_json.read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert run_json.read_bytes() == meta_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+
+
+def test_authority_fail_closed_on_saved_digest_not_matching_verified_prefix(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    run_json = run_dir / "run.json"
+    meta = json.loads(run_json.read_text())
+    meta["journal_last_event_digest"] = "b" * 64
+    run_json.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    meta_before = run_json.read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert run_json.read_bytes() == meta_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+
+
+def test_authoritative_write_order_checkpoint_lifecycle_parity_readiness_replace(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="authority run",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json_authority(run_dir, "started")
+    calls: list[str] = []
+    real_checkpoint = run_checkpoint.write_checkpoint
+    real_transition = run_lifecycle.record_lifecycle_transition
+    real_shadow = run_shadow.record_shadow_comparison
+    real_readiness = run_shadow.check_projection_readiness
+    real_atomic = localio.write_text_atomic
+
+    def checkpoint_spy(*a, **kw):
+        calls.append("checkpoint")
+        return real_checkpoint(*a, **kw)
+
+    def transition_spy(*a, **kw):
+        calls.append("lifecycle")
+        return real_transition(*a, **kw)
+
+    def shadow_spy(*a, **kw):
+        calls.append("parity")
+        return real_shadow(*a, **kw)
+
+    def readiness_spy(*a, **kw):
+        calls.append("readiness")
+        return real_readiness(*a, **kw)
+
+    def atomic_spy(path, payload, **kw):
+        # Only the run.json atomic replace is the observable "replace" step;
+        # record_shadow_comparison also writes the shadow artifact through
+        # write_text_atomic, which is internal to parity and not part of the
+        # authority write order.
+        if Path(path).name == "run.json":
+            calls.append("replace")
+        return real_atomic(path, payload, **kw)
+
+    monkeypatch.setattr(run_checkpoint, "write_checkpoint", checkpoint_spy)
+    monkeypatch.setattr(run_lifecycle, "record_lifecycle_transition", transition_spy)
+    monkeypatch.setattr(run_shadow, "record_shadow_comparison", shadow_spy)
+    monkeypatch.setattr(run_shadow, "check_projection_readiness", readiness_spy)
+    monkeypatch.setattr(localio, "write_text_atomic", atomic_spy)
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json_authority(run_dir, "planning")
+    # The first "started" write already projects (finding 2: a ready first
+    # post-parity comparison projects that same write), so this "planning"
+    # write is genuinely authoritative. The prior authority gate fires a
+    # readiness check BEFORE the checkpoint/lifecycle append (finding 1:
+    # fail closed before append), then the observable five-step order runs:
+    # checkpoint, lifecycle, parity, post-parity readiness, replace.
+    assert calls == [
+        "readiness",
+        "checkpoint",
+        "lifecycle",
+        "parity",
+        "readiness",
+        "replace",
+    ]
+
+
+def test_first_authority_write_checkpoint_seq1_then_status_seq2(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="authority run",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json_authority(run_dir, "started")
+    events = run_journal.read_journal(_journal_path(run_dir)).events
+    assert events[0].event_type == "run.snapshot.checkpointed"
+    assert events[0].sequence == 1
+    assert events[0].payload.get("body_kind") == "base-stripped"
+    assert events[1].event_type == "run.created"
+    assert events[1].sequence == 2
+
+
+def test_direct_write_json_failure_raises_lifecycle_journal_error(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    from brigade import run_projector
+
+    monkeypatch.setattr(
+        run_projector,
+        "project_run_snapshot",
+        lambda *_a, **_kw: (_ for _ in ()).throw(run_projector.EventPayloadError("forged")),
+    )
+    payload = _apply_authority_request(run_dir, _run_payload("dispatching"))
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            aboyeur._write_json(run_dir / "run.json", payload)
+
+
+# -- Issue #568 slice 6, Task 7 corrections: review findings 1-4 ---------------
+
+
+def _forge_shadow_artifact(run_dir: Path, **overrides) -> None:
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    data = json.loads(artifact.read_text())
+    data.update(overrides)
+    artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def _assert_authoritative_prior_gate_forged_evidence_fails_closed(run_dir, repo, monkeypatch, *, forge_kwargs):
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    run_json_before = (run_dir / "run.json").read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+    events_before = [e.sequence for e in _events(run_dir)]
+    _forge_shadow_artifact(run_dir, **forge_kwargs)
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    # Forged evidence fails closed BEFORE the checkpoint/lifecycle append: no
+    # new journal event is appended and run.json is not replaced.
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+    assert [e.sequence for e in _events(run_dir)] == events_before
+
+
+def test_authoritative_prior_gate_forged_artifact_schema_fails_closed_before_append(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _assert_authoritative_prior_gate_forged_evidence_fails_closed(
+        run_dir, repo, monkeypatch, forge_kwargs={"schema": "brigade.forged.v1"}
+    )
+
+
+def test_authoritative_prior_gate_forged_artifact_run_id_fails_closed_before_append(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _assert_authoritative_prior_gate_forged_evidence_fails_closed(
+        run_dir, repo, monkeypatch, forge_kwargs={"run_id": "forged-run-id"}
+    )
+
+
+def test_authoritative_prior_gate_forged_artifact_last_digest_fails_closed_before_append(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    # Forged last_compared_event_digest at the correct sequence: the old
+    # _authority_prior_decision checked tail.sequence but not the digest, so
+    # this forgery authorized projection. check_projection_readiness reports
+    # REASON_JOURNAL_AHEAD, but the cursor does not verify against the journal
+    # event at that sequence, so the journal-ahead exception does not apply
+    # and the gate fails closed.
+    _assert_authoritative_prior_gate_forged_evidence_fails_closed(
+        run_dir, repo, monkeypatch, forge_kwargs={"last_compared_event_digest": "f" * 64}
+    )
+
+
+def test_authoritative_prior_gate_forged_artifact_journal_cursor_fails_closed_before_append(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    # Forged last_compared_sequence beyond the journal tail: REASON_JOURNAL_AHEAD
+    # is reported, but the cursor is out of range so the journal-ahead
+    # exception does not apply and the gate fails closed.
+    _assert_authoritative_prior_gate_forged_evidence_fails_closed(
+        run_dir, repo, monkeypatch, forge_kwargs={"last_compared_sequence": 999}
+    )
+
+
+def test_authoritative_prior_gate_malformed_last_outcome_fails_closed_before_append(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _assert_authoritative_prior_gate_forged_evidence_fails_closed(
+        run_dir, repo, monkeypatch, forge_kwargs={"last_outcome": "bogus"}
+    )
+
+
+def test_authoritative_prior_gate_malformed_last_outcome_none_fails_closed_before_append(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _assert_authoritative_prior_gate_forged_evidence_fails_closed(
+        run_dir, repo, monkeypatch, forge_kwargs={"last_outcome": None}
+    )
+
+
+def test_first_authority_started_write_projects_on_first_write(tmp_path, monkeypatch):
+    # Finding 2: authority-requested first-write authorization uses the
+    # post-parity readiness report. A ready first comparison projects that
+    # same write, so the single first "started" write after enrollment already
+    # carries projector_version 3, journal_present true, and the journal has
+    # checkpoint seq1 + run.created seq2.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="authority run",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json_authority(run_dir, "started")
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["projector_version"] == 3
+    assert meta["journal_present"] is True
+    events = _events(run_dir)
+    assert [e.event_type for e in events] == [
+        "run.snapshot.checkpointed",
+        "run.created",
+    ]
+    assert [e.sequence for e in events] == [1, 2]
+
+
+def test_authority_requested_post_parity_not_ready_falls_back_to_legacy(tmp_path, monkeypatch):
+    # Finding 2: a requested run whose post-parity gate is not ready still
+    # falls back to legacy (never fail-closed).
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="authority run",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+    monkeypatch.setattr(
+        run_shadow,
+        "check_projection_readiness",
+        lambda run_dir: run_shadow.ReadinessReport(ready=False, reasons=(run_shadow.REASON_NO_COMPARISONS,)),
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json_authority(run_dir, "planning")
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert "projector_version" not in meta
+    assert meta["status"] == "planning"
+
+
+def test_legacy_run_does_not_call_prior_authority_gate(tmp_path, monkeypatch):
+    # Finding 3: legacy runs skip prior-decision work entirely; the prior
+    # authority gate (check_projection_readiness) is never called and legacy
+    # bytes/order are preserved.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.delenv("BRIGADE_RUN_JOURNAL_AUTHORITY", raising=False)
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="legacy run",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+
+    def raise_if_called(run_dir):
+        raise AssertionError("check_projection_readiness must not be called for legacy runs")
+
+    monkeypatch.setattr(run_shadow, "check_projection_readiness", raise_if_called)
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json(run_dir, "planning")
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert "run_journal_authority_requested" not in meta
+    assert "projector_version" not in meta
+    assert meta["status"] == "planning"
+
+
+def test_authoritative_prior_ready_post_parity_not_ready_fails_closed(tmp_path, monkeypatch):
+    # Finding 4: for an authoritative normal write whose prior gate was ready,
+    # require the post-parity readiness report to remain ready before
+    # projecting. Prior ready + post-parity not ready -> fail closed, no
+    # replace.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    run_json_before = (run_dir / "run.json").read_bytes()
+    # Counter-based stub: the prior gate (1st call) returns ready so the write
+    # proceeds to checkpoint/lifecycle/parity; the post-parity gate (2nd call)
+    # returns not-ready so the authoritative normal write fails closed.
+    calls = {"n": 0}
+
+    def two_phase(run_dir):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return run_shadow.ReadinessReport(ready=True, reasons=())
+        return run_shadow.ReadinessReport(ready=False, reasons=(run_shadow.REASON_MISMATCH_RECORDED,))
+
+    monkeypatch.setattr(run_shadow, "check_projection_readiness", two_phase)
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+
+
+def test_authoritative_prior_journal_ahead_allows_projection_despite_parity_gap(tmp_path, monkeypatch):
+    # Finding 4: for the approved prior journal-ahead exception, allow
+    # projection despite the current parity gap. A direct append advances the
+    # journal tail past the last recorded comparison; the prior gate approves
+    # the genuine journal-ahead, and this write's parity records a comparison
+    # gap (post-parity not ready) but the write still projects.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    with runguard.run_lock(repo, run_dir=run_dir):
+        tail = run_journal.read_journal(_journal_path(run_dir)).events[-1].sequence
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=run_dir.name,
+            event_type="run.completed",
+            payload={"status": "ok", "detail": "ok"},
+            idempotency_key="complete-1",
+            expected_previous_sequence=tail,
+            recorded_at="2026-07-27T15:31:46.000000Z",
+        )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json_authority(run_dir, "ok")
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["projector_version"] == 3
+    assert meta["journal_present"] is True
+    assert meta["status"] == "ok"
+
+
+# -- Issue #568 slice 6, Task 7 final corrections: findings 1-3 regressions -----
+
+
+def test_authority_fail_closed_on_journal_present_false_with_projection_metadata(tmp_path, monkeypatch):
+    # Finding 1: once any projection metadata exists, journal_present must be
+    # exactly True. A false value is invalid authoritative metadata and must
+    # raise a bounded LifecycleJournalError BEFORE the checkpoint/lifecycle
+    # append, with no run.json replace and no journal change.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    run_json = run_dir / "run.json"
+    meta = json.loads(run_json.read_text())
+    meta["journal_present"] = False
+    run_json.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    meta_before = run_json.read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert run_json.read_bytes() == meta_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+
+
+def test_authority_fail_closed_on_journal_present_wrong_typed_with_projection_metadata(tmp_path, monkeypatch):
+    # Finding 1: journal_present must be exactly True (bool), not a truthy
+    # string or int. A wrong-typed value is invalid authoritative metadata.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    run_json = run_dir / "run.json"
+    meta = json.loads(run_json.read_text())
+    meta["journal_present"] = "true"
+    run_json.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    meta_before = run_json.read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert run_json.read_bytes() == meta_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+
+
+def test_authority_fail_closed_on_mixed_run_id_chain_valid_prefix(tmp_path, monkeypatch):
+    # Finding 2: the bounded verified prefix must reject ANY event whose run_id
+    # differs from run_dir.name, not only the event at the saved cursor. A
+    # chain-valid journal that mixes in a forged-run-id event must fail closed
+    # before append with no run.json replace and no journal change, even when
+    # the saved cursor points at a legitimate same-run event.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    journal = _journal_path(run_dir)
+    # Append a chain-valid event carrying a FOREIGN run_id directly to the
+    # journal. The digest chain stays valid (run_id is part of the event
+    # envelope, not the chain link), but the prefix is no longer exclusively
+    # this run's.
+    with runguard.run_lock(repo, run_dir=run_dir):
+        tail = run_journal.read_journal(journal).events[-1].sequence
+        run_journal.append_event(
+            journal,
+            run_id="foreign-run-id",
+            event_type="run.completed",
+            payload={"status": "ok", "detail": "ok"},
+            idempotency_key="foreign-1",
+            expected_previous_sequence=tail,
+            recorded_at="2026-07-27T15:31:46.000000Z",
+        )
+    # Point the saved cursor at the last SAME-run event (the planning
+    # transition) so the old cursor-only check would pass; the mixed prefix
+    # must still be rejected.
+    run_json = run_dir / "run.json"
+    meta = json.loads(run_json.read_text())
+    same_run_events = [e for e in _events(run_dir) if e.run_id == run_dir.name]
+    cursor_event = same_run_events[-1]
+    meta["journal_last_sequence"] = cursor_event.sequence
+    meta["journal_last_event_digest"] = cursor_event.event_digest
+    run_json.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    meta_before = run_json.read_bytes()
+    journal_before = journal.read_bytes()
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "dispatching")
+    assert run_json.read_bytes() == meta_before
+    assert journal.read_bytes() == journal_before
+
+
+def test_authoritative_prior_journal_ahead_with_current_mismatch_fails_closed(tmp_path, monkeypatch):
+    # Finding 3: the approved prior journal-ahead exception must not ignore an
+    # arbitrary post-parity mismatch. Prior journal-ahead is genuine (the
+    # journal tail advanced past the last recorded comparison), but the
+    # current parity is forced to record a mismatch instead of a match. The
+    # gate must fail closed (raise, no run.json replace) rather than project.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    with runguard.run_lock(repo, run_dir=run_dir):
+        tail = run_journal.read_journal(_journal_path(run_dir)).events[-1].sequence
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=run_dir.name,
+            event_type="run.completed",
+            payload={"status": "ok", "detail": "ok"},
+            idempotency_key="complete-1",
+            expected_previous_sequence=tail,
+            recorded_at="2026-07-27T15:31:46.000000Z",
+        )
+    run_json_before = (run_dir / "run.json").read_bytes()
+    real_record_shadow = run_shadow.record_shadow_comparison
+
+    def force_mismatch(run_dir_arg, legacy_snapshot):
+        real_record_shadow(run_dir_arg, legacy_snapshot)
+        artifact = run_shadow.shadow_artifact_path(run_dir_arg)
+        data = json.loads(artifact.read_text())
+        records = data.get("recent_records") or []
+        if records and records[-1].get("outcome") == run_shadow.OUTCOME_MATCH:
+            records[-1]["outcome"] = run_shadow.OUTCOME_MISMATCH
+            records[-1]["differing_fields"] = ["forged"]
+            data["matches"] = int(data.get("matches", 0) or 0) - 1
+            data["mismatches"] = int(data.get("mismatches", 0) or 0) + 1
+            data["last_outcome"] = run_shadow.OUTCOME_MISMATCH
+            data["last_differing_fields"] = ["forged"]
+            artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+    monkeypatch.setattr(run_shadow, "record_shadow_comparison", force_mismatch)
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "ok")
+    # Finding 3: the validation runs AFTER the checkpoint/lifecycle append
+    # and parity, so the journal advances; the contract is "no run.json
+    # replace" (the prior gate already passed, so the append is expected).
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+
+
+# -- Task 7 review correction: post-parity reasons / strict counters / aggregate
+
+
+def _forge_after_parity(run_dir_arg, legacy_snapshot, *, forge):
+    """Run the real shadow comparison, then forge the artifact per ``forge``.
+
+    Used by the journal-ahead correction regressions: the genuine parity pass
+    produces the approved comparison-gap-then-match record pair, and the forge
+    layer mutates only the aggregate fields the validator must reject.
+    """
+    real_record_shadow = run_shadow.record_shadow_comparison
+
+    def _wrapper(run_dir_inner, legacy_inner):
+        real_record_shadow(run_dir_inner, legacy_inner)
+        artifact = run_shadow.shadow_artifact_path(run_dir_inner)
+        data = json.loads(artifact.read_text())
+        forge(data)
+        artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+    return _wrapper
+
+
+def _enroll_authorize_and_advance(repo, run_dir, monkeypatch):
+    """Enroll, authorize, then append a direct ``run.completed`` event so the
+    journal tail is genuinely ahead of the last recorded comparison."""
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    with runguard.run_lock(repo, run_dir=run_dir):
+        tail = run_journal.read_journal(_journal_path(run_dir)).events[-1].sequence
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=run_dir.name,
+            event_type="run.completed",
+            payload={"status": "ok", "detail": "ok"},
+            idempotency_key="complete-ahead",
+            expected_previous_sequence=tail,
+            recorded_at="2026-07-27T15:31:46.000000Z",
+        )
+    return (run_dir / "run.json").read_bytes()
+
+
+def test_journal_ahead_override_rejects_forged_extra_journal_unreadable_reason(tmp_path, monkeypatch):
+    # Correction 1: the journal-ahead override must accept the post-parity
+    # readiness report ONLY when its reasons are exactly
+    # (REASON_ERROR_RECORDED,). A forged aggregate ``last_error_category`` of
+    # "journal-unreadable" makes the post-parity report carry
+    # (REASON_ERROR_RECORDED, REASON_JOURNAL_UNREADABLE); even though the
+    # recent_records pair still looks like comparison-gap then match, the gate
+    # must fail closed with no run.json replace.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    run_json_before = _enroll_authorize_and_advance(repo, run_dir, monkeypatch)
+
+    def forge(data):
+        data["last_error_category"] = "journal-unreadable"
+
+    monkeypatch.setattr(
+        run_shadow,
+        "record_shadow_comparison",
+        _forge_after_parity(run_dir, {}, forge=forge),
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "ok")
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+
+
+def test_journal_ahead_override_rejects_bool_mismatches_counter(tmp_path, monkeypatch):
+    # Correction 2: ``mismatches`` must be a non-bool int equal to 0. A bool
+    # ``False`` satisfies ``False == 0`` and must NOT be accepted.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    run_json_before = _enroll_authorize_and_advance(repo, run_dir, monkeypatch)
+
+    def forge(data):
+        data["mismatches"] = False
+
+    monkeypatch.setattr(
+        run_shadow,
+        "record_shadow_comparison",
+        _forge_after_parity(run_dir, {}, forge=forge),
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "ok")
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+
+
+def test_journal_ahead_override_rejects_bool_errors_counter(tmp_path, monkeypatch):
+    # Correction 2: ``errors`` must be a non-bool int equal to 1. A bool
+    # ``True`` satisfies ``True == 1`` and must NOT be accepted.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    run_json_before = _enroll_authorize_and_advance(repo, run_dir, monkeypatch)
+
+    def forge(data):
+        data["errors"] = True
+
+    monkeypatch.setattr(
+        run_shadow,
+        "record_shadow_comparison",
+        _forge_after_parity(run_dir, {}, forge=forge),
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "ok")
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+
+
+def test_journal_ahead_override_rejects_non_none_last_error_category(tmp_path, monkeypatch):
+    # Correction 3: the final match aggregate's ``last_error_category`` must
+    # be None. A forger sets it to "comparison-gap" (which is NOT
+    # "journal-unreadable", so the post-parity reasons stay exactly
+    # (REASON_ERROR_RECORDED,) and correction 1 does not catch it) while the
+    # penultimate record's category remains "comparison-gap". The gate must
+    # fail closed so an unrelated current aggregate error category cannot
+    # piggyback on the journal-ahead exception.
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    run_json_before = _enroll_authorize_and_advance(repo, run_dir, monkeypatch)
+
+    def forge(data):
+        data["last_error_category"] = "comparison-gap"
+
+    monkeypatch.setattr(
+        run_shadow,
+        "record_shadow_comparison",
+        _forge_after_parity(run_dir, {}, forge=forge),
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "ok")
+    assert (run_dir / "run.json").read_bytes() == run_json_before

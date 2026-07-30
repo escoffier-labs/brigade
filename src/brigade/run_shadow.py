@@ -13,7 +13,18 @@ consults before making the journal authoritative.
 
 The legacy writer stays authoritative: this module never writes
 ``run.json``, never appends to the journal, and never raises into the writer
-path. Standard library only. Brigade is zero-runtime-dependency.
+path. Known journal-read failures are classified journal-unreadable before
+the outer containment returns; a failing evidence write is swallowed silently
+and leaves the previous artifact in place.
+
+Issue #568 slice 6 contract: ``record_shadow_comparison`` runs BEFORE the
+authority candidate is committed in ``aboyeur._write_json``. The writer order
+is checkpoint, lifecycle transition, shadow parity, readiness veto, then the
+atomic run.json replace. The comparison input (the incoming legacy payload
+plus the journal tail) and the fail-open behavior are unchanged from slice 4;
+only the call site moved earlier so a ready first comparison can authorize
+that same write's projected snapshot. Standard library only. Brigade is
+zero-runtime-dependency.
 """
 
 from __future__ import annotations
