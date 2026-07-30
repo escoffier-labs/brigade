@@ -34,10 +34,36 @@ MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024
 MAX_JOURNAL_BYTES = 8 * 1024 * 1024
 MAX_JOURNAL_EVENTS = 512
 
-_CHECKPOINT_PAYLOAD_KEYS = frozenset(
+_CHECKPOINT_PAYLOAD_REQUIRED_KEYS = frozenset(
     {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type"}
 )
+_CHECKPOINT_PAYLOAD_OPTIONAL_KEYS = frozenset({"body_kind"})
+# Backwards-compatible alias kept for any external reader of the closed key set;
+# the validation logic now treats body_kind as optional.
+_CHECKPOINT_PAYLOAD_KEYS = _CHECKPOINT_PAYLOAD_REQUIRED_KEYS | _CHECKPOINT_PAYLOAD_OPTIONAL_KEYS
 _CHECKPOINT_IDEMPOTENCY_PREFIX = "checkpoint"
+
+# Journal-derived metadata fields the projector owns over the run.json
+# contract (see run_projector.DERIVED_FIELDS). A base-stripped checkpoint
+# excludes exactly these four fields so the content-addressed snapshot is
+# stable across projector re-derivations while the durable request fields
+# are preserved.
+_JOURNAL_METADATA_FIELDS = frozenset(
+    {
+        "projector_version",
+        "journal_present",
+        "journal_last_sequence",
+        "journal_last_event_digest",
+    }
+)
+
+# Durable request fields that must be present in a base-stripped checkpoint:
+# the lifecycle journal request and the journal-authority request. These are
+# the two preserved request signals a base-stripped snapshot must carry.
+_DURABLE_REQUEST_FIELDS = frozenset({"lifecycle_journal_requested", "run_journal_authority_requested"})
+
+_BODY_KIND_BASE_STRIPPED = "base-stripped"
+_CHECKPOINT_IDEMPOTENCY_BASE_STRIPPED_PREFIX = f"{_CHECKPOINT_IDEMPOTENCY_PREFIX}:base-stripped"
 
 
 class CheckpointError(RuntimeError):
@@ -77,13 +103,24 @@ def _validate_payload(payload: Any) -> None:
             raise CheckpointError(_bound("payload keys must be strings"), category="payload-keys")
 
     keys = set(payload.keys())
-    if keys != _CHECKPOINT_PAYLOAD_KEYS:
-        missing = sorted(_CHECKPOINT_PAYLOAD_KEYS - keys)
-        extra = sorted(keys - _CHECKPOINT_PAYLOAD_KEYS)
+    missing = _CHECKPOINT_PAYLOAD_REQUIRED_KEYS - keys
+    extra = keys - _CHECKPOINT_PAYLOAD_KEYS
+    if missing or extra:
+        missing_sorted = sorted(missing)
+        extra_sorted = sorted(extra)
         raise CheckpointError(
-            _bound(f"payload keys mismatch: missing={missing}, extra={extra}"),
+            _bound(f"payload keys mismatch: missing={missing_sorted}, extra={extra_sorted}"),
             category="payload-keys",
         )
+
+    # body_kind is optional: absent means legacy-full. An explicitly present
+    # value (including null) must be exactly "base-stripped"; anything else
+    # fails closed with category body-kind so unknown body kinds never reach
+    # the fd path. A present null is not base-stripped, so it fails too.
+    if "body_kind" in payload:
+        body_kind = payload["body_kind"]
+        if not isinstance(body_kind, str) or body_kind != _BODY_KIND_BASE_STRIPPED:
+            raise CheckpointError(_bound("body_kind must be base-stripped"), category="body-kind")
 
     if payload["media_type"] != CHECKPOINT_MEDIA_TYPE:
         raise CheckpointError(_bound("media_type mismatch"), category="media-type")
@@ -134,6 +171,65 @@ def _validate_payload(payload: Any) -> None:
 def _writer_canonical_bytes(obj: Any) -> bytes:
     """Replicate ``aboyeur._write_json`` canonical encoding for writer-byte equality."""
     return (json.dumps(obj, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _strip_journal_metadata_from_base(base_bytes: bytes) -> bytes:
+    """Strip the four journal-derived metadata fields from a run.json base.
+
+    Returns the writer-canonical encoding of the base object with
+    ``projector_version``, ``journal_present``, ``journal_last_sequence``,
+    and ``journal_last_event_digest`` removed. Status and every other
+    preserved field are retained. The result is writer-canonical so the
+    operation is idempotent (a second strip removes nothing and re-emits
+    the same canonical bytes). Non-UTF8, non-JSON, and non-object inputs
+    fail closed with bounded categories ``utf8`` / ``json-object``.
+    """
+    try:
+        text = base_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CheckpointError(_bound("base is not valid UTF-8"), category="utf8") from exc
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise CheckpointError(_bound("base is not valid JSON"), category="json-object") from exc
+    except RecursionError as exc:
+        raise CheckpointError(_bound("base JSON nesting too deep"), category="json-object") from exc
+    if not isinstance(obj, dict):
+        raise CheckpointError(_bound("base is not a JSON object"), category="json-object")
+    stripped = {k: v for k, v in obj.items() if k not in _JOURNAL_METADATA_FIELDS}
+    try:
+        return _writer_canonical_bytes(stripped)
+    except RecursionError as exc:
+        raise CheckpointError(_bound("base canonical re-encode nesting too deep"), category="json-object") from exc
+
+
+def _validate_base_stripped_request_rules(obj: Mapping[str, Any]) -> None:
+    """Enforce the base-stripped durable-request / metadata-exclusion rules.
+
+    A base-stripped checkpoint must carry both durable request fields
+    (``lifecycle_journal_requested`` and ``run_journal_authority_requested``)
+    set to the bool ``True`` (not merely present: a missing key, a False
+    value, or a wrong-typed value all fail closed) and must exclude every
+    journal-derived metadata field. Validation runs on the stripped result:
+    the write path passes the parsed stripped object (after
+    ``_strip_journal_metadata_from_base``) and the validate path passes the
+    stored stripped bytes. Canonical metadata-bearing input is accepted on
+    the write path and stripped, so only the derived stored base must
+    exclude the journal metadata fields. Any violation fails closed with
+    category ``base-stripped-requests``.
+    """
+    for field in _DURABLE_REQUEST_FIELDS:
+        if obj.get(field) is not True:
+            raise CheckpointError(
+                _bound(f"base-stripped base missing durable request field: {field}"),
+                category="base-stripped-requests",
+            )
+    present_metadata = sorted(set(obj.keys()) & _JOURNAL_METADATA_FIELDS)
+    if present_metadata:
+        raise CheckpointError(
+            _bound(f"base-stripped base must exclude journal metadata fields: {present_metadata}"),
+            category="base-stripped-requests",
+        )
 
 
 def _read_bounded(fd: int, expected_size: int) -> bytes:
@@ -256,6 +352,13 @@ def validate_checkpoint(run_dir: Path, event: Any) -> bytes:
             ) from exc
         if canonical != data:
             raise CheckpointError(_bound("checkpoint bytes differ from writer canonical form"), category="writer-bytes")
+        # When the payload declares body_kind base-stripped, the stored bytes
+        # are the stripped base: they must still carry both durable request
+        # fields and must exclude every journal-derived metadata field. This
+        # is the recovery-side integrity check that the snapshot was legitimately
+        # stripped (metadata removed, requests preserved).
+        if payload.get("body_kind") == _BODY_KIND_BASE_STRIPPED:
+            _validate_base_stripped_request_rules(obj)
         return data
     except CheckpointError as exc:
         primary = exc
@@ -500,9 +603,14 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
 # -- Checkpoint coordinator (issue #568 slice 5, Task 2) ----------------------
 
 
-def _checkpoint_payload(run_json_bytes: bytes, *, paired_event_type: str | None) -> dict[str, Any]:
+def _checkpoint_payload(
+    run_json_bytes: bytes,
+    *,
+    paired_event_type: str | None,
+    body_kind: str | None = None,
+) -> dict[str, Any]:
     sha = hashlib.sha256(run_json_bytes).hexdigest()
-    return {
+    payload: dict[str, Any] = {
         "path": f"events/{CHECKPOINT_DIR_NAME}/{sha}.json",
         "sha256": sha,
         "media_type": CHECKPOINT_MEDIA_TYPE,
@@ -510,22 +618,34 @@ def _checkpoint_payload(run_json_bytes: bytes, *, paired_event_type: str | None)
         "privacy_class": CHECKPOINT_PRIVACY_CLASS,
         "paired_event_type": paired_event_type,
     }
+    if body_kind is not None:
+        payload["body_kind"] = body_kind
+    return payload
 
 
-def _checkpoint_idempotency_key(sha: str, *, paired_event_type: str | None) -> str:
+def _checkpoint_idempotency_key(
+    sha: str,
+    *,
+    paired_event_type: str | None,
+    body_kind: str | None = None,
+) -> str:
     paired = paired_event_type if paired_event_type is not None else "none"
-    key = f"{_CHECKPOINT_IDEMPOTENCY_PREFIX}:{sha}:{paired}"
+    if body_kind == _BODY_KIND_BASE_STRIPPED:
+        prefix = _CHECKPOINT_IDEMPOTENCY_BASE_STRIPPED_PREFIX
+    else:
+        prefix = _CHECKPOINT_IDEMPOTENCY_PREFIX
+    key = f"{prefix}:{sha}:{paired}"
     if len(key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN:
         return key
     # Bound the paired-event-type tail so the key stays within the envelope
-    # limit regardless of event_type length; the sha and prefix are fixed.
-    budget = run_events.MAX_IDEMPOTENCY_KEY_LEN - len(_CHECKPOINT_IDEMPOTENCY_PREFIX) - 1 - len(sha) - 1
+    # limit regardless of event_type length; the prefix and sha are fixed.
+    budget = run_events.MAX_IDEMPOTENCY_KEY_LEN - len(prefix) - 1 - len(sha) - 1
     if budget < 0:
         # Pathological: prefix+sha already overflow the bound. Fall back to a
         # digest of the paired type so the key is still unique and bounded.
         paired_digest = hashlib.sha256(paired.encode("utf-8")).hexdigest()[:16]
-        return f"{_CHECKPOINT_IDEMPOTENCY_PREFIX}:{sha}:{paired_digest}"
-    return f"{_CHECKPOINT_IDEMPOTENCY_PREFIX}:{sha}:{paired[:budget]}"
+        return f"{prefix}:{sha}:{paired_digest}"
+    return f"{prefix}:{sha}:{paired[:budget]}"
 
 
 def write_checkpoint(
@@ -534,16 +654,29 @@ def write_checkpoint(
     *,
     workspace: Path | None = None,
     paired_event_type: str | None,
+    body_kind: str | None = None,
 ) -> "run_journal.RunEvent | None":
     """Publish a crash-safe recovery checkpoint and append the checkpoint event.
 
     Called from ``aboyeur._write_json`` BEFORE ``record_lifecycle_transition``
     and the ``run.json`` atomic replacement. Idempotently activates the
     lifecycle journal (``run_lifecycle.prepare_lifecycle_journal``), publishes
-    ``run_json_bytes`` to the content-addressed checkpoint file
+    the checkpoint bytes to the content-addressed checkpoint file
     (``publish_checkpoint_file``), and appends one
-    ``run.snapshot.checkpointed`` event to the lifecycle journal with
-    idempotency key ``checkpoint:<sha256>:<paired-event-type-or-none>``.
+    ``run.snapshot.checkpointed`` event to the lifecycle journal.
+
+    ``body_kind`` selects the checkpoint body authority. The default
+    (``None``) is the slice-5 legacy-full form: the SHA, payload, and
+    published file are over the raw ``run_json_bytes`` and the event
+    payload omits ``body_kind``; the idempotency key remains exactly
+    ``checkpoint:<sha256>:<paired-event-type-or-none>``. When
+    ``body_kind`` is ``"base-stripped"`` the durable request rules are
+    enforced on the parsed base (both durable request fields present and
+    every journal-derived metadata field absent), the four metadata
+    fields are stripped (``_strip_journal_metadata_from_base``), and the
+    SHA, payload, published file, and event payload ``body_kind`` are
+    derived from the stripped bytes; the idempotency key becomes
+    ``checkpoint:base-stripped:<sha256>:<paired-event-type-or-none>``.
 
     No-op (no file, no event) when the journal is not active for the run.
     When the journal is active but the caller does not hold the matching active
@@ -551,16 +684,77 @@ def write_checkpoint(
     ``LifecycleJournalError`` BEFORE any publish or append: a lock-less writer
     on an active journal must never advance the journal or the snapshot, for
     any status (mapped or unmapped). Raises ``CheckpointError`` on any bounded
-    checkpoint publish failure; the failure surfaces BEFORE the lifecycle
-    status append and BEFORE the ``run.json`` replacement. Raises
+    checkpoint publish failure (including an unknown ``body_kind`` value or a
+    base-stripped request/metadata rule violation); the failure surfaces BEFORE
+    the lifecycle status append and BEFORE the ``run.json`` replacement. Raises
     ``LifecycleJournalError`` on a bounded journal read failure.
 
     ``run_lifecycle`` is imported lazily inside this function so the lifecycle
     layer may depend on this checkpoint substrate without a circular import.
+
+    Validation-before-activation ordering: ``body_kind`` validation and, for
+    ``base-stripped``, all decoding, canonical-byte validation, stripping,
+    and durable-request validation run BEFORE
+    ``prepare_lifecycle_journal``. A rejected candidate therefore raises
+    before the lifecycle journal is activated, so an enrolled-but-inactive
+    run under the lock never gains an ``events/`` directory or
+    ``lifecycle.jsonl`` from a rejected write (the no-mutation precondition).
+    After successful preprocessing, the existing prepare, journal-active, and
+    owner checks run unchanged, and the crash-safe publish still precedes the
+    journal append. Canonical metadata-bearing input is accepted and stripped;
+    only the derived stored base must exclude the journal metadata fields.
     """
     from brigade import run_lifecycle  # lazy: avoid circular import
 
     run_dir = Path(run_dir).expanduser().resolve()
+    run_json_bytes = bytes(run_json_bytes)
+    # Validate body_kind and, for base-stripped, strip the journal-derived
+    # metadata fields BEFORE SHA/payload/publish AND before
+    # prepare_lifecycle_journal, so the content-addressed snapshot is stable
+    # across projector re-derivations AND a rejected candidate never
+    # activates the journal. The base-stripped invariants (both durable
+    # request fields present, no journal metadata) are enforced on the
+    # stripped result so the write path and the validate path agree: a base
+    # carrying metadata fields is stripped (not rejected), and a base missing
+    # a durable request field fails closed.
+    if body_kind is not None and body_kind != _BODY_KIND_BASE_STRIPPED:
+        raise CheckpointError(_bound("body_kind must be base-stripped"), category="body-kind")
+    if body_kind == _BODY_KIND_BASE_STRIPPED:
+        # Reject non-house-canonical incoming bytes BEFORE stripping, SHA,
+        # payload, publish, or append. The standalone stripping helper may
+        # canonicalize valid noncanonical JSON, but the write path must not:
+        # a base-stripped snapshot is content-addressed over the stripped
+        # bytes, so the incoming base must already be the aboyeur writer
+        # canonical encoding.
+        try:
+            incoming_text = run_json_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CheckpointError(_bound("base is not valid UTF-8"), category="utf8") from exc
+        try:
+            incoming_obj = json.loads(incoming_text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise CheckpointError(_bound("base is not valid JSON"), category="json-object") from exc
+        except RecursionError as exc:
+            raise CheckpointError(_bound("base JSON nesting too deep"), category="json-object") from exc
+        if not isinstance(incoming_obj, dict):
+            raise CheckpointError(_bound("base is not a JSON object"), category="json-object")
+        try:
+            if _writer_canonical_bytes(incoming_obj) != run_json_bytes:
+                raise CheckpointError(_bound("base bytes differ from writer canonical form"), category="writer-bytes")
+        except RecursionError as exc:
+            raise CheckpointError(_bound("base canonical re-encode nesting too deep"), category="writer-bytes") from exc
+        publish_bytes = _strip_journal_metadata_from_base(run_json_bytes)
+        try:
+            stripped_obj = json.loads(publish_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise CheckpointError(_bound("stripped base is not valid JSON"), category="json-object") from exc
+        except RecursionError as exc:
+            raise CheckpointError(_bound("stripped base JSON nesting too deep"), category="json-object") from exc
+        if not isinstance(stripped_obj, dict):
+            raise CheckpointError(_bound("stripped base is not a JSON object"), category="json-object")
+        _validate_base_stripped_request_rules(stripped_obj)
+    else:
+        publish_bytes = run_json_bytes
     run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
     journal_path = run_lifecycle._journal_path(run_dir)
     if not journal_path.is_file():
@@ -572,17 +766,16 @@ def write_checkpoint(
         raise run_lifecycle.LifecycleJournalError(
             run_events._bound("lifecycle journal append requires the active run lock for this run")
         )
-    run_json_bytes = bytes(run_json_bytes)
-    sha = hashlib.sha256(run_json_bytes).hexdigest()
-    payload = _checkpoint_payload(run_json_bytes, paired_event_type=paired_event_type)
+    sha = hashlib.sha256(publish_bytes).hexdigest()
+    payload = _checkpoint_payload(publish_bytes, paired_event_type=paired_event_type, body_kind=body_kind)
     # Crash-safe publish FIRST. A CheckpointError here fails before the
     # lifecycle status append and before run.json replacement.
-    publish_checkpoint_file(run_dir, run_json_bytes)
+    publish_checkpoint_file(run_dir, publish_bytes)
     try:
         report = run_journal.read_journal(journal_path)
         if report.partial_tail is not None or report.chain_errors:
             raise run_journal.ChainIntegrityError(run_events._bound(run_lifecycle._CHAIN_CATEGORY))
-        idempotency_key = _checkpoint_idempotency_key(sha, paired_event_type=paired_event_type)
+        idempotency_key = _checkpoint_idempotency_key(sha, paired_event_type=paired_event_type, body_kind=body_kind)
         return run_journal.append_event(
             journal_path,
             run_id=run_lifecycle._run_id_from_dir(run_dir),
@@ -771,10 +964,22 @@ def recover_from_checkpoint(
     ``paired_event_type`` covers only checkpoint-at-tail. Anything else
     fails uncovered-tail.
 
+    Restore-byte selection (issue #568 slice 6): when the latest checkpoint
+    payload carries ``body_kind`` ``"base-stripped"`` and the validated
+    checkpoint base carries ``run_journal_authority_requested`` set to True,
+    the canonical stripped base is parsed and projected with
+    ``run_projector.project_run_snapshot(base, events, journal_present=True)``;
+    the projector bytes are the intermediate recovery receipt. A
+    ``run_projector.ProjectionError`` is wrapped as a bounded
+    ``CheckpointError`` with category ``projection`` (the original preserved
+    as the cause); recovery never falls back to an earlier checkpoint or to
+    a legacy-full restore. When ``body_kind`` is absent the legacy-full
+    restore uses the verified checkpoint bytes verbatim.
+
     Restores ``run.json`` only when it is missing or unparseable
     (``run_meta is None``); a corrupt original is preserved by rename and
     the restore uses ``localio.write_text_atomic``. Returns the repaired
-    validated mapping parsed from the verified checkpoint bytes. Raises
+    validated mapping parsed from the selected restore bytes. Raises
     ``CheckpointError`` (bounded, categorized) on any validation or
     restoration failure; nothing is restored on failure.
     """
@@ -850,4 +1055,23 @@ def recover_from_checkpoint(
     checkpoint_bytes = validate_checkpoint(run_dir, latest)
     checkpoint_obj = _parse_checkpoint_object(checkpoint_bytes)
     _verify_coverage(report.events, latest, checkpoint_obj)
-    return _restore_run_json_from_checkpoint(run_dir, checkpoint_bytes, run_meta=run_meta)
+    restore_bytes = checkpoint_bytes
+    if (
+        latest.payload.get("body_kind") == _BODY_KIND_BASE_STRIPPED
+        and checkpoint_obj.get("run_journal_authority_requested") is True
+    ):
+        # Authority path (issue #568 slice 6): the validated checkpoint body is
+        # the canonical stripped base and the base carries the journal-authority
+        # request, so the recovery receipt is the projector's re-derivation of
+        # the snapshot over the verified event sequence -- never the stripped
+        # bytes verbatim. A projection failure fails closed as a bounded
+        # CheckpointError: no fallback to an earlier checkpoint or to a
+        # legacy-full restore.
+        from brigade import run_projector  # lazy: avoid import cycle
+
+        try:
+            projection = run_projector.project_run_snapshot(checkpoint_obj, report.events, journal_present=True)
+            restore_bytes = projection.to_bytes()
+        except run_projector.ProjectionError as exc:
+            raise CheckpointError(_bound("projection failed"), category="projection") from exc
+    return _restore_run_json_from_checkpoint(run_dir, restore_bytes, run_meta=run_meta)

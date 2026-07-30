@@ -243,6 +243,31 @@ def _recovery_checkpoint_run_verdict(target: Path, run_dir: Path) -> tuple[str, 
     except run_checkpoint.CheckpointError as exc:
         return "fail", exc.diagnostic
 
+    # Authority path (issue #568 slice 6): when the latest checkpoint payload
+    # carries body_kind base-stripped and the validated base has
+    # run_journal_authority_requested set to True, the recovery receipt is the
+    # projector's re-derivation of the stripped base over the verified event
+    # sequence -- never the stripped checkpoint bytes verbatim. The projection
+    # runs before the run.json presence check so a projection failure is FAIL
+    # regardless of run.json state; a missing/unparseable run.json is WARN only
+    # when projection succeeds. Legacy-full (absent body_kind) keeps the
+    # existing verbatim compare.
+    is_authority = (
+        latest.payload.get("body_kind") == run_checkpoint._BODY_KIND_BASE_STRIPPED
+        and checkpoint_obj.get("run_journal_authority_requested") is True
+    )
+    compare_bytes = checkpoint_bytes
+    compare_obj = checkpoint_obj
+    if is_authority:
+        from brigade import run_projector  # lazy: avoid import cycle
+
+        try:
+            projection = run_projector.project_run_snapshot(checkpoint_obj, report.events, journal_present=True)
+            compare_bytes = projection.to_bytes()
+            compare_obj = projection.snapshot
+        except run_projector.ProjectionError:
+            return "fail", "projection failed"
+
     run_json_path = run_dir / "run.json"
     try:
         run_json_present = run_json_path.is_file()
@@ -264,14 +289,25 @@ def _recovery_checkpoint_run_verdict(target: Path, run_dir: Path) -> tuple[str, 
     if run_meta is None:
         return "warn", "run.json unparseable with valid checkpoint"
 
-    if run_bytes == checkpoint_bytes:
-        return "ok", "checkpoint bytes match run.json"
+    if run_bytes == compare_bytes:
+        return (
+            "ok",
+            "projected snapshot matches run.json" if is_authority else "checkpoint bytes match run.json",
+        )
 
-    expected = _reconstruct_stale_lock_recovery_receipt(checkpoint_obj, run_meta)
+    expected = _reconstruct_stale_lock_recovery_receipt(compare_obj, run_meta)
     if expected is not None and expected == run_meta:
-        return "ok", "stale-lock-recovery receipt matches checkpoint reconstruction"
+        return (
+            "ok",
+            "stale-lock-recovery receipt matches projection reconstruction"
+            if is_authority
+            else "stale-lock-recovery receipt matches checkpoint reconstruction",
+        )
 
-    return "fail", "run.json does not match checkpoint"
+    return (
+        "fail",
+        "run.json does not match projected snapshot" if is_authority else "run.json does not match checkpoint",
+    )
 
 
 def _read_run_meta_fail_safe(run_json_path: Path) -> dict[str, object] | None:

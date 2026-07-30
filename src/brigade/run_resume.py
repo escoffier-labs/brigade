@@ -12,7 +12,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import aboyeur, agents, codex_appserver, receipt_schema, runguard
+from . import aboyeur, agents, codex_appserver, receipt_schema, run_lifecycle, runguard
 from .roster import Agent, Roster, _as_bool, _as_env
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
@@ -241,7 +241,10 @@ def _resume_locked(run_dir: Path) -> int:
     if not final.ok:
         run_meta["status"] = "failed"
         run_meta["error"] = final.detail
-        aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
+        try:
+            aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
+        except run_lifecycle.LifecycleJournalError as exc:
+            raise runguard.RetainRunLockError(f"failed to write failed-synthesis run receipt: {exc}") from exc
         print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
         return 2
     (run_dir / "final.txt").write_text(final.text + "\n")
@@ -255,6 +258,9 @@ def _resume_locked(run_dir: Path) -> int:
             history = []
             run_meta["recovery_history"] = history
         history.append(recovered_failure)
-    aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
+    try:
+        aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(run_meta))
+    except run_lifecycle.LifecycleJournalError as exc:
+        raise runguard.RetainRunLockError(f"failed to write successful-synthesis run receipt: {exc}") from exc
     print(final.text)
     return 0

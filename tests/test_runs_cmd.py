@@ -1123,6 +1123,43 @@ def _activate_journal_with_checkpoint(
     _write_lock_owner(workspace, run_dir, pid=99999999)
 
 
+def _activate_authority_journal_with_checkpoint(
+    workspace: Path,
+    run_dir: Path,
+    run_json_obj: dict,
+    *,
+    paired_event_type: str | None = "run.planning.started",
+) -> None:
+    """Authority-journal mirror of ``_activate_journal_with_checkpoint``.
+
+    Bootstraps run.json with BOTH durable request flags true and writes the
+    checkpoint with ``body_kind="base-stripped"`` over a base that carries
+    both request flags (the write path strips the journal metadata fields).
+    Ends with a dead pid lock owner so ``runs_cmd.recover`` sees a stale
+    matching lock.
+    """
+    runs_dir = run_dir.parent
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    base = {
+        "schema": "brigade.run.v1",
+        **run_json_obj,
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+    }
+    _localio().write_json(run_dir / "run.json", base)
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            _writer_bytes(base),
+            workspace=workspace,
+            paired_event_type=paired_event_type,
+            body_kind="base-stripped",
+        )
+    _write_lock_owner(workspace, run_dir, pid=99999999)
+
+
 def _localio():
     from brigade import localio
 
@@ -1886,3 +1923,109 @@ def test_runs_recover_restores_from_retained_lock_after_initial_run_json_write_f
     assert recovered["failure_phase"] == "stale-lock-recovery"
     assert recovered["task"] == "demo task"
     assert not lock_path.exists()
+
+
+# -- Issue #568 slice 6: authority-aware base-stripped runs recover ------------
+
+
+def test_runs_recover_authority_checkpoint_terminalizes_preserving_fields_and_provenance(tmp_path, capsys):
+    """runs recover over a base-stripped authority checkpoint.
+
+    With run.json missing, recovery projects the validated stripped base over
+    the verified journal events and terminalizes the projected receipt: the
+    base fields (task/cwd/orchestrator), the authority request flag, and the
+    current projector metadata survive, and the stale-lock-recovery failure
+    provenance records the projected prior status.
+    """
+    from brigade import run_projector
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {
+        "status": "dispatching",
+        "task": "inspect",
+        "cwd": str(workspace),
+        "orchestrator": "chef",
+        "active_seats": ["coder"],
+        "duration_seconds": 5,
+    }
+    _activate_authority_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure_phase"] == "stale-lock-recovery"
+    # Restored (projected) receipt fields preserved through terminalization.
+    assert recovered["task"] == "inspect"
+    assert recovered["cwd"] == str(workspace)
+    assert recovered["orchestrator"] == "chef"
+    assert recovered["active_seats"] == ["coder"]
+    assert recovered["duration_seconds"] == 5
+    assert recovered["run_journal_authority_requested"] is True
+    # Recovery provenance: the failure records the projected prior status.
+    assert recovered["failure"]["prior_status"] == "dispatching"
+    # Projector metadata proves the authority projection path ran (a verbatim
+    # restore of the stripped body would carry none of these).
+    assert recovered["projector_version"] == run_projector.PROJECTOR_VERSION
+    assert recovered["journal_present"] is True
+    assert recovered["journal_last_sequence"] == 1
+    assert f"recovered: {run_dir}" in capsys.readouterr().out
+
+
+def test_runs_recover_authority_checkpoint_preserves_corrupt_run_json(tmp_path, capsys):
+    """A corrupt run.json is preserved by rename, then replaced by the projection."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo task", "cwd": str(workspace)}
+    _activate_authority_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").write_text("not json")
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["task"] == "demo task"
+    assert recovered["journal_present"] is True
+    preserved = list(run_dir.glob("run.json.corrupt-*"))
+    assert len(preserved) == 1
+    assert preserved[0].read_text() == "not json"
+    assert f"recovered: {run_dir}" in capsys.readouterr().out
+
+
+def test_runs_recover_authority_projection_failure_fails_closed(tmp_path, monkeypatch, capsys):
+    """A failed authority projection maps to exit 2 with the bounded reason.
+
+    The runguard claim is restored (lock dir remains), no run.json is
+    restored, and the surfaced stderr reason is the bounded checkpoint
+    projection diagnostic, not the raw projector error.
+    """
+    from brigade import run_projector
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / _RUN_ID
+    run_json_obj = {"status": "planning", "task": "demo", "cwd": str(workspace)}
+    _activate_authority_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+    (run_dir / "run.json").unlink()
+    lock_path = workspace / ".brigade" / "run.lock"
+
+    def boom(base_snapshot, events, *, journal_present):
+        raise run_projector.ProjectionError("raw projector detail")
+
+    monkeypatch.setattr(run_projector, "project_run_snapshot", boom)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert not (run_dir / "run.json").exists()
+    # The dead lock is restored (callback failed; lock restored by runguard).
+    assert lock_path.is_dir()
+    err = capsys.readouterr().err
+    assert "projection failed" in err
+    assert "raw projector detail" not in err

@@ -422,7 +422,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 44
+    assert len(PRESERVED_FIELDS) == 45
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",
@@ -436,6 +436,7 @@ def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
         "run.dispatch.completed": "result-processing",
         "run.synthesis.started": "synthesizing",
         "run.synthesis.completed": "handoff",
+        "run.artifact_collection.started": "artifact-collection",
     }
     projection = project_run_snapshot(base, [], journal_present=False)
     for field in PRESERVED_FIELDS:
@@ -538,7 +539,84 @@ def test_checkpoint_after_unmapped_status_preserves_last_mapped_status():
     assert projection.last_event_digest == unmapped_checkpoint["event_digest"]
 
 
-def test_projector_version_is_two():
+def test_projector_version_is_three():
     projection = project_run_snapshot(_minimal_base_snapshot(), [], journal_present=False)
-    assert PROJECTOR_VERSION == 2
-    assert projection.snapshot["projector_version"] == 2
+    assert PROJECTOR_VERSION == 3
+    assert projection.snapshot["projector_version"] == 3
+
+
+def _events_ending_with_completed(*, status: str | None) -> list[dict]:
+    """Build a two-event sequence ending with run.completed with the given status."""
+    created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
+    payload = {"detail": "done"}
+    if status is not None:
+        payload["status"] = status
+    completed = _build_event(
+        2,
+        "run.completed",
+        payload,
+        "completed-1",
+        "2026-07-27T15:30:46.000000Z",
+        created["event_digest"],
+    )
+    return [created, completed]
+
+
+def test_run_completed_derives_ok():
+    projection = project_run_snapshot(
+        _minimal_base_snapshot(),
+        _events_ending_with_completed(status="ok"),
+        journal_present=True,
+    )
+    assert projection.status == "ok"
+    assert projection.snapshot["status"] == "ok"
+
+
+def test_run_completed_derives_dry_run():
+    projection = project_run_snapshot(
+        _minimal_base_snapshot(),
+        _events_ending_with_completed(status="dry-run"),
+        journal_present=True,
+    )
+    assert projection.status == "dry-run"
+    assert projection.snapshot["status"] == "dry-run"
+
+
+def test_run_completed_bad_or_missing_status_raises_bounded_event_payload_error():
+    for status in ("bad-status", None):
+        with pytest.raises(EventPayloadError) as excinfo:
+            project_run_snapshot(
+                _minimal_base_snapshot(),
+                _events_ending_with_completed(status=status),
+                journal_present=True,
+            )
+        _assert_bounded_projection_error(excinfo)
+
+
+def test_run_failed_derives_incomplete():
+    projection = project_run_snapshot(
+        _minimal_base_snapshot(),
+        _events_ending_with_failed(status="incomplete"),
+        journal_present=True,
+    )
+    assert projection.status == "incomplete"
+    assert projection.snapshot["status"] == "incomplete"
+
+
+def test_artifact_collection_started_derives_artifact_collection():
+    created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
+    artifact = _build_event(
+        2,
+        "run.artifact_collection.started",
+        {"detail": "collecting"},
+        "artifact-1",
+        "2026-07-27T15:30:46.000000Z",
+        created["event_digest"],
+    )
+    projection = project_run_snapshot(
+        _minimal_base_snapshot(),
+        [created, artifact],
+        journal_present=True,
+    )
+    assert projection.status == "artifact-collection"
+    assert projection.snapshot["status"] == "artifact-collection"

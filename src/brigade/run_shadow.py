@@ -13,7 +13,18 @@ consults before making the journal authoritative.
 
 The legacy writer stays authoritative: this module never writes
 ``run.json``, never appends to the journal, and never raises into the writer
-path. Standard library only. Brigade is zero-runtime-dependency.
+path. Known journal-read failures are classified journal-unreadable before
+the outer containment returns; a failing evidence write is swallowed silently
+and leaves the previous artifact in place.
+
+Issue #568 slice 6 contract: ``record_shadow_comparison`` runs BEFORE the
+authority candidate is committed in ``aboyeur._write_json``. The writer order
+is checkpoint, lifecycle transition, shadow parity, readiness veto, then the
+atomic run.json replace. The comparison input (the incoming legacy payload
+plus the journal tail) and the fail-open behavior are unchanged from slice 4;
+only the call site moved earlier so a ready first comparison can authorize
+that same write's projected snapshot. Standard library only. Brigade is
+zero-runtime-dependency.
 """
 
 from __future__ import annotations
@@ -45,6 +56,7 @@ REASON_NO_JOURNAL = "no-journal"
 REASON_JOURNAL_UNREADABLE = "journal-unreadable"
 REASON_NO_EVIDENCE = "no-evidence"
 REASON_EVIDENCE_UNREADABLE = "evidence-unreadable"
+REASON_EVIDENCE_PROJECTOR_VERSION_STALE = "evidence-projector-version-stale"
 REASON_EVIDENCE_SCHEMA_MISMATCH = "evidence-schema-mismatch"
 REASON_JOURNAL_AHEAD = "journal-ahead-of-evidence"
 REASON_NO_COMPARISONS = "no-comparisons"
@@ -57,6 +69,34 @@ REASON_STATUS_LAG_CURRENT = "status-lag-current"
 class ReadinessReport:
     ready: bool
     reasons: tuple[str, ...]
+
+
+def _valid_counter(value: object) -> bool:
+    """True only for a non-bool nonnegative int counter.
+
+    ``bool`` is an ``int`` subclass, so a bare ``isinstance(value, int)`` guard
+    accepts ``True``/``False``; the explicit bool rejection stops a forged
+    boolean counter from satisfying ``== 0`` (``False``) or ``== 1`` (``True``)
+    and slipping through the readiness gate or the carry accumulator.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _has_invalid_counters(data: object) -> bool:
+    """True when a current-v3 artifact carries an untrustworthy counter.
+
+    Only ``comparisons``, ``mismatches``, and ``errors`` feed the readiness
+    gate and the carry accumulator; a bool, negative, or non-int value for
+    any of the three is structurally broken and must fail closed as
+    evidence-unreadable rather than be carried forward.
+    """
+    if not isinstance(data, dict):
+        return True
+    return not (
+        _valid_counter(data.get("comparisons"))
+        and _valid_counter(data.get("mismatches"))
+        and _valid_counter(data.get("errors"))
+    )
 
 
 def shadow_artifact_path(run_dir: Path) -> Path:
@@ -98,6 +138,55 @@ def _quarantine_corrupt(artifact_path: Path) -> None:
         artifact_path.replace(target)
     except Exception:
         return
+
+
+def _quarantine_stale_projector(artifact_path: Path) -> bool:
+    """Atomically rename a stale-projector-version artifact to a private sibling.
+
+    The stale artifact is moved to ``.stale-projector-v2-<timestamp>`` under
+    the same ``events`` directory before a fresh current-version artifact is
+    written, so a crash between the quarantine and the fresh write leaves no
+    evidence file in place (the gate then reads ``no-evidence``). Returns
+    True on success and False if the atomic rename failed, in which case the
+    caller must leave the stale evidence byte-identical and write nothing.
+    """
+    try:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        target = artifact_path.with_name(f".stale-projector-v2-{stamp}")
+        artifact_path.replace(target)
+        return True
+    except Exception:
+        return False
+
+
+def _verify_stale_baseline(
+    run_dir: Path, run_id: str, baseline_seq: object, baseline_digest: object
+) -> tuple[int, str] | None:
+    """Return a carryable baseline only when it identifies an exact event in a
+    bounded, contiguous verified journal prefix.
+
+    The stale artifact's ``last_compared_sequence`` and
+    ``last_compared_event_digest`` are only type-checked by the caller; a
+    forged, missing, or mismatched cursor must not be trusted. Reuse the
+    baseline only when the journal reads clean (no partial tail, no chain
+    errors), the sequence is an integer in range, the digest is a string
+    equal to the event at that sequence, and that event's run_id matches.
+    """
+    if isinstance(baseline_seq, bool) or not isinstance(baseline_seq, int) or not isinstance(baseline_digest, str):
+        return None
+    try:
+        journal_report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
+    except (OSError, run_journal.RunJournalError):
+        return None
+    if journal_report.partial_tail is not None or journal_report.chain_errors:
+        return None
+    events = journal_report.events
+    if baseline_seq < 1 or baseline_seq > len(events):
+        return None
+    event = events[baseline_seq - 1]
+    if event.run_id != run_id or event.event_digest != baseline_digest:
+        return None
+    return baseline_seq, baseline_digest
 
 
 def _load_prior_artifact(artifact_path: Path) -> tuple[dict[str, Any] | None, bool]:
@@ -182,7 +271,7 @@ def _checkpoint_status_write_gap(
         expected_checkpoint_seq = prior_seq + 1
         expected_status_seq = tail_seq
     try:
-        journal_report = run_journal.read_journal(run_lifecycle._journal_path(run_dir))
+        journal_report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
     except (OSError, run_journal.RunJournalError):
         return False
     if journal_report.partial_tail is not None or journal_report.chain_errors:
@@ -238,10 +327,51 @@ def _record_outcome(
     differing_fields: list[str],
 ) -> None:
     prior, was_corrupt = _load_prior_artifact(shadow_artifact_path(run_dir))
-    if prior is None:
+    invalid_counters = False
+    if prior is None or was_corrupt:
         data = _empty_artifact(run_id)
     else:
-        data = prior
+        prior_version = prior.get("projector_version")
+        if prior_version != run_projector.PROJECTOR_VERSION:
+            # A complete prior artifact with a noncurrent projector version is
+            # atomically quarantined to a private .stale-projector-v2-<timestamp>
+            # sibling before a fresh current-version artifact is written. A
+            # crash after the quarantine and before the fresh write leaves no
+            # evidence file (the gate reads no-evidence). If the atomic rename
+            # fails, the stale evidence is left byte-identical and no fresh
+            # artifact is written. Only a verified stale tail is reused as the
+            # first comparison-gap baseline; stale counters and recent records
+            # are never carried forward, and a forged or mismatched cursor is
+            # dropped so it cannot suppress a comparison gap.
+            if not _quarantine_stale_projector(shadow_artifact_path(run_dir)):
+                return
+            data = _empty_artifact(run_id)
+            baseline = _verify_stale_baseline(
+                run_dir,
+                run_id,
+                prior.get("last_compared_sequence"),
+                prior.get("last_compared_event_digest"),
+            )
+            if baseline is not None:
+                data["last_compared_sequence"] = baseline[0]
+                data["last_compared_event_digest"] = baseline[1]
+        else:
+            # Current-version artifact: counters and records only accumulate,
+            # never reset (mismatches/errors from a current-v3 artifact are
+            # preserved across later comparisons). A current-v3 artifact with
+            # an invalid counter (bool, negative, or non-int for comparisons,
+            # mismatches, or errors) is structurally broken and must not be
+            # trusted: quarantine it aside, start a fresh artifact, and record
+            # an evidence-unreadable side record so the invalid counters never
+            # flow into the accumulators (a forged False must not satisfy
+            # ``== 0`` and a negative comparisons must not bypass the
+            # no-comparisons gate once re-read).
+            if _has_invalid_counters(prior):
+                _quarantine_corrupt(shadow_artifact_path(run_dir))
+                data = _empty_artifact(run_id)
+                invalid_counters = True
+            else:
+                data = prior
     key = (tail_seq, shadow_digest, projected_digest, outcome, category)
     prior_records = data.get("recent_records") or []
     if prior_records:
@@ -256,15 +386,21 @@ def _record_outcome(
         if last_key == key:
             return  # idempotent: same tail sequence, digests, outcome, and category
     # A present-but-unparseable prior artifact is quarantined and treated as
-    # absent; record an evidence-unreadable error before the main record.
-    if was_corrupt:
+    # absent; record an evidence-unreadable error before the main record. A
+    # current-v3 prior with invalid counters is treated the same way: the
+    # forged counters are dropped and an evidence-unreadable side record
+    # explains the fresh start.
+    if was_corrupt or invalid_counters:
         _append_evidence_unreadable(data, tail_seq, tail_digest)
     # Comparison-gap defense: if the journal tail advanced by more than one
     # since the last recorded comparison, a committed transition's shadow
     # step was skipped (crash window). Record a comparison-gap error in the
     # same atomic write as the main record. The absent-prior case (no prior
     # artifact, e.g. after a crash that lost the first comparison) fires when
-    # the tail is already beyond the first transition.
+    # the tail is already beyond the first transition. A stale-projector
+    # quarantine reuses the verified stale tail as the baseline so a normal
+    # checkpoint+status advance does not create a false comparison gap while
+    # a larger unexplained advance records a fresh comparison-gap error.
     prior_seq = data.get("last_compared_sequence")
     if isinstance(tail_seq, int):
         gap = False
@@ -381,7 +517,7 @@ def record_shadow_comparison(run_dir: Path, legacy_snapshot: Mapping[str, Any]) 
         run_id = run_dir.name
 
         try:
-            journal_report = run_journal.read_journal(journal_path)
+            journal_report = run_journal.read_journal_bounded(journal_path)
         except (OSError, run_journal.RunJournalError):
             _record_error(run_dir, run_id, "journal-unreadable", None, None)
             return
@@ -486,16 +622,40 @@ def check_projection_readiness(run_dir: Path) -> ReadinessReport:
         if not artifact_path.is_file():
             return ReadinessReport(ready=False, reasons=(REASON_NO_EVIDENCE,))
         data = json.loads(artifact_path.read_text())
+        # Version door: a noncurrent projector version closes the gate with
+        # the dedicated stale reason BEFORE the schema check fires. Only this
+        # reason is returned so callers can distinguish a version rotation
+        # from a structural schema break.
+        if data.get("projector_version") != run_projector.PROJECTOR_VERSION:
+            return ReadinessReport(ready=False, reasons=(REASON_EVIDENCE_PROJECTOR_VERSION_STALE,))
+        # Evidence schema mismatch applies only to schema, schema_version, or
+        # run_id; the projector version is handled by the door above.
         if (
             data.get("schema") != SHADOW_SCHEMA
             or data.get("schema_version") != SHADOW_SCHEMA_VERSION
             or data.get("run_id") != run_dir.name
-            or data.get("projector_version") != run_projector.PROJECTOR_VERSION
-            or data.get("last_outcome") not in _OUTCOMES
         ):
             return ReadinessReport(ready=False, reasons=(REASON_EVIDENCE_SCHEMA_MISMATCH,))
+        # Strict counter validation: a current-v3 artifact accepts only
+        # non-bool nonnegative ints for comparisons, mismatches, and errors.
+        # A bool (``True``/``False``), negative, or non-int counter is
+        # structurally broken and closes the gate as evidence-unreadable
+        # BEFORE the no-comparisons or mismatch/error branches can misread it
+        # (``False`` must not satisfy ``== 0``; ``True`` must not satisfy a
+        # truthy mismatch/error check; a negative comparisons must not bypass
+        # the no-comparisons gate).
+        if _has_invalid_counters(data):
+            return ReadinessReport(ready=False, reasons=(REASON_EVIDENCE_UNREADABLE,))
         if not isinstance(data.get("comparisons"), int) or data["comparisons"] < 1:
             return ReadinessReport(ready=False, reasons=(REASON_NO_COMPARISONS,))
+        # A current-version artifact with comparisons >= 1 but a malformed
+        # last_outcome is structurally broken: the schema check above is
+        # deliberately limited to schema/schema_version/run_id, so a bogus or
+        # None last_outcome is closed here as evidence-unreadable rather than
+        # being misclassified as a schema mismatch or slipping through to
+        # readiness.
+        if data.get("last_outcome") not in _OUTCOMES:
+            return ReadinessReport(ready=False, reasons=(REASON_EVIDENCE_UNREADABLE,))
         if data.get("mismatches") or data.get("errors") or data.get("last_outcome") == OUTCOME_LAG:
             reasons: tuple[str, ...] = ()
             if data.get("mismatches"):
@@ -509,12 +669,12 @@ def check_projection_readiness(run_dir: Path) -> ReadinessReport:
             return ReadinessReport(ready=False, reasons=reasons)
         # Re-read the journal and compare its tail to the artifact's last
         # recorded comparison. A journal that is currently unreadable (partial
-        # tail or any chain errors) closes the gate with journal-unreadable;
-        # a journal that advanced past the evidence (e.g. a committed transition
-        # whose shadow step was skipped) closes the gate with
-        # journal-ahead-of-evidence.
+        # tail or any chain errors, or a bound-exceeded read) closes the gate
+        # with journal-unreadable; a journal that advanced past the evidence
+        # (e.g. a committed transition whose shadow step was skipped) closes
+        # the gate with journal-ahead-of-evidence.
         try:
-            journal_report = run_journal.read_journal(run_lifecycle._journal_path(run_dir))
+            journal_report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
         except (OSError, run_journal.RunJournalError):
             return ReadinessReport(ready=False, reasons=(REASON_JOURNAL_UNREADABLE,))
         if journal_report.partial_tail is not None or journal_report.chain_errors:

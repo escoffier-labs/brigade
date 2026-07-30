@@ -470,3 +470,96 @@ def test_resume_rejects_invalid_snapshot_env_before_dispatch(tmp_path, monkeypat
 
     assert run_resume._resume_locked(run_dir) == 2
     assert "invalid roster snapshot" in capsys.readouterr().err
+
+
+# -- Issue #568 slice 6, Task 7: authority receipt-write lock retention ------------
+
+
+def test_authority_resume_failed_synthesis_receipt_write_retains_lock(tmp_path, monkeypatch):
+    from brigade import aboyeur, run_events, run_lifecycle, runguard
+
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "timeout",
+                "text": "part",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            },
+        ],
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["run_journal_authority_requested"] = True
+    run_meta["lifecycle_journal_requested"] = True
+    run_meta["cwd"] = str(tmp_path)
+    run_meta["lock_workspace"] = str(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps(run_meta))
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="synthesis failed", ok=False, detail="timeout"),
+    )
+    real_write_json = aboyeur._write_json
+
+    def failing_write_json(path, payload, **kwargs):
+        if Path(path).name == "run.json":
+            raise run_lifecycle.LifecycleJournalError(run_events._bound("projection failed"))
+        return real_write_json(path, payload, **kwargs)
+
+    monkeypatch.setattr(aboyeur, "_write_json", failing_write_json)
+    with pytest.raises(runguard.RetainRunLockError):
+        run_resume.resume(run_dir)
+    lock_path = tmp_path / ".brigade" / "run.lock"
+    assert lock_path.exists()
+
+
+def test_authority_resume_successful_synthesis_receipt_write_retains_lock(tmp_path, monkeypatch):
+    from brigade import aboyeur, run_events, run_lifecycle, runguard
+
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "timeout",
+                "text": "part",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            },
+        ],
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["run_journal_authority_requested"] = True
+    run_meta["lifecycle_journal_requested"] = True
+    run_meta["cwd"] = str(tmp_path)
+    run_meta["lock_workspace"] = str(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps(run_meta))
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
+    )
+    real_write_json = aboyeur._write_json
+
+    def failing_write_json(path, payload, **kwargs):
+        if Path(path).name == "run.json":
+            raise run_lifecycle.LifecycleJournalError(run_events._bound("projection failed"))
+        return real_write_json(path, payload, **kwargs)
+
+    monkeypatch.setattr(aboyeur, "_write_json", failing_write_json)
+    with pytest.raises(runguard.RetainRunLockError):
+        run_resume.resume(run_dir)
+    lock_path = tmp_path / ".brigade" / "run.lock"
+    assert lock_path.exists()

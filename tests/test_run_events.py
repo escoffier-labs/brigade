@@ -245,8 +245,56 @@ def test_event_type_registry_includes_run_created_with_status_only():
 def test_checkpoint_event_type_registered_with_closed_payload_keys():
     assert "run.snapshot.checkpointed" in run_events.EVENT_TYPES
     assert run_events.EVENT_TYPES["run.snapshot.checkpointed"] == frozenset(
-        {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type"}
+        {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type", "body_kind"}
     )
+
+
+def test_artifact_collection_started_registered_with_closed_payload_keys():
+    assert "run.artifact_collection.started" in run_events.EVENT_TYPES
+    assert run_events.EVENT_TYPES["run.artifact_collection.started"] == frozenset({"detail"})
+
+
+def test_build_event_accepts_checkpoint_payload_with_body_kind():
+    event = run_events.build_event(
+        run_id=RUN_ID,
+        sequence=1,
+        event_type="run.snapshot.checkpointed",
+        payload={
+            "path": "events/recovery-checkpoints/" + "a" * 64 + ".json",
+            "sha256": "a" * 64,
+            "media_type": "application/vnd.brigade.run+json",
+            "byte_size": 128,
+            "privacy_class": "private",
+            "paired_event_type": "run.created",
+            "body_kind": "base-stripped",
+        },
+        idempotency_key="checkpoint-1",
+        recorded_at=RECORDED_AT,
+        previous_digest=None,
+    )
+    assert run_events.validate_event(event) == []
+    assert event["payload"]["body_kind"] == "base-stripped"
+
+
+def test_build_event_accepts_checkpoint_payload_without_body_kind():
+    event = run_events.build_event(
+        run_id=RUN_ID,
+        sequence=1,
+        event_type="run.snapshot.checkpointed",
+        payload={
+            "path": "events/recovery-checkpoints/" + "a" * 64 + ".json",
+            "sha256": "a" * 64,
+            "media_type": "application/vnd.brigade.run+json",
+            "byte_size": 128,
+            "privacy_class": "private",
+            "paired_event_type": "run.created",
+        },
+        idempotency_key="checkpoint-1",
+        recorded_at=RECORDED_AT,
+        previous_digest=None,
+    )
+    assert run_events.validate_event(event) == []
+    assert "body_kind" not in event["payload"]
 
 
 def test_build_event_rejects_payload_with_non_integer_numbers():

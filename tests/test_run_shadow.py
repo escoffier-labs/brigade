@@ -14,6 +14,7 @@ from brigade import run_projector
 from brigade import run_shadow  # RED: module does not exist yet
 from brigade.run_shadow import (  # RED: constants land in Task 2
     REASON_ERROR_RECORDED,
+    REASON_EVIDENCE_PROJECTOR_VERSION_STALE,
     REASON_EVIDENCE_SCHEMA_MISMATCH,
     REASON_EVIDENCE_UNREADABLE,
     REASON_JOURNAL_AHEAD,
@@ -22,7 +23,6 @@ from brigade.run_shadow import (  # RED: constants land in Task 2
     REASON_NO_COMPARISONS,
     REASON_NO_EVIDENCE,
     REASON_NO_JOURNAL,
-    REASON_STATUS_LAG_CURRENT,
 )
 
 _REQUEST_FIELD = "lifecycle_journal_requested"
@@ -256,7 +256,7 @@ def test_first_locked_write_records_match(enabled, tmp_path):
     assert report.reasons == ()
 
 
-def test_unmapped_status_after_handoff_is_lag(enabled, tmp_path):
+def test_artifact_collection_after_handoff_is_mapped_no_lag(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
     chain = [
@@ -274,21 +274,24 @@ def test_unmapped_status_after_handoff_is_lag(enabled, tmp_path):
         _write_run_json_locked(repo, run_dir, status)
 
     data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
-    assert data["lags"] == 1
+    assert data["lags"] == 0
     assert data["mismatches"] == 0
     assert data["errors"] == 0
-    assert data["last_outcome"] == "lag"
-    assert data["last_differing_fields"] == ["status"]
-    # unmapped write appends a checkpoint event; status event is skipped
-    assert data["last_compared_sequence"] == 13
+    assert data["last_outcome"] == "match"
+    # artifact-collection is now mapped, so its write appends a checkpoint
+    # plus the run.artifact_collection.started status event: 7 mapped writes
+    # x (checkpoint + status) = 14 events at the tail.
+    assert data["last_compared_sequence"] == 14
     report = run_shadow.check_projection_readiness(run_dir)
-    assert report.ready is False
-    assert REASON_STATUS_LAG_CURRENT in report.reasons
+    assert report.ready is True
+    assert report.reasons == ()
 
 
 def test_mapped_ok_after_lag_restores_readiness(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
+    # "running" remains an unmapped status, so it produces a lag; the
+    # subsequent mapped "ok" restores readiness.
     chain = [
         "started",
         "planning",
@@ -296,7 +299,7 @@ def test_mapped_ok_after_lag_restores_readiness(enabled, tmp_path):
         "result-processing",
         "synthesizing",
         "handoff",
-        "artifact-collection",
+        "running",
         "ok",
     ]
 
@@ -582,6 +585,7 @@ def test_gate_reason_coverage(tmp_path):
             "schema": "brigade.other.v1",
             "schema_version": 1,
             "run_id": _RUN_ID,
+            "projector_version": run_projector.PROJECTOR_VERSION,
             "comparisons": 1,
             "matches": 1,
             "mismatches": 0,
@@ -604,14 +608,14 @@ def test_gate_reason_coverage(tmp_path):
     data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
     data["schema"] = "brigade.run_shadow.v1"
     data["run_id"] = "other"
-    data["projector_version"] = 2
+    data["projector_version"] = run_projector.PROJECTOR_VERSION
     run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
     assert REASON_EVIDENCE_SCHEMA_MISMATCH in run_shadow.check_projection_readiness(run_dir).reasons
 
     # Zero comparisons.
     data["run_id"] = _RUN_ID
     data["comparisons"] = 0
-    data["projector_version"] = 2
+    data["projector_version"] = run_projector.PROJECTOR_VERSION
     run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
     assert REASON_NO_COMPARISONS in run_shadow.check_projection_readiness(run_dir).reasons
 
@@ -807,20 +811,15 @@ def test_run_journal_error_in_shadow_is_contained(enabled, tmp_path, monkeypatch
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")  # match, seq 1
 
-    # read_journal is also called by record_lifecycle_transition BEFORE the
-    # atomic run.json write. Raise only on the shadow-path call (the second
-    # read_journal in this write) so the legacy write still commits, then the
-    # shadow hook sees the RunJournalError and must contain it.
-    original_read = run_journal.read_journal
-    calls = {"n": 0}
+    # The shadow path reads the journal through read_journal_bounded; the
+    # legacy lifecycle path (record_lifecycle_transition) still reads through
+    # read_journal. Raise only on the bounded read so the legacy write still
+    # commits, then the shadow hook sees the RunJournalError and must contain
+    # it as journal-unreadable.
+    def raising_bounded(path):
+        raise run_journal.RunJournalError("simulated chain failure")
 
-    def raising_read(path):
-        calls["n"] += 1
-        if calls["n"] >= 3:
-            raise run_journal.RunJournalError("simulated chain failure")
-        return original_read(path)
-
-    monkeypatch.setattr(run_journal, "read_journal", raising_read)
+    monkeypatch.setattr(run_journal, "read_journal_bounded", raising_bounded)
 
     run_before = (run_dir / "run.json").read_bytes()
     _write_run_json_locked(repo, run_dir, "planning")  # legacy write must still advance
@@ -871,10 +870,10 @@ def test_gate_reports_journal_unreadable_when_read_raises(enabled, tmp_path, mon
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")  # match, seq 1, clean artifact
 
-    def raising_read(path):
+    def raising_bounded(path):
         raise exc_factory("simulated journal read failure")
 
-    monkeypatch.setattr(run_journal, "read_journal", raising_read)
+    monkeypatch.setattr(run_journal, "read_journal_bounded", raising_bounded)
 
     report = run_shadow.check_projection_readiness(run_dir)
     assert report.ready is False
@@ -918,7 +917,7 @@ def test_journal_run_id_mismatch_records_error(enabled, tmp_path):
     assert REASON_ERROR_RECORDED in report.reasons
 
 
-def test_same_tail_different_unmapped_status_counts_distinct_lags(enabled, tmp_path):
+def test_same_tail_distinct_unmapped_shadow_states_count_distinct_lags(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
     chain = [
@@ -933,17 +932,18 @@ def test_same_tail_different_unmapped_status_counts_distinct_lags(enabled, tmp_p
     for status in chain:
         _write_run_json_locked(repo, run_dir, status)
 
-    # Two distinct unmapped statuses with the same journal tail (seq 6). Each
-    # produces a different shadow_digest (the legacy status is preserved in
-    # the shadow candidate), so they are distinct lag states and must both be
-    # counted -- idempotency keys on (tail sequence, shadow digest, projected
-    # digest, outcome, category), not on the journal tail alone.
+    # "running" remains an unmapped status. Two shadow candidates with the
+    # same unmapped status but distinct preserved detail (task) produce
+    # distinct shadow_digests at the same journal tail (seq 12), so they are
+    # distinct lag states and must both be counted -- idempotency keys on
+    # (tail sequence, shadow digest, projected digest, outcome, category),
+    # not on the journal tail alone.
     run_shadow.record_shadow_comparison(
         run_dir,
         {
             "schema": "brigade.run.v1",
             "schema_version": 1,
-            "status": "artifact-collection",
+            "status": "running",
             "task": "direct-a",
         },
     )
@@ -952,7 +952,7 @@ def test_same_tail_different_unmapped_status_counts_distinct_lags(enabled, tmp_p
         {
             "schema": "brigade.run.v1",
             "schema_version": 1,
-            "status": "dry-run",
+            "status": "running",
             "task": "direct-b",
         },
     )
@@ -1099,15 +1099,41 @@ def test_version_one_shadow_artifact_is_stale(enabled, tmp_path):
 
     artifact = run_shadow.shadow_artifact_path(run_dir)
     data = json.loads(artifact.read_text())
+    stale_seq = data["last_compared_sequence"]
     data["projector_version"] = 1
     artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    stale_bytes = artifact.read_bytes()
 
+    # Version door: a noncurrent projector version closes the gate with the
+    # dedicated stale reason BEFORE the schema check fires.
     report = run_shadow.check_projection_readiness(run_dir)
     assert report.ready is False
-    assert REASON_EVIDENCE_SCHEMA_MISMATCH in report.reasons
+    assert REASON_EVIDENCE_PROJECTOR_VERSION_STALE in report.reasons
+    assert REASON_EVIDENCE_SCHEMA_MISMATCH not in report.reasons
+
+    # Quarantine: the next shadow comparison atomically renames the stale
+    # artifact to a private .stale-projector-v2-<timestamp> sibling under
+    # events before a fresh current-v3 artifact is written.
+    _write_run_json_locked(repo, run_dir, "planning")
+
+    quarantined = list((run_dir / "events").glob(".stale-projector-v2-*"))
+    assert quarantined
+    assert quarantined[0].read_bytes() == stale_bytes
+    assert artifact.read_bytes() != stale_bytes
+    fresh = json.loads(artifact.read_text())
+    assert fresh["projector_version"] == run_projector.PROJECTOR_VERSION
+    # Fresh v3 counters: no carried stale counters or recent records.
+    assert fresh["comparisons"] == 1
+    assert fresh["matches"] == 1
+    assert fresh["mismatches"] == 0
+    assert fresh["lags"] == 0
+    assert fresh["errors"] == 0
+    assert len(fresh["recent_records"]) == 1
+    # The stale artifact's verified tail is reused as the gap baseline.
+    assert fresh["last_compared_sequence"] != stale_seq
 
 
-def test_version_two_artifact_with_checkpoint_tail_reads_ready_when_bytes_match(enabled, tmp_path):
+def test_current_projector_version_artifact_with_checkpoint_tail_reads_ready_when_bytes_match(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
 
@@ -1120,10 +1146,830 @@ def test_version_two_artifact_with_checkpoint_tail_reads_ready_when_bytes_match(
 
     artifact = run_shadow.shadow_artifact_path(run_dir)
     data = json.loads(artifact.read_text())
-    assert data["projector_version"] == 2
+    assert data["projector_version"] == run_projector.PROJECTOR_VERSION
     assert data["last_compared_sequence"] == 2
     assert data["last_outcome"] == "match"
 
     report = run_shadow.check_projection_readiness(run_dir)
     assert report.ready is True
     assert report.reasons == ()
+
+
+def _make_stale_artifact(run_dir: Path, *, stale_version: int) -> tuple[int, str | None]:
+    """Rewrite the current artifact with a noncurrent projector version.
+
+    Returns (stale_last_compared_sequence, stale_last_compared_event_digest).
+    """
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    data = json.loads(artifact.read_text())
+    seq = data["last_compared_sequence"]
+    digest = data["last_compared_event_digest"]
+    data["projector_version"] = stale_version
+    artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    return seq, digest
+
+
+def test_stale_projector_version_gate_returns_only_stale_reason(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+
+    # Wrong projector_version but otherwise valid. The version door fires
+    # BEFORE the schema check and returns only the stale reason.
+    _make_stale_artifact(run_dir, stale_version=2)
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert report.reasons == (REASON_EVIDENCE_PROJECTOR_VERSION_STALE,)
+    assert REASON_EVIDENCE_SCHEMA_MISMATCH not in report.reasons
+    assert REASON_NO_COMPARISONS not in report.reasons
+
+
+def test_schema_only_mismatch_still_returns_schema_mismatch(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+
+    # Correct projector_version, wrong schema -> schema mismatch (not stale).
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    data = json.loads(artifact.read_text())
+    data["schema"] = "brigade.other.v1"
+    artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    assert REASON_EVIDENCE_SCHEMA_MISMATCH in run_shadow.check_projection_readiness(run_dir).reasons
+    assert REASON_EVIDENCE_PROJECTOR_VERSION_STALE not in run_shadow.check_projection_readiness(run_dir).reasons
+
+    # Correct projector_version, wrong schema_version -> schema mismatch.
+    data = json.loads(artifact.read_text())
+    data["schema"] = "brigade.run_shadow.v1"
+    data["schema_version"] = 999
+    artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    assert REASON_EVIDENCE_SCHEMA_MISMATCH in run_shadow.check_projection_readiness(run_dir).reasons
+    assert REASON_EVIDENCE_PROJECTOR_VERSION_STALE not in run_shadow.check_projection_readiness(run_dir).reasons
+
+    # Correct projector_version, wrong run_id -> schema mismatch.
+    data = json.loads(artifact.read_text())
+    data["schema_version"] = 1
+    data["run_id"] = "other-run"
+    artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    assert REASON_EVIDENCE_SCHEMA_MISMATCH in run_shadow.check_projection_readiness(run_dir).reasons
+    assert REASON_EVIDENCE_PROJECTOR_VERSION_STALE not in run_shadow.check_projection_readiness(run_dir).reasons
+
+
+def test_stale_quarantine_writes_fresh_v3_counters(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # match, seq 2
+    _write_run_json_locked(repo, run_dir, "planning")  # match, seq 4
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    stale_data = json.loads(artifact.read_text())
+    assert stale_data["comparisons"] == 2
+    assert stale_data["matches"] == 2
+
+    _make_stale_artifact(run_dir, stale_version=2)
+    stale_bytes = artifact.read_bytes()
+
+    _write_run_json_locked(repo, run_dir, "dispatching")  # triggers quarantine + fresh v3
+
+    quarantined = list((run_dir / "events").glob(".stale-projector-v2-*"))
+    assert quarantined
+    assert quarantined[0].read_bytes() == stale_bytes
+
+    fresh = json.loads(artifact.read_text())
+    assert fresh["projector_version"] == run_projector.PROJECTOR_VERSION
+    # Fresh v3 counters: stale counters and recent records are NOT carried.
+    assert fresh["comparisons"] == 1
+    assert fresh["matches"] == 1
+    assert fresh["mismatches"] == 0
+    assert fresh["lags"] == 0
+    assert fresh["errors"] == 0
+    assert len(fresh["recent_records"]) == 1
+    assert fresh["recent_records"][0]["outcome"] == "match"
+
+
+def test_crash_window_after_quarantine_reads_as_no_evidence(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # match, seq 2
+    _write_run_json_locked(repo, run_dir, "planning")  # match, seq 4
+
+    _make_stale_artifact(run_dir, stale_version=2)
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+
+    # Simulate the crash window: quarantine the stale artifact (atomic rename
+    # to the private sibling) but do NOT write a fresh current-v3 artifact.
+    stamp = "20260730T000000000000Z"
+    artifact.replace(artifact.with_name(f".stale-projector-v2-{stamp}"))
+    assert not artifact.exists()
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_NO_EVIDENCE in report.reasons
+    assert REASON_EVIDENCE_PROJECTOR_VERSION_STALE not in report.reasons
+
+
+def test_stale_quarantine_reuses_gap_baseline_no_false_gap_on_normal_advance(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # checkpoint 1, created 2
+    _write_run_json_locked(repo, run_dir, "planning")  # checkpoint 3, planning 4
+
+    stale_seq, _ = _make_stale_artifact(run_dir, stale_version=2)
+    assert stale_seq == 4
+
+    # A normal checkpoint+status advance (dispatching) from baseline 4 to
+    # tail 6 must NOT create a false comparison gap: the stale baseline is
+    # reused, and the (5,6) pair is a valid checkpoint+status pair.
+    _write_run_json_locked(repo, run_dir, "dispatching")
+
+    fresh = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    gap_records = _gap_records(fresh)
+    assert not gap_records
+    assert fresh["errors"] == 0
+    assert fresh["comparisons"] == 1
+    assert fresh["matches"] == 1
+    assert fresh["last_compared_sequence"] == 6
+    assert list((run_dir / "events").glob(".stale-projector-v2-*"))
+
+
+def test_stale_quarantine_larger_advance_records_comparison_gap(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # checkpoint 1, created 2
+    _write_run_json_locked(repo, run_dir, "planning")  # checkpoint 3, planning 4
+
+    stale_seq, _ = _make_stale_artifact(run_dir, stale_version=2)
+    assert stale_seq == 4
+
+    # Skip a shadow step: append run.dispatch.requested (seq 5) directly,
+    # write run.json directly so the shadow hook does NOT run.
+    with runguard.run_lock(repo, run_dir=run_dir):
+        report = run_journal.read_journal(_journal_path(run_dir))
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=_RUN_ID,
+            event_type="run.dispatch.requested",
+            payload={},
+            idempotency_key="lifecycle:dispatch-stale-gap",
+            expected_previous_sequence=report.events[-1].sequence,
+        )
+        localio.write_json(
+            run_dir / "run.json",
+            {
+                "schema": "brigade.run.v1",
+                "schema_version": 1,
+                "status": "dispatching",
+                "task": "stale-gap",
+            },
+        )
+
+    # Later locked write (result-processing) runs the hook: tail seq 7 vs the
+    # reused stale baseline 4 is an unexplained advance (7 != 4+2), so a
+    # fresh comparison-gap error is recorded on the fresh v3 artifact.
+    _write_run_json_locked(repo, run_dir, "result-processing")
+
+    fresh = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    gap_records = _gap_records(fresh)
+    assert gap_records
+    assert fresh["errors"] >= 1
+    assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
+    assert list((run_dir / "events").glob(".stale-projector-v2-*"))
+
+
+def test_current_v3_mismatch_is_never_reset_by_later_match(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # match, seq 2
+
+    # Record a mismatch against the current v3 artifact (forged status
+    # divergence with a mapped legacy status) at the same journal tail.
+    run_shadow.record_shadow_comparison(
+        run_dir,
+        {
+            "schema": "brigade.run.v1",
+            "schema_version": 1,
+            "status": "ok",
+            "task": "forged-mismatch",
+        },
+    )
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert data["mismatches"] == 1
+    assert data["last_outcome"] == "mismatch"
+
+    # A subsequent matching comparison (normal checkpoint+status advance from
+    # seq 2 to seq 4, no gap) must NOT reset the recorded mismatch: counters on
+    # a current-v3 artifact only accumulate, never zero out.
+    _write_run_json_locked(repo, run_dir, "planning")  # match, seq 4
+
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert data["mismatches"] == 1
+    assert data["matches"] == 2
+    assert data["last_outcome"] == "match"
+
+
+def test_current_v3_error_is_never_reset_by_later_match(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # match, seq 2
+
+    # Record a journal-unreadable error against the current v3 artifact via a
+    # direct call (a locked write would fail inside write_checkpoint before
+    # the shadow hook runs, so the error path is exercised directly). The
+    # journal tail stays at seq 2 throughout so the later clean comparison
+    # does not trip the absent-prior gap guard.
+    with _journal_path(run_dir).open("a") as handle:
+        handle.write("{not-json\n")
+    run_shadow.record_shadow_comparison(
+        run_dir,
+        {
+            "schema": "brigade.run.v1",
+            "schema_version": 1,
+            "status": "planning",
+            "task": "direct-error",
+        },
+    )
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert data["errors"] >= 1
+    assert data["last_error_category"] == "journal-unreadable"
+
+    # Repair the journal corruption; the verified tail is back at seq 2.
+    raw = _journal_path(run_dir).read_text()
+    _journal_path(run_dir).write_text(raw.split("{not-json")[0])
+
+    # A clean direct comparison matching the journal tail (started) records a
+    # match without resetting the prior error: prior_seq is None (the error
+    # record carried no sequence), tail_seq is 2, and the (1,2) pair is a
+    # valid checkpoint+status pair, so no false comparison-gap fires.
+    run_shadow.record_shadow_comparison(
+        run_dir,
+        {
+            "schema": "brigade.run.v1",
+            "schema_version": 1,
+            "status": "started",
+            "task": "direct-match",
+        },
+    )
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert data["errors"] >= 1
+    assert data["last_outcome"] == "match"
+    assert data["matches"] == 2
+
+
+def test_bounded_journal_reads_map_bound_failure_to_journal_unreadable(enabled, tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # clean current-v3 artifact
+
+    # A bound-exceeded journal read must map to journal-unreadable on both the
+    # comparison path and the readiness path. read_journal_bounded is the
+    # only journal reader run_shadow uses; the legacy lifecycle path keeps
+    # using unbounded read_journal, so the legacy write still commits.
+    def raising_bounded(path):
+        raise run_journal.RunJournalError("bound exceeded: journal above MAX_JOURNAL_BYTES")
+
+    monkeypatch.setattr(run_journal, "read_journal_bounded", raising_bounded)
+
+    # Comparison path: legacy write still advances, shadow records
+    # journal-unreadable.
+    run_before = (run_dir / "run.json").read_bytes()
+    _write_run_json_locked(repo, run_dir, "planning")
+    assert (run_dir / "run.json").read_bytes() != run_before
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert data["errors"] >= 1
+    assert data["last_error_category"] == "journal-unreadable"
+
+    # Readiness path: bound failure closes the gate with journal-unreadable.
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_JOURNAL_UNREADABLE in report.reasons
+    assert REASON_EVIDENCE_UNREADABLE not in report.reasons
+
+
+def _forge_stale_baseline(run_dir: Path, *, stale_version: int, baseline_seq: object, baseline_digest: object) -> None:
+    """Rewrite the current artifact with a noncurrent projector version and a
+    forged last_compared_sequence / last_compared_event_digest pair."""
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    data = json.loads(artifact.read_text())
+    data["projector_version"] = stale_version
+    data["last_compared_sequence"] = baseline_seq
+    data["last_compared_event_digest"] = baseline_digest
+    artifact.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def test_quarantine_replace_failure_leaves_stale_artifact_intact(enabled, tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # match, seq 2
+    _write_run_json_locked(repo, run_dir, "planning")  # match, seq 4
+
+    _make_stale_artifact(run_dir, stale_version=2)
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    stale_bytes = artifact.read_bytes()
+    assert not list((run_dir / "events").glob(".stale-projector-v2-*"))
+
+    # Force only the quarantine atomic rename (Path.replace on the stale
+    # artifact path) to fail. The fresh evidence write goes through
+    # localio.write_text_atomic which uses os.replace on a temp file, so it
+    # is unaffected by this targeted Path.replace patch.
+    real_replace = Path.replace
+
+    def failing_replace(self, target):
+        if str(self) == str(artifact):
+            raise OSError("rename not permitted")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+
+    # The write path must not raise even though quarantine failed.
+    _write_run_json_locked(repo, run_dir, "dispatching")
+
+    # Quarantine failed: the active stale artifact is byte-identical.
+    assert artifact.read_bytes() == stale_bytes
+    # No quarantine sibling was created.
+    assert not list((run_dir / "events").glob(".stale-projector-v2-*"))
+
+
+def test_forged_stale_digest_cannot_suppress_comparison_gap(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # ck 1, created 2
+    _write_run_json_locked(repo, run_dir, "planning")  # ck 3, planning 4
+
+    # Forge a stale artifact whose baseline claims seq 6 with a digest that
+    # does not match the real event at seq 6. Without verification this
+    # baseline would make the tail-7 advance look like a single step (+1)
+    # and suppress the comparison gap; with verification the digest
+    # mismatch drops the baseline and the gap is recorded.
+    _forge_stale_baseline(
+        run_dir,
+        stale_version=2,
+        baseline_seq=6,
+        baseline_digest="forged-digest-not-matching-event-6",
+    )
+
+    # Crash window: append run.dispatch.requested (seq 5) directly and write
+    # run.json directly so the shadow hook does NOT run.
+    with runguard.run_lock(repo, run_dir=run_dir):
+        report = run_journal.read_journal(_journal_path(run_dir))
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=_RUN_ID,
+            event_type="run.dispatch.requested",
+            payload={},
+            idempotency_key="lifecycle:dispatch-forged-digest",
+            expected_previous_sequence=report.events[-1].sequence,
+        )
+        localio.write_json(
+            run_dir / "run.json",
+            {
+                "schema": "brigade.run.v1",
+                "schema_version": 1,
+                "status": "dispatching",
+                "task": "forged-digest",
+            },
+        )
+
+    # Later locked write (result-processing) appends ck 6 + status 7 and runs
+    # the hook. The forged baseline must NOT suppress the gap.
+    _write_run_json_locked(repo, run_dir, "result-processing")
+
+    fresh = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert _gap_records(fresh)
+    assert fresh["errors"] >= 1
+    assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
+    assert list((run_dir / "events").glob(".stale-projector-v2-*"))
+
+
+def test_forged_stale_sequence_out_of_range_cannot_suppress_comparison_gap(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # ck 1, created 2
+    _write_run_json_locked(repo, run_dir, "planning")  # ck 3, planning 4
+
+    # Forge a stale artifact whose baseline claims seq 999 (out of range).
+    # Without verification this baseline would make tail 7 <= prior and
+    # suppress the comparison gap; with verification the out-of-range
+    # sequence drops the baseline and the gap is recorded.
+    _forge_stale_baseline(
+        run_dir,
+        stale_version=2,
+        baseline_seq=999,
+        baseline_digest="forged-digest",
+    )
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        report = run_journal.read_journal(_journal_path(run_dir))
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=_RUN_ID,
+            event_type="run.dispatch.requested",
+            payload={},
+            idempotency_key="lifecycle:dispatch-forged-seq",
+            expected_previous_sequence=report.events[-1].sequence,
+        )
+        localio.write_json(
+            run_dir / "run.json",
+            {
+                "schema": "brigade.run.v1",
+                "schema_version": 1,
+                "status": "dispatching",
+                "task": "forged-seq",
+            },
+        )
+
+    _write_run_json_locked(repo, run_dir, "result-processing")
+
+    fresh = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert _gap_records(fresh)
+    assert fresh["errors"] >= 1
+    assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
+    assert list((run_dir / "events").glob(".stale-projector-v2-*"))
+
+
+def test_malformed_last_outcome_is_unreadable_not_schema_mismatch(tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    run_dir.joinpath("events").mkdir()
+    run_lifecycle._journal_path(run_dir).write_text("")  # empty journal file
+
+    # A current-version artifact with comparisons >= 1, zero counters, and a
+    # bogus last_outcome. The version door and schema check both pass; the
+    # no-comparisons branch passes; the malformed last_outcome must close the
+    # gate as evidence-unreadable, NOT schema mismatch.
+    localio.write_json(
+        run_shadow.shadow_artifact_path(run_dir),
+        {
+            "schema": "brigade.run_shadow.v1",
+            "schema_version": 1,
+            "run_id": _RUN_ID,
+            "projector_version": run_projector.PROJECTOR_VERSION,
+            "comparisons": 1,
+            "matches": 0,
+            "mismatches": 0,
+            "lags": 0,
+            "errors": 0,
+            "last_outcome": "bogus",
+            "last_compared_sequence": None,
+            "last_compared_event_digest": None,
+            "last_shadow_digest": None,
+            "last_projected_digest": None,
+            "last_differing_fields": None,
+            "last_error_category": None,
+            "last_recorded_at": None,
+            "recent_records": [],
+        },
+    )
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_EVIDENCE_UNREADABLE in report.reasons
+    assert REASON_EVIDENCE_SCHEMA_MISMATCH not in report.reasons
+
+    # A None last_outcome is equally malformed.
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    data["last_outcome"] = None
+    run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_EVIDENCE_UNREADABLE in report.reasons
+    assert REASON_EVIDENCE_SCHEMA_MISMATCH not in report.reasons
+
+
+def test_forged_boolean_sequence_cannot_be_carried_as_stale_baseline(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # ck 1, created 2
+    _write_run_json_locked(repo, run_dir, "planning")  # ck 3, planning 4
+
+    # bool is an int subclass, so a naive ``isinstance(baseline_seq, int)``
+    # guard would accept ``True`` (=1) and carry it as the stale baseline.
+    # Forge ``True`` with the REAL digest of event 1 so every check except the
+    # bool rejection would pass; without the explicit bool guard this baseline
+    # is carried and the artifact's last_compared_baseline cursor is corrupted
+    # by a boolean. _verify_stale_baseline must reject it outright.
+    real_event_1_digest = _events(run_dir)[0].event_digest
+    assert run_shadow._verify_stale_baseline(run_dir, _RUN_ID, True, real_event_1_digest) is None
+    assert run_shadow._verify_stale_baseline(run_dir, _RUN_ID, False, real_event_1_digest) is None
+
+    # End-to-end: the forged boolean baseline must not suppress the
+    # comparison-gap recorded when a later locked write runs the hook after a
+    # crash window skipped a shadow step.
+    _forge_stale_baseline(
+        run_dir,
+        stale_version=2,
+        baseline_seq=True,
+        baseline_digest=real_event_1_digest,
+    )
+
+    # Crash window: append run.dispatch.requested (seq 5) directly and write
+    # run.json directly so the shadow hook does NOT run.
+    with runguard.run_lock(repo, run_dir=run_dir):
+        report = run_journal.read_journal(_journal_path(run_dir))
+        run_journal.append_event(
+            _journal_path(run_dir),
+            run_id=_RUN_ID,
+            event_type="run.dispatch.requested",
+            payload={},
+            idempotency_key="lifecycle:dispatch-forged-bool",
+            expected_previous_sequence=report.events[-1].sequence,
+        )
+        localio.write_json(
+            run_dir / "run.json",
+            {
+                "schema": "brigade.run.v1",
+                "schema_version": 1,
+                "status": "dispatching",
+                "task": "forged-bool",
+            },
+        )
+
+    # Later locked write (result-processing) appends ck 6 + status 7 and runs
+    # the hook. The forged boolean baseline must NOT be carried, so the
+    # comparison-gap fires (it would also fire if carried, but the direct
+    # _verify_stale_baseline assertions above are the RED driver for the
+    # bool rejection fix).
+    _write_run_json_locked(repo, run_dir, "result-processing")
+
+    fresh = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert _gap_records(fresh)
+    assert fresh["errors"] >= 1
+    # The carried cursor is never a bool: it is either None (rejected) or the
+    # real int tail sequence written by the main record.
+    assert not isinstance(fresh["last_compared_sequence"], bool)
+    assert isinstance(fresh["last_compared_sequence"], int)
+    assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
+    assert list((run_dir / "events").glob(".stale-projector-v2-*"))
+
+
+def test_real_journal_above_max_bytes_records_journal_unreadable(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    # Build a clean current-version artifact with a real parsed legacy
+    # snapshot (ck 1, run.created 2). This is the "previously parsed legacy
+    # snapshot" the integration test replays after the journal grows.
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+    legacy_snapshot = json.loads((run_dir / "run.json").read_text())
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    clean_data = json.loads(artifact.read_text())
+    assert clean_data["last_outcome"] == "match"
+    assert clean_data["errors"] == 0
+
+    # Grow the real journal past run_checkpoint.MAX_JOURNAL_BYTES (8 MiB) by
+    # appending padding bytes. read_journal_bounded fstat-checks the file
+    # size before any allocation and raises RunJournalError("bound exceeded:
+    # journal above MAX_JOURNAL_BYTES") -- no monkeypatch, the real bound.
+    padding = b"\n" * (run_checkpoint.MAX_JOURNAL_BYTES + 1024)
+    with _journal_path(run_dir).open("ab") as handle:
+        handle.write(padding)
+    assert _journal_path(run_dir).stat().st_size > run_checkpoint.MAX_JOURNAL_BYTES
+
+    # Replay the previously parsed legacy snapshot through the comparison
+    # path. The bounded read raises, so the shadow hook must classify the
+    # failure as journal-unreadable on the active artifact.
+    run_shadow.record_shadow_comparison(run_dir, legacy_snapshot)
+
+    data = json.loads(artifact.read_text())
+    assert data["errors"] >= 1
+    assert data["last_outcome"] == "error"
+    assert data["last_error_category"] == "journal-unreadable"
+
+    # The readiness gate re-reads the journal through the same bounded reader
+    # and must close with REASON_JOURNAL_UNREADABLE (not evidence-unreadable).
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_JOURNAL_UNREADABLE in report.reasons
+    assert REASON_EVIDENCE_UNREADABLE not in report.reasons
+
+
+# -- Issue #568 slice 6 blocker #2: strict counter validation -------------------
+
+
+def _current_artifact(run_dir: Path, **overrides) -> dict[str, object]:
+    """A current-projector-version artifact with valid counters by default."""
+    data: dict[str, object] = {
+        "schema": run_shadow.SHADOW_SCHEMA,
+        "schema_version": run_shadow.SHADOW_SCHEMA_VERSION,
+        "run_id": _RUN_ID,
+        "projector_version": run_projector.PROJECTOR_VERSION,
+        "comparisons": 1,
+        "matches": 1,
+        "mismatches": 0,
+        "lags": 0,
+        "errors": 0,
+        "last_compared_sequence": None,
+        "last_compared_event_digest": None,
+        "last_shadow_digest": None,
+        "last_projected_digest": None,
+        "last_differing_fields": None,
+        "last_outcome": run_shadow.OUTCOME_MATCH,
+        "last_error_category": None,
+        "last_recorded_at": None,
+        "recent_records": [],
+    }
+    data.update(overrides)
+    return data
+
+
+def _write_current_artifact(run_dir: Path, data: dict[str, object]) -> None:
+    run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def _gate_artifact_ready(run_dir: Path) -> None:
+    """Stand up an empty journal and a current artifact so the gate reaches the
+    counter checks (past the no-journal, no-evidence, version, and schema doors)."""
+    run_dir.joinpath("events").mkdir(exist_ok=True)
+    run_lifecycle._journal_path(run_dir).write_text("")
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("comparisons", True),
+        ("comparisons", False),
+        ("mismatches", True),
+        ("mismatches", False),
+        ("errors", True),
+        ("errors", False),
+    ],
+)
+def test_gate_rejects_bool_counters_as_evidence_unreadable(tmp_path, field, value):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _gate_artifact_ready(run_dir)
+    _write_current_artifact(run_dir, _current_artifact(run_dir, **{field: value}))
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_EVIDENCE_UNREADABLE in report.reasons
+    assert REASON_NO_COMPARISONS not in report.reasons
+    assert REASON_MISMATCH_RECORDED not in report.reasons
+    assert REASON_ERROR_RECORDED not in report.reasons
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("comparisons", -1),
+        ("mismatches", -1),
+        ("errors", -1),
+    ],
+)
+def test_gate_rejects_negative_counters_as_evidence_unreadable(tmp_path, field, value):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _gate_artifact_ready(run_dir)
+    _write_current_artifact(run_dir, _current_artifact(run_dir, **{field: value}))
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_EVIDENCE_UNREADABLE in report.reasons
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("comparisons", "1"),
+        ("mismatches", "0"),
+        ("errors", "1"),
+        ("comparisons", 1.5),
+        ("mismatches", 0.0),
+        ("errors", None),
+    ],
+)
+def test_gate_rejects_non_int_counters_as_evidence_unreadable(tmp_path, field, value):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _gate_artifact_ready(run_dir)
+    _write_current_artifact(run_dir, _current_artifact(run_dir, **{field: value}))
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_EVIDENCE_UNREADABLE in report.reasons
+
+
+def test_gate_accepts_zero_mismatches_and_zero_errors_as_valid(tmp_path):
+    """Regression guard: zero is a valid nonnegative int. A current artifact with
+    comparisons >= 1, mismatches == 0, errors == 0, and last_outcome match must
+    still pass the counter validation and reach the journal-tail check."""
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _gate_artifact_ready(run_dir)
+    _write_current_artifact(
+        run_dir,
+        _current_artifact(
+            run_dir,
+            comparisons=1,
+            matches=1,
+            mismatches=0,
+            errors=0,
+            last_outcome=run_shadow.OUTCOME_MATCH,
+        ),
+    )
+    report = run_shadow.check_projection_readiness(run_dir)
+    # No real events, so the gate closes with journal-ahead, NOT evidence
+    # unreadable -- proving the zero counters passed validation.
+    assert REASON_EVIDENCE_UNREADABLE not in report.reasons
+    assert REASON_NO_COMPARISONS not in report.reasons
+
+
+def test_record_outcome_does_not_trust_invalid_counters_on_carry(enabled, tmp_path):
+    """Blocker #2 carry side: a current-v3 prior artifact with invalid counters
+    (bool / negative / non-int) must not be trusted when a new comparison
+    accumulates. The prior is quarantined and a fresh artifact starts; the
+    invalid counters never flow into the new artifact's accumulators.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # ck 1, run.created 2
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    # Forge a current-version artifact with invalid counters of every kind.
+    forged = json.loads(artifact.read_text())
+    forged["projector_version"] = run_projector.PROJECTOR_VERSION
+    forged["comparisons"] = True  # bool
+    forged["mismatches"] = -3  # negative
+    forged["errors"] = "2"  # non-int string
+    forged["matches"] = False  # bool (matches is not gated, but must not crash)
+    artifact.write_text(json.dumps(forged, indent=2, sort_keys=True) + "\n")
+
+    # A new locked status write runs the shadow hook, which loads the prior
+    # current-v3 artifact, detects the invalid counters, quarantines it, and
+    # starts fresh with an evidence-unreadable side record plus the new match.
+    _write_run_json_locked(repo, run_dir, "planning")  # ck 3, planning 4
+
+    fresh = json.loads(artifact.read_text())
+    # Counters are never derived from the forged values: comparisons is the
+    # evidence-unreadable side record plus the new match (2), not bool True.
+    assert isinstance(fresh["comparisons"], int) and not isinstance(fresh["comparisons"], bool)
+    assert isinstance(fresh["mismatches"], int) and not isinstance(fresh["mismatches"], bool)
+    assert isinstance(fresh["errors"], int) and not isinstance(fresh["errors"], bool)
+    assert fresh["mismatches"] >= 0
+    assert fresh["errors"] >= 1  # the evidence-unreadable side record
+    assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
+    # The forged bool/negative/string values did not leak into the accumulators.
+    assert fresh["comparisons"] != True  # noqa: E712 - guard against bool carry
+    assert fresh["mismatches"] != -3
+    assert fresh["errors"] != "2"
+    # An evidence-unreadable side record was appended for the invalid prior.
+    assert any(
+        isinstance(r, dict)
+        and r.get("outcome") == run_shadow.OUTCOME_ERROR
+        and r.get("category") == "evidence-unreadable"
+        for r in fresh["recent_records"]
+    )
+    # The forged prior was quarantined aside.
+    assert list((run_dir / "events").glob("*.corrupt-*"))
+
+
+def test_record_outcome_does_not_trust_negative_counters_on_carry(enabled, tmp_path):
+    """Blocker #2 carry side: a current-v3 prior with negative comparisons must
+    not produce a negative accumulator (which would silently bypass the
+    no-comparisons gate)."""
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # ck 1, run.created 2
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    forged = json.loads(artifact.read_text())
+    forged["projector_version"] = run_projector.PROJECTOR_VERSION
+    forged["comparisons"] = -5
+    forged["matches"] = -5
+    forged["mismatches"] = 0
+    forged["errors"] = 0
+    artifact.write_text(json.dumps(forged, indent=2, sort_keys=True) + "\n")
+
+    _write_run_json_locked(repo, run_dir, "planning")
+
+    fresh = json.loads(artifact.read_text())
+    assert isinstance(fresh["comparisons"], int) and not isinstance(fresh["comparisons"], bool)
+    assert fresh["comparisons"] >= 1
+    assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
+    assert list((run_dir / "events").glob("*.corrupt-*"))
