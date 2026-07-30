@@ -62,9 +62,11 @@ BRIEF_BUDGET_BYTES = 6000
 NOOP_DETAIL = "no-op"
 
 # Journal-authority opt-in (issue #568 slice 6). Per-run and durable, like the
-# lifecycle-journal flag, and requires lifecycle journaling: enrolling a new
-# run sets BOTH request fields true. Existing runs enroll only from their
-# durable run.json field, never a later environment change.
+# lifecycle-journal flag. The authority opt-in implies lifecycle journaling:
+# enrolling a new run with BRIGADE_RUN_JOURNAL_AUTHORITY=1 sets BOTH request
+# fields true even when BRIGADE_LIFECYCLE_JOURNAL is unset. Existing runs
+# enroll only from their durable run.json field, never a later environment
+# change.
 _AUTHORITY_FLAG_ENV = "BRIGADE_RUN_JOURNAL_AUTHORITY"
 _AUTHORITY_REQUEST_FIELD = "run_journal_authority_requested"
 _AUTHORITY_TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -598,6 +600,34 @@ def _resolve_authority_state(run_dir: Path) -> str:
     return "authoritative"
 
 
+_PROJECTION_METADATA_FIELDS = (
+    "projector_version",
+    "journal_present",
+    "journal_last_sequence",
+    "journal_last_event_digest",
+)
+
+
+def _payload_requests_authority(payload: dict[str, object]) -> bool:
+    """Cheap payload classification: does the incoming run.json payload carry
+    any authority signal that requires filesystem authority resolution?
+
+    Returns True when the payload carries the durable authority request field
+    with ANY value (present, including an explicit ``False`` which is a forged
+    downgrade attempt) OR any of the four projection metadata fields
+    (projector_version, journal_present, journal_last_sequence,
+    journal_last_event_digest). Only legacy and lifecycle-only writes (the
+    authority request field ABSENT and all four projection metadata fields
+    ABSENT) return False so ``_write_json`` can skip the existing-run.json
+    authority read entirely. No-downgrade is preserved: any incoming durable
+    authority request (true or false) or projected metadata still resolves
+    and validates authority through ``_resolve_authority_state``.
+    """
+    if _AUTHORITY_REQUEST_FIELD in payload:
+        return True
+    return any(field in payload for field in _PROJECTION_METADATA_FIELDS)
+
+
 def _genuine_journal_ahead(run_dir: Path) -> bool:
     """Return True only when the journal tail has genuinely advanced past a
     real recorded comparison (not a forged cursor).
@@ -794,12 +824,20 @@ def _write_json(path: Path, payload: object) -> None:
         if isinstance(status, str) and status:
             run_dir = path.parent
             workspace = runguard.resolve_run_lock_workspace(payload, run_dir)
-            # Resolve the authority state BEFORE any new checkpoint or lifecycle
-            # append. The resolver raises a bounded LifecycleJournalError when
-            # projected metadata exists and validation fails, so the writer
-            # never observes an authoritative run downgrade. runguard recovery
-            # repair writes (no status) bypass this branch entirely.
-            authority_state = _resolve_authority_state(run_dir)
+            # Cheap payload classification BEFORE the filesystem authority
+            # resolution. Legacy and lifecycle-only status writes (the durable
+            # authority request field ABSENT and all four projection metadata
+            # fields ABSENT in the incoming payload) never read/parse the
+            # existing run.json only to resolve authority, so an unreadable
+            # legacy run.json cannot make a status write fail. No-downgrade is
+            # preserved: an incoming durable authority request of ANY value
+            # (including an explicit False, which is a forged downgrade
+            # attempt) or any projection metadata field still resolves and
+            # validates authority through _resolve_authority_state.
+            if _payload_requests_authority(payload):
+                authority_state = _resolve_authority_state(run_dir)
+            else:
+                authority_state = "legacy"
             # Construct the canonical legacy candidate and the projection base
             # exactly once. The base strips the four journal-derived metadata
             # fields; the same object is the base-stripped checkpoint body
@@ -2708,15 +2746,18 @@ def record_run_start(
                 existing_lifecycle_requested = True
             if existing.get(_AUTHORITY_REQUEST_FIELD) is True:
                 existing_authority_requested = True
+    # A new run enrolls in lifecycle journaling when the lifecycle-journal flag
+    # is set OR when the authority opt-in is set: BRIGADE_RUN_JOURNAL_AUTHORITY=1
+    # implies lifecycle journaling even when BRIGADE_LIFECYCLE_JOURNAL is unset,
+    # so a new authority run carries BOTH durable request fields. An existing
+    # run enrolls only from its durable run.json fields: a later environment
+    # change never enrolls it.
+    new_run = not run_json_exists
+    authority_env = is_run_journal_authority_enabled()
     lifecycle_requested = existing_lifecycle_requested or (
-        not run_json_exists and run_lifecycle.is_lifecycle_journaling_enabled()
+        new_run and (run_lifecycle.is_lifecycle_journaling_enabled() or authority_env)
     )
-    # A new run enrolls in journal authority only when BOTH the authority and
-    # lifecycle-journal flags are set. An existing run enrolls only from its
-    # durable run.json field: a later environment change never enrolls it.
-    authority_requested = existing_authority_requested or (
-        not run_json_exists and is_run_journal_authority_enabled() and run_lifecycle.is_lifecycle_journaling_enabled()
-    )
+    authority_requested = existing_authority_requested or (new_run and authority_env)
     # The first run.json write activates the lifecycle journal and publishes a
     # recovery checkpoint BEFORE the atomic run.json replacement. If that final
     # replacement fails, durable journal/checkpoint state already exists without

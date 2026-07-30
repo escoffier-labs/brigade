@@ -5285,3 +5285,263 @@ def test_record_run_start_run_json_write_failure_retains_lock_and_durable_state(
     checkpoint_dir = run_checkpoint.checkpoint_dir(run_dir)
     assert checkpoint_dir.is_dir()
     assert any(checkpoint_dir.glob("*.json"))
+
+
+# -- Issue #568 slice 6 independent-review blockers ----------------------------
+
+_AUTHORITY_ENV = "BRIGADE_RUN_JOURNAL_AUTHORITY"
+_LIFECYCLE_ENV = "BRIGADE_LIFECYCLE_JOURNAL"
+_AUTHORITY_REQUEST_FIELD = "run_journal_authority_requested"
+_LIFECYCLE_REQUEST_FIELD = "lifecycle_journal_requested"
+_PROJECTION_METADATA_FIELDS = (
+    "projector_version",
+    "journal_present",
+    "journal_last_sequence",
+    "journal_last_event_digest",
+)
+
+
+def _authority_run_dir(tmp_path: Path) -> tuple[Path, Path]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "20260730-104300-deadbeef"
+    run_dir.mkdir(parents=True)
+    return workspace, run_dir
+
+
+def test_new_run_authority_env_implies_both_durable_request_fields(tmp_path, monkeypatch):
+    """Blocker #1: BRIGADE_RUN_JOURNAL_AUTHORITY=1 alone enrolls a new run with
+    BOTH durable request fields true, even when BRIGADE_LIFECYCLE_JOURNAL is
+    unset. The authority opt-in implies lifecycle journaling.
+    """
+    monkeypatch.setenv(_AUTHORITY_ENV, "1")
+    monkeypatch.delenv(_LIFECYCLE_ENV, raising=False)
+    workspace, run_dir = _authority_run_dir(tmp_path)
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="authority-implied lifecycle",
+            cwd=workspace,
+            roster=_roster(),
+            read_only=False,
+            lock_workspace=workspace,
+        )
+
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta[_AUTHORITY_REQUEST_FIELD] is True
+    assert meta[_LIFECYCLE_REQUEST_FIELD] is True
+
+
+def test_existing_legacy_run_not_enrolled_by_later_authority_env(tmp_path, monkeypatch):
+    """Blocker #1 guard: an existing legacy run never picks up journal authority
+    from a later environment change. The durable field is set at run creation
+    only; a later BRIGADE_RUN_JOURNAL_AUTHORITY=1 must not enroll it.
+    """
+    monkeypatch.delenv(_AUTHORITY_ENV, raising=False)
+    monkeypatch.delenv(_LIFECYCLE_ENV, raising=False)
+    workspace, run_dir = _authority_run_dir(tmp_path)
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="legacy run",
+            cwd=workspace,
+            roster=_roster(),
+            read_only=False,
+            lock_workspace=workspace,
+        )
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert _AUTHORITY_REQUEST_FIELD not in meta
+    assert _LIFECYCLE_REQUEST_FIELD not in meta
+
+    # A later env change must not enroll the existing run.
+    monkeypatch.setenv(_AUTHORITY_ENV, "1")
+    monkeypatch.setenv(_LIFECYCLE_ENV, "1")
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="legacy run",
+            cwd=workspace,
+            roster=_roster(),
+            read_only=False,
+            lock_workspace=workspace,
+        )
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert _AUTHORITY_REQUEST_FIELD not in meta
+    assert _LIFECYCLE_REQUEST_FIELD not in meta
+
+
+def _legacy_status_payload(status: str = "planning") -> dict[str, object]:
+    return {"schema": "brigade.run.v1", "schema_version": 1, "status": status, "task": "legacy"}
+
+
+def test_legacy_status_write_skips_authority_resolution_read(tmp_path, monkeypatch):
+    """Blocker #3: a legacy (no authority signals) status write must not read
+    existing run.json only to resolve authority. _resolve_authority_state is
+    not consulted for legacy payloads.
+    """
+    workspace, run_dir = _authority_run_dir(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps(_legacy_status_payload("started")))
+
+    def _boom(_run_dir):
+        raise AssertionError("legacy status write must not resolve authority state")
+
+    monkeypatch.setattr(aboyeur, "_resolve_authority_state", _boom)
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur._write_json(run_dir / "run.json", _legacy_status_payload("planning"))
+
+    written = json.loads((run_dir / "run.json").read_text())
+    assert written["status"] == "planning"
+    assert _AUTHORITY_REQUEST_FIELD not in written
+    for field in _PROJECTION_METADATA_FIELDS:
+        assert field not in written
+
+
+def test_lifecycle_only_status_write_skips_authority_resolution_read(tmp_path, monkeypatch):
+    """Blocker #3: a lifecycle-only status write (lifecycle_journal_requested
+    true, no authority request, no projection metadata) must not read existing
+    run.json only to resolve authority.
+    """
+    workspace, run_dir = _authority_run_dir(tmp_path)
+    existing = _legacy_status_payload("started")
+    existing[_LIFECYCLE_REQUEST_FIELD] = True
+    (run_dir / "run.json").write_text(json.dumps(existing))
+
+    def _boom(_run_dir):
+        raise AssertionError("lifecycle-only status write must not resolve authority state")
+
+    monkeypatch.setattr(aboyeur, "_resolve_authority_state", _boom)
+
+    payload = _legacy_status_payload("planning")
+    payload[_LIFECYCLE_REQUEST_FIELD] = True
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur._write_json(run_dir / "run.json", payload)
+
+    written = json.loads((run_dir / "run.json").read_text())
+    assert written["status"] == "planning"
+    assert written[_LIFECYCLE_REQUEST_FIELD] is True
+    assert _AUTHORITY_REQUEST_FIELD not in written
+    for field in _PROJECTION_METADATA_FIELDS:
+        assert field not in written
+
+
+def test_authority_payload_still_resolves_and_validates_authority(tmp_path, monkeypatch):
+    """Blocker #3 no-downgrade: an incoming payload carrying a durable authority
+    request OR projection metadata must still resolve and validate authority
+    through _resolve_authority_state (the filesystem read is preserved).
+    """
+    workspace, run_dir = _authority_run_dir(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps(_legacy_status_payload("started")))
+
+    calls: list[Path] = []
+
+    def _spy(run_dir):
+        calls.append(run_dir)
+        return "authority-requested"
+
+    monkeypatch.setattr(aboyeur, "_resolve_authority_state", _spy)
+    # Force the post-parity gate to fall back to the legacy body so the write
+    # completes without needing a real projected snapshot.
+    monkeypatch.setattr(
+        aboyeur.run_shadow,
+        "check_projection_readiness",
+        lambda _run_dir: aboyeur.run_shadow.ReadinessReport(
+            ready=False, reasons=(aboyeur.run_shadow.REASON_NO_EVIDENCE,)
+        ),
+    )
+
+    payload = _legacy_status_payload("planning")
+    payload[_AUTHORITY_REQUEST_FIELD] = True
+    payload[_LIFECYCLE_REQUEST_FIELD] = True
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur._write_json(run_dir / "run.json", payload)
+
+    assert calls, "authority payload must trigger filesystem authority resolution"
+    assert calls[0] == run_dir
+    written = json.loads((run_dir / "run.json").read_text())
+    assert written[_AUTHORITY_REQUEST_FIELD] is True
+
+
+def test_authority_payload_with_projection_metadata_still_resolves_authority(tmp_path, monkeypatch):
+    """Blocker #3 no-downgrade: an incoming payload carrying projection metadata
+    (any of the four derived fields) must still trigger authority resolution,
+    even without the durable authority request field.
+    """
+    workspace, run_dir = _authority_run_dir(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps(_legacy_status_payload("started")))
+
+    calls: list[Path] = []
+
+    def _spy(run_dir):
+        calls.append(run_dir)
+        return "legacy"
+
+    monkeypatch.setattr(aboyeur, "_resolve_authority_state", _spy)
+
+    payload = _legacy_status_payload("planning")
+    payload["projector_version"] = 3
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur._write_json(run_dir / "run.json", payload)
+
+    assert calls, "projection metadata must trigger filesystem authority resolution"
+
+
+def test_explicit_false_authority_request_field_triggers_authority_resolution(tmp_path, monkeypatch):
+    """Issue #568 slice 6 follow-up: an incoming payload that explicitly carries
+    ``run_journal_authority_requested=False`` is an authority signal (a forged
+    downgrade attempt), not a legacy/lifecycle-only write. It must still trigger
+    ``_resolve_authority_state`` so the no-downgrade gate can reject it. The
+    legacy/lifecycle-only fast path applies only when the authority request
+    field is ABSENT and all four projection metadata fields are ABSENT.
+    """
+    workspace, run_dir = _authority_run_dir(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps(_legacy_status_payload("started")))
+
+    calls: list[Path] = []
+
+    def _spy(run_dir):
+        calls.append(run_dir)
+        return "legacy"
+
+    monkeypatch.setattr(aboyeur, "_resolve_authority_state", _spy)
+
+    payload = _legacy_status_payload("planning")
+    payload[_AUTHORITY_REQUEST_FIELD] = False
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur._write_json(run_dir / "run.json", payload)
+
+    assert calls, (
+        "explicit False authority request field is a forged downgrade attempt "
+        "and must trigger filesystem authority resolution"
+    )
+
+
+def test_legacy_status_write_tolerates_corrupt_existing_run_json(tmp_path, monkeypatch):
+    """Blocker #3: an unreadable (OSError, not just JSONDecodeError) legacy
+    run.json must not make a legacy status write fail. The authority resolution
+    read is skipped for legacy payloads, so an unreadable existing run.json
+    never reaches the authority resolver (which only catches FileNotFoundError,
+    not other OSErrors).
+    """
+    workspace, run_dir = _authority_run_dir(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps(_legacy_status_payload("started")))
+
+    real_read_bytes = Path.read_bytes
+
+    def failing_read_bytes(self):
+        if self == run_dir / "run.json":
+            raise OSError("permission denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", failing_read_bytes)
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur._write_json(run_dir / "run.json", _legacy_status_payload("planning"))
+
+    written = json.loads((run_dir / "run.json").read_text())
+    assert written["status"] == "planning"
+    assert _AUTHORITY_REQUEST_FIELD not in written
+    for field in _PROJECTION_METADATA_FIELDS:
+        assert field not in written

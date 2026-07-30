@@ -1763,3 +1763,213 @@ def test_real_journal_above_max_bytes_records_journal_unreadable(enabled, tmp_pa
     assert report.ready is False
     assert REASON_JOURNAL_UNREADABLE in report.reasons
     assert REASON_EVIDENCE_UNREADABLE not in report.reasons
+
+
+# -- Issue #568 slice 6 blocker #2: strict counter validation -------------------
+
+
+def _current_artifact(run_dir: Path, **overrides) -> dict[str, object]:
+    """A current-projector-version artifact with valid counters by default."""
+    data: dict[str, object] = {
+        "schema": run_shadow.SHADOW_SCHEMA,
+        "schema_version": run_shadow.SHADOW_SCHEMA_VERSION,
+        "run_id": _RUN_ID,
+        "projector_version": run_projector.PROJECTOR_VERSION,
+        "comparisons": 1,
+        "matches": 1,
+        "mismatches": 0,
+        "lags": 0,
+        "errors": 0,
+        "last_compared_sequence": None,
+        "last_compared_event_digest": None,
+        "last_shadow_digest": None,
+        "last_projected_digest": None,
+        "last_differing_fields": None,
+        "last_outcome": run_shadow.OUTCOME_MATCH,
+        "last_error_category": None,
+        "last_recorded_at": None,
+        "recent_records": [],
+    }
+    data.update(overrides)
+    return data
+
+
+def _write_current_artifact(run_dir: Path, data: dict[str, object]) -> None:
+    run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def _gate_artifact_ready(run_dir: Path) -> None:
+    """Stand up an empty journal and a current artifact so the gate reaches the
+    counter checks (past the no-journal, no-evidence, version, and schema doors)."""
+    run_dir.joinpath("events").mkdir(exist_ok=True)
+    run_lifecycle._journal_path(run_dir).write_text("")
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("comparisons", True),
+        ("comparisons", False),
+        ("mismatches", True),
+        ("mismatches", False),
+        ("errors", True),
+        ("errors", False),
+    ],
+)
+def test_gate_rejects_bool_counters_as_evidence_unreadable(tmp_path, field, value):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _gate_artifact_ready(run_dir)
+    _write_current_artifact(run_dir, _current_artifact(run_dir, **{field: value}))
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_EVIDENCE_UNREADABLE in report.reasons
+    assert REASON_NO_COMPARISONS not in report.reasons
+    assert REASON_MISMATCH_RECORDED not in report.reasons
+    assert REASON_ERROR_RECORDED not in report.reasons
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("comparisons", -1),
+        ("mismatches", -1),
+        ("errors", -1),
+    ],
+)
+def test_gate_rejects_negative_counters_as_evidence_unreadable(tmp_path, field, value):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _gate_artifact_ready(run_dir)
+    _write_current_artifact(run_dir, _current_artifact(run_dir, **{field: value}))
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_EVIDENCE_UNREADABLE in report.reasons
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("comparisons", "1"),
+        ("mismatches", "0"),
+        ("errors", "1"),
+        ("comparisons", 1.5),
+        ("mismatches", 0.0),
+        ("errors", None),
+    ],
+)
+def test_gate_rejects_non_int_counters_as_evidence_unreadable(tmp_path, field, value):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _gate_artifact_ready(run_dir)
+    _write_current_artifact(run_dir, _current_artifact(run_dir, **{field: value}))
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert REASON_EVIDENCE_UNREADABLE in report.reasons
+
+
+def test_gate_accepts_zero_mismatches_and_zero_errors_as_valid(tmp_path):
+    """Regression guard: zero is a valid nonnegative int. A current artifact with
+    comparisons >= 1, mismatches == 0, errors == 0, and last_outcome match must
+    still pass the counter validation and reach the journal-tail check."""
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _gate_artifact_ready(run_dir)
+    _write_current_artifact(
+        run_dir,
+        _current_artifact(
+            run_dir,
+            comparisons=1,
+            matches=1,
+            mismatches=0,
+            errors=0,
+            last_outcome=run_shadow.OUTCOME_MATCH,
+        ),
+    )
+    report = run_shadow.check_projection_readiness(run_dir)
+    # No real events, so the gate closes with journal-ahead, NOT evidence
+    # unreadable -- proving the zero counters passed validation.
+    assert REASON_EVIDENCE_UNREADABLE not in report.reasons
+    assert REASON_NO_COMPARISONS not in report.reasons
+
+
+def test_record_outcome_does_not_trust_invalid_counters_on_carry(enabled, tmp_path):
+    """Blocker #2 carry side: a current-v3 prior artifact with invalid counters
+    (bool / negative / non-int) must not be trusted when a new comparison
+    accumulates. The prior is quarantined and a fresh artifact starts; the
+    invalid counters never flow into the new artifact's accumulators.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # ck 1, run.created 2
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    # Forge a current-version artifact with invalid counters of every kind.
+    forged = json.loads(artifact.read_text())
+    forged["projector_version"] = run_projector.PROJECTOR_VERSION
+    forged["comparisons"] = True  # bool
+    forged["mismatches"] = -3  # negative
+    forged["errors"] = "2"  # non-int string
+    forged["matches"] = False  # bool (matches is not gated, but must not crash)
+    artifact.write_text(json.dumps(forged, indent=2, sort_keys=True) + "\n")
+
+    # A new locked status write runs the shadow hook, which loads the prior
+    # current-v3 artifact, detects the invalid counters, quarantines it, and
+    # starts fresh with an evidence-unreadable side record plus the new match.
+    _write_run_json_locked(repo, run_dir, "planning")  # ck 3, planning 4
+
+    fresh = json.loads(artifact.read_text())
+    # Counters are never derived from the forged values: comparisons is the
+    # evidence-unreadable side record plus the new match (2), not bool True.
+    assert isinstance(fresh["comparisons"], int) and not isinstance(fresh["comparisons"], bool)
+    assert isinstance(fresh["mismatches"], int) and not isinstance(fresh["mismatches"], bool)
+    assert isinstance(fresh["errors"], int) and not isinstance(fresh["errors"], bool)
+    assert fresh["mismatches"] >= 0
+    assert fresh["errors"] >= 1  # the evidence-unreadable side record
+    assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
+    # The forged bool/negative/string values did not leak into the accumulators.
+    assert fresh["comparisons"] != True  # noqa: E712 - guard against bool carry
+    assert fresh["mismatches"] != -3
+    assert fresh["errors"] != "2"
+    # An evidence-unreadable side record was appended for the invalid prior.
+    assert any(
+        isinstance(r, dict)
+        and r.get("outcome") == run_shadow.OUTCOME_ERROR
+        and r.get("category") == "evidence-unreadable"
+        for r in fresh["recent_records"]
+    )
+    # The forged prior was quarantined aside.
+    assert list((run_dir / "events").glob("*.corrupt-*"))
+
+
+def test_record_outcome_does_not_trust_negative_counters_on_carry(enabled, tmp_path):
+    """Blocker #2 carry side: a current-v3 prior with negative comparisons must
+    not produce a negative accumulator (which would silently bypass the
+    no-comparisons gate)."""
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # ck 1, run.created 2
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    forged = json.loads(artifact.read_text())
+    forged["projector_version"] = run_projector.PROJECTOR_VERSION
+    forged["comparisons"] = -5
+    forged["matches"] = -5
+    forged["mismatches"] = 0
+    forged["errors"] = 0
+    artifact.write_text(json.dumps(forged, indent=2, sort_keys=True) + "\n")
+
+    _write_run_json_locked(repo, run_dir, "planning")
+
+    fresh = json.loads(artifact.read_text())
+    assert isinstance(fresh["comparisons"], int) and not isinstance(fresh["comparisons"], bool)
+    assert fresh["comparisons"] >= 1
+    assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
+    assert list((run_dir / "events").glob("*.corrupt-*"))

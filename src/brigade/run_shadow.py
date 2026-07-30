@@ -71,6 +71,34 @@ class ReadinessReport:
     reasons: tuple[str, ...]
 
 
+def _valid_counter(value: object) -> bool:
+    """True only for a non-bool nonnegative int counter.
+
+    ``bool`` is an ``int`` subclass, so a bare ``isinstance(value, int)`` guard
+    accepts ``True``/``False``; the explicit bool rejection stops a forged
+    boolean counter from satisfying ``== 0`` (``False``) or ``== 1`` (``True``)
+    and slipping through the readiness gate or the carry accumulator.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _has_invalid_counters(data: object) -> bool:
+    """True when a current-v3 artifact carries an untrustworthy counter.
+
+    Only ``comparisons``, ``mismatches``, and ``errors`` feed the readiness
+    gate and the carry accumulator; a bool, negative, or non-int value for
+    any of the three is structurally broken and must fail closed as
+    evidence-unreadable rather than be carried forward.
+    """
+    if not isinstance(data, dict):
+        return True
+    return not (
+        _valid_counter(data.get("comparisons"))
+        and _valid_counter(data.get("mismatches"))
+        and _valid_counter(data.get("errors"))
+    )
+
+
 def shadow_artifact_path(run_dir: Path) -> Path:
     return Path(run_dir) / "events" / SHADOW_ARTIFACT_NAME
 
@@ -299,6 +327,7 @@ def _record_outcome(
     differing_fields: list[str],
 ) -> None:
     prior, was_corrupt = _load_prior_artifact(shadow_artifact_path(run_dir))
+    invalid_counters = False
     if prior is None or was_corrupt:
         data = _empty_artifact(run_id)
     else:
@@ -329,8 +358,20 @@ def _record_outcome(
         else:
             # Current-version artifact: counters and records only accumulate,
             # never reset (mismatches/errors from a current-v3 artifact are
-            # preserved across later comparisons).
-            data = prior
+            # preserved across later comparisons). A current-v3 artifact with
+            # an invalid counter (bool, negative, or non-int for comparisons,
+            # mismatches, or errors) is structurally broken and must not be
+            # trusted: quarantine it aside, start a fresh artifact, and record
+            # an evidence-unreadable side record so the invalid counters never
+            # flow into the accumulators (a forged False must not satisfy
+            # ``== 0`` and a negative comparisons must not bypass the
+            # no-comparisons gate once re-read).
+            if _has_invalid_counters(prior):
+                _quarantine_corrupt(shadow_artifact_path(run_dir))
+                data = _empty_artifact(run_id)
+                invalid_counters = True
+            else:
+                data = prior
     key = (tail_seq, shadow_digest, projected_digest, outcome, category)
     prior_records = data.get("recent_records") or []
     if prior_records:
@@ -345,8 +386,11 @@ def _record_outcome(
         if last_key == key:
             return  # idempotent: same tail sequence, digests, outcome, and category
     # A present-but-unparseable prior artifact is quarantined and treated as
-    # absent; record an evidence-unreadable error before the main record.
-    if was_corrupt:
+    # absent; record an evidence-unreadable error before the main record. A
+    # current-v3 prior with invalid counters is treated the same way: the
+    # forged counters are dropped and an evidence-unreadable side record
+    # explains the fresh start.
+    if was_corrupt or invalid_counters:
         _append_evidence_unreadable(data, tail_seq, tail_digest)
     # Comparison-gap defense: if the journal tail advanced by more than one
     # since the last recorded comparison, a committed transition's shadow
@@ -592,6 +636,16 @@ def check_projection_readiness(run_dir: Path) -> ReadinessReport:
             or data.get("run_id") != run_dir.name
         ):
             return ReadinessReport(ready=False, reasons=(REASON_EVIDENCE_SCHEMA_MISMATCH,))
+        # Strict counter validation: a current-v3 artifact accepts only
+        # non-bool nonnegative ints for comparisons, mismatches, and errors.
+        # A bool (``True``/``False``), negative, or non-int counter is
+        # structurally broken and closes the gate as evidence-unreadable
+        # BEFORE the no-comparisons or mismatch/error branches can misread it
+        # (``False`` must not satisfy ``== 0``; ``True`` must not satisfy a
+        # truthy mismatch/error check; a negative comparisons must not bypass
+        # the no-comparisons gate).
+        if _has_invalid_counters(data):
+            return ReadinessReport(ready=False, reasons=(REASON_EVIDENCE_UNREADABLE,))
         if not isinstance(data.get("comparisons"), int) or data["comparisons"] < 1:
             return ReadinessReport(ready=False, reasons=(REASON_NO_COMPARISONS,))
         # A current-version artifact with comparisons >= 1 but a malformed
