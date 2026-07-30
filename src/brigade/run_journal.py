@@ -637,6 +637,52 @@ def _envelope_to_event(env: dict[str, Any]) -> RunEvent:
         raise ChainIntegrityError(_bound(f"envelope fields are malformed: {exc}")) from exc
 
 
+def _idempotent_event(
+    index: dict[str, dict[str, Any]],
+    *,
+    idempotency_key: str,
+    request_digest: str,
+) -> RunEvent | None:
+    existing = index.get(idempotency_key)
+    if existing is None:
+        return None
+    existing_rd = existing.get("request_digest")
+    if not isinstance(existing_rd, str):
+        raise ChainIntegrityError(_bound("indexed journal event is missing request_digest"))
+    if existing_rd == request_digest:
+        return _envelope_to_event(existing)
+    existing_event_id = existing.get("event_id")
+    if not isinstance(existing_event_id, str):
+        raise ChainIntegrityError(_bound("indexed journal event is missing event_id"))
+    raise IdempotencyConflict(
+        _bound(f"idempotency key {idempotency_key!r} conflict"),
+        existing_event_id=existing_event_id,
+        request_digest=request_digest,
+        existing_request_digest=existing_rd,
+    )
+
+
+def lookup_idempotent_event(
+    journal_path: Path,
+    *,
+    event_type: str,
+    payload: dict[str, Any],
+    idempotency_key: str,
+) -> RunEvent | None:
+    """Return an exact replay or fail on conflict without mutating the journal."""
+    journal_path = Path(journal_path)
+    rd = run_events.request_digest(event_type=event_type, payload=payload, idempotency_key=idempotency_key)
+    with _append_critical_section():
+        _sequence, _digest, index, partial_tail, _journal_bytes = _read_tail_state(journal_path)
+        if partial_tail is not None:
+            raise PartialTailError(_bound("journal ends in a partial line; run recover_partial_tail before appending"))
+        return _idempotent_event(
+            index,
+            idempotency_key=idempotency_key,
+            request_digest=rd,
+        )
+
+
 def append_event(
     journal_path: Path,
     *,
@@ -672,22 +718,13 @@ def append_event(
         if partial_tail is not None:
             raise PartialTailError(_bound("journal ends in a partial line; run recover_partial_tail before appending"))
 
-        existing = index.get(idempotency_key)
+        existing = _idempotent_event(
+            index,
+            idempotency_key=idempotency_key,
+            request_digest=rd,
+        )
         if existing is not None:
-            existing_rd = existing.get("request_digest")
-            if not isinstance(existing_rd, str):
-                raise ChainIntegrityError(_bound("indexed journal event is missing request_digest"))
-            if existing_rd == rd:
-                return _envelope_to_event(existing)
-            existing_event_id = existing.get("event_id")
-            if not isinstance(existing_event_id, str):
-                raise ChainIntegrityError(_bound("indexed journal event is missing event_id"))
-            raise IdempotencyConflict(
-                _bound(f"idempotency key {idempotency_key!r} conflict"),
-                existing_event_id=existing_event_id,
-                request_digest=rd,
-                existing_request_digest=existing_rd,
-            )
+            return existing
 
         if expected_previous_sequence != last_sequence:
             raise StaleSequenceError(

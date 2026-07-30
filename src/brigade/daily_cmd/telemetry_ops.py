@@ -87,17 +87,18 @@ def _review_approval(
         print(f"error: invalid approval status: {status}", file=sys.stderr)
         return 2
     target = target.expanduser().resolve()
-    approval = _find_approval(target, approval_id)
-    if approval is None:
-        print(f"error: approval not found: {approval_id}", file=sys.stderr)
-        return 1
-    if approval.get("status") == "consumed":
-        print(f"error: approval already consumed: {approval_id}", file=sys.stderr)
-        return 1
-    approval["status"] = status
-    approval["reviewed_at"] = _now().isoformat()
-    approval["review_reason"] = reason
-    _write_approval(target, approval)
+    with _approval_store_lock(target, approval_id):
+        approval = _find_approval(target, approval_id)
+        if approval is None:
+            print(f"error: approval not found: {approval_id}", file=sys.stderr)
+            return 1
+        if approval.get("status") == "consumed":
+            print(f"error: approval already consumed: {approval_id}", file=sys.stderr)
+            return 1
+        approval["status"] = status
+        approval["reviewed_at"] = _now().isoformat()
+        approval["review_reason"] = reason
+        _write_approval_unlocked(target, approval)
     if json_output:
         print(json.dumps(approval, indent=2, sort_keys=True))
     else:
@@ -184,20 +185,24 @@ def approvals_archive(*, target: Path, consumed: bool = False, json_output: bool
         if approval.get("status") not in archiveable:
             continue
         approval_id = str(approval.get("approval_id") or "")
-        source = _approvals_root(target) / approval_id
-        destination = _approvals_archive_root(target) / approval_id
-        if not source.is_dir() or destination.exists():
-            continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(source), str(destination))
-        record = {
-            "approval_id": approval_id,
-            "status": approval.get("status"),
-            "archived_at": _now().isoformat(),
-            "archive_path": str(destination),
-        }
-        _write_json(destination / "archive.json", record)
-        archived.append(record)
+        with _approval_store_lock(target, approval_id):
+            current = _find_approval(target, approval_id)
+            if current is None or current.get("status") not in archiveable:
+                continue
+            source = _approvals_root(target) / approval_id
+            destination = _approvals_archive_root(target) / approval_id
+            if not source.is_dir() or destination.exists():
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(destination))
+            record = {
+                "approval_id": approval_id,
+                "status": current.get("status"),
+                "archived_at": _now().isoformat(),
+                "archive_path": str(destination),
+            }
+            _write_json(destination / "archive.json", record)
+            archived.append(record)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": {"name": "daily-approval-archive", "version": SCHEMA_VERSION},

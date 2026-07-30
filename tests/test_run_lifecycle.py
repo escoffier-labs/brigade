@@ -1211,6 +1211,210 @@ def test_unpaired_journal_ahead_fails_closed_before_status_append(tmp_path, monk
     assert _journal_path(run_dir).read_bytes() == journal_before
 
 
+def test_record_approval_pause_commits_events_snapshot_and_releases_lock(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    approval_reference = {
+        "approval_id": "approval-1",
+        "source": "daily",
+        "fingerprint": "approval-fingerprint-1",
+        "source_fingerprint": "source-fingerprint-1",
+        "contract_fingerprint": "contract-fingerprint-1",
+        "evidence_fingerprint": "evidence-fingerprint-1",
+    }
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        aboyeur.record_approval_pause(run_dir, approval_reference)
+        assert runguard.is_active_run_owner(repo, run_dir)
+
+    assert runguard.run_lock_state(repo, run_dir) == "absent"
+    events = _events(run_dir)
+    assert [event.event_type for event in events[-4:]] == [
+        run_checkpoint.CHECKPOINT_EVENT_TYPE,
+        "approval.requested",
+        run_checkpoint.CHECKPOINT_EVENT_TYPE,
+        "run.paused",
+    ]
+    _, requested, _, paused = events[-4:]
+    assert requested.payload == {
+        "approval_id": "approval-1",
+        "source": "daily",
+        "contract_fingerprint": "contract-fingerprint-1",
+    }
+    assert paused.payload == {
+        "approval_id": "approval-1",
+        "reason": "approval-required",
+    }
+    snapshot = json.loads((run_dir / "run.json").read_text())
+    assert snapshot["status"] == "running"
+    assert snapshot["approval_reference"] == {
+        **approval_reference,
+        "decision_state": "pending",
+    }
+    assert snapshot["journal_last_sequence"] == paused.sequence
+    assert snapshot["journal_last_event_digest"] == paused.event_digest
+
+
+def test_status_neutral_approval_event_is_checkpoint_paired_and_recoverable(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        requested = run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="approval.requested",
+            payload={
+                "approval_id": "approval-1",
+                "source": "daily",
+                "contract_fingerprint": "contract-fingerprint-1",
+            },
+            idempotency_key="approval:requested:test",
+            workspace=repo,
+        )
+
+    events = _events(run_dir)
+    checkpoint = events[-2]
+    assert checkpoint.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE
+    assert checkpoint.payload["paired_event_type"] == "approval.requested"
+    assert requested == events[-1]
+    assert run_shadow.check_projection_readiness(run_dir).ready is True
+
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired["status"] == "planning"
+    assert repaired["journal_last_sequence"] == requested.sequence
+    assert repaired["journal_last_event_digest"] == requested.event_digest
+
+
+def test_status_neutral_event_replay_and_conflict_do_not_append_checkpoint(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    payload = {
+        "approval_id": "approval-1",
+        "source": "daily",
+        "contract_fingerprint": "contract-fingerprint-1",
+    }
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        recorded = run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="approval.requested",
+            payload=payload,
+            idempotency_key="approval:requested:stable",
+            workspace=repo,
+        )
+        _write_run_json_authority(run_dir, "dispatching", lock_workspace=repo)
+    journal_path = _journal_path(run_dir)
+    journal_before = journal_path.read_bytes()
+    checkpoint_count = len(_checkpoint_events(run_dir))
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        replayed = run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="approval.requested",
+            payload=payload,
+            idempotency_key="approval:requested:stable",
+            workspace=repo,
+        )
+    assert replayed == recorded
+    assert journal_path.read_bytes() == journal_before
+    assert len(_checkpoint_events(run_dir)) == checkpoint_count
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError, match="idempotency key"):
+            run_lifecycle.record_lifecycle_event(
+                run_dir,
+                event_type="approval.requested",
+                payload={**payload, "source": "tool"},
+                idempotency_key="approval:requested:stable",
+                workspace=repo,
+            )
+    assert journal_path.read_bytes() == journal_before
+    assert len(_checkpoint_events(run_dir)) == checkpoint_count
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        ("approval.forged", {"approval_id": "approval-1"}),
+        (
+            "approval.rejected",
+            {
+                "approval_id": "approval-1",
+                "decided_at": "2026-07-30T18:00:00+00:00",
+                "decision_state": "approved",
+            },
+        ),
+    ],
+)
+def test_invalid_approval_event_request_has_zero_journal_or_checkpoint_mutation(
+    tmp_path,
+    monkeypatch,
+    event_type,
+    payload,
+):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    journal_path = _journal_path(run_dir)
+    journal_before = journal_path.read_bytes()
+    checkpoint_count = len(_checkpoint_events(run_dir))
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError, match="canonicalization"):
+            run_lifecycle.record_lifecycle_event(
+                run_dir,
+                event_type=event_type,
+                payload=payload,
+                idempotency_key="approval:invalid:test",
+                workspace=repo,
+            )
+
+    assert journal_path.read_bytes() == journal_before
+    assert len(_checkpoint_events(run_dir)) == checkpoint_count
+
+
+def test_approval_reference_rejects_unknown_decision_state():
+    reference = {
+        "approval_id": "approval-1",
+        "source": "daily",
+        "fingerprint": "approval-fingerprint-1",
+        "source_fingerprint": "source-fingerprint-1",
+        "contract_fingerprint": "contract-fingerprint-1",
+        "evidence_fingerprint": "evidence-fingerprint-1",
+        "decision_state": "garbage",
+    }
+
+    with pytest.raises(run_lifecycle.LifecycleJournalError, match="invalid decision_state"):
+        run_lifecycle.normalize_approval_reference(reference)
+
+
+def test_approval_idempotency_key_is_bounded_and_reference_only():
+    approval_id = "private-approval-id-" + ("x" * 500)
+
+    key = run_lifecycle.approval_idempotency_key(
+        approval_id,
+        "consumed",
+        scope="run-approval-1",
+    )
+
+    assert len(key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN
+    assert approval_id not in key
+    assert key == run_lifecycle.approval_idempotency_key(
+        approval_id,
+        "consumed",
+        scope="run-approval-1",
+    )
+    assert key != run_lifecycle.approval_idempotency_key(
+        approval_id,
+        "consumed",
+        scope="run-approval-2",
+    )
+
+
 def test_current_version_mismatch_fail_closed(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
@@ -1507,7 +1711,7 @@ def test_first_authority_started_write_projects_on_first_write(tmp_path, monkeyp
     # Finding 2: authority-requested first-write authorization uses the
     # post-parity readiness report. A ready first comparison projects that
     # same write, so the single first "started" write after enrollment already
-    # carries projector_version 3, journal_present true, and the journal has
+    # carries the current projector version, journal_present true, and the journal has
     # checkpoint seq1 + run.created seq2.
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)

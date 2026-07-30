@@ -104,7 +104,12 @@ def resume(run_dir: Path) -> int:
         return 2
 
 
-def _resume_locked(run_dir: Path) -> int:
+def _resume_locked(
+    run_dir: Path,
+    *,
+    approval_resume: bool = False,
+    approval_token: str | None = None,
+) -> int:
     run_dir = run_dir.expanduser().resolve()
     run_meta = _load_json(run_dir, "run.json")
     roster_snapshot = _load_json(run_dir, "roster.json")
@@ -116,7 +121,16 @@ def _resume_locked(run_dir: Path) -> int:
         )
         return 2
     status = run_meta.get("status")
-    if not isinstance(status, str) or status in _NONTERMINAL_RUN_STATUSES:
+    approval_reference = run_meta.get("approval_reference")
+    approval_reserved = (
+        status == "running"
+        and isinstance(approval_reference, dict)
+        and approval_reference.get("decision_state") == "approved"
+    )
+    invalid_status = (
+        not approval_reserved if approval_resume else not isinstance(status, str) or status in _NONTERMINAL_RUN_STATUSES
+    )
+    if invalid_status:
         print("error: run is not terminal; recover or wait for the active run before resuming", file=sys.stderr)
         return 2
     raw_cwd = run_meta.get("cwd")
@@ -147,12 +161,31 @@ def _resume_locked(run_dir: Path) -> int:
 
     read_only = bool(run_meta.get("read_only"))
     sandbox = roster_snapshot.get("sandbox")
+    if approval_resume:
+        from . import runs_cmd
 
-    server = codex_appserver.AppServer(cwd=cwd)
+        if approval_token is None or not runs_cmd._APPROVAL_MARKER_RE.fullmatch(approval_token):
+            print("error: approval resume token is missing or invalid", file=sys.stderr)
+            return 2
+        server = codex_appserver.AppServer(
+            cwd=cwd,
+            env={runs_cmd._APPROVAL_RESUME_TOKEN_ENV: approval_token},
+        )
+    else:
+        server = codex_appserver.AppServer(cwd=cwd)
+
+    def redact_approval_token(value: str) -> str:
+        if approval_resume and approval_token is not None:
+            return value.replace(approval_token, "[redacted]")
+        return value
+
     try:
         server.start()
     except codex_appserver.AppServerError as exc:
-        print(f"error: codex app-server unavailable: {exc}", file=sys.stderr)
+        print(
+            f"error: codex app-server unavailable: {redact_approval_token(str(exc))}",
+            file=sys.stderr,
+        )
         return 2
     try:
         for entry in resumable:
@@ -176,15 +209,22 @@ def _resume_locked(run_dir: Path) -> int:
                 else:
                     turn = thread.run_turn(_continuation_prompt(entry.get("task", "")), timeout=timeout)
             except codex_appserver.AppServerError as exc:
-                entry["detail"] = str(exc)[:200]
+                entry["detail"] = redact_approval_token(str(exc))[:200]
                 entry["status"] = "failed"
                 continue
-            entry["text"] = turn.text.strip()
+            entry["text"] = redact_approval_token(turn.text).strip()
             entry["ok"] = turn.ok and bool(turn.text.strip())
-            entry["detail"] = "" if entry["ok"] else (turn.detail or f"turn {turn.status}")[:200]
+            entry["detail"] = "" if entry["ok"] else redact_approval_token(turn.detail or f"turn {turn.status}")[:200]
             entry["status"] = turn.status
     finally:
         server.close()
+
+    if approval_resume:
+        from . import runs_cmd
+
+        assert isinstance(approval_reference, dict)
+        reference = run_lifecycle.normalize_approval_reference(approval_reference)
+        runs_cmd._finalize_redeemed_approval(run_dir, cwd, reference)
 
     worker_results = [
         aboyeur.WorkerResult(

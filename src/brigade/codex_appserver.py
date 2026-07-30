@@ -66,10 +66,12 @@ class AppServer:
         argv: list[str] | None = None,
         cwd: Path | None = None,
         process_registry: proc_mod.ProcessRegistry | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         self._argv = argv or ["codex", "app-server"]
         self._cwd = cwd
         self._process_registry = process_registry or proc_mod.ProcessRegistry()
+        self._env = env
         self._proc: subprocess.Popen | None = None
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
@@ -97,6 +99,10 @@ class AppServer:
                 0x00000200,
             )
         try:
+            child_env = None
+            if self._env is not None:
+                child_env = dict(os.environ)
+                child_env.update(self._env)
             self._proc = subprocess.Popen(
                 self._argv,
                 stdin=subprocess.PIPE,
@@ -104,6 +110,7 @@ class AppServer:
                 stderr=subprocess.DEVNULL,
                 text=True,
                 cwd=self._cwd,
+                env=child_env,
                 **process_group_kwargs,
             )
             self._process_registry.register(cast("subprocess.Popen[bytes]", self._proc))

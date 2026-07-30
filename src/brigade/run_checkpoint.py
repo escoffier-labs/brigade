@@ -101,6 +101,12 @@ def _mapped_lifecycle_event_types() -> set[str]:
     return set(run_lifecycle.STATUS_EVENT_TYPE.values())
 
 
+def _status_neutral_event_types() -> set[str]:
+    from brigade import run_projector
+
+    return set(run_projector._STATUS_NEUTRAL_EVENT_TYPES)
+
+
 def _validate_payload(payload: Any) -> None:
     """Full payload validation before any path access. Raises CheckpointError."""
     if not isinstance(payload, Mapping):
@@ -174,9 +180,13 @@ def _validate_payload(payload: Any) -> None:
         raise CheckpointError(_bound("paired_event_type must be null or a string"), category="paired-event-type")
     elif paired not in run_events.EVENT_TYPES:
         raise CheckpointError(_bound("paired_event_type not in registry"), category="paired-event-type")
-    elif paired not in _mapped_lifecycle_event_types() and paired not in _DISPATCH_FACT_EVENT_TYPES:
+    elif (
+        paired not in _mapped_lifecycle_event_types()
+        and paired not in _DISPATCH_FACT_EVENT_TYPES
+        and paired not in _status_neutral_event_types()
+    ):
         raise CheckpointError(
-            _bound("paired_event_type is not a mapped lifecycle or dispatch fact event"),
+            _bound("paired_event_type is not a mapped lifecycle, neutral approval, or dispatch fact event"),
             category="paired-event-type",
         )
 
@@ -1012,6 +1022,14 @@ def _verify_coverage(
         # Identity-bearing dispatch facts are status-neutral. Their paired
         # checkpoint preserves the aggregate status already in run.json, so
         # no event-derived status comparison applies.
+        return
+    if paired.event_type in _status_neutral_event_types():
+        checkpoint_status = checkpoint_obj.get("status")
+        if not isinstance(checkpoint_status, str) or not checkpoint_status:
+            raise CheckpointError(
+                _bound("status-neutral checkpoint has no aggregate status"),
+                category="uncovered-tail",
+            )
         return
     derived = _paired_event_derived_status(paired)
     checkpoint_status = checkpoint_obj.get("status")

@@ -2,18 +2,24 @@ import errno
 import json
 import os
 import shutil
+import threading
 import time as system_time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+from brigade import aboyeur
 from brigade import cli
+from brigade import daily_cmd
 from brigade import run_checkpoint
 from brigade import run_events
 from brigade import run_journal
 from brigade import run_lifecycle
+from brigade import run_resume
 from brigade import runguard
 from brigade import runs_cmd
+from brigade import tools_cmd
 
 
 def _write_json(path, payload):
@@ -27,6 +33,567 @@ def test_artifact_collection_status_is_nonterminal():
 
 def test_legacy_handoff_failed_status_remains_terminal():
     assert runs_cmd._is_terminal({"status": "handoff-failed"}) is True
+
+
+def test_approval_wait_uses_previous_reader_nonterminal_status():
+    meta = {
+        "status": "running",
+        "approval_reference": {
+            "decision_state": "pending",
+        },
+    }
+
+    assert meta["status"] in run_resume._NONTERMINAL_RUN_STATUSES
+    assert runs_cmd._is_terminal(meta) is False
+    assert runs_cmd._is_intentional_approval_pause(meta) is True
+    assert runs_cmd._approval_needs_reconciliation(meta) is False
+
+
+def test_consumed_approval_marker_is_nonterminal_and_needs_reconciliation():
+    meta = {
+        "status": "running",
+        "approval_reference": {
+            "decision_state": "consumed",
+        },
+    }
+
+    assert runs_cmd._is_terminal(meta) is False
+    assert runs_cmd._is_intentional_approval_pause(meta) is False
+    assert runs_cmd._approval_needs_reconciliation(meta) is True
+
+
+def test_true_terminal_status_remains_terminal_with_approval_reference():
+    assert (
+        runs_cmd._is_terminal(
+            {
+                "status": "ok",
+                "finished_at": "2026-07-30T18:00:00+00:00",
+                "approval_reference": {"decision_state": "consumed"},
+            }
+        )
+        is True
+    )
+
+
+def test_previous_resume_reader_refuses_new_approval_wait_before_provider(tmp_path, monkeypatch, capsys):
+    approval = _daily_approval()
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("previous reader must not reach provider")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert "run is not terminal" in capsys.readouterr().err
+
+
+def _approval_run(tmp_path, *, source, record):
+    run_dir = tmp_path / ".brigade" / "runs" / "run-approval-1"
+    run_dir.mkdir(parents=True)
+    reference = runs_cmd._approval_reference_from_record(source, record)
+    _write_json(
+        run_dir / "run.json",
+        {
+            "status": "running",
+            "cwd": str(tmp_path),
+            "lock_workspace": str(tmp_path),
+            "approval_reference": {**reference, "decision_state": "pending"},
+        },
+    )
+    return run_dir, reference
+
+
+def _daily_approval(*, status="approved", consumed_run_id=None):
+    return {
+        "approval_id": "daily-approval-1",
+        "status": status,
+        "reviewed_at": "2026-07-30T18:00:00+00:00",
+        "selected_action_id": "daily-action-1",
+        "source_fingerprint": "daily-source-fingerprint",
+        "config_fingerprint": "daily-config-fingerprint",
+        "evidence_refs": ["receipt:daily-1"],
+        "consumed_run_id": consumed_run_id,
+        "consumed_at": "2026-07-30T18:01:00+00:00" if consumed_run_id else None,
+    }
+
+
+def _patch_daily_store(monkeypatch, approval, *, blockers=None):
+    monkeypatch.setattr(daily_cmd.approvals, "_find_approval", lambda target, approval_id: approval)
+    monkeypatch.setattr(daily_cmd.config, "_load_config", lambda target: ({}, []))
+    monkeypatch.setattr(
+        daily_cmd.approvals,
+        "_approval_blockers",
+        lambda target, record, config: list(blockers or []),
+    )
+
+
+def test_approval_pause_marker_binds_exact_event_and_redacts_artifact(tmp_path, monkeypatch):
+    approval = _daily_approval(status="pending")
+    marker = "m" * 43
+    run_dir = tmp_path / ".brigade" / "runs" / "marker-run"
+    daily_cmd.approvals._write_approval(tmp_path, approval)
+    monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
+
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        stored = daily_cmd.approvals._find_approval(tmp_path, approval["approval_id"])
+        assert stored is not None
+        assert runs_cmd._attach_approval_pause_request(tmp_path, "daily", stored) is True
+        daily_cmd.approvals._write_approval(tmp_path, stored)
+        writer = aboyeur._worker_event_writer(
+            run_dir / "events",
+            "requester",
+            workspace=tmp_path,
+            correlation_marker=marker,
+        )
+        assert writer is not None
+        writer(
+            {
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thread-requester",
+                    "turnId": "turn-requester",
+                    "item": {
+                        "id": "command-1",
+                        "type": "commandExecution",
+                        "command": f"{runs_cmd._APPROVAL_CORRELATION_ENV}={marker} brigade daily run",
+                    },
+                },
+            }
+        )
+        reference = runs_cmd._approval_pause_reference_for_owned_run(tmp_path, run_dir)
+        assert reference is not None
+        assert reference.requester_worker == "requester"
+        assert reference.requester_thread_id == "thread-requester"
+        assert reference.requester_turn_id == "turn-requester"
+        with pytest.raises(runs_cmd.ApprovalResumeError, match="already bound"):
+            runs_cmd._bind_approval_pause_request(
+                tmp_path,
+                correlation_marker=marker,
+                worker="requester",
+                thread_id="thread-requester",
+                turn_id="turn-requester",
+            )
+        with pytest.raises(runs_cmd.ApprovalResumeError, match="exactly one request"):
+            runs_cmd._bind_approval_pause_request(
+                tmp_path,
+                correlation_marker="x" * 43,
+                worker="other",
+                thread_id="thread-other",
+                turn_id="turn-other",
+            )
+
+    event_text = (run_dir / "events" / "requester.jsonl").read_text()
+    approval_text = daily_cmd.approvals._approval_path(tmp_path, approval["approval_id"]).read_text()
+    assert marker not in event_text
+    assert marker not in approval_text
+    assert "[redacted]" in event_text
+
+
+@pytest.mark.parametrize("source", ["daily", "tool"])
+def test_approval_pause_binding_rejects_request_replaced_before_source_lock(
+    tmp_path,
+    monkeypatch,
+    source,
+):
+    marker = "n" * 43
+    run_dir = tmp_path / ".brigade" / "runs" / f"{source}-replacement-run"
+    record = _daily_approval(status="pending") if source == "daily" else _tool_call()
+    monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
+
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        assert runs_cmd._attach_approval_pause_request(tmp_path, source, record) is True
+        request = record[runs_cmd._APPROVAL_PAUSE_REQUEST_FIELD]
+        original_reference = dict(request["approval_reference"])
+        replaced = False
+
+        @contextmanager
+        def replace_before_locked_reread(*args, **kwargs):
+            nonlocal replaced
+            assert replaced is False
+            request["approval_reference"] = {
+                **original_reference,
+                "fingerprint": "replacement-fingerprint",
+            }
+            replaced = True
+            yield
+
+        if source == "daily":
+            monkeypatch.setattr(daily_cmd.approvals, "_read_approvals", lambda target: ([record], []))
+            monkeypatch.setattr(daily_cmd.approvals, "_approval_store_lock", replace_before_locked_reread)
+            monkeypatch.setattr(daily_cmd.approvals, "_find_approval", lambda target, approval_id: record)
+            monkeypatch.setattr(
+                daily_cmd.approvals,
+                "_write_approval_unlocked",
+                lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("replaced request was bound")),
+            )
+            monkeypatch.setattr(tools_cmd.calls, "_read_calls", lambda target: [])
+        else:
+            monkeypatch.setattr(daily_cmd.approvals, "_read_approvals", lambda target: ([], []))
+            monkeypatch.setattr(tools_cmd.calls, "_read_calls", lambda target: [record])
+            monkeypatch.setattr(tools_cmd.calls, "_calls_store_lock", replace_before_locked_reread)
+            monkeypatch.setattr(
+                tools_cmd.calls,
+                "_resolve_call",
+                lambda target, approval_id: (record, [record], None),
+            )
+            monkeypatch.setattr(
+                tools_cmd.calls,
+                "_write_calls_unlocked",
+                lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("replaced request was bound")),
+            )
+
+        with pytest.raises(runs_cmd.ApprovalResumeError, match="reference changed"):
+            runs_cmd._bind_approval_pause_request(
+                tmp_path,
+                correlation_marker=marker,
+                worker="requester",
+                thread_id="replacement-thread",
+                turn_id="replacement-turn",
+            )
+
+    assert replaced is True
+    assert request["requester_worker"] is None
+    assert request["requester_thread_id"] is None
+    assert request["requester_turn_id"] is None
+
+
+def test_resume_paused_daily_consumes_once_under_fresh_lock(tmp_path, monkeypatch):
+    approval = _daily_approval()
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+    observed = []
+
+    _patch_daily_store(monkeypatch, approval)
+
+    original_reserve = daily_cmd.approvals.reserve_for_run
+
+    def reserve(target, approval_id, reference, run_id, token_fingerprint):
+        observed.append(("reserve", runguard.run_lock_state(tmp_path, run_dir), run_id))
+        return original_reserve(target, approval_id, reference, run_id, token_fingerprint)
+
+    monkeypatch.setattr(daily_cmd.approvals, "reserve_for_run", reserve)
+    monkeypatch.setattr(
+        run_lifecycle,
+        "record_lifecycle_event",
+        lambda *args, event_type, **kwargs: observed.append(("event", event_type)),
+    )
+
+    def continue_run(path, *, approval_resume, approval_token):
+        assert isinstance(approval_token, str)
+        observed.append(("continue", runguard.run_lock_state(tmp_path, run_dir), approval_resume))
+        return 0
+
+    monkeypatch.setattr(run_resume, "_resume_locked", continue_run)
+
+    assert runs_cmd.resume(run_dir) == 0
+    assert observed == [
+        ("reserve", "live", run_dir.name),
+        ("event", "approval.granted"),
+        ("continue", "live", True),
+    ]
+    assert runguard.run_lock_state(tmp_path, run_dir) == "absent"
+
+
+def test_daily_reservation_rotation_refuses_foreign_run(tmp_path, monkeypatch):
+    approval = _daily_approval()
+    reference = runs_cmd._approval_reference_from_record("daily", approval)
+    approval["approval_claim"] = {
+        "run_id": "other-run",
+        "state": "reserved",
+        "reserved_at": "2026-07-30T18:01:00+00:00",
+        "token_fingerprint": "a" * 64,
+        "redeemed_at": None,
+    }
+    _patch_daily_store(monkeypatch, approval)
+
+    with pytest.raises(daily_cmd.approvals.ApprovalClaimError, match="reserved by other-run"):
+        daily_cmd.approvals.reserve_for_run(
+            tmp_path,
+            approval["approval_id"],
+            reference,
+            "requesting-run",
+            "b" * 64,
+        )
+
+    assert approval["approval_claim"]["run_id"] == "other-run"
+    assert approval["approval_claim"]["token_fingerprint"] == "a" * 64
+
+
+def test_resume_paused_daily_legacy_consumed_store_fails_closed(tmp_path, monkeypatch, capsys):
+    approval = _daily_approval(status="consumed", consumed_run_id="run-approval-1")
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+    events = []
+
+    _patch_daily_store(monkeypatch, approval)
+    monkeypatch.setattr(
+        run_lifecycle,
+        "record_lifecycle_event",
+        lambda *args, event_type, **kwargs: events.append(event_type),
+    )
+    monkeypatch.setattr(
+        run_resume,
+        "_resume_locked",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy claim reached provider")),
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert events == []
+    assert "daily approval is consumed" in capsys.readouterr().err
+
+
+def test_resume_paused_legacy_consumed_store_does_not_rewrite_snapshot(tmp_path, monkeypatch):
+    approval = _daily_approval(status="consumed", consumed_run_id="run-approval-1")
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+    continued = []
+
+    _patch_daily_store(monkeypatch, approval)
+    monkeypatch.setattr(run_lifecycle, "record_lifecycle_event", lambda *args, **kwargs: None)
+    before = (run_dir / "run.json").read_bytes()
+    monkeypatch.setattr(run_resume, "_resume_locked", lambda *args, **kwargs: continued.append(args) or 0)
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert continued == []
+    assert (run_dir / "run.json").read_bytes() == before
+
+
+def test_consumed_daily_reconciliation_revalidates_live_evidence(tmp_path, monkeypatch, capsys):
+    approval = _daily_approval(status="consumed", consumed_run_id="run-approval-1")
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+    checked = []
+
+    monkeypatch.setattr(daily_cmd.approvals, "_find_approval", lambda target, approval_id: approval)
+    monkeypatch.setattr(daily_cmd.config, "_load_config", lambda target: ({}, []))
+
+    def blockers(target, record, config):
+        checked.append((record["status"], record.get("consumed_run_id")))
+        return ["selected action fingerprint changed since approval"]
+
+    monkeypatch.setattr(daily_cmd.approvals, "_approval_blockers", blockers)
+    monkeypatch.setattr(
+        run_resume,
+        "_resume_locked",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stale evidence must not reach provider")),
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert checked == [("approved", None)]
+    assert "selected action fingerprint changed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("status", ["rejected", "held"])
+def test_resume_paused_records_terminal_daily_decision_without_consuming(tmp_path, monkeypatch, capsys, status):
+    approval = _daily_approval(status=status)
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+    events = []
+
+    _patch_daily_store(monkeypatch, approval)
+    monkeypatch.setattr(
+        daily_cmd.approvals,
+        "_consume_approval",
+        lambda *args: (_ for _ in ()).throw(AssertionError("terminal decision must not consume")),
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "record_lifecycle_event",
+        lambda *args, event_type, **kwargs: events.append(event_type),
+    )
+    monkeypatch.setattr(runs_cmd, "_refresh_paused_snapshot", lambda *args, **kwargs: None)
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert events == [f"approval.{status}"]
+    assert f"approval is {status}" in capsys.readouterr().err
+
+
+def test_held_marker_stays_approval_aware_and_resumes_after_store_grant(tmp_path, monkeypatch, capsys):
+    approval = _daily_approval(status="held")
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+    continued = []
+    claims = []
+
+    _patch_daily_store(monkeypatch, approval)
+    monkeypatch.setattr(run_lifecycle, "record_lifecycle_event", lambda *args, **kwargs: None)
+    original_reserve = daily_cmd.approvals.reserve_for_run
+
+    def reserve(target, approval_id, reference, run_id, token_fingerprint):
+        claims.append(run_id)
+        return original_reserve(target, approval_id, reference, run_id, token_fingerprint)
+
+    monkeypatch.setattr(daily_cmd.approvals, "reserve_for_run", reserve)
+    monkeypatch.setattr(
+        run_resume,
+        "_resume_locked",
+        lambda path, *, approval_resume, approval_token: continued.append((path, approval_resume)) or 0,
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert "approval is held" in capsys.readouterr().err
+    held = json.loads((run_dir / "run.json").read_text())
+    assert held["approval_reference"]["decision_state"] == "held"
+    assert runs_cmd._approval_resume_state(held) == "held"
+
+    approval["status"] = "approved"
+    approval["reviewed_at"] = "2026-07-30T18:05:00+00:00"
+    assert runs_cmd.resume(run_dir) == 0
+    assert continued == [(run_dir, True)]
+    assert claims == [run_dir.name]
+    assert approval["status"] == "approved"
+    assert approval["approval_claim"]["state"] == "reserved"
+    assert approval["approval_claim"]["run_id"] == run_dir.name
+
+
+def test_rejected_marker_stays_approval_aware_and_never_reaches_provider(tmp_path, monkeypatch, capsys):
+    approval = _daily_approval(status="rejected")
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+
+    _patch_daily_store(monkeypatch, approval)
+    monkeypatch.setattr(run_lifecycle, "record_lifecycle_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        run_resume,
+        "_resume_locked",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rejected approval reached provider")),
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert "approval is rejected" in capsys.readouterr().err
+    rejected = json.loads((run_dir / "run.json").read_text())
+    assert rejected["approval_reference"]["decision_state"] == "rejected"
+    assert runs_cmd._approval_resume_state(rejected) == "rejected"
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert "approval is rejected" in capsys.readouterr().err
+
+
+def test_resume_paused_refuses_stale_daily_reference_before_consuming(tmp_path, monkeypatch, capsys):
+    approval = _daily_approval()
+    run_dir, reference = _approval_run(tmp_path, source="daily", record=approval)
+    reference["evidence_fingerprint"] = "stale"
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["approval_reference"] = {**reference, "decision_state": "pending"}
+    _write_json(run_dir / "run.json", meta)
+
+    _patch_daily_store(monkeypatch, approval)
+    monkeypatch.setattr(
+        daily_cmd.approvals,
+        "_consume_approval",
+        lambda *args: (_ for _ in ()).throw(AssertionError("stale approval must not consume")),
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert "approval fingerprints changed" in capsys.readouterr().err
+
+
+def _tool_call():
+    call = {
+        "id": "call-approval-1",
+        "status": "approved",
+        "reviewed_at": "2026-07-30T18:00:00+00:00",
+        "tool_id": "fake-tool",
+        "source_fingerprint": "tool-source-fingerprint",
+        "contract_fingerprint": "tool-contract-fingerprint",
+        "call_fingerprint": "tool-call-fingerprint",
+        "approval_fingerprint": "approved-fingerprint",
+    }
+    return call
+
+
+def test_resume_paused_tool_consumes_existing_call_record_once(tmp_path, monkeypatch):
+    call = _tool_call()
+    run_dir, _ = _approval_run(tmp_path, source="tool", record=call)
+    writes = []
+
+    monkeypatch.setattr(tools_cmd.calls, "_resolve_call", lambda target, call_id: (call, [call], None))
+    monkeypatch.setattr(tools_cmd.calls, "_call_run_blockers", lambda target, record: [])
+    monkeypatch.setattr(
+        tools_cmd.calls,
+        "_write_calls_unlocked",
+        lambda target, calls: writes.append([dict(item) for item in calls]),
+    )
+    monkeypatch.setattr(
+        run_lifecycle,
+        "record_lifecycle_event",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        run_resume,
+        "_resume_locked",
+        lambda path, *, approval_resume, approval_token: 0,
+    )
+
+    assert runs_cmd.resume(run_dir) == 0
+    assert len(writes) == 1
+    assert writes[0][0]["status"] == "approved"
+    assert writes[0][0].get("run_id") is None
+    assert writes[0][0]["approval_claim"]["state"] == "reserved"
+    assert writes[0][0]["approval_claim"]["run_id"] == run_dir.name
+
+
+def test_tool_reservation_rotation_refuses_foreign_run(tmp_path, monkeypatch):
+    call = _tool_call()
+    reference = runs_cmd._approval_reference_from_record("tool", call)
+    call["approval_claim"] = {
+        "run_id": "other-run",
+        "state": "reserved",
+        "reserved_at": "2026-07-30T18:01:00+00:00",
+        "token_fingerprint": "a" * 64,
+        "redeemed_at": None,
+    }
+    writes = []
+    monkeypatch.setattr(tools_cmd.calls, "_resolve_call", lambda target, call_id: (call, [call], None))
+    monkeypatch.setattr(tools_cmd.calls, "_call_run_blockers", lambda target, record: [])
+    monkeypatch.setattr(
+        tools_cmd.calls,
+        "_write_calls_unlocked",
+        lambda target, calls: writes.append([dict(item) for item in calls]),
+    )
+
+    with pytest.raises(tools_cmd.calls.CallClaimError, match="reserved by other-run"):
+        tools_cmd.calls.reserve_for_run(
+            tmp_path,
+            call["id"],
+            reference,
+            "requesting-run",
+            "b" * 64,
+        )
+
+    assert writes == []
+    assert call["approval_claim"]["run_id"] == "other-run"
+    assert call["approval_claim"]["token_fingerprint"] == "a" * 64
+
+
+def test_consumed_tool_reconciliation_revalidates_live_contract(tmp_path, monkeypatch, capsys):
+    call = _tool_call()
+    call.update({"status": "running", "run_id": "run-approval-1"})
+    run_dir, _ = _approval_run(tmp_path, source="tool", record=call)
+    checked = []
+
+    monkeypatch.setattr(tools_cmd.calls, "_resolve_call", lambda target, call_id: (call, [call], None))
+
+    def blockers(target, record):
+        checked.append((record["status"], record.get("run_id")))
+        return ["contract fingerprint is stale"]
+
+    monkeypatch.setattr(tools_cmd.calls, "_call_run_blockers", blockers)
+    monkeypatch.setattr(
+        run_resume,
+        "_resume_locked",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stale contract must not reach provider")),
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert checked == [("approved", None)]
+    assert "contract fingerprint is stale" in capsys.readouterr().err
+
+
+def test_resume_nonapproval_run_uses_legacy_fallback(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_json(run_dir / "run.json", {"status": "failed"})
+    seen = []
+    monkeypatch.setattr(run_resume, "resume", lambda path: seen.append(path) or 0)
+
+    assert runs_cmd.resume(run_dir) == 0
+    assert seen == [run_dir]
 
 
 def test_watch_reports_unrecoverable_artifact_collection_lock_error(tmp_path, monkeypatch, capsys):
@@ -89,6 +656,101 @@ def test_watch_handles_artifact_collection_completion_race(tmp_path, monkeypatch
     monkeypatch.setattr(runguard, "recover_stale_run", finish_without_recovery)
 
     assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 0
+
+
+def test_watch_stops_on_pending_approval_with_no_lock(tmp_path, capsys):
+    approval = _daily_approval(status="pending")
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+
+    assert runguard.run_lock_state(tmp_path, run_dir) == "absent"
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 1
+    assert "summary: running" in capsys.readouterr().out
+
+
+def test_watch_waits_for_consumed_approval_while_provider_lock_is_live(tmp_path, monkeypatch):
+    approval = _daily_approval(status="consumed", consumed_run_id="run-approval-1")
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+    run_path = run_dir / "run.json"
+    meta = json.loads(run_path.read_text())
+    meta["approval_reference"]["decision_state"] = "consumed"
+    meta["approval_reference"]["consuming_run_id"] = run_dir.name
+    _write_json(run_path, meta)
+
+    consumed_observed = threading.Event()
+    original_poll = runs_cmd._poll_watch_artifacts
+
+    def observe_poll(*args, **kwargs):
+        result = original_poll(*args, **kwargs)
+        current = result[0]
+        if current is not None and runs_cmd._approval_needs_reconciliation(current):
+            consumed_observed.set()
+        return result
+
+    monkeypatch.setattr(runs_cmd, "_poll_watch_artifacts", observe_poll)
+
+    def finish_provider():
+        assert consumed_observed.wait(timeout=2)
+        finished = json.loads(run_path.read_text())
+        finished["status"] = "ok"
+        finished["finished_at"] = "2026-07-30T18:10:00+00:00"
+        _write_json(run_path, finished)
+
+    worker = threading.Thread(target=finish_provider)
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        worker.start()
+        assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.001) == 0
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+
+
+def test_watch_consumed_approval_without_lock_requests_resume_reconciliation(tmp_path, capsys):
+    approval = _daily_approval(status="consumed", consumed_run_id="run-approval-1")
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["approval_reference"]["decision_state"] = "consumed"
+    meta["approval_reference"]["consuming_run_id"] = run_dir.name
+    _write_json(run_dir / "run.json", meta)
+
+    assert runguard.run_lock_state(tmp_path, run_dir) == "absent"
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 2
+    assert "approval resume requires reconciliation" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("pending", "approval wait is intentional"),
+        ("consumed", "approval resume requires reconciliation"),
+    ],
+)
+def test_recover_refuses_approval_control_states_without_terminalizing(tmp_path, capsys, state, expected):
+    approval = _daily_approval(
+        status="consumed" if state == "consumed" else "pending",
+        consumed_run_id="run-approval-1" if state == "consumed" else None,
+    )
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["approval_reference"]["decision_state"] = state
+    if state == "consumed":
+        meta["approval_reference"]["consuming_run_id"] = run_dir.name
+    _write_json(run_dir / "run.json", meta)
+
+    assert runs_cmd.recover(run_dir, cwd=tmp_path) == 2
+    assert expected in capsys.readouterr().err
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "running"
+
+
+def test_recover_consumed_approval_refuses_live_provider_lock(tmp_path, capsys):
+    approval = _daily_approval(status="consumed", consumed_run_id="run-approval-1")
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["approval_reference"]["decision_state"] = "consumed"
+    meta["approval_reference"]["consuming_run_id"] = run_dir.name
+    _write_json(run_dir / "run.json", meta)
+
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        assert runs_cmd.recover(run_dir, cwd=tmp_path) == 2
+    assert "run owner process is still active" in capsys.readouterr().err
 
 
 def _write_run_artifacts(run_dir):

@@ -22,7 +22,6 @@ from brigade.run_projector import (
     RunProjection,
     SnapshotEncodingError,
     UnknownSnapshotFieldError,
-    UnmappedEventTypeError,
     encode_snapshot_bytes,
     project_run_snapshot,
 )
@@ -99,6 +98,11 @@ def _full_base_snapshot() -> dict:
         "lock_workspace": True,
         "codex_transport": "app-server",
         "lifecycle_journal_requested": True,
+        "approval_reference": {
+            "approval_id": "approval-1",
+            "source": "daily",
+            "fingerprint": "approval-fingerprint",
+        },
         "started_at": "2026-07-27T15:30:00.000000Z",
         "status_started_at": "2026-07-27T15:30:00.000000Z",
         "finished_at": None,
@@ -369,19 +373,116 @@ def test_unknown_base_key_raises_bounded_unknown_snapshot_field_error():
     assert "unknown_field" in excinfo.value.diagnostic
 
 
-def test_registered_unmapped_run_paused_raises_bounded_unmapped_event_type_error():
+def test_forged_approval_snapshot_decision_state_fails_closed():
+    base = _minimal_base_snapshot()
+    base["approval_reference"] = {
+        "approval_id": "approval-1",
+        "decision_state": "garbage",
+    }
+
+    with pytest.raises(ProjectionInputError, match="invalid decision_state"):
+        project_run_snapshot(base, [], journal_present=False)
+
+
+def test_approval_pause_resume_events_are_all_mapped_and_reconstruct_status():
+    created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
+    requested = _build_event(
+        2,
+        "approval.requested",
+        {"approval_id": "a-1", "source": "daily", "contract_fingerprint": "fp-1"},
+        "approval-requested-1",
+        "2026-07-27T15:30:46.000000Z",
+        created["event_digest"],
+    )
+    paused = _build_event(
+        3,
+        "run.paused",
+        {"approval_id": "a-1", "reason": "approval-required"},
+        "pause-1",
+        "2026-07-27T15:30:47.000000Z",
+        requested["event_digest"],
+    )
+    granted = _build_event(
+        4,
+        "approval.granted",
+        {
+            "approval_id": "a-1",
+            "decided_at": "2026-07-27T15:31:00+00:00",
+            "decision_state": "approved",
+        },
+        "approval-granted-1",
+        "2026-07-27T15:31:00.000000Z",
+        paused["event_digest"],
+    )
+    consumed = _build_event(
+        5,
+        "approval.consumed",
+        {"approval_id": "a-1", "consuming_run_id": RUN_ID},
+        "approval-consumed-1",
+        "2026-07-27T15:31:01.000000Z",
+        granted["event_digest"],
+    )
+    resumed = _build_event(
+        6,
+        "run.resumed",
+        {"approval_id": "a-1"},
+        "resume-1",
+        "2026-07-27T15:31:02.000000Z",
+        consumed["event_digest"],
+    )
+    projection = project_run_snapshot(
+        _minimal_base_snapshot(),
+        [created, requested, paused, granted, consumed, resumed],
+        journal_present=True,
+    )
+    assert projection.status == "running"
+    assert projection.snapshot["status"] == "running"
+    assert projection.last_sequence == 6
+    assert projection.last_event_digest == resumed["event_digest"]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            "approval.rejected",
+            {
+                "approval_id": "a-1",
+                "decided_at": "2026-07-27T15:31:00+00:00",
+                "decision_state": "rejected",
+            },
+        ),
+        (
+            "approval.held",
+            {
+                "approval_id": "a-1",
+                "decided_at": "2026-07-27T15:31:00+00:00",
+                "decision_state": "held",
+            },
+        ),
+    ],
+)
+def test_terminal_approval_decisions_preserve_compatibility_status(event_type, payload):
     created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
     paused = _build_event(
         2,
         "run.paused",
-        {"approval_id": "a-1", "reason": "wait"},
+        {"approval_id": "a-1", "reason": "approval-required"},
         "pause-1",
         "2026-07-27T15:30:46.000000Z",
         created["event_digest"],
     )
-    with pytest.raises(UnmappedEventTypeError) as excinfo:
-        project_run_snapshot(_minimal_base_snapshot(), [created, paused], journal_present=True)
-    _assert_bounded_projection_error(excinfo)
+    decision = _build_event(
+        3,
+        event_type,
+        payload,
+        f"{event_type}-1",
+        "2026-07-27T15:31:00.000000Z",
+        paused["event_digest"],
+    )
+    projection = project_run_snapshot(_minimal_base_snapshot(), [created, paused, decision], journal_present=True)
+    assert projection.status == "running"
+    assert projection.snapshot["status"] == "running"
 
 
 @pytest.mark.parametrize(
@@ -422,7 +523,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 45
+    assert len(PRESERVED_FIELDS) == 46
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",
@@ -441,6 +542,8 @@ def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
         "run.synthesis.started": "synthesizing",
         "run.synthesis.completed": "handoff",
         "run.artifact_collection.started": "artifact-collection",
+        "run.paused": "running",
+        "run.resumed": "running",
     }
     projection = project_run_snapshot(base, [], journal_present=False)
     for field in PRESERVED_FIELDS:
@@ -450,6 +553,7 @@ def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     assert projection.snapshot["recovery_history"] is not base["recovery_history"]
     assert projection.snapshot["active_seats"] is not base["active_seats"]
     assert projection.snapshot["code_graph_brief"] is not base["code_graph_brief"]
+    assert projection.snapshot["approval_reference"] is not base["approval_reference"]
     assert set(projection.snapshot.keys()) <= OWNED_FIELDS
 
 
@@ -558,10 +662,14 @@ def test_checkpoint_after_unmapped_status_preserves_last_mapped_status():
     assert projection.last_event_digest == unmapped_checkpoint["event_digest"]
 
 
-def test_projector_version_is_four():
-    projection = project_run_snapshot(_minimal_base_snapshot(), [], journal_present=False)
-    assert PROJECTOR_VERSION == 4
-    assert projection.snapshot["projector_version"] == 4
+def test_projector_version_is_five_and_replaces_stale_v4():
+    base = _minimal_base_snapshot()
+    base["projector_version"] = 4
+
+    projection = project_run_snapshot(base, [], journal_present=False)
+
+    assert PROJECTOR_VERSION == 5
+    assert projection.snapshot["projector_version"] == 5
 
 
 def _events_ending_with_completed(*, status: str | None) -> list[dict]:

@@ -12,8 +12,10 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from collections import Counter
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
@@ -32,12 +34,33 @@ from .. import (
     tools_cmd,
     work_cmd,
 )
+from .. import runguard
 from ..localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 from ..render import emit
 
 from . import config as _family_base
 
 globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+
+_APPROVAL_REFERENCE_FIELDS = (
+    "approval_id",
+    "source",
+    "fingerprint",
+    "source_fingerprint",
+    "contract_fingerprint",
+    "evidence_fingerprint",
+)
+
+
+class ApprovalClaimError(RuntimeError):
+    """A Daily approval could not be claimed from its current stored state."""
+
+
+@dataclass(frozen=True)
+class ApprovalClaim:
+    decided_at: str
+    claimed_at: str
+    already_claimed: bool
 
 
 def _config_fingerprint(config: dict[str, Any]) -> str:
@@ -62,15 +85,36 @@ def _approval_path(target: Path, approval_id: str) -> Path:
     return _approvals_root(target) / approval_id / "approval.json"
 
 
+def _approval_lock_path(target: Path, approval_id: str) -> Path:
+    return _approvals_root(target).parent / ".approval-locks" / f"{approval_id}.lock"
+
+
+@contextmanager
+def _approval_store_lock(target: Path, approval_id: str) -> Iterator[None]:
+    path = _approval_lock_path(target, approval_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ownership = runguard._acquire_lock(path)
+    try:
+        yield
+    finally:
+        runguard._release_lock(path, ownership)
+
+
 def _read_approvals(target: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     return _iter_receipts(_approvals_root(target), "approval.json")
 
 
-def _write_approval(target: Path, approval: dict[str, Any]) -> dict[str, Any]:
+def _write_approval_unlocked(target: Path, approval: dict[str, Any]) -> dict[str, Any]:
     approval_id = str(approval["approval_id"])
     approval["path"] = str(_approvals_root(target) / approval_id)
     _write_json(_approval_path(target, approval_id), approval)
     return approval
+
+
+def _write_approval(target: Path, approval: dict[str, Any]) -> dict[str, Any]:
+    approval_id = str(approval["approval_id"])
+    with _approval_store_lock(target, approval_id):
+        return _write_approval_unlocked(target, approval)
 
 
 def _find_approval(target: Path, approval_id: str) -> dict[str, Any] | None:
@@ -92,40 +136,39 @@ def _matching_approvals(target: Path, action: dict[str, Any], config: dict[str, 
 def _ensure_approval(
     target: Path, plan_data: dict[str, Any], action: dict[str, Any], config: dict[str, Any]
 ) -> dict[str, Any]:
-    matches = _matching_approvals(target, action, config)
-    for status in ("pending", "approved"):
-        existing = next((approval for approval in matches if approval.get("status") == status), None)
-        if existing:
-            return existing
-    for status in ("rejected", "held", "consumed"):
-        existing = next((approval for approval in matches if approval.get("status") == status), None)
-        if existing:
-            return existing
-    approval = {
-        "schema_version": SCHEMA_VERSION,
-        "approval_id": _approval_id(action, config),
-        "created_at": _now().isoformat(),
-        "status": "pending",
-        "source_plan_id": plan_data.get("plan_id"),
-        "selected_action_id": action.get("action_id"),
-        "selected_action": action,
-        "selected_adapter": _adapter_for(action),
-        "source_subsystem": action.get("source_subsystem"),
-        "source_local_id": action.get("source_local_id"),
-        "source_fingerprint": action.get("source_fingerprint"),
-        "config_fingerprint": _config_fingerprint(config),
-        "acceptance": action.get("acceptance") if isinstance(action.get("acceptance"), list) else [],
-        "safe_summary": action.get("safe_summary"),
-        "evidence_refs": action.get("evidence_refs") if isinstance(action.get("evidence_refs"), list) else [],
-        "risk_level": action.get("risk_level"),
-        "approval_reason": action.get("approval_reason") or "explicit approval required",
-        "config": config,
-        "suggested_next_command": action.get("suggested_next_command"),
-        "reviewed_at": None,
-        "review_reason": None,
-        "consumed_run_id": None,
-    }
-    return _write_approval(target, approval)
+    approval_id = _approval_id(action, config)
+    with _approval_store_lock(target, approval_id):
+        matches = _matching_approvals(target, action, config)
+        for status in ("pending", "approved", "rejected", "held", "consumed"):
+            existing = next((approval for approval in matches if approval.get("status") == status), None)
+            if existing is not None:
+                return existing
+        evidence_refs = action.get("evidence_refs")
+        approval = {
+            "schema_version": SCHEMA_VERSION,
+            "approval_id": approval_id,
+            "created_at": _now().isoformat(),
+            "status": "pending",
+            "source_plan_id": plan_data.get("plan_id"),
+            "selected_action_id": action.get("action_id"),
+            "selected_action": action,
+            "selected_adapter": _adapter_for(action),
+            "source_subsystem": action.get("source_subsystem"),
+            "source_local_id": action.get("source_local_id"),
+            "source_fingerprint": action.get("source_fingerprint"),
+            "config_fingerprint": _config_fingerprint(config),
+            "acceptance": action.get("acceptance") if isinstance(action.get("acceptance"), list) else [],
+            "safe_summary": action.get("safe_summary"),
+            "evidence_refs": evidence_refs if isinstance(evidence_refs, list) else [],
+            "risk_level": action.get("risk_level"),
+            "approval_reason": action.get("approval_reason") or "explicit approval required",
+            "config": config,
+            "suggested_next_command": action.get("suggested_next_command"),
+            "reviewed_at": None,
+            "review_reason": None,
+            "consumed_run_id": None,
+        }
+        return _write_approval_unlocked(target, approval)
 
 
 def _current_action_for_approval(target: Path, approval: dict[str, Any]) -> dict[str, Any] | None:
@@ -168,8 +211,180 @@ def _approval_blockers(target: Path, approval: dict[str, Any], config: dict[str,
     return list(dict.fromkeys(blockers))
 
 
+def _approval_claim_reference(approval: Mapping[str, Any]) -> dict[str, str]:
+    components = {
+        "approval_id": approval.get("approval_id"),
+        "source": "daily",
+        "source_fingerprint": approval.get("source_fingerprint"),
+        "contract_fingerprint": approval.get("config_fingerprint"),
+        "evidence_fingerprint": _fingerprint(approval.get("evidence_refs", [])),
+    }
+    if any(not isinstance(value, str) or not value for value in components.values()):
+        raise ApprovalClaimError("daily approval record is missing required fingerprints")
+    return {
+        **{key: str(value) for key, value in components.items()},
+        "fingerprint": _fingerprint(components),
+    }
+
+
+def claim_for_run(
+    target: Path,
+    approval_id: str,
+    reference: Mapping[str, str],
+    run_id: str,
+) -> ApprovalClaim:
+    """Atomically validate and claim one approved Daily record for a run."""
+    with _approval_store_lock(target, approval_id):
+        approval = _find_approval(target, approval_id)
+        if approval is None:
+            raise ApprovalClaimError(f"daily approval not found: {approval_id}")
+        actual = _approval_claim_reference(approval)
+        if any(reference.get(field) != actual[field] for field in _APPROVAL_REFERENCE_FIELDS):
+            raise ApprovalClaimError("daily approval fingerprints changed before claim")
+        status = str(approval.get("status") or "")
+        consumed_by = approval.get("consumed_run_id")
+        if status == "consumed" and consumed_by == run_id:
+            decided_at = approval.get("reviewed_at")
+            if not isinstance(decided_at, str) or not decided_at:
+                raise ApprovalClaimError("daily approval decision has no review timestamp")
+            claimed_at = approval.get("consumed_at")
+            if not isinstance(claimed_at, str) or not claimed_at:
+                raise ApprovalClaimError("daily approval claim has no consumption timestamp")
+            return ApprovalClaim(
+                decided_at=decided_at,
+                claimed_at=claimed_at,
+                already_claimed=True,
+            )
+        if status != "approved":
+            raise ApprovalClaimError(f"daily approval is {status or 'pending'}")
+        config, _ = _load_config(target)
+        blockers = _approval_blockers(target, approval, config)
+        if blockers:
+            raise ApprovalClaimError(f"daily approval is stale or blocked: {blockers[0]}")
+        decided_at = approval.get("reviewed_at")
+        if not isinstance(decided_at, str) or not decided_at:
+            raise ApprovalClaimError("daily approval decision has no review timestamp")
+        claimed_at = _now().isoformat()
+        approval["status"] = "consumed"
+        approval["consumed_run_id"] = run_id
+        approval["consumed_at"] = claimed_at
+        _write_approval_unlocked(target, approval)
+        return ApprovalClaim(
+            decided_at=decided_at,
+            claimed_at=claimed_at,
+            already_claimed=False,
+        )
+
+
+def reserve_for_run(
+    target: Path,
+    approval_id: str,
+    reference: Mapping[str, str],
+    run_id: str,
+    token_fingerprint: str,
+) -> ApprovalClaim:
+    """Reserve a rotatable one-shot approval claim without consuming it."""
+    with _approval_store_lock(target, approval_id):
+        approval = _find_approval(target, approval_id)
+        if approval is None:
+            raise ApprovalClaimError(f"daily approval not found: {approval_id}")
+        actual = _approval_claim_reference(approval)
+        if any(reference.get(field) != actual[field] for field in _APPROVAL_REFERENCE_FIELDS):
+            raise ApprovalClaimError("daily approval fingerprints changed before reservation")
+        existing = approval.get("approval_claim")
+        if existing is not None:
+            if not isinstance(existing, Mapping):
+                raise ApprovalClaimError("daily approval claim is malformed")
+            existing_state = existing.get("state")
+            existing_run_id = existing.get("run_id")
+            if existing_state == "redeemed":
+                raise ApprovalClaimError("daily approval claim is already redeemed")
+            if existing_state != "reserved" or not isinstance(existing_run_id, str):
+                raise ApprovalClaimError("daily approval claim is malformed")
+            if existing_run_id != run_id:
+                raise ApprovalClaimError(f"daily approval claim is reserved by {existing_run_id}")
+        if approval.get("status") != "approved":
+            raise ApprovalClaimError(f"daily approval is {approval.get('status') or 'pending'}")
+        config, _ = _load_config(target)
+        blockers = _approval_blockers(target, approval, config)
+        if blockers:
+            raise ApprovalClaimError(f"daily approval is stale or blocked: {blockers[0]}")
+        decided_at = approval.get("reviewed_at")
+        if not isinstance(decided_at, str) or not decided_at:
+            raise ApprovalClaimError("daily approval decision has no review timestamp")
+        reserved_at = _now().isoformat()
+        approval["approval_claim"] = {
+            "run_id": run_id,
+            "state": "reserved",
+            "reserved_at": reserved_at,
+            "token_fingerprint": token_fingerprint,
+            "redeemed_at": None,
+        }
+        _write_approval_unlocked(target, approval)
+        return ApprovalClaim(
+            decided_at=decided_at,
+            claimed_at=reserved_at,
+            already_claimed=isinstance(existing, Mapping),
+        )
+
+
+def redeem_for_run(target: Path, approval_id: str, reference: Mapping[str, str], token: str) -> ApprovalClaim:
+    """CAS one reserved claim to redeemed immediately before its action."""
+    from .. import runs_cmd
+
+    with _approval_store_lock(target, approval_id):
+        approval = _find_approval(target, approval_id)
+        if approval is None:
+            raise ApprovalClaimError(f"daily approval not found: {approval_id}")
+        actual = _approval_claim_reference(approval)
+        if any(reference.get(field) != actual[field] for field in _APPROVAL_REFERENCE_FIELDS):
+            raise ApprovalClaimError("daily approval fingerprints changed before redemption")
+        claim = approval.get("approval_claim")
+        if not isinstance(claim, dict) or claim.get("state") != "reserved":
+            raise ApprovalClaimError("daily approval claim is not reserved")
+        if claim.get("token_fingerprint") != runs_cmd._request_digest(token):
+            raise ApprovalClaimError("daily approval claim token does not match")
+        run_id = claim.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            raise ApprovalClaimError("daily approval claim has no run id")
+        status = str(approval.get("status") or "")
+        if status != "approved":
+            raise ApprovalClaimError(f"daily approval is {status or 'pending'}")
+        config, _ = _load_config(target)
+        blockers = _approval_blockers(target, approval, config)
+        if blockers:
+            raise ApprovalClaimError(f"daily approval is stale or blocked: {blockers[0]}")
+        redeemed_at = _now().isoformat()
+        claim["state"] = "redeemed"
+        claim["redeemed_at"] = redeemed_at
+        approval["status"] = "consumed"
+        approval["consumed_run_id"] = run_id
+        approval["consumed_at"] = redeemed_at
+        _write_approval_unlocked(target, approval)
+        decided_at = approval.get("reviewed_at")
+        if not isinstance(decided_at, str) or not decided_at:
+            raise ApprovalClaimError("daily approval decision has no review timestamp")
+        return ApprovalClaim(decided_at=decided_at, claimed_at=redeemed_at, already_claimed=False)
+
+
 def _consume_approval(target: Path, approval: dict[str, Any], run_id: str) -> None:
-    approval["status"] = "consumed"
-    approval["consumed_run_id"] = run_id
-    approval["consumed_at"] = _now().isoformat()
-    _write_approval(target, approval)
+    claim = approval.get("approval_claim")
+    if isinstance(claim, Mapping) and claim.get("state") == "reserved":
+        from .. import runs_cmd
+
+        token = runs_cmd._approval_marker_from_env(runs_cmd._APPROVAL_RESUME_TOKEN_ENV)
+        if token is None:
+            raise ApprovalClaimError("daily approval resume token is missing")
+        redeem_for_run(
+            target,
+            str(approval.get("approval_id") or ""),
+            _approval_claim_reference(approval),
+            token,
+        )
+        return
+    claim_for_run(
+        target,
+        str(approval.get("approval_id") or ""),
+        _approval_claim_reference(approval),
+        run_id,
+    )

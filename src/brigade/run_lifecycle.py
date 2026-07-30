@@ -95,10 +95,9 @@ _CANONICALIZATION_CATEGORY = "lifecycle journal canonicalization failure"
 _CHAIN_CATEGORY = "lifecycle journal is not derivable"
 
 # Map of current run.json status values to the allowlisted run_event.v1
-# event_type that records that transition. Statuses without a mapping
-# (e.g. "running") are skipped: no event is appended and the run.json
-# snapshot refresh proceeds unchanged. This keeps the integration to the
-# current status transitions and the existing event registry -- no new schemas.
+# event_type that records that transition. Statuses without a mapping are
+# skipped: no event is appended and the run.json snapshot refresh proceeds
+# unchanged.
 STATUS_EVENT_TYPE: dict[str, str] = {
     "started": "run.created",
     "planning": "run.planning.started",
@@ -113,6 +112,8 @@ STATUS_EVENT_TYPE: dict[str, str] = {
     "dry-run": "run.completed",
     "incomplete": "run.failed",
     "artifact-collection": "run.artifact_collection.started",
+    "paused": "run.paused",
+    "running": "run.resumed",
 }
 
 _CHECKPOINT_EVENT_PAIR_LOCK = threading.Lock()
@@ -125,6 +126,24 @@ _DISPATCH_FACT_TYPES = frozenset(
         "run.dispatch.failed",
     }
 )
+APPROVAL_REFERENCE_REQUIRED_FIELDS = frozenset(
+    {
+        "approval_id",
+        "source",
+        "fingerprint",
+        "source_fingerprint",
+        "contract_fingerprint",
+        "evidence_fingerprint",
+    }
+)
+APPROVAL_REFERENCE_OPTIONAL_FIELDS = frozenset(
+    {
+        "decision_state",
+        "decided_at",
+        "consuming_run_id",
+    }
+)
+APPROVAL_REFERENCE_FIELDS = APPROVAL_REFERENCE_REQUIRED_FIELDS | APPROVAL_REFERENCE_OPTIONAL_FIELDS
 
 
 class LifecycleJournalError(RuntimeError):
@@ -430,7 +449,62 @@ def record_dispatch_fact(
             raise _bound_journal_failure(exc) from exc
 
 
-def _allowlisted_payload(event_type: str, *, status: str) -> dict[str, Any]:
+def normalize_approval_reference(reference: Mapping[str, Any]) -> dict[str, str]:
+    """Validate and copy the closed, reference-only approval snapshot shape."""
+    if not isinstance(reference, Mapping):
+        raise LifecycleJournalError("approval reference must be an object")
+    unknown = sorted(set(reference) - APPROVAL_REFERENCE_FIELDS)
+    if unknown:
+        raise LifecycleJournalError(run_events._bound(f"approval reference has unknown fields: {unknown[:8]}"))
+    missing = sorted(APPROVAL_REFERENCE_REQUIRED_FIELDS - set(reference))
+    if missing:
+        raise LifecycleJournalError(run_events._bound(f"approval reference is missing fields: {missing}"))
+    normalized: dict[str, str] = {}
+    for key in APPROVAL_REFERENCE_FIELDS:
+        if key not in reference:
+            continue
+        value = reference[key]
+        if not isinstance(value, str) or not value:
+            raise LifecycleJournalError(run_events._bound(f"approval reference field {key!r} must be non-empty text"))
+        if len(value) > run_events.MAX_PAYLOAD_STR_LEN:
+            raise LifecycleJournalError(
+                run_events._bound(f"approval reference field {key!r} exceeds {run_events.MAX_PAYLOAD_STR_LEN} chars")
+            )
+        if key == "decision_state" and value not in run_events.APPROVAL_DECISION_STATES:
+            raise LifecycleJournalError(run_events._bound(f"approval reference has invalid decision_state {value!r}"))
+        normalized[key] = value
+    return normalized
+
+
+def approval_idempotency_key(approval_id: str, fact: str, *, scope: str | None = None) -> str:
+    """Return a bounded key without copying approval identifiers into metadata."""
+    digest = hashlib.sha256(
+        run_events.canonical_bytes(
+            {
+                "approval_id": approval_id,
+                "fact": fact,
+                "scope": scope,
+            }
+        )
+    ).hexdigest()
+    return f"approval:{fact}:{digest[:32]}"
+
+
+def _approval_reference(incoming_snapshot: Mapping[str, Any] | None) -> dict[str, str] | None:
+    if incoming_snapshot is None or "approval_reference" not in incoming_snapshot:
+        return None
+    raw = incoming_snapshot.get("approval_reference")
+    if not isinstance(raw, Mapping):
+        raise LifecycleJournalError("approval reference must be an object")
+    return normalize_approval_reference(raw)
+
+
+def _allowlisted_payload(
+    event_type: str,
+    *,
+    status: str,
+    incoming_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build a payload carrying only keys in the closed per-type allowlist."""
     allowed = run_events.EVENT_TYPES[event_type]
     payload: dict[str, Any] = {}
@@ -441,6 +515,13 @@ def _allowlisted_payload(event_type: str, *, status: str) -> dict[str, Any]:
         if len(text) > run_events.MAX_PAYLOAD_STR_LEN:
             text = text[: run_events.MAX_PAYLOAD_STR_LEN]
         payload["detail"] = text
+    if event_type in {"run.paused", "run.resumed"}:
+        reference = _approval_reference(incoming_snapshot)
+        if reference is None:
+            raise LifecycleJournalError(f"{event_type} requires an approval reference")
+        payload["approval_id"] = reference["approval_id"]
+        if event_type == "run.paused":
+            payload["reason"] = "approval-required"
     return payload
 
 
@@ -491,6 +572,89 @@ def prepare_lifecycle_journal(
         raise _bound_journal_failure(exc) from exc
     except OSError as exc:
         raise _bound_journal_failure(exc) from exc
+
+
+def record_lifecycle_event(
+    run_dir: Path,
+    *,
+    event_type: str,
+    payload: Mapping[str, Any],
+    idempotency_key: str,
+    workspace: Path | None,
+) -> run_journal.RunEvent:
+    """Append or replay one checkpoint-paired fact under the active run lock."""
+    run_dir = Path(run_dir).expanduser().resolve()
+    run_id = _run_id_from_dir(run_dir)
+    if not run_events._RUN_ID_RE.match(run_id):
+        raise LifecycleJournalError(run_events._bound(f"invalid run_id from run_dir: {run_id!r}"))
+    try:
+        run_events.validate_event_request(
+            event_type=event_type,
+            payload=payload,
+            idempotency_key=idempotency_key,
+        )
+    except run_events.CanonicalizationError as exc:
+        raise _bound_journal_failure(exc) from exc
+    with checkpoint_event_pair():
+        journal_path = _journal_path(run_dir)
+        if not journal_path.is_file():
+            raise LifecycleJournalError("lifecycle journal is not active for this run")
+        if workspace is None or not runguard.is_active_run_owner(workspace, run_dir):
+            raise LifecycleJournalError("lifecycle journal append requires the active run lock for this run")
+        try:
+            existing = run_journal.lookup_idempotent_event(
+                journal_path,
+                event_type=event_type,
+                payload=dict(payload),
+                idempotency_key=idempotency_key,
+            )
+            if existing is not None:
+                return existing
+            # Keep every explicit fact recoverable under the same authoritative
+            # prior gate used by status and per-worker dispatch pairs.
+            from brigade import aboyeur, run_shadow
+
+            snapshot = (run_dir / "run.json").read_bytes()
+            try:
+                snapshot_obj = json.loads(snapshot)
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise LifecycleJournalError(run_events._bound("lifecycle run receipt is not valid JSON")) from exc
+            if not isinstance(snapshot_obj, dict):
+                raise LifecycleJournalError(run_events._bound("lifecycle run receipt is not a JSON object"))
+            if aboyeur._resolve_authority_state(run_dir) == "authoritative":
+                aboyeur._authoritative_prior_decision(run_dir, snapshot_obj)
+            checkpoint = run_checkpoint.write_checkpoint(
+                run_dir,
+                snapshot,
+                workspace=workspace,
+                paired_event_type=event_type,
+                body_kind=(
+                    run_checkpoint._BODY_KIND_BASE_STRIPPED
+                    if snapshot_obj.get("run_journal_authority_requested") is True
+                    else None
+                ),
+            )
+            if checkpoint is None:
+                raise LifecycleJournalError(run_events._bound("enrolled lifecycle journal checkpoint was not recorded"))
+            report = run_journal.read_journal(journal_path)
+            if report.partial_tail is not None or report.chain_errors:
+                raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
+            event = run_journal.append_event(
+                journal_path,
+                run_id=run_id,
+                event_type=event_type,
+                payload=dict(payload),
+                idempotency_key=idempotency_key,
+                expected_previous_sequence=report.events[-1].sequence if report.events else 0,
+            )
+            run_shadow.record_shadow_comparison(run_dir, snapshot_obj)
+            return event
+        except run_journal.RunJournalError as exc:
+            raise _bound_journal_failure(exc) from exc
+        except run_events.CanonicalizationError as exc:
+            raise _bound_journal_failure(exc) from exc
+        except OSError as exc:
+            raise _bound_journal_failure(exc) from exc
 
 
 def record_lifecycle_transition(
@@ -558,13 +722,18 @@ def record_lifecycle_transition(
         if report.partial_tail is not None or report.chain_errors:
             raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
         prior_status, prior_digest = _run_snapshot_state(run_dir)
-        payload = _allowlisted_payload(event_type, status=status)
+        payload = _allowlisted_payload(
+            event_type,
+            status=status,
+            incoming_snapshot=incoming_snapshot,
+        )
         # Status transitions, not detail refreshes: a same-status refresh
         # appends nothing once a status event is already committed, even when
         # error/detail fields changed. Recovery checkpoint events are not
         # status events, so a first mapped-status write still appends its
         # status event after the checkpoint event.
-        status_events = [e for e in report.events if e.event_type != run_checkpoint.CHECKPOINT_EVENT_TYPE]
+        mapped_event_types = frozenset(STATUS_EVENT_TYPE.values())
+        status_events = [e for e in report.events if e.event_type in mapped_event_types]
         if prior_status == status and status_events:
             return status_events[-1]
         # Real transition: the idempotency key binds the prior snapshot digest
@@ -603,10 +772,13 @@ def record_lifecycle_transition(
 __all__ = [
     "LifecycleJournalError",
     "STATUS_EVENT_TYPE",
+    "approval_idempotency_key",
     "checkpoint_event_pair",
     "is_lifecycle_journaling_enabled",
+    "normalize_approval_reference",
     "pending_dispatch_requests",
     "prepare_lifecycle_journal",
     "record_dispatch_fact",
+    "record_lifecycle_event",
     "record_lifecycle_transition",
 ]

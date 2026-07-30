@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from functools import partial, wraps
 from json import JSONDecoder
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 from uuid import uuid4
 
 from . import agents
@@ -737,6 +737,22 @@ def _write_json_inner(path: Path, payload: object) -> None:
     if path.name == "run.json" and isinstance(payload, dict):
         status = payload.get("status")
         if isinstance(status, str) and status:
+            transition_status = status
+            approval_reference = payload.get("approval_reference")
+            if status == "running" and isinstance(approval_reference, Mapping):
+                decision_state = approval_reference.get("decision_state")
+                if decision_state == "pending":
+                    # Keep the compatibility snapshot on a status understood
+                    # by the previous reader while journaling the intentional
+                    # pause.
+                    transition_status = "paused"
+                elif decision_state in {"approved", "rejected", "held", "consumed"}:
+                    # Approval facts own these state changes. Treat their
+                    # compatibility snapshot refreshes as neutral so a
+                    # same-status write cannot leave a checkpoint promising a
+                    # run.resumed event that record_lifecycle_transition
+                    # correctly suppresses.
+                    transition_status = "approval-state-refresh"
             run_dir = path.parent
             workspace = runguard.resolve_run_lock_workspace(payload, run_dir)
             # Cheap payload classification BEFORE the filesystem authority
@@ -807,12 +823,12 @@ def _write_json_inner(path: Path, payload: object) -> None:
                 run_dir,
                 base_bytes,
                 workspace=workspace,
-                paired_event_type=run_lifecycle.STATUS_EVENT_TYPE.get(status),
+                paired_event_type=run_lifecycle.STATUS_EVENT_TYPE.get(transition_status),
                 body_kind=body_kind,
             )
             run_lifecycle.record_lifecycle_transition(
                 run_dir,
-                status=status,
+                status=transition_status,
                 # The receipt payload identifies the lock workspace
                 # (lock_workspace or cwd); the run directory layout does not.
                 workspace=workspace,
@@ -1548,7 +1564,24 @@ def _worker_prompt(
     return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
 
 
-def _worker_event_writer(events_dir: Path | None, worker: str, *, verbose: bool = False):
+def _redact_event_marker(value: Any, marker: str) -> Any:
+    if isinstance(value, str):
+        return value.replace(marker, "[redacted]")
+    if isinstance(value, list):
+        return [_redact_event_marker(item, marker) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_event_marker(item, marker) for key, item in value.items()}
+    return value
+
+
+def _worker_event_writer(
+    events_dir: Path | None,
+    worker: str,
+    *,
+    verbose: bool = False,
+    workspace: Path | None = None,
+    correlation_marker: str | None = None,
+):
     """Append lifecycle notifications to events/<worker>.jsonl; optionally narrate."""
     if events_dir is None and not verbose:
         return None
@@ -1558,11 +1591,39 @@ def _worker_event_writer(events_dir: Path | None, worker: str, *, verbose: bool 
         path = events_dir / f"{_slug(worker)}.jsonl"
 
     def on_event(msg: dict) -> None:
+        safe_msg = msg
+        if correlation_marker is not None:
+            params = msg.get("params") if isinstance(msg, dict) else None
+            item = params.get("item") if isinstance(params, dict) else None
+            rendered = json.dumps(msg, sort_keys=True, default=str)
+            if (
+                msg.get("method") == "item/completed"
+                and isinstance(item, dict)
+                and item.get("type") == "commandExecution"
+                and correlation_marker in rendered
+                and workspace is not None
+            ):
+                thread_id = params.get("threadId")
+                turn_id = params.get("turnId")
+                if isinstance(thread_id, str) and isinstance(turn_id, str):
+                    from . import runs_cmd
+
+                    try:
+                        runs_cmd._bind_approval_pause_request(
+                            workspace,
+                            correlation_marker=correlation_marker,
+                            worker=worker,
+                            thread_id=thread_id,
+                            turn_id=turn_id,
+                        )
+                    except runs_cmd.ApprovalResumeError:
+                        pass
+            safe_msg = _redact_event_marker(msg, correlation_marker)
         if path is not None:
             with path.open("a") as fh:
-                fh.write(json.dumps(msg) + "\n")
-        if verbose and msg.get("method") == "item/completed":
-            item = (msg.get("params") or {}).get("item") or {}
+                fh.write(json.dumps(safe_msg) + "\n")
+        if verbose and safe_msg.get("method") == "item/completed":
+            item = (safe_msg.get("params") or {}).get("item") or {}
             print(f"worker {worker}: {item.get('type', 'item')} completed", file=sys.stderr)
 
     return on_event
@@ -2390,6 +2451,95 @@ def record_run_termination(
         _write_json(run_path, receipt_schema.stamp_run_receipt(payload))
     except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
         raise runguard.RetainRunLockError(f"failed to write terminal run receipt: {exc}") from exc
+
+
+def record_approval_pause(output_dir: Path, approval_reference: Mapping[str, Any]) -> None:
+    """Commit an approval wait and refresh its compatibility snapshot.
+
+    The caller must hold the matching normal run lock. Successful return is
+    intentionally non-exceptional so the surrounding ``run_lock`` context
+    releases ownership and the process can exit cleanly.
+    """
+    run_dir = output_dir.expanduser().resolve()
+    run_path = run_dir / "run.json"
+    try:
+        raw = json.loads(run_path.read_text())
+    except OSError as exc:
+        raise runguard.RetainRunLockError(f"failed to read run receipt before approval pause: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise runguard.RetainRunLockError(f"run receipt is invalid before approval pause: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise runguard.RetainRunLockError("run receipt must contain an object before approval pause")
+    try:
+        reference = run_lifecycle.normalize_approval_reference(approval_reference)
+        workspace = runguard.resolve_run_lock_workspace(raw, run_dir)
+        if workspace is None or not runguard.is_active_run_owner(workspace, run_dir):
+            raise run_lifecycle.LifecycleJournalError("approval pause requires the active run lock for this run")
+        run_lifecycle.prepare_lifecycle_journal(
+            run_dir,
+            workspace=workspace,
+            incoming_snapshot=raw,
+        )
+        run_lifecycle.record_lifecycle_event(
+            run_dir,
+            event_type="approval.requested",
+            payload={
+                "approval_id": reference["approval_id"],
+                "source": reference["source"],
+                "contract_fingerprint": reference["contract_fingerprint"],
+            },
+            idempotency_key=run_lifecycle.approval_idempotency_key(reference["approval_id"], "requested"),
+            workspace=workspace,
+        )
+        raw["status"] = "running"
+        raw["status_started_at"] = _utc_iso(datetime.now(timezone.utc))
+        raw["approval_reference"] = {
+            **reference,
+            "decision_state": "pending",
+        }
+        raw.pop("finished_at", None)
+        raw.pop("duration_seconds", None)
+        _write_json(run_path, receipt_schema.stamp_run_receipt(raw))
+    except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
+        raise runguard.RetainRunLockError(f"failed to record approval pause: {exc}") from exc
+
+
+def write_approval_resume_handoff(
+    output_dir: Path,
+    worker_results: list[WorkerResult],
+    *,
+    requester_worker: str,
+    requester_thread_id: str,
+) -> None:
+    """Persist only the closed worker coordinates needed by approval resume."""
+    matching = [
+        result
+        for result in worker_results
+        if isinstance(result.thread_id, str)
+        and bool(result.thread_id)
+        and result.worker == requester_worker
+        and result.thread_id == requester_thread_id
+    ]
+    if len(matching) != 1:
+        raise runguard.RetainRunLockError("approval pause requester did not match exactly one worker thread")
+    requester = matching[0]
+    resumable = [
+        {
+            "worker": requester.worker,
+            "task": requester.task,
+            "ok": False,
+            "thread_id": requester.thread_id,
+            "status": "interrupted",
+        }
+    ]
+    try:
+        write_sidecar_revision(
+            output_dir,
+            "worker-results.json",
+            receipt_schema.worker_results_document(resumable),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise runguard.RetainRunLockError("failed to persist approval resume handoff") from exc
 
 
 def record_dispatch_stage(output_dir: Path, *, stage: int, seats: tuple[str, ...]) -> None:
@@ -3525,6 +3675,26 @@ def run(
             raise
     finally:
         close_server_resources()
+    if (
+        output_dir is not None
+        and lock_workspace is not None
+        and runguard.is_active_run_owner(lock_workspace, output_dir)
+    ):
+        from . import runs_cmd
+
+        approval_reference = runs_cmd._approval_pause_reference_for_owned_run(
+            lock_workspace,
+            output_dir,
+        )
+        if approval_reference is not None:
+            write_approval_resume_handoff(
+                output_dir,
+                worker_results,
+                requester_worker=approval_reference.requester_worker,
+                requester_thread_id=approval_reference.requester_thread_id,
+            )
+            record_approval_pause(output_dir, approval_reference)
+            return 0
     # Drift checkpoint: after worker dispatch. A concurrent commit or branch
     # switch during dispatch must fail the run before ground truth attributes
     # the foreign state to the worker.

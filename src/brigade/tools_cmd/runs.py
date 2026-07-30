@@ -245,14 +245,16 @@ def _replay_call_payload(target: Path, run_id: str) -> tuple[dict[str, Any], int
     record["replay_of_run_id"] = receipt.get("id")
     record["replay_source_call_id"] = receipt.get("call_id")
     record["replay_created_at"] = helpers._now().isoformat()
-    calls = calls_mod._read_calls(target)
-    existing_ids = {str(call.get("id")) for call in calls}
-    if record["id"] in existing_ids:
-        record["id"] = (
-            f"{record['id']}-replay-{helpers._stable_hash({'run_id': receipt.get('id'), 'created_at': record['replay_created_at']})}"
-        )
-    calls.append(record)
-    calls_mod._write_calls(target, calls)
+    with calls_mod._calls_store_lock(target):
+        calls = calls_mod._read_calls(target)
+        existing_ids = {str(call.get("id")) for call in calls}
+        if record["id"] in existing_ids:
+            record["id"] = (
+                f"{record['id']}-replay-"
+                f"{helpers._stable_hash({'run_id': receipt.get('id'), 'created_at': record['replay_created_at']})}"
+            )
+        calls.append(record)
+        calls_mod._write_calls_unlocked(target, calls)
     payload["call"] = record
     payload["created"] = 1
     return payload, 0
@@ -373,54 +375,82 @@ def _run_call_payload(
     target: Path, *, call_id: str | None = None, next_call: bool = False
 ) -> tuple[dict[str, Any], int]:
     target = target.expanduser().resolve()
-    calls = calls_mod._read_calls(target)
-    call: dict[str, Any] | None
-    error: str | None = None
-    if next_call:
-        call = _next_approved_call(calls)
+    with calls_mod._calls_store_lock(target):
+        calls = calls_mod._read_calls(target)
+        call: dict[str, Any] | None
+        error: str | None = None
+        if next_call:
+            call = _next_approved_call(calls)
+            if call is None:
+                error = "no approved calls available"
+        elif call_id:
+            call, calls, error = calls_mod._resolve_call(target, call_id)
+        else:
+            call = None
+            error = "pass a call id or --next"
         if call is None:
-            error = "no approved calls available"
-    elif call_id:
-        call, calls, error = calls_mod._resolve_call(target, call_id)
-    else:
-        call = None
-        error = "pass a call id or --next"
-    if call is None:
-        return {"target": str(target), "calls_path": str(paths.calls_path(target)), "error": error}, 1
-    blockers = calls_mod._call_run_blockers(target, call)
-    if blockers:
-        return {
-            "target": str(target),
-            "calls_path": str(paths.calls_path(target)),
-            "call": call,
-            "blockers": blockers,
-            "error": "call is not runnable",
-        }, 1
-    raw_contract = call.get("contract")
-    contract = raw_contract if isinstance(raw_contract, dict) else {}
-    cwd_value = contract.get("cwd")
-    cwd = helpers._as_path(target, cwd_value) if cwd_value else target
-    assert cwd is not None
-    argv = safety._command_parts(call.get("command"))
-    if call.get("family") != "mcp":
-        raw_arguments = call.get("arguments")
-        arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
-        for key in sorted(arguments.keys()):
-            value = arguments[key]
-            if value is None:
-                continue
-            argv.extend(shlex.split(str(value)))
-    started_at = helpers._now().isoformat()
-    run_id = calls_mod._run_id_for_call(call, started_at)
-    receipt_path = paths.runs_path(target) / f"{run_id}.json"
-    paths.checkpoints_path(target).mkdir(parents=True, exist_ok=True)
-    call["status"] = "running"
-    call["started_at"] = started_at
-    call["completed_at"] = None
-    call["run_id"] = run_id
-    call["receipt_path"] = str(receipt_path)
-    call["exit_code"] = None
-    calls_mod._write_calls(target, calls)
+            return {"target": str(target), "calls_path": str(paths.calls_path(target)), "error": error}, 1
+        blockers = calls_mod._call_run_blockers(target, call)
+        if blockers:
+            if call.get("status") == "pending":
+                from .. import runs_cmd
+
+                if runs_cmd._attach_approval_pause_request(target, "tool", call):
+                    calls_mod._write_calls_unlocked(target, calls)
+            return {
+                "target": str(target),
+                "calls_path": str(paths.calls_path(target)),
+                "call": call,
+                "blockers": blockers,
+                "error": "call is not runnable",
+            }, 1
+        approval_claim = call.get("approval_claim")
+        if isinstance(approval_claim, dict):
+            from .. import runs_cmd
+
+            token = runs_cmd._approval_marker_from_env(runs_cmd._APPROVAL_RESUME_TOKEN_ENV)
+            if token is None:
+                return {
+                    "target": str(target),
+                    "calls_path": str(paths.calls_path(target)),
+                    "call": call,
+                    "error": "approval resume token is missing",
+                }, 1
+            try:
+                calls_mod.redeem_for_run_unlocked(call, token)
+            except calls_mod.CallClaimError as exc:
+                return {
+                    "target": str(target),
+                    "calls_path": str(paths.calls_path(target)),
+                    "call": call,
+                    "error": str(exc),
+                }, 1
+            calls_mod._write_calls_unlocked(target, calls)
+        raw_contract = call.get("contract")
+        contract = raw_contract if isinstance(raw_contract, dict) else {}
+        cwd_value = contract.get("cwd")
+        cwd = helpers._as_path(target, cwd_value) if cwd_value else target
+        assert cwd is not None
+        argv = safety._command_parts(call.get("command"))
+        if call.get("family") != "mcp":
+            raw_arguments = call.get("arguments")
+            arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
+            for key in sorted(arguments.keys()):
+                value = arguments[key]
+                if value is None:
+                    continue
+                argv.extend(shlex.split(str(value)))
+        started_at = helpers._now().isoformat()
+        run_id = calls_mod._run_id_for_call(call, started_at)
+        receipt_path = paths.runs_path(target) / f"{run_id}.json"
+        paths.checkpoints_path(target).mkdir(parents=True, exist_ok=True)
+        call["status"] = "running"
+        call["started_at"] = started_at
+        call["completed_at"] = None
+        call["run_id"] = run_id
+        call["receipt_path"] = str(receipt_path)
+        call["exit_code"] = None
+        calls_mod._write_calls_unlocked(target, calls)
 
     timeout = contract.get("timeout")
     timeout_value = float(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else None
@@ -505,14 +535,26 @@ def _run_call_payload(
         policy_decision=policy_decision,
         extra=extra_receipt,
     )
-    call["status"] = status
-    call["completed_at"] = completed_at
-    call["exit_code"] = exit_code
-    call["timed_out"] = timed_out
-    call["receipt_path"] = receipt["receipt_path"]
-    if checkpoint is not None:
-        call["checkpoint_id"] = checkpoint.get("id")
-    calls_mod._write_calls(target, calls)
+    with calls_mod._calls_store_lock(target):
+        current, current_calls, error = calls_mod._resolve_call(target, str(call.get("id") or ""))
+        if current is None or current.get("status") != "running" or current.get("run_id") != run_id:
+            return {
+                "target": str(target),
+                "calls_path": str(paths.calls_path(target)),
+                "runs_path": str(paths.runs_path(target)),
+                "call": current or call,
+                "receipt": receipt,
+                "error": error or "call state changed while execution was running",
+            }, 1
+        current["status"] = status
+        current["completed_at"] = completed_at
+        current["exit_code"] = exit_code
+        current["timed_out"] = timed_out
+        current["receipt_path"] = receipt["receipt_path"]
+        if checkpoint is not None:
+            current["checkpoint_id"] = checkpoint.get("id")
+        calls_mod._write_calls_unlocked(target, current_calls)
+        call = current
     return {
         "target": str(target),
         "calls_path": str(paths.calls_path(target)),

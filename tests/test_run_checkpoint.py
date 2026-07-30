@@ -172,6 +172,27 @@ def test_validate_checkpoint_accepts_mapped_paired_event_type(tmp_path):
     assert run_checkpoint.validate_checkpoint(run_dir, payload) == run_json_bytes
 
 
+def test_validate_checkpoint_accepts_registered_status_neutral_approval_type(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "running"})
+    _place_checkpoint_file(run_dir, run_json_bytes)
+    payload = _checkpoint_payload(run_json_bytes, paired_event_type="approval.requested")
+
+    assert run_checkpoint.validate_checkpoint(run_dir, payload) == run_json_bytes
+
+
+def test_validate_checkpoint_rejects_unregistered_approval_type(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    run_json_bytes = _writer_bytes({"status": "running"})
+    _place_checkpoint_file(run_dir, run_json_bytes)
+    payload = _checkpoint_payload(run_json_bytes, paired_event_type="approval.forged")
+
+    with pytest.raises(run_checkpoint.CheckpointError, match="not in registry") as excinfo:
+        run_checkpoint.validate_checkpoint(run_dir, payload)
+
+    assert excinfo.value.category == "paired-event-type"
+
+
 # -- Open-fd hardening -------------------------------------------------------
 
 

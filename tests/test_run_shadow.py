@@ -290,7 +290,7 @@ def test_artifact_collection_after_handoff_is_mapped_no_lag(enabled, tmp_path):
 def test_mapped_ok_after_lag_restores_readiness(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    # "running" remains an unmapped status, so it produces a lag; the
+    # A legacy status without an event mapping produces a lag; the
     # subsequent mapped "ok" restores readiness.
     chain = [
         "started",
@@ -299,7 +299,7 @@ def test_mapped_ok_after_lag_restores_readiness(enabled, tmp_path):
         "result-processing",
         "synthesizing",
         "handoff",
-        "running",
+        "legacy-unmapped",
         "ok",
     ]
 
@@ -361,9 +361,9 @@ def test_unmapped_event_type_records_projection_error(enabled, tmp_path):
         run_journal.append_event(
             _journal_path(run_dir),
             run_id=_RUN_ID,
-            event_type="run.paused",
-            payload={},
-            idempotency_key="lifecycle:paused-test",
+            event_type="run.recovery.started",
+            payload={"detail": "recovering"},
+            idempotency_key="lifecycle:recovery-test",
             expected_previous_sequence=report.events[-1].sequence,
         )
 
@@ -932,8 +932,8 @@ def test_same_tail_distinct_unmapped_shadow_states_count_distinct_lags(enabled, 
     for status in chain:
         _write_run_json_locked(repo, run_dir, status)
 
-    # "running" remains an unmapped status. Two shadow candidates with the
-    # same unmapped status but distinct preserved detail (task) produce
+    # Two candidates with the same legacy unmapped status but distinct
+    # preserved detail (task) produce
     # distinct shadow_digests at the same journal tail (seq 12), so they are
     # distinct lag states and must both be counted -- idempotency keys on
     # (tail sequence, shadow digest, projected digest, outcome, category),
@@ -943,7 +943,7 @@ def test_same_tail_distinct_unmapped_shadow_states_count_distinct_lags(enabled, 
         {
             "schema": "brigade.run.v1",
             "schema_version": 1,
-            "status": "running",
+            "status": "legacy-unmapped",
             "task": "direct-a",
         },
     )
@@ -952,7 +952,7 @@ def test_same_tail_distinct_unmapped_shadow_states_count_distinct_lags(enabled, 
         {
             "schema": "brigade.run.v1",
             "schema_version": 1,
-            "status": "running",
+            "status": "legacy-unmapped",
             "task": "direct-b",
         },
     )
@@ -1133,16 +1133,16 @@ def test_version_one_shadow_artifact_is_stale(enabled, tmp_path):
     assert fresh["last_compared_sequence"] != stale_seq
 
 
-def test_dispatch_semantics_v4_quarantines_old_v3_shadow_artifact(enabled, tmp_path):
+def test_approval_semantics_v5_quarantines_old_v4_shadow_artifact(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    assert run_projector.PROJECTOR_VERSION == 4
+    assert run_projector.PROJECTOR_VERSION == 5
 
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")
     artifact = run_shadow.shadow_artifact_path(run_dir)
     stale = json.loads(artifact.read_text())
-    stale["projector_version"] = 3
+    stale["projector_version"] = 4
     artifact.write_text(json.dumps(stale, indent=2, sort_keys=True) + "\n")
     stale_bytes = artifact.read_bytes()
 
@@ -1154,7 +1154,7 @@ def test_dispatch_semantics_v4_quarantines_old_v3_shadow_artifact(enabled, tmp_p
     assert quarantined
     assert quarantined[0].read_bytes() == stale_bytes
     fresh = json.loads(artifact.read_text())
-    assert fresh["projector_version"] == 4
+    assert fresh["projector_version"] == 5
     assert fresh["errors"] == 0
 
 

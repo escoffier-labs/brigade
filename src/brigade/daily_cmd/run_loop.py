@@ -310,6 +310,16 @@ def run(
         )
     if action.get("approval_required") and not approval_granted:
         approval = _ensure_approval(target, plan_data, action, config)
+        from .. import runs_cmd
+
+        approval_id = str(approval.get("approval_id") or "")
+        with _approval_store_lock(target, approval_id):
+            current_approval = _find_approval(target, approval_id)
+            if current_approval is None:
+                raise ApprovalClaimError(f"daily approval not found: {approval_id}")
+            if runs_cmd._attach_approval_pause_request(target, "daily", current_approval):
+                _write_approval_unlocked(target, current_approval)
+            approval = current_approval
         blockers = [str(action.get("approval_reason") or "explicit approval required")]
         if approval.get("status") not in {"pending", "approved"}:
             blockers.append(f"approval status is {approval.get('status')}")

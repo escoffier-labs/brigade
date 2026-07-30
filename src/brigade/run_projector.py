@@ -26,7 +26,7 @@ from typing import Any, Mapping, Sequence
 
 from brigade import run_checkpoint, run_events, run_journal
 
-PROJECTOR_VERSION: int = 4
+PROJECTOR_VERSION: int = 5
 
 # Field ownership over the run.json contract. Every current run.json key is
 # in exactly one of these two sets; see the ownership inventory in
@@ -59,6 +59,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "codex_transport",
         "lifecycle_journal_requested",
         "run_journal_authority_requested",
+        "approval_reference",
         # Timing
         "started_at",
         "status_started_at",
@@ -115,6 +116,10 @@ EVENT_STATUS: dict[str, str] = {
     "run.synthesis.started": "synthesizing",
     "run.synthesis.completed": "handoff",
     "run.artifact_collection.started": "artifact-collection",
+    # Approval waits retain the documented previous-reader nonterminal status.
+    # Current readers distinguish the wait through the approval reference.
+    "run.paused": "running",
+    "run.resumed": "running",
 }
 
 
@@ -128,6 +133,19 @@ def _has_dispatch_identity(payload: Any) -> bool:
         and payload["attempt"] > 0
     )
 
+
+# Approval observations do not themselves change the compatibility status.
+# ``run.paused`` and ``run.resumed`` own the status transition; the approval
+# facts between them only advance the verified journal cursor.
+_STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "approval.requested",
+        "approval.granted",
+        "approval.rejected",
+        "approval.held",
+        "approval.consumed",
+    }
+)
 
 # Payload-driven rows: event_type -> (allowed payload status values, derived
 # status). A None derived status means the payload status value is used
@@ -274,6 +292,8 @@ def _derive_status(envelopes: list[Mapping[str, Any]], base_status: Any) -> str:
         sequence = env["sequence"]
         if event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE:
             continue
+        if event_type in _STATUS_NEUTRAL_EVENT_TYPES:
+            continue
         # Slice-9 per-worker facts are status-neutral: a worker terminal
         # result must not advance the aggregate run while other seats remain
         # active. Older aggregate envelopes lacked an identity and retain
@@ -323,6 +343,13 @@ def project_run_snapshot(
         raise ProjectionInputError(_bound("journal_present must be a boolean"))
     if not isinstance(base_snapshot, Mapping):
         raise ProjectionInputError(_bound("base_snapshot must be a mapping"))
+    approval_reference = base_snapshot.get("approval_reference")
+    if approval_reference is not None:
+        if not isinstance(approval_reference, Mapping):
+            raise ProjectionInputError(_bound("base snapshot approval_reference must be a mapping"))
+        decision_state = approval_reference.get("decision_state")
+        if decision_state is not None and decision_state not in run_events.APPROVAL_DECISION_STATES:
+            raise ProjectionInputError(_bound("base snapshot approval_reference has invalid decision_state"))
 
     unknown = sorted(set(base_snapshot.keys()) - OWNED_FIELDS)
     if unknown:
