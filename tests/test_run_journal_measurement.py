@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from brigade import runguard
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "measure_run_journal.py"
@@ -157,3 +160,41 @@ def test_cli_writes_exact_output_path(tmp_path):
     report = json.loads(raw)
     assert report["runs"] == 1
     assert "threshold" not in raw
+
+
+def test_measure_runs_nested_under_outer_run_lock(tmp_path):
+    """A measurement run inside an outer runguard.run_lock must not collide.
+
+    Regression for the nested-lock bug: the harness staged its lock workspace
+    under the requested root, and runguard lock discovery treats every
+    descendant of a git worktree as the same worktree, so an inner
+    measure_runs call resolved to the outer repo's run.lock and raised
+    RunLockError. The lock workspace must live outside the detected git
+    worktree so the inner lock is independent of the outer one.
+    """
+    module = _load_measure_run_journal_module()
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+    sentinel = repo / "sentinel.txt"
+    sentinel.write_text("keep me")
+
+    outer_lock_dir = repo / ".brigade" / "run.lock"
+    with runguard.run_lock(repo):
+        assert outer_lock_dir.is_dir(), "outer run lock was not acquired"
+        report = module.measure_runs(runs=1, root=repo)
+        # The outer lock must remain owned by this process throughout the call.
+        assert outer_lock_dir.is_dir(), "outer run lock was released during measurement"
+        owner = json.loads((outer_lock_dir / "owner.json").read_text())
+        assert owner["pid"] == os.getpid(), "outer run lock owner changed during measurement"
+
+    assert isinstance(report["per_run"], list)
+    assert len(report["per_run"]) == 1
+    assert sentinel.read_text() == "keep me", "unrelated repo file was modified"
+
+    repo_leftovers = [path.name for path in repo.iterdir() if path.name.startswith("brigade-run-journal-")]
+    assert repo_leftovers == [], f"measurement temp dirs left under repo: {repo_leftovers}"
+    parent_leftovers = [path.name for path in tmp_path.iterdir() if path.name.startswith("brigade-run-journal-")]
+    assert parent_leftovers == [], f"lock workspace temp dirs left under repo parent: {parent_leftovers}"

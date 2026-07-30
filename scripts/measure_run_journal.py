@@ -160,12 +160,46 @@ def _environment(root: Path) -> dict[str, Any]:
     }
 
 
+def _lock_workspace_parent(root: Path, staging_root: Path) -> Path | None:
+    """Pick a parent directory for the runguard lock workspace.
+
+    ``runguard.lock_path`` treats every descendant of a git worktree as the
+    same worktree and resolves the lock to ``<git top-level>/.brigade/run.lock``.
+    When the requested ``root`` lives inside a git worktree, a lock workspace
+    staged under ``root`` would therefore resolve to the very repo lock an
+    outer Brigade run already owns and raise ``RunLockError``. Place the lock
+    workspace outside the git top-level instead: its parent is never a
+    worktree descendant, so ``lock_path`` falls back to the workspace itself.
+
+    For a non-git ``root`` the staging subtree under the requested root is
+    already outside any worktree, so an isolated lock workspace there is fine
+    and keeps cleanup tied to the staging tree. Returns ``None`` to select the
+    standard ``TemporaryDirectory`` location for the impossible case where the
+    git top-level is the filesystem root.
+    """
+    if runguard.is_git_worktree(root):
+        git_top = runguard.git_root(root)
+        parent = git_top.parent
+        if parent != git_top:
+            return parent
+        return None
+    return staging_root
+
+
 def measure_runs(runs: int, root: Path) -> dict[str, Any]:
     """Drive ``runs`` run directories under ``root`` through journal authority.
 
     Returns a deterministic-schema report dict with keys ``runs``,
     ``per_run``, ``aggregate``, and ``environment``. No pass/fail verdict or
     acceptance threshold is included.
+
+    All measured run directories and journal/checkpoint files live inside a
+    unique staging subtree under ``root`` so filesystem measurements remain on
+    the requested filesystem. Only the runguard lock workspace is placed in a
+    second unique ``TemporaryDirectory`` outside the detected git worktree, so
+    an inner measurement run never collides with an outer Brigade run that
+    already owns the repo lock. The lock workspace is not part of measured
+    append files or timing and is cleaned on both success and exception.
     """
     if isinstance(runs, bool) or not isinstance(runs, int):
         raise TypeError("runs must be an integer")
@@ -180,12 +214,13 @@ def measure_runs(runs: int, root: Path) -> dict[str, Any]:
     all_latencies: list[int] = []
     with tempfile.TemporaryDirectory(prefix="brigade-run-journal-measure-", dir=root) as staging:
         staging_root = Path(staging)
-        workspace = staging_root / "workspace"
-        workspace.mkdir(parents=True, exist_ok=True)
-        for index in range(runs):
-            entry = _measure_run(staging_root / "runs" / f"run-{index:05d}", workspace)
-            per_run.append(entry)
-            all_latencies.extend(entry["append_latencies_ns"])
+        lock_parent = _lock_workspace_parent(root, staging_root)
+        with tempfile.TemporaryDirectory(prefix="brigade-run-journal-lock-", dir=lock_parent) as lock_dir:
+            workspace = Path(lock_dir)
+            for index in range(runs):
+                entry = _measure_run(staging_root / "runs" / f"run-{index:05d}", workspace)
+                per_run.append(entry)
+                all_latencies.extend(entry["append_latencies_ns"])
 
     ordered = sorted(all_latencies)
     aggregate = {
