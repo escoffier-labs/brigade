@@ -655,6 +655,19 @@ def _journal_active(run_dir: Path) -> bool:
     return (run_dir / "events" / "lifecycle.jsonl").is_file()
 
 
+def _print_pending_dispatch_recovery(run_dir: Path) -> None:
+    """Surface unobserved external dispatches as at-least-once recovery work."""
+    from . import run_journal, run_lifecycle
+
+    try:
+        events = run_journal.read_journal(run_lifecycle._journal_path(run_dir)).events
+    except (OSError, run_journal.RunJournalError):
+        return
+    for seat, attempt in run_lifecycle.pending_dispatch_requests(events):
+        attempt_text = str(attempt) if attempt is not None else "unknown"
+        print(f"dispatch recovery: at-least-once work required (seat={seat}, attempt={attempt_text})")
+
+
 def _read_run_json_state(run_dir: Path) -> tuple[bool, dict[str, Any] | None, str | None, bool]:
     """Return (parseable, run_meta, read_error, read_oserror) for run.json.
 
@@ -844,7 +857,10 @@ def recover(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
         return 2
 
     if _journal_active(run_dir):
-        return _recover_from_checkpoint(run_dir, workspace, parseable, run_meta, read_error)
+        result = _recover_from_checkpoint(run_dir, workspace, parseable, run_meta, read_error)
+        if result == 0:
+            _print_pending_dispatch_recovery(run_dir)
+        return result
     return _recover_legacy(run_dir, workspace, parseable, run_meta, read_error)
 
 

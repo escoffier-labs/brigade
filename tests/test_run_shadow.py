@@ -1113,7 +1113,7 @@ def test_version_one_shadow_artifact_is_stale(enabled, tmp_path):
 
     # Quarantine: the next shadow comparison atomically renames the stale
     # artifact to a private .stale-projector-v2-<timestamp> sibling under
-    # events before a fresh current-v3 artifact is written.
+    # events before a fresh current-version artifact is written.
     _write_run_json_locked(repo, run_dir, "planning")
 
     quarantined = list((run_dir / "events").glob(".stale-projector-v2-*"))
@@ -1131,6 +1131,31 @@ def test_version_one_shadow_artifact_is_stale(enabled, tmp_path):
     assert len(fresh["recent_records"]) == 1
     # The stale artifact's verified tail is reused as the gap baseline.
     assert fresh["last_compared_sequence"] != stale_seq
+
+
+def test_dispatch_semantics_v4_quarantines_old_v3_shadow_artifact(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    assert run_projector.PROJECTOR_VERSION == 4
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    stale = json.loads(artifact.read_text())
+    stale["projector_version"] = 3
+    artifact.write_text(json.dumps(stale, indent=2, sort_keys=True) + "\n")
+    stale_bytes = artifact.read_bytes()
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.reasons == (REASON_EVIDENCE_PROJECTOR_VERSION_STALE,)
+    _write_run_json_locked(repo, run_dir, "planning")
+
+    quarantined = list((run_dir / "events").glob(".stale-projector-v2-*"))
+    assert quarantined
+    assert quarantined[0].read_bytes() == stale_bytes
+    fresh = json.loads(artifact.read_text())
+    assert fresh["projector_version"] == 4
+    assert fresh["errors"] == 0
 
 
 def test_current_projector_version_artifact_with_checkpoint_tail_reads_ready_when_bytes_match(enabled, tmp_path):
@@ -1234,7 +1259,7 @@ def test_stale_quarantine_writes_fresh_v3_counters(enabled, tmp_path):
     _make_stale_artifact(run_dir, stale_version=2)
     stale_bytes = artifact.read_bytes()
 
-    _write_run_json_locked(repo, run_dir, "dispatching")  # triggers quarantine + fresh v3
+    _write_run_json_locked(repo, run_dir, "dispatching")  # triggers quarantine + fresh artifact
 
     quarantined = list((run_dir / "events").glob(".stale-projector-v2-*"))
     assert quarantined
@@ -1264,7 +1289,7 @@ def test_crash_window_after_quarantine_reads_as_no_evidence(enabled, tmp_path):
     artifact = run_shadow.shadow_artifact_path(run_dir)
 
     # Simulate the crash window: quarantine the stale artifact (atomic rename
-    # to the private sibling) but do NOT write a fresh current-v3 artifact.
+    # to the private sibling) but do NOT write a fresh current-version artifact.
     stamp = "20260730T000000000000Z"
     artifact.replace(artifact.with_name(f".stale-projector-v2-{stamp}"))
     assert not artifact.exists()
@@ -1336,7 +1361,7 @@ def test_stale_quarantine_larger_advance_records_comparison_gap(enabled, tmp_pat
 
     # Later locked write (result-processing) runs the hook: tail seq 7 vs the
     # reused stale baseline 4 is an unexplained advance (7 != 4+2), so a
-    # fresh comparison-gap error is recorded on the fresh v3 artifact.
+    # fresh comparison-gap error is recorded on the fresh current-version artifact.
     _write_run_json_locked(repo, run_dir, "result-processing")
 
     fresh = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
@@ -1354,7 +1379,7 @@ def test_current_v3_mismatch_is_never_reset_by_later_match(enabled, tmp_path):
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")  # match, seq 2
 
-    # Record a mismatch against the current v3 artifact (forged status
+    # Record a mismatch against the current-version artifact (forged status
     # divergence with a mapped legacy status) at the same journal tail.
     run_shadow.record_shadow_comparison(
         run_dir,
@@ -1371,7 +1396,7 @@ def test_current_v3_mismatch_is_never_reset_by_later_match(enabled, tmp_path):
 
     # A subsequent matching comparison (normal checkpoint+status advance from
     # seq 2 to seq 4, no gap) must NOT reset the recorded mismatch: counters on
-    # a current-v3 artifact only accumulate, never zero out.
+    # a current-version artifact only accumulate, never zero out.
     _write_run_json_locked(repo, run_dir, "planning")  # match, seq 4
 
     data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
@@ -1387,7 +1412,7 @@ def test_current_v3_error_is_never_reset_by_later_match(enabled, tmp_path):
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")  # match, seq 2
 
-    # Record a journal-unreadable error against the current v3 artifact via a
+    # Record a journal-unreadable error against the current-version artifact via a
     # direct call (a locked write would fail inside write_checkpoint before
     # the shadow hook runs, so the error path is exercised directly). The
     # journal tail stays at seq 2 throughout so the later clean comparison
@@ -1434,7 +1459,7 @@ def test_bounded_journal_reads_map_bound_failure_to_journal_unreadable(enabled, 
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
     _write_run_json(run_dir, "started")
-    _write_run_json_locked(repo, run_dir, "started")  # clean current-v3 artifact
+    _write_run_json_locked(repo, run_dir, "started")  # clean current-version artifact
 
     # A bound-exceeded journal read must map to journal-unreadable on both the
     # comparison path and the readiness path. read_journal_bounded is the
@@ -1913,7 +1938,7 @@ def test_gate_accepts_zero_mismatches_and_zero_errors_as_valid(tmp_path):
 def test_gate_rejects_malformed_recent_records_as_evidence_unreadable(enabled, tmp_path, malformed_recent_records):
     """Readiness must reject malformed records before the tail check.
 
-    The artifact starts as a real current-v3 match with its cursor equal to
+    The artifact starts as a real current-version match with its cursor equal to
     the journal tail. Only ``recent_records`` is forged, so the expected
     result cannot be attributed to an earlier readiness gate.
     """
@@ -1936,7 +1961,7 @@ def test_gate_rejects_malformed_recent_records_as_evidence_unreadable(enabled, t
 
 
 def test_record_outcome_does_not_trust_invalid_counters_on_carry(enabled, tmp_path):
-    """Blocker #2 carry side: a current-v3 prior artifact with invalid counters
+    """Blocker #2 carry side: a current-version prior artifact with invalid counters
     (bool / negative / non-int) must not be trusted when a new comparison
     accumulates. The prior is quarantined and a fresh artifact starts; the
     invalid counters never flow into the new artifact's accumulators.
@@ -1958,7 +1983,7 @@ def test_record_outcome_does_not_trust_invalid_counters_on_carry(enabled, tmp_pa
     artifact.write_text(json.dumps(forged, indent=2, sort_keys=True) + "\n")
 
     # A new locked status write runs the shadow hook, which loads the prior
-    # current-v3 artifact, detects the invalid counters, quarantines it, and
+    # current-version artifact, detects the invalid counters, quarantines it, and
     # starts fresh with an evidence-unreadable side record plus the new match.
     _write_run_json_locked(repo, run_dir, "planning")  # ck 3, planning 4
 
@@ -1987,7 +2012,7 @@ def test_record_outcome_does_not_trust_invalid_counters_on_carry(enabled, tmp_pa
 
 
 def test_record_outcome_does_not_trust_negative_counters_on_carry(enabled, tmp_path):
-    """Blocker #2 carry side: a current-v3 prior with negative comparisons must
+    """Blocker #2 carry side: a current-version prior with negative comparisons must
     not produce a negative accumulator (which would silently bypass the
     no-comparisons gate)."""
     repo = _repo(tmp_path)
@@ -2069,7 +2094,7 @@ def test_record_shadow_comparison_quarantines_invalid_accumulated_counter(enable
     ],
 )
 def test_malformed_recent_records_quarantined_via_record_shadow_comparison(enabled, tmp_path, malformed_recent_records):
-    """A current-v3 artifact with valid counters but malformed recent_records
+    """A current-version artifact with valid counters but malformed recent_records
     must not crash record_shadow_comparison. The prior is quarantined, counters
     are not carried, evidence-unreadable precedes the new outcome, and
     recent_records is a bounded list of dict records."""
@@ -2175,7 +2200,7 @@ def test_non_object_shadow_artifact_quarantined_via_record_shadow_comparison(ena
     _write_run_json_locked(repo, run_dir, "started")  # ck 1, run.created 2
 
     artifact = run_shadow.shadow_artifact_path(run_dir)
-    # Overwrite the valid current-v3 artifact with a non-object JSON payload.
+    # Overwrite the valid current-version artifact with a non-object JSON payload.
     artifact.write_text(non_object_payload + "\n")
 
     # Exercise the public writer path through a valid journal/snapshot.

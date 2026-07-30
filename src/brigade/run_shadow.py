@@ -83,7 +83,7 @@ def _valid_counter(value: object) -> bool:
 
 
 def _has_invalid_counters(data: object) -> bool:
-    """True when a current-v3 artifact carries an untrustworthy counter.
+    """True when a current-version artifact carries an untrustworthy counter.
 
     ``_record_outcome`` accumulates ``comparisons``, ``matches``,
     ``mismatches``, ``lags``, and ``errors``. A bool, negative, or non-int
@@ -118,7 +118,7 @@ def _has_invalid_recent_records(data: object) -> bool:
 
 
 def _has_invalid_artifact_structure(data: object) -> bool:
-    """True when a current-v3 artifact is structurally untrustworthy.
+    """True when a current-version artifact is structurally untrustworthy.
 
     Invalid gated counters and malformed ``recent_records`` both close the
     carry path: quarantine the prior, start a fresh artifact, and record an
@@ -330,7 +330,24 @@ def _checkpoint_status_write_gap(
         return False
     if status_event.event_type != paired_event_type:
         return False
-    return paired_event_type in run_lifecycle.STATUS_EVENT_TYPE.values()
+    pairing_key = checkpoint.payload.get("pairing_key")
+    if status_event.event_type in run_checkpoint._DISPATCH_FACT_EVENT_TYPES and pairing_key is None:
+        return False
+    if pairing_key is not None:
+        seat = status_event.payload.get("seat")
+        attempt = status_event.payload.get("attempt")
+        if (
+            status_event.event_type not in run_checkpoint._DISPATCH_FACT_EVENT_TYPES
+            or not isinstance(pairing_key, str)
+            or not isinstance(seat, str)
+            or not seat
+            or isinstance(attempt, bool)
+            or not isinstance(attempt, int)
+            or attempt < 1
+        ):
+            return False
+        return pairing_key == run_checkpoint.dispatch_pairing_key(status_event.event_type, seat, attempt)
+    return run_checkpoint._paired_event_derived_status(status_event) is not None
 
 
 def _append_gap_record(data: dict[str, Any], tail_seq: int, tail_digest: str | None) -> None:
@@ -395,8 +412,8 @@ def _record_outcome(
                 data["last_compared_event_digest"] = baseline[1]
         else:
             # Current-version artifact: counters and records only accumulate,
-            # never reset (mismatches/errors from a current-v3 artifact are
-            # preserved across later comparisons). A current-v3 artifact with
+            # never reset (mismatches/errors from a current-version artifact
+            # are preserved across later comparisons). A current-version artifact with
             # invalid counters (bool, negative, or non-int for comparisons,
             # matches, mismatches, lags, or errors) or malformed
             # ``recent_records`` is structurally broken and must not be
@@ -424,7 +441,7 @@ def _record_outcome(
             return  # idempotent: same tail sequence, digests, outcome, and category
     # A present-but-unparseable prior artifact is quarantined and treated as
     # absent; record an evidence-unreadable error before the main record. A
-    # current-v3 prior with invalid structure is treated the same way: forged
+    # current-version prior with invalid structure is treated the same way: forged
     # counters or malformed recent_records are dropped and an
     # evidence-unreadable side record explains the fresh start.
     if was_corrupt or structurally_invalid:
@@ -673,7 +690,7 @@ def check_projection_readiness(run_dir: Path) -> ReadinessReport:
             or data.get("run_id") != run_dir.name
         ):
             return ReadinessReport(ready=False, reasons=(REASON_EVIDENCE_SCHEMA_MISMATCH,))
-        # Strict structure validation: a current-v3 artifact accepts only
+        # Strict structure validation: a current-version artifact accepts only
         # non-bool nonnegative counters and a list of mapping-shaped recent
         # records. A forged counter or malformed/missing ``recent_records``
         # is structurally broken and closes the gate as evidence-unreadable

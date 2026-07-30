@@ -26,7 +26,7 @@ from typing import Any, Mapping, Sequence
 
 from brigade import run_checkpoint, run_events, run_journal
 
-PROJECTOR_VERSION: int = 3
+PROJECTOR_VERSION: int = 4
 
 # Field ownership over the run.json contract. Every current run.json key is
 # in exactly one of these two sets; see the ownership inventory in
@@ -106,12 +106,28 @@ OWNED_FIELDS: frozenset[str] = DERIVED_FIELDS | PRESERVED_FIELDS
 # the event-to-status table).
 EVENT_STATUS: dict[str, str] = {
     "run.planning.started": "planning",
+    "run.dispatching.started": "dispatching",
     "run.dispatch.requested": "dispatching",
-    "run.dispatch.completed": "result-processing",
+    "run.dispatch.observed": "dispatching",
+    "run.dispatch.completed": "dispatching",
+    "run.dispatch.failed": "dispatching",
+    "run.result-processing.started": "result-processing",
     "run.synthesis.started": "synthesizing",
     "run.synthesis.completed": "handoff",
     "run.artifact_collection.started": "artifact-collection",
 }
+
+
+def _has_dispatch_identity(payload: Any) -> bool:
+    return (
+        isinstance(payload, Mapping)
+        and isinstance(payload.get("seat"), str)
+        and bool(payload["seat"])
+        and isinstance(payload.get("attempt"), int)
+        and not isinstance(payload["attempt"], bool)
+        and payload["attempt"] > 0
+    )
+
 
 # Payload-driven rows: event_type -> (allowed payload status values, derived
 # status). A None derived status means the payload status value is used
@@ -257,6 +273,15 @@ def _derive_status(envelopes: list[Mapping[str, Any]], base_status: Any) -> str:
         event_type = env["event_type"]
         sequence = env["sequence"]
         if event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE:
+            continue
+        # Slice-9 per-worker facts are status-neutral: a worker terminal
+        # result must not advance the aggregate run while other seats remain
+        # active. Older aggregate envelopes lacked an identity and retain
+        # their original status semantics below.
+        if event_type.startswith("run.dispatch.") and _has_dispatch_identity(env["payload"]):
+            continue
+        if event_type == "run.dispatch.completed" and not _has_dispatch_identity(env["payload"]):
+            status = "result-processing"
             continue
         if event_type in EVENT_STATUS:
             status = EVENT_STATUS[event_type]

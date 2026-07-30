@@ -84,7 +84,16 @@ def test_checkpoint_dir_and_path_helpers():
 def test_checkpoint_event_type_registered_with_closed_payload_keys():
     assert "run.snapshot.checkpointed" in run_events.EVENT_TYPES
     assert run_events.EVENT_TYPES["run.snapshot.checkpointed"] == frozenset(
-        {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type", "body_kind"}
+        {
+            "path",
+            "sha256",
+            "media_type",
+            "byte_size",
+            "privacy_class",
+            "paired_event_type",
+            "body_kind",
+            "pairing_key",
+        }
     )
 
 
@@ -1580,6 +1589,7 @@ def _journal_with_checkpoint_and_trailing(
     run_json_obj: dict,
     *,
     paired_event_type: str | None,
+    pairing_key: str | None = None,
     trailing_events: list[tuple[str, dict, str, str]],
 ) -> run_journal.RunEvent:
     """Activate the journal, write one checkpoint, then append trailing events.
@@ -1593,7 +1603,11 @@ def _journal_with_checkpoint_and_trailing(
         run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=workspace)
         run_json_bytes = _writer_bytes(run_json_obj)
         checkpoint = run_checkpoint.write_checkpoint(
-            run_dir, run_json_bytes, workspace=workspace, paired_event_type=paired_event_type
+            run_dir,
+            run_json_bytes,
+            workspace=workspace,
+            paired_event_type=paired_event_type,
+            pairing_key=pairing_key,
         )
         assert checkpoint is not None
         prev_seq = checkpoint.sequence
@@ -1609,6 +1623,71 @@ def _journal_with_checkpoint_and_trailing(
             )
             prev_seq = appended.sequence
     return checkpoint
+
+
+@pytest.mark.parametrize(
+    ("payload", "pairing_seat", "pairing_attempt"),
+    [
+        ({"seat": "other", "attempt": 1, "detail": "completed"}, "coder", 1),
+        ({"seat": "coder", "attempt": 2, "detail": "completed"}, "coder", 1),
+        ({"seat": "coder", "detail": "completed"}, "coder", 1),
+    ],
+    ids=("wrong-seat", "wrong-attempt", "missing-attempt"),
+)
+def test_recover_from_checkpoint_rejects_mismatched_dispatch_pairing_identity(
+    tmp_path, payload, pairing_seat, pairing_attempt
+):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "dispatching", "task": "demo"}
+    _journal_with_checkpoint_and_trailing(
+        workspace,
+        run_dir,
+        run_json_obj,
+        paired_event_type="run.dispatch.completed",
+        pairing_key=run_checkpoint.dispatch_pairing_key("run.dispatch.completed", pairing_seat, pairing_attempt),
+        trailing_events=[
+            ("run.dispatch.completed", payload, "dispatch-completed-1", "2026-07-27T15:30:46.000000Z"),
+        ],
+    )
+    (run_dir / "run.json").unlink()
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+    assert excinfo.value.category == "pairing"
+    assert not (run_dir / "run.json").exists()
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "run.dispatch.requested",
+        "run.dispatch.observed",
+        "run.dispatch.completed",
+        "run.dispatch.failed",
+    ],
+)
+def test_recover_rejects_dispatch_pairing_checkpoint_at_tail_as_incomplete(tmp_path, event_type):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "dispatching", "task": "demo"}
+    _journal_with_checkpoint_and_trailing(
+        workspace,
+        run_dir,
+        run_json_obj,
+        paired_event_type=event_type,
+        pairing_key=run_checkpoint.dispatch_pairing_key(event_type, "coder", 1),
+        trailing_events=[],
+    )
+    (run_dir / "run.json").unlink()
+
+    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+
+    assert excinfo.value.category == "incomplete-pair"
+    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    assert not (run_dir / "run.json").exists()
 
 
 def test_recover_from_checkpoint_fails_on_wrong_paired_event_type(tmp_path):

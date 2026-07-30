@@ -629,17 +629,15 @@ def _payload_requests_authority(payload: dict[str, object]) -> bool:
 
 
 def _genuine_journal_ahead(run_dir: Path) -> bool:
-    """Return True only when the journal tail has genuinely advanced past a
-    real recorded comparison (not a forged cursor).
+    """Return True only for one verified checkpoint/event pair ahead.
 
     ``check_projection_readiness`` reports ``REASON_JOURNAL_AHEAD`` whenever
     the artifact's ``last_compared_sequence``/``last_compared_event_digest``
     does not match the journal tail, which conflates a real committed
-    transition whose shadow step has not run yet with a forged or stale
-    cursor. The journal-ahead exception may only authorize projection when the
-    artifact's cursor verifies against an actual event in a clean journal
-    prefix AND the tail has advanced past it; otherwise the evidence is
-    forged and the gate must fail closed.
+    checkpoint/event pair whose shadow step has not run yet with a forged,
+    stale, or multi-pair cursor. Catch-up is safe only when the artifact cursor
+    verifies against an actual event in a clean journal and the tail is exactly
+    one structurally covered pair ahead.
     """
     artifact_path = run_shadow.shadow_artifact_path(run_dir)
     try:
@@ -664,26 +662,53 @@ def _genuine_journal_ahead(run_dir: Path) -> bool:
         return False
     if not journal_report.events:
         return False
-    return journal_report.events[-1].sequence > baseline[0]
+    tail_seq = journal_report.events[-1].sequence
+    return run_shadow._checkpoint_status_write_gap(run_dir, prior_seq=baseline[0], tail_seq=tail_seq)
 
 
-def _authoritative_prior_decision(run_dir: Path) -> str:
+def _authoritative_prior_decision(run_dir: Path, prior_snapshot: dict[str, object]) -> str:
     """Resolve the prior authority gate for an authoritative run.
 
-    Returns ``"ready"`` when the prior committed state is ready, or
-    ``"journal-ahead"`` for the approved prior journal-ahead exception (a
-    genuine committed transition whose shadow step has not run yet). Any
-    other prior state raises a bounded ``LifecycleJournalError`` BEFORE the
-    checkpoint/lifecycle append, so forged evidence cannot authorize
-    projection and no unrelated prior reason piggybacks on the journal-ahead
-    exception. The decision is based on ``run_shadow.check_projection_readiness``
-    on the prior committed state, not this write's pre-parity ad hoc parsing.
+    A ready prior returns immediately. A prior that is not ready may catch up
+    exactly one verified checkpoint/event pair by recording parity against the
+    persisted pre-write snapshot and then requiring readiness to become fully
+    green. Forged cursors, multi-pair gaps, mismatches, errors, and a catch-up
+    that does not restore readiness all raise before a new pair is appended.
     """
     report = run_shadow.check_projection_readiness(run_dir)
     if report.ready:
         return "ready"
     if report.reasons == (run_shadow.REASON_JOURNAL_AHEAD,) and _genuine_journal_ahead(run_dir):
-        return "journal-ahead"
+        run_shadow.record_shadow_comparison(run_dir, prior_snapshot)
+        caught_up = run_shadow.check_projection_readiness(run_dir)
+        if caught_up.ready:
+            artifact_path = run_shadow.shadow_artifact_path(run_dir)
+            try:
+                artifact = json.loads(artifact_path.read_text())
+            except (OSError, ValueError) as exc:
+                raise run_lifecycle.LifecycleJournalError(
+                    run_events._bound("authoritative run prior catch-up evidence is unreadable")
+                ) from exc
+            mismatches = artifact.get("mismatches") if isinstance(artifact, dict) else None
+            errors = artifact.get("errors") if isinstance(artifact, dict) else None
+            if (
+                not isinstance(artifact, dict)
+                or artifact.get("last_outcome") != run_shadow.OUTCOME_MATCH
+                or isinstance(mismatches, bool)
+                or not isinstance(mismatches, int)
+                or mismatches != 0
+                or isinstance(errors, bool)
+                or not isinstance(errors, int)
+                or errors != 0
+                or artifact.get("last_error_category") is not None
+            ):
+                raise run_lifecycle.LifecycleJournalError(
+                    run_events._bound("authoritative run prior catch-up evidence is not a clean match")
+                )
+            return "ready"
+        raise run_lifecycle.LifecycleJournalError(
+            run_events._bound("authoritative run prior catch-up not ready: " + ",".join(sorted(caught_up.reasons)))
+        )
     raise run_lifecycle.LifecycleJournalError(
         run_events._bound("authoritative run prior gate not ready: " + ",".join(sorted(report.reasons)))
     )
@@ -705,117 +730,7 @@ def _project_authority_candidate(path: Path, run_dir: Path, candidate: dict[str,
     localio.write_text_atomic(path, projection.to_bytes().decode("utf-8"))
 
 
-def _validate_journal_ahead_projection(run_dir: Path, readiness: run_shadow.ReadinessReport) -> None:
-    """Validate the post-parity shadow artifact for the approved prior
-    journal-ahead exception (finding 3).
-
-    The exception may project only when the post-parity gate failure is
-    exactly the one comparison-gap error created by catching up a genuinely
-    ahead journal AND the current parity outcome is match. Any other
-    post-parity mismatch or error must fail closed with a bounded
-    ``LifecycleJournalError`` and no run.json replace, so the exception cannot
-    ignore an arbitrary post-parity defect.
-
-    The post-parity ``ReadinessReport`` is checked explicitly: its reasons must
-    be exactly ``(REASON_ERROR_RECORDED,)``. A forged extra reason such as
-    ``REASON_JOURNAL_UNREADABLE`` (set by forging the aggregate
-    ``last_error_category`` to ``"journal-unreadable"``) must fail closed even
-    when the recent_records pair still looks like comparison-gap then match.
-
-    The current shadow artifact is validated after parity: current
-    schema/version/run_id, current projector version, ``mismatches`` a
-    non-bool int equal to 0, ``errors`` a non-bool int equal to 1 (the
-    comparison-gap), ``last_error_category`` None on the final match
-    aggregate, last_outcome match, and the final two recent records are
-    comparison-gap error then match for the same current tail
-    sequence/digest. Strict integer semantics reject bool counters: ``False``
-    must not satisfy ``mismatches == 0`` and ``True`` must not satisfy
-    ``errors == 1``.
-    """
-    if readiness.reasons != (run_shadow.REASON_ERROR_RECORDED,):
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound(
-                "journal-ahead projection post-parity reasons are not exactly error-recorded: "
-                + ",".join(sorted(readiness.reasons))
-            )
-        )
-    artifact_path = run_shadow.shadow_artifact_path(run_dir)
-    try:
-        data = json.loads(artifact_path.read_text())
-    except (OSError, ValueError):
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("journal-ahead projection artifact unreadable")
-        ) from None
-    if not isinstance(data, dict):
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("journal-ahead projection artifact is not an object")
-        )
-    if (
-        data.get("schema") != run_shadow.SHADOW_SCHEMA
-        or data.get("schema_version") != run_shadow.SHADOW_SCHEMA_VERSION
-        or data.get("run_id") != run_dir.name
-    ):
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("journal-ahead projection artifact schema/run_id mismatch")
-        )
-    if data.get("projector_version") != run_projector.PROJECTOR_VERSION:
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("journal-ahead projection artifact projector version is not current")
-        )
-    mismatches = data.get("mismatches")
-    if isinstance(mismatches, bool) or not isinstance(mismatches, int) or mismatches != 0:
-        raise run_lifecycle.LifecycleJournalError(run_events._bound("journal-ahead projection recorded a mismatch"))
-    errors = data.get("errors")
-    if isinstance(errors, bool) or not isinstance(errors, int) or errors != 1:
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("journal-ahead projection must record exactly one comparison-gap error")
-        )
-    if data.get("last_error_category") is not None:
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("journal-ahead projection aggregate last_error_category is not none")
-        )
-    if data.get("last_outcome") != run_shadow.OUTCOME_MATCH:
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("journal-ahead projection current parity is not a match")
-        )
-    records = data.get("recent_records")
-    if not isinstance(records, list) or len(records) < 2:
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("journal-ahead projection artifact lacks the gap-then-match record pair")
-        )
-    gap_record = records[-2]
-    match_record = records[-1]
-    if (
-        not isinstance(gap_record, dict)
-        or gap_record.get("outcome") != run_shadow.OUTCOME_ERROR
-        or gap_record.get("category") != "comparison-gap"
-    ):
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("journal-ahead projection prior record is not a comparison-gap error")
-        )
-    if not isinstance(match_record, dict) or match_record.get("outcome") != run_shadow.OUTCOME_MATCH:
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("journal-ahead projection current record is not a match")
-        )
-    try:
-        journal_report = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir))
-    except (OSError, run_journal.RunJournalError) as exc:
-        raise run_lifecycle._bound_journal_failure(exc) from exc
-    if journal_report.partial_tail is not None or journal_report.chain_errors or not journal_report.events:
-        raise run_lifecycle.LifecycleJournalError(
-            run_events._bound("journal-ahead projection journal is not chain-valid")
-        )
-    tail = journal_report.events[-1]
-    tail_seq = tail.sequence
-    tail_digest = tail.event_digest
-    for record in (gap_record, match_record):
-        if record.get("sequence") != tail_seq or record.get("event_digest") != tail_digest:
-            raise run_lifecycle.LifecycleJournalError(
-                run_events._bound("journal-ahead projection gap/match records do not match the current tail")
-            )
-
-
-def _write_json(path: Path, payload: object) -> None:
+def _write_json_inner(path: Path, payload: object) -> None:
     # run.json is polled by `brigade runs watch/steer/interrupt` while the run
     # rewrites it, so the write must be atomic or a concurrent reader can
     # observe a truncated file.
@@ -860,15 +775,22 @@ def _write_json(path: Path, payload: object) -> None:
             )
             # Prior authority gate (authoritative only): fail closed BEFORE
             # the checkpoint/lifecycle append when the prior committed state
-            # is not ready and not a genuine journal-ahead. Legacy and
-            # authority-requested runs skip this gate; authority-requested
-            # bases projection on the post-parity readiness report, and legacy
-            # skips all prior-decision work (no shadow/journal reads).
-            prior_decision: str | None
+            # is not ready and not exactly one recoverable checkpoint/event
+            # pair ahead. The catch-up uses the persisted pre-write snapshot,
+            # never the incoming next status. Legacy and authority-requested
+            # runs skip this gate.
             if authority_state == "authoritative":
-                prior_decision = _authoritative_prior_decision(run_dir)
-            else:
-                prior_decision = None
+                try:
+                    prior_snapshot = json.loads(path.read_bytes())
+                except (OSError, ValueError, UnicodeDecodeError) as exc:
+                    raise run_lifecycle.LifecycleJournalError(
+                        run_events._bound("authoritative prior snapshot is unreadable")
+                    ) from exc
+                if not isinstance(prior_snapshot, dict):
+                    raise run_lifecycle.LifecycleJournalError(
+                        run_events._bound("authoritative prior snapshot is not an object")
+                    )
+                _authoritative_prior_decision(run_dir, prior_snapshot)
             # Exact order: activate the journal, publish the recovery
             # checkpoint, append the lifecycle status transition, record the
             # shadow parity, consult the post-parity readiness veto, then
@@ -912,22 +834,10 @@ def _write_json(path: Path, payload: object) -> None:
                 else:
                     localio.write_text_atomic(path, encoded_candidate)
                 return
-            # authoritative: prior_decision is "ready" or "journal-ahead".
+            # Authoritative writes require both the prior gate and this
+            # post-parity gate to be fully ready. No comparison-gap override
+            # survives: the only recoverable lag was consumed before append.
             if readiness.ready:
-                _project_authority_candidate(path, run_dir, candidate)
-                return
-            # Post-parity gate is not ready. For the approved prior
-            # journal-ahead exception, allow projection despite the current
-            # parity gap ONLY when the post-parity gate failure is exactly
-            # the one comparison-gap error created by catching up a genuinely
-            # ahead journal AND the current parity outcome is match (finding
-            # 3). Any other post-parity mismatch or error fails closed with no
-            # run.json replace. For a prior-ready normal write, require the
-            # post-parity report to remain ready; any other prior reason
-            # already failed closed at the prior gate, so nothing unrelated
-            # piggybacks here.
-            if prior_decision == "journal-ahead":
-                _validate_journal_ahead_projection(run_dir, readiness)
                 _project_authority_candidate(path, run_dir, candidate)
                 return
             raise run_lifecycle.LifecycleJournalError(
@@ -936,6 +846,20 @@ def _write_json(path: Path, payload: object) -> None:
     localio.write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     if path.name == "run.json" and isinstance(payload, dict):
         run_shadow.record_shadow_comparison(path.parent, payload)
+
+
+def _write_json(path: Path, payload: object) -> None:
+    """Write JSON, serializing every run.json checkpoint/event transaction."""
+    if (
+        path.name == "run.json"
+        and isinstance(payload, dict)
+        and isinstance(payload.get("status"), str)
+        and payload["status"]
+    ):
+        with run_lifecycle.checkpoint_event_pair():
+            _write_json_inner(path, payload)
+        return
+    _write_json_inner(path, payload)
 
 
 def _revision_contains(revisions_dir: Path, projection: bytes) -> bool:
@@ -1768,6 +1692,10 @@ def dispatch(
     on_stage_start: Callable[[int, tuple[str, ...]], None] | None = None,
     on_interrupt: Callable[[], None] | None = None,
     on_scheduler_resolved: Callable[[str, str | None], None] | None = None,
+    on_dispatch_requested: Callable[[Agent], int | None] | None = None,
+    on_dispatch_observed: Callable[[Agent, int], None] | None = None,
+    on_dispatch_completed: Callable[[Agent, int], None] | None = None,
+    on_dispatch_failed: Callable[[Agent, int], None] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     build_prompt: Callable[..., str] | None = None,
 ) -> list[WorkerResult]:
@@ -1799,6 +1727,10 @@ def dispatch(
         on_stage_start=on_stage_start,
         on_interrupt=on_interrupt,
         on_scheduler_resolved=on_scheduler_resolved,
+        on_dispatch_requested=on_dispatch_requested,
+        on_dispatch_observed=on_dispatch_observed,
+        on_dispatch_completed=on_dispatch_completed,
+        on_dispatch_failed=on_dispatch_failed,
         process_registry=process_registry,
     )
 
@@ -2488,8 +2420,8 @@ def record_dispatch_stage(output_dir: Path, *, stage: int, seats: tuple[str, ...
         raise runguard.RetainRunLockError(f"failed to write dispatch stage receipt: {exc}") from exc
 
 
-def record_result_processing(output_dir: Path, *, seat: str) -> None:
-    """Record post-dispatch result processing and clear completed worker ownership."""
+def record_result_processing(output_dir: Path, *, seat: str | None = None) -> None:
+    """Record aggregate post-dispatch result processing and clear worker ownership."""
 
     run_path = output_dir / "run.json"
     try:
@@ -2502,13 +2434,11 @@ def record_result_processing(output_dir: Path, *, seat: str) -> None:
         raise runguard.RetainRunLockError("run receipt must contain an object during result processing")
     if payload.get("finished_at"):
         return
-    payload.update(
-        {
-            "status": "result-processing",
-            "status_started_at": _utc_iso(datetime.now(timezone.utc)),
-            "phase_owner": seat,
-        }
-    )
+    payload.update({"status": "result-processing", "status_started_at": _utc_iso(datetime.now(timezone.utc))})
+    if seat is None:
+        payload.pop("phase_owner", None)
+    else:
+        payload["phase_owner"] = seat
     payload.pop("active_stage", None)
     payload.pop("active_seats", None)
     try:
@@ -3485,6 +3415,36 @@ def run(
             active_seats=active_seats,
         )
 
+    def dispatch_fact(event_type: str, agent: Agent, attempt: int | None = None) -> int | None:
+        if output_dir is None:
+            return None
+        try:
+            event = run_lifecycle.record_dispatch_fact(
+                output_dir,
+                workspace=lock_workspace,
+                event_type=event_type,
+                seat=agent.name,
+                attempt=attempt,
+            )
+        except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
+            raise runguard.RetainRunLockError(f"failed to record dispatch lifecycle fact: {exc}") from exc
+        if event is None:
+            return None
+        recorded_attempt = event.payload.get("attempt")
+        return recorded_attempt if isinstance(recorded_attempt, int) else None
+
+    def dispatch_requested(agent: Agent) -> int | None:
+        return dispatch_fact("run.dispatch.requested", agent)
+
+    def dispatch_observed(agent: Agent, attempt: int) -> None:
+        dispatch_fact("run.dispatch.observed", agent, attempt)
+
+    def dispatch_completed(agent: Agent, attempt: int) -> None:
+        dispatch_fact("run.dispatch.completed", agent, attempt)
+
+    def dispatch_failed(agent: Agent, attempt: int) -> None:
+        dispatch_fact("run.dispatch.failed", agent, attempt)
+
     active_seat = active_seats[0] if len(active_seats) == 1 else None
     worker_prompt_builder = partial(_worker_prompt, skill_policy=skill_policy)
     try:
@@ -3513,6 +3473,10 @@ def run(
                 on_stage_start=stage_started,
                 on_interrupt=dispatch_interrupted,
                 on_scheduler_resolved=scheduler_resolved,
+                on_dispatch_requested=dispatch_requested,
+                on_dispatch_observed=dispatch_observed,
+                on_dispatch_completed=dispatch_completed,
+                on_dispatch_failed=dispatch_failed,
                 process_registry=process_registry,
                 build_prompt=worker_prompt_builder,
             )
@@ -3568,7 +3532,7 @@ def run(
     if drift_rc is not None:
         return drift_rc
     if output_dir is not None:
-        record_result_processing(output_dir, seat=roster.orchestrator)
+        record_result_processing(output_dir)
     if output_dir is not None and code_graph_delta_before is not None and cwd is not None:
         code_graph_delta = graphtrail_delta.capture_after_and_diff(cwd, output_dir, code_graph_delta_before)
     context_eval_payload = _context_eval_for_run(code_graph, code_graph_delta)

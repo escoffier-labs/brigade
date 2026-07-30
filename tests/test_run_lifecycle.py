@@ -16,20 +16,25 @@ categories that block the snapshot. Every journaling append runs under the real
 from __future__ import annotations
 
 import json
+import signal
 import stat
+import threading
 from pathlib import Path
 
 import pytest
 
 from brigade import (
     aboyeur,
+    agents,
     localio,
     proc,
     run_checkpoint,
     run_events,
     run_journal,
     run_lifecycle,
+    run_projector,
     runguard,
+    run_transport,
 )
 from brigade import roster as roster_mod
 
@@ -425,9 +430,9 @@ def test_aba_recurrence_appends_all_three_occurrences(enabled, tmp_path):
 
     assert [e.event_type for e in _status_events(run_dir)] == [
         "run.created",
-        "run.dispatch.requested",
-        "run.dispatch.completed",
-        "run.dispatch.requested",
+        "run.dispatching.started",
+        "run.result-processing.started",
+        "run.dispatching.started",
     ]
     # Checkpoints interleave before each status event, but a checkpoint
     # replays when the run.json bytes + paired_event_type repeat. The second
@@ -438,14 +443,74 @@ def test_aba_recurrence_appends_all_three_occurrences(enabled, tmp_path):
         "run.snapshot.checkpointed",
         "run.created",
         "run.snapshot.checkpointed",
-        "run.dispatch.requested",
+        "run.dispatching.started",
         "run.snapshot.checkpointed",
-        "run.dispatch.completed",
-        "run.dispatch.requested",
+        "run.result-processing.started",
+        "run.dispatching.started",
     ]
     assert [e.sequence for e in events] == [1, 2, 3, 4, 5, 6, 7]
     assert events[3].previous_digest == events[2].event_digest
     assert events[6].previous_digest == events[5].event_digest
+
+
+def test_dispatch_facts_pair_each_real_attempt_without_reusing_pending_identity(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started", lock_workspace=repo)
+    _write_run_json_locked(repo, run_dir, "started", lock_workspace=repo)
+    _write_run_json_locked(repo, run_dir, "dispatching", lock_workspace=repo)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        first = run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.requested",
+            seat="coder",
+        )
+        second = run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.requested",
+            seat="coder",
+        )
+        assert first is not None
+        assert second is not None
+        assert first.payload["attempt"] == 1
+        assert second.payload["attempt"] == 2
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.observed",
+            seat="coder",
+            attempt=1,
+        )
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.failed",
+            seat="coder",
+            attempt=1,
+        )
+
+    events = _events(run_dir)
+    facts = [event for event in events if event.event_type.startswith("run.dispatch.")]
+    assert [(event.event_type, event.payload["attempt"]) for event in facts[-4:]] == [
+        ("run.dispatch.requested", 1),
+        ("run.dispatch.requested", 2),
+        ("run.dispatch.observed", 1),
+        ("run.dispatch.failed", 1),
+    ]
+    dispatch_checkpoints = [
+        event
+        for event in events
+        if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE
+        and event.payload.get("paired_event_type", "").startswith("run.dispatch.")
+        and "pairing_key" in event.payload
+    ]
+    assert len(dispatch_checkpoints) == 4
+    assert len({event.payload["pairing_key"] for event in dispatch_checkpoints}) == 4
+    assert run_lifecycle.pending_dispatch_requests(events) == [("coder", 2)]
 
 
 def test_artifact_collection_intermediate_appends_the_second_a(enabled, tmp_path):
@@ -468,9 +533,9 @@ def test_artifact_collection_intermediate_appends_the_second_a(enabled, tmp_path
     assert meta["status"] == "dispatching"
     assert [e.event_type for e in _status_events(run_dir)] == [
         "run.created",
-        "run.dispatch.requested",
+        "run.dispatching.started",
         "run.artifact_collection.started",
-        "run.dispatch.requested",
+        "run.dispatching.started",
     ]
     events = _events(run_dir)
     # The second "dispatching" produces identical run.json bytes to the first,
@@ -479,13 +544,13 @@ def test_artifact_collection_intermediate_appends_the_second_a(enabled, tmp_path
         "run.snapshot.checkpointed",
         "run.created",
         "run.snapshot.checkpointed",
-        "run.dispatch.requested",
+        "run.dispatching.started",
         "run.snapshot.checkpointed",
         "run.artifact_collection.started",
-        "run.dispatch.requested",
+        "run.dispatching.started",
     ]
     assert [e.sequence for e in events] == [1, 2, 3, 4, 5, 6, 7]
-    # The second run.dispatch.requested links to the artifact-collection
+    # The second run.dispatching.started links to the artifact-collection
     # status event immediately before it (its checkpoint replayed, so no
     # checkpoint sits between them).
     assert events[6].previous_digest == events[5].event_digest
@@ -518,7 +583,7 @@ def test_retry_after_interruption_reuses_committed_event(enabled, tmp_path):
     assert [e.event_type for e in events] == [
         "run.snapshot.checkpointed",
         "run.created",
-        "run.dispatch.completed",
+        "run.result-processing.started",
     ]
     assert replay.event_id == events[2].event_id
     assert _journal_path(run_dir).read_bytes() == journal_before
@@ -1050,7 +1115,7 @@ def test_first_write_match_authorizes_first_projected_snapshot(tmp_path, monkeyp
         _write_run_json_authority(run_dir, "started")
         _write_run_json_authority(run_dir, "planning")
     meta = json.loads((run_dir / "run.json").read_text())
-    assert meta["projector_version"] == 3
+    assert meta["projector_version"] == run_projector.PROJECTOR_VERSION
     assert meta["journal_present"] is True
     assert meta["status"] == "planning"
 
@@ -1122,7 +1187,7 @@ def _enroll_and_authorize(repo, run_dir, monkeypatch):
     return json.loads((run_dir / "run.json").read_text())
 
 
-def test_journal_ahead_remains_authoritative(tmp_path, monkeypatch):
+def test_unpaired_journal_ahead_fails_closed_before_status_append(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
     _enroll_and_authorize(repo, run_dir, monkeypatch)
@@ -1137,12 +1202,13 @@ def test_journal_ahead_remains_authoritative(tmp_path, monkeypatch):
             expected_previous_sequence=tail,
             recorded_at="2026-07-27T15:31:46.000000Z",
         )
+    run_json_before = (run_dir / "run.json").read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
     with runguard.run_lock(repo, run_dir=run_dir):
-        _write_run_json_authority(run_dir, "ok")
-    meta = json.loads((run_dir / "run.json").read_text())
-    assert meta["projector_version"] == 3
-    assert meta["status"] == "ok"
-    assert meta["journal_present"] is True
+        with pytest.raises(run_lifecycle.LifecycleJournalError, match="journal-ahead"):
+            _write_run_json_authority(run_dir, "ok")
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
 
 
 def test_current_version_mismatch_fail_closed(tmp_path, monkeypatch):
@@ -1458,7 +1524,7 @@ def test_first_authority_started_write_projects_on_first_write(tmp_path, monkeyp
     with runguard.run_lock(repo, run_dir=run_dir):
         _write_run_json_authority(run_dir, "started")
     meta = json.loads((run_dir / "run.json").read_text())
-    assert meta["projector_version"] == 3
+    assert meta["projector_version"] == run_projector.PROJECTOR_VERSION
     assert meta["journal_present"] is True
     events = _events(run_dir)
     assert [e.event_type for e in events] == [
@@ -1551,16 +1617,23 @@ def test_authoritative_prior_ready_post_parity_not_ready_fails_closed(tmp_path, 
     assert (run_dir / "run.json").read_bytes() == run_json_before
 
 
-def test_authoritative_prior_journal_ahead_allows_projection_despite_parity_gap(tmp_path, monkeypatch):
-    # Finding 4: for the approved prior journal-ahead exception, allow
-    # projection despite the current parity gap. A direct append advances the
-    # journal tail past the last recorded comparison; the prior gate approves
-    # the genuine journal-ahead, and this write's parity records a comparison
-    # gap (post-parity not ready) but the write still projects.
+def test_authoritative_prior_status_changing_pair_catch_up_fails_closed(tmp_path, monkeypatch):
+    # A structurally covered checkpoint/status pair is still unsafe to catch
+    # up against the persisted pre-write snapshot when the event changes the
+    # projected status. The catch-up records a mismatch and fails before the
+    # next status pair is appended.
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
     _enroll_and_authorize(repo, run_dir, monkeypatch)
     with runguard.run_lock(repo, run_dir=run_dir):
+        snapshot = (run_dir / "run.json").read_bytes()
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            snapshot,
+            workspace=repo,
+            paired_event_type="run.completed",
+            body_kind=run_checkpoint._BODY_KIND_BASE_STRIPPED,
+        )
         tail = run_journal.read_journal(_journal_path(run_dir)).events[-1].sequence
         run_journal.append_event(
             _journal_path(run_dir),
@@ -1571,12 +1644,13 @@ def test_authoritative_prior_journal_ahead_allows_projection_despite_parity_gap(
             expected_previous_sequence=tail,
             recorded_at="2026-07-27T15:31:46.000000Z",
         )
+    run_json_before = (run_dir / "run.json").read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
     with runguard.run_lock(repo, run_dir=run_dir):
-        _write_run_json_authority(run_dir, "ok")
-    meta = json.loads((run_dir / "run.json").read_text())
-    assert meta["projector_version"] == 3
-    assert meta["journal_present"] is True
-    assert meta["status"] == "ok"
+        with pytest.raises(run_lifecycle.LifecycleJournalError, match="catch-up not ready"):
+            _write_run_json_authority(run_dir, "ok")
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
 
 
 # -- Issue #568 slice 6, Task 7 final corrections: findings 1-3 regressions -----
@@ -1666,27 +1740,22 @@ def test_authority_fail_closed_on_mixed_run_id_chain_valid_prefix(tmp_path, monk
     assert journal.read_bytes() == journal_before
 
 
-def test_authoritative_prior_journal_ahead_with_current_mismatch_fails_closed(tmp_path, monkeypatch):
-    # Finding 3: the approved prior journal-ahead exception must not ignore an
-    # arbitrary post-parity mismatch. Prior journal-ahead is genuine (the
-    # journal tail advanced past the last recorded comparison), but the
-    # current parity is forced to record a mismatch instead of a match. The
-    # gate must fail closed (raise, no run.json replace) rather than project.
+def test_authoritative_pair_catch_up_with_current_mismatch_fails_closed(tmp_path, monkeypatch):
+    # A valid one-pair lag is eligible for catch-up, but the catch-up must not
+    # ignore an arbitrary parity mismatch.
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
     _enroll_and_authorize(repo, run_dir, monkeypatch)
     with runguard.run_lock(repo, run_dir=run_dir):
-        tail = run_journal.read_journal(_journal_path(run_dir)).events[-1].sequence
-        run_journal.append_event(
-            _journal_path(run_dir),
-            run_id=run_dir.name,
-            event_type="run.completed",
-            payload={"status": "ok", "detail": "ok"},
-            idempotency_key="complete-1",
-            expected_previous_sequence=tail,
-            recorded_at="2026-07-27T15:31:46.000000Z",
+        _append_dispatch_pair_without_parity(
+            run_dir,
+            repo,
+            event_type="run.dispatch.completed",
+            seat="coder",
+            attempt=1,
         )
     run_json_before = (run_dir / "run.json").read_bytes()
+    journal_before = _journal_path(run_dir).read_bytes()
     real_record_shadow = run_shadow.record_shadow_comparison
 
     def force_mismatch(run_dir_arg, legacy_snapshot):
@@ -1706,11 +1775,9 @@ def test_authoritative_prior_journal_ahead_with_current_mismatch_fails_closed(tm
     monkeypatch.setattr(run_shadow, "record_shadow_comparison", force_mismatch)
     with runguard.run_lock(repo, run_dir=run_dir):
         with pytest.raises(run_lifecycle.LifecycleJournalError):
-            _write_run_json_authority(run_dir, "ok")
-    # Finding 3: the validation runs AFTER the checkpoint/lifecycle append
-    # and parity, so the journal advances; the contract is "no run.json
-    # replace" (the prior gate already passed, so the append is expected).
+            _write_run_json_authority(run_dir, "result-processing")
     assert (run_dir / "run.json").read_bytes() == run_json_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
 
 
 # -- Task 7 review correction: post-parity reasons / strict counters / aggregate
@@ -1719,9 +1786,9 @@ def test_authoritative_prior_journal_ahead_with_current_mismatch_fails_closed(tm
 def _forge_after_parity(run_dir_arg, legacy_snapshot, *, forge):
     """Run the real shadow comparison, then forge the artifact per ``forge``.
 
-    Used by the journal-ahead correction regressions: the genuine parity pass
-    produces the approved comparison-gap-then-match record pair, and the forge
-    layer mutates only the aggregate fields the validator must reject.
+    Used by the one-pair catch-up regressions. The real comparison catches up
+    the eligible dispatch pair, then the forge layer mutates only the aggregate
+    fields the post-catch-up readiness check must reject.
     """
     real_record_shadow = run_shadow.record_shadow_comparison
 
@@ -1736,31 +1803,21 @@ def _forge_after_parity(run_dir_arg, legacy_snapshot, *, forge):
 
 
 def _enroll_authorize_and_advance(repo, run_dir, monkeypatch):
-    """Enroll, authorize, then append a direct ``run.completed`` event so the
-    journal tail is genuinely ahead of the last recorded comparison."""
+    """Enroll, authorize, then append one dispatch pair without parity."""
     _enroll_and_authorize(repo, run_dir, monkeypatch)
     with runguard.run_lock(repo, run_dir=run_dir):
-        tail = run_journal.read_journal(_journal_path(run_dir)).events[-1].sequence
-        run_journal.append_event(
-            _journal_path(run_dir),
-            run_id=run_dir.name,
-            event_type="run.completed",
-            payload={"status": "ok", "detail": "ok"},
-            idempotency_key="complete-ahead",
-            expected_previous_sequence=tail,
-            recorded_at="2026-07-27T15:31:46.000000Z",
+        _append_dispatch_pair_without_parity(
+            run_dir,
+            repo,
+            event_type="run.dispatch.completed",
+            seat="coder",
+            attempt=1,
         )
     return (run_dir / "run.json").read_bytes()
 
 
-def test_journal_ahead_override_rejects_forged_extra_journal_unreadable_reason(tmp_path, monkeypatch):
-    # Correction 1: the journal-ahead override must accept the post-parity
-    # readiness report ONLY when its reasons are exactly
-    # (REASON_ERROR_RECORDED,). A forged aggregate ``last_error_category`` of
-    # "journal-unreadable" makes the post-parity report carry
-    # (REASON_ERROR_RECORDED, REASON_JOURNAL_UNREADABLE); even though the
-    # recent_records pair still looks like comparison-gap then match, the gate
-    # must fail closed with no run.json replace.
+def test_pair_catch_up_rejects_forged_extra_journal_unreadable_reason(tmp_path, monkeypatch):
+    # A forged aggregate error after catch-up must fail closed.
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
     run_json_before = _enroll_authorize_and_advance(repo, run_dir, monkeypatch)
@@ -1779,7 +1836,7 @@ def test_journal_ahead_override_rejects_forged_extra_journal_unreadable_reason(t
     assert (run_dir / "run.json").read_bytes() == run_json_before
 
 
-def test_journal_ahead_override_rejects_bool_mismatches_counter(tmp_path, monkeypatch):
+def test_pair_catch_up_rejects_bool_mismatches_counter(tmp_path, monkeypatch):
     # Correction 2: ``mismatches`` must be a non-bool int equal to 0. A bool
     # ``False`` satisfies ``False == 0`` and must NOT be accepted.
     repo = _repo(tmp_path)
@@ -1800,7 +1857,7 @@ def test_journal_ahead_override_rejects_bool_mismatches_counter(tmp_path, monkey
     assert (run_dir / "run.json").read_bytes() == run_json_before
 
 
-def test_journal_ahead_override_rejects_bool_errors_counter(tmp_path, monkeypatch):
+def test_pair_catch_up_rejects_bool_errors_counter(tmp_path, monkeypatch):
     # Correction 2: ``errors`` must be a non-bool int equal to 1. A bool
     # ``True`` satisfies ``True == 1`` and must NOT be accepted.
     repo = _repo(tmp_path)
@@ -1821,7 +1878,7 @@ def test_journal_ahead_override_rejects_bool_errors_counter(tmp_path, monkeypatc
     assert (run_dir / "run.json").read_bytes() == run_json_before
 
 
-def test_journal_ahead_override_rejects_non_none_last_error_category(tmp_path, monkeypatch):
+def test_pair_catch_up_rejects_non_none_last_error_category(tmp_path, monkeypatch):
     # Correction 3: the final match aggregate's ``last_error_category`` must
     # be None. A forger sets it to "comparison-gap" (which is NOT
     # "journal-unreadable", so the post-parity reasons stay exactly
@@ -1845,3 +1902,431 @@ def test_journal_ahead_override_rejects_non_none_last_error_category(tmp_path, m
         with pytest.raises(run_lifecycle.LifecycleJournalError):
             _write_run_json_authority(run_dir, "ok")
     assert (run_dir / "run.json").read_bytes() == run_json_before
+
+
+@pytest.mark.parametrize("sabotage", ["remove", "rename", "symlink"])
+def test_dispatch_fact_fails_closed_when_enrolled_journal_is_not_regular(
+    tmp_path,
+    monkeypatch,
+    sabotage,
+):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    _write_run_json(run_dir, "started", lock_workspace=repo)
+    _write_run_json_locked(repo, run_dir, "dispatching", lock_workspace=repo)
+    journal = _journal_path(run_dir)
+    displaced = journal.with_name("lifecycle.displaced")
+    if sabotage == "remove":
+        journal.unlink()
+    elif sabotage == "rename":
+        journal.rename(displaced)
+    else:
+        journal.rename(displaced)
+        journal.symlink_to(displaced.name)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError, match="journal"):
+            run_lifecycle.record_dispatch_fact(
+                run_dir,
+                workspace=repo,
+                event_type="run.dispatch.requested",
+                seat="coder",
+            )
+
+
+def test_transport_does_not_invoke_after_enrolled_journal_disappears(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    _write_run_json(run_dir, "started", lock_workspace=repo)
+    _write_run_json_locked(repo, run_dir, "dispatching", lock_workspace=repo)
+    _journal_path(run_dir).unlink()
+    external_calls: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):  # noqa: ARG001
+        external_calls.append(cli_ref)
+        return agents.AgentResult(text="must not run", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    roster = roster_mod.Roster(
+        orchestrator="chef",
+        agents={
+            "chef": roster_mod.Agent("chef", "codex", "plan"),
+            "coder": roster_mod.Agent("coder", "codex", "code"),
+        },
+        max_workers=1,
+    )
+
+    def requested(agent):
+        try:
+            return run_lifecycle.record_dispatch_fact(
+                run_dir,
+                workspace=repo,
+                event_type="run.dispatch.requested",
+                seat=agent.name,
+            )
+        except run_lifecycle.LifecycleJournalError as exc:
+            raise runguard.RetainRunLockError("dispatch fact unavailable") from exc
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(runguard.RetainRunLockError, match="dispatch fact unavailable"):
+            run_transport.dispatch(
+                [run_transport.Assignment(worker="coder", task="do work")],
+                roster,
+                build_prompt=lambda agent, assignment, **kwargs: assignment.task,
+                run_appserver_worker=lambda *args, **kwargs: agents.AgentResult(text="", ok=False),
+                event_writer=lambda *args, **kwargs: None,
+                cwd=repo,
+                on_dispatch_requested=requested,
+            )
+
+    assert external_calls == []
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "detail"),
+    [
+        ("keyboard-interrupt", "run canceled by user"),
+        ("signal-15", "run terminated by SIGTERM"),
+    ],
+)
+def test_dispatch_pair_is_adjacent_when_interrupt_writer_crosses_barrier(
+    tmp_path,
+    monkeypatch,
+    failure_kind,
+    detail,
+):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    aboyeur.record_run_start(
+        run_dir,
+        task="barrier run",
+        cwd=repo,
+        roster=_minimal_roster(),
+        read_only=False,
+        lock_workspace=repo,
+    )
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _write_run_json(run_dir, "dispatching", lock_workspace=repo)
+
+    checkpoint_written = threading.Event()
+    release_worker = threading.Event()
+    interrupt_done = threading.Event()
+    errors: list[BaseException] = []
+    real_write_checkpoint = run_checkpoint.write_checkpoint
+
+    def checkpoint_barrier(*args, **kwargs):
+        event = real_write_checkpoint(*args, **kwargs)
+        if kwargs.get("pairing_key") is not None:
+            checkpoint_written.set()
+            assert release_worker.wait(timeout=5)
+        return event
+
+    monkeypatch.setattr(run_checkpoint, "write_checkpoint", checkpoint_barrier)
+
+    def worker_writer():
+        try:
+            run_lifecycle.record_dispatch_fact(
+                run_dir,
+                workspace=repo,
+                event_type="run.dispatch.requested",
+                seat="coder",
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def interrupt_writer():
+        try:
+            aboyeur.record_run_termination(
+                run_dir,
+                status="canceled",
+                failure_phase="dispatch",
+                failure_kind=failure_kind,
+                detail=detail,
+                seat="coder",
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            interrupt_done.set()
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        worker = threading.Thread(target=worker_writer)
+        worker.start()
+        assert checkpoint_written.wait(timeout=5)
+        interrupt = threading.Thread(target=interrupt_writer)
+        interrupt.start()
+        assert not interrupt_done.wait(timeout=0.1)
+        release_worker.set()
+        worker.join(timeout=5)
+        interrupt.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert not interrupt.is_alive()
+    assert errors == []
+    events = _events(run_dir)
+    dispatch_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE and event.payload.get("pairing_key")
+    )
+    assert events[dispatch_index + 1].event_type == "run.dispatch.requested"
+    assert events[dispatch_index + 1].payload["seat"] == "coder"
+    assert events[dispatch_index + 1].payload["attempt"] == 1
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired["status"] == "canceled"
+
+
+@pytest.mark.skipif(not hasattr(signal, "pthread_sigmask"), reason="pthread signal masks unavailable")
+def test_checkpoint_event_pair_restores_exact_signal_mask_and_rejects_reentry(monkeypatch):
+    previous_mask = {signal.SIGINT}
+    calls: list[tuple[int, set[signal.Signals]]] = []
+
+    def fake_sigmask(operation, mask):
+        calls.append((operation, set(mask)))
+        return previous_mask
+
+    monkeypatch.setattr(signal, "pthread_sigmask", fake_sigmask)
+    with run_lifecycle.checkpoint_event_pair():
+        with pytest.raises(run_lifecycle.LifecycleJournalError, match="reentry"):
+            with run_lifecycle.checkpoint_event_pair():
+                pass
+
+    assert calls == [
+        (signal.SIG_BLOCK, {signal.SIGTERM}),
+        (signal.SIG_SETMASK, previous_mask),
+    ]
+
+
+def test_authoritative_dispatch_pairs_keep_shadow_ready_through_synthesis(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        requested = run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.requested",
+            seat="coder",
+        )
+        assert requested is not None
+        attempt = requested.payload["attempt"]
+        assert isinstance(attempt, int)
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.observed",
+            seat="coder",
+            attempt=attempt,
+        )
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.completed",
+            seat="coder",
+            attempt=attempt,
+        )
+        _write_run_json_authority(run_dir, "result-processing")
+        _write_run_json_authority(run_dir, "synthesizing")
+
+    shadow = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert shadow["errors"] == 0
+    assert shadow["mismatches"] == 0
+    assert shadow["last_outcome"] == run_shadow.OUTCOME_MATCH
+    readiness = run_shadow.check_projection_readiness(run_dir)
+    assert readiness.ready is True
+    assert readiness.reasons == ()
+
+
+def test_authoritative_dispatch_recovers_one_pair_parity_crash_before_next_pair(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    real_shadow = run_shadow.record_shadow_comparison
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        monkeypatch.setattr(run_shadow, "record_shadow_comparison", lambda *args, **kwargs: None)
+        requested = run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.requested",
+            seat="coder",
+        )
+        assert requested is not None
+        attempt = requested.payload["attempt"]
+        assert isinstance(attempt, int)
+        monkeypatch.setattr(run_shadow, "record_shadow_comparison", real_shadow)
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.observed",
+            seat="coder",
+            attempt=attempt,
+        )
+
+    shadow = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert shadow["errors"] == 0
+    assert shadow["mismatches"] == 0
+    assert shadow["last_outcome"] == run_shadow.OUTCOME_MATCH
+    assert run_shadow.check_projection_readiness(run_dir).ready is True
+
+
+@pytest.mark.parametrize(
+    "terminal_event_type",
+    ["run.dispatch.completed", "run.dispatch.failed"],
+)
+def test_authoritative_status_write_catches_up_final_dispatch_pair_before_append(
+    tmp_path,
+    monkeypatch,
+    terminal_event_type,
+):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    real_shadow = run_shadow.record_shadow_comparison
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        requested = run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.requested",
+            seat="coder",
+        )
+        assert requested is not None
+        attempt = requested.payload["attempt"]
+        assert isinstance(attempt, int)
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.observed",
+            seat="coder",
+            attempt=attempt,
+        )
+        monkeypatch.setattr(run_shadow, "record_shadow_comparison", lambda *args, **kwargs: None)
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type=terminal_event_type,
+            seat="coder",
+            attempt=attempt,
+        )
+        monkeypatch.setattr(run_shadow, "record_shadow_comparison", real_shadow)
+
+        _write_run_json_authority(run_dir, "result-processing")
+        _write_run_json_authority(run_dir, "synthesizing")
+
+    events = _events(run_dir)
+    tail = events[-1]
+    shadow = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    receipt = json.loads((run_dir / "run.json").read_text())
+    assert shadow["errors"] == 0
+    assert shadow["mismatches"] == 0
+    assert shadow["last_outcome"] == run_shadow.OUTCOME_MATCH
+    assert shadow["last_compared_sequence"] == tail.sequence
+    assert shadow["last_compared_event_digest"] == tail.event_digest
+    assert receipt["journal_last_sequence"] == tail.sequence
+    assert receipt["journal_last_event_digest"] == tail.event_digest
+    assert run_shadow.check_projection_readiness(run_dir).ready is True
+
+
+def _append_dispatch_pair_without_parity(
+    run_dir: Path,
+    repo: Path,
+    *,
+    event_type: str,
+    seat: str,
+    attempt: int,
+    include_pairing_key: bool = True,
+) -> None:
+    snapshot = (run_dir / "run.json").read_bytes()
+    pairing_key = run_checkpoint.dispatch_pairing_key(event_type, seat, attempt)
+    run_checkpoint.write_checkpoint(
+        run_dir,
+        snapshot,
+        workspace=repo,
+        paired_event_type=event_type,
+        body_kind=run_checkpoint._BODY_KIND_BASE_STRIPPED,
+        pairing_key=pairing_key if include_pairing_key else None,
+    )
+    report = run_journal.read_journal(_journal_path(run_dir))
+    run_journal.append_event(
+        _journal_path(run_dir),
+        run_id=run_dir.name,
+        event_type=event_type,
+        payload={"seat": seat, "attempt": attempt, "detail": event_type.rsplit(".", 1)[-1]},
+        idempotency_key=f"test-uncompared:{event_type}:{seat}:{attempt}",
+        expected_previous_sequence=report.events[-1].sequence,
+    )
+
+
+@pytest.mark.parametrize("gap_kind", ["two-pair", "forged-cursor", "missing-pairing-key"])
+def test_authoritative_status_write_rejects_uncovered_or_forged_dispatch_gap(
+    tmp_path,
+    monkeypatch,
+    gap_kind,
+):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        _append_dispatch_pair_without_parity(
+            run_dir,
+            repo,
+            event_type="run.dispatch.requested",
+            seat="coder",
+            attempt=1,
+            include_pairing_key=gap_kind != "missing-pairing-key",
+        )
+        if gap_kind == "two-pair":
+            _append_dispatch_pair_without_parity(
+                run_dir,
+                repo,
+                event_type="run.dispatch.observed",
+                seat="coder",
+                attempt=1,
+            )
+        elif gap_kind == "forged-cursor":
+            artifact_path = run_shadow.shadow_artifact_path(run_dir)
+            artifact = json.loads(artifact_path.read_text())
+            artifact["last_compared_event_digest"] = "f" * 64
+            artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
+
+        run_json_before = (run_dir / "run.json").read_bytes()
+        journal_before = _journal_path(run_dir).read_bytes()
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            _write_run_json_authority(run_dir, "result-processing")
+
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+
+
+def test_authority_dispatch_checkpoint_is_base_stripped_and_recovers_exact_tail(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        requested = run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.requested",
+            seat="coder",
+        )
+    assert requested is not None
+    events = _events(run_dir)
+    dispatch_checkpoint = events[-2]
+    assert dispatch_checkpoint.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE
+    assert dispatch_checkpoint.payload["body_kind"] == "base-stripped"
+    assert dispatch_checkpoint.payload["pairing_key"]
+
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    events = _events(run_dir)
+    assert repaired["journal_last_sequence"] == events[-1].sequence
+    assert repaired["journal_last_event_digest"] == events[-1].event_digest
+    assert repaired["projector_version"] == run_projector.PROJECTOR_VERSION

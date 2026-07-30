@@ -74,7 +74,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
+import stat
+import threading
+from contextlib import contextmanager
 from collections.abc import Mapping
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -97,8 +102,8 @@ _CHAIN_CATEGORY = "lifecycle journal is not derivable"
 STATUS_EVENT_TYPE: dict[str, str] = {
     "started": "run.created",
     "planning": "run.planning.started",
-    "dispatching": "run.dispatch.requested",
-    "result-processing": "run.dispatch.completed",
+    "dispatching": "run.dispatching.started",
+    "result-processing": "run.result-processing.started",
     "synthesizing": "run.synthesis.started",
     "handoff": "run.synthesis.completed",
     "ok": "run.completed",
@@ -110,9 +115,68 @@ STATUS_EVENT_TYPE: dict[str, str] = {
     "artifact-collection": "run.artifact_collection.started",
 }
 
+_CHECKPOINT_EVENT_PAIR_LOCK = threading.Lock()
+_CHECKPOINT_EVENT_PAIR_STATE = threading.local()
+_DISPATCH_FACT_TYPES = frozenset(
+    {
+        "run.dispatch.requested",
+        "run.dispatch.observed",
+        "run.dispatch.completed",
+        "run.dispatch.failed",
+    }
+)
+
 
 class LifecycleJournalError(RuntimeError):
     """Bounded lifecycle-journal failure; run.json must not advance past it."""
+
+
+@contextmanager
+def checkpoint_event_pair() -> Iterator[None]:
+    """Serialize one checkpoint/event pair and defer SIGTERM across its gap.
+
+    The lock is separate from ``run_journal``'s append lock. It spans the
+    checkpoint and paired event at the process level, so worker threads and
+    interruption writers cannot interleave pair members. SIGTERM is blocked
+    in the entering thread before it waits for the lock and restored to the
+    exact prior mask only after the pair lock is released. That ordering lets
+    a pending main-thread handler enter the writer normally instead of
+    reentering the protected region while its lock is still held.
+    """
+    if getattr(_CHECKPOINT_EVENT_PAIR_STATE, "active", False):
+        raise LifecycleJournalError(run_events._bound("checkpoint/event pair reentry is not allowed"))
+
+    previous_mask: set[int | signal.Signals] | None = None
+    if hasattr(signal, "pthread_sigmask"):
+        try:
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        except (OSError, ValueError) as exc:
+            raise LifecycleJournalError(run_events._bound("checkpoint/event pair signal mask failed")) from exc
+
+    acquired = False
+    restore_error: BaseException | None = None
+    try:
+        # Mark the whole wait-and-hold interval active. On platforms where
+        # SIGTERM cannot be masked, a same-thread signal handler that runs
+        # while lock acquisition is waiting must fail bounded instead of
+        # trying to acquire this non-reentrant lock again.
+        _CHECKPOINT_EVENT_PAIR_STATE.active = True
+        _CHECKPOINT_EVENT_PAIR_LOCK.acquire()
+        acquired = True
+        yield
+    finally:
+        _CHECKPOINT_EVENT_PAIR_STATE.active = False
+        if acquired:
+            _CHECKPOINT_EVENT_PAIR_LOCK.release()
+        if previous_mask is not None:
+            try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            except (OSError, ValueError) as exc:
+                restore_error = exc
+        if restore_error is not None:
+            raise LifecycleJournalError(
+                run_events._bound("checkpoint/event pair signal mask restoration failed")
+            ) from restore_error
 
 
 def is_lifecycle_journaling_enabled() -> bool:
@@ -126,6 +190,55 @@ def _run_id_from_dir(run_dir: Path) -> str:
 
 def _journal_path(run_dir: Path) -> Path:
     return run_dir / "events" / _JOURNAL_NAME
+
+
+def _dispatch_journal_path(run_dir: Path) -> Path | None:
+    """Return the active regular journal, or ``None`` only for true legacy.
+
+    Dispatch is the last boundary before an external worker invocation. A
+    missing, renamed, or substituted journal after durable lifecycle or
+    authority enrollment must fail closed there. A snapshot is considered
+    truly unenrolled only when it is a regular JSON object and carries none
+    of the durable request or projection metadata fields.
+    """
+    journal_path = _journal_path(run_dir)
+    try:
+        journal_mode = journal_path.lstat().st_mode
+    except FileNotFoundError:
+        journal_mode = None
+    except OSError as exc:
+        raise LifecycleJournalError(run_events._bound("lifecycle journal enrollment check failed")) from exc
+    if journal_mode is not None:
+        if not stat.S_ISREG(journal_mode):
+            raise LifecycleJournalError(run_events._bound("enrolled lifecycle journal is not a regular file"))
+        return journal_path
+
+    run_json = run_dir / "run.json"
+    try:
+        run_mode = run_json.lstat().st_mode
+    except FileNotFoundError as exc:
+        raise LifecycleJournalError(run_events._bound("dispatch run receipt is missing")) from exc
+    except OSError as exc:
+        raise LifecycleJournalError(run_events._bound("dispatch run receipt enrollment check failed")) from exc
+    if not stat.S_ISREG(run_mode):
+        raise LifecycleJournalError(run_events._bound("dispatch run receipt is not a regular file"))
+    try:
+        meta = json.loads(run_json.read_bytes())
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        raise LifecycleJournalError(run_events._bound("dispatch run receipt enrollment is unreadable")) from exc
+    if not isinstance(meta, dict):
+        raise LifecycleJournalError(run_events._bound("dispatch run receipt enrollment is unreadable"))
+    enrollment_fields = {
+        _REQUEST_FIELD,
+        "run_journal_authority_requested",
+        "projector_version",
+        "journal_present",
+        "journal_last_sequence",
+        "journal_last_event_digest",
+    }
+    if any(field in meta for field in enrollment_fields):
+        raise LifecycleJournalError(run_events._bound("enrolled lifecycle journal is missing"))
+    return None
 
 
 def _journal_requested(
@@ -170,6 +283,151 @@ def _run_snapshot_state(run_dir: Path) -> tuple[str | None, str | None]:
         if isinstance(candidate, str) and candidate:
             status = candidate
     return status, digest
+
+
+def pending_dispatch_requests(events: list[run_journal.RunEvent]) -> list[tuple[str, int | None]]:
+    """Return dispatch requests without a terminal observation.
+
+    A completed, failed, or observed fact closes the matching seat/attempt.
+    Missing or malformed legacy payloads remain explicit unknown
+    at-least-once work instead of being silently discarded.
+    """
+    pending: list[tuple[str, int | None]] = []
+    for event in events:
+        if event.event_type == "run.dispatch.requested":
+            seat = event.payload.get("seat")
+            attempt = event.payload.get("attempt")
+            # Historical aggregate dispatch status events carried only a
+            # detail field. They do not identify a worker action and must not
+            # manufacture perpetual recovery work for every legacy run.
+            if seat is None and attempt is None:
+                continue
+            valid_seat = seat if isinstance(seat, str) and seat else "unknown"
+            valid_attempt = (
+                attempt if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0 else None
+            )
+            pending.append((valid_seat, valid_attempt))
+            continue
+        if event.event_type not in {"run.dispatch.observed", "run.dispatch.completed", "run.dispatch.failed"}:
+            continue
+        seat = event.payload.get("seat")
+        attempt = event.payload.get("attempt")
+        if (
+            not isinstance(seat, str)
+            or not seat
+            or isinstance(attempt, bool)
+            or not isinstance(attempt, int)
+            or attempt < 1
+        ):
+            continue
+        pending = [item for item in pending if item != (seat, attempt)]
+    return pending
+
+
+def record_dispatch_fact(
+    run_dir: Path,
+    *,
+    workspace: Path | None,
+    event_type: str,
+    seat: str,
+    attempt: int | None = None,
+) -> run_journal.RunEvent | None:
+    """Append one paired per-invocation dispatch fact under a process lock.
+
+    Each worker transport call receives its own checkpoint-event pair. The
+    lock covers both appends so wave and DAG workers cannot interleave a
+    checkpoint with another seat's fact. The event payload deliberately holds
+    only the selected seat and its monotonically allocated attempt identity.
+    """
+    if event_type not in _DISPATCH_FACT_TYPES:
+        raise LifecycleJournalError(run_events._bound("invalid dispatch fact event type"))
+    if not isinstance(seat, str) or not seat:
+        raise LifecycleJournalError(run_events._bound("dispatch fact seat must be non-empty"))
+    if attempt is None and event_type != "run.dispatch.requested":
+        raise LifecycleJournalError(run_events._bound("only dispatch requested may allocate an attempt"))
+    if attempt is not None and (isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1):
+        raise LifecycleJournalError(run_events._bound("dispatch fact attempt must be a positive integer"))
+
+    run_dir = Path(run_dir).expanduser().resolve()
+    with checkpoint_event_pair():
+        journal_path = _dispatch_journal_path(run_dir)
+        if journal_path is None:
+            return None
+        if workspace is None or not runguard.is_active_run_owner(workspace, run_dir):
+            raise LifecycleJournalError("lifecycle journal append requires the active run lock for this run")
+        try:
+            # Import lazily to avoid the aboyeur -> lifecycle module cycle.
+            # These are the same authority gates used by run.json status
+            # writers, now applied before every dispatch pair.
+            from brigade import aboyeur, run_shadow
+
+            snapshot = (run_dir / "run.json").read_bytes()
+            try:
+                snapshot_obj = json.loads(snapshot)
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise LifecycleJournalError(run_events._bound("dispatch run receipt is not valid JSON")) from exc
+            if not isinstance(snapshot_obj, dict):
+                raise LifecycleJournalError(run_events._bound("dispatch run receipt is not a JSON object"))
+            authority_state = aboyeur._resolve_authority_state(run_dir)
+            if authority_state == "authoritative":
+                # The shared prior gate catches up exactly one verified
+                # checkpoint/event pair before any new dispatch or aggregate
+                # status pair can advance the journal again.
+                aboyeur._authoritative_prior_decision(run_dir, snapshot_obj)
+            if attempt is None:
+                report = run_journal.read_journal(journal_path)
+                if report.partial_tail is not None or report.chain_errors:
+                    raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
+                attempts: list[int] = []
+                for event in report.events:
+                    candidate = event.payload.get("attempt")
+                    if (
+                        event.payload.get("seat") == seat
+                        and isinstance(candidate, int)
+                        and not isinstance(candidate, bool)
+                    ):
+                        attempts.append(candidate)
+                attempt = max(attempts, default=0) + 1
+            assert attempt is not None
+            pairing_key = run_checkpoint.dispatch_pairing_key(event_type, seat, attempt)
+            checkpoint = run_checkpoint.write_checkpoint(
+                run_dir,
+                snapshot,
+                workspace=workspace,
+                paired_event_type=event_type,
+                body_kind=(
+                    run_checkpoint._BODY_KIND_BASE_STRIPPED
+                    if snapshot_obj.get("run_journal_authority_requested") is True
+                    else None
+                ),
+                pairing_key=pairing_key,
+            )
+            if checkpoint is None:
+                raise LifecycleJournalError(run_events._bound("enrolled lifecycle journal checkpoint was not recorded"))
+            report = run_journal.read_journal(journal_path)
+            if report.partial_tail is not None or report.chain_errors:
+                raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
+            key_digest = hashlib.sha256(
+                run_events.canonical_bytes(
+                    {"event_type": event_type, "seat": seat, "attempt": attempt, "pairing_key": pairing_key}
+                )
+            ).hexdigest()
+            event = run_journal.append_event(
+                journal_path,
+                run_id=_run_id_from_dir(run_dir),
+                event_type=event_type,
+                payload={"seat": seat, "attempt": attempt, "detail": event_type.rsplit(".", 1)[-1]},
+                idempotency_key=f"dispatch:{key_digest[:32]}",
+                expected_previous_sequence=report.events[-1].sequence if report.events else 0,
+            )
+            run_shadow.record_shadow_comparison(run_dir, snapshot_obj)
+            return event
+        except run_journal.RunJournalError as exc:
+            raise _bound_journal_failure(exc) from exc
+        except run_events.CanonicalizationError as exc:
+            raise _bound_journal_failure(exc) from exc
+        except OSError as exc:
+            raise _bound_journal_failure(exc) from exc
 
 
 def _allowlisted_payload(event_type: str, *, status: str) -> dict[str, Any]:
@@ -345,7 +603,10 @@ def record_lifecycle_transition(
 __all__ = [
     "LifecycleJournalError",
     "STATUS_EVENT_TYPE",
+    "checkpoint_event_pair",
     "is_lifecycle_journaling_enabled",
+    "pending_dispatch_requests",
     "prepare_lifecycle_journal",
+    "record_dispatch_fact",
     "record_lifecycle_transition",
 ]

@@ -432,8 +432,12 @@ def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     }
     assert EVENT_STATUS == {
         "run.planning.started": "planning",
+        "run.dispatching.started": "dispatching",
         "run.dispatch.requested": "dispatching",
-        "run.dispatch.completed": "result-processing",
+        "run.dispatch.observed": "dispatching",
+        "run.dispatch.completed": "dispatching",
+        "run.dispatch.failed": "dispatching",
+        "run.result-processing.started": "result-processing",
         "run.synthesis.started": "synthesizing",
         "run.synthesis.completed": "handoff",
         "run.artifact_collection.started": "artifact-collection",
@@ -447,6 +451,21 @@ def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     assert projection.snapshot["active_seats"] is not base["active_seats"]
     assert projection.snapshot["code_graph_brief"] is not base["code_graph_brief"]
     assert set(projection.snapshot.keys()) <= OWNED_FIELDS
+
+
+def test_identified_dispatch_fact_does_not_advance_aggregate_status():
+    completed = _build_event(
+        1,
+        "run.dispatch.completed",
+        {"seat": "coder", "attempt": 1, "detail": "completed"},
+        "dispatch-worker-1",
+        RECORDED_AT,
+        None,
+    )
+
+    projection = project_run_snapshot(_minimal_base_snapshot("result-processing"), [completed], journal_present=True)
+
+    assert projection.snapshot["status"] == "result-processing"
 
 
 def test_reprojection_is_byte_idempotent():
@@ -539,10 +558,10 @@ def test_checkpoint_after_unmapped_status_preserves_last_mapped_status():
     assert projection.last_event_digest == unmapped_checkpoint["event_digest"]
 
 
-def test_projector_version_is_three():
+def test_projector_version_is_four():
     projection = project_run_snapshot(_minimal_base_snapshot(), [], journal_present=False)
-    assert PROJECTOR_VERSION == 3
-    assert projection.snapshot["projector_version"] == 3
+    assert PROJECTOR_VERSION == 4
+    assert projection.snapshot["projector_version"] == 4
 
 
 def _events_ending_with_completed(*, status: str | None) -> list[dict]:
