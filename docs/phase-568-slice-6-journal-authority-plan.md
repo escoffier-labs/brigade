@@ -49,9 +49,9 @@ share write ownership.
 | `src/brigade/run_lifecycle.py` | Add the three `STATUS_EVENT_TYPE` rows for `dry-run`, `incomplete`, `artifact-collection` | 2 |
 | `tests/test_run_lifecycle.py` | Mapping and append assertions for the three previously unmapped statuses | 2 |
 | `src/brigade/run_checkpoint.py` | `body_kind` on the payload, `write_checkpoint` `body_kind` parameter, stripped-base publish path, `validate_checkpoint` body-kind branch, `recover_from_checkpoint` authority-aware projection branch | 3, 5 |
-| `tests/test_run_checkpoint.py` | `body_kind`, stripped-base, idempotency-key, coverage, and recovery-projection assertions | 3, 5 |
+| `tests/test_run_checkpoint.py` | `body_kind`, stripped-base, idempotency-key, coverage, and recovery-projection assertions, plus the closed checkpoint payload-allowlist assertion widened in task 1 | 1, 3, 5 |
 | `src/brigade/run_shadow.py` | `REASON_EVIDENCE_PROJECTOR_VERSION_STALE`, version-door split in `check_projection_readiness`, stale-v2 quarantine in `record_shadow_comparison`, gap-baseline carry, bounded journal reads | 4 |
-| `tests/test_run_shadow.py` | Stale-v2, quarantine, gap-baseline, current-v3 non-reset, schema-mismatch split, bounded-read assertions | 4 |
+| `tests/test_run_shadow.py` | Stale-v2, quarantine, gap-baseline, current-v3 non-reset, schema-mismatch split, bounded-read assertions, plus the `test_unmapped_status_after_handoff_is_lag` expectation updated in task 2 | 2, 4 |
 | `tests/test_runs_cmd.py` | Authority-requested recovery projection, corrupt-preserve, terminalization field preservation, fail-closed projection error, legacy-full verbatim restore | 5 |
 | `tests/test_runguard.py` | Kept green unchanged for the recovery plane | 5 |
 | `src/brigade/doctor.py` | Reproject-before-compare branch in `_recovery_checkpoint_run_verdict` for `base-stripped` authority-requested runs | 6 |
@@ -70,8 +70,8 @@ existing branch unchanged.
 Module ownership across the eight sequential tasks. Each task has exclusive
 write ownership for its stage.
 
-- Task 1: `src/brigade/run_events.py`, `src/brigade/run_projector.py`. `tests/test_run_events.py`, `tests/test_run_projector.py`.
-- Task 2: `src/brigade/run_lifecycle.py`. `tests/test_run_lifecycle.py`.
+- Task 1: `src/brigade/run_events.py`, `src/brigade/run_projector.py`. `tests/test_run_events.py`, `tests/test_run_projector.py`, `tests/test_run_checkpoint.py` (the closed checkpoint payload-allowlist assertion in `test_checkpoint_event_type_registered_with_closed_payload_keys` only).
+- Task 2: `src/brigade/run_lifecycle.py`. `tests/test_run_lifecycle.py`, `tests/test_run_shadow.py` (the `test_unmapped_status_after_handoff_is_lag` shadow expectation only, since `dry-run`, `incomplete`, and `artifact-collection` become mapped).
 - Task 3: `src/brigade/run_checkpoint.py`. `tests/test_run_checkpoint.py`.
 - Task 4: `src/brigade/run_shadow.py`. `tests/test_run_shadow.py`.
 - Task 5: `src/brigade/run_checkpoint.py` (recovery branch only). `tests/test_runs_cmd.py`, `tests/test_run_checkpoint.py`, `tests/test_runguard.py`.
@@ -115,7 +115,9 @@ errors: `LifecycleJournalError` (existing, bounded). Journal errors:
 
 **Files:**
 - Modify: `src/brigade/run_events.py:71-98` (EVENT_TYPES), `src/brigade/run_projector.py:29` (PROJECTOR_VERSION), `src/brigade/run_projector.py:44-100` (PRESERVED_FIELDS), `src/brigade/run_projector.py:106-122` (EVENT_STATUS, _PAYLOAD_STATUS_RULES)
-- Test: `tests/test_run_events.py`, `tests/test_run_projector.py`
+- Test: `tests/test_run_events.py`, `tests/test_run_projector.py`, `tests/test_run_checkpoint.py`
+
+Task 3 depends on this task's registry update: `run_checkpoint.write_checkpoint` builds the `run.snapshot.checkpointed` payload through `run_events.build_event`, which enforces the closed `EVENT_TYPES` allowlist. The `body_kind` key this task adds to the allowlist is the same key task 3 sets when it calls `write_checkpoint(..., body_kind="base-stripped")`. Task 3 cannot land its stripped-base write path until this task widens the allowlist, or every `base-stripped` checkpoint append raises `CanonicalizationError` on the unknown `body_kind` key.
 
 - [ ] Write the failing tests. Append to `tests/test_run_events.py`:
 
@@ -129,6 +131,91 @@ def test_checkpoint_event_payload_allowlist_includes_optional_body_kind():
     assert run_events.EVENT_TYPES["run.snapshot.checkpointed"] == frozenset(
         {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type", "body_kind"}
     )
+
+
+def test_build_checkpoint_event_accepts_base_stripped_payload_with_body_kind():
+    event = run_events.build_event(
+        run_id=RUN_ID,
+        sequence=1,
+        event_type="run.snapshot.checkpointed",
+        payload={
+            "path": "events/recovery-checkpoints/aaa.json",
+            "sha256": "a" * 64,
+            "media_type": "application/json",
+            "byte_size": 1,
+            "privacy_class": "internal",
+            "paired_event_type": "run.planning.started",
+            "body_kind": "base-stripped",
+        },
+        idempotency_key="checkpoint-1",
+        recorded_at=RECORDED_AT,
+        previous_digest=None,
+    )
+    assert run_events.validate_event(event) == []
+    assert event["payload"]["body_kind"] == "base-stripped"
+
+
+def test_build_checkpoint_event_accepts_legacy_payload_without_body_kind():
+    event = run_events.build_event(
+        run_id=RUN_ID,
+        sequence=1,
+        event_type="run.snapshot.checkpointed",
+        payload={
+            "path": "events/recovery-checkpoints/aaa.json",
+            "sha256": "a" * 64,
+            "media_type": "application/json",
+            "byte_size": 1,
+            "privacy_class": "internal",
+            "paired_event_type": "run.planning.started",
+        },
+        idempotency_key="checkpoint-1",
+        recorded_at=RECORDED_AT,
+        previous_digest=None,
+    )
+    assert run_events.validate_event(event) == []
+    assert "body_kind" not in event["payload"]
+```
+
+Update the existing `test_checkpoint_event_type_registered_with_closed_payload_keys` in `tests/test_run_checkpoint.py` (at `tests/test_run_checkpoint.py:80`) to assert the widened allowlist. The exact replacement body is:
+
+```python
+def test_checkpoint_event_type_registered_with_closed_payload_keys():
+    assert "run.snapshot.checkpointed" in run_events.EVENT_TYPES
+    assert run_events.EVENT_TYPES["run.snapshot.checkpointed"] == frozenset(
+        {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type", "body_kind"}
+    )
+```
+
+Update the existing `test_full_field_fixture_preserves_deep_equality_and_copies_nested_values` in `tests/test_run_projector.py` (at `tests/test_run_projector.py:423`) for the `PRESERVED_FIELDS` count increase (44 to 45, since `run_journal_authority_requested` joins the set) and the exact `EVENT_STATUS` map change (the new `run.artifact_collection.started` row). The exact replacement body is:
+
+```python
+def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
+    base = _full_base_snapshot()
+    assert len(PRESERVED_FIELDS) == 45
+    assert DERIVED_FIELDS == {
+        "status",
+        "projector_version",
+        "journal_present",
+        "journal_last_sequence",
+        "journal_last_event_digest",
+    }
+    assert EVENT_STATUS == {
+        "run.planning.started": "planning",
+        "run.dispatch.requested": "dispatching",
+        "run.dispatch.completed": "result-processing",
+        "run.synthesis.started": "synthesizing",
+        "run.synthesis.completed": "handoff",
+        "run.artifact_collection.started": "artifact-collection",
+    }
+    projection = project_run_snapshot(base, [], journal_present=False)
+    for field in PRESERVED_FIELDS:
+        assert field in projection.snapshot
+        assert projection.snapshot[field] == base[field]
+    assert projection.snapshot["failure"] is not base["failure"]
+    assert projection.snapshot["recovery_history"] is not base["recovery_history"]
+    assert projection.snapshot["active_seats"] is not base["active_seats"]
+    assert projection.snapshot["code_graph_brief"] is not base["code_graph_brief"]
+    assert set(projection.snapshot.keys()) <= OWNED_FIELDS
 ```
 
 Append to `tests/test_run_projector.py`:
@@ -216,7 +303,7 @@ def test_projector_version_is_three():
 
 No second `test_projector_version_is_three` definition is appended. The rename above is the only definition.
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py" --capture brigade-work` - expect FAIL, `AssertionError` on the new registry and version assertions, plus the renamed `test_projector_version_is_three` failing on `assert PROJECTOR_VERSION == 3`.
+- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py" --capture brigade-work` - expect FAIL, `AssertionError` on the new registry and version assertions, `CanonicalizationError` on `test_build_checkpoint_event_accepts_base_stripped_payload_with_body_kind` (the `body_kind` key is not yet in the allowlist), `AssertionError` on the widened allowlist in `test_checkpoint_event_type_registered_with_closed_payload_keys`, `AssertionError` on `len(PRESERVED_FIELDS) == 45` and the six-entry `EVENT_STATUS` map in `test_full_field_fixture_preserves_deep_equality_and_copies_nested_values`, plus the renamed `test_projector_version_is_three` failing on `assert PROJECTOR_VERSION == 3`.
 - [ ] Implement the minimal change. In `src/brigade/run_events.py` add the row to `EVENT_TYPES`:
 
 ```python
@@ -240,14 +327,16 @@ In `src/brigade/run_projector.py` set `PROJECTOR_VERSION: int = 3`. Add `"run_jo
 
 `DERIVED_FIELDS`, `OWNED_FIELDS`, and `encode_snapshot_bytes` do not change. `run_journal_authority_requested` joins `PRESERVED_FIELDS` and therefore `OWNED_FIELDS`.
 
-- [ ] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py" --capture brigade-work` - expect PASS, all collected tests pass. Keep `test_empty_events_no_journal_preserves_base_status_and_deep_copies` green unchanged.
-- [ ] Commit: `git add src/brigade/run_events.py src/brigade/run_projector.py tests/test_run_events.py tests/test_run_projector.py && git commit -m "feat(run-projector): map dry-run incomplete artifact-collection and bump PROJECTOR_VERSION to 3"`
+- [ ] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py" --capture brigade-work` - expect PASS, all collected tests pass. Keep `test_empty_events_no_journal_preserves_base_status_and_deep_copies` green unchanged.
+- [ ] Commit: `git add src/brigade/run_events.py src/brigade/run_projector.py tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py && git commit -m "feat(run-projector): map dry-run incomplete artifact-collection and bump PROJECTOR_VERSION to 3"`
 
 ## Task 2: Lifecycle mapping for the three previously unmapped statuses
 
 **Files:**
 - Modify: `src/brigade/run_lifecycle.py:98-109` (STATUS_EVENT_TYPE)
-- Test: `tests/test_run_lifecycle.py`
+- Test: `tests/test_run_lifecycle.py`, `tests/test_run_shadow.py`
+
+The three statuses this task maps (`dry-run`, `incomplete`, `artifact-collection`) were previously unmapped, so four existing tests assert the unmapped behavior and must change in this same commit: `test_unmapped_status_after_handoff_is_lag` in `tests/test_run_shadow.py`, and `test_unmapped_intermediate_status_still_appends_the_second_a`, `test_unmapped_status_writes_run_json_without_status_event`, and `test_unmapped_activated_write_checkpoint_seq1_no_status_event` in `tests/test_run_lifecycle.py`. Each is renamed and rewritten below so no test keeps asserting unmapped behavior for a status this task maps.
 
 - [ ] Write the failing tests. Append to `tests/test_run_lifecycle.py`:
 
@@ -312,7 +401,141 @@ def test_dry_run_incomplete_artifact_collection_no_longer_skip(enabled, tmp_path
     ]
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py" --capture brigade-work` - expect FAIL, `KeyError: 'dry-run'` from `STATUS_EVENT_TYPE.get(status)` returning `None` so no event appends and the assertions on `status_events` fail.
+Rename and rewrite the four existing tests that assert unmapped behavior for statuses this task maps. In `tests/test_run_shadow.py`, replace `test_unmapped_status_after_handoff_is_lag` (at `tests/test_run_shadow.py:259`) with `test_artifact_collection_after_handoff_is_mapped_no_lag`. The exact replacement body is:
+
+```python
+def test_artifact_collection_after_handoff_is_mapped_no_lag(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    chain = [
+        "started",
+        "planning",
+        "dispatching",
+        "result-processing",
+        "synthesizing",
+        "handoff",
+        "artifact-collection",
+    ]
+
+    _write_run_json(run_dir, "started")
+    for status in chain:
+        _write_run_json_locked(repo, run_dir, status)
+
+    data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    # artifact-collection is now mapped to run.artifact_collection.started, so
+    # the final comparison matches and no lag is recorded.
+    assert data["lags"] == 0
+    assert data["mismatches"] == 0
+    assert data["errors"] == 0
+    assert data["last_outcome"] == "match"
+    # The mapped artifact-collection write appends a checkpoint event and a
+    # run.artifact_collection.started status event, so the last compared
+    # sequence is the status event (seq 14), not the checkpoint (seq 13).
+    assert data["last_compared_sequence"] == 14
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is True
+    assert REASON_STATUS_LAG_CURRENT not in report.reasons
+```
+
+In `tests/test_run_lifecycle.py`, replace `test_unmapped_intermediate_status_still_appends_the_second_a` (at `tests/test_run_lifecycle.py:451`) with `test_mapped_intermediate_artifact_collection_appends_status_event`. The exact replacement body is:
+
+```python
+def test_mapped_intermediate_artifact_collection_appends_status_event(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "dispatching")
+    # artifact-collection is now mapped: it appends both a checkpoint event
+    # and a run.artifact_collection.started status event.
+    _write_run_json_locked(repo, run_dir, "artifact-collection")
+    # A-mapped-B-A: the second dispatching is a real transition from the
+    # artifact-collection snapshot and must append even though the journal
+    # tail status payload matches.
+    _write_run_json_locked(repo, run_dir, "dispatching")
+
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["status"] == "dispatching"
+    assert [e.event_type for e in _status_events(run_dir)] == [
+        "run.created",
+        "run.dispatch.requested",
+        "run.artifact_collection.started",
+        "run.dispatch.requested",
+    ]
+    events = _events(run_dir)
+    # The second "dispatching" produces identical run.json bytes to the first,
+    # so its checkpoint replays and only the status event appends. The
+    # artifact-collection checkpoint is now paired with run.artifact_collection.started.
+    assert [e.event_type for e in events] == [
+        "run.snapshot.checkpointed",
+        "run.created",
+        "run.snapshot.checkpointed",
+        "run.dispatch.requested",
+        "run.snapshot.checkpointed",
+        "run.artifact_collection.started",
+        "run.dispatch.requested",
+    ]
+    assert [e.sequence for e in events] == [1, 2, 3, 4, 5, 6, 7]
+    # The second run.dispatch.requested links to the artifact-collection
+    # status event immediately before it, not to the checkpoint.
+    assert events[6].previous_digest == events[5].event_digest
+    # The artifact-collection checkpoint is paired with its mapped status event.
+    assert events[4].payload["paired_event_type"] == "run.artifact_collection.started"
+```
+
+In `tests/test_run_lifecycle.py`, replace `test_unmapped_status_writes_run_json_without_status_event` (at `tests/test_run_lifecycle.py:574`) with `test_mapped_dry_run_and_artifact_collection_write_status_events`. The exact replacement body is:
+
+```python
+def test_mapped_dry_run_and_artifact_collection_write_status_events(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "dry-run")
+    _write_run_json_locked(repo, run_dir, "artifact-collection")
+
+    assert (run_dir / "run.json").is_file()
+    # dry-run maps to run.completed and artifact-collection maps to
+    # run.artifact_collection.started, so each appends a status event in
+    # addition to its checkpoint event.
+    assert [e.event_type for e in _status_events(run_dir)] == [
+        "run.created",
+        "run.completed",
+        "run.artifact_collection.started",
+    ]
+    assert len(_checkpoint_events(run_dir)) == 3
+```
+
+In `tests/test_run_lifecycle.py`, replace `test_unmapped_activated_write_checkpoint_seq1_no_status_event` (at `tests/test_run_lifecycle.py:753`) with `test_mapped_activated_artifact_collection_writes_status_event`. The exact replacement body is:
+
+```python
+def test_mapped_activated_artifact_collection_writes_status_event(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # activate + run.created
+    # artifact-collection is now mapped: checkpoint event appends paired
+    # with run.artifact_collection.started, and that status event appends too.
+    _write_run_json_locked(repo, run_dir, "artifact-collection")
+
+    events = _events(run_dir)
+    assert [e.event_type for e in events] == [
+        "run.snapshot.checkpointed",
+        "run.created",
+        "run.snapshot.checkpointed",
+        "run.artifact_collection.started",
+    ]
+    assert [e.sequence for e in events] == [1, 2, 3, 4]
+    assert events[2].payload["paired_event_type"] == "run.artifact_collection.started"
+    assert [e.event_type for e in _status_events(run_dir)] == [
+        "run.created",
+        "run.artifact_collection.started",
+    ]
+```
+
+- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py tests/test_run_shadow.py" --capture brigade-work` - expect FAIL, `KeyError: 'dry-run'` from `STATUS_EVENT_TYPE.get(status)` returning `None` so no event appends and the assertions on `status_events` fail, plus the four renamed tests fail because the unmapped behavior they no longer assert is gone and the mapped behavior they now assert is absent.
 - [ ] Implement the minimal change. In `src/brigade/run_lifecycle.py` add the three rows to `STATUS_EVENT_TYPE`:
 
 ```python
@@ -323,8 +546,8 @@ def test_dry_run_incomplete_artifact_collection_no_longer_skip(enabled, tmp_path
 
 `_allowlisted_payload` already builds the payload from the closed per-type allowlist, so `run.completed` and `run.failed` carry `payload.status` and `run.artifact_collection.started` carries `detail`. No change to the activation model, the skip rules for same-status writes, or the bounded-failure wrapping.
 
-- [ ] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py" --capture brigade-work` - expect PASS. Keep `test_first_activated_mapped_write_checkpoint_seq1_then_status_seq2` green unchanged.
-- [ ] Commit: `git add src/brigade/run_lifecycle.py tests/test_run_lifecycle.py && git commit -m "feat(run-lifecycle): map dry-run incomplete and artifact-collection status transitions"`
+- [ ] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_lifecycle.py tests/test_run_shadow.py" --capture brigade-work` - expect PASS. Keep `test_first_activated_mapped_write_checkpoint_seq1_then_status_seq2` green unchanged.
+- [ ] Commit: `git add src/brigade/run_lifecycle.py tests/test_run_lifecycle.py tests/test_run_shadow.py && git commit -m "feat(run-lifecycle): map dry-run incomplete and artifact-collection status transitions"`
 
 ## Task 3: Stripped checkpoint base and body_kind payload key
 
@@ -1218,10 +1441,10 @@ def test_direct_write_json_failure_raises_lifecycle_journal_error(tmp_path, monk
             aboyeur._write_json(run_dir / "run.json", payload)
 ```
 
-Append to `tests/test_run_resume.py`. The test is self-contained and uses the existing `_write_run_dir` fixture, a successful `_StubServer`, and a successful `agents.run_agent` stub. It then monkeypatches `aboyeur._write_json` to raise `run_lifecycle.LifecycleJournalError` at the actual final receipt write and exercises `run_resume.resume(run_dir)`. It does not call `aboyeur._write_json` directly.
+Append to `tests/test_run_resume.py`. The two tests are self-contained and use the existing `_write_run_dir` fixture, a successful `_StubServer`, and an `agents.run_agent` stub whose `ok` value selects the receipt-write site under test. Each monkeypatches `aboyeur._write_json` to raise `run_lifecycle.LifecycleJournalError` only at the `run.json` receipt write (the sidecar revision writes for `worker-results.json` and `synthesis.json` must still succeed) and then exercises `run_resume.resume(run_dir)`. Neither calls `aboyeur._write_json` directly. The two tests cover the two distinct `run_resume._resume_locked` receipt writes at `src/brigade/run_resume.py:244` (failed-synthesis path, `final.ok` is false) and `src/brigade/run_resume.py:258` (successful-synthesis path, `final.ok` is true). Both must translate the bounded `LifecycleJournalError` to `runguard.RetainRunLockError` while retaining the workspace `run.lock`.
 
 ```python
-def test_authority_resume_receipt_write_retains_lock_on_projection_failure(tmp_path, monkeypatch):
+def test_authority_resume_failed_synthesis_receipt_write_retains_lock(tmp_path, monkeypatch):
     from brigade import aboyeur, run_events, run_lifecycle, runguard
 
     run_dir = _write_run_dir(
@@ -1238,8 +1461,9 @@ def test_authority_resume_receipt_write_retains_lock_on_projection_failure(tmp_p
             },
         ],
     )
-    # Mark the run as authority-requested so the final receipt write goes
-    # through the authoritative projection path in aboyeur._write_json.
+    # Mark the run as authority-requested so the failed-synthesis receipt
+    # write at src/brigade/run_resume.py:244 goes through the authoritative
+    # projection path in aboyeur._write_json.
     run_meta = json.loads((run_dir / "run.json").read_text())
     run_meta["run_journal_authority_requested"] = True
     run_meta["lifecycle_journal_requested"] = True
@@ -1249,15 +1473,64 @@ def test_authority_resume_receipt_write_retains_lock_on_projection_failure(tmp_p
     monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    # Failed synthesis: final.ok is False, so _resume_locked takes the
+    # status="failed" branch and writes the receipt at line 244.
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="synthesis failed", ok=False, detail="timeout"),
+    )
+    real_write_json = aboyeur._write_json
+
+    def failing_write_json(path, payload, **kwargs):
+        if Path(path).name == "run.json":
+            raise run_lifecycle.LifecycleJournalError(run_events._bound("projection failed"))
+        return real_write_json(path, payload, **kwargs)
+
+    monkeypatch.setattr(aboyeur, "_write_json", failing_write_json)
+    with pytest.raises(runguard.RetainRunLockError):
+        run_resume.resume(run_dir)
+    # The workspace run.lock must remain so stale-lock recovery can rerun.
+    lock_path = tmp_path / ".brigade" / "run.lock"
+    assert lock_path.exists()
+
+
+def test_authority_resume_successful_synthesis_receipt_write_retains_lock(tmp_path, monkeypatch):
+    from brigade import aboyeur, run_events, run_lifecycle, runguard
+
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "timeout",
+                "text": "part",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            },
+        ],
+    )
+    # Mark the run as authority-requested so the successful-synthesis
+    # receipt write at src/brigade/run_resume.py:258 goes through the
+    # authoritative projection path in aboyeur._write_json.
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["run_journal_authority_requested"] = True
+    run_meta["lifecycle_journal_requested"] = True
+    run_meta["cwd"] = str(tmp_path)
+    run_meta["lock_workspace"] = str(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps(run_meta))
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    # Successful synthesis: final.ok is True, so _resume_locked takes the
+    # status="ok" branch and writes the receipt at line 258.
     monkeypatch.setattr(
         run_resume.agents,
         "run_agent",
         lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
     )
-    # The final receipt write is the actual failure point: monkeypatch
-    # aboyeur._write_json to raise a bounded LifecycleJournalError only at
-    # the run.json receipt write (the sidecar revision writes for
-    # worker-results.json and synthesis.json must still succeed).
     real_write_json = aboyeur._write_json
 
     def failing_write_json(path, payload, **kwargs):
