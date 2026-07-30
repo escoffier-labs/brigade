@@ -1798,6 +1798,11 @@ def _write_current_artifact(run_dir: Path, data: dict[str, object]) -> None:
     run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
+# Sentinel distinguishing "delete the recent_records key" from a forged
+# ``None``/falsy value in readiness and carry-path regression tests.
+_ABSENT_RECENT_RECORDS = object()
+
+
 def _gate_artifact_ready(run_dir: Path) -> None:
     """Stand up an empty journal and a current artifact so the gate reaches the
     counter checks (past the no-journal, no-evidence, version, and schema doors)."""
@@ -1896,6 +1901,40 @@ def test_gate_accepts_zero_mismatches_and_zero_errors_as_valid(tmp_path):
     assert REASON_NO_COMPARISONS not in report.reasons
 
 
+@pytest.mark.parametrize(
+    "malformed_recent_records",
+    [
+        pytest.param(_ABSENT_RECENT_RECORDS, id="absent"),
+        pytest.param("not-a-list", id="string"),
+        pytest.param({"outcome": "match"}, id="mapping"),
+        pytest.param(["not-a-record"], id="list_non_mapping"),
+    ],
+)
+def test_gate_rejects_malformed_recent_records_as_evidence_unreadable(enabled, tmp_path, malformed_recent_records):
+    """Readiness must reject malformed records before the tail check.
+
+    The artifact starts as a real current-v3 match with its cursor equal to
+    the journal tail. Only ``recent_records`` is forged, so the expected
+    result cannot be attributed to an earlier readiness gate.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    forged = json.loads(artifact.read_text())
+    if malformed_recent_records is _ABSENT_RECENT_RECORDS:
+        forged.pop("recent_records", None)
+    else:
+        forged["recent_records"] = malformed_recent_records
+    artifact.write_text(json.dumps(forged, indent=2, sort_keys=True) + "\n")
+
+    report = run_shadow.check_projection_readiness(run_dir)
+    assert report.ready is False
+    assert report.reasons == (REASON_EVIDENCE_UNREADABLE,)
+
+
 def test_record_outcome_does_not_trust_invalid_counters_on_carry(enabled, tmp_path):
     """Blocker #2 carry side: a current-v3 prior artifact with invalid counters
     (bool / negative / non-int) must not be trusted when a new comparison
@@ -1973,3 +2012,188 @@ def test_record_outcome_does_not_trust_negative_counters_on_carry(enabled, tmp_p
     assert fresh["comparisons"] >= 1
     assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
     assert list((run_dir / "events").glob("*.corrupt-*"))
+
+
+@pytest.mark.parametrize(
+    "field, invalid_value",
+    [
+        pytest.param("matches", True, id="matches-bool"),
+        pytest.param("matches", -1, id="matches-negative"),
+        pytest.param("matches", "1", id="matches-string"),
+        pytest.param("lags", False, id="lags-bool"),
+        pytest.param("lags", -1, id="lags-negative"),
+        pytest.param("lags", "0", id="lags-string"),
+    ],
+)
+def test_record_shadow_comparison_quarantines_invalid_accumulated_counter(enabled, tmp_path, field, invalid_value):
+    """Every counter read by the carry accumulator must be trusted first."""
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    forged = json.loads(artifact.read_text())
+    forged["projector_version"] = run_projector.PROJECTOR_VERSION
+    forged[field] = invalid_value
+    artifact.write_text(json.dumps(forged, indent=2, sort_keys=True) + "\n")
+
+    snapshot = json.loads((run_dir / "run.json").read_text())
+    run_shadow.record_shadow_comparison(run_dir, snapshot)
+
+    fresh = json.loads(artifact.read_text())
+    assert list((run_dir / "events").glob("*.corrupt-*"))
+    assert fresh["comparisons"] == 2
+    assert fresh["matches"] == 1
+    assert fresh["mismatches"] == 0
+    assert fresh["lags"] == 0
+    assert fresh["errors"] == 1
+    assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
+    assert fresh["recent_records"][0]["outcome"] == run_shadow.OUTCOME_ERROR
+    assert fresh["recent_records"][0]["category"] == "evidence-unreadable"
+    assert fresh["recent_records"][-1]["outcome"] == run_shadow.OUTCOME_MATCH
+
+
+# -- Issue #568 slice 7 assignment 4: recent_records structural validation -----
+
+
+@pytest.mark.parametrize(
+    "malformed_recent_records",
+    [
+        pytest.param({"outcome": "match"}, id="mapping"),
+        pytest.param("not-a-list", id="string"),
+        pytest.param(["string-entry"], id="list_non_mapping"),
+        pytest.param([{"outcome": "match"}, 42], id="list_mixed_non_mapping"),
+        pytest.param(_ABSENT_RECENT_RECORDS, id="absent"),
+    ],
+)
+def test_malformed_recent_records_quarantined_via_record_shadow_comparison(enabled, tmp_path, malformed_recent_records):
+    """A current-v3 artifact with valid counters but malformed recent_records
+    must not crash record_shadow_comparison. The prior is quarantined, counters
+    are not carried, evidence-unreadable precedes the new outcome, and
+    recent_records is a bounded list of dict records."""
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # ck 1, run.created 2
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    forged = json.loads(artifact.read_text())
+    forged["projector_version"] = run_projector.PROJECTOR_VERSION
+    forged["comparisons"] = 7
+    forged["matches"] = 5
+    forged["mismatches"] = 1
+    forged["errors"] = 1
+    if malformed_recent_records is _ABSENT_RECENT_RECORDS:
+        forged.pop("recent_records", None)
+    else:
+        forged["recent_records"] = malformed_recent_records
+    artifact.write_text(json.dumps(forged, indent=2, sort_keys=True) + "\n")
+
+    # Exercise the public writer path through a valid journal/snapshot.
+    _write_run_json_locked(repo, run_dir, "planning")  # ck 3, planning 4
+
+    assert artifact.is_file()
+    fresh = json.loads(artifact.read_text())
+    assert list((run_dir / "events").glob("*.corrupt-*"))
+    assert fresh["schema"] == run_shadow.SHADOW_SCHEMA
+    assert fresh["projector_version"] == run_projector.PROJECTOR_VERSION
+    # Forged counters must not be carried forward.
+    assert fresh["comparisons"] != 7
+    assert fresh["matches"] != 5
+    assert fresh["mismatches"] != 1
+    assert fresh["errors"] >= 1
+    assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
+    recent = fresh["recent_records"]
+    assert isinstance(recent, list)
+    assert len(recent) <= run_shadow.MAX_RECENT_RECORDS
+    assert all(isinstance(record, dict) for record in recent)
+    unreadable = [r for r in recent if r.get("outcome") == "error" and r.get("category") == "evidence-unreadable"]
+    assert unreadable
+    assert unreadable[0] is recent[0]
+    assert recent[-1]["outcome"] == run_shadow.OUTCOME_MATCH
+
+
+def test_recent_records_structure_valid_artifact_accumulates_and_dedupes(enabled, tmp_path):
+    """Control: a structurally valid current artifact still accumulates new
+    comparisons and idempotently dedupes repeated calls at the same tail."""
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # ck 1, run.created 2
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    baseline = json.loads(artifact.read_text())
+    baseline_comparisons = baseline["comparisons"]
+
+    # Reuse the exact legacy payload aboyeur just wrote so the shadow and
+    # projected digests match the baseline record byte-for-byte; a hand-rolled
+    # snapshot with a different field set would project to a different digest
+    # and fail to dedupe.
+    snapshot = json.loads((run_dir / "run.json").read_text())
+    run_shadow.record_shadow_comparison(run_dir, snapshot)
+    run_shadow.record_shadow_comparison(run_dir, snapshot)
+
+    after_dedupe = json.loads(artifact.read_text())
+    assert after_dedupe["comparisons"] == baseline_comparisons
+
+    _write_run_json_locked(repo, run_dir, "planning")  # ck 3, planning 4
+
+    after_advance = json.loads(artifact.read_text())
+    assert after_advance["comparisons"] == baseline_comparisons + 1
+    recent = after_advance["recent_records"]
+    assert isinstance(recent, list)
+    assert all(isinstance(record, dict) for record in recent)
+    assert (
+        after_advance["comparisons"]
+        == after_advance["matches"] + after_advance["mismatches"] + after_advance["lags"] + after_advance["errors"]
+    )
+
+
+@pytest.mark.parametrize(
+    "non_object_payload",
+    [
+        pytest.param("[1, 2, 3]", id="list"),
+        pytest.param('"not-an-object"', id="string"),
+        pytest.param("42", id="number"),
+        pytest.param("true", id="bool"),
+        pytest.param("null", id="null"),
+    ],
+)
+def test_non_object_shadow_artifact_quarantined_via_record_shadow_comparison(enabled, tmp_path, non_object_payload):
+    """A parseable but non-object top-level JSON artifact (list, string,
+    number, bool, null) must be rejected before any ``.get`` call on the
+    carry path. The prior is quarantined, a fresh artifact starts, and an
+    evidence-unreadable side record precedes the new match."""
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")  # ck 1, run.created 2
+
+    artifact = run_shadow.shadow_artifact_path(run_dir)
+    # Overwrite the valid current-v3 artifact with a non-object JSON payload.
+    artifact.write_text(non_object_payload + "\n")
+
+    # Exercise the public writer path through a valid journal/snapshot.
+    _write_run_json_locked(repo, run_dir, "planning")  # ck 3, planning 4
+
+    assert artifact.is_file()
+    fresh = json.loads(artifact.read_text())
+    # The non-object prior was quarantined aside.
+    assert list((run_dir / "events").glob("*.corrupt-*"))
+    assert fresh["schema"] == run_shadow.SHADOW_SCHEMA
+    assert fresh["projector_version"] == run_projector.PROJECTOR_VERSION
+    assert isinstance(fresh["comparisons"], int) and not isinstance(fresh["comparisons"], bool)
+    assert fresh["errors"] >= 1
+    assert fresh["comparisons"] == fresh["matches"] + fresh["mismatches"] + fresh["lags"] + fresh["errors"]
+    recent = fresh["recent_records"]
+    assert isinstance(recent, list)
+    assert all(isinstance(record, dict) for record in recent)
+    unreadable = [r for r in recent if r.get("outcome") == "error" and r.get("category") == "evidence-unreadable"]
+    assert unreadable
+    assert unreadable[0] is recent[0]
+    assert recent[-1]["outcome"] == run_shadow.OUTCOME_MATCH

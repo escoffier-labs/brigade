@@ -6,7 +6,10 @@ import errno
 import hashlib
 import json
 import os
+import signal
 import stat
+import subprocess
+import sys
 from copy import deepcopy
 from pathlib import Path
 
@@ -910,15 +913,14 @@ def test_fallback_open_nofollow_closes_fd_when_verify_identity_raises(tmp_path, 
     assert excinfo.value.errno == errno.EBADF
 
 
-def test_fallback_enforce_dir_mode_skips_open_without_o_directory(tmp_path, monkeypatch):
+def test_fallback_enforce_dir_mode_corrects_via_lstat_without_o_directory(tmp_path, monkeypatch):
     _disable_posix_open_guards(monkeypatch)
-    journal_path = _journal_path(_run_dir(tmp_path))
-    events_dir = journal_path.parent
+    events_dir = _journal_path(_run_dir(tmp_path)).parent
     real_open = os.open
 
     def guard_open(path, flags, mode=0o777, *, dir_fd=None):
         if Path(path) == events_dir:
-            raise AssertionError("os.open must not be called for the events directory without O_DIRECTORY")
+            raise AssertionError("directory mode fallback must not open the events directory")
         if dir_fd is not None:
             return real_open(path, flags, mode, dir_fd=dir_fd)
         return real_open(path, flags, mode)
@@ -927,9 +929,8 @@ def test_fallback_enforce_dir_mode_skips_open_without_o_directory(tmp_path, monk
     events_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(events_dir, 0o755)
 
-    run_journal.ensure_journal(journal_path)
+    run_journal._enforce_dir_mode(events_dir)
 
-    assert journal_path.is_file()
     assert stat.S_IMODE(events_dir.stat().st_mode) == 0o700
 
 
@@ -1115,3 +1116,798 @@ def test_read_journal_bounded_rejects_complete_record_513_even_with_repeated_seq
         run_journal.read_journal_bounded(journal_path)
 
     assert "bound exceeded" in excinfo.value.diagnostic
+
+
+# -- Slice 7 assignment 5: append-side bounds --------------------------------
+
+
+def _write_journal_events(journal_path: Path, count: int) -> dict:
+    """Write ``count`` canonical events directly (no append_event fsyncs)."""
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_digest: str | None = None
+    last_env: dict | None = None
+    with journal_path.open("ab") as handle:
+        for sequence in range(1, count + 1):
+            event_type = "run.planning.started" if sequence % 2 == 0 else "run.dispatch.observed"
+            payload = (
+                {"detail": "n"} if event_type == "run.planning.started" else {"seat": "c", "attempt": 1, "detail": "n"}
+            )
+            env = run_events.build_event(
+                run_id=RUN_ID,
+                sequence=sequence,
+                event_type=event_type,
+                payload=payload,
+                idempotency_key=f"ev-{sequence}",
+                recorded_at="2026-07-27T15:30:45.000000Z",
+                previous_digest=previous_digest,
+            )
+            handle.write(run_events.canonical_bytes(env) + b"\n")
+            previous_digest = env["event_digest"]
+            last_env = env
+    assert last_env is not None
+    return last_env
+
+
+def _tracking_write(monkeypatch) -> list[bytes]:
+    """Monkeypatch os.write and return a list that collects write payloads."""
+    original_write = os.write
+    write_calls: list[bytes] = []
+
+    def _record_write(fd, data):
+        write_calls.append(data)
+        return original_write(fd, data)
+
+    monkeypatch.setattr(os, "write", _record_write)
+    return write_calls
+
+
+def test_append_event_refuses_513th_distinct_event_before_write(tmp_path, monkeypatch):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _write_journal_events(journal_path, run_checkpoint.MAX_JOURNAL_EVENTS)
+    before = journal_path.read_bytes()
+    write_calls = _tracking_write(monkeypatch)
+
+    with pytest.raises(run_journal.RunJournalError) as excinfo:
+        run_journal.append_event(
+            journal_path,
+            run_id=RUN_ID,
+            event_type="run.created",
+            payload={"status": "started"},
+            idempotency_key="ev-513",
+            expected_previous_sequence=run_checkpoint.MAX_JOURNAL_EVENTS,
+            recorded_at="2026-07-27T15:30:50.000000Z",
+        )
+
+    assert "bound exceeded" in excinfo.value.diagnostic
+    assert not write_calls
+    assert journal_path.read_bytes() == before
+
+
+def test_append_event_refuses_growth_past_max_journal_bytes_before_write(tmp_path, monkeypatch):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+    before = journal_path.read_bytes()
+    monkeypatch.setattr(run_checkpoint, "MAX_JOURNAL_BYTES", len(before) + 64)
+    write_calls = _tracking_write(monkeypatch)
+
+    with pytest.raises(run_journal.RunJournalError) as excinfo:
+        _append_second_event(journal_path)
+
+    assert excinfo.value.diagnostic == "bound exceeded: journal above MAX_JOURNAL_BYTES"
+    assert not write_calls
+    assert journal_path.read_bytes() == before
+
+
+def test_append_event_allows_idempotent_replay_of_512th_event_when_full(tmp_path, monkeypatch):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    last_env = _write_journal_events(journal_path, run_checkpoint.MAX_JOURNAL_EVENTS)
+    before = journal_path.read_bytes()
+    write_calls = _tracking_write(monkeypatch)
+
+    replay = run_journal.append_event(
+        journal_path,
+        run_id=RUN_ID,
+        event_type=last_env["event_type"],
+        payload=dict(last_env["payload"]),
+        idempotency_key=last_env["idempotency_key"],
+        expected_previous_sequence=run_checkpoint.MAX_JOURNAL_EVENTS,
+        recorded_at=last_env["recorded_at"],
+    )
+
+    assert replay.sequence == run_checkpoint.MAX_JOURNAL_EVENTS
+    assert replay.event_id == last_env["event_id"]
+    assert not write_calls
+    assert journal_path.read_bytes() == before
+
+
+def test_append_event_allows_idempotent_replay_at_exact_byte_bound(tmp_path, monkeypatch):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    existing = _append_first_event(journal_path)
+    before = journal_path.read_bytes()
+    monkeypatch.setattr(run_checkpoint, "MAX_JOURNAL_BYTES", len(before))
+    write_calls = _tracking_write(monkeypatch)
+
+    replay = _append_first_event(journal_path)
+
+    assert replay == existing
+    assert replay.request_digest == existing.request_digest
+    assert not write_calls
+    assert journal_path.read_bytes() == before
+
+
+def test_append_event_refuses_oversize_journal_consistent_with_read_journal_bounded(tmp_path, monkeypatch):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+    padding = b"\n" * (run_checkpoint.MAX_JOURNAL_BYTES + 1024)
+    journal_path.write_bytes(journal_path.read_bytes() + padding)
+    before = journal_path.read_bytes()
+    write_calls = _tracking_write(monkeypatch)
+
+    with pytest.raises(run_journal.RunJournalError) as append_exc:
+        _append_second_event(journal_path)
+
+    with pytest.raises(run_journal.RunJournalError) as read_exc:
+        run_journal.read_journal_bounded(journal_path)
+
+    assert append_exc.value.diagnostic == read_exc.value.diagnostic
+    assert "bound exceeded" in append_exc.value.diagnostic
+    assert not write_calls
+    assert journal_path.read_bytes() == before
+
+
+def test_append_event_refuses_journal_with_513_complete_records_before_write(tmp_path, monkeypatch):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_digest: str | None = None
+    with journal_path.open("ab") as handle:
+        for sequence in range(1, 514):
+            event_type = "run.planning.started" if sequence % 2 == 0 else "run.dispatch.observed"
+            payload = (
+                {"detail": "n"} if event_type == "run.planning.started" else {"seat": "c", "attempt": 1, "detail": "n"}
+            )
+            env = run_events.build_event(
+                run_id=RUN_ID,
+                sequence=sequence,
+                event_type=event_type,
+                payload=payload,
+                idempotency_key=f"ev-{sequence}",
+                recorded_at="2026-07-27T15:30:45.000000Z",
+                previous_digest=previous_digest,
+            )
+            handle.write(run_events.canonical_bytes(env) + b"\n")
+            previous_digest = env["event_digest"]
+    before = journal_path.read_bytes()
+    write_calls = _tracking_write(monkeypatch)
+
+    with pytest.raises(run_journal.RunJournalError) as append_exc:
+        run_journal.append_event(
+            journal_path,
+            run_id=RUN_ID,
+            event_type="run.created",
+            payload={"status": "started"},
+            idempotency_key="ev-new",
+            expected_previous_sequence=513,
+            recorded_at="2026-07-27T15:30:50.000000Z",
+        )
+
+    with pytest.raises(run_journal.RunJournalError) as read_exc:
+        run_journal.read_journal_bounded(journal_path)
+
+    assert append_exc.value.diagnostic == read_exc.value.diagnostic
+    assert "bound exceeded" in append_exc.value.diagnostic
+    assert not write_calls
+    assert journal_path.read_bytes() == before
+
+
+# -- Slice 7 assignment 1: signal atomicity ----------------------------------
+
+
+def _run_isolated_child(
+    script: str,
+    *args: str,
+    timeout: float = 5.0,
+) -> tuple[int, str, str]:
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script, *args],
+        env=child_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate(timeout=2.0)
+        pytest.fail(
+            f"isolated signal/lock child timed out and was killed and reaped\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        )
+    return proc.returncode, stdout, stderr
+
+
+def _install_fake_pthread_sigmask_api(monkeypatch) -> tuple[object, object]:
+    block_mode = object()
+    restore_mode = object()
+    monkeypatch.setattr(signal, "SIG_BLOCK", block_mode, raising=False)
+    monkeypatch.setattr(signal, "SIG_SETMASK", restore_mode, raising=False)
+    monkeypatch.setattr(run_journal, "_HAS_PTHREAD_SIGMASK", True)
+    monkeypatch.setattr(run_journal, "_DEFERRED_SIGNALS", frozenset({signal.SIGTERM}))
+    return block_mode, restore_mode
+
+
+def test_defer_sigterm_translates_mask_block_oserror(monkeypatch):
+    block_mode, _ = _install_fake_pthread_sigmask_api(monkeypatch)
+
+    def fail_block(how, _mask):
+        assert how is block_mode
+        raise OSError("block failed")
+
+    monkeypatch.setattr(signal, "pthread_sigmask", fail_block, raising=False)
+
+    with pytest.raises(run_journal.RunJournalError) as excinfo:
+        with run_journal._defer_sigterm():
+            pytest.fail("body must not run after mask block failure")
+
+    assert excinfo.value.diagnostic == "SIGTERM mask block failed"
+    assert isinstance(excinfo.value.__cause__, OSError)
+
+
+def test_defer_sigterm_translates_mask_restore_oserror(monkeypatch):
+    block_mode, restore_mode = _install_fake_pthread_sigmask_api(monkeypatch)
+    prior = {signal.SIGINT}
+
+    def fail_restore(how, _mask):
+        if how is block_mode:
+            return prior
+        assert how is restore_mode
+        raise OSError("restore failed")
+
+    monkeypatch.setattr(signal, "pthread_sigmask", fail_restore, raising=False)
+
+    with pytest.raises(run_journal.RunJournalError) as excinfo:
+        with run_journal._defer_sigterm():
+            pass
+
+    assert excinfo.value.diagnostic == "SIGTERM mask restoration failed"
+    assert isinstance(excinfo.value.__cause__, OSError)
+
+
+def test_defer_sigterm_restore_oserror_does_not_mask_primary_base_exception(monkeypatch):
+    block_mode, restore_mode = _install_fake_pthread_sigmask_api(monkeypatch)
+    primary = KeyboardInterrupt("primary body failure")
+
+    def fail_restore(how, _mask):
+        if how is block_mode:
+            return {signal.SIGINT}
+        assert how is restore_mode
+        raise OSError("restore failed")
+
+    monkeypatch.setattr(signal, "pthread_sigmask", fail_restore, raising=False)
+
+    with pytest.raises(KeyboardInterrupt) as excinfo:
+        with run_journal._defer_sigterm():
+            raise primary
+
+    assert excinfo.value is primary
+
+
+@pytest.mark.parametrize("body_raises", [False, True], ids=["success", "body-exception"])
+def test_append_critical_section_restores_exact_prior_signal_mask_in_subprocess(body_raises):
+    if not run_journal._HAS_PTHREAD_SIGMASK:
+        pytest.skip("signal.pthread_sigmask unavailable on this platform")
+
+    script = r"""
+import json
+import signal
+import sys
+from brigade import run_journal
+
+body_raises = sys.argv[1] == "true"
+seed_signal = signal.SIGUSR1 if hasattr(signal, "SIGUSR1") else signal.SIGINT
+original = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+seeded = set(original)
+seeded.add(seed_signal)
+signal.pthread_sigmask(signal.SIG_SETMASK, seeded)
+
+class BodyFailure(BaseException):
+    pass
+
+caught = False
+try:
+    try:
+        with run_journal._append_critical_section():
+            inside = set(signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+            if signal.SIGTERM not in inside:
+                raise RuntimeError("SIGTERM was not blocked inside critical section")
+            if not seeded.issubset(inside):
+                raise RuntimeError("seeded prior mask was not preserved inside critical section")
+            if body_raises:
+                raise BodyFailure()
+    except BodyFailure:
+        caught = True
+    restored = set(signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+    print(json.dumps({
+        "caught": caught,
+        "restored_exactly": restored == seeded,
+        "seeded_nonempty": bool(seeded),
+    }))
+finally:
+    signal.pthread_sigmask(signal.SIG_SETMASK, original)
+"""
+    rc, stdout, stderr = _run_isolated_child(script, str(body_raises).lower())
+
+    assert rc == 0, f"child exited {rc}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    result = json.loads(stdout)
+    assert result == {
+        "caught": body_raises,
+        "restored_exactly": True,
+        "seeded_nonempty": True,
+    }
+
+
+def test_append_event_signal_deferral_prevents_duplicate_sequence_in_subprocess(tmp_path):
+    """A regression fails by child timeout instead of hanging the pytest process."""
+    if not run_journal._HAS_PTHREAD_SIGMASK:
+        pytest.skip("signal.pthread_sigmask unavailable on this platform")
+
+    script = r"""
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+from brigade import run_journal
+
+journal_path = Path(sys.argv[1])
+run_id = "20260727-153045-a1b2c3d4"
+signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+run_journal.append_event(
+    journal_path,
+    run_id=run_id,
+    event_type="run.created",
+    payload={"status": "started"},
+    idempotency_key="create-1",
+    expected_previous_sequence=0,
+    recorded_at="2026-07-27T15:30:45.123456Z",
+)
+
+handler_results = []
+def handler(_signum, _frame):
+    try:
+        run_journal.append_event(
+            journal_path,
+            run_id=run_id,
+            event_type="run.interrupted",
+            payload={"status": "interrupted", "detail": "sigterm"},
+            idempotency_key="term-1",
+            expected_previous_sequence=1,
+            recorded_at="2026-07-27T15:30:50.000000Z",
+        )
+        handler_results.append(["appended"])
+    except run_journal.StaleSequenceError as exc:
+        handler_results.append(["stale", exc.diagnostic])
+    except BaseException as exc:
+        handler_results.append(["error", type(exc).__name__, str(exc)])
+
+old_handler = signal.signal(signal.SIGTERM, handler)
+fired = False
+real_read_tail = run_journal._read_tail_state
+def tracking_read_tail(path):
+    global fired
+    result = real_read_tail(path)
+    if not fired:
+        fired = True
+        os.kill(os.getpid(), signal.SIGTERM)
+    return result
+run_journal._read_tail_state = tracking_read_tail
+
+try:
+    run_journal.append_event(
+        journal_path,
+        run_id=run_id,
+        event_type="run.planning.started",
+        payload={"detail": "planning"},
+        idempotency_key="plan-1",
+        expected_previous_sequence=1,
+        recorded_at="2026-07-27T15:30:46.000000Z",
+    )
+finally:
+    signal.signal(signal.SIGTERM, old_handler)
+
+report = run_journal.read_journal(journal_path)
+print(json.dumps({
+    "chain_errors": report.chain_errors,
+    "sequences": [event.sequence for event in report.events],
+    "handler_results": handler_results,
+}))
+"""
+    journal_path = _journal_path(_run_dir(tmp_path))
+    rc, stdout, stderr = _run_isolated_child(script, str(journal_path))
+
+    assert rc == 0, f"child exited {rc}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    result = json.loads(stdout)
+    assert result["chain_errors"] == []
+    assert result["sequences"] == [1, 2]
+    assert result["handler_results"]
+    assert result["handler_results"][0][0] == "stale"
+    assert result["handler_results"][0][1] == "stale sequence: expected previous 1, actual 2"
+
+
+def test_append_critical_section_rejects_same_thread_nested_entry_without_pthread_sigmask():
+    """Without pthread_sigmask, nested same-thread entry must fail fast, not deadlock."""
+    script = """
+from contextlib import contextmanager
+from brigade import run_journal
+
+run_journal._HAS_PTHREAD_SIGMASK = False
+
+@contextmanager
+def nested():
+    with run_journal._append_critical_section():
+        with run_journal._append_critical_section():
+            yield
+
+try:
+    with nested():
+        pass
+except run_journal.RunJournalError as exc:
+    if len(exc.diagnostic) > 240:
+        raise SystemExit(2)
+    if "recursive append" not in exc.diagnostic:
+        raise SystemExit(3)
+    raise SystemExit(0)
+raise SystemExit(1)
+"""
+    rc, stdout, stderr = _run_isolated_child(script, timeout=2.0)
+    assert rc == 0, f"child exited {rc}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+
+
+def test_append_event_process_lock_prevents_worker_main_sigterm_duplicate_in_subprocess(tmp_path):
+    """Worker-thread append holds the process lock while SIGTERM runs on the main
+    thread: the handler blocks until the worker finishes, then sees a fresh tail
+    and raises StaleSequenceError instead of duplicating sequence 2.
+    """
+    if not run_journal._HAS_PTHREAD_SIGMASK:
+        pytest.skip("signal.pthread_sigmask unavailable on this platform")
+
+    script = r"""
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import threading
+from brigade import run_journal
+
+journal_path = Path(sys.argv[1])
+run_id = "20260727-153045-a1b2c3d4"
+signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+run_journal.append_event(
+    journal_path,
+    run_id=run_id,
+    event_type="run.created",
+    payload={"status": "started"},
+    idempotency_key="create-1",
+    expected_previous_sequence=0,
+    recorded_at="2026-07-27T15:30:45.123456Z",
+)
+
+handler_results = []
+handler_started = threading.Event()
+worker_past_tail = threading.Event()
+worker_done = threading.Event()
+worker_errors = []
+def handler(_signum, _frame):
+    handler_started.set()
+    try:
+        run_journal.append_event(
+            journal_path,
+            run_id=run_id,
+            event_type="run.interrupted",
+            payload={"status": "interrupted", "detail": "sigterm"},
+            idempotency_key="term-worker-1",
+            expected_previous_sequence=1,
+            recorded_at="2026-07-27T15:30:50.000000Z",
+        )
+        handler_results.append(["appended"])
+    except run_journal.StaleSequenceError as exc:
+        handler_results.append(["stale", exc.diagnostic])
+    except BaseException as exc:
+        handler_results.append(["error", type(exc).__name__, str(exc)])
+
+old_handler = signal.signal(signal.SIGTERM, handler)
+real_read_tail = run_journal._read_tail_state
+fired = False
+def tracking_read_tail(path):
+    global fired
+    result = real_read_tail(path)
+    if threading.current_thread().name == "append-worker" and not fired:
+        fired = True
+        worker_past_tail.set()
+        os.kill(os.getpid(), signal.SIGTERM)
+    return result
+run_journal._read_tail_state = tracking_read_tail
+
+def worker_append():
+    try:
+        run_journal.append_event(
+            journal_path,
+            run_id=run_id,
+            event_type="run.planning.started",
+            payload={"detail": "planning"},
+            idempotency_key="plan-1",
+            expected_previous_sequence=1,
+            recorded_at="2026-07-27T15:30:46.000000Z",
+        )
+    except BaseException as exc:
+        worker_errors.append([type(exc).__name__, str(exc)])
+    finally:
+        worker_done.set()
+
+worker = threading.Thread(target=worker_append, name="append-worker")
+worker.start()
+if not worker_past_tail.wait(timeout=2.0):
+    raise RuntimeError("worker did not reach tail read")
+worker.join(timeout=2.0)
+if worker.is_alive() or not worker_done.is_set():
+    raise RuntimeError("worker append did not finish")
+if not handler_started.wait(timeout=0.2):
+    raise RuntimeError("SIGTERM handler did not run")
+signal.signal(signal.SIGTERM, old_handler)
+
+report = run_journal.read_journal(journal_path)
+print(json.dumps({
+    "chain_errors": report.chain_errors,
+    "sequences": [event.sequence for event in report.events],
+    "handler_results": handler_results,
+    "worker_errors": worker_errors,
+}))
+"""
+    journal_path = _journal_path(_run_dir(tmp_path))
+    rc, stdout, stderr = _run_isolated_child(script, str(journal_path))
+
+    assert rc == 0, f"child exited {rc}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    result = json.loads(stdout)
+    assert result["worker_errors"] == []
+    assert result["chain_errors"] == []
+    assert result["sequences"] == [1, 2]
+    assert result["handler_results"]
+    assert result["handler_results"][0][0] == "stale"
+    assert result["handler_results"][0][1] == "stale sequence: expected previous 1, actual 2"
+
+
+def test_append_event_process_lock_serializes_workers_without_pthread_sigmask(tmp_path):
+    script = r"""
+import json
+from pathlib import Path
+import sys
+import threading
+from brigade import run_journal
+
+journal_path = Path(sys.argv[1])
+run_id = "20260727-153045-a1b2c3d4"
+run_journal.append_event(
+    journal_path,
+    run_id=run_id,
+    event_type="run.created",
+    payload={"status": "started"},
+    idempotency_key="create-1",
+    expected_previous_sequence=0,
+    recorded_at="2026-07-27T15:30:45.123456Z",
+)
+run_journal._HAS_PTHREAD_SIGMASK = False
+
+first_reached_tail = threading.Event()
+release_first = threading.Event()
+second_started = threading.Event()
+second_reached_tail = threading.Event()
+results = {}
+real_read_tail = run_journal._read_tail_state
+def tracking_read_tail(path):
+    result = real_read_tail(path)
+    name = threading.current_thread().name
+    if name == "first-worker":
+        first_reached_tail.set()
+        if not release_first.wait(timeout=2.0):
+            raise RuntimeError("first worker release timed out")
+    elif name == "second-worker":
+        second_reached_tail.set()
+    return result
+run_journal._read_tail_state = tracking_read_tail
+
+def append_from(name, key):
+    if name == "second":
+        second_started.set()
+    try:
+        event = run_journal.append_event(
+            journal_path,
+            run_id=run_id,
+            event_type="run.planning.started",
+            payload={"detail": name},
+            idempotency_key=key,
+            expected_previous_sequence=1,
+            recorded_at="2026-07-27T15:30:46.000000Z",
+        )
+        results[name] = ["appended", event.sequence]
+    except run_journal.StaleSequenceError as exc:
+        results[name] = ["stale", exc.diagnostic]
+    except BaseException as exc:
+        results[name] = ["error", type(exc).__name__, str(exc)]
+
+first = threading.Thread(target=append_from, args=("first", "plan-1"), name="first-worker")
+second = threading.Thread(target=append_from, args=("second", "plan-2"), name="second-worker")
+first.start()
+if not first_reached_tail.wait(timeout=1.0):
+    raise RuntimeError("first worker did not reach tail read")
+second.start()
+if not second_started.wait(timeout=1.0):
+    raise RuntimeError("second worker did not start")
+serialized = not second_reached_tail.wait(timeout=0.2)
+release_first.set()
+first.join(timeout=2.0)
+second.join(timeout=2.0)
+if first.is_alive() or second.is_alive():
+    raise RuntimeError("worker did not finish")
+
+report = run_journal.read_journal(journal_path)
+print(json.dumps({
+    "serialized": serialized,
+    "results": results,
+    "chain_errors": report.chain_errors,
+    "sequences": [event.sequence for event in report.events],
+}))
+"""
+    journal_path = _journal_path(_run_dir(tmp_path))
+    rc, stdout, stderr = _run_isolated_child(script, str(journal_path))
+
+    assert rc == 0, f"child exited {rc}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    result = json.loads(stdout)
+    assert result["serialized"] is True
+    assert result["results"]["first"] == ["appended", 2]
+    assert result["results"]["second"] == [
+        "stale",
+        "stale sequence: expected previous 1, actual 2",
+    ]
+    assert result["chain_errors"] == []
+    assert result["sequences"] == [1, 2]
+
+
+# -- Slice 7 assignment 2: journal directory durability ----------------------
+
+
+_POSIX_DIRECTORY_FSYNC_ONLY = pytest.mark.skipif(
+    os.name != "posix",
+    reason="directory fsync is intentionally a no-op off POSIX",
+)
+
+
+def _refers_to_directory(fd: int, directory: Path) -> bool:
+    try:
+        st = os.fstat(fd)
+        dir_st = directory.stat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_ino == dir_st.st_ino and st.st_dev == dir_st.st_dev
+
+
+@_POSIX_DIRECTORY_FSYNC_ONLY
+def test_ensure_journal_directory_fsync_after_creating_lifecycle_file(tmp_path, monkeypatch):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    events_dir = journal_path.parent
+
+    real_fsync = os.fsync
+    call_log: list[tuple[str, bool]] = []
+
+    def tracking_fsync(fd):
+        call_log.append(("fsync", _refers_to_directory(fd, events_dir)))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+
+    run_journal.ensure_journal(journal_path)
+
+    dir_fsyncs = [i for i, (kind, refers_events) in enumerate(call_log) if kind == "fsync" and refers_events]
+    assert dir_fsyncs, "events directory was not fsynced after creating lifecycle.jsonl"
+    assert journal_path.is_file()
+
+
+@_POSIX_DIRECTORY_FSYNC_ONLY
+def test_ensure_journal_skips_creation_directory_fsync_for_existing_journal(tmp_path, monkeypatch):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    events_dir = journal_path.parent
+    run_journal.ensure_journal(journal_path)
+
+    real_fsync = os.fsync
+    call_log: list[tuple[str, bool]] = []
+
+    def tracking_fsync(fd):
+        call_log.append(("fsync", _refers_to_directory(fd, events_dir)))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+
+    run_journal.ensure_journal(journal_path)
+
+    dir_fsyncs = [i for i, (kind, refers_events) in enumerate(call_log) if kind == "fsync" and refers_events]
+    assert not dir_fsyncs, "existing journal must not trigger a creation directory fsync"
+
+
+@_POSIX_DIRECTORY_FSYNC_ONLY
+def test_recover_partial_tail_directory_fsyncs_quarantine_dir_before_truncating(tmp_path, monkeypatch):
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+    partial_suffix = b'{"schema":"brigade.run_event.v1","event_type":"run.plan'
+    journal_path.write_bytes(journal_path.read_bytes() + partial_suffix)
+    quarantine_dir = tmp_path / "quarantine"
+
+    real_fsync = os.fsync
+    real_ftruncate = os.ftruncate
+    call_log: list[tuple[str, bool | None]] = []
+
+    def tracking_fsync(fd):
+        call_log.append(("fsync", _refers_to_directory(fd, quarantine_dir)))
+        return real_fsync(fd)
+
+    def tracking_ftruncate(fd, length):
+        call_log.append(("ftruncate", None))
+        return real_ftruncate(fd, length)
+
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+    monkeypatch.setattr(os, "ftruncate", tracking_ftruncate)
+
+    run_journal.recover_partial_tail(journal_path, quarantine_dir)
+
+    truncate_indices = [i for i, (kind, _) in enumerate(call_log) if kind == "ftruncate"]
+    assert truncate_indices, "journal was never truncated"
+    first_truncate = truncate_indices[0]
+    quarantine_dir_fsyncs_before_truncate = [
+        i for i, (kind, refers_q) in enumerate(call_log) if kind == "fsync" and refers_q and i < first_truncate
+    ]
+    assert quarantine_dir_fsyncs_before_truncate, (
+        "quarantine directory was not fsynced after quarantine file close and before journal truncate"
+    )
+
+
+@_POSIX_DIRECTORY_FSYNC_ONLY
+def test_fsync_directory_refuses_symlink(tmp_path):
+    real_dir = tmp_path / "events"
+    real_dir.mkdir()
+    symlink = tmp_path / "events-link"
+    symlink.symlink_to(real_dir)
+
+    with pytest.raises(run_journal.RunJournalError):
+        run_journal._fsync_directory(symlink)
+
+
+@_POSIX_DIRECTORY_FSYNC_ONLY
+def test_fsync_directory_refuses_non_directory(tmp_path):
+    file_path = tmp_path / "lifecycle.jsonl"
+    file_path.write_bytes(b"")
+
+    with pytest.raises(run_journal.RunJournalError):
+        run_journal._fsync_directory(file_path)
+
+
+def test_fsync_directory_without_o_directory_opens_readonly_and_fsyncs(tmp_path, monkeypatch):
+    if os.name != "posix":
+        pytest.skip("POSIX directory fsync fallback is not exercised on this platform")
+
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    monkeypatch.setattr(run_journal, "_HAS_O_DIRECTORY", False)
+
+    real_fsync = os.fsync
+    fsynced: list[bool] = []
+
+    def tracking_fsync(fd):
+        fsynced.append(_refers_to_directory(fd, events_dir))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", tracking_fsync)
+
+    run_journal._fsync_directory(events_dir)
+
+    assert fsynced
+    assert fsynced[0]

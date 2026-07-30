@@ -85,18 +85,46 @@ def _valid_counter(value: object) -> bool:
 def _has_invalid_counters(data: object) -> bool:
     """True when a current-v3 artifact carries an untrustworthy counter.
 
-    Only ``comparisons``, ``mismatches``, and ``errors`` feed the readiness
-    gate and the carry accumulator; a bool, negative, or non-int value for
-    any of the three is structurally broken and must fail closed as
+    ``_record_outcome`` accumulates ``comparisons``, ``matches``,
+    ``mismatches``, ``lags``, and ``errors``. A bool, negative, or non-int
+    value for any of the five is structurally broken and must fail closed as
     evidence-unreadable rather than be carried forward.
     """
     if not isinstance(data, dict):
         return True
     return not (
         _valid_counter(data.get("comparisons"))
+        and _valid_counter(data.get("matches"))
         and _valid_counter(data.get("mismatches"))
+        and _valid_counter(data.get("lags"))
         and _valid_counter(data.get("errors"))
     )
+
+
+def _has_invalid_recent_records(data: object) -> bool:
+    """True when ``recent_records`` is not a list of record-shaped mappings.
+
+    ``_record_outcome`` indexes the tail entry and calls ``.get`` on
+    ``sequence``, ``shadow_digest``, ``projected_digest``, ``outcome``, and
+    ``category``; a dict, string, or list containing non-mappings must be
+    rejected before any indexing or appending.
+    """
+    if not isinstance(data, dict):
+        return True
+    recent = data.get("recent_records")
+    if not isinstance(recent, list):
+        return True
+    return any(not isinstance(entry, Mapping) for entry in recent)
+
+
+def _has_invalid_artifact_structure(data: object) -> bool:
+    """True when a current-v3 artifact is structurally untrustworthy.
+
+    Invalid gated counters and malformed ``recent_records`` both close the
+    carry path: quarantine the prior, start a fresh artifact, and record an
+    evidence-unreadable side record before the requested outcome.
+    """
+    return _has_invalid_counters(data) or _has_invalid_recent_records(data)
 
 
 def shadow_artifact_path(run_dir: Path) -> Path:
@@ -190,14 +218,24 @@ def _verify_stale_baseline(
 
 
 def _load_prior_artifact(artifact_path: Path) -> tuple[dict[str, Any] | None, bool]:
-    """Return (parsed artifact, was_corrupt). Absent -> (None, False)."""
+    """Return (parsed artifact, was_corrupt). Absent -> (None, False).
+
+    A parseable but non-object JSON payload (list, string, number, etc.) is
+    rejected before any caller can call ``.get`` on it: the file is quarantined
+    aside and reported as corrupt so the carry path starts fresh with an
+    evidence-unreadable side record instead of raising ``AttributeError``.
+    """
     if not artifact_path.is_file():
         return None, False
     try:
-        return json.loads(artifact_path.read_text()), False
+        parsed = json.loads(artifact_path.read_text())
     except (OSError, ValueError):
         _quarantine_corrupt(artifact_path)
         return None, True
+    if not isinstance(parsed, dict):
+        _quarantine_corrupt(artifact_path)
+        return None, True
+    return parsed, False
 
 
 def _write_artifact(run_dir: Path, data: dict[str, Any]) -> None:
@@ -327,7 +365,7 @@ def _record_outcome(
     differing_fields: list[str],
 ) -> None:
     prior, was_corrupt = _load_prior_artifact(shadow_artifact_path(run_dir))
-    invalid_counters = False
+    structurally_invalid = False
     if prior is None or was_corrupt:
         data = _empty_artifact(run_id)
     else:
@@ -359,17 +397,16 @@ def _record_outcome(
             # Current-version artifact: counters and records only accumulate,
             # never reset (mismatches/errors from a current-v3 artifact are
             # preserved across later comparisons). A current-v3 artifact with
-            # an invalid counter (bool, negative, or non-int for comparisons,
-            # mismatches, or errors) is structurally broken and must not be
+            # invalid counters (bool, negative, or non-int for comparisons,
+            # matches, mismatches, lags, or errors) or malformed
+            # ``recent_records`` is structurally broken and must not be
             # trusted: quarantine it aside, start a fresh artifact, and record
-            # an evidence-unreadable side record so the invalid counters never
-            # flow into the accumulators (a forged False must not satisfy
-            # ``== 0`` and a negative comparisons must not bypass the
-            # no-comparisons gate once re-read).
-            if _has_invalid_counters(prior):
+            # an evidence-unreadable side record so the invalid state never
+            # flows into the accumulators.
+            if _has_invalid_artifact_structure(prior):
                 _quarantine_corrupt(shadow_artifact_path(run_dir))
                 data = _empty_artifact(run_id)
-                invalid_counters = True
+                structurally_invalid = True
             else:
                 data = prior
     key = (tail_seq, shadow_digest, projected_digest, outcome, category)
@@ -387,10 +424,10 @@ def _record_outcome(
             return  # idempotent: same tail sequence, digests, outcome, and category
     # A present-but-unparseable prior artifact is quarantined and treated as
     # absent; record an evidence-unreadable error before the main record. A
-    # current-v3 prior with invalid counters is treated the same way: the
-    # forged counters are dropped and an evidence-unreadable side record
-    # explains the fresh start.
-    if was_corrupt or invalid_counters:
+    # current-v3 prior with invalid structure is treated the same way: forged
+    # counters or malformed recent_records are dropped and an
+    # evidence-unreadable side record explains the fresh start.
+    if was_corrupt or structurally_invalid:
         _append_evidence_unreadable(data, tail_seq, tail_digest)
     # Comparison-gap defense: if the journal tail advanced by more than one
     # since the last recorded comparison, a committed transition's shadow
@@ -636,15 +673,12 @@ def check_projection_readiness(run_dir: Path) -> ReadinessReport:
             or data.get("run_id") != run_dir.name
         ):
             return ReadinessReport(ready=False, reasons=(REASON_EVIDENCE_SCHEMA_MISMATCH,))
-        # Strict counter validation: a current-v3 artifact accepts only
-        # non-bool nonnegative ints for comparisons, mismatches, and errors.
-        # A bool (``True``/``False``), negative, or non-int counter is
-        # structurally broken and closes the gate as evidence-unreadable
-        # BEFORE the no-comparisons or mismatch/error branches can misread it
-        # (``False`` must not satisfy ``== 0``; ``True`` must not satisfy a
-        # truthy mismatch/error check; a negative comparisons must not bypass
-        # the no-comparisons gate).
-        if _has_invalid_counters(data):
+        # Strict structure validation: a current-v3 artifact accepts only
+        # non-bool nonnegative counters and a list of mapping-shaped recent
+        # records. A forged counter or malformed/missing ``recent_records``
+        # is structurally broken and closes the gate as evidence-unreadable
+        # BEFORE the no-comparisons or mismatch/error branches can misread it.
+        if _has_invalid_artifact_structure(data):
             return ReadinessReport(ready=False, reasons=(REASON_EVIDENCE_UNREADABLE,))
         if not isinstance(data.get("comparisons"), int) or data["comparisons"] < 1:
             return ReadinessReport(ready=False, reasons=(REASON_NO_COMPARISONS,))
