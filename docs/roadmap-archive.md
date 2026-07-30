@@ -419,6 +419,6 @@ The workspace on top of the bones:
 
 Status: foundation queue cleared.
 
-The detailed working queue for phases 61-100 lives in [`docs/phase-61-100-plan.md`](docs/phase-61-100-plan.md). That queue now serves as completion evidence for the foundation hardening pass: roadmap audit precision, deferred-item ownership, command documentation contracts, cross-producer provenance, privacy regression coverage, chat export hardening, backup and tool closeouts, context and learning receipts, security report compatibility, issue/TDD repair imports, memory and handoff hardening, release evidence schemas, operator-center schemas, fleet release reports, CI platform warnings, install smoke receipts, public template privacy, and local operator readiness closeout.
+The detailed working queue for phases 61-100 lives in [`docs/phase-61-100-plan.md`](phase-61-100-plan.md). That queue now serves as completion evidence for the foundation hardening pass: roadmap audit precision, deferred-item ownership, command documentation contracts, cross-producer provenance, privacy regression coverage, chat export hardening, backup and tool closeouts, context and learning receipts, security report compatibility, issue/TDD repair imports, memory and handoff hardening, release evidence schemas, operator-center schemas, fleet release reports, CI platform warnings, install smoke receipts, public template privacy, and local operator readiness closeout.
 
-Closed roadmap items move to [`docs/roadmap-archive.md`](docs/roadmap-archive.md) so this file stays focused on current direction.
+Closed roadmap items move to [`docs/roadmap-archive.md`](roadmap-archive.md) so this file stays focused on current direction.
