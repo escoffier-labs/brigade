@@ -80,7 +80,7 @@ def test_checkpoint_dir_and_path_helpers():
 def test_checkpoint_event_type_registered_with_closed_payload_keys():
     assert "run.snapshot.checkpointed" in run_events.EVENT_TYPES
     assert run_events.EVENT_TYPES["run.snapshot.checkpointed"] == frozenset(
-        {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type"}
+        {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type", "body_kind"}
     )
 
 

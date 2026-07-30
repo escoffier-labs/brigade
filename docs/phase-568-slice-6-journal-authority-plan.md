@@ -119,7 +119,7 @@ errors: `LifecycleJournalError` (existing, bounded). Journal errors:
 
 Task 3 depends on this task's registry update: `run_checkpoint.write_checkpoint` builds the `run.snapshot.checkpointed` payload through `run_events.build_event`, which enforces the closed `EVENT_TYPES` allowlist. The `body_kind` key this task adds to the allowlist is the same key task 3 sets when it calls `write_checkpoint(..., body_kind="base-stripped")`. Task 3 cannot land its stripped-base write path until this task widens the allowlist, or every `base-stripped` checkpoint append raises `CanonicalizationError` on the unknown `body_kind` key.
 
-- [ ] Write the failing tests. Append to `tests/test_run_events.py`:
+- [x] Write the failing tests. Append to `tests/test_run_events.py`:
 
 ```python
 def test_event_types_registry_includes_run_artifact_collection_started():
@@ -303,8 +303,8 @@ def test_projector_version_is_three():
 
 No second `test_projector_version_is_three` definition is appended. The rename above is the only definition.
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py" --capture brigade-work` - expect FAIL, `AssertionError` on the new registry and version assertions, `CanonicalizationError` on `test_build_checkpoint_event_accepts_base_stripped_payload_with_body_kind` (the `body_kind` key is not yet in the allowlist), `AssertionError` on the widened allowlist in `test_checkpoint_event_type_registered_with_closed_payload_keys`, `AssertionError` on `len(PRESERVED_FIELDS) == 45` and the six-entry `EVENT_STATUS` map in `test_full_field_fixture_preserves_deep_equality_and_copies_nested_values`, plus the renamed `test_projector_version_is_three` failing on `assert PROJECTOR_VERSION == 3`.
-- [ ] Implement the minimal change. In `src/brigade/run_events.py` add the row to `EVENT_TYPES`:
+- [x] Run it, watch it fail: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py" --capture brigade-work` - expect FAIL, `AssertionError` on the new registry and version assertions, `CanonicalizationError` on `test_build_checkpoint_event_accepts_base_stripped_payload_with_body_kind` (the `body_kind` key is not yet in the allowlist), `AssertionError` on the widened allowlist in `test_checkpoint_event_type_registered_with_closed_payload_keys`, `AssertionError` on `len(PRESERVED_FIELDS) == 45` and the six-entry `EVENT_STATUS` map in `test_full_field_fixture_preserves_deep_equality_and_copies_nested_values`, plus the renamed `test_projector_version_is_three` failing on `assert PROJECTOR_VERSION == 3`.
+- [x] Implement the minimal change. In `src/brigade/run_events.py` add the row to `EVENT_TYPES`:
 
 ```python
     "run.artifact_collection.started": frozenset({"detail"}),
@@ -327,8 +327,8 @@ In `src/brigade/run_projector.py` set `PROJECTOR_VERSION: int = 3`. Add `"run_jo
 
 `DERIVED_FIELDS`, `OWNED_FIELDS`, and `encode_snapshot_bytes` do not change. `run_journal_authority_requested` joins `PRESERVED_FIELDS` and therefore `OWNED_FIELDS`.
 
-- [ ] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py" --capture brigade-work` - expect PASS, all collected tests pass. Keep `test_empty_events_no_journal_preserves_base_status_and_deep_copies` green unchanged.
-- [ ] Commit: `git add src/brigade/run_events.py src/brigade/run_projector.py tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py && git commit -m "feat(run-projector): map dry-run incomplete artifact-collection and bump PROJECTOR_VERSION to 3"`
+- [x] Run to green: `brigade work verify run --target . --command ".venv/bin/python -m pytest -q tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py" --capture brigade-work` - expect PASS, all collected tests pass. Keep `test_empty_events_no_journal_preserves_base_status_and_deep_copies` green unchanged.
+- [x] Commit: `git add src/brigade/run_events.py src/brigade/run_projector.py tests/test_run_events.py tests/test_run_projector.py tests/test_run_checkpoint.py && git commit -m "feat(run-projector): map dry-run incomplete artifact-collection and bump PROJECTOR_VERSION to 3"`
 
 ## Task 2: Lifecycle mapping for the three previously unmapped statuses
 

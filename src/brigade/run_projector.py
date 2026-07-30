@@ -26,7 +26,7 @@ from typing import Any, Mapping, Sequence
 
 from brigade import run_checkpoint, run_events, run_journal
 
-PROJECTOR_VERSION: int = 2
+PROJECTOR_VERSION: int = 3
 
 # Field ownership over the run.json contract. Every current run.json key is
 # in exactly one of these two sets; see the ownership inventory in
@@ -58,6 +58,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "lock_workspace",
         "codex_transport",
         "lifecycle_journal_requested",
+        "run_journal_authority_requested",
         # Timing
         "started_at",
         "status_started_at",
@@ -109,6 +110,7 @@ EVENT_STATUS: dict[str, str] = {
     "run.dispatch.completed": "result-processing",
     "run.synthesis.started": "synthesizing",
     "run.synthesis.completed": "handoff",
+    "run.artifact_collection.started": "artifact-collection",
 }
 
 # Payload-driven rows: event_type -> (allowed payload status values, derived
@@ -116,8 +118,8 @@ EVENT_STATUS: dict[str, str] = {
 # directly as the derived status (run.failed: "failed" vs "timeout").
 _PAYLOAD_STATUS_RULES: dict[str, tuple[frozenset[str], str | None]] = {
     "run.created": (frozenset({"started"}), "started"),
-    "run.completed": (frozenset({"ok"}), "ok"),
-    "run.failed": (frozenset({"failed", "timeout"}), None),
+    "run.completed": (frozenset({"ok", "dry-run"}), None),
+    "run.failed": (frozenset({"failed", "timeout", "incomplete"}), None),
     "run.interrupted": (frozenset({"canceled"}), "canceled"),
 }
 

@@ -582,6 +582,7 @@ def test_gate_reason_coverage(tmp_path):
             "schema": "brigade.other.v1",
             "schema_version": 1,
             "run_id": _RUN_ID,
+            "projector_version": run_projector.PROJECTOR_VERSION,
             "comparisons": 1,
             "matches": 1,
             "mismatches": 0,
@@ -604,14 +605,14 @@ def test_gate_reason_coverage(tmp_path):
     data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
     data["schema"] = "brigade.run_shadow.v1"
     data["run_id"] = "other"
-    data["projector_version"] = 2
+    data["projector_version"] = run_projector.PROJECTOR_VERSION
     run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
     assert REASON_EVIDENCE_SCHEMA_MISMATCH in run_shadow.check_projection_readiness(run_dir).reasons
 
     # Zero comparisons.
     data["run_id"] = _RUN_ID
     data["comparisons"] = 0
-    data["projector_version"] = 2
+    data["projector_version"] = run_projector.PROJECTOR_VERSION
     run_shadow.shadow_artifact_path(run_dir).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
     assert REASON_NO_COMPARISONS in run_shadow.check_projection_readiness(run_dir).reasons
 
@@ -1107,7 +1108,7 @@ def test_version_one_shadow_artifact_is_stale(enabled, tmp_path):
     assert REASON_EVIDENCE_SCHEMA_MISMATCH in report.reasons
 
 
-def test_version_two_artifact_with_checkpoint_tail_reads_ready_when_bytes_match(enabled, tmp_path):
+def test_current_projector_version_artifact_with_checkpoint_tail_reads_ready_when_bytes_match(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
 
@@ -1120,7 +1121,7 @@ def test_version_two_artifact_with_checkpoint_tail_reads_ready_when_bytes_match(
 
     artifact = run_shadow.shadow_artifact_path(run_dir)
     data = json.loads(artifact.read_text())
-    assert data["projector_version"] == 2
+    assert data["projector_version"] == run_projector.PROJECTOR_VERSION
     assert data["last_compared_sequence"] == 2
     assert data["last_outcome"] == "match"
 
