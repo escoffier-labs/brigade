@@ -1398,56 +1398,23 @@ def _stale_recovery_receipt(
     lock_workspace: str | None = None,
     lock_acquired_at: str | None = None,
 ) -> dict:
-    from brigade import receipt_schema
+    from brigade import runguard
 
     payload = json.loads(json.dumps(checkpoint_obj))
-    failure_attribution: dict[str, object] = {}
-    stored_status = payload.get("status")
-    active_seats = payload.get("active_seats")
-    if stored_status == "dispatching" and isinstance(active_seats, list):
-        seats = [seat for seat in active_seats if isinstance(seat, str) and seat]
-        if len(seats) == 1:
-            failure_attribution["seat"] = seats[0]
-        elif seats:
-            failure_attribution["seats"] = seats
-    phase_owner = payload.get("phase_owner")
-    if not failure_attribution and isinstance(phase_owner, str) and phase_owner:
-        failure_attribution["seat"] = phase_owner
-    if not failure_attribution:
-        worker = payload.get("worker")
-        orchestrator = payload.get("orchestrator")
-        if isinstance(worker, str) and worker:
-            failure_attribution["seat"] = worker
-        elif isinstance(orchestrator, str) and orchestrator:
-            failure_attribution["seat"] = orchestrator
-    failure: dict[str, object] = {
-        "phase": "stale-lock-recovery",
-        "kind": "owner-process-exited",
-        "detail": f"run owner process {owner_pid} is no longer active",
-        "owner_pid": owner_pid,
-        "prior_status": payload.get("status", "planning"),
-        "recovered_at": recovered_at,
-        **failure_attribution,
-    }
-    if lock_workspace is not None:
-        failure["lock_workspace"] = lock_workspace
-        payload.setdefault("cwd", lock_workspace)
-        payload.setdefault("lock_workspace", lock_workspace)
-    if lock_acquired_at is not None:
-        failure["lock_acquired_at"] = lock_acquired_at
-        payload.setdefault("started_at", lock_acquired_at)
-    detail = failure["detail"]
-    payload.update(
-        {
-            "status": "failed",
-            "status_started_at": recovered_at,
-            "finished_at": recovered_at,
-            "error": detail,
-            "failure_phase": "stale-lock-recovery",
-            "failure": failure,
-        }
+    raw_status = payload.get("status")
+    if isinstance(raw_status, str) and raw_status:
+        prior_status = raw_status
+    else:
+        prior_status = "artifact-unavailable"
+    return runguard._build_stale_lock_recovery_receipt(
+        payload,
+        owner_pid=owner_pid,
+        recovered_at=recovered_at,
+        prior_status=prior_status,
+        lock_workspace=lock_workspace,
+        lock_acquired_at=lock_acquired_at,
+        persist_recovery_provenance=True,
     )
-    return receipt_schema.stamp_run_receipt(payload)
 
 
 def _recovery_check(target: Path, *, full: bool = False) -> tuple[str, str, str]:

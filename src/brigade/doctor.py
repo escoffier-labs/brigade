@@ -9,7 +9,10 @@ import shlex
 import shutil
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import TYPE_CHECKING, List, Sequence, Tuple
+
+if TYPE_CHECKING:
+    from . import run_journal
 
 from .budgets import (
     BOOTSTRAP_BUDGETS,
@@ -313,7 +316,7 @@ def _recovery_run_has_live_owner(target: Path, run_dir: Path) -> bool:
     return runguard._owner_matches_run(owner, resolved)
 
 
-def _recovery_journal_chain_reason(report: object, run_id: str) -> str | None:
+def _recovery_journal_chain_reason(report: run_journal.JournalReport, run_id: str) -> str | None:
     if report.partial_tail is not None:
         return "partial tail"
     if report.chain_errors:
@@ -397,7 +400,7 @@ def _reconstruct_stale_lock_recovery_receipt(
     never written a stale-lock-recovery receipt, so no reconstruction can
     match.
     """
-    from brigade import receipt_schema, runguard
+    from brigade import runguard
 
     failure = candidate.get("failure")
     if not isinstance(failure, dict):
@@ -445,58 +448,15 @@ def _reconstruct_stale_lock_recovery_receipt(
     else:
         prior_status = "artifact-unavailable"
 
-    failure_attribution: dict[str, object] = {}
-    stored_status = payload.get("status")
-    active_seats = payload.get("active_seats")
-    phase_owner = payload.get("phase_owner")
-    if stored_status == "dispatching" and isinstance(active_seats, list):
-        seats = [seat for seat in active_seats if isinstance(seat, str) and seat]
-        if len(seats) == 1:
-            failure_attribution["seat"] = seats[0]
-        elif seats:
-            failure_attribution["seats"] = seats
-    if not failure_attribution and isinstance(phase_owner, str) and phase_owner:
-        failure_attribution["seat"] = phase_owner
-    if not failure_attribution:
-        worker = payload.get("worker")
-        orchestrator = payload.get("orchestrator")
-        if isinstance(worker, str) and worker:
-            failure_attribution["seat"] = worker
-        elif isinstance(orchestrator, str) and orchestrator:
-            failure_attribution["seat"] = orchestrator
-
-    workspace = failure.get("lock_workspace")
-    if isinstance(workspace, str) and workspace:
-        payload.setdefault("cwd", workspace)
-        payload.setdefault("lock_workspace", workspace)
-    acquired_at = failure.get("lock_acquired_at")
-    if isinstance(acquired_at, str) and acquired_at:
-        payload.setdefault("started_at", acquired_at)
-
-    failure_payload: dict[str, object] = {
-        "phase": "stale-lock-recovery",
-        "kind": "owner-process-exited",
-        "detail": detail,
-        "owner_pid": owner_pid,
-        "prior_status": prior_status,
-        "recovered_at": recovered_at,
-        **failure_attribution,
-    }
-    if isinstance(workspace, str) and workspace:
-        failure_payload["lock_workspace"] = workspace
-    if isinstance(acquired_at, str) and acquired_at:
-        failure_payload["lock_acquired_at"] = acquired_at
-    payload.update(
-        {
-            "status": "failed",
-            "status_started_at": recovered_at,
-            "finished_at": recovered_at,
-            "error": detail,
-            "failure_phase": "stale-lock-recovery",
-            "failure": failure_payload,
-        }
+    return runguard._build_stale_lock_recovery_receipt(
+        payload,
+        owner_pid=owner_pid,
+        recovered_at=recovered_at,
+        prior_status=prior_status,
+        lock_workspace=failure.get("lock_workspace"),
+        lock_acquired_at=failure.get("lock_acquired_at"),
+        persist_recovery_provenance=True,
     )
-    return receipt_schema.stamp_run_receipt(payload)
 
 
 def _check_claude_work_loop(target: Path) -> CheckResult | None:

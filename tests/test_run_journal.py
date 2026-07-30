@@ -1027,17 +1027,48 @@ def test_read_journal_bounded_refuses_event_sequence_513(tmp_path):
 
 
 def test_read_journal_stays_compatible_after_bounded_reader(tmp_path):
-    """read_journal must still parse a journal that read_journal_bounded refuses on bounds."""
-    journal_path = _journal_path(_run_dir(tmp_path))
-    _append_first_event(journal_path)
-    _append_second_event(journal_path)
+    """read_journal must still parse a journal that read_journal_bounded refuses on bounds.
 
-    # read_journal_bounded succeeds on a small journal.
-    bounded = run_journal.read_journal_bounded(journal_path)
-    assert len(bounded.events) == 2
-    # read_journal stays compatible on the same journal.
+    Builds a 513-event journal with efficient direct canonical construction
+    (``run_events.build_event`` + a single appending ``write`` per line, no
+    ``append_event`` fsyncs). ``read_journal_bounded`` refuses it on the 513th
+    complete record (``MAX_JOURNAL_EVENTS`` is 512); ``read_journal`` has no
+    event-count bound and must read the full chain cleanly.
+    """
+    journal_path = _journal_path(_run_dir(tmp_path))
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_digest: str | None = None
+    with journal_path.open("ab") as handle:
+        for sequence in range(1, 514):
+            event_type = "run.planning.started" if sequence % 2 == 0 else "run.dispatch.observed"
+            payload = (
+                {"detail": "n"} if event_type == "run.planning.started" else {"seat": "c", "attempt": 1, "detail": "n"}
+            )
+            env = run_events.build_event(
+                run_id=RUN_ID,
+                sequence=sequence,
+                event_type=event_type,
+                payload=payload,
+                idempotency_key=f"ev-{sequence}",
+                recorded_at="2026-07-27T15:30:45.000000Z",
+                previous_digest=previous_digest,
+            )
+            handle.write(run_events.canonical_bytes(env) + b"\n")
+            previous_digest = env["event_digest"]
+
+    # read_journal_bounded refuses the journal on bounds.
+    with pytest.raises(run_journal.RunJournalError) as excinfo:
+        run_journal.read_journal_bounded(journal_path)
+    assert "bound exceeded" in excinfo.value.diagnostic
+
+    # read_journal stays compatible: it has no event-count bound and reads the
+    # full gap-free, digest-linked chain without raising or reporting errors.
     plain = run_journal.read_journal(journal_path)
-    assert len(plain.events) == 2
+    assert len(plain.events) == 513
+    assert plain.partial_tail is None
+    assert plain.chain_errors == []
+    assert plain.events[0].sequence == 1
+    assert plain.events[-1].sequence == 513
 
 
 # -- Finding 6: read_journal_bounded must count complete records, not trust sequence --

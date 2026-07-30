@@ -277,6 +277,81 @@ def _claim_existing_stale(path: Path, stale: Path) -> tuple[Path, dict[str, obje
     return claimed, _owner_with_workspace(_read_lock_owner(claimed), path)
 
 
+def _build_stale_lock_recovery_receipt(
+    payload: dict[str, object],
+    *,
+    owner_pid: int,
+    recovered_at: str,
+    prior_status: str,
+    lock_workspace: object | None = None,
+    lock_acquired_at: object | None = None,
+    persist_recovery_provenance: bool = False,
+) -> dict[str, object]:
+    """Pure builder for the stale-lock-recovery terminal receipt payload.
+
+    Derives the failure attribution (``dispatching``/``active_seats`` ->
+    ``phase_owner`` -> ``worker`` -> ``orchestrator``), applies the
+    ``cwd``/``lock_workspace``/``started_at`` metadata defaults, and stamps the
+    run receipt. Never touches the filesystem; the caller owns reading
+    ``run.json``, the terminal-status short-circuit, and the final write.
+    ``persist_recovery_provenance`` controls whether ``lock_workspace``/
+    ``lock_acquired_at`` are recorded on the ``failure`` sub-object (the
+    persisted-provenance path) versus applied only as run.json metadata
+    defaults (the legacy path). Mutates ``payload`` in place; callers pass a
+    fresh copy they own.
+    """
+    detail = f"run owner process {owner_pid} is no longer active"
+    failure_attribution: dict[str, object] = {}
+    stored_status = payload.get("status")
+    active_seats = payload.get("active_seats")
+    phase_owner = payload.get("phase_owner")
+    if stored_status == "dispatching" and isinstance(active_seats, list):
+        seats = [seat for seat in active_seats if isinstance(seat, str) and seat]
+        if len(seats) == 1:
+            failure_attribution["seat"] = seats[0]
+        elif seats:
+            failure_attribution["seats"] = seats
+    if not failure_attribution and isinstance(phase_owner, str) and phase_owner:
+        failure_attribution["seat"] = phase_owner
+    if not failure_attribution:
+        worker = payload.get("worker")
+        orchestrator = payload.get("orchestrator")
+        if isinstance(worker, str) and worker:
+            failure_attribution["seat"] = worker
+        elif isinstance(orchestrator, str) and orchestrator:
+            failure_attribution["seat"] = orchestrator
+    if isinstance(lock_workspace, str) and lock_workspace:
+        payload.setdefault("cwd", lock_workspace)
+        payload.setdefault("lock_workspace", lock_workspace)
+    if isinstance(lock_acquired_at, str) and lock_acquired_at:
+        payload.setdefault("started_at", lock_acquired_at)
+    failure_payload: dict[str, object] = {
+        "phase": "stale-lock-recovery",
+        "kind": "owner-process-exited",
+        "detail": detail,
+        "owner_pid": owner_pid,
+        "prior_status": prior_status,
+        "recovered_at": recovered_at,
+        **failure_attribution,
+    }
+    if persist_recovery_provenance:
+        if isinstance(lock_workspace, str) and lock_workspace:
+            failure_payload["lock_workspace"] = lock_workspace
+        if isinstance(lock_acquired_at, str) and lock_acquired_at:
+            failure_payload["lock_acquired_at"] = lock_acquired_at
+    payload.update(
+        {
+            "status": "failed",
+            "status_started_at": recovered_at,
+            "finished_at": recovered_at,
+            "error": detail,
+            "failure_phase": "stale-lock-recovery",
+            "failure": failure_payload,
+        }
+    )
+    return receipt_schema.stamp_run_receipt(payload)
+
+
 def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_provenance: bool = False) -> str:
     if owner is None:
         return "unattributable"
@@ -321,61 +396,17 @@ def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_p
             if status not in _NONTERMINAL_RUN_STATUSES:
                 return "terminal"
     recovered_at = datetime.now(timezone.utc).isoformat()
-    detail = f"run owner process {owner_pid} is no longer active"
-    failure_attribution: dict[str, object] = {}
-    stored_status = payload.get("status")
-    active_seats = payload.get("active_seats")
-    phase_owner = payload.get("phase_owner")
-    if stored_status == "dispatching" and isinstance(active_seats, list):
-        seats = [seat for seat in active_seats if isinstance(seat, str) and seat]
-        if len(seats) == 1:
-            failure_attribution["seat"] = seats[0]
-        elif seats:
-            failure_attribution["seats"] = seats
-    if not failure_attribution and isinstance(phase_owner, str) and phase_owner:
-        failure_attribution["seat"] = phase_owner
-    if not failure_attribution:
-        worker = payload.get("worker")
-        orchestrator = payload.get("orchestrator")
-        if isinstance(worker, str) and worker:
-            failure_attribution["seat"] = worker
-        elif isinstance(orchestrator, str) and orchestrator:
-            failure_attribution["seat"] = orchestrator
-    workspace = owner.get("_lock_workspace")
-    if isinstance(workspace, str) and workspace:
-        payload.setdefault("cwd", workspace)
-        payload.setdefault("lock_workspace", workspace)
-    acquired_at = owner.get("acquired_at")
-    if isinstance(acquired_at, str) and acquired_at:
-        payload.setdefault("started_at", acquired_at)
-    failure_payload: dict[str, object] = {
-        "phase": "stale-lock-recovery",
-        "kind": "owner-process-exited",
-        "detail": detail,
-        "owner_pid": owner_pid,
-        "prior_status": prior_status,
-        "recovered_at": recovered_at,
-        **failure_attribution,
-    }
-    if persist_recovery_provenance:
-        provenance_workspace = owner.get("_lock_workspace")
-        if isinstance(provenance_workspace, str) and provenance_workspace:
-            failure_payload["lock_workspace"] = provenance_workspace
-        provenance_acquired_at = owner.get("acquired_at")
-        if isinstance(provenance_acquired_at, str) and provenance_acquired_at:
-            failure_payload["lock_acquired_at"] = provenance_acquired_at
-    payload.update(
-        {
-            "status": "failed",
-            "status_started_at": recovered_at,
-            "finished_at": recovered_at,
-            "error": detail,
-            "failure_phase": "stale-lock-recovery",
-            "failure": failure_payload,
-        }
+    stamped = _build_stale_lock_recovery_receipt(
+        payload,
+        owner_pid=owner_pid,
+        recovered_at=recovered_at,
+        prior_status=prior_status,
+        lock_workspace=owner.get("_lock_workspace"),
+        lock_acquired_at=owner.get("acquired_at"),
+        persist_recovery_provenance=persist_recovery_provenance,
     )
     try:
-        localio.write_json(run_json, receipt_schema.stamp_run_receipt(payload))
+        localio.write_json(run_json, stamped)
     except OSError:
         return "write-failed"
     return "recovered"
@@ -494,7 +525,12 @@ def run_lock_state(workspace: Path, run_dir: Path) -> str:
     """
     try:
         path = lock_path(workspace)
-    except RunGuardError:
+    except (RunGuardError, OSError, RuntimeError):
+        # ``lock_path`` raises ``RunGuardError`` for a non-worktree git failure
+        # and ``OSError``/``RuntimeError`` from path resolution (``resolve``,
+        # or ``expanduser`` when HOME is unavailable) for a non-worktree
+        # workspace. The predicate is never-raises: an unresolvable workspace
+        # normalizes to ``absent`` so callers fail closed.
         return "absent"
     try:
         if not path.exists():
@@ -598,8 +634,19 @@ def _recover_pending_claims(
     recovered = False
     for stale in _stale_claims(path):
         pre_claim_owner = _read_lock_owner(stale)
-        if run_dir is not None and not _owner_matches_run(pre_claim_owner, run_dir):
-            continue
+        if run_dir is not None:
+            try:
+                matches = _owner_matches_run(pre_claim_owner, run_dir)
+            except (OSError, RuntimeError):
+                # ``_owner_matches_run`` resolves the owner's recorded run_dir
+                # via ``expanduser``/``resolve``; ``expanduser`` raises
+                # ``RuntimeError`` when HOME is unavailable and ``resolve``
+                # can raise ``OSError`` on a cyclic or vanished path. Fail
+                # closed: skip the claim we cannot verify rather than letting
+                # the error escape the recovery gate.
+                continue
+            if not matches:
+                continue
         claimed_owner = _claim_existing_stale(path, stale)
         if claimed_owner is None:
             continue

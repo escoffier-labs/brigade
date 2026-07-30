@@ -1323,6 +1323,39 @@ def test_run_lock_state_returns_invalid_for_cyclic_requested_run_dir(tmp_path, m
     assert (lock_path / "owner.json").read_bytes() == snapshot_owner_bytes
 
 
+@pytest.mark.parametrize("exc", [OSError("resolve boom"), RuntimeError("resolve boom")])
+def test_run_lock_state_never_raises_for_lock_path_resolution_errors(tmp_path, monkeypatch, exc):
+    """``OSError``/``RuntimeError`` from ``lock_path`` resolution (``cwd.resolve``
+    on a cyclic or vanished workspace, or ``expanduser`` with no HOME) must not
+    escape the never-raises predicate; the lock normalizes to ``absent`` so
+    callers fail closed, mirroring ``has_matching_stale_claim``."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    real_lock_path = runguard.lock_path
+
+    def boom(cwd):
+        if cwd == workspace:
+            raise exc
+        return real_lock_path(cwd)
+
+    monkeypatch.setattr(runguard, "lock_path", boom)
+
+    assert runguard.run_lock_state(workspace, run_dir) == "absent"
+
+
+def test_run_lock_state_never_raises_for_unresolvable_workspace(tmp_path, monkeypatch):
+    """A real unresolvable workspace (cyclic symlink) must normalize to
+    ``absent`` rather than escape ``run_lock_state`` with ``OSError``."""
+    cyclic = tmp_path / "cyclic"
+    cyclic.symlink_to(cyclic, target_is_directory=True)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    assert runguard.run_lock_state(cyclic, run_dir) == "absent"
+
+
 def test_recover_stale_run_invokes_before_terminalize_after_token_check(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = tmp_path / "abandoned-run"
@@ -1797,6 +1830,29 @@ def test_recover_stale_run_still_raises_when_foreign_lock_and_no_matching_claim(
         runguard.recover_stale_run(repo, run_dir)
     assert lock_path.is_dir()
     assert json.loads((lock_path / "owner.json").read_text())["owner_token"] == "foreign"
+
+
+@pytest.mark.parametrize("exc", [OSError("resolve boom"), RuntimeError("expanduser boom")])
+def test_recover_pending_claims_skips_claim_when_owner_matches_run_raises(tmp_path, monkeypatch, exc):
+    """When ``_owner_matches_run`` raises ``OSError``/``RuntimeError`` resolving
+    the owner's recorded run_dir, ``_recover_pending_claims`` fails closed
+    (skips the unverifiable claim) instead of letting the error escape the
+    recovery gate. The matching claim is left in place and run.json is not
+    terminalized."""
+    repo, run_dir = _abandoned_run(tmp_path)
+    stale = _matching_stale_claim(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid != 99999999)
+
+    def boom(_owner, _run_dir):
+        raise exc
+
+    monkeypatch.setattr(runguard, "_owner_matches_run", boom)
+
+    # required=False so the gate returns False instead of raising "run lock not
+    # found"; the point is that no exception escapes and the claim is skipped.
+    assert runguard._recover_pending_claims(runguard.lock_path(repo), run_dir=run_dir) is False
+    assert stale.exists()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
 
 
 def test_has_matching_stale_claim_normalizes_oserror_from_stale_claims_glob(tmp_path, monkeypatch):
