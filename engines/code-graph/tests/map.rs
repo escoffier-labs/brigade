@@ -249,11 +249,13 @@ fn map_data_includes_symbols_paths_and_call_site_labels() {
     assert!(html.contains("src/focus.rs"));
     assert!(html.contains("src/caller.rs"));
     assert!(html.contains("src/callee.rs"));
-    assert!(data["edges"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|edge| edge["kind"] == "call" && edge["line"] == 21));
+    assert!(
+        data["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["kind"] == "call" && edge["line"] == 21)
+    );
 }
 
 #[test]

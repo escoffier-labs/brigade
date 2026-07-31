@@ -29,7 +29,7 @@ pub use graph::{
     limit_edges, normalize_depth,
 };
 pub use health::{CycleReport, DeadCodeReport, cycles, dead_code};
-pub use map::{MapDirection, MapOptions, MAX_MAP_DEPTH, MAX_MAP_EDGES, MAX_MAP_NODES};
+pub use map::{MAX_MAP_DEPTH, MAX_MAP_EDGES, MAX_MAP_NODES, MapDirection, MapOptions};
 pub use map_html::export_html_map;
 pub use search::{search_symbols, search_symbols_with_path};
 pub use stats::stats;

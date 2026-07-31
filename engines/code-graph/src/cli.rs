@@ -9,13 +9,13 @@ use crate::model::{ContextPack, Direction, EdgeRow, GraphDiff, SearchRow};
 #[cfg(feature = "codesearch")]
 use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
-    DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, ExportFormat, ExportScope, affected,
-    build_context_pack,
+    DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, ExportFormat, ExportScope, MapDirection,
+    MapOptions, affected, build_context_pack,
     context::{edge_location, symbol_location},
     cycles, dead_code, diff_graphs, doctor, export_graph, export_html_map, file_neighbors,
     graph_edges_with_depth, impact_edges, missing_db_report, normalize_depth,
-    personalize_context_pack, render_markdown, render_markdown_budgeted,
-    search_symbols_with_path, stats, MapDirection, MapOptions,
+    personalize_context_pack, render_markdown, render_markdown_budgeted, search_symbols_with_path,
+    stats,
 };
 use crate::store::{
     db_path, init_schema, open_db, open_default_read_only, open_read_only, sync_repo_force,

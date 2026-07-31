@@ -152,11 +152,7 @@ const HTML_SUFFIX: &str = r###"</script>
 "###;
 
 /// Builds a self-contained static HTML document for the requested file map.
-pub fn export_html_map(
-    conn: &Connection,
-    focus_path: &str,
-    options: MapOptions,
-) -> Result<String> {
+pub fn export_html_map(conn: &Connection, focus_path: &str, options: MapOptions) -> Result<String> {
     let graph = build_file_map(conn, focus_path, options)?;
     let data = serde_json::to_string(&graph)?;
     let safe_data = data

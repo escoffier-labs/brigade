@@ -2,9 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::ValueEnum;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 
 pub const MAX_MAP_DEPTH: u8 = 5;
@@ -345,9 +345,9 @@ fn compare_map_edges(left: &MapEdge, right: &MapEdge) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use rusqlite::{params, Connection};
+    use rusqlite::{Connection, params};
 
-    use super::{build_file_map, MapDirection, MapOptions};
+    use super::{MapDirection, MapOptions, build_file_map};
     use crate::store::init_schema;
 
     fn fixture(reverse_insert_order: bool) -> Result<Connection> {

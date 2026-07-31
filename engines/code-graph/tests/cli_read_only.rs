@@ -77,7 +77,13 @@ fn build_map_db(root: &Path) -> PathBuf {
         ("focus_a", "focus_a", "focus::alpha", "src/focus.rs", 4),
         ("focus_b", "focus_b", "focus::beta", "src/focus.rs", 18),
         ("callee", "callee", "callee::work", "src/callee.rs", 12),
-        ("neighbor", "neighbor", "neighbor::deep", "src/neighbor.rs", 3),
+        (
+            "neighbor",
+            "neighbor",
+            "neighbor::deep",
+            "src/neighbor.rs",
+            3,
+        ),
     ] {
         conn.execute(
             "INSERT INTO symbols \
@@ -346,10 +352,14 @@ fn map_cli_reports_missing_indexed_focus_without_writing_or_mutating() {
 
     assert!(!output.status.success(), "map unexpectedly succeeded");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("src/missing.rs is not an indexed focus file"),
+        String::from_utf8_lossy(&output.stderr)
+            .contains("src/missing.rs is not an indexed focus file"),
         "missing focus diagnostic: {output:?}"
     );
-    assert!(!output_path.exists(), "map wrote output after query failure");
+    assert!(
+        !output_path.exists(),
+        "map wrote output after query failure"
+    );
     assert_eq!(before, snapshot_graph_state(graph_dir));
 }
 
@@ -383,12 +393,18 @@ fn map_cli_rejects_invalid_bounds_without_mutating_graph_state() {
             .output()
             .unwrap();
 
-        assert!(!output.status.success(), "{option}={value} unexpectedly succeeded");
+        assert!(
+            !output.status.success(),
+            "{option}={value} unexpectedly succeeded"
+        );
         assert!(
             String::from_utf8_lossy(&output.stderr).contains(expected),
             "invalid {option}={value} diagnostic: {output:?}"
         );
-        assert!(!output_path.exists(), "map wrote output for {option}={value}");
+        assert!(
+            !output_path.exists(),
+            "map wrote output for {option}={value}"
+        );
         assert_eq!(before, snapshot_graph_state(graph_dir));
     }
 }
