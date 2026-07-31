@@ -91,7 +91,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
 <button id="map-graph-zoom-out" type="button">Zoom out</button>
 <button id="map-graph-reset" type="button">Reset view</button>
 </div>
-<svg id="map-graph" role="img" aria-labelledby="map-graph-heading map-graph-description" viewBox="0 0 960 640" tabindex="0">
+<svg id="map-graph" role="group" aria-labelledby="map-graph-heading map-graph-description" viewBox="0 0 960 640" tabindex="0">
 <desc id="map-graph-description">Interactive call graph. Use the controls or keyboard to pan, zoom, and reset.</desc>
 <defs><marker id="graphtrail-arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M 0 0 L 8 4 L 0 8 z"></path></marker></defs>
 <g id="map-graph-pan-layer"><g id="map-graph-edge-layer"></g><g id="map-graph-node-layer"></g></g>
@@ -134,13 +134,14 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
   } else {
     status.textContent = `${graph.status.rendered_nodes} nodes rendered, ${graph.status.omitted_nodes} omitted; ${graph.status.rendered_edges} edges rendered, ${graph.status.omitted_edges} omitted.`;
   }
+  const shellQuote = (value) => `'${value.replaceAll("'", "'\"'\"'")}'`;
   const show = (node) => {
     const heading = document.createElement('h2');
     heading.textContent = node.qualified_name;
     const location = document.createElement('p');
     location.textContent = `${node.file_path}:${node.start_line}`;
     const command = document.createElement('code');
-    command.textContent = `graphtrail map ${node.file_path} --out graphtrail-map.html`;
+    command.textContent = `graphtrail map --out graphtrail-map.html -- ${shellQuote(node.file_path)}`;
     details.replaceChildren(heading, location, command);
   };
   const makeNodeButton = (node) => {
@@ -278,6 +279,12 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
     if (calleeIds.has(node.id)) return 'graph-node graph-node--callee';
     return 'graph-node graph-node--additional';
   };
+  const nodeRadius = (node) => {
+    const degree = degreeById.get(node.id) || 0;
+    const degreeRadius = 6 + Math.min(degree, 8);
+    const radius = node.id === primaryFocusNode?.id ? Math.max(16, degreeRadius) : degreeRadius;
+    return radius;
+  };
   let transform = { x: 0, y: 0, scale: 1 };
   let panStart = null;
   const labelZoomThreshold = 1.5;
@@ -311,17 +318,24 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
     edgeLayer.replaceChildren();
     nodeLayer.replaceChildren();
     for (const edge of edges) {
+      const sourceNode = nodesById.get(edge.source);
+      const targetNode = nodesById.get(edge.target);
       const sourcePosition = positions.get(edge.source);
       const targetPosition = positions.get(edge.target);
+      const sourceRadius = nodeRadius(sourceNode) + 2;
+      const targetRadius = nodeRadius(targetNode) + 2;
+      const edgeDx = targetPosition.x - sourcePosition.x;
+      const edgeDy = targetPosition.y - sourcePosition.y;
+      const edgeDistance = Math.max(Math.hypot(edgeDx, edgeDy), 1);
       const line = document.createElementNS(svg.namespaceURI, 'line');
       line.classList.add('graph-edge');
       line.dataset.source = edge.source;
       line.dataset.target = edge.target;
       line.setAttribute('marker-end', 'url(#graphtrail-arrowhead)');
-      line.setAttribute('x1', String(sourcePosition.x));
-      line.setAttribute('y1', String(sourcePosition.y));
-      line.setAttribute('x2', String(targetPosition.x));
-      line.setAttribute('y2', String(targetPosition.y));
+      line.setAttribute('x1', String(sourcePosition.x + (edgeDx / edgeDistance) * sourceRadius));
+      line.setAttribute('y1', String(sourcePosition.y + (edgeDy / edgeDistance) * sourceRadius));
+      line.setAttribute('x2', String(targetPosition.x - (edgeDx / edgeDistance) * targetRadius));
+      line.setAttribute('y2', String(targetPosition.y - (edgeDy / edgeDistance) * targetRadius));
       const title = document.createElementNS(svg.namespaceURI, 'title');
       title.textContent = `${edge.kind} (line ${edge.line})`;
       line.append(title);
@@ -338,9 +352,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
       nodeGroup.setAttribute('aria-label', `${label}, ${node.file_path}:${node.start_line}`);
       nodeGroup.setAttribute('transform', `translate(${position.x} ${position.y})`);
       const circle = document.createElementNS(svg.namespaceURI, 'circle');
-      const degree = degreeById.get(node.id) || 0;
-      const degreeRadius = 6 + Math.min(degree, 8);
-      const radius = node.id === primaryFocusNode?.id ? Math.max(16, degreeRadius) : degreeRadius;
+      const radius = nodeRadius(node);
       circle.setAttribute('r', String(radius));
       const text = document.createElementNS(svg.namespaceURI, 'text');
       const maxLabelLength = 36;
