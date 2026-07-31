@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -496,7 +497,7 @@ def test_redaction_quarantines_rewrites_rechains_and_reprojects(tmp_path):
     verified = run_journal.read_journal_bounded(_journal_path(run_dir))
     assert verified.chain_errors == []
     assert verified.partial_tail is None
-    assert len(verified.events) == len(original_events)
+    assert len(verified.events) == len(original_events) + 1
     assert verified.events[1].payload == {"detail": "[REDACTED]"}
     assert verified.events[0].event_digest == original_events[0].event_digest
     assert verified.events[1].event_digest != original_events[1].event_digest
@@ -505,8 +506,223 @@ def test_redaction_quarantines_rewrites_rechains_and_reprojects(tmp_path):
     current = json.loads((run_dir / "run.json").read_text())
     after_projection = run_projector.project_run_snapshot(current, verified.events, journal_present=True).snapshot
     assert current == after_projection
-    assert _without_tail_digest(current) == _without_tail_digest(before_projection)
+    expected_projection = dict(before_projection)
+    expected_projection["journal_last_sequence"] = len(verified.events)
+    assert _without_tail_digest(current) == _without_tail_digest(expected_projection)
     assert current["journal_last_event_digest"] == verified.events[-1].event_digest
+
+
+def test_overlapping_redactions_preserve_both_chained_operation_anchors(tmp_path):
+    run_dir, _, _ = _authority_run(tmp_path)
+
+    first = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=2,
+        sequence_end=2,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    second = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=2,
+        sequence_end=5,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+
+    anchors = [
+        event
+        for event in run_journal.read_journal_bounded(_journal_path(run_dir)).events
+        if event.event_type == "run.redaction.recorded"
+    ]
+    assert {anchor.payload["operation_id"] for anchor in anchors} == {first.operation_id, second.operation_id}
+    assert all(
+        set(anchor.payload)
+        == {
+            "operation_id",
+            "affected_first_sequence",
+            "affected_last_sequence",
+            "reason_class",
+            "record_sha256",
+        }
+        for anchor in anchors
+    )
+    records = {report.operation_id: report.record_path.read_bytes() for report in (first, second)}
+    assert all(
+        anchor.payload["record_sha256"] == hashlib.sha256(records[anchor.payload["operation_id"]]).hexdigest()
+        for anchor in anchors
+    )
+    second_record = json.loads(second.record_path.read_text())
+    assert second_record["parent_operation_id"] == first.operation_id
+
+
+def test_redaction_rejects_preserved_structural_only_range_without_mutation(tmp_path):
+    run_dir, _, events = _authority_run(tmp_path)
+    checkpoint = next(event for event in events if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE)
+    before = _artifact_snapshot(run_dir)
+
+    with pytest.raises(run_redaction.RedactionError, match="redaction range contains no redactable payloads"):
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=checkpoint.sequence,
+            sequence_end=checkpoint.sequence,
+            reason=REASON_CODE,
+            operator_confirmed=True,
+        )
+
+    assert _artifact_snapshot(run_dir) == before
+    assert not (run_dir / "events" / "redactions").exists()
+
+
+def test_resume_projection_accepts_only_trailing_redaction_anchor_lag(tmp_path):
+    run_dir, _, _ = _authority_run(tmp_path)
+    run_redaction.redact_journal(
+        run_dir,
+        sequence_start=2,
+        sequence_end=2,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    events = run_journal.read_journal_bounded(_journal_path(run_dir)).events
+    projected_before_anchor = json.loads((run_dir / "run.json").read_text())
+    projected_before_anchor["journal_last_sequence"] = events[-2].sequence
+    projected_before_anchor["journal_last_event_digest"] = events[-2].event_digest
+    (run_dir / "run.json").write_text(json.dumps(projected_before_anchor, indent=2, sort_keys=True) + "\n")
+
+    run_redaction._resume_projection_after_rewrite(run_dir, events)
+
+    assert (
+        json.loads((run_dir / "run.json").read_text())
+        == run_projector.project_run_snapshot(projected_before_anchor, events, journal_present=True).snapshot
+    )
+
+
+def test_resume_projection_rejects_non_anchor_sequence_lag(tmp_path):
+    run_dir, _, _ = _authority_run(tmp_path)
+    run_redaction.redact_journal(
+        run_dir,
+        sequence_start=2,
+        sequence_end=2,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    events = run_journal.read_journal_bounded(_journal_path(run_dir)).events
+    stale = json.loads((run_dir / "run.json").read_text())
+    stale["journal_last_sequence"] = events[-3].sequence
+    stale["journal_last_event_digest"] = events[-3].event_digest
+    (run_dir / "run.json").write_text(json.dumps(stale, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(run_redaction.RedactionError, match="projection sequence lag"):
+        run_redaction._resume_projection_after_rewrite(run_dir, events)
+
+
+def test_redaction_retry_appends_missing_anchor_after_verified_record(tmp_path, monkeypatch):
+    run_dir, _, _ = _authority_run(tmp_path)
+    real_append = run_redaction._append_redaction_anchor
+    failed = False
+
+    def fail_before_anchor(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise run_redaction.RedactionError("simulated anchor append failure")
+        return real_append(*args, **kwargs)
+
+    monkeypatch.setattr(run_redaction, "_append_redaction_anchor", fail_before_anchor)
+    with pytest.raises(run_redaction.RedactionError, match="anchor append"):
+        run_redaction.redact_journal(
+            run_dir, sequence_start=2, sequence_end=2, reason=REASON_CODE, operator_confirmed=True
+        )
+
+    monkeypatch.setattr(run_redaction, "_append_redaction_anchor", real_append)
+    report = run_redaction.redact_journal(
+        run_dir, sequence_start=2, sequence_end=2, reason=REASON_CODE, operator_confirmed=True
+    )
+    events = run_journal.read_journal_bounded(_journal_path(run_dir)).events
+    anchors = [event for event in events if event.event_type == "run.redaction.recorded"]
+    assert [anchor.payload["operation_id"] for anchor in anchors] == [report.operation_id]
+    assert (
+        json.loads((run_dir / "run.json").read_text())
+        == run_projector.project_run_snapshot(
+            json.loads((run_dir / "run.json").read_text()), events, journal_present=True
+        ).snapshot
+    )
+
+
+def test_redaction_retry_reprojects_after_anchor_before_projection_failure(tmp_path, monkeypatch):
+    run_dir, _, _ = _authority_run(tmp_path)
+    real_replace_projection = run_redaction._replace_projection
+    failed = False
+
+    def fail_anchor_projection(path, projection):
+        nonlocal failed
+        if not failed and projection.snapshot["journal_last_sequence"] == 5:
+            failed = True
+            raise run_redaction.RedactionError("simulated anchor projection failure")
+        return real_replace_projection(path, projection)
+
+    monkeypatch.setattr(run_redaction, "_replace_projection", fail_anchor_projection)
+    with pytest.raises(run_redaction.RedactionError, match="anchor projection"):
+        run_redaction.redact_journal(
+            run_dir, sequence_start=2, sequence_end=2, reason=REASON_CODE, operator_confirmed=True
+        )
+
+    monkeypatch.setattr(run_redaction, "_replace_projection", real_replace_projection)
+    report = run_redaction.redact_journal(
+        run_dir, sequence_start=2, sequence_end=2, reason=REASON_CODE, operator_confirmed=True
+    )
+    events = run_journal.read_journal_bounded(_journal_path(run_dir)).events
+    anchors = [event for event in events if event.event_type == "run.redaction.recorded"]
+    assert [anchor.payload["operation_id"] for anchor in anchors] == [report.operation_id]
+    assert (
+        json.loads((run_dir / "run.json").read_text())
+        == run_projector.project_run_snapshot(
+            json.loads((run_dir / "run.json").read_text()), events, journal_present=True
+        ).snapshot
+    )
+
+
+def test_redaction_refuses_anchor_append_after_ownership_loss(tmp_path, monkeypatch):
+    run_dir, _, _ = _authority_run(tmp_path)
+    real_assert_owner = run_redaction._assert_active_owner
+    calls = 0
+
+    def lose_owner(workspace, resolved_run_dir):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise run_redaction.RedactionError("redaction lost exclusive run lock ownership")
+        return real_assert_owner(workspace, resolved_run_dir)
+
+    monkeypatch.setattr(run_redaction, "_assert_active_owner", lose_owner)
+    with pytest.raises(run_redaction.RedactionError, match="lost exclusive"):
+        run_redaction.redact_journal(
+            run_dir, sequence_start=2, sequence_end=2, reason=REASON_CODE, operator_confirmed=True
+        )
+
+    assert not [
+        event
+        for event in run_journal.read_journal_bounded(_journal_path(run_dir)).events
+        if event.event_type == "run.redaction.recorded"
+    ]
+
+
+def test_replaced_redaction_record_set_fails_chained_anchor_validation(tmp_path):
+    run_dir, _, _ = _authority_run(tmp_path)
+    report = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=2,
+        sequence_end=2,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    record = json.loads(report.record_path.read_text())
+    replacement = (json.dumps(record, separators=(",", ":")) + "\n").encode()
+    assert replacement != report.record_path.read_bytes()
+    report.record_path.write_bytes(replacement)
+
+    with pytest.raises(run_redaction.RedactionError, match="anchor"):
+        run_redaction._post_replace_verify(run_dir, expected_digest=None)
 
 
 def test_redaction_refuses_live_lock_without_mutation(tmp_path):
@@ -1051,7 +1267,7 @@ def test_redacted_payloads_remain_valid_for_projection_sensitive_status_fields(t
     assert report.events[3].payload == {"status": "ok", "detail": "[REDACTED]"}
     current = json.loads((run_dir / "run.json").read_text())
     assert current["status"] == before_projection["status"] == "ok"
-    assert current["journal_last_sequence"] == 4
+    assert current["journal_last_sequence"] == 5
     for event in report.events:
         assert run_events.validate_event(event.to_dict()) == []
 
@@ -1059,6 +1275,10 @@ def test_redacted_payloads_remain_valid_for_projection_sensitive_status_fields(t
 def test_two_operator_processes_cannot_publish_concurrent_rewrites(tmp_path):
     run_dir, _, _ = _authority_run(tmp_path)
     marker = tmp_path / "first-operator-inside-transaction"
+    child_env = dict(os.environ)
+    child_env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (str(Path(__file__).parents[1] / "src"), child_env.get("PYTHONPATH")))
+    )
     script = textwrap.dedent(
         """
         import sys
@@ -1098,12 +1318,15 @@ def test_two_operator_processes_cannot_publish_concurrent_rewrites(tmp_path):
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=child_env,
     )
     for _ in range(100):
         if marker.exists():
             break
         time.sleep(0.02)
-    assert marker.exists()
+    if not marker.exists():
+        first_stdout, first_stderr = first.communicate(timeout=10)
+        pytest.fail(f"first operator never entered transaction\nstdout:\n{first_stdout}\nstderr:\n{first_stderr}")
 
     second = subprocess.run(
         [
@@ -1118,6 +1341,7 @@ def test_two_operator_processes_cannot_publish_concurrent_rewrites(tmp_path):
         text=True,
         capture_output=True,
         check=False,
+        env=child_env,
     )
     first_stdout, first_stderr = first.communicate(timeout=10)
 
@@ -1536,6 +1760,7 @@ def test_sequential_cleanup_removes_prior_rewritten_digest_alias_oracle(tmp_path
     first_state_path = first.record_path.parent / "state.json"
     first_state = json.loads(first_state_path.read_text())
     first_rewritten_digest = first_state["rewritten_sha256"]
+    first_post_anchor_digest = hashlib.sha256(_journal_path(run_dir).read_bytes()).hexdigest()
     assert first_rewritten_digest in first.record_path.read_text()
 
     second = run_redaction.redact_journal(
@@ -1546,7 +1771,14 @@ def test_sequential_cleanup_removes_prior_rewritten_digest_alias_oracle(tmp_path
         operator_confirmed=True,
     )
     second_state = json.loads((second.record_path.parent / "state.json").read_text())
-    assert second_state["original_sha256"] == first_rewritten_digest
+    assert second_state["original_sha256"] == first_post_anchor_digest
+    assert second_state["original_sha256"] != first_rewritten_digest
+    parent_anchor = next(
+        event
+        for event in run_journal.read_journal_bounded(_journal_path(run_dir)).events
+        if event.event_type == "run.redaction.recorded" and event.payload["operation_id"] == first.operation_id
+    )
+    assert json.loads(second.record_path.read_text())["parent_record_sha256"] == parent_anchor.payload["record_sha256"]
 
     run_redaction.cleanup_redaction_quarantine(
         run_dir,
@@ -1681,6 +1913,69 @@ def test_cleanup_retry_finishes_after_child_record_before_cleaned_state(tmp_path
             assert second_original_digest.encode() not in path.read_bytes()
 
 
+def test_redaction_after_cleaned_parent_uses_active_anchor_reference(tmp_path):
+    run_dir, _, _ = _authority_run(tmp_path)
+    first = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=2,
+        sequence_end=2,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    run_redaction.cleanup_redaction_quarantine(
+        run_dir,
+        operation_id=first.operation_id,
+        operator_confirmed=True,
+    )
+    parent_anchor = next(
+        event
+        for event in run_journal.read_journal_bounded(_journal_path(run_dir)).events
+        if event.event_type == "run.redaction.recorded" and event.payload["operation_id"] == first.operation_id
+    )
+
+    second = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=4,
+        sequence_end=4,
+        reason="personal-data-exposure",
+        operator_confirmed=True,
+    )
+
+    second_record = json.loads(second.record_path.read_text())
+    assert second_record["parent_operation_id"] == first.operation_id
+    assert second_record["parent_record_sha256"] == parent_anchor.payload["record_sha256"]
+
+
+def test_redaction_inventory_rejects_tampered_parent_record_anchor_reference(tmp_path):
+    run_dir, _, _ = _authority_run(tmp_path)
+    run_redaction.redact_journal(
+        run_dir,
+        sequence_start=2,
+        sequence_end=2,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    second = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=4,
+        sequence_end=4,
+        reason="personal-data-exposure",
+        operator_confirmed=True,
+    )
+    second_record = json.loads(second.record_path.read_text())
+    second_record["parent_record_sha256"] = "0" * 64
+    second.record_path.write_text(json.dumps(second_record, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(run_redaction.RedactionError, match="parent reference"):
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=3,
+            sequence_end=3,
+            reason="other-sensitive-data",
+            operator_confirmed=True,
+        )
+
+
 def test_redaction_inventory_rejects_record_without_state(tmp_path):
     run_dir, _, _ = _authority_run(tmp_path)
     first = run_redaction.redact_journal(
@@ -1724,6 +2019,7 @@ def test_redaction_inventory_rejects_forged_multiple_tip_graph(tmp_path):
     second_record = json.loads(second.record_path.read_text())
     second_state["parent_operation_id"] = None
     second_record["parent_operation_id"] = None
+    second_record.pop("parent_record_sha256")
     second_state_path.write_text(json.dumps(second_state))
     second.record_path.write_text(json.dumps(second_record))
 

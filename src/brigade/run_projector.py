@@ -144,6 +144,7 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "approval.rejected",
         "approval.held",
         "approval.consumed",
+        "run.redaction.recorded",
     }
 )
 

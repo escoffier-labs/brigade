@@ -107,6 +107,15 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
         }
     ),
     "run.artifact_collection.started": frozenset({"detail"}),
+    "run.redaction.recorded": frozenset(
+        {
+            "operation_id",
+            "affected_first_sequence",
+            "affected_last_sequence",
+            "reason_class",
+            "record_sha256",
+        }
+    ),
 }
 APPROVAL_DECISION_STATES = frozenset({"pending", "approved", "rejected", "held", "consumed"})
 APPROVAL_DECISION_EVENT_STATES = {
