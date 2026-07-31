@@ -18,9 +18,10 @@ a:focus-visible, button:focus-visible { outline: 3px solid Highlight; outline-of
 .skip-link { left: 0.75rem; position: absolute; top: -3rem; }
 .skip-link:focus { top: 0.75rem; }
 .layout { display: grid; gap: 1rem; grid-template-columns: minmax(16rem, 1fr) minmax(18rem, 2fr); padding: 1rem; }
+.lane { border-block-start: 1px solid ButtonBorder; padding-block: 0.5rem; }
 .node { border: 1px solid ButtonBorder; display: block; margin: 0.5rem 0; padding: 0.5rem; text-align: left; width: 100%; }
 .direction-label { font-weight: 700; }
-@media (prefers-color-scheme: dark) { .node { border-color: GrayText; } }
+@media (prefers-color-scheme: dark) { .lane, .node { border-color: GrayText; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; } }
 </style>
 </head>
@@ -36,9 +37,30 @@ a:focus-visible, button:focus-visible { outline: 3px solid Highlight; outline-of
 <div class="layout">
 <section aria-label="Map nodes">
 <p><span class="direction-label">Direction</span>: <span id="map-direction"></span></p>
-<div id="map-nodes" role="tree" aria-label="Code map nodes"></div>
+<div id="map-nodes" role="tree" aria-label="Code map nodes">
+<section id="map-focus-lane" class="lane" aria-labelledby="map-focus-heading">
+<h2 id="map-focus-heading">Focus file</h2>
+<div id="map-focus-list"></div>
+</section>
+<section id="map-callers-lane" class="lane" aria-labelledby="map-callers-heading">
+<h2 id="map-callers-heading">Callers (incoming relationships)</h2>
+<div id="map-callers-list"></div>
+</section>
+<section id="map-callees-lane" class="lane" aria-labelledby="map-callees-heading">
+<h2 id="map-callees-heading">Callees (outgoing relationships)</h2>
+<div id="map-callees-list"></div>
+</section>
+<section id="map-additional-neighbors-lane" class="lane" aria-labelledby="map-additional-neighbors-heading">
+<h2 id="map-additional-neighbors-heading">Additional neighbors</h2>
+<div id="map-additional-neighbors-list"></div>
+</section>
+</div>
 </section>
 <aside id="map-details" aria-label="Selected node" tabindex="-1"></aside>
+<section id="map-relationships-lane" class="lane" aria-labelledby="map-relationships-heading">
+<h2 id="map-relationships-heading">Relationships (source → target)</h2>
+<ul id="map-relationship-list"></ul>
+</section>
 </div>
 </section>
 </main>
@@ -49,9 +71,14 @@ const HTML_SUFFIX: &str = r###"</script>
 (() => {
   const source = document.getElementById('graphtrail-map-data');
   const graph = JSON.parse(source.textContent);
-  const nodes = document.getElementById('map-nodes');
   const details = document.getElementById('map-details');
   const status = document.getElementById('map-status');
+  const focusList = document.getElementById('map-focus-list');
+  const callersList = document.getElementById('map-callers-list');
+  const calleesList = document.getElementById('map-callees-list');
+  const additionalNeighborsList = document.getElementById('map-additional-neighbors-list');
+  const relationshipList = document.getElementById('map-relationship-list');
+  const buttons = [];
   document.getElementById('map-direction').textContent = graph.direction;
   if (graph.empty) {
     status.textContent = `No indexed symbols in ${graph.focus_path}.`;
@@ -59,15 +86,14 @@ const HTML_SUFFIX: &str = r###"</script>
     status.textContent = `${graph.status.rendered_nodes} nodes rendered, ${graph.status.omitted_nodes} omitted; ${graph.status.rendered_edges} edges rendered, ${graph.status.omitted_edges} omitted.`;
   }
   const show = (node) => {
-    details.replaceChildren();
     const heading = document.createElement('h2');
     heading.textContent = node.qualified_name;
     const location = document.createElement('p');
     location.textContent = `${node.file_path}:${node.start_line}`;
-    details.append(heading, location);
+    details.replaceChildren(heading, location);
     details.focus();
   };
-  const buttons = graph.nodes.map((node) => {
+  const makeNodeButton = (node) => {
     const button = document.createElement('button');
     button.className = 'node';
     button.type = 'button';
@@ -80,9 +106,46 @@ const HTML_SUFFIX: &str = r###"</script>
       if (event.key === 'ArrowUp') { event.preventDefault(); buttons[(index + buttons.length - 1) % buttons.length].focus(); }
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); show(node); }
     });
-    nodes.append(button);
+    buttons.push(button);
     return button;
+  };
+  const renderLane = (list, laneNodes, emptyMessage) => {
+    if (laneNodes.length === 0) {
+      const empty = document.createElement('p');
+      empty.textContent = emptyMessage;
+      list.replaceChildren(empty);
+      return;
+    }
+    list.replaceChildren(...laneNodes.map(makeNodeButton));
+  };
+  const selectedNodeIds = new Set(graph.nodes.map((node) => node.id));
+  const edges = graph.edges.filter((edge) => selectedNodeIds.has(edge.source) && selectedNodeIds.has(edge.target));
+  const focusNodes = graph.nodes.filter((node) => node.file_path === graph.focus_path);
+  const focusIds = new Set(focusNodes.map((node) => node.id));
+  const callerIds = new Set(edges.filter((edge) => focusIds.has(edge.target)).map((edge) => edge.source));
+  const calleeIds = new Set(edges.filter((edge) => focusIds.has(edge.source)).map((edge) => edge.target));
+  const callers = graph.nodes.filter((node) => !focusIds.has(node.id) && callerIds.has(node.id));
+  const callees = graph.nodes.filter((node) => !focusIds.has(node.id) && calleeIds.has(node.id));
+  const additionalNeighbors = graph.nodes.filter((node) => !focusIds.has(node.id) && !callerIds.has(node.id) && !calleeIds.has(node.id));
+  renderLane(focusList, focusNodes, 'No focus-file symbols.');
+  renderLane(callersList, callers, 'No direct callers.');
+  renderLane(calleesList, callees, 'No direct callees.');
+  renderLane(additionalNeighborsList, additionalNeighbors, 'No additional neighbors.');
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const relationships = edges.map((edge) => {
+    const source = nodesById.get(edge.source);
+    const target = nodesById.get(edge.target);
+    const item = document.createElement('li');
+    item.textContent = `${source.qualified_name} ${edge.kind} (line ${edge.line}) → ${target.qualified_name}`;
+    return item;
   });
+  if (relationships.length === 0) {
+    const empty = document.createElement('li');
+    empty.textContent = 'No selected relationships.';
+    relationshipList.replaceChildren(empty);
+  } else {
+    relationshipList.replaceChildren(...relationships);
+  }
 })();
 </script>
 </body>
