@@ -512,7 +512,7 @@ def test_redaction_quarantines_rewrites_rechains_and_reprojects(tmp_path):
     assert current["journal_last_event_digest"] == verified.events[-1].event_digest
 
 
-def test_overlapping_redactions_preserve_both_chained_operation_anchors(tmp_path):
+def test_redaction_preserves_first_anchor_when_second_range_contains_it(tmp_path):
     run_dir, _, _ = _authority_run(tmp_path)
 
     first = run_redaction.redact_journal(
@@ -522,19 +522,27 @@ def test_overlapping_redactions_preserve_both_chained_operation_anchors(tmp_path
         reason=REASON_CODE,
         operator_confirmed=True,
     )
+    first_anchor = next(
+        event
+        for event in run_journal.read_journal_bounded(_journal_path(run_dir)).events
+        if event.event_type == "run.redaction.recorded" and event.payload["operation_id"] == first.operation_id
+    )
+    second_sequence_start = 2
+    second_sequence_end = first_anchor.sequence
+    assert second_sequence_start <= first_anchor.sequence <= second_sequence_end
+
     second = run_redaction.redact_journal(
         run_dir,
-        sequence_start=2,
-        sequence_end=5,
+        sequence_start=second_sequence_start,
+        sequence_end=second_sequence_end,
         reason=REASON_CODE,
         operator_confirmed=True,
     )
 
-    anchors = [
-        event
-        for event in run_journal.read_journal_bounded(_journal_path(run_dir)).events
-        if event.event_type == "run.redaction.recorded"
-    ]
+    verified = run_journal.read_journal_bounded(_journal_path(run_dir))
+    assert verified.chain_errors == []
+    assert verified.partial_tail is None
+    anchors = [event for event in verified.events if event.event_type == "run.redaction.recorded"]
     assert {anchor.payload["operation_id"] for anchor in anchors} == {first.operation_id, second.operation_id}
     assert all(
         set(anchor.payload)
@@ -547,11 +555,10 @@ def test_overlapping_redactions_preserve_both_chained_operation_anchors(tmp_path
         }
         for anchor in anchors
     )
-    records = {report.operation_id: report.record_path.read_bytes() for report in (first, second)}
-    assert all(
-        anchor.payload["record_sha256"] == hashlib.sha256(records[anchor.payload["operation_id"]]).hexdigest()
-        for anchor in anchors
-    )
+    record_hashes = {
+        report.operation_id: hashlib.sha256(report.record_path.read_bytes()).hexdigest() for report in (first, second)
+    }
+    assert {anchor.payload["operation_id"]: anchor.payload["record_sha256"] for anchor in anchors} == record_hashes
     second_record = json.loads(second.record_path.read_text())
     assert second_record["parent_operation_id"] == first.operation_id
 
