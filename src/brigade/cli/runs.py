@@ -26,6 +26,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Explicit runs directory. Defaults to .brigade/runs under --cwd.",
     )
     p_runs_list.add_argument("--limit", type=int, default=10, help="Maximum number of runs to show.")
+    p_runs_list.add_argument("--json", action="store_true", help="Emit the versioned JSON run list contract.")
     p_runs_latest = runs_sub.add_parser("latest", help="Show the most recent Brigade run.")
     p_runs_latest.add_argument(
         "--cwd",
@@ -39,8 +40,10 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Explicit runs directory. Defaults to .brigade/runs under --cwd.",
     )
+    p_runs_latest.add_argument("--json", action="store_true", help="Emit the versioned JSON run detail contract.")
     p_runs_show = runs_sub.add_parser("show", help="Show a readable summary of one run directory.")
     p_runs_show.add_argument("run_dir", type=Path, help="Path to a Brigade run artifact directory.")
+    p_runs_show.add_argument("--json", action="store_true", help="Emit the versioned JSON run detail contract.")
     p_runs_watch = runs_sub.add_parser("watch", help="Watch a Brigade run artifact directory until it finishes.")
     p_runs_watch.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
     p_runs_watch.add_argument(
@@ -121,11 +124,11 @@ def dispatch(args) -> int:
     from .. import runs_cmd
 
     if args.runs_command == "list":
-        return runs_cmd.list_runs(cwd=args.cwd, runs_dir=args.runs_dir, limit=args.limit)
+        return runs_cmd.list_runs(cwd=args.cwd, runs_dir=args.runs_dir, limit=args.limit, json_output=args.json)
     if args.runs_command == "latest":
-        return runs_cmd.show_latest(cwd=args.cwd, runs_dir=args.runs_dir)
+        return runs_cmd.show_latest(cwd=args.cwd, runs_dir=args.runs_dir, json_output=args.json)
     if args.runs_command == "show":
-        return runs_cmd.show(args.run_dir)
+        return runs_cmd.show(args.run_dir, json_output=args.json)
     if args.runs_command == "watch":
         return runs_cmd.watch(
             args.run,

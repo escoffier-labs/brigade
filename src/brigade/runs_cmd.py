@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os.path
+import re
+import shlex
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _NONTERMINAL_STATUSES = frozenset(
     {
@@ -22,6 +25,50 @@ _NONTERMINAL_STATUSES = frozenset(
     }
 )
 _SUCCESS_STATUSES = frozenset({"ok", "dry-run"})
+_RUNS_LIST_SCHEMA = "brigade.runs-list.v1"
+_RUN_DETAIL_SCHEMA = "brigade.run-detail.v1"
+_RUN_WATCH_SCHEMA = "brigade.run-watch.v1"
+_SAFE_TEXT_LIMIT = 240
+_SAFE_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def _safe_text(value: object, *, limit: int = _SAFE_TEXT_LIMIT) -> str | None:
+    """Return one bounded display string without user home or absolute paths."""
+    if not isinstance(value, str):
+        return None
+    rendered = " ".join(value.split())
+    rendered = re.sub(r"(?<![A-Za-z0-9._-])(?:/|~|[A-Za-z]:[\\/]|\\\\)\S*", "[path]", rendered)
+    if len(rendered) <= limit:
+        return rendered
+    return rendered[: limit - 3].rstrip() + "..."
+
+
+def _safe_number(value: object) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _safe_run_id(run_dir: Path) -> str:
+    return _safe_text(run_dir.name, limit=128) or "unknown"
+
+
+def _mode(meta: dict[str, Any]) -> str:
+    modes: list[str] = []
+    if meta.get("read_only") is True:
+        modes.append("read-only")
+    if meta.get("dry_run") is True:
+        modes.append("dry-run")
+    return ", ".join(modes) if modes else "normal"
+
+
+def _active_phase(meta: dict[str, Any]) -> str | None:
+    if value := _safe_text(meta.get("active_phase"), limit=128):
+        return value
+    stage = meta.get("active_stage")
+    if isinstance(stage, int) and not isinstance(stage, bool):
+        return f"stage {stage}"
+    return _safe_text(meta.get("status"), limit=128)
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -228,37 +275,45 @@ def _watch_return_code(status: object) -> int:
     return 1
 
 
-def _emit_json(payload: dict[str, object]) -> None:
+def _emit_json(payload: dict[str, object], *, record_sink: Callable[[dict[str, object]], None] | None = None) -> None:
+    if record_sink is not None:
+        record_sink(payload)
+        return
     print(json.dumps(payload, sort_keys=True))
 
 
-def _emit_run(meta: dict[str, Any], *, json_output: bool) -> None:
+def _emit_run(
+    run_dir: Path,
+    meta: dict[str, Any],
+    *,
+    json_output: bool,
+    record_sink: Callable[[dict[str, object]], None] | None = None,
+) -> None:
     if json_output:
-        phase, kind, detail = _failure_fields(meta)
-        payload = {
-            "type": "run",
-            "status": meta.get("status"),
-            "task": meta.get("task"),
-            "started_at": meta.get("started_at"),
-            "finished_at": meta.get("finished_at"),
-            "duration_seconds": meta.get("duration_seconds"),
-            "failure_phase": phase,
-            "failure_kind": kind,
-            "failure_detail": detail,
-        }
-        _emit_json({key: value for key, value in payload.items() if value is not None})
+        _emit_json(
+            {"schema": _RUN_WATCH_SCHEMA, "type": "run", "run": _run_summary(run_dir, meta)},
+            record_sink=record_sink,
+        )
         return
     _line("status", meta.get("status"))
     _line("task", meta.get("task"))
     _print_failure(meta)
 
 
-def _emit_plan(plan_payload: dict[str, Any], *, json_output: bool) -> None:
+def _emit_plan(
+    plan_payload: dict[str, Any],
+    *,
+    json_output: bool,
+    record_sink: Callable[[dict[str, object]], None] | None = None,
+) -> None:
     assignments = plan_payload.get("assignments")
     if not isinstance(assignments, list):
         return
     if json_output:
-        _emit_json({"type": "plan", "assignments": assignments})
+        _emit_json(
+            {"schema": _RUN_WATCH_SCHEMA, "type": "plan", "assignments": _plan_payload(plan_payload)},
+            record_sink=record_sink,
+        )
         return
     print("plan:")
     if not assignments:
@@ -284,9 +339,24 @@ def _event_item_type(event: dict[str, Any]) -> str:
     return ""
 
 
-def _emit_event(worker: str, event: dict[str, Any], *, json_output: bool) -> None:
+def _emit_event(
+    worker: str,
+    event: dict[str, Any],
+    *,
+    json_output: bool,
+    record_sink: Callable[[dict[str, object]], None] | None = None,
+) -> None:
     if json_output:
-        _emit_json({"type": "event", "worker": worker, "event": event})
+        payload: dict[str, object] = {
+            "schema": _RUN_WATCH_SCHEMA,
+            "type": "event",
+            "worker": _safe_text(worker, limit=128) or "unknown",
+        }
+        if method := _safe_text(event.get("method"), limit=128):
+            payload["method"] = method
+        if item_type := _safe_text(_event_item_type(event), limit=128):
+            payload["item_type"] = item_type
+        _emit_json(payload, record_sink=record_sink)
         return
     method = event.get("method", "unknown")
     item_type = _event_item_type(event)
@@ -294,54 +364,95 @@ def _emit_event(worker: str, event: dict[str, Any], *, json_output: bool) -> Non
     print(f"event: {worker} {method}{suffix}")
 
 
-def _emit_workers(worker_results: dict[str, Any], *, json_output: bool) -> None:
+def _emit_workers(
+    worker_results: dict[str, Any],
+    *,
+    json_output: bool,
+    record_sink: Callable[[dict[str, object]], None] | None = None,
+) -> None:
     if json_output:
-        _emit_json({"type": "workers", "results": worker_results.get("results") or []})
+        _emit_json(
+            {"schema": _RUN_WATCH_SCHEMA, "type": "workers", "workers": _workers_payload(worker_results)},
+            record_sink=record_sink,
+        )
         return
     _print_workers(worker_results)
 
 
-def _emit_synthesis(synthesis: dict[str, Any], *, json_output: bool) -> None:
+def _emit_synthesis(
+    synthesis: dict[str, Any],
+    *,
+    json_output: bool,
+    record_sink: Callable[[dict[str, object]], None] | None = None,
+) -> None:
     if json_output:
         _emit_json(
             {
+                "schema": _RUN_WATCH_SCHEMA,
                 "type": "synthesis",
-                "orchestrator": synthesis.get("orchestrator"),
-                "result": synthesis.get("result"),
-            }
+                "synthesis": _synthesis_payload(synthesis),
+            },
+            record_sink=record_sink,
         )
         return
     _print_synthesis(synthesis)
 
 
-def _emit_final(final_text: str, *, json_output: bool) -> None:
+def _emit_final(
+    final_text: str,
+    *,
+    json_output: bool,
+    record_sink: Callable[[dict[str, object]], None] | None = None,
+) -> None:
     if json_output:
-        _emit_json({"type": "final", "text": final_text})
+        _emit_json(
+            {
+                "schema": _RUN_WATCH_SCHEMA,
+                "type": "final",
+                "available": True,
+                "size_bytes": len(final_text.encode()),
+            },
+            record_sink=record_sink,
+        )
         return
     _print_final(final_text)
 
 
-def _emit_summary(run_dir: Path, meta: dict[str, Any], *, json_output: bool) -> None:
+def _emit_summary(
+    run_dir: Path,
+    meta: dict[str, Any],
+    *,
+    json_output: bool,
+    record_sink: Callable[[dict[str, object]], None] | None = None,
+) -> None:
     status = str(meta.get("status") or "unknown")
     duration = meta.get("duration_seconds")
     if json_output:
-        payload: dict[str, object] = {"type": "summary", "run": str(run_dir), "status": status}
+        payload: dict[str, object] = {
+            "schema": _RUN_WATCH_SCHEMA,
+            "type": "summary",
+            "run_id": _safe_run_id(run_dir),
+            "status": _safe_text(status, limit=128) or "unknown",
+        }
         if isinstance(duration, (int, float)):
             payload["duration_seconds"] = duration
         phase, _, _ = _failure_fields(meta)
         if phase == "stale-lock-recovery":
-            recovery_status = _lock_recovery_status(run_dir, meta)
             payload["failure_phase"] = phase
-            payload["inspect_command"] = f"brigade runs show {run_dir}"
-            payload["recover_status"] = recovery_status
             payload["resume_available"] = _resume_available(run_dir)
-        _emit_json(payload)
+        _emit_json(payload, record_sink=record_sink)
         return
     print(f"summary: {status} in {_duration_text(duration)}")
     _print_terminal_guidance(run_dir, meta)
 
 
-def _tail_events(run_dir: Path, offsets: dict[Path, int], *, json_output: bool) -> None:
+def _tail_events(
+    run_dir: Path,
+    offsets: dict[Path, int],
+    *,
+    json_output: bool,
+    record_sink: Callable[[dict[str, object]], None] | None = None,
+) -> None:
     events_dir = run_dir / "events"
     if not events_dir.is_dir():
         return
@@ -365,7 +476,7 @@ def _tail_events(run_dir: Path, offsets: dict[Path, int], *, json_output: bool) 
                     except json.JSONDecodeError:
                         continue
                     if isinstance(event, dict):
-                        _emit_event(path.stem, event, json_output=json_output)
+                        _emit_event(path.stem, event, json_output=json_output, record_sink=record_sink)
                 offsets[path] = fh.tell()
         except OSError:
             continue
@@ -377,6 +488,7 @@ def _poll_watch_artifacts(
     event_offsets: dict[Path, int],
     *,
     json_output: bool,
+    record_sink: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[dict[str, Any] | None, int | None]:
     try:
         run_meta = _read_json(run_dir / "run.json")
@@ -385,35 +497,35 @@ def _poll_watch_artifacts(
             return None, 2
         run_sig = _artifact_signature(run_meta)
         if signatures.get("run") != run_sig:
-            _emit_run(run_meta, json_output=json_output)
+            _emit_run(run_dir, run_meta, json_output=json_output, record_sink=record_sink)
             signatures["run"] = run_sig
 
         plan = _read_json(run_dir / "plan.json")
         if plan is not None:
             plan_sig = _artifact_signature(plan)
             if signatures.get("plan") != plan_sig:
-                _emit_plan(plan, json_output=json_output)
+                _emit_plan(plan, json_output=json_output, record_sink=record_sink)
                 signatures["plan"] = plan_sig
 
-        _tail_events(run_dir, event_offsets, json_output=json_output)
+        _tail_events(run_dir, event_offsets, json_output=json_output, record_sink=record_sink)
 
         worker_results = _read_json(run_dir / "worker-results.json")
         if worker_results is not None:
             workers_sig = _artifact_signature(worker_results)
             if signatures.get("workers") != workers_sig:
-                _emit_workers(worker_results, json_output=json_output)
+                _emit_workers(worker_results, json_output=json_output, record_sink=record_sink)
                 signatures["workers"] = workers_sig
 
         synthesis = _read_json(run_dir / "synthesis.json")
         if synthesis is not None:
             synthesis_sig = _artifact_signature(synthesis)
             if signatures.get("synthesis") != synthesis_sig:
-                _emit_synthesis(synthesis, json_output=json_output)
+                _emit_synthesis(synthesis, json_output=json_output, record_sink=record_sink)
                 signatures["synthesis"] = synthesis_sig
 
         final_text = _read_text(run_dir / "final.txt")
         if final_text is not None and signatures.get("final") != final_text:
-            _emit_final(final_text, json_output=json_output)
+            _emit_final(final_text, json_output=json_output, record_sink=record_sink)
             signatures["final"] = final_text
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -443,6 +555,32 @@ def _collect_runs(root: Path) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
         try:
             meta = _read_json(child / "run.json")
         except ValueError:
+            skipped += 1
+            continue
+        if meta is None:
+            skipped += 1
+            continue
+        runs.append((child, meta))
+    runs.sort(key=_run_sort_key, reverse=True)
+    return runs, skipped
+
+
+def _collect_serializable_runs(root: Path) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
+    """Collect only direct, safe-named run directories for browser serialization."""
+    runs: list[tuple[Path, dict[str, Any]]] = []
+    skipped = 0
+    for child in root.iterdir():
+        if child.is_symlink():
+            skipped += 1
+            continue
+        if not child.is_dir():
+            continue
+        if _SAFE_RUN_ID.fullmatch(child.name) is None:
+            skipped += 1
+            continue
+        try:
+            meta = _read_json(child / "run.json")
+        except (OSError, ValueError):
             skipped += 1
             continue
         if meta is None:
@@ -526,7 +664,259 @@ def _stale_timeout(run_dir: Path, meta: dict[str, Any]) -> float | None:
     return timeout if time.time() - started.timestamp() > timeout else None
 
 
-def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> int:
+def _run_summary(run_dir: Path, meta: dict[str, Any]) -> dict[str, object]:
+    phase, _, _ = _failure_fields(meta)
+    return {
+        "run_id": _safe_run_id(run_dir),
+        "status": _safe_text(meta.get("status"), limit=128) or "unknown",
+        "active_phase": _active_phase(meta),
+        "task_summary": _safe_text(meta.get("task")),
+        "started_at": _safe_text(meta.get("started_at"), limit=128),
+        "status_started_at": _safe_text(meta.get("status_started_at"), limit=128),
+        "finished_at": _safe_text(meta.get("finished_at"), limit=128),
+        "duration_seconds": _safe_number(meta.get("duration_seconds")),
+        "failure_phase": _safe_text(phase, limit=128),
+        "mode": _mode(meta),
+        "stale": _stale_timeout(run_dir, meta) is not None,
+        "resume_available": _resume_available(run_dir),
+    }
+
+
+def runs_list_payload(
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    limit: int = 10,
+    missing_root_as_empty: bool = False,
+) -> dict[str, object]:
+    """Serialize an allowlisted run list for CLI and future local consumers."""
+    if limit < 1:
+        raise ValueError("--limit must be a positive integer")
+    cwd = cwd.expanduser().resolve()
+    if not cwd.is_dir():
+        raise ValueError(f"--cwd is not a directory: {cwd}")
+    root = runs_dir.expanduser() if runs_dir is not None else cwd / ".brigade" / "runs"
+    if not root.is_dir():
+        if missing_root_as_empty:
+            return {
+                "schema": _RUNS_LIST_SCHEMA,
+                "runs": [],
+                "skipped_invalid": 0,
+                "diagnostic": "runs directory is unavailable",
+            }
+        raise ValueError(f"runs directory not found: {root}")
+    runs, skipped = _collect_serializable_runs(root)
+    return {
+        "schema": _RUNS_LIST_SCHEMA,
+        "runs": [_run_summary(path, meta) for path, meta in runs[:limit]],
+        "skipped_invalid": skipped,
+    }
+
+
+def _roster_payload(roster: dict[str, Any] | None) -> list[dict[str, object]]:
+    agents = roster.get("agents") if roster else None
+    if not isinstance(agents, dict):
+        return []
+    seats: list[dict[str, object]] = []
+    for name, agent in sorted(agents.items()):
+        if not isinstance(agent, dict):
+            continue
+        seat: dict[str, object] = {"name": _safe_text(name, limit=128) or "unknown"}
+        for source, target in (("cli", "cli"), ("model", "model"), ("reasoning", "reasoning")):
+            if value := _safe_text(agent.get(source), limit=128):
+                seat[target] = value
+        if (timeout := _safe_number(agent.get("timeout_seconds"))) is not None:
+            seat["timeout_seconds"] = timeout
+        seats.append(seat)
+    return seats
+
+
+def _plan_payload(plan: dict[str, Any] | None) -> list[dict[str, object]]:
+    assignments = plan.get("assignments") if plan else None
+    if not isinstance(assignments, list):
+        return []
+    payload: list[dict[str, object]] = []
+    for index, assignment in enumerate(assignments, start=1):
+        if not isinstance(assignment, dict):
+            continue
+        item: dict[str, object] = {"order": index}
+        if isinstance(assignment.get("stage"), int) and not isinstance(assignment["stage"], bool):
+            item["stage"] = assignment["stage"]
+        if worker := _safe_text(assignment.get("worker"), limit=128):
+            item["worker"] = worker
+        if task := _safe_text(assignment.get("task")):
+            item["task_summary"] = task
+        payload.append(item)
+    return payload
+
+
+def _workers_payload(worker_results: dict[str, Any] | None) -> list[dict[str, object]]:
+    results = worker_results.get("results") if worker_results else None
+    if not isinstance(results, list):
+        return []
+    payload: list[dict[str, object]] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        item: dict[str, object] = {}
+        if worker := _safe_text(result.get("worker"), limit=128):
+            item["worker"] = worker
+        if task := _safe_text(result.get("task")):
+            item["task_summary"] = task
+        if status := _safe_text(result.get("status"), limit=128):
+            item["status"] = status
+        if isinstance(result.get("ok"), bool):
+            item["ok"] = result["ok"]
+        if detail := _safe_text(result.get("detail")):
+            item["detail"] = detail
+        if (duration := _safe_number(result.get("duration_seconds"))) is not None:
+            item["duration_seconds"] = duration
+        if isinstance(result.get("exit_code"), int) and not isinstance(result["exit_code"], bool):
+            item["exit_code"] = result["exit_code"]
+        payload.append(item)
+    return payload
+
+
+def _synthesis_payload(synthesis: dict[str, Any] | None) -> dict[str, object]:
+    if not synthesis:
+        return {}
+    payload: dict[str, object] = {}
+    if orchestrator := _safe_text(synthesis.get("orchestrator"), limit=128):
+        payload["orchestrator"] = orchestrator
+    result = synthesis.get("result")
+    if isinstance(result, dict):
+        if isinstance(result.get("ok"), bool):
+            payload["ok"] = result["ok"]
+        if detail := _safe_text(result.get("detail")):
+            payload["detail"] = detail
+    return payload
+
+
+def _receipt_duration(receipt: dict[str, Any]) -> int | float | None:
+    if (duration := _safe_number(receipt.get("duration_seconds"))) is not None:
+        return duration
+    started_at = receipt.get("started_at")
+    completed_at = receipt.get("completed_at")
+    if not isinstance(started_at, str) or not isinstance(completed_at, str):
+        return None
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0.0, round((completed - started).total_seconds(), 3))
+
+
+def _command_label(command: dict[str, Any]) -> str:
+    for field in ("command_label", "label"):
+        if label := _safe_text(command.get(field)):
+            return label
+    raw_command = command.get("command")
+    if not isinstance(raw_command, str):
+        return "command"
+    try:
+        argv = shlex.split(raw_command)
+    except ValueError:
+        return "command"
+    if not argv:
+        return "command"
+    label = os.path.basename(argv[0].replace("\\", "/"))
+    return _safe_text(label, limit=128) or "command"
+
+
+def _verification_payload(worker_results: dict[str, Any] | None) -> list[dict[str, object]]:
+    ground_truth = worker_results.get("ground_truth") if worker_results else None
+    receipts = ground_truth.get("verify_receipts") if isinstance(ground_truth, dict) else None
+    if not isinstance(receipts, list):
+        return []
+    payload: list[dict[str, object]] = []
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            continue
+        base: dict[str, object] = {}
+        if receipt_id := _safe_text(receipt.get("run_id"), limit=128):
+            base["receipt_id"] = receipt_id
+        if status := _safe_text(receipt.get("status"), limit=128):
+            base["status"] = status
+        if (duration := _receipt_duration(receipt)) is not None:
+            base["duration_seconds"] = duration
+        commands = receipt.get("commands")
+        if not isinstance(commands, list) or not commands:
+            payload.append(base)
+            continue
+        for command in commands:
+            if not isinstance(command, dict):
+                continue
+            item = dict(base)
+            item["command_label"] = _command_label(command)
+            if (status := _safe_text(command.get("status"), limit=128)) is not None:
+                item["status"] = status
+            if isinstance(command.get("exit_code"), int) and not isinstance(command["exit_code"], bool):
+                item["exit_code"] = command["exit_code"]
+            payload.append(item)
+    return payload
+
+
+def _briefs_payload(meta: dict[str, Any]) -> dict[str, dict[str, object]]:
+    payload: dict[str, dict[str, object]] = {}
+    for name, key in (
+        ("code_graph", "code_graph_brief"),
+        ("drift_impact", "drift_impact_brief"),
+        ("evidence", "evidence_brief"),
+    ):
+        source = meta.get(key)
+        source = source if isinstance(source, dict) else {}
+        attached = source.get("attached") is True
+        item: dict[str, object] = {
+            "attached": attached,
+            "size_bytes": max(0, int(source["bytes"])) if isinstance(source.get("bytes"), (int, float)) else 0,
+            "count": max(0, int(source["pending_count"]))
+            if isinstance(source.get("pending_count"), (int, float))
+            else 0,
+            "summary": "attached" if attached else "not attached",
+        }
+        if name == "evidence":
+            item["untrusted"] = True
+        payload[name] = item
+    return payload
+
+
+def run_detail_payload(run_dir: Path) -> dict[str, object]:
+    """Serialize one run through a positive field allowlist."""
+    run_dir = run_dir.expanduser()
+    if not run_dir.is_dir():
+        raise ValueError(f"run directory not found: {run_dir}")
+    run_meta = _read_json(run_dir / "run.json")
+    if run_meta is None:
+        raise ValueError(f"run.json not found in {run_dir}")
+    roster = _read_json(run_dir / "roster.json")
+    plan = _read_json(run_dir / "plan.json")
+    worker_results = _read_json(run_dir / "worker-results.json")
+    synthesis = _read_json(run_dir / "synthesis.json")
+    run = _run_summary(run_dir, run_meta)
+    _, failure_kind, failure_detail = _failure_fields(run_meta)
+    run["failure_kind"] = _safe_text(failure_kind, limit=128)
+    run["failure_detail"] = _safe_text(failure_detail)
+    return {
+        "schema": _RUN_DETAIL_SCHEMA,
+        "run": run,
+        "roster": _roster_payload(roster),
+        "plan": _plan_payload(plan),
+        "workers": _workers_payload(worker_results),
+        "synthesis": _synthesis_payload(synthesis),
+        "verification": _verification_payload(worker_results),
+        "briefs": _briefs_payload(run_meta),
+    }
+
+
+def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10, json_output: bool = False) -> int:
+    if json_output:
+        try:
+            _emit_json(runs_list_payload(cwd=cwd, runs_dir=runs_dir, limit=limit))
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        return 0
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
         return 2
@@ -562,7 +952,25 @@ def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> in
     return 0
 
 
-def show_latest(*, cwd: Path, runs_dir: Path | None = None) -> int:
+def show_latest(*, cwd: Path, runs_dir: Path | None = None, json_output: bool = False) -> int:
+    if json_output:
+        try:
+            payload = runs_list_payload(cwd=cwd, runs_dir=runs_dir, limit=1)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        runs = payload["runs"]
+        if not isinstance(runs, list) or not runs:
+            cwd = cwd.expanduser().resolve()
+            root = runs_dir.expanduser() if runs_dir is not None else cwd / ".brigade" / "runs"
+            print(f"error: no runs found in {root}", file=sys.stderr)
+            return 1
+        root = runs_dir.expanduser() if runs_dir is not None else cwd / ".brigade" / "runs"
+        run_id = runs[0].get("run_id") if isinstance(runs[0], dict) else None
+        if not isinstance(run_id, str):
+            print("error: latest run has no safe run id", file=sys.stderr)
+            return 2
+        return show(root / run_id, json_output=True)
     cwd = cwd.expanduser().resolve()
     if not cwd.is_dir():
         print(f"error: --cwd is not a directory: {cwd}", file=sys.stderr)
@@ -584,7 +992,7 @@ def show_latest(*, cwd: Path, runs_dir: Path | None = None) -> int:
 def _resume_available(run_dir: Path) -> bool:
     try:
         worker_results = _read_json(run_dir / "worker-results.json")
-    except ValueError:
+    except (OSError, ValueError):
         return False
     results = worker_results.get("results") if worker_results else None
     if not isinstance(results, list):
@@ -720,6 +1128,8 @@ def watch(
     runs_dir: Path | None = None,
     json_output: bool = False,
     interval: float = 1.0,
+    record_sink: Callable[[dict[str, object]], None] | None = None,
+    recover_artifact_collection: bool = True,
 ) -> int:
     if interval < 0:
         print("error: --interval must be non-negative", file=sys.stderr)
@@ -730,7 +1140,10 @@ def watch(
         return 2
     assert run_dir is not None
     if json_output:
-        _emit_json({"type": "watch", "run": str(run_dir)})
+        _emit_json(
+            {"schema": _RUN_WATCH_SCHEMA, "type": "watch", "run_id": _safe_run_id(run_dir)},
+            record_sink=record_sink,
+        )
     else:
         print(f"watching: {run_dir}")
 
@@ -743,11 +1156,12 @@ def watch(
             signatures,
             event_offsets,
             json_output=json_output,
+            record_sink=record_sink,
         )
         if rc is not None:
             return rc
         assert run_meta is not None
-        if run_meta.get("status") == "artifact-collection":
+        if recover_artifact_collection and run_meta.get("status") == "artifact-collection":
             workspace = _lock_workspace(run_dir, run_meta, fallback=cwd)
             if workspace is not None:
                 from . import runguard
@@ -770,13 +1184,24 @@ def watch(
                         return 2
         if _is_terminal(run_meta):
             if not summary_emitted:
-                _emit_summary(run_dir, run_meta, json_output=json_output)
+                _emit_summary(run_dir, run_meta, json_output=json_output, record_sink=record_sink)
                 summary_emitted = True
             return _watch_return_code(run_meta.get("status"))
         time.sleep(interval)
 
 
-def show(run_dir: Path) -> int:
+def show(run_dir: Path, *, json_output: bool = False) -> int:
+    if json_output:
+        try:
+            payload = run_detail_payload(run_dir)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        _emit_json(payload)
+        run = payload["run"]
+        if isinstance(run, dict) and _is_terminal({"status": run.get("status"), "finished_at": run.get("finished_at")}):
+            return _watch_return_code(run.get("status"))
+        return 0
     run_dir = run_dir.expanduser()
     if not run_dir.is_dir():
         print(f"error: run directory not found: {run_dir}", file=sys.stderr)

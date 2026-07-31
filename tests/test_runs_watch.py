@@ -124,9 +124,52 @@ def test_watch_json_outputs_ndjson_incrementally(tmp_path, capsys, monkeypatch):
         "final",
         "summary",
     ]
+    assert {record["schema"] for record in records} == {"brigade.run-watch.v1"}
     assert records[2]["worker"] == "coder"
-    assert records[2]["event"]["method"] == "item/started"
+    assert records[2]["method"] == "item/started"
+    assert "event" not in records[2]
     assert records[-1]["status"] == "ok"
+    assert all("/" not in str(record.get("run_id", "")) for record in records)
+
+
+def test_watch_json_sink_receives_exact_safe_records_without_recovery(tmp_path, monkeypatch, capsys):
+    run_dir = tmp_path / "run"
+    _write_run(run_dir, status="artifact-collection", finished=True)
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update(
+        {
+            "control_socket": "/tmp/control.sock",
+            "task": "watch /home/example/private",
+            "failure_phase": "collect /home/example/phase",
+        }
+    )
+    _write_json(run_dir / "run.json", run_meta)
+    records = []
+
+    def fail_recovery(*args, **kwargs):
+        raise AssertionError("watch must not recover when disabled")
+
+    monkeypatch.setattr("brigade.runguard.recover_stale_run", fail_recovery)
+
+    assert (
+        runs_cmd.watch(
+            run_dir,
+            cwd=tmp_path,
+            interval=0.0,
+            json_output=True,
+            record_sink=records.append,
+            recover_artifact_collection=False,
+        )
+        == 1
+    )
+
+    assert capsys.readouterr().out == ""
+    assert all(record["schema"] == "brigade.run-watch.v1" for record in records)
+    assert records[0] == {"schema": "brigade.run-watch.v1", "type": "watch", "run_id": "run"}
+    serialized = json.dumps(records)
+    assert "/home/example/private" not in serialized
+    assert "/home/example/phase" not in serialized
+    assert "/tmp/control.sock" not in serialized
 
 
 def test_watch_exec_transport_without_events_dir_still_finishes(tmp_path, capsys, monkeypatch):

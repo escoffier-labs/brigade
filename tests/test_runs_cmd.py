@@ -1029,3 +1029,257 @@ def test_runs_show_without_ground_truth_stays_quiet(tmp_path, capsys):
 
     assert runs_cmd.show(run_dir) == 0
     assert "ground truth" not in capsys.readouterr().out
+
+
+def test_runs_list_json_is_versioned_bounded_and_excludes_paths(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    run_dir = runs_root / "safe-run"
+    _write_minimal_run(
+        run_dir,
+        task="x" * 500 + " /home/example/private.txt",
+        status="dispatching",
+        started_at="2026-05-26T14:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update(
+        {
+            "active_stage": 2,
+            "status_started_at": "2026-05-26T14:01:00Z",
+            "failure_phase": "worker /tmp/secret",
+            "control_socket": "/tmp/control.sock",
+            "artifacts": str(run_dir),
+        }
+    )
+    _write_json(run_dir / "run.json", run_meta)
+
+    assert cli.main(["runs", "list", "--json", "--cwd", str(tmp_path)]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert set(payload) == {"schema", "runs", "skipped_invalid"}
+    assert payload["schema"] == "brigade.runs-list.v1"
+    summary = payload["runs"][0]
+    assert set(summary) == {
+        "run_id",
+        "status",
+        "active_phase",
+        "task_summary",
+        "started_at",
+        "status_started_at",
+        "finished_at",
+        "duration_seconds",
+        "failure_phase",
+        "mode",
+        "stale",
+        "resume_available",
+    }
+    assert summary["run_id"] == "safe-run"
+    assert summary["status_started_at"] == "2026-05-26T14:01:00Z"
+    assert len(summary["task_summary"]) <= 240
+    assert "/home/example/private.txt" not in json.dumps(payload)
+    assert "/tmp/control.sock" not in json.dumps(payload)
+    assert "artifacts" not in json.dumps(payload)
+
+
+def test_runs_list_json_skips_symlinked_and_malformed_run_directories(tmp_path):
+    runs_root = tmp_path / ".brigade" / "runs"
+    outside_run = tmp_path / "outside-run"
+    _write_minimal_run(
+        outside_run,
+        task="outside",
+        status="ok",
+        started_at="2026-05-26T14:00:00Z",
+    )
+    _write_minimal_run(
+        runs_root / "invalid id",
+        task="malformed",
+        status="ok",
+        started_at="2026-05-26T14:00:00Z",
+    )
+    runs_root.mkdir(parents=True, exist_ok=True)
+    os.symlink(outside_run, runs_root / "escape", target_is_directory=True)
+
+    payload = runs_cmd.runs_list_payload(cwd=tmp_path)
+
+    assert payload["runs"] == []
+    assert payload["skipped_invalid"] == 2
+
+
+def test_runs_list_payload_tolerates_unreadable_optional_worker_results(tmp_path, monkeypatch):
+    runs_root = tmp_path / ".brigade" / "runs"
+    run_dir = runs_root / "safe-run"
+    _write_minimal_run(
+        run_dir,
+        task="safe",
+        status="failed",
+        started_at="2026-05-26T14:00:00Z",
+    )
+    original_read_json = runs_cmd._read_json
+
+    def unreadable_worker_results(path):
+        if path.name == "worker-results.json":
+            raise OSError("permission denied")
+        return original_read_json(path)
+
+    monkeypatch.setattr(runs_cmd, "_read_json", unreadable_worker_results)
+
+    payload = runs_cmd.runs_list_payload(cwd=tmp_path)
+
+    assert payload["runs"][0]["resume_available"] is False
+
+
+def test_runs_list_payload_can_make_a_missing_root_an_empty_safe_result(tmp_path):
+    payload = runs_cmd.runs_list_payload(cwd=tmp_path, missing_root_as_empty=True)
+
+    assert payload == {
+        "schema": "brigade.runs-list.v1",
+        "runs": [],
+        "skipped_invalid": 0,
+        "diagnostic": "runs directory is unavailable",
+    }
+
+
+def test_runs_show_and_latest_json_use_the_safe_detail_contract(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    run_dir = runs_root / "safe-run"
+    runs_root.mkdir(parents=True)
+    _write_run_artifacts(run_dir)
+    worker_results = json.loads((run_dir / "worker-results.json").read_text())
+    worker_results["results"][0].update(
+        {
+            "detail": "failed at /home/example/token",
+            "thread_id": "thread-secret",
+            "stdout": "private output",
+            "stderr": "private error",
+        }
+    )
+    worker_results["ground_truth"] = {
+        "verify_receipts": [
+            {
+                "run_id": "receipt-1",
+                "status": "completed",
+                "started_at": "2026-05-26T14:00:00Z",
+                "completed_at": "2026-05-26T14:00:02Z",
+                "commands": [
+                    {
+                        "command": "pytest -q --token SECRET /home/example/private",
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                    {
+                        "command": "python -m pytest --token ANOTHER_SECRET",
+                        "command_label": "focused checks",
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                    {
+                        "command": "ignored --token THIRD_SECRET",
+                        "label": "receipt checks",
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                ],
+            }
+        ]
+    }
+    _write_json(run_dir / "worker-results.json", worker_results)
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update(
+        {
+            "code_graph_brief": {"attached": True, "bytes": 12},
+            "drift_impact_brief": {"attached": True, "bytes": 34, "pending_count": 2},
+            "evidence_brief": {"attached": True, "bytes": 56},
+            "control_transport": {"token": "secret"},
+            "status_started_at": "2026-05-26T14:00:01Z",
+            "failure": {
+                "kind": "worker-failed",
+                "detail": r"failed at C:\Users\Example\secret.txt",
+            },
+        }
+    )
+    _write_json(run_dir / "run.json", run_meta)
+
+    assert cli.main(["runs", "show", "--json", str(run_dir)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert set(payload) == {"schema", "run", "roster", "plan", "workers", "synthesis", "verification", "briefs"}
+    assert payload["schema"] == "brigade.run-detail.v1"
+    assert set(payload["run"]) == {
+        "run_id",
+        "status",
+        "active_phase",
+        "task_summary",
+        "started_at",
+        "status_started_at",
+        "finished_at",
+        "duration_seconds",
+        "failure_phase",
+        "failure_kind",
+        "failure_detail",
+        "mode",
+        "stale",
+        "resume_available",
+    }
+    assert payload["run"]["status_started_at"] == "2026-05-26T14:00:01Z"
+    assert payload["run"]["failure_kind"] == "worker-failed"
+    assert payload["run"]["failure_detail"] == "failed at [path]"
+    assert set(payload["roster"][0]) <= {"name", "cli", "model", "reasoning", "timeout_seconds"}
+    assert set(payload["plan"][0]) <= {"stage", "order", "worker", "task_summary"}
+    assert set(payload["workers"][0]) <= {
+        "worker",
+        "task_summary",
+        "status",
+        "ok",
+        "detail",
+        "duration_seconds",
+        "exit_code",
+    }
+    assert set(payload["synthesis"]) <= {"orchestrator", "ok", "detail"}
+    assert set(payload["verification"][0]) <= {
+        "receipt_id",
+        "status",
+        "duration_seconds",
+        "exit_code",
+        "command_label",
+    }
+    assert [item["command_label"] for item in payload["verification"]] == [
+        "pytest",
+        "focused checks",
+        "receipt checks",
+    ]
+    assert payload["briefs"]["evidence"]["untrusted"] is True
+    serialized = json.dumps(payload)
+    for forbidden in (
+        "/home/example",
+        "C:\\Users\\Example\\secret.txt",
+        "thread-secret",
+        "private output",
+        "private error",
+        "final answer",
+        "secret",
+        "SECRET",
+        "ANOTHER_SECRET",
+        "THIRD_SECRET",
+    ):
+        assert forbidden not in serialized
+
+    assert cli.main(["runs", "latest", "--json", "--cwd", str(tmp_path)]) == 0
+    assert json.loads(capsys.readouterr().out)["schema"] == "brigade.run-detail.v1"
+
+
+def test_runs_show_and_latest_json_return_failed_terminal_status(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    run_dir = runs_root / "failed-run"
+    _write_minimal_run(
+        run_dir,
+        task="failed task",
+        status="failed",
+        started_at="2026-05-26T14:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["finished_at"] = "2026-05-26T14:00:01Z"
+    _write_json(run_dir / "run.json", run_meta)
+
+    assert cli.main(["runs", "show", "--json", str(run_dir)]) == 1
+    assert json.loads(capsys.readouterr().out)["run"]["status"] == "failed"
+    assert cli.main(["runs", "latest", "--json", "--cwd", str(tmp_path)]) == 1
+    assert json.loads(capsys.readouterr().out)["run"]["status"] == "failed"
