@@ -362,6 +362,216 @@ fn hostile_graph_text_is_json_escaped_and_only_rendered_as_text() {
 }
 
 #[test]
+fn graph_mode_keeps_the_accessible_list_default_and_adds_an_svg_graph_surface() {
+    let conn = fixture(false);
+    let html = export_html_map(&conn, "src/focus.rs", MapOptions::default()).unwrap();
+
+    for required in [
+        "<div class=\"map-view-toggle\" role=\"group\" aria-label=\"Map view\">",
+        "<button id=\"map-list-view\" type=\"button\" aria-pressed=\"true\">List</button>",
+        "<button id=\"map-graph-view-toggle\" type=\"button\" aria-pressed=\"false\">Graph</button>",
+        "<section id=\"map-graph-view\" hidden aria-labelledby=\"map-graph-heading\">",
+        "<h2 id=\"map-graph-heading\">Graph view</h2>",
+        "<svg id=\"map-graph\" role=\"img\" aria-labelledby=\"map-graph-heading map-graph-description\"",
+        "<desc id=\"map-graph-description\">",
+        "<marker id=\"graphtrail-arrowhead\"",
+        "line.setAttribute('marker-end', 'url(#graphtrail-arrowhead)');",
+        "id=\"map-graph-legend\"",
+        "Focus file",
+        "Caller",
+        "Callee",
+        "Additional neighbor",
+        "graph-node--focus",
+        "graph-node--caller",
+        "graph-node--callee",
+        "graph-node--additional",
+        "const nodeClass = (node) => {",
+        "node.file_path === graph.focus_path",
+        "const degree = degreeById.get(node.id) || 0;",
+        "const degreeRadius = 6 + Math.min(degree, 8);",
+        "const primaryFocusNode = focusNodes[0];",
+        "const focusPosition = { x: viewBox.width / 2, y: viewBox.height / 2 };",
+        "if (primaryFocusNode) positions.set(primaryFocusNode.id, focusPosition);",
+        "const radius = node.id === primaryFocusNode?.id ? Math.max(16, degreeRadius) : degreeRadius;",
+        "line.setAttribute('x1', String(sourcePosition.x));",
+        "line.setAttribute('y1', String(sourcePosition.y));",
+        "line.setAttribute('x2', String(targetPosition.x));",
+        "line.setAttribute('y2', String(targetPosition.y));",
+        "nodeGroup.setAttribute('transform', `translate(${position.x} ${position.y})`);",
+        "nodeGroup.setAttribute('role', 'button');",
+        "nodeGroup.setAttribute('aria-label', `${label}, ${node.file_path}:${node.start_line}`);",
+        "const label = node.qualified_name || node.name;",
+        "const maxLabelLength = 36;",
+        "label.slice(0, maxLabelLength - 1) + '…'",
+    ] {
+        assert!(
+            html.contains(required),
+            "graph mode must include {required}"
+        );
+    }
+    assert!(
+        html.contains("<div id=\"map-nodes\" role=\"tree\" aria-label=\"Code map nodes\">")
+            && html.contains("id=\"map-focus-lane\"")
+            && html.contains("id=\"map-callers-lane\"")
+            && html.contains("id=\"map-callees-lane\"")
+            && html.contains("id=\"map-additional-neighbors-lane\""),
+        "the accessible list lanes remain the default view"
+    );
+}
+
+#[test]
+fn graph_layout_contract_is_seeded_and_deterministic_for_equivalent_graphs() {
+    let first = fixture(false);
+    let second = fixture(true);
+    let options = options(MapDirection::Neighbors, 2, 100, 250);
+    let first_html = export_html_map(&first, "src/focus.rs", options).unwrap();
+    let second_html = export_html_map(&second, "src/focus.rs", options).unwrap();
+
+    assert_eq!(
+        first_html, second_html,
+        "equivalent graph data must retain identical layout input"
+    );
+    for required in [
+        "const layoutSeed = (id) => {",
+        "const seededPosition = (id) => {",
+        "const layoutNodes = [...graph.nodes].sort((left, right) => left.id.localeCompare(right.id));",
+        "const layoutEdges = [...edges].sort((left, right) => `${left.source}:${left.target}:${left.kind}:${left.line}`.localeCompare(`${right.source}:${right.target}:${right.kind}:${right.line}`));",
+        "const positions = new Map(layoutNodes.map((node) => [node.id, seededPosition(node.id)]));",
+        "const forceIterations = 160;",
+        "for (let iteration = 0; iteration < forceIterations; iteration += 1) {",
+        "for (let leftIndex = 0; leftIndex < layoutNodes.length; leftIndex += 1) {",
+        "for (let rightIndex = leftIndex + 1; rightIndex < layoutNodes.length; rightIndex += 1) {",
+        "const repulsion = 1800 / distanceSquared;",
+        "const desiredLength = 140;",
+        "const spring = (distance - desiredLength) * 0.012;",
+        "for (const edge of layoutEdges) {",
+        "const primaryFocusNode = focusNodes[0];",
+        "if (primaryFocusNode) positions.set(primaryFocusNode.id, focusPosition);",
+        "const positionRepresentation = graph.nodes.map((node) => ({ id: node.id, x: positions.get(node.id).x, y: positions.get(node.id).y }));",
+    ] {
+        assert!(
+            first_html.contains(required),
+            "deterministic layout must include {required}"
+        );
+    }
+}
+
+#[test]
+fn graph_layout_seed_hash_contract_uses_node_ids_and_never_randomness() {
+    let conn = fixture(false);
+    let html = export_html_map(&conn, "src/focus.rs", MapOptions::default()).unwrap();
+
+    for required in [
+        "const layoutSeed = (id) => {",
+        "for (let index = 0; index < id.length; index += 1) {",
+        "hash = ((hash << 5) - hash + id.charCodeAt(index)) | 0;",
+        "return hash >>> 0;",
+        "const angle = (layoutSeed(id) / 0x100000000) * Math.PI * 2;",
+        "const radius = 120 + (layoutSeed(`${id}:radius`) % 180);",
+    ] {
+        assert!(
+            html.contains(required),
+            "seed hash contract must include {required}"
+        );
+    }
+    assert!(
+        !html.contains("Math.random"),
+        "layout positions must be derived only from stable node ids"
+    );
+    assert!(
+        !html.contains("for (const node of graph.nodes.filter((node) => node.file_path === graph.focus_path))"),
+        "only the first focus node may be pinned at the graph center"
+    );
+}
+
+#[test]
+fn graph_interactions_reuse_details_and_remain_static_motion_safe_and_text_only() {
+    let conn = fixture(false);
+    let html = export_html_map(
+        &conn,
+        "src/focus.rs",
+        options(MapDirection::Neighbors, 2, 2, 1),
+    )
+    .unwrap();
+
+    for required in [
+        "nodeGroup.addEventListener('click', () => show(node));",
+        "nodeGroup.addEventListener('keydown', (event) => {",
+        "if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); show(node); }",
+        "nodeGroup.addEventListener('pointerenter', () => highlightNeighbors(node.id));",
+        "nodeGroup.addEventListener('focusin', () => highlightNeighbors(node.id));",
+        "nodeGroup.addEventListener('pointerleave', clearNeighborHighlight);",
+        "nodeGroup.addEventListener('focusout', clearNeighborHighlight);",
+        "nodeGroup.setAttribute('tabindex', '0');",
+        "edgeElement.classList.toggle('is-neighbor', isNeighbor);",
+        "svg.addEventListener('pointerdown', beginPan);",
+        "svg.addEventListener('wheel', zoomGraph, { passive: false });",
+        "graphControls.addEventListener('keydown', (event) => {",
+        "event.key === '+' || event.key === '='",
+        "event.key === '-'",
+        "event.key === '0'",
+        "event.key === 'ArrowLeft'",
+        "event.key === 'ArrowRight'",
+        "event.key === 'ArrowUp'",
+        "event.key === 'ArrowDown'",
+        "resetGraphView();",
+        "document.getElementById('map-graph-zoom-in').addEventListener('click', zoomIn);",
+        "document.getElementById('map-graph-zoom-out').addEventListener('click', zoomOut);",
+        "const command = document.createElement('code');",
+        "command.textContent = `graphtrail map ${node.file_path} --out graphtrail-map.html`;",
+        "details.replaceChildren(heading, location, command);",
+        "Graph view: ${graph.status.rendered_nodes} nodes rendered, ${graph.status.omitted_nodes} omitted; ${graph.status.rendered_edges} edges rendered, ${graph.status.omitted_edges} omitted.",
+        "@media (prefers-reduced-motion: reduce) { #map-graph { transition: none; } }",
+        "if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { renderGraph(); return; }",
+        "text.textContent = displayLabel;",
+        "text.classList.add('graph-label');",
+        "if (node.file_path === graph.focus_path) text.classList.add('graph-label--focus');",
+        "const labelZoomThreshold = 1.5;",
+        "svg.classList.toggle('graph-labels-expanded', transform.scale >= labelZoomThreshold);",
+        ".graph-label { display: none; }",
+        ".graph-label--focus, .graph-node:hover .graph-label, .graph-node:focus-within .graph-label, #map-graph.graph-labels-expanded .graph-label { display: block; }",
+        "const title = document.createElementNS(svg.namespaceURI, 'title');",
+        "title.textContent = `${edge.kind} (line ${edge.line})`;",
+        "line.append(title);",
+    ] {
+        assert!(
+            html.contains(required),
+            "graph interaction contract must include {required}"
+        );
+    }
+    assert!(
+        !html.contains("fetch("),
+        "the static graph must not fetch data dynamically"
+    );
+    assert!(!html.contains("innerHTML"));
+    assert!(!html.contains("insertAdjacentHTML"));
+    assert!(
+        html.contains("textContent"),
+        "hostile graph strings must flow through DOM text nodes"
+    );
+}
+
+#[test]
+fn graph_visual_contract_has_accessible_category_colors_and_legend_swatches() {
+    let conn = fixture(false);
+    let html = export_html_map(&conn, "src/focus.rs", MapOptions::default()).unwrap();
+
+    for required in [
+        ".graph-node--focus circle, .graph-legend-swatch--focus { fill: #005a9c; stroke: #003f6b; }",
+        ".graph-node--caller circle, .graph-legend-swatch--caller { fill: #a64000; stroke: #702b00; }",
+        ".graph-node--callee circle, .graph-legend-swatch--callee { fill: #007a65; stroke: #005443; }",
+        ".graph-node--additional circle, .graph-legend-swatch--additional { fill: #654090; stroke: #472868; }",
+        "class=\"graph-legend-swatch graph-legend-swatch--focus\" aria-hidden=\"true\"",
+        "class=\"graph-legend-swatch graph-legend-swatch--caller\" aria-hidden=\"true\"",
+        "class=\"graph-legend-swatch graph-legend-swatch--callee\" aria-hidden=\"true\"",
+        "class=\"graph-legend-swatch graph-legend-swatch--additional\" aria-hidden=\"true\"",
+        "line.setAttribute('marker-end', 'url(#graphtrail-arrowhead)');",
+    ] {
+        assert!(html.contains(required), "graph visual contract must include {required}");
+    }
+}
+
+#[test]
 fn equivalent_graphs_inserted_in_different_orders_produce_identical_html() {
     let first = fixture(false);
     let second = fixture(true);
