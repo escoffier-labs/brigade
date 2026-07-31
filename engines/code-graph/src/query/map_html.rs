@@ -3,7 +3,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 
-use super::map::{build_file_map, MapOptions};
+use super::map::{MapOptions, build_file_map};
 
 const HTML_PREFIX: &str = r###"<!doctype html>
 <html lang="en">

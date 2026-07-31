@@ -1,8 +1,8 @@
 //! Contract tests for the bounded, file-rooted static HTML map query.
 
-use graphtrail::query::{export_html_map, MapDirection, MapOptions};
+use graphtrail::query::{MapDirection, MapOptions, export_html_map};
 use graphtrail::store::init_schema;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -249,11 +249,13 @@ fn map_data_includes_symbols_paths_and_call_site_labels() {
     assert!(html.contains("src/focus.rs"));
     assert!(html.contains("src/caller.rs"));
     assert!(html.contains("src/callee.rs"));
-    assert!(data["edges"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|edge| edge["kind"] == "call" && edge["line"] == 21));
+    assert!(
+        data["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["kind"] == "call" && edge["line"] == 21)
+    );
 }
 
 #[test]
@@ -573,7 +575,10 @@ fn graph_visual_contract_has_accessible_category_colors_and_legend_swatches() {
         "class=\"graph-legend-swatch graph-legend-swatch--additional\" aria-hidden=\"true\"",
         "line.setAttribute('marker-end', 'url(#graphtrail-arrowhead)');",
     ] {
-        assert!(html.contains(required), "graph visual contract must include {required}");
+        assert!(
+            html.contains(required),
+            "graph visual contract must include {required}"
+        );
     }
 }
 
