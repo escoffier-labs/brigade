@@ -1,8 +1,8 @@
 //! Contract tests for the bounded, file-rooted static HTML map query.
 
-use graphtrail::query::{MapDirection, MapOptions, export_html_map};
+use graphtrail::query::{export_html_map, MapDirection, MapOptions};
 use graphtrail::store::init_schema;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -249,13 +249,11 @@ fn map_data_includes_symbols_paths_and_call_site_labels() {
     assert!(html.contains("src/focus.rs"));
     assert!(html.contains("src/caller.rs"));
     assert!(html.contains("src/callee.rs"));
-    assert!(
-        data["edges"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|edge| edge["kind"] == "call" && edge["line"] == 21)
-    );
+    assert!(data["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|edge| edge["kind"] == "call" && edge["line"] == 21));
 }
 
 #[test]
@@ -434,8 +432,10 @@ fn graph_layout_contract_is_seeded_and_deterministic_for_equivalent_graphs() {
     for required in [
         "const layoutSeed = (id) => {",
         "const seededPosition = (id) => {",
-        "const layoutNodes = [...graph.nodes].sort((left, right) => left.id.localeCompare(right.id));",
-        "const layoutEdges = [...edges].sort((left, right) => `${left.source}:${left.target}:${left.kind}:${left.line}`.localeCompare(`${right.source}:${right.target}:${right.kind}:${right.line}`));",
+        "const compareStableText = (left, right) => left < right ? -1 : left > right ? 1 : 0;",
+        "const layoutNodes = [...graph.nodes].sort((left, right) => compareStableText(left.id, right.id));",
+        "const edgeKey = (edge) => `${edge.source}:${edge.target}:${edge.kind}:${edge.line}`;",
+        "const layoutEdges = [...edges].sort((left, right) => compareStableText(edgeKey(left), edgeKey(right)));",
         "const positions = new Map(layoutNodes.map((node) => [node.id, seededPosition(node.id)]));",
         "const forceIterations = 160;",
         "for (let iteration = 0; iteration < forceIterations; iteration += 1) {",
@@ -479,7 +479,13 @@ fn graph_layout_seed_hash_contract_uses_node_ids_and_never_randomness() {
         "layout positions must be derived only from stable node ids"
     );
     assert!(
-        !html.contains("for (const node of graph.nodes.filter((node) => node.file_path === graph.focus_path))"),
+        !html.contains("localeCompare"),
+        "layout ordering must not depend on the browser locale"
+    );
+    assert!(
+        !html.contains(
+            "for (const node of graph.nodes.filter((node) => node.file_path === graph.focus_path))"
+        ),
         "only the first focus node may be pinned at the graph center"
     );
 }
@@ -568,6 +574,39 @@ fn graph_visual_contract_has_accessible_category_colors_and_legend_swatches() {
         "line.setAttribute('marker-end', 'url(#graphtrail-arrowhead)');",
     ] {
         assert!(html.contains(required), "graph visual contract must include {required}");
+    }
+}
+
+#[test]
+fn graph_canvas_spans_the_layout_and_fits_the_settled_graph_around_focus() {
+    let conn = fixture(false);
+    let html = export_html_map(&conn, "src/focus.rs", MapOptions::default()).unwrap();
+
+    for required in [
+        "<section id=\"map-list-panel\" aria-label=\"Map nodes\">",
+        "#map-graph-view { grid-column: 1 / -1; min-inline-size: 0; }",
+        "const listView = document.getElementById('map-list-panel');",
+        ".graph-legend-swatch--focus { background-color: #005a9c; border-color: #003f6b; }",
+        ".graph-legend-swatch--caller { background-color: #a64000; border-color: #702b00; }",
+        ".graph-legend-swatch--callee { background-color: #007a65; border-color: #005443; }",
+        ".graph-legend-swatch--additional { background-color: #654090; border-color: #472868; }",
+        "#graphtrail-arrowhead path { fill: color-mix(in srgb, CanvasText 55%, Canvas); }",
+        "const primaryFocusPosition = positions.get(primaryFocusNode.id);",
+        "const focusOffset = { x: focusPosition.x - primaryFocusPosition.x, y: focusPosition.y - primaryFocusPosition.y };",
+        "for (const position of positions.values()) {",
+        "position.x += focusOffset.x;",
+        "position.y += focusOffset.y;",
+        "const layoutMargin = 48;",
+        "const maxDistanceX = Math.max(...[...positions.values()].map((position) => Math.abs(position.x - focusPosition.x)), 1);",
+        "const maxDistanceY = Math.max(...[...positions.values()].map((position) => Math.abs(position.y - focusPosition.y)), 1);",
+        "const layoutScale = Math.min(1, (viewBox.width / 2 - layoutMargin) / maxDistanceX, (viewBox.height / 2 - layoutMargin) / maxDistanceY);",
+        "position.x = focusPosition.x + (position.x - focusPosition.x) * layoutScale;",
+        "position.y = focusPosition.y + (position.y - focusPosition.y) * layoutScale;",
+    ] {
+        assert!(
+            html.contains(required),
+            "graph canvas layout must include {required}"
+        );
     }
 }
 

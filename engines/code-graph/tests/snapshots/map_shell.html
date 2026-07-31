@@ -15,13 +15,23 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
 .node { border: 1px solid ButtonBorder; display: block; margin: 0.5rem 0; padding: 0.5rem; text-align: left; width: 100%; }
 .direction-label { font-weight: 700; }
 .map-view-toggle, .graph-controls, #map-graph-legend { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-block: 0.5rem; }
-#map-graph { block-size: min(70vh, 44rem); border: 1px solid ButtonBorder; inline-size: 100%; touch-action: none; }
+.graph-controls button, .map-view-toggle button { border: 1px solid ButtonBorder; border-radius: 0.3rem; padding: 0.4rem 0.65rem; }
+#map-graph-view { grid-column: 1 / -1; min-inline-size: 0; }
+#map-graph { background: color-mix(in srgb, Canvas 92%, CanvasText); block-size: min(74vh, 52rem); border: 1px solid ButtonBorder; border-radius: 0.4rem; inline-size: 100%; touch-action: none; }
+.graph-edge { stroke: color-mix(in srgb, CanvasText 55%, Canvas); stroke-width: 1.35; vector-effect: non-scaling-stroke; }
+.graph-node circle { stroke-width: 2; vector-effect: non-scaling-stroke; }
+.graph-node text { fill: CanvasText; font-size: 12px; paint-order: stroke; stroke: Canvas; stroke-width: 3px; stroke-linejoin: round; }
 .graph-node--focus circle, .graph-legend-swatch--focus { fill: #005a9c; stroke: #003f6b; }
 .graph-node--caller circle, .graph-legend-swatch--caller { fill: #a64000; stroke: #702b00; }
 .graph-node--callee circle, .graph-legend-swatch--callee { fill: #007a65; stroke: #005443; }
 .graph-node--additional circle, .graph-legend-swatch--additional { fill: #654090; stroke: #472868; }
 .graph-node--focus circle { stroke-width: 4; }
-.graph-legend-swatch { display: inline-block; height: 0.8rem; margin-inline-end: 0.25rem; vertical-align: middle; width: 0.8rem; }
+.graph-legend-swatch { border: 1px solid ButtonBorder; display: inline-block; height: 0.8rem; margin-inline-end: 0.25rem; vertical-align: middle; width: 0.8rem; }
+.graph-legend-swatch--focus { background-color: #005a9c; border-color: #003f6b; }
+.graph-legend-swatch--caller { background-color: #a64000; border-color: #702b00; }
+.graph-legend-swatch--callee { background-color: #007a65; border-color: #005443; }
+.graph-legend-swatch--additional { background-color: #654090; border-color: #472868; }
+#graphtrail-arrowhead path { fill: color-mix(in srgb, CanvasText 55%, Canvas); }
 .graph-label { display: none; }
 .graph-label--focus, .graph-node:hover .graph-label, .graph-node:focus-within .graph-label, #map-graph.graph-labels-expanded .graph-label { display: block; }
 .graph-edge.is-neighbor, .graph-node.is-neighbor { opacity: 1; }
@@ -29,6 +39,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
 @media (prefers-color-scheme: dark) { .lane, .node { border-color: GrayText; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; } }
 @media (prefers-reduced-motion: reduce) { #map-graph { transition: none; } }
+@media (max-width: 48rem) { .layout { grid-template-columns: 1fr; } #map-graph { block-size: 64vh; } }
 </style>
 </head>
 <body>
@@ -45,7 +56,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
 <button id="map-graph-view-toggle" type="button" aria-pressed="false">Graph</button>
 </div>
 <div class="layout">
-<section aria-label="Map nodes">
+<section id="map-list-panel" aria-label="Map nodes">
 <p><span class="direction-label">Direction</span>: <span id="map-direction"></span></p>
 <div id="map-nodes" role="tree" aria-label="Code map nodes">
 <section id="map-focus-lane" class="lane" aria-labelledby="map-focus-heading">
@@ -106,7 +117,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
   const calleesList = document.getElementById('map-callees-list');
   const additionalNeighborsList = document.getElementById('map-additional-neighbors-list');
   const relationshipList = document.getElementById('map-relationship-list');
-  const listView = document.getElementById('map-nodes');
+  const listView = document.getElementById('map-list-panel');
   const listToggle = document.getElementById('map-list-view');
   const graphToggle = document.getElementById('map-graph-view-toggle');
   const graphView = document.getElementById('map-graph-view');
@@ -198,8 +209,10 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
     const radius = 120 + (layoutSeed(`${id}:radius`) % 180);
     return { x: viewBox.width / 2 + Math.cos(angle) * radius, y: viewBox.height / 2 + Math.sin(angle) * radius };
   };
-  const layoutNodes = [...graph.nodes].sort((left, right) => left.id.localeCompare(right.id));
-  const layoutEdges = [...edges].sort((left, right) => `${left.source}:${left.target}:${left.kind}:${left.line}`.localeCompare(`${right.source}:${right.target}:${right.kind}:${right.line}`));
+  const compareStableText = (left, right) => left < right ? -1 : left > right ? 1 : 0;
+  const layoutNodes = [...graph.nodes].sort((left, right) => compareStableText(left.id, right.id));
+  const edgeKey = (edge) => `${edge.source}:${edge.target}:${edge.kind}:${edge.line}`;
+  const layoutEdges = [...edges].sort((left, right) => compareStableText(edgeKey(left), edgeKey(right)));
   const positions = new Map(layoutNodes.map((node) => [node.id, seededPosition(node.id)]));
   const forceIterations = 160;
   const settlePositions = () => {
@@ -236,7 +249,23 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
   }
   const focusPosition = { x: viewBox.width / 2, y: viewBox.height / 2 };
   const primaryFocusNode = focusNodes[0];
-  if (primaryFocusNode) positions.set(primaryFocusNode.id, focusPosition);
+  if (primaryFocusNode) {
+    const primaryFocusPosition = positions.get(primaryFocusNode.id);
+    const focusOffset = { x: focusPosition.x - primaryFocusPosition.x, y: focusPosition.y - primaryFocusPosition.y };
+    for (const position of positions.values()) {
+      position.x += focusOffset.x;
+      position.y += focusOffset.y;
+    }
+    if (primaryFocusNode) positions.set(primaryFocusNode.id, focusPosition);
+  }
+  const layoutMargin = 48;
+  const maxDistanceX = Math.max(...[...positions.values()].map((position) => Math.abs(position.x - focusPosition.x)), 1);
+  const maxDistanceY = Math.max(...[...positions.values()].map((position) => Math.abs(position.y - focusPosition.y)), 1);
+  const layoutScale = Math.min(1, (viewBox.width / 2 - layoutMargin) / maxDistanceX, (viewBox.height / 2 - layoutMargin) / maxDistanceY);
+  for (const position of positions.values()) {
+    position.x = focusPosition.x + (position.x - focusPosition.x) * layoutScale;
+    position.y = focusPosition.y + (position.y - focusPosition.y) * layoutScale;
+  }
   const positionRepresentation = graph.nodes.map((node) => ({ id: node.id, x: positions.get(node.id).x, y: positions.get(node.id).y }));
   const degreeById = new Map(graph.nodes.map((node) => [node.id, 0]));
   for (const edge of edges) {
@@ -282,29 +311,42 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
     edgeLayer.replaceChildren();
     nodeLayer.replaceChildren();
     for (const edge of edges) {
+      const sourcePosition = positions.get(edge.source);
+      const targetPosition = positions.get(edge.target);
       const line = document.createElementNS(svg.namespaceURI, 'line');
       line.classList.add('graph-edge');
       line.dataset.source = edge.source;
       line.dataset.target = edge.target;
       line.setAttribute('marker-end', 'url(#graphtrail-arrowhead)');
+      line.setAttribute('x1', String(sourcePosition.x));
+      line.setAttribute('y1', String(sourcePosition.y));
+      line.setAttribute('x2', String(targetPosition.x));
+      line.setAttribute('y2', String(targetPosition.y));
       const title = document.createElementNS(svg.namespaceURI, 'title');
       title.textContent = `${edge.kind} (line ${edge.line})`;
       line.append(title);
       edgeLayer.append(line);
     }
     for (const node of graph.nodes) {
+      const position = positions.get(node.id);
       const nodeGroup = document.createElementNS(svg.namespaceURI, 'g');
       nodeGroup.setAttribute('class', nodeClass(node));
       nodeGroup.dataset.nodeId = node.id;
       nodeGroup.setAttribute('tabindex', '0');
+      nodeGroup.setAttribute('role', 'button');
+      const label = node.qualified_name || node.name;
+      nodeGroup.setAttribute('aria-label', `${label}, ${node.file_path}:${node.start_line}`);
+      nodeGroup.setAttribute('transform', `translate(${position.x} ${position.y})`);
       const circle = document.createElementNS(svg.namespaceURI, 'circle');
       const degree = degreeById.get(node.id) || 0;
-      const radius = 6 + Math.min(degree, 8);
+      const degreeRadius = 6 + Math.min(degree, 8);
+      const radius = node.id === primaryFocusNode?.id ? Math.max(16, degreeRadius) : degreeRadius;
       circle.setAttribute('r', String(radius));
       const text = document.createElementNS(svg.namespaceURI, 'text');
-      const label = node.qualified_name || node.name;
       const maxLabelLength = 36;
       const displayLabel = label.length > maxLabelLength ? label.slice(0, maxLabelLength - 1) + '…' : label;
+      text.setAttribute('x', String(radius + 5));
+      text.setAttribute('y', '4');
       text.textContent = displayLabel;
       text.classList.add('graph-label');
       if (node.file_path === graph.focus_path) text.classList.add('graph-label--focus');
@@ -322,7 +364,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
     updateTransform();
   };
   const resetGraphView = () => { transform = { x: 0, y: 0, scale: 1 }; updateTransform(); };
-  const beginPan = (event) => { panStart = { x: event.clientX - transform.x, y: event.clientY - transform.y }; };
+  const beginPan = (event) => { panStart = { x: event.clientX - transform.x, y: event.clientY - transform.y }; svg.setPointerCapture(event.pointerId); };
   const zoomGraph = (event) => { event.preventDefault(); transform.scale = Math.max(0.5, Math.min(3, transform.scale + (event.deltaY < 0 ? 0.1 : -0.1))); updateTransform(); };
   const zoomIn = () => { transform.scale = Math.min(3, transform.scale + 0.1); updateTransform(); };
   const zoomOut = () => { transform.scale = Math.max(0.5, transform.scale - 0.1); updateTransform(); };
@@ -330,6 +372,7 @@ a:focus-visible, button:focus-visible, [tabindex]:focus-visible { outline: 3px s
   svg.addEventListener('wheel', zoomGraph, { passive: false });
   svg.addEventListener('pointermove', (event) => { if (panStart) { transform.x = event.clientX - panStart.x; transform.y = event.clientY - panStart.y; updateTransform(); } });
   svg.addEventListener('pointerup', () => { panStart = null; });
+  svg.addEventListener('pointercancel', () => { panStart = null; });
   graphControls.addEventListener('keydown', (event) => {
     if (event.key === '+' || event.key === '=') { event.preventDefault(); transform.scale = Math.min(3, transform.scale + 0.1); updateTransform(); }
     if (event.key === '-') { event.preventDefault(); transform.scale = Math.max(0.5, transform.scale - 0.1); updateTransform(); }
