@@ -1564,6 +1564,42 @@ raise SystemExit(1)
     assert rc == 0, f"child exited {rc}\nstdout:\n{stdout}\nstderr:\n{stderr}"
 
 
+def test_recover_partial_tail_reentrancy_matches_append_event(tmp_path):
+    """Recovery must fail fast when signal delivery recursively enters it."""
+    script = """
+from pathlib import Path
+from brigade import run_journal
+
+journal_path = Path(__import__("sys").argv[1])
+quarantine_dir = Path(__import__("sys").argv[2])
+run_journal._HAS_PTHREAD_SIGMASK = False
+original = run_journal._read_bytes_nofollow
+entered = False
+def recurse(path):
+    global entered
+    data = original(path)
+    if not entered:
+        entered = True
+        run_journal.recover_partial_tail(journal_path, quarantine_dir)
+    return data
+run_journal._read_bytes_nofollow = recurse
+try:
+    run_journal.recover_partial_tail(journal_path, quarantine_dir)
+except run_journal.RunJournalError as exc:
+    if "recursive append" not in exc.diagnostic:
+        raise SystemExit(2)
+    raise SystemExit(0)
+raise SystemExit(1)
+"""
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+    journal_path.write_bytes(journal_path.read_bytes() + b"partial")
+
+    rc, stdout, stderr = _run_isolated_child(script, str(journal_path), str(tmp_path / "quarantine"), timeout=2.0)
+
+    assert rc == 0, f"child exited {rc}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+
+
 def test_append_event_process_lock_prevents_worker_main_sigterm_duplicate_in_subprocess(tmp_path):
     """Worker-thread append holds the process lock while SIGTERM runs on the main
     thread: the handler blocks until the worker finishes, then sees a fresh tail

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -47,8 +48,10 @@ def write_text_atomic(path: Path, data: str) -> None:
 
     The write goes to a temp file in the same directory and is swapped in with
     os.replace, so a reader (or a crashed writer) never observes a half-written
-    file: it sees either the old file or the complete new one. On failure the
-    temp file is removed and the existing file is left untouched.
+    file: it sees either the old file or the complete new one. On failure before
+    replacement the temp file is removed and the existing file is left untouched.
+    A directory-fsync failure occurs after replacement and means durable
+    publication is unconfirmed, although the new bytes are already present.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -62,6 +65,33 @@ def write_text_atomic(path: Path, data: str) -> None:
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+    _fsync_parent_directory(path.parent)
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    """Durably publish a replacement on platforms that support directory fsync."""
+    if not _supports_directory_fsync():
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path.resolve(), flags)
+    primary: BaseException | None = None
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("atomic-write parent is not a directory")
+        os.fsync(fd)
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        try:
+            os.close(fd)
+        except BaseException:
+            if primary is None:
+                raise
+
+
+def _supports_directory_fsync() -> bool:
+    return os.name == "posix"
 
 
 def write_bytes_atomic(path: Path, data: bytes) -> None:

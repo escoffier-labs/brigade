@@ -980,6 +980,14 @@ def _verify_coverage(
     paired_event_type = latest.payload.get("paired_event_type")
     pairing_key = latest.payload.get("pairing_key")
     tail = events[-1]
+    trailing_redaction_anchors = 0
+    while tail.event_type == "run.redaction.recorded":
+        trailing_redaction_anchors += 1
+        if trailing_redaction_anchors == len(events):
+            raise CheckpointError(
+                _bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail"
+            )
+        tail = events[-1 - trailing_redaction_anchors]
     if latest.sequence == tail.sequence:
         # A dispatch pairing key promises a specific identity-bearing fact.
         # A checkpoint at tail means that fact never committed, so recovery

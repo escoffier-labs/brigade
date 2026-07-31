@@ -430,9 +430,12 @@ def _rewrite_events(
     idempotency_keys: set[str] = set()
     for event in events:
         affected = sequence_start <= event.sequence <= sequence_end
-        payload = _redacted_payload(event) if affected else dict(event.payload)
+        preserved_anchor = event.event_type == "run.redaction.recorded"
+        payload = _redacted_payload(event) if affected and not preserved_anchor else dict(event.payload)
         idempotency_key = (
-            _redaction_idempotency_key(operation_id, event.sequence) if affected else event.idempotency_key
+            _redaction_idempotency_key(operation_id, event.sequence)
+            if affected and not preserved_anchor
+            else event.idempotency_key
         )
         if idempotency_key in idempotency_keys:
             raise RedactionError("rewritten journal idempotency key collision")
@@ -1122,10 +1125,15 @@ def _record_bytes(
     rewritten_sha256: str | None,
     quarantine_retained: bool,
     parent_operation_id: str | None,
+    parent_record_sha256: str | None = None,
     rewritten_digest_retired_by: str | None = None,
 ) -> bytes:
     if (rewritten_sha256 is None) == (rewritten_digest_retired_by is None):
         raise RedactionError("redaction record digest is invalid")
+    if (parent_operation_id is None) != (parent_record_sha256 is None):
+        raise RedactionError("redaction record parent reference is invalid")
+    if parent_record_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", parent_record_sha256):
+        raise RedactionError("redaction record parent reference is invalid")
     payload = {
         "schema": REDACTION_SCHEMA,
         "schema_version": REDACTION_SCHEMA_VERSION,
@@ -1139,6 +1147,8 @@ def _record_bytes(
         "projection_verified": True,
         "quarantine_retained": quarantine_retained,
     }
+    if parent_record_sha256 is not None:
+        payload["parent_record_sha256"] = parent_record_sha256
     if rewritten_sha256 is not None:
         payload["rewritten_journal_sha256"] = rewritten_sha256
     if rewritten_digest_retired_by is not None:
@@ -1157,6 +1167,7 @@ def _write_redaction_record(
     rewritten_sha256: str | None,
     quarantine_retained: bool,
     parent_operation_id: str | None = None,
+    parent_record_sha256: str | None = None,
     rewritten_digest_retired_by: str | None = None,
 ) -> None:
     _atomic_write(
@@ -1170,10 +1181,21 @@ def _write_redaction_record(
             rewritten_sha256=rewritten_sha256,
             quarantine_retained=quarantine_retained,
             parent_operation_id=parent_operation_id,
+            parent_record_sha256=parent_record_sha256,
             rewritten_digest_retired_by=rewritten_digest_retired_by,
         ),
         mode=_FILE_MODE,
         category="redaction record",
+    )
+
+
+def _redaction_record_sha256(record_path: Path) -> str:
+    return _digest(
+        _read_bounded_regular(
+            record_path,
+            limit=16 * 1024,
+            category="redaction record",
+        )
     )
 
 
@@ -1209,6 +1231,12 @@ def _validate_redaction_record(
         or not isinstance(record.get("quarantine_retained"), bool)
     ):
         raise RedactionError("redaction record verification failed")
+    parent_record_sha256 = record.get("parent_record_sha256")
+    if (parent_operation_id is None) != (parent_record_sha256 is None) or (
+        parent_record_sha256 is not None
+        and (not isinstance(parent_record_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", parent_record_sha256))
+    ):
+        raise RedactionError("redaction record verification failed")
     if rewritten_sha256 is not None:
         if (
             not re.fullmatch(r"[0-9a-f]{64}", rewritten_sha256)
@@ -1238,6 +1266,7 @@ def _parse_lineage_record(raw_record: bytes, *, operation_id: str, run_id: str) 
         and rewritten_digest_retired_by != operation_id
     )
     parent = record.get("parent_operation_id")
+    parent_record_sha256 = record.get("parent_record_sha256")
     if (
         record.get("schema") != REDACTION_SCHEMA
         or record.get("schema_version") != REDACTION_SCHEMA_VERSION
@@ -1250,12 +1279,201 @@ def _parse_lineage_record(raw_record: bytes, *, operation_id: str, run_id: str) 
         or not isinstance(record.get("sequence_end"), int)
         or valid_rewritten == valid_retirement
         or (parent is not None and (not isinstance(parent, str) or not _OPERATION_RE.fullmatch(parent)))
+        or (parent is None) != (parent_record_sha256 is None)
+        or (
+            parent_record_sha256 is not None
+            and (not isinstance(parent_record_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", parent_record_sha256))
+        )
         or record.get("chain_verified") is not True
         or record.get("projection_verified") is not True
         or not isinstance(record.get("quarantine_retained"), bool)
     ):
         raise RedactionError("redaction lineage record verification failed")
     return record
+
+
+def _parent_record_reference(
+    events: Sequence[run_journal.RunEvent],
+    parent_operation_id: str | None,
+) -> str | None:
+    if parent_operation_id is None:
+        return None
+    parent_anchors = [
+        event
+        for event in events
+        if event.event_type == "run.redaction.recorded" and event.payload.get("operation_id") == parent_operation_id
+    ]
+    if len(parent_anchors) != 1:
+        raise RedactionError("redaction lineage is incomplete")
+    payload = parent_anchors[0].payload
+    reference = payload.get("record_sha256")
+    if (
+        set(payload)
+        != {
+            "operation_id",
+            "affected_first_sequence",
+            "affected_last_sequence",
+            "reason_class",
+            "record_sha256",
+        }
+        or not isinstance(reference, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", reference)
+    ):
+        raise RedactionError("redaction lineage parent reference is invalid")
+    return reference
+
+
+def _validate_chained_anchors(
+    events: Sequence[run_journal.RunEvent],
+    records: Mapping[str, Mapping[str, Any]],
+    record_digests: Mapping[str, str],
+    states: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    resumable_operation_id: str | None = None,
+) -> None:
+    seen: set[str] = set()
+    for event in events:
+        if event.event_type != "run.redaction.recorded":
+            continue
+        payload = event.payload
+        if set(payload) != {
+            "operation_id",
+            "affected_first_sequence",
+            "affected_last_sequence",
+            "reason_class",
+            "record_sha256",
+        }:
+            raise RedactionError("redaction chained anchor verification failed")
+        operation_id = payload.get("operation_id")
+        if not isinstance(operation_id, str) or operation_id in seen:
+            raise RedactionError("redaction chained anchor verification failed")
+        record = records.get(operation_id)
+        if record is None:
+            raise RedactionError("redaction chained anchor verification failed")
+        seen.add(operation_id)
+        expected_digest = record_digests.get(operation_id)
+        if expected_digest is None:
+            raise RedactionError("redaction chained anchor verification failed")
+        if (
+            payload.get("affected_first_sequence") != record.get("sequence_start")
+            or payload.get("affected_last_sequence") != record.get("sequence_end")
+            or payload.get("reason_class") != record.get("reason_code")
+        ):
+            raise RedactionError("redaction chained anchor verification failed")
+        if payload.get("record_sha256") != expected_digest:
+            current = states.get(resumable_operation_id) if states is not None and resumable_operation_id else None
+            allowed_current = (
+                operation_id == resumable_operation_id
+                and current is not None
+                and current.get("phase")
+                in {
+                    "cleanup-authorized",
+                    "cleaned",
+                }
+            )
+            allowed_parent = (
+                current is not None
+                and current.get("phase") in {"cleanup-authorized", "cleaned"}
+                and record.get("rewritten_digest_retired_by") == resumable_operation_id
+                and current.get("parent_operation_id") == operation_id
+            )
+            if not (allowed_current or allowed_parent):
+                raise RedactionError("redaction chained anchor verification failed")
+    missing = set(records) - seen
+    if missing:
+        resumable_state = states.get(resumable_operation_id) if states is not None and resumable_operation_id else None
+        if missing != {resumable_operation_id} or resumable_state is None or resumable_state.get("phase") != "verified":
+            raise RedactionError("redaction chained anchor verification failed")
+
+
+def _redaction_anchor_payload(record: Mapping[str, Any], *, record_sha256: str) -> dict[str, Any]:
+    return {
+        "operation_id": record["operation_id"],
+        "affected_first_sequence": record["sequence_start"],
+        "affected_last_sequence": record["sequence_end"],
+        "reason_class": record["reason_code"],
+        "record_sha256": record_sha256,
+    }
+
+
+def _append_redaction_anchor(
+    journal_path: Path,
+    events: Sequence[run_journal.RunEvent],
+    record: Mapping[str, Any],
+    *,
+    record_sha256: str,
+) -> run_journal.RunEvent:
+    return run_journal.append_event(
+        journal_path,
+        run_id=events[-1].run_id,
+        event_type="run.redaction.recorded",
+        payload=_redaction_anchor_payload(record, record_sha256=record_sha256),
+        idempotency_key=f"redaction-recorded:{record['operation_id']}",
+        expected_previous_sequence=events[-1].sequence,
+    )
+
+
+def _refresh_chained_anchors(
+    run_dir: Path,
+    *,
+    workspace: Path,
+    resumable_operation_id: str | None,
+) -> str:
+    """Re-chain anchor payload hashes after a record lifecycle update."""
+    journal_path = run_dir / "events" / "lifecycle.jsonl"
+    events = _verified_events(journal_path, category="journal")
+    records, states, record_digests = _load_operation_inventory(
+        run_dir / "events" / "redactions", run_dir.name, resumable_operation_id=resumable_operation_id
+    )
+    _validate_chained_anchors(
+        events,
+        records,
+        record_digests,
+        states,
+        resumable_operation_id=resumable_operation_id,
+    )
+    rewritten: list[run_journal.RunEvent] = []
+    previous_digest: str | None = None
+    for event in events:
+        payload = (
+            _redaction_anchor_payload(
+                records[event.payload["operation_id"]],
+                record_sha256=record_digests[event.payload["operation_id"]],
+            )
+            if event.event_type == "run.redaction.recorded"
+            else event.payload
+        )
+        envelope = run_events.build_event(
+            run_id=event.run_id,
+            sequence=event.sequence,
+            event_type=event.event_type,
+            payload=payload,
+            idempotency_key=event.idempotency_key,
+            recorded_at=event.recorded_at,
+            previous_digest=previous_digest,
+        )
+        rewritten_event = run_journal.RunEvent(
+            schema=envelope["schema"],
+            schema_version=envelope["schema_version"],
+            event_id=envelope["event_id"],
+            run_id=envelope["run_id"],
+            sequence=envelope["sequence"],
+            event_type=envelope["event_type"],
+            recorded_at=envelope["recorded_at"],
+            idempotency_key=envelope["idempotency_key"],
+            request_digest=envelope["request_digest"],
+            previous_digest=envelope["previous_digest"],
+            event_digest=envelope["event_digest"],
+            payload=dict(envelope["payload"]),
+        )
+        rewritten.append(rewritten_event)
+        previous_digest = rewritten_event.event_digest
+    data = _canonical_event_bytes(rewritten)
+    _assert_active_owner(workspace, run_dir)
+    _replace_journal(journal_path, data)
+    snapshot = _load_json_object(run_dir / "run.json", limit=MAX_RUN_JSON_BYTES, category="run projection")
+    _replace_projection(run_dir, _projection(snapshot, rewritten))
+    return _digest(data)
 
 
 def _validate_lineage_graph(records: Mapping[str, Mapping[str, Any]]) -> None:
@@ -1300,12 +1518,13 @@ def _load_operation_inventory(
     run_id: str,
     *,
     resumable_operation_id: str | None,
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, str]]:
     if not os.path.lexists(redactions_dir):
-        return {}, {}
+        return {}, {}, {}
     root_fd = _open_directory_handle(redactions_dir, category="redactions")
     records: dict[str, dict[str, Any]] = {}
     states: dict[str, dict[str, Any]] = {}
+    record_digests: dict[str, str] = {}
     incomplete: list[str] = []
     try:
         try:
@@ -1387,6 +1606,7 @@ def _load_operation_inventory(
                     raise RedactionError("incomplete redaction transaction exists; retry its original request")
                 incomplete.append(operation_id)
             records[operation_id] = record
+            record_digests[operation_id] = _digest(raw_record)
     finally:
         os.close(root_fd)
 
@@ -1408,10 +1628,8 @@ def _load_operation_inventory(
         if state_digest != record_digest or state_retired_by != record_retired_by:
             if record_retired_by is not None and state_digest is not None:
                 split_retired_by = record_retired_by
-                split_digest = state_digest
             elif state_retired_by is not None and record_digest is not None:
                 split_retired_by = state_retired_by
-                split_digest = record_digest
             else:
                 raise RedactionError("redaction transaction state/record mismatch")
             child_state = states.get(split_retired_by)
@@ -1423,7 +1641,6 @@ def _load_operation_inventory(
                 or child_state.get("phase") != "cleanup-authorized"
                 or child_state.get("parent_operation_id") != operation_id
                 or child_record.get("parent_operation_id") != operation_id
-                or child_state.get("original_sha256") != split_digest
             ):
                 raise RedactionError("redaction transaction state/record mismatch")
         phase = state.get("phase")
@@ -1432,92 +1649,109 @@ def _load_operation_inventory(
             phase == "cleaned" and quarantine_retained is not False
         ):
             raise RedactionError("redaction transaction state/record mismatch")
+        parent_operation_id = record.get("parent_operation_id")
+        parent_reference = record.get("parent_record_sha256")
+        if parent_operation_id is None:
+            if parent_reference is not None:
+                raise RedactionError("redaction lineage parent reference is invalid")
+            continue
+        if parent_operation_id not in states or not isinstance(parent_reference, str):
+            raise RedactionError("redaction lineage parent reference is invalid")
+        quarantine = redactions_dir / operation_id / "original.jsonl"
+        if os.path.lexists(quarantine):
+            original_sha256 = state.get("original_sha256")
+            if not isinstance(original_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", original_sha256):
+                raise RedactionError("redaction lineage child quarantine is invalid")
+            _verify_quarantine(quarantine, original_sha256)
+            if _parent_record_reference(
+                _verified_events(quarantine, category="redaction quarantine"), parent_operation_id
+            ) != (parent_reference):
+                raise RedactionError("redaction lineage parent reference is invalid")
+        elif phase not in {"cleanup-authorized", "cleaned"}:
+            raise RedactionError("redaction lineage child quarantine is missing")
     _validate_lineage_graph(records)
-    return records, states
+    return records, states, record_digests
 
 
 def _retire_rewritten_digest_aliases(
     redactions_dir: Path,
     *,
     run_id: str,
-    sensitive_digest: str,
+    parent_operation_id: str | None,
     retired_by_operation_id: str,
     records: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    for operation_id, record in records.items():
-        state_path = redactions_dir / operation_id / "state.json"
-        state = _load_and_validate_state(
-            state_path,
-            operation_id=operation_id,
-            run_id=run_id,
-            sequence_start=record["sequence_start"],
-            sequence_end=record["sequence_end"],
-            reason=record["reason_code"],
-        )
-        if state.get("parent_operation_id") != record.get("parent_operation_id"):
-            raise RedactionError("redaction lineage metadata mismatch")
-
-        record_digest = record.get("rewritten_journal_sha256")
-        record_retired_by = record.get("rewritten_digest_retired_by")
-        state_digest = state.get("rewritten_sha256")
-        state_retired_by = state.get("rewritten_digest_retired_by")
-        record_matches = record_digest == sensitive_digest or record_retired_by == retired_by_operation_id
-        state_matches = state_digest == sensitive_digest or state_retired_by == retired_by_operation_id
-        if not record_matches and not state_matches:
-            continue
-        if (record_digest != sensitive_digest and record_retired_by != retired_by_operation_id) or (
-            state_digest != sensitive_digest and state_retired_by != retired_by_operation_id
-        ):
-            raise RedactionError("redaction lineage digest mismatch")
-        operation_dir = redactions_dir / operation_id
-        record_path = operation_dir / "record.json"
-        if not (record_retired_by == retired_by_operation_id and state_retired_by == retired_by_operation_id):
-            _write_redaction_record(
-                record_path,
-                operation_id=operation_id,
-                run_id=run_id,
-                sequence_start=record["sequence_start"],
-                sequence_end=record["sequence_end"],
-                reason=record["reason_code"],
-                rewritten_sha256=None,
-                quarantine_retained=record["quarantine_retained"],
-                parent_operation_id=record.get("parent_operation_id"),
-                rewritten_digest_retired_by=retired_by_operation_id,
-            )
-            _write_state(
-                state_path,
-                operation_id=operation_id,
-                run_id=run_id,
-                sequence_start=record["sequence_start"],
-                sequence_end=record["sequence_end"],
-                reason=record["reason_code"],
-                original_sha256=state.get("original_sha256"),
-                rewritten_sha256=None,
-                phase=state["phase"],
-                parent_operation_id=state.get("parent_operation_id"),
-                rewritten_digest_retired_by=retired_by_operation_id,
-            )
-        operation_fd = _open_directory_handle(operation_dir, category="redaction operation")
-        try:
-            _remove_operation_temps(
-                operation_dir,
-                operation_fd,
-                patterns=(_STATE_TEMP_RE, _RECORD_TEMP_RE),
-                category="redaction lineage cleanup",
-            )
-        finally:
-            os.close(operation_fd)
-        _validate_redaction_record(
+    if parent_operation_id is None:
+        return
+    record = records.get(parent_operation_id)
+    if record is None:
+        raise RedactionError("redaction lineage is incomplete")
+    operation_dir = redactions_dir / parent_operation_id
+    state_path = operation_dir / "state.json"
+    record_path = operation_dir / "record.json"
+    state = _load_and_validate_state(
+        state_path,
+        operation_id=parent_operation_id,
+        run_id=run_id,
+        sequence_start=record["sequence_start"],
+        sequence_end=record["sequence_end"],
+        reason=record["reason_code"],
+    )
+    if state.get("parent_operation_id") != record.get("parent_operation_id"):
+        raise RedactionError("redaction lineage metadata mismatch")
+    if record.get("rewritten_digest_retired_by") not in {None, retired_by_operation_id} or state.get(
+        "rewritten_digest_retired_by"
+    ) not in {None, retired_by_operation_id}:
+        raise RedactionError("redaction lineage digest mismatch")
+    if record.get("rewritten_digest_retired_by") != retired_by_operation_id:
+        _write_redaction_record(
             record_path,
-            operation_id=operation_id,
+            operation_id=parent_operation_id,
             run_id=run_id,
             sequence_start=record["sequence_start"],
             sequence_end=record["sequence_end"],
             reason=record["reason_code"],
             rewritten_sha256=None,
+            quarantine_retained=record["quarantine_retained"],
             parent_operation_id=record.get("parent_operation_id"),
+            parent_record_sha256=record.get("parent_record_sha256"),
             rewritten_digest_retired_by=retired_by_operation_id,
         )
+    if state.get("rewritten_digest_retired_by") != retired_by_operation_id:
+        _write_state(
+            state_path,
+            operation_id=parent_operation_id,
+            run_id=run_id,
+            sequence_start=record["sequence_start"],
+            sequence_end=record["sequence_end"],
+            reason=record["reason_code"],
+            original_sha256=state.get("original_sha256"),
+            rewritten_sha256=None,
+            phase=state["phase"],
+            parent_operation_id=state.get("parent_operation_id"),
+            rewritten_digest_retired_by=retired_by_operation_id,
+        )
+    operation_fd = _open_directory_handle(operation_dir, category="redaction operation")
+    try:
+        _remove_operation_temps(
+            operation_dir,
+            operation_fd,
+            patterns=(_STATE_TEMP_RE, _RECORD_TEMP_RE),
+            category="redaction lineage cleanup",
+        )
+    finally:
+        os.close(operation_fd)
+    _validate_redaction_record(
+        record_path,
+        operation_id=parent_operation_id,
+        run_id=run_id,
+        sequence_start=record["sequence_start"],
+        sequence_end=record["sequence_end"],
+        reason=record["reason_code"],
+        rewritten_sha256=None,
+        parent_operation_id=record.get("parent_operation_id"),
+        rewritten_digest_retired_by=retired_by_operation_id,
+    )
 
 
 def _lineage_parent_for_digest(
@@ -1539,8 +1773,16 @@ def _lineage_contains(
     *,
     ancestor_operation_id: str,
     active_journal_digest: str,
+    active_events: Sequence[run_journal.RunEvent] | None = None,
 ) -> bool:
-    current = _lineage_parent_for_digest(records, active_journal_digest)
+    anchored_operations = (
+        [event.payload["operation_id"] for event in active_events if event.event_type == "run.redaction.recorded"]
+        if active_events is not None
+        else []
+    )
+    current = (
+        anchored_operations[-1] if anchored_operations else _lineage_parent_for_digest(records, active_journal_digest)
+    )
     visited: set[str] = set()
     while current is not None:
         if current == ancestor_operation_id:
@@ -1585,7 +1827,10 @@ def _assert_affected_values_removed(
     end: int,
 ) -> None:
     for prior, current in zip(original, rewritten, strict=True):
-        if not start <= prior.sequence <= end or prior.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE:
+        if not start <= prior.sequence <= end or prior.event_type in {
+            run_checkpoint.CHECKPOINT_EVENT_TYPE,
+            "run.redaction.recorded",
+        }:
             continue
         for key, value in prior.payload.items():
             if key == "status" or value is None:
@@ -1703,6 +1948,7 @@ def _post_replace_verify(
     run_dir: Path,
     *,
     expected_digest: str | None,
+    resumable_operation_id: str | None = None,
 ) -> tuple[dict[str, Any], list[run_journal.RunEvent], str]:
     journal_path = run_dir / "events" / "lifecycle.jsonl"
     active = _read_bounded_regular(
@@ -1714,6 +1960,19 @@ def _post_replace_verify(
     if expected_digest is not None and active_digest != expected_digest:
         raise RedactionError("post-rewrite verification failed")
     events = _verified_events(journal_path, category="post-rewrite journal")
+    if any(event.event_type == "run.redaction.recorded" for event in events):
+        records, states, record_digests = _load_operation_inventory(
+            run_dir / "events" / "redactions",
+            run_dir.name,
+            resumable_operation_id=resumable_operation_id,
+        )
+        _validate_chained_anchors(
+            events,
+            records,
+            record_digests,
+            states,
+            resumable_operation_id=resumable_operation_id,
+        )
     snapshot = _load_json_object(
         run_dir / "run.json",
         limit=MAX_RUN_JSON_BYTES,
@@ -1750,8 +2009,34 @@ def _resume_projection_after_rewrite(
     projected = _projection(snapshot, events)
     if snapshot == projected.snapshot:
         return
-    if _projection_semantics(snapshot) != _projection_semantics(projected.snapshot):
-        raise RedactionError("post-rewrite projection semantics changed")
+    last_sequence = snapshot.get("journal_last_sequence")
+    projected_last_sequence = projected.snapshot.get("journal_last_sequence")
+    if last_sequence == projected_last_sequence:
+        if _projection_semantics(snapshot) != _projection_semantics(projected.snapshot):
+            raise RedactionError("post-rewrite projection semantics changed")
+    else:
+        snapshot_without_sequence = {
+            key: value
+            for key, value in snapshot.items()
+            if key not in {_PROJECTION_DIGEST_FIELD, "journal_last_sequence"}
+        }
+        projected_without_sequence = {
+            key: value
+            for key, value in projected.snapshot.items()
+            if key not in {_PROJECTION_DIGEST_FIELD, "journal_last_sequence"}
+        }
+        if snapshot_without_sequence != projected_without_sequence:
+            raise RedactionError("post-rewrite projection semantics changed")
+        if (
+            isinstance(last_sequence, bool)
+            or not isinstance(last_sequence, int)
+            or isinstance(projected_last_sequence, bool)
+            or not isinstance(projected_last_sequence, int)
+            or last_sequence < 0
+            or last_sequence > projected_last_sequence
+            or any(event.sequence > last_sequence and event.event_type != "run.redaction.recorded" for event in events)
+        ):
+            raise RedactionError("post-rewrite projection sequence lag is invalid")
     _replace_projection(run_dir, projected)
 
 
@@ -1803,12 +2088,30 @@ def redact_journal(
             if original_bytes != _canonical_event_bytes(events):
                 raise RedactionError("journal changed during redaction preflight")
             active_digest = _digest(original_bytes)
-            lineage_records, inventory_states = _load_operation_inventory(
+            lineage_records, inventory_states, record_digests = _load_operation_inventory(
                 redactions_dir,
                 resolved_run_dir.name,
                 resumable_operation_id=operation_id,
             )
+            _validate_chained_anchors(
+                events,
+                lineage_records,
+                record_digests,
+                inventory_states,
+                resumable_operation_id=operation_id,
+            )
             prior_state = inventory_states.get(operation_id)
+
+            if prior_state is not None and any(
+                event.event_type == "run.redaction.recorded" and event.payload.get("operation_id") == operation_id
+                for event in events
+            ):
+                _resume_projection_after_rewrite(resolved_run_dir, events)
+                snapshot = _load_json_object(
+                    resolved_run_dir / "run.json",
+                    limit=MAX_RUN_JSON_BYTES,
+                    category="run projection",
+                )
 
             if prior_state is not None:
                 if (
@@ -1839,6 +2142,7 @@ def redact_journal(
                     lineage_records,
                     ancestor_operation_id=operation_id,
                     active_journal_digest=active_digest,
+                    active_events=events,
                 )
                 if is_current_or_descendant:
                     if prior_state["phase"] == "cleanup-authorized":
@@ -1852,9 +2156,13 @@ def redact_journal(
                         if not isinstance(original_sha256, str):
                             raise RedactionError("redaction transaction digest is invalid")
                         _verify_quarantine(quarantine_path, original_sha256)
-                    if isinstance(rewritten_sha256, str) and active_digest == rewritten_sha256:
+                    anchor_present = any(
+                        event.event_type == "run.redaction.recorded"
+                        and event.payload.get("operation_id") == operation_id
+                        for event in events
+                    )
+                    if anchor_present:
                         _resume_projection_after_rewrite(resolved_run_dir, events)
-                    _post_replace_verify(resolved_run_dir, expected_digest=None)
                     if not os.path.lexists(record_path):
                         if not isinstance(rewritten_sha256, str) or active_digest != rewritten_sha256 or cleaned:
                             raise RedactionError("redaction lineage record is missing")
@@ -1869,6 +2177,7 @@ def redact_journal(
                                 rewritten_sha256=rewritten_sha256,
                                 quarantine_retained=True,
                                 parent_operation_id=parent_operation_id,
+                                parent_record_sha256=_parent_record_reference(events, parent_operation_id),
                             )
                         except (OSError, RedactionError) as exc:
                             raise RedactionError("redaction record write failed") from exc
@@ -1895,6 +2204,27 @@ def redact_journal(
                         parent_operation_id=parent_operation_id,
                         rewritten_digest_retired_by=rewritten_digest_retired_by,
                     )
+                    if not anchor_present:
+                        record = _load_json_object(record_path, limit=16 * 1024, category="redaction record")
+                        _assert_active_owner(workspace, resolved_run_dir)
+                        anchor = _append_redaction_anchor(
+                            journal_path,
+                            events,
+                            record,
+                            record_sha256=_redaction_record_sha256(record_path),
+                        )
+                        _replace_projection(
+                            resolved_run_dir,
+                            _projection(
+                                _load_json_object(
+                                    resolved_run_dir / "run.json",
+                                    limit=MAX_RUN_JSON_BYTES,
+                                    category="run projection",
+                                ),
+                                [*events, anchor],
+                            ),
+                        )
+                    _post_replace_verify(resolved_run_dir, expected_digest=None)
                     return RedactionReport(
                         operation_id,
                         start,
@@ -1906,11 +2236,22 @@ def redact_journal(
                 if active_digest != prior_state.get("original_sha256") or prior_state["phase"] != "quarantined":
                     raise RedactionError("redaction transaction does not match the active journal")
 
+            active_anchor_ids = [
+                event.payload["operation_id"] for event in events if event.event_type == "run.redaction.recorded"
+            ]
             parent_operation_id = (
                 prior_state.get("parent_operation_id")
                 if prior_state is not None
                 else _lineage_parent_for_digest(lineage_records, active_digest)
+                or (active_anchor_ids[-1] if active_anchor_ids else None)
             )
+            if not any(
+                start <= event.sequence <= end
+                and event.event_type not in {run_checkpoint.CHECKPOINT_EVENT_TYPE, "run.redaction.recorded"}
+                for event in events
+            ):
+                raise RedactionError("redaction range contains no redactable payloads")
+            parent_record_sha256 = _parent_record_reference(events, parent_operation_id)
             rewritten_events, rewritten_bytes = _rewrite_events(
                 events,
                 sequence_start=start,
@@ -1965,7 +2306,11 @@ def redact_journal(
                 parent_operation_id=parent_operation_id,
             )
             _replace_projection(resolved_run_dir, after_projection)
-            _post_replace_verify(resolved_run_dir, expected_digest=rewritten_sha256)
+            _post_replace_verify(
+                resolved_run_dir,
+                expected_digest=rewritten_sha256,
+                resumable_operation_id=operation_id,
+            )
             try:
                 _write_redaction_record(
                     record_path,
@@ -1977,6 +2322,7 @@ def redact_journal(
                     rewritten_sha256=rewritten_sha256,
                     quarantine_retained=True,
                     parent_operation_id=parent_operation_id,
+                    parent_record_sha256=parent_record_sha256,
                 )
             except (OSError, RedactionError) as exc:
                 raise RedactionError("redaction record write failed") from exc
@@ -2002,6 +2348,16 @@ def redact_journal(
                 rewritten_sha256=rewritten_sha256,
                 parent_operation_id=parent_operation_id,
             )
+            record = _load_json_object(record_path, limit=16 * 1024, category="redaction record")
+            _assert_active_owner(workspace, resolved_run_dir)
+            anchor = _append_redaction_anchor(
+                journal_path,
+                rewritten_events,
+                record,
+                record_sha256=_redaction_record_sha256(record_path),
+            )
+            _replace_projection(resolved_run_dir, _projection(after_projection.snapshot, [*rewritten_events, anchor]))
+            _post_replace_verify(resolved_run_dir, expected_digest=None)
             return RedactionReport(operation_id, start, end, quarantine_path, record_path)
 
 
@@ -2029,7 +2385,7 @@ def cleanup_redaction_quarantine(
             if not _existing_operation_dir(resolved_run_dir, operation_id):
                 raise RedactionError("redaction transaction does not exist")
             state_path = operation_dir / "state.json"
-            lineage_records, inventory_states = _load_operation_inventory(
+            lineage_records, inventory_states, _ = _load_operation_inventory(
                 operation_dir.parent,
                 resolved_run_dir.name,
                 resumable_operation_id=operation_id,
@@ -2037,10 +2393,14 @@ def cleanup_redaction_quarantine(
             state = inventory_states.get(operation_id)
             if state is None:
                 raise RedactionError("redaction transaction metadata mismatch")
+            record = lineage_records.get(operation_id)
+            if record is None:
+                raise RedactionError("redaction transaction metadata mismatch")
             start = state.get("sequence_start")
             end = state.get("sequence_end")
             reason = state.get("reason_code")
             parent_operation_id = state.get("parent_operation_id")
+            parent_record_sha256 = record.get("parent_record_sha256")
             rewritten_sha256 = state.get("rewritten_sha256")
             rewritten_digest_retired_by = state.get("rewritten_digest_retired_by")
             if (
@@ -2055,12 +2415,19 @@ def cleanup_redaction_quarantine(
 
             journal_path = resolved_run_dir / "events" / "lifecycle.jsonl"
             events = _verified_events(journal_path, category="journal")
+            _resume_projection_after_rewrite(resolved_run_dir, events)
+            snapshot = _load_json_object(
+                resolved_run_dir / "run.json",
+                limit=MAX_RUN_JSON_BYTES,
+                category="run projection",
+            )
             _verify_current_projection(snapshot, events)
             _validate_checkpoint_artifacts(resolved_run_dir, snapshot, events)
             try:
                 _, _, active_digest = _post_replace_verify(
                     resolved_run_dir,
                     expected_digest=None,
+                    resumable_operation_id=operation_id,
                 )
             except RedactionError as exc:
                 raise RedactionError("cleanup verification failed") from exc
@@ -2068,6 +2435,7 @@ def cleanup_redaction_quarantine(
                 lineage_records,
                 ancestor_operation_id=operation_id,
                 active_journal_digest=active_digest,
+                active_events=events,
             ):
                 raise RedactionError("cleanup verification failed")
             try:
@@ -2088,6 +2456,12 @@ def cleanup_redaction_quarantine(
             if state["phase"] == "cleaned":
                 if os.path.lexists(quarantine_path):
                     raise RedactionError("cleanup state conflicts with retained quarantine")
+                refreshed_digest = _refresh_chained_anchors(
+                    resolved_run_dir,
+                    workspace=workspace,
+                    resumable_operation_id=operation_id,
+                )
+                _post_replace_verify(resolved_run_dir, expected_digest=refreshed_digest)
                 return RedactionReport(
                     operation_id,
                     start,
@@ -2120,6 +2494,7 @@ def cleanup_redaction_quarantine(
                 rewritten_sha256=rewritten_sha256,
                 quarantine_retained=True,
                 parent_operation_id=parent_operation_id,
+                parent_record_sha256=parent_record_sha256,
                 rewritten_digest_retired_by=rewritten_digest_retired_by,
             )
             _write_state(
@@ -2168,13 +2543,9 @@ def cleanup_redaction_quarantine(
             _retire_rewritten_digest_aliases(
                 operation_dir.parent,
                 run_id=resolved_run_dir.name,
-                sensitive_digest=original_sha256,
+                parent_operation_id=parent_operation_id,
                 retired_by_operation_id=operation_id,
                 records=lineage_records,
-            )
-            _post_replace_verify(
-                resolved_run_dir,
-                expected_digest=active_digest,
             )
             _write_redaction_record(
                 record_path,
@@ -2186,6 +2557,7 @@ def cleanup_redaction_quarantine(
                 rewritten_sha256=rewritten_sha256,
                 quarantine_retained=False,
                 parent_operation_id=parent_operation_id,
+                parent_record_sha256=parent_record_sha256,
                 rewritten_digest_retired_by=rewritten_digest_retired_by,
             )
             _write_state(
@@ -2201,6 +2573,12 @@ def cleanup_redaction_quarantine(
                 parent_operation_id=parent_operation_id,
                 rewritten_digest_retired_by=rewritten_digest_retired_by,
             )
+            refreshed_digest = _refresh_chained_anchors(
+                resolved_run_dir,
+                workspace=workspace,
+                resumable_operation_id=operation_id,
+            )
+            _post_replace_verify(resolved_run_dir, expected_digest=refreshed_digest)
             return RedactionReport(
                 operation_id,
                 start,

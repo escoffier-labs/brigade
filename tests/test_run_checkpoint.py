@@ -1646,6 +1646,35 @@ def _journal_with_checkpoint_and_trailing(
     return checkpoint
 
 
+def test_recover_from_checkpoint_accepts_trailing_redaction_anchor(tmp_path):
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {"schema": "brigade.run.v1", "status": "dispatching", "task": "demo"}
+    _journal_with_checkpoint_and_trailing(
+        workspace,
+        run_dir,
+        run_json_obj,
+        paired_event_type=None,
+        trailing_events=[
+            (
+                "run.redaction.recorded",
+                {
+                    "operation_id": "redact-0123456789abcdef",
+                    "affected_first_sequence": 1,
+                    "affected_last_sequence": 1,
+                    "reason_class": "credential-exposure",
+                    "record_sha256": "a" * 64,
+                },
+                "redaction-recorded-test",
+                "2026-07-27T15:30:46.000000Z",
+            )
+        ],
+    )
+    (run_dir / "run.json").unlink()
+
+    assert run_checkpoint.recover_from_checkpoint(run_dir, None) == run_json_obj
+
+
 @pytest.mark.parametrize(
     ("payload", "pairing_seat", "pairing_attempt"),
     [
