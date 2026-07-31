@@ -7,6 +7,7 @@ use std::process::Command;
 use std::time::SystemTime;
 
 use graphtrail::store::{init_schema, open_db, sync_repo};
+use rusqlite::params;
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "miseledger")]
@@ -47,6 +48,57 @@ def run():
     let conn = open_db(&db).unwrap();
     init_schema(&conn).unwrap();
     sync_repo(&conn, root).unwrap();
+    conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+        .unwrap();
+    drop(conn);
+    db
+}
+
+fn build_map_db(root: &Path) -> PathBuf {
+    let db = root.join(".graphtrail").join("graphtrail.db");
+    let conn = open_db(&db).unwrap();
+    init_schema(&conn).unwrap();
+
+    for path in [
+        "src/caller.rs",
+        "src/focus.rs",
+        "src/callee.rs",
+        "src/neighbor.rs",
+    ] {
+        conn.execute(
+            "INSERT INTO files (path, content_hash, size, modified_at, indexed_at, language) \
+             VALUES (?1, 'fixture', 0, 0, 0, 'rust')",
+            [path],
+        )
+        .unwrap();
+    }
+    for (id, name, qualified_name, file_path, start_line) in [
+        ("caller", "caller", "caller::entry", "src/caller.rs", 8),
+        ("focus_a", "focus_a", "focus::alpha", "src/focus.rs", 4),
+        ("focus_b", "focus_b", "focus::beta", "src/focus.rs", 18),
+        ("callee", "callee", "callee::work", "src/callee.rs", 12),
+        ("neighbor", "neighbor", "neighbor::deep", "src/neighbor.rs", 3),
+    ] {
+        conn.execute(
+            "INSERT INTO symbols \
+             (id, kind, name, qualified_name, file_path, start_line, end_line, signature, content_hash) \
+             VALUES (?1, 'function', ?2, ?3, ?4, ?5, ?5, '', 'fixture')",
+            params![id, name, qualified_name, file_path, start_line],
+        )
+        .unwrap();
+    }
+    for (source, target, line) in [
+        ("caller", "focus_a", 21),
+        ("focus_a", "callee", 9),
+        ("focus_b", "callee", 22),
+        ("callee", "neighbor", 16),
+    ] {
+        conn.execute(
+            "INSERT INTO edges (source, target, kind, line, confidence) VALUES (?1, ?2, 'call', ?3, 1.0)",
+            params![source, target, line],
+        )
+        .unwrap();
+    }
     conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
         .unwrap();
     drop(conn);
@@ -143,6 +195,202 @@ fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, (usize, String)> {
         }
     }
     out
+}
+
+fn snapshot_graph_state(root: &Path) -> BTreeMap<PathBuf, (usize, String)> {
+    let mut out = BTreeMap::new();
+    if !root.exists() {
+        return out;
+    }
+    for entry in fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_file() && !path.to_string_lossy().ends_with("-shm") {
+            let bytes = fs::read(&path).unwrap();
+            out.insert(
+                path.file_name().unwrap().into(),
+                (bytes.len(), format!("{:x}", Sha256::digest(&bytes))),
+            );
+        }
+    }
+    out
+}
+
+fn keep_wal_sidecars(db: &Path) -> rusqlite::Connection {
+    let conn = open_db(db).unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('map_cli_sidecar_fixture', '1')",
+        [],
+    )
+    .unwrap();
+    conn
+}
+
+fn map_data(html: &str) -> serde_json::Value {
+    const OPEN: &str = r#"<script id="graphtrail-map-data" type="application/json">"#;
+    const CLOSE: &str = "</script>";
+
+    let start = html.find(OPEN).unwrap() + OPEN.len();
+    let end = start + html[start..].find(CLOSE).unwrap();
+    serde_json::from_str(&html[start..end]).unwrap()
+}
+
+#[test]
+fn map_cli_writes_default_html_and_preserves_graph_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_map_db(dir.path());
+    let graph_dir = db.parent().unwrap();
+    let output_path = dir.path().join("focus-map.html");
+    let _sidecars = keep_wal_sidecars(&db);
+    let before = snapshot_graph_state(graph_dir);
+
+    let output = Command::new(graphtrail())
+        .current_dir(dir.path())
+        .args([
+            "--db",
+            &db.display().to_string(),
+            "map",
+            "src/focus.rs",
+            "--out",
+            &output_path.display().to_string(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "map failed: {output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("wrote {}\n", output_path.display())
+    );
+    let html = fs::read_to_string(&output_path).unwrap();
+    let data = map_data(&html);
+    assert_eq!(data["focus_path"], "src/focus.rs");
+    assert_eq!(data["direction"], "neighbors");
+    assert_eq!(data["depth"], 1);
+    assert_eq!(data["status"]["rendered_nodes"], 4);
+    assert_eq!(data["status"]["rendered_edges"], 3);
+    assert_eq!(before, snapshot_graph_state(graph_dir));
+}
+
+#[test]
+fn map_cli_embeds_custom_options_in_output_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_map_db(dir.path());
+    let output_path = dir.path().join("custom-map.html");
+
+    let output = Command::new(graphtrail())
+        .args([
+            "--db",
+            &db.display().to_string(),
+            "map",
+            "src/focus.rs",
+            "--out",
+            &output_path.display().to_string(),
+            "--direction",
+            "callees",
+            "--depth",
+            "2",
+            "--max-nodes",
+            "3",
+            "--max-edges",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "map failed: {output:?}");
+    let data = map_data(&fs::read_to_string(output_path).unwrap());
+    assert_eq!(data["direction"], "callees");
+    assert_eq!(data["depth"], 2);
+    assert_eq!(data["nodes"].as_array().unwrap().len(), 3);
+    assert_eq!(data["edges"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn map_cli_requires_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_map_db(dir.path());
+
+    let output = Command::new(graphtrail())
+        .args(["--db", &db.display().to_string(), "map", "src/focus.rs"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "map unexpectedly succeeded");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--out <FILE>"),
+        "missing --out diagnostic: {output:?}"
+    );
+}
+
+#[test]
+fn map_cli_reports_missing_indexed_focus_without_writing_or_mutating() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_map_db(dir.path());
+    let graph_dir = db.parent().unwrap();
+    let output_path = dir.path().join("missing-map.html");
+    let _sidecars = keep_wal_sidecars(&db);
+    let before = snapshot_graph_state(graph_dir);
+
+    let output = Command::new(graphtrail())
+        .args([
+            "--db",
+            &db.display().to_string(),
+            "map",
+            "src/missing.rs",
+            "--out",
+            &output_path.display().to_string(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "map unexpectedly succeeded");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("src/missing.rs is not an indexed focus file"),
+        "missing focus diagnostic: {output:?}"
+    );
+    assert!(!output_path.exists(), "map wrote output after query failure");
+    assert_eq!(before, snapshot_graph_state(graph_dir));
+}
+
+#[test]
+fn map_cli_rejects_invalid_bounds_without_mutating_graph_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_map_db(dir.path());
+    let graph_dir = db.parent().unwrap();
+    let before = snapshot_graph_state(graph_dir);
+
+    for (option, value, expected) in [
+        ("--depth", "0", "depth must be between 1 and 5"),
+        ("--depth", "6", "depth must be between 1 and 5"),
+        ("--max-nodes", "0", "max_nodes must be between 1 and 250"),
+        ("--max-nodes", "251", "max_nodes must be between 1 and 250"),
+        ("--max-edges", "0", "max_edges must be between 1 and 500"),
+        ("--max-edges", "501", "max_edges must be between 1 and 500"),
+    ] {
+        let output_path = dir.path().join(format!("invalid-{value}.html"));
+        let output = Command::new(graphtrail())
+            .args([
+                "--db",
+                &db.display().to_string(),
+                "map",
+                "src/focus.rs",
+                "--out",
+                &output_path.display().to_string(),
+                option,
+                value,
+            ])
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success(), "{option}={value} unexpectedly succeeded");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "invalid {option}={value} diagnostic: {output:?}"
+        );
+        assert!(!output_path.exists(), "map wrote output for {option}={value}");
+        assert_eq!(before, snapshot_graph_state(graph_dir));
+    }
 }
 
 #[test]

@@ -12,9 +12,10 @@ use crate::query::{
     DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, ExportFormat, ExportScope, affected,
     build_context_pack,
     context::{edge_location, symbol_location},
-    cycles, dead_code, diff_graphs, doctor, export_graph, file_neighbors, graph_edges_with_depth,
-    impact_edges, missing_db_report, normalize_depth, personalize_context_pack, render_markdown,
-    render_markdown_budgeted, search_symbols_with_path, stats,
+    cycles, dead_code, diff_graphs, doctor, export_graph, export_html_map, file_neighbors,
+    graph_edges_with_depth, impact_edges, missing_db_report, normalize_depth,
+    personalize_context_pack, render_markdown, render_markdown_budgeted,
+    search_symbols_with_path, stats, MapDirection, MapOptions,
 };
 use crate::store::{
     db_path, init_schema, open_db, open_default_read_only, open_read_only, sync_repo_force,
@@ -155,6 +156,21 @@ enum Command {
         /// Write to a file instead of stdout.
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+    },
+    /// Render a bounded, file-rooted static HTML call map.
+    Map {
+        /// Indexed, repo-relative file path to use as the map focus.
+        path: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        #[arg(long, value_enum, default_value_t = MapDirection::Neighbors)]
+        direction: MapDirection,
+        #[arg(long, default_value_t = 1)]
+        depth: u8,
+        #[arg(long, default_value_t = 100)]
+        max_nodes: usize,
+        #[arg(long, default_value_t = 250)]
+        max_edges: usize,
     },
     /// Watch a repository and run an incremental sync when source files change.
     #[cfg(feature = "watch")]
@@ -519,6 +535,28 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
                 None => print!("{text}"),
             }
+        }
+        Command::Map {
+            path,
+            out,
+            direction,
+            depth,
+            max_nodes,
+            max_edges,
+        } => {
+            let conn = open_default_read_only(cli.db)?;
+            let html = export_html_map(
+                &conn,
+                &path,
+                MapOptions {
+                    direction,
+                    depth,
+                    max_nodes,
+                    max_edges,
+                },
+            )?;
+            std::fs::write(&out, html)?;
+            println!("wrote {}", out.display());
         }
         #[cfg(feature = "watch")]
         Command::Watch { root, debounce_ms } => {
