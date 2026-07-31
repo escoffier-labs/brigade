@@ -257,6 +257,26 @@ fn map_data_includes_symbols_paths_and_call_site_labels() {
 }
 
 #[test]
+fn legacy_edges_schema_without_confidence_exports_null_edge_confidence() {
+    let conn = fixture(false);
+    conn.execute_batch("ALTER TABLE edges DROP COLUMN confidence")
+        .expect("fixture schema must support the pre-confidence edges layout");
+
+    let html = export_html_map(&conn, "src/focus.rs", MapOptions::default())
+        .expect("legacy edges schema must remain exportable");
+
+    for edge in map_data(&html)["edges"]
+        .as_array()
+        .expect("map data must contain edges")
+    {
+        assert!(
+            edge["confidence"].is_null(),
+            "legacy edge confidence must serialize as null: {edge}"
+        );
+    }
+}
+
+#[test]
 fn empty_indexed_file_renders_a_valid_explicit_empty_state() {
     let conn = connection(&["src/empty.rs"], &[], &[]);
 
@@ -371,6 +391,9 @@ fn document_shell_matches_snapshot_and_has_no_external_surface() {
         "const additionalNeighbors = graph.nodes.filter((node) => !focusIds.has(node.id) && !callerIds.has(node.id) && !calleeIds.has(node.id));",
         "button.setAttribute('role', 'treeitem');",
         "button.type = 'button';",
+        "button:focus-visible",
+        "event.key === 'Enter'",
+        "event.key === ' '",
         "textContent = `${source.qualified_name} ${edge.kind} (line ${edge.line}) → ${target.qualified_name}`;",
         "No focus-file symbols.",
         "No direct callers.",
@@ -380,6 +403,7 @@ fn document_shell_matches_snapshot_and_has_no_external_surface() {
     ] {
         assert!(html.contains(required), "must include {required}");
     }
+    assert!(!html.contains("details.focus()"));
     assert_eq!(shell(&html), include_str!("snapshots/map_shell.html"));
     assert_eq!(html.matches("<style>").count(), 1);
     assert_eq!(html.matches("<script").count(), 2);
@@ -390,6 +414,8 @@ fn document_shell_matches_snapshot_and_has_no_external_surface() {
     assert!(html.contains("ArrowDown"));
     assert!(html.contains("ArrowUp"));
     assert!(html.contains("event.key === 'Enter'"));
+    assert!(html.contains("event.key === ' '"));
+    assert!(html.contains("button:focus-visible"));
     assert!(html.contains("@media (prefers-color-scheme: dark)"));
     assert!(html.contains("@media (prefers-reduced-motion: reduce)"));
     assert!(!html.contains("innerHTML"));
