@@ -65,6 +65,14 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=1.0,
         help="Polling interval in seconds.",
     )
+    p_runs_serve = runs_sub.add_parser("serve", help="Open a local read-only Run View.")
+    p_runs_serve.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose .brigade/runs directory should be displayed.",
+    )
+    p_runs_serve.add_argument("--no-open", action="store_true", help="Do not open the Run View in a browser.")
     p_runs_steer = runs_sub.add_parser("steer", help="Send steering text to an active app-server worker turn.")
     p_runs_steer.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
     p_runs_steer.add_argument("worker", help="Worker name to steer.")
@@ -137,6 +145,10 @@ def dispatch(args) -> int:
             json_output=args.json,
             interval=args.interval,
         )
+    if args.runs_command == "serve":
+        from .. import run_view_server
+
+        return run_view_server.serve(args.cwd, no_open=args.no_open)
     if args.runs_command == "steer":
         return _control_request(
             args.run,
