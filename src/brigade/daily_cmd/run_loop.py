@@ -461,6 +461,13 @@ def run(
     receipt["completed_at"] = _now().isoformat()
     receipt["next_recommended_command"] = "brigade daily closeout"
     _record_run(target, receipt)
+    if rc == 0 and approval is not None:
+        record_redeemed_action_completed(
+            target,
+            str(approval.get("approval_id") or ""),
+            _approval_claim_reference(approval),
+            receipt,
+        )
     _record_telemetry_event(
         target,
         {

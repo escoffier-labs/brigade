@@ -243,6 +243,13 @@ original file is missing, corrupt, or not an object.
 | `artifact_collection` | object | no | Artifact-retention result |
 | `resumed_at` | array of string | no | ISO-8601 resume timestamps |
 | `recovery_history` | array of object | no | Prior failure objects retained after a successful resume |
+| `lifecycle_journal_requested` | boolean | no | Durable enrollment request. Present and `true` on every new run |
+| `run_journal_authority_requested` | boolean | no | Durable authority request. Present and `true` on every new run |
+| `projector_version` | integer | no | Journal projector version used for the compatibility snapshot |
+| `journal_present` | boolean | no | Whether the verified lifecycle journal exists |
+| `journal_last_sequence` | integer | no | Last event sequence applied to this snapshot |
+| `journal_last_event_digest` | string / null | no | Digest at `journal_last_sequence`. Null only at sequence zero |
+| `approval_reference` | object | no | Redacted approval identity, source, fingerprints, and decision state |
 
 **Partial stale-recovery variant**
 
@@ -317,10 +324,27 @@ writes this smaller receipt:
 | `worktree` | string | Detached worktree path when used |
 | `failure` | object | Same shape as `failure` when collection failed |
 
-**Lifecycle:** this file is **updated in place** during a run. Treat each write as
-the latest snapshot, not an append-only log. Sidecars (`roster.json`, `plan.json`,
-`worker-results.json`, `synthesis.json`) are write-once per phase (resume salvage
-and patch-ref binding may rewrite worker/synthesis artifacts).
+**Lifecycle:** journal authority is the default for every new run.
+`events/lifecycle.jsonl` is the append-only lifecycle record and `run.json` is its
+latest `brigade.run.v1` compatibility projection. Existing run directories that
+lack both durable request fields remain snapshot-only and are not migrated in
+place. Readers must ignore additive keys. A paused approval projects `status:
+running` so a previous version still sees a known nonterminal status.
+
+Do not create a journal or add durable request fields to a legacy receipt by
+hand. Journal-aware writers verify the bounded chain and checkpoint before
+replacing the snapshot. An older release may inspect the additive `run.json`
+shape, but operators must roll forward before it writes, recovers, or resumes a
+journal-authoritative run. A retry after an approval action redeemed its claim
+but exited before outcome persistence verifies the same run and fingerprints.
+Daily approvals also bind the redeemed claim to the exact completed Daily run
+receipt. A missing or changed completion receipt is not recoverable by retry.
+The source-store lock spans validation, any missing `approval.consumed` and
+`run.resumed` facts, and the refreshed snapshot. Review writes wait until that
+transaction finishes. Reconciliation does not execute the action again.
+Sidecars (`roster.json`, `plan.json`, `worker-results.json`, `synthesis.json`)
+are write-once per phase (resume salvage and patch-ref binding may rewrite
+worker/synthesis artifacts).
 
 ---
 

@@ -1,5 +1,9 @@
 # Issue #568 Slice 6: Journal Authority Implementation Plan
 
+> Historical slice note. This plan records the slice 6 opt-in rollout. Slice 11
+> superseded that rollout: new runs request journal authority by default, and
+> `BRIGADE_RUN_JOURNAL_AUTHORITY` no longer controls runtime behavior.
+
 Goal in one sentence: cut `run.json` over to a journal-authoritative projected
 snapshot for newly enrolled runs while leaving legacy and lifecycle-only runs
 byte-identical to slice 5.

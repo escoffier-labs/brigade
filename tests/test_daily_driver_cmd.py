@@ -562,7 +562,6 @@ def test_daily_approval_pauses_real_run_and_cli_resume_consumes_store_once(
             }
         ],
     )
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     marker = "d" * 43
     monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
@@ -647,6 +646,8 @@ def test_daily_approval_pauses_real_run_and_cli_resume_consumes_store_once(
     assert consumed["status"] == "consumed"
     assert consumed["consumed_run_id"] == run_dir.name
     assert consumed["approval_claim"]["state"] == "redeemed"
+    assert consumed["approval_action_receipt"]["state"] == "completed"
+    assert consumed["approval_action_receipt"]["owner_run_id"] == run_dir.name
     event_types = [
         event.event_type for event in run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events
     ]
@@ -750,7 +751,6 @@ def test_daily_rejected_pause_stays_rejected_after_store_is_approved(
             }
         ],
     )
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     marker = "e" * 43
     monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)

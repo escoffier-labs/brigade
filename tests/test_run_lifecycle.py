@@ -1052,7 +1052,6 @@ def _write_run_json_authority(run_dir: Path, status: str, **kwargs) -> None:
 def test_authority_enrollment_persists_run_journal_authority_requested(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     aboyeur.record_run_start(
         run_dir,
@@ -1071,7 +1070,6 @@ def test_authority_enrollment_persists_run_journal_authority_requested(tmp_path,
 def test_not_yet_authoritative_run_writes_legacy_body_when_gate_not_ready(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     aboyeur.record_run_start(
         run_dir,
@@ -1101,7 +1099,6 @@ def test_not_yet_authoritative_run_writes_legacy_body_when_gate_not_ready(tmp_pa
 def test_first_write_match_authorizes_first_projected_snapshot(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     aboyeur.record_run_start(
         run_dir,
@@ -1123,7 +1120,6 @@ def test_first_write_match_authorizes_first_projected_snapshot(tmp_path, monkeyp
 def test_authoritative_run_fail_closed_on_projection_error(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     aboyeur.record_run_start(
         run_dir,
@@ -1150,19 +1146,12 @@ def test_authoritative_run_fail_closed_on_projection_error(tmp_path, monkeypatch
     assert (run_dir / "run.json").read_bytes() == meta_before
 
 
-def test_legacy_run_unchanged_under_authority_flag_off(tmp_path, monkeypatch):
+def test_existing_lifecycle_only_run_remains_non_authoritative(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    monkeypatch.delenv("BRIGADE_RUN_JOURNAL_AUTHORITY", raising=False)
-    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
-    aboyeur.record_run_start(
-        run_dir,
-        task="lifecycle only",
-        cwd=repo,
-        roster=_minimal_roster(),
-        read_only=False,
-        lock_workspace=repo,
-    )
+    existing = _run_payload("started", lock_workspace=repo)
+    existing[_REQUEST_FIELD] = True
+    localio.write_json(run_dir / "run.json", existing)
     with runguard.run_lock(repo, run_dir=run_dir):
         _write_run_json(run_dir, "planning")
     meta = json.loads((run_dir / "run.json").read_text())
@@ -1171,7 +1160,6 @@ def test_legacy_run_unchanged_under_authority_flag_off(tmp_path, monkeypatch):
 
 
 def _enroll_and_authorize(repo, run_dir, monkeypatch):
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     aboyeur.record_run_start(
         run_dir,
@@ -1517,7 +1505,6 @@ def test_authority_fail_closed_on_saved_digest_not_matching_verified_prefix(tmp_
 def test_authoritative_write_order_checkpoint_lifecycle_parity_readiness_replace(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     aboyeur.record_run_start(
         run_dir,
@@ -1587,7 +1574,6 @@ def test_authoritative_write_order_checkpoint_lifecycle_parity_readiness_replace
 def test_first_authority_write_checkpoint_seq1_then_status_seq2(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     aboyeur.record_run_start(
         run_dir,
@@ -1715,7 +1701,6 @@ def test_first_authority_started_write_projects_on_first_write(tmp_path, monkeyp
     # checkpoint seq1 + run.created seq2.
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     aboyeur.record_run_start(
         run_dir,
@@ -1743,7 +1728,6 @@ def test_authority_requested_post_parity_not_ready_falls_back_to_legacy(tmp_path
     # falls back to legacy (never fail-closed).
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     aboyeur.record_run_start(
         run_dir,
@@ -1771,16 +1755,7 @@ def test_legacy_run_does_not_call_prior_authority_gate(tmp_path, monkeypatch):
     # bytes/order are preserved.
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)
-    monkeypatch.delenv("BRIGADE_RUN_JOURNAL_AUTHORITY", raising=False)
-    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
-    aboyeur.record_run_start(
-        run_dir,
-        task="legacy run",
-        cwd=repo,
-        roster=_minimal_roster(),
-        read_only=False,
-        lock_workspace=repo,
-    )
+    localio.write_json(run_dir / "run.json", _run_payload("started", lock_workspace=repo))
 
     def raise_if_called(run_dir):
         raise AssertionError("check_projection_readiness must not be called for legacy runs")

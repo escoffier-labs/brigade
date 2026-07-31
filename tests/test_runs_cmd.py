@@ -128,6 +128,62 @@ def _patch_daily_store(monkeypatch, approval, *, blockers=None):
         "_approval_blockers",
         lambda target, record, config: list(blockers or []),
     )
+    monkeypatch.setattr(
+        daily_cmd.approvals,
+        "_redeemed_reconciliation_blockers",
+        lambda record, config: list(blockers or []),
+    )
+
+
+def _patch_tool_store(monkeypatch, call, *, blockers=None):
+    monkeypatch.setattr(
+        tools_cmd.calls,
+        "_resolve_call",
+        lambda target, call_id: (call, [call], None),
+    )
+    monkeypatch.setattr(
+        tools_cmd.calls,
+        "_call_run_blockers",
+        lambda target, record: list(blockers or []),
+    )
+
+
+def _mark_redeemed(record, run_id):
+    redeemed_at = "2026-07-30T18:01:00+00:00"
+    record["approval_claim"] = {
+        "run_id": run_id,
+        "state": "redeemed",
+        "reserved_at": "2026-07-30T18:00:30+00:00",
+        "token_fingerprint": "a" * 64,
+        "redeemed_at": redeemed_at,
+    }
+    return redeemed_at
+
+
+def _mark_daily_action_completed(record, target, owner_run_id):
+    daily_run_id = "daily-action-run-1"
+    completed_at = "2026-07-30T18:02:00+00:00"
+    record["approval_action_receipt"] = {
+        "state": "completed",
+        "owner_run_id": owner_run_id,
+        "daily_run_id": daily_run_id,
+        "action_id": record["selected_action_id"],
+        "source_fingerprint": record["source_fingerprint"],
+        "completed_at": completed_at,
+    }
+    receipt_path = target / ".brigade" / "daily" / "runs" / daily_run_id / "run.json"
+    receipt_path.parent.mkdir(parents=True)
+    _write_json(
+        receipt_path,
+        {
+            "status": "completed",
+            "run_id": daily_run_id,
+            "approval_id": record["approval_id"],
+            "selected_action_id": record["selected_action_id"],
+            "selected_action": {"source_fingerprint": record["source_fingerprint"]},
+            "completed_at": completed_at,
+        },
+    )
 
 
 def test_approval_pause_marker_binds_exact_event_and_redacts_artifact(tmp_path, monkeypatch):
@@ -584,6 +640,234 @@ def test_consumed_tool_reconciliation_revalidates_live_contract(tmp_path, monkey
     assert runs_cmd.resume(run_dir) == 2
     assert checked == [("approved", None)]
     assert "contract fingerprint is stale" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("source", "status"),
+    [
+        ("daily", "rejected"),
+        ("daily", "held"),
+        ("tool", "rejected"),
+        ("tool", "held"),
+    ],
+)
+def test_redeemed_retry_refuses_changed_source_decision(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    source,
+    status,
+):
+    record = _daily_approval(status=status) if source == "daily" else _tool_call()
+    if source == "tool":
+        record["status"] = status
+    run_dir, _ = _approval_run(tmp_path, source=source, record=record)
+    _mark_redeemed(record, run_dir.name)
+    events = []
+
+    if source == "daily":
+        _patch_daily_store(monkeypatch, record)
+    else:
+        _patch_tool_store(monkeypatch, record)
+    monkeypatch.setattr(
+        run_lifecycle,
+        "record_lifecycle_event",
+        lambda *args, event_type, **kwargs: events.append(event_type),
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert events == []
+    assert status in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("source", ["daily", "tool"])
+def test_redeemed_retry_revalidates_current_blockers(tmp_path, monkeypatch, capsys, source):
+    if source == "daily":
+        record = _daily_approval(status="consumed", consumed_run_id="run-approval-1")
+    else:
+        record = _tool_call()
+        record["status"] = "completed"
+    run_dir, _ = _approval_run(tmp_path, source=source, record=record)
+    redeemed_at = _mark_redeemed(record, run_dir.name)
+    if source == "daily":
+        record["consumed_at"] = redeemed_at
+        _mark_daily_action_completed(record, tmp_path, run_dir.name)
+        _patch_daily_store(monkeypatch, record, blockers=["daily config changed since approval"])
+    else:
+        _patch_tool_store(monkeypatch, record, blockers=["contract fingerprint is stale"])
+    events = []
+    monkeypatch.setattr(
+        run_lifecycle,
+        "record_lifecycle_event",
+        lambda *args, event_type, **kwargs: events.append(event_type),
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert events == []
+    assert "stale or blocked" in capsys.readouterr().err
+
+
+def test_redeemed_daily_retry_requires_completed_action_receipt(tmp_path, monkeypatch, capsys):
+    record = _daily_approval(status="consumed", consumed_run_id="run-approval-1")
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=record)
+    redeemed_at = _mark_redeemed(record, run_dir.name)
+    record["consumed_at"] = redeemed_at
+    _patch_daily_store(monkeypatch, record)
+    events = []
+    monkeypatch.setattr(
+        run_lifecycle,
+        "record_lifecycle_event",
+        lambda *args, event_type, **kwargs: events.append(event_type),
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert events == []
+    assert "completed action receipt" in capsys.readouterr().err
+
+
+def test_redeemed_daily_retry_refuses_tampered_action_receipt(tmp_path, monkeypatch, capsys):
+    record = _daily_approval(status="consumed", consumed_run_id="run-approval-1")
+    run_dir, _ = _approval_run(tmp_path, source="daily", record=record)
+    redeemed_at = _mark_redeemed(record, run_dir.name)
+    record["consumed_at"] = redeemed_at
+    _mark_daily_action_completed(record, tmp_path, run_dir.name)
+    daily_run_id = record["approval_action_receipt"]["daily_run_id"]
+    action_receipt_path = tmp_path / ".brigade" / "daily" / "runs" / daily_run_id / "run.json"
+    action_receipt = json.loads(action_receipt_path.read_text())
+    action_receipt["status"] = "failed"
+    _write_json(action_receipt_path, action_receipt)
+    _patch_daily_store(monkeypatch, record)
+    events = []
+    monkeypatch.setattr(
+        run_lifecycle,
+        "record_lifecycle_event",
+        lambda *args, event_type, **kwargs: events.append(event_type),
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert events == []
+    assert "no longer matches its run" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("source", ["daily", "tool"])
+def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    source,
+):
+    if source == "daily":
+        record = _daily_approval(status="consumed", consumed_run_id="run-approval-1")
+    else:
+        record = _tool_call()
+        record["status"] = "completed"
+    run_dir, _ = _approval_run(tmp_path, source=source, record=record)
+    redeemed_at = _mark_redeemed(record, run_dir.name)
+    if source == "daily":
+        record["consumed_at"] = redeemed_at
+        _mark_daily_action_completed(record, tmp_path, run_dir.name)
+        daily_cmd.approvals._write_approval(tmp_path, record)
+        monkeypatch.setattr(
+            daily_cmd.approvals,
+            "_redeemed_reconciliation_blockers",
+            lambda approval, config: [],
+        )
+    else:
+        tools_cmd.calls._write_calls(tmp_path, [record])
+        monkeypatch.setattr(tools_cmd.calls, "_call_run_blockers", lambda target, call: [])
+
+    append_entered = threading.Event()
+    review_started = threading.Event()
+    review_finished = threading.Event()
+    review_result = []
+    events = []
+
+    def review_source():
+        assert append_entered.wait(2)
+        review_started.set()
+        if source == "daily":
+            rc = daily_cmd.approvals_hold(
+                target=tmp_path,
+                approval_id=record["approval_id"],
+                reason="concurrent hold",
+            )
+        else:
+            rc = tools_cmd.call_reject(
+                target=tmp_path,
+                call_id=record["id"],
+                reason="concurrent rejection",
+            )
+        review_result.append(rc)
+        review_finished.set()
+
+    def append_fact(*args, event_type, **kwargs):
+        if not events:
+            append_entered.set()
+            assert review_started.wait(2)
+            assert not review_finished.wait(0.2)
+        events.append(event_type)
+
+    monkeypatch.setattr(run_lifecycle, "record_lifecycle_event", append_fact)
+    reviewer = threading.Thread(target=review_source)
+    reviewer.start()
+    assert runs_cmd.resume(run_dir) == 0
+    reviewer.join(2)
+    assert not reviewer.is_alive()
+    assert review_result == [1]
+    assert events == ["approval.consumed", "run.resumed"]
+    if source == "daily":
+        stored = daily_cmd.approvals._find_approval(tmp_path, record["approval_id"])
+        assert stored is not None
+        assert stored["status"] == "consumed"
+    else:
+        stored, _calls, error = tools_cmd.calls._resolve_call(tmp_path, record["id"])
+        assert error is None
+        assert stored is not None
+        assert stored["status"] == "completed"
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("source", ["daily", "tool"])
+def test_redeemed_retry_refuses_claim_for_another_run(tmp_path, monkeypatch, capsys, source):
+    if source == "daily":
+        record = _daily_approval(status="consumed", consumed_run_id="other-run")
+    else:
+        record = _tool_call()
+        record["status"] = "completed"
+    run_dir, _ = _approval_run(tmp_path, source=source, record=record)
+    redeemed_at = _mark_redeemed(record, "other-run")
+    if source == "daily":
+        record["consumed_at"] = redeemed_at
+        _patch_daily_store(monkeypatch, record)
+    else:
+        _patch_tool_store(monkeypatch, record)
+    events = []
+    monkeypatch.setattr(
+        run_lifecycle,
+        "record_lifecycle_event",
+        lambda *args, event_type, **kwargs: events.append(event_type),
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert events == []
+    assert "belongs to other-run" in capsys.readouterr().err
+
+
+def test_redeemed_retry_refuses_legacy_tool_consumption_without_claim(tmp_path, monkeypatch, capsys):
+    call = _tool_call()
+    call.update({"status": "running", "run_id": "run-approval-1"})
+    run_dir, _ = _approval_run(tmp_path, source="tool", record=call)
+    _patch_tool_store(monkeypatch, call)
+    events = []
+    monkeypatch.setattr(
+        run_lifecycle,
+        "record_lifecycle_event",
+        lambda *args, event_type, **kwargs: events.append(event_type),
+    )
+
+    assert runs_cmd.resume(run_dir) == 2
+    assert events == []
+    assert "tool approval is running" in capsys.readouterr().err
 
 
 def test_resume_nonapproval_run_uses_legacy_fallback(tmp_path, monkeypatch):

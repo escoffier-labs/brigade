@@ -479,6 +479,7 @@ def test_writable_trials_use_fresh_isolated_worktrees(tmp_path, monkeypatch):
         return 0
 
     monkeypatch.setattr(model_trials.runguard, "is_git_worktree", lambda path: True)
+    monkeypatch.setattr(model_trials.runguard, "git_root", lambda path: workspace.resolve())
     monkeypatch.setattr(
         model_trials,
         "_trial_worktree_path",

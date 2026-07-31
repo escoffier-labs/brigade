@@ -61,20 +61,11 @@ DRIFT_IMPACT_LIMIT = 4000
 BRIEF_BUDGET_BYTES = 6000
 NOOP_DETAIL = "no-op"
 
-# Journal-authority opt-in (issue #568 slice 6). Per-run and durable, like the
-# lifecycle-journal flag. The authority opt-in implies lifecycle journaling:
-# enrolling a new run with BRIGADE_RUN_JOURNAL_AUTHORITY=1 sets BOTH request
-# fields true even when BRIGADE_LIFECYCLE_JOURNAL is unset. Existing runs
-# enroll only from their durable run.json field, never a later environment
-# change.
-_AUTHORITY_FLAG_ENV = "BRIGADE_RUN_JOURNAL_AUTHORITY"
+# Journal authority is the default for every new run (issue #568 slice 11).
+# Enrollment stays durable and per-run: existing runs are classified only from
+# their stored run.json fields, so legacy snapshot-only runs are never migrated
+# by a later Brigade release or environment change.
 _AUTHORITY_REQUEST_FIELD = "run_journal_authority_requested"
-_AUTHORITY_TRUTHY = frozenset({"1", "true", "yes", "on"})
-
-
-def is_run_journal_authority_enabled() -> bool:
-    """True when the opt-in journal-authority flag is set in the environment."""
-    return os.environ.get(_AUTHORITY_FLAG_ENV, "").strip().lower() in _AUTHORITY_TRUTHY
 
 
 # A plan-mode seat has no write tool, so any file it tries to create fails, and a
@@ -2835,18 +2826,13 @@ def record_run_start(
             existing_lifecycle_requested = True
         if existing.get(_AUTHORITY_REQUEST_FIELD) is True:
             existing_authority_requested = True
-    # A new run enrolls in lifecycle journaling when the lifecycle-journal flag
-    # is set OR when the authority opt-in is set: BRIGADE_RUN_JOURNAL_AUTHORITY=1
-    # implies lifecycle journaling even when BRIGADE_LIFECYCLE_JOURNAL is unset,
-    # so a new authority run carries BOTH durable request fields. An existing
-    # run enrolls only from its durable run.json fields: a later environment
-    # change never enrolls it.
+    # Every new run carries both durable request fields. Existing runs enroll
+    # only from their stored run.json fields, so legacy snapshot-only runs stay
+    # untouched. An authority request implies lifecycle journaling even when an
+    # older or repaired receipt retained only the authority field.
     new_run = not run_json_exists
-    authority_env = is_run_journal_authority_enabled()
-    lifecycle_requested = existing_lifecycle_requested or (
-        new_run and (run_lifecycle.is_lifecycle_journaling_enabled() or authority_env)
-    )
-    authority_requested = existing_authority_requested or (new_run and authority_env)
+    lifecycle_requested = existing_lifecycle_requested or existing_authority_requested or new_run
+    authority_requested = existing_authority_requested or new_run
     # The first run.json write activates the lifecycle journal and publishes a
     # recovery checkpoint BEFORE the atomic run.json replacement. If that final
     # replacement fails, durable journal/checkpoint state already exists without

@@ -14,6 +14,7 @@ import pytest
 from brigade import aboyeur
 from brigade import agents
 from brigade.roster import Agent, Roster
+from tests.run_test_helpers import run_aboyeur_guarded
 
 
 def _roster():
@@ -61,7 +62,7 @@ def aboyeur_harness(monkeypatch):
             )
 
         monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-        return aboyeur.run(
+        return run_aboyeur_guarded(
             "build feature",
             _roster(),
             cwd=output_dir.parent,

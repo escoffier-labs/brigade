@@ -89,11 +89,22 @@ def _approval_lock_path(target: Path, approval_id: str) -> Path:
     return _approvals_root(target).parent / ".approval-locks" / f"{approval_id}.lock"
 
 
+def _acquire_approval_store_lock(path: Path) -> runguard._LockOwnership:
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            return runguard._acquire_lock(path)
+        except runguard.RunLockError as exc:
+            if "another brigade run appears active" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 @contextmanager
 def _approval_store_lock(target: Path, approval_id: str) -> Iterator[None]:
     path = _approval_lock_path(target, approval_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    ownership = runguard._acquire_lock(path)
+    ownership = _acquire_approval_store_lock(path)
     try:
         yield
     finally:
@@ -365,6 +376,188 @@ def redeem_for_run(target: Path, approval_id: str, reference: Mapping[str, str],
         if not isinstance(decided_at, str) or not decided_at:
             raise ApprovalClaimError("daily approval decision has no review timestamp")
         return ApprovalClaim(decided_at=decided_at, claimed_at=redeemed_at, already_claimed=False)
+
+
+def record_redeemed_action_completed(
+    target: Path,
+    approval_id: str,
+    reference: Mapping[str, str],
+    run_receipt: Mapping[str, Any],
+) -> bool:
+    """Bind a successful Daily action receipt to its redeemed approval claim."""
+    with _approval_store_lock(target, approval_id):
+        approval = _find_approval(target, approval_id)
+        if approval is None:
+            raise ApprovalClaimError(f"daily approval not found: {approval_id}")
+        actual = _approval_claim_reference(approval)
+        if any(reference.get(field) != actual[field] for field in _APPROVAL_REFERENCE_FIELDS):
+            raise ApprovalClaimError("daily approval fingerprints changed after action")
+        claim = approval.get("approval_claim")
+        if claim is None:
+            return False
+        if not isinstance(claim, Mapping) or claim.get("state") != "redeemed":
+            raise ApprovalClaimError("daily approval claim changed after action")
+        owner_run_id = claim.get("run_id")
+        redeemed_at = claim.get("redeemed_at")
+        if not isinstance(owner_run_id, str) or not owner_run_id:
+            raise ApprovalClaimError("daily approval redeemed claim has no run id")
+        if not isinstance(redeemed_at, str) or not redeemed_at:
+            raise ApprovalClaimError("daily approval redeemed claim has no redemption timestamp")
+        if (
+            approval.get("status") != "consumed"
+            or approval.get("consumed_run_id") != owner_run_id
+            or approval.get("consumed_at") != redeemed_at
+        ):
+            raise ApprovalClaimError(f"daily approval redeemed source state is {approval.get('status') or 'unknown'}")
+
+        daily_run_id = run_receipt.get("run_id")
+        completed_at = run_receipt.get("completed_at")
+        action_id = approval.get("selected_action_id")
+        selected_action = (
+            run_receipt.get("selected_action") if isinstance(run_receipt.get("selected_action"), Mapping) else {}
+        )
+        if (
+            run_receipt.get("status") != "completed"
+            or run_receipt.get("approval_id") != approval_id
+            or run_receipt.get("selected_action_id") != action_id
+            or selected_action.get("source_fingerprint") != approval.get("source_fingerprint")
+            or not isinstance(daily_run_id, str)
+            or not daily_run_id
+            or not isinstance(completed_at, str)
+            or not completed_at
+        ):
+            raise ApprovalClaimError("daily approval action receipt does not prove successful completion")
+
+        completed = {
+            "state": "completed",
+            "owner_run_id": owner_run_id,
+            "daily_run_id": daily_run_id,
+            "action_id": action_id,
+            "source_fingerprint": approval.get("source_fingerprint"),
+            "completed_at": completed_at,
+        }
+        existing = approval.get("approval_action_receipt")
+        if existing is not None and existing != completed:
+            raise ApprovalClaimError("daily approval action receipt conflicts with stored completion")
+        approval["approval_action_receipt"] = completed
+        _write_approval_unlocked(target, approval)
+        return True
+
+
+def _redeemed_reconciliation_blockers(
+    approval: Mapping[str, Any],
+    config: dict[str, Any],
+) -> list[str]:
+    blockers: list[str] = []
+    if approval.get("config_fingerprint") != _config_fingerprint(config):
+        blockers.append("daily config changed since approval")
+    selected_action = approval.get("selected_action")
+    if not isinstance(selected_action, dict) or not selected_action:
+        blockers.append("daily approval selected action is malformed")
+    elif approval.get("selected_adapter") != _adapter_for(selected_action):
+        blockers.append("daily approval adapter changed since approval")
+    return blockers
+
+
+def _validate_redeemed_for_run_unlocked(
+    target: Path,
+    approval_id: str,
+    reference: Mapping[str, str],
+    run_id: str,
+) -> ApprovalClaim:
+    """Validate one redeemed Daily claim while its source-store lock is held."""
+    approval = _find_approval(target, approval_id)
+    if approval is None:
+        raise ApprovalClaimError(f"daily approval not found: {approval_id}")
+    actual = _approval_claim_reference(approval)
+    if any(reference.get(field) != actual[field] for field in _APPROVAL_REFERENCE_FIELDS):
+        raise ApprovalClaimError("daily approval fingerprints changed before reconciliation")
+    claim = approval.get("approval_claim")
+    if not isinstance(claim, Mapping) or claim.get("state") != "redeemed":
+        raise ApprovalClaimError("daily approval has no redeemed claim to reconcile")
+    claim_run_id = claim.get("run_id")
+    if claim_run_id != run_id:
+        owner = claim_run_id if isinstance(claim_run_id, str) and claim_run_id else "another run"
+        raise ApprovalClaimError(f"daily approval redeemed claim belongs to {owner}")
+    redeemed_at = claim.get("redeemed_at")
+    if not isinstance(redeemed_at, str) or not redeemed_at:
+        raise ApprovalClaimError("daily approval redeemed claim has no redemption timestamp")
+    if (
+        approval.get("status") != "consumed"
+        or approval.get("consumed_run_id") != run_id
+        or approval.get("consumed_at") != redeemed_at
+    ):
+        raise ApprovalClaimError(f"daily approval redeemed source state is {approval.get('status') or 'unknown'}")
+
+    action_receipt = approval.get("approval_action_receipt")
+    if not isinstance(action_receipt, Mapping) or action_receipt.get("state") != "completed":
+        raise ApprovalClaimError("daily approval has no completed action receipt to reconcile")
+    if action_receipt.get("owner_run_id") != run_id:
+        owner = action_receipt.get("owner_run_id")
+        owner_text = owner if isinstance(owner, str) and owner else "another run"
+        raise ApprovalClaimError(f"daily approval completed action receipt belongs to {owner_text}")
+    daily_run_id = action_receipt.get("daily_run_id")
+    completed_at = action_receipt.get("completed_at")
+    if (
+        action_receipt.get("action_id") != approval.get("selected_action_id")
+        or action_receipt.get("source_fingerprint") != approval.get("source_fingerprint")
+        or not isinstance(daily_run_id, str)
+        or not daily_run_id
+        or not isinstance(completed_at, str)
+        or not completed_at
+    ):
+        raise ApprovalClaimError("daily approval completed action receipt is malformed")
+    run_receipt = _read_json(_runs_root(target) / daily_run_id / "run.json")
+    selected_action = (
+        run_receipt.get("selected_action")
+        if isinstance(run_receipt, Mapping) and isinstance(run_receipt.get("selected_action"), Mapping)
+        else {}
+    )
+    if (
+        not isinstance(run_receipt, Mapping)
+        or run_receipt.get("status") != "completed"
+        or run_receipt.get("run_id") != daily_run_id
+        or run_receipt.get("approval_id") != approval_id
+        or run_receipt.get("selected_action_id") != approval.get("selected_action_id")
+        or selected_action.get("source_fingerprint") != approval.get("source_fingerprint")
+        or run_receipt.get("completed_at") != completed_at
+    ):
+        raise ApprovalClaimError("daily approval completed action receipt no longer matches its run")
+    config, _ = _load_config(target)
+    blockers = _redeemed_reconciliation_blockers(approval, config)
+    if blockers:
+        raise ApprovalClaimError(f"daily approval is stale or blocked: {blockers[0]}")
+    decided_at = approval.get("reviewed_at")
+    if not isinstance(decided_at, str) or not decided_at:
+        raise ApprovalClaimError("daily approval decision has no review timestamp")
+    return ApprovalClaim(
+        decided_at=decided_at,
+        claimed_at=redeemed_at,
+        already_claimed=True,
+    )
+
+
+@contextmanager
+def redeemed_reconciliation_guard(
+    target: Path,
+    approval_id: str,
+    reference: Mapping[str, str],
+    run_id: str,
+) -> Iterator[ApprovalClaim]:
+    """Hold the Daily source-store lock through outcome reconciliation."""
+    with _approval_store_lock(target, approval_id):
+        yield _validate_redeemed_for_run_unlocked(target, approval_id, reference, run_id)
+
+
+def validate_redeemed_for_run(
+    target: Path,
+    approval_id: str,
+    reference: Mapping[str, str],
+    run_id: str,
+) -> ApprovalClaim:
+    """Validate one redeemed Daily claim for outcome-only reconciliation."""
+    with redeemed_reconciliation_guard(target, approval_id, reference, run_id) as claim:
+        return claim
 
 
 def _consume_approval(target: Path, approval: dict[str, Any], run_id: str) -> None:
