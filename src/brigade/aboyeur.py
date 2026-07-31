@@ -2791,7 +2791,7 @@ def record_run_start(
     codex_transport: str | None = None,
     started_at: datetime | None = None,
     scheduler: str | None = None,
-) -> None:
+) -> bool:
     """Write the minimal typed receipt needed before optional or blocking work.
 
     The requested scheduler is recorded here so a run that dies before dispatch
@@ -2870,6 +2870,7 @@ def record_run_start(
     except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
         raise runguard.RetainRunLockError(f"failed to write initial run receipt: {exc}") from exc
     _write_json(output_dir / "roster.json", _roster_payload(roster))
+    return lifecycle_requested or authority_requested
 
 
 @contextmanager
@@ -3037,6 +3038,7 @@ def run(
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     direct_worker = worker is not None
+    durable_enrollment_expected = False
 
     # What the roster/flag asked for vs what dispatch actually ran. `used` stays
     # None until dispatch resolves it, so a run that dies before dispatch reads
@@ -3058,11 +3060,30 @@ def run(
             "lifecycle_journal_requested" not in kwargs or "run_journal_authority_requested" not in kwargs
         ):
             run_path = output_dir / "run.json"
-            if run_path.is_file():
+            try:
+                run_info = os.lstat(run_path)
+            except FileNotFoundError as exc:
+                if durable_enrollment_expected:
+                    raise runguard.RetainRunLockError("refusing to overwrite unknown durable enrollment state") from exc
+                run_info = None
+            except OSError as exc:
+                if durable_enrollment_expected:
+                    raise runguard.RetainRunLockError("refusing to overwrite unknown durable enrollment state") from exc
+                run_info = None
+            if run_info is not None and (not os.path.isfile(run_path) or os.path.islink(run_path)):
+                if durable_enrollment_expected:
+                    raise runguard.RetainRunLockError("refusing to overwrite unknown durable enrollment state")
+            elif run_info is not None:
                 try:
                     existing = json.loads(run_path.read_text())
-                except (OSError, json.JSONDecodeError):
+                except (OSError, ValueError, RecursionError) as exc:
+                    if durable_enrollment_expected:
+                        raise runguard.RetainRunLockError(
+                            "refusing to overwrite unknown durable enrollment state"
+                        ) from exc
                     existing = None
+                if not isinstance(existing, dict) and durable_enrollment_expected:
+                    raise runguard.RetainRunLockError("refusing to overwrite unknown durable enrollment state")
                 if isinstance(existing, dict):
                     if (
                         "lifecycle_journal_requested" not in kwargs
@@ -3139,7 +3160,7 @@ def run(
             print(f"error: {worker_error}", file=sys.stderr)
             return 2
     if output_dir is not None:
-        record_run_start(
+        durable_enrollment_expected = record_run_start(
             output_dir,
             task=task,
             cwd=cwd,

@@ -5662,6 +5662,30 @@ def test_default_journal_authority_implies_lifecycle_without_lifecycle_environme
     assert meta[_LIFECYCLE_REQUEST_FIELD] is True
 
 
+def test_record_run_start_treats_lifecycle_only_enrollment_as_durable(tmp_path):
+    workspace, run_dir = _authority_run_dir(tmp_path)
+    lifecycle_only = _legacy_status_payload("started")
+    lifecycle_only[_LIFECYCLE_REQUEST_FIELD] = True
+    (run_dir / "run.json").write_text(json.dumps(lifecycle_only))
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        assert (
+            aboyeur.record_run_start(
+                run_dir,
+                task="lifecycle only",
+                cwd=workspace,
+                roster=_roster(),
+                read_only=False,
+                lock_workspace=workspace,
+            )
+            is True
+        )
+
+    receipt = json.loads((run_dir / "run.json").read_text())
+    assert receipt[_LIFECYCLE_REQUEST_FIELD] is True
+    assert _AUTHORITY_REQUEST_FIELD not in receipt
+
+
 def test_existing_legacy_run_remains_snapshot_only_when_rerecorded(tmp_path, monkeypatch):
     """A pre-cutover receipt without enrollment fields stays snapshot-only."""
     workspace, run_dir = _authority_run_dir(tmp_path)
@@ -5930,6 +5954,66 @@ def test_run_preserves_authority_enrollment_through_first_follow_up_receipt_rewr
     # lifecycle journal activates and the ready first comparison publishes
     # projection metadata, so the completed run is authoritative.
     assert aboyeur._resolve_authority_state(output_dir) == "authoritative"
+
+
+@pytest.mark.parametrize(
+    ("case", "mutate"),
+    [
+        pytest.param("invalid-json", lambda path: path.write_bytes(b"{not valid json"), id="invalid-json"),
+        pytest.param("json-array", lambda path: path.write_text("[]"), id="json-array"),
+        pytest.param("json-null", lambda path: path.write_text("null"), id="json-null"),
+        pytest.param("missing", lambda path: path.unlink(), id="missing"),
+        pytest.param("non-regular", lambda path: (path.unlink(), path.mkdir()), id="non-regular"),
+        pytest.param("symlink", lambda path: (path.unlink(), path.symlink_to("untrusted-run.json")), id="symlink"),
+    ],
+)
+def test_run_payload_fails_closed_when_enrolled_run_json_becomes_corrupt(monkeypatch, tmp_path, case, mutate):
+    """A later run status write must not downgrade a corrupt enrolled receipt."""
+    monkeypatch.delenv(_LIFECYCLE_ENV, raising=False)
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(
+            text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}), ok=True
+        )
+
+    run_cwd = tmp_path / "work"
+    run_cwd.mkdir()
+    _init_git_repo(run_cwd)
+    (run_cwd / "tracked.txt").write_text("initial\n")
+    _commit_all(run_cwd)
+    output_dir = tmp_path / "run"
+    real_write_json = aboyeur._write_json
+    run_json_writes = 0
+
+    def corrupt_after_enrollment(path, payload):
+        nonlocal run_json_writes
+        result = real_write_json(path, payload)
+        if Path(path).name == "run.json":
+            run_json_writes += 1
+            if run_json_writes == 1:
+                mutate(Path(path))
+        return result
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(aboyeur, "_write_json", corrupt_after_enrollment)
+
+    with runguard.run_lock(run_cwd, run_dir=output_dir):
+        with pytest.raises(
+            runguard.RetainRunLockError,
+            match="refusing to overwrite unknown durable enrollment state",
+        ) as exc_info:
+            run_aboyeur_guarded(
+                "build feature",
+                _roster(),
+                cwd=run_cwd,
+                output_dir=output_dir,
+                code_graph_enabled=False,
+            )
+
+    assert str(exc_info.value) == "refusing to overwrite unknown durable enrollment state"
+    assert run_json_writes == 1, f"{case} was overwritten by a legacy payload"
 
 
 # -- Issue #568 slice 7 assignment 3: durable enrollment fail-closed ------------
