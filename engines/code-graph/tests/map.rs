@@ -351,6 +351,35 @@ fn document_shell_matches_snapshot_and_has_no_external_surface() {
     let conn = fixture(false);
     let html = export_html_map(&conn, "src/focus.rs", MapOptions::default()).unwrap();
 
+    for required in [
+        "<h2 id=\"map-focus-heading\">Focus file</h2>",
+        "<h2 id=\"map-callers-heading\">Callers (incoming relationships)</h2>",
+        "<h2 id=\"map-callees-heading\">Callees (outgoing relationships)</h2>",
+        "<h2 id=\"map-additional-neighbors-heading\">Additional neighbors</h2>",
+        "<h2 id=\"map-relationships-heading\">Relationships (source → target)</h2>",
+        "id=\"map-focus-lane\"",
+        "id=\"map-callers-lane\"",
+        "id=\"map-callees-lane\"",
+        "id=\"map-additional-neighbors-lane\"",
+        "id=\"map-relationships-lane\"",
+        "id=\"map-relationship-list\"",
+        "const focusNodes = graph.nodes.filter((node) => node.file_path === graph.focus_path);",
+        "const callerIds = new Set(edges.filter((edge) => focusIds.has(edge.target)).map((edge) => edge.source));",
+        "const calleeIds = new Set(edges.filter((edge) => focusIds.has(edge.source)).map((edge) => edge.target));",
+        "const callers = graph.nodes.filter((node) => !focusIds.has(node.id) && callerIds.has(node.id));",
+        "const callees = graph.nodes.filter((node) => !focusIds.has(node.id) && calleeIds.has(node.id));",
+        "const additionalNeighbors = graph.nodes.filter((node) => !focusIds.has(node.id) && !callerIds.has(node.id) && !calleeIds.has(node.id));",
+        "button.setAttribute('role', 'treeitem');",
+        "button.type = 'button';",
+        "textContent = `${source.qualified_name} ${edge.kind} (line ${edge.line}) → ${target.qualified_name}`;",
+        "No focus-file symbols.",
+        "No direct callers.",
+        "No direct callees.",
+        "No additional neighbors.",
+        "No selected relationships.",
+    ] {
+        assert!(html.contains(required), "must include {required}");
+    }
     assert_eq!(shell(&html), include_str!("snapshots/map_shell.html"));
     assert_eq!(html.matches("<style>").count(), 1);
     assert_eq!(html.matches("<script").count(), 2);
@@ -363,6 +392,8 @@ fn document_shell_matches_snapshot_and_has_no_external_surface() {
     assert!(html.contains("event.key === 'Enter'"));
     assert!(html.contains("@media (prefers-color-scheme: dark)"));
     assert!(html.contains("@media (prefers-reduced-motion: reduce)"));
+    assert!(!html.contains("innerHTML"));
+    assert!(!html.contains("insertAdjacentHTML"));
     for prohibited in ["http://", "https://", "//cdn", "@import", "telemetry"] {
         assert!(!html.contains(prohibited), "must not include {prohibited}");
     }
