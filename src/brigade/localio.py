@@ -73,7 +73,7 @@ def _fsync_parent_directory(path: Path) -> None:
     if not _supports_directory_fsync():
         return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
+    fd = os.open(path.resolve(), flags)
     primary: BaseException | None = None
     try:
         if not stat.S_ISDIR(os.fstat(fd).st_mode):

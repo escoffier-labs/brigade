@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import localio
+from brigade import localio, run_journal
 
 
 def test_read_json_dict_invalid_utf8_returns_none(tmp_path: Path):
@@ -90,6 +90,33 @@ def test_write_text_atomic_opens_parent_without_following_symlinks(tmp_path: Pat
     localio.write_text_atomic(path, "durable\n")
 
     assert flags_seen and flags_seen[-1] & os.O_NOFOLLOW
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW is a POSIX symlink hardening flag"
+)
+def test_write_text_atomic_allows_directory_symlink_parent(tmp_path: Path):
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    symlinked_parent = tmp_path / "symlinked-parent"
+    symlinked_parent.symlink_to(real_parent, target_is_directory=True)
+    path = symlinked_parent / "receipt.txt"
+
+    localio.write_text_atomic(path, "durable through symlink\n")
+
+    assert path.read_text() == "durable through symlink\n"
+    assert (real_parent / "receipt.txt").read_text() == "durable through symlink\n"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="directory fsync is a POSIX durability guarantee")
+def test_run_journal_fsync_directory_refuses_directory_symlink(tmp_path: Path):
+    real_directory = tmp_path / "real-directory"
+    real_directory.mkdir()
+    symlinked_directory = tmp_path / "symlinked-directory"
+    symlinked_directory.symlink_to(real_directory, target_is_directory=True)
+
+    with pytest.raises(run_journal.RunJournalError, match="refusing symlinked path"):
+        run_journal._fsync_directory(symlinked_directory)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="directory fsync is a POSIX durability guarantee")
