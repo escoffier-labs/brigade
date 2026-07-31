@@ -923,8 +923,12 @@ def recover_partial_tail(journal_path: Path, quarantine_dir: Path) -> RecoveryRe
     and ``quarantine_path`` is None. Normal readers must never call this; it
     is the only API that mutates the journal body.
     """
-    journal_path = Path(journal_path)
-    quarantine_dir = Path(quarantine_dir)
+    with _append_critical_section():
+        return _recover_partial_tail_locked(Path(journal_path), Path(quarantine_dir))
+
+
+def _recover_partial_tail_locked(journal_path: Path, quarantine_dir: Path) -> RecoveryReport:
+    """Perform recovery while the append critical section is held."""
     if os.path.lexists(journal_path) and not journal_path.exists():
         raise RunJournalError(_bound(f"journal path is a dangling symlink: {journal_path.name}"))
     if not journal_path.exists():
