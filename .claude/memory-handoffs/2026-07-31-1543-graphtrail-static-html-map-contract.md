@@ -7,18 +7,20 @@ decision
 GraphTrail static HTML maps use a dedicated bounded command
 
 ## Summary
-GraphTrail's static Code Intelligence map is a dedicated `graphtrail map` command instead of another `ExportFormat`. The decision preserves `export_graph` as a whole-graph serializer while giving the HTML surface a required focus file, traversal direction, depth, and output limits.
+GraphTrail uses a dedicated, bounded `graphtrail map` command for static Code Intelligence HTML. Its list lanes remain the accessible default; an inline SVG graph progressively enhances the same embedded JSON. SVG fits the hard caps while preserving keyboard-addressable nodes and safe text labels.
 
 ## Durable facts
 - Contract: `graphtrail map <PATH> --out <FILE> [--direction callers|callees|neighbors] [--depth N] [--max-nodes N] [--max-edges N]`.
-- Defaults are `neighbors`, depth `1`, `100` nodes, and `250` edges. Hard maxima are depth `5`, `250` nodes, and `500` edges.
-- Selection starts with focus-file symbols, expands breadth-first, and orders nodes and edges deterministically. Rendered edges must have both endpoints in the selected node set. Truncation reports exact rendered and omitted counts.
-- Output is one static HTML file with inline CSS and JavaScript. Embedded JSON escapes `<`, `>`, and `&`; visible graph values use DOM text sinks only.
+- Defaults: `neighbors`, depth `1`, `100` nodes, `250` edges. Hard maxima: depth `5`, `250` nodes, `500` edges.
+- Selection expands breadth-first from focus-file symbols, sorts nodes and edges deterministically, and retains only edges whose endpoints survived bounding. Truncation reports exact rendered and omitted counts.
+- Output is one static HTML file with inline CSS and JavaScript. Embedded JSON escapes `<`, `>`, and `&`; visible values use DOM text sinks only.
+- SVG positions use stable node-ID hashes, explicit ordinal sorting, and exactly 160 repulsion-and-spring iterations without `Math.random()`. The first sorted focus node is centered before the settled graph is fitted to a fixed margin.
+- Graph mode repeats truncation counts, supports keyboard pan and zoom, reuses the details panel, and POSIX-quotes paths in regeneration commands.
 
 ## Evidence
-- files changed: `engines/code-graph/src/query/map.rs`, `engines/code-graph/src/query/map_html.rs`, `engines/code-graph/src/cli.rs`, `engines/code-graph/tests/map.rs`, `engines/code-graph/tests/cli_read_only.rs`
-- commands run: `cargo fmt --manifest-path engines/code-graph/Cargo.toml -- --check`; `cargo clippy --manifest-path engines/code-graph/Cargo.toml --all-targets --all-features -- -D warnings`; `cargo test --manifest-path engines/code-graph/Cargo.toml --all-features`; `cargo build --release --manifest-path engines/code-graph/Cargo.toml`
-- issue contract: `docs/issue-drafts/2026-07-31-code-intelligence-html-map.md`
+- implementation: `engines/code-graph/src/query/map.rs`, `engines/code-graph/src/query/map_html.rs`
+- contracts: `engines/code-graph/tests/map.rs`, `engines/code-graph/tests/snapshots/map_shell.html`
+- verification: engine format, clippy, all-feature tests, and release build passed through `brigade work verify run`
 
 ## Recommended memory action
 create-card
@@ -30,13 +32,13 @@ graphtrail-static-html-map-contract.md
 ---
 topic: GraphTrail static HTML map contract
 category: architecture
-tags: [graphtrail, code-intelligence, html, cli, bounding]
+tags: [graphtrail, code-intelligence, html, cli, bounding, svg, determinism]
 ---
 
 # GraphTrail static HTML map contract
 
-Use `graphtrail map`, not `ExportFormat::Html`, for file-rooted static maps. Existing export formats serialize the whole file or symbol graph. The map contract requires a focus file plus direction, depth, node, and edge bounds.
+Use `graphtrail map`, not `ExportFormat::Html`, for file-rooted static maps. Defaults are `neighbors`, depth `1`, `100` nodes, and `250` edges. Hard maxima are depth `5`, `250` nodes, and `500` edges. Traverse breadth-first, sort deterministically, keep edges between retained nodes, and report exact omissions.
 
-Defaults: `neighbors`, depth `1`, `100` nodes, `250` edges. Hard maxima: depth `5`, `250` nodes, `500` edges. Traverse focus symbols breadth-first and sort deterministically. Keep only relationships whose endpoints are retained, and report exact rendered and omitted counts.
+Keep list lanes as the accessible default. Render the optional graph as inline SVG over the same bounded JSON. Seed positions from stable node-ID hashes, sort ordinally, and run exactly 160 repulsion-and-spring iterations without randomness. Center the first sorted focus node and fit the result to a fixed margin.
 
-The output is one static file with inline CSS and JavaScript. Escape `<`, `>`, and `&` in embedded JSON, render untrusted values with `textContent`, make no network requests, and add no frontend toolchain or runtime service.
+Escape embedded JSON, use DOM text sinks for untrusted values, POSIX-quote regeneration paths, make no network requests, and add no frontend toolchain or runtime service.
