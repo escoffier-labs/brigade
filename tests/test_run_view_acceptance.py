@@ -508,7 +508,9 @@ def test_local_run_view_http_and_ui_acceptance(run_view_workspace: dict[str, Pat
         assert "prefers-reduced-motion" in html
         assert "@media (max-width:" in html
         assert "aria-" in html
-        assert "<button" in html
+        assert "document.createElement(tag)" in html
+        assert 'node("button"' in html
+        assert 'select.type = "button"' in html
         assert ":focus-visible" in html
         assert "aria-label=" in html or "<label" in html
         assert not re.search(r"<(?:div|span|li)\b[^>]*\bonclick=", html)
