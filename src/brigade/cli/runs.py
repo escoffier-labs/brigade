@@ -110,6 +110,42 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
     )
+    p_runs_redact = runs_sub.add_parser(
+        "redact",
+        help="Run the explicit operator procedure for lifecycle journal redaction.",
+    )
+    p_runs_redact.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_runs_redact.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_runs_redact.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_runs_redact.add_argument("--from-sequence", dest="sequence_start", type=int, default=None)
+    p_runs_redact.add_argument("--to-sequence", dest="sequence_end", type=int, default=None)
+    p_runs_redact.add_argument(
+        "--reason",
+        default=None,
+        help="Closed incident reason code; never include the private value.",
+    )
+    p_runs_redact.add_argument(
+        "--cleanup-quarantine",
+        dest="cleanup_operation",
+        default=None,
+        metavar="OPERATION_ID",
+        help="Explicitly remove a previously verified quarantine.",
+    )
+    p_runs_redact.add_argument(
+        "--operator-confirm",
+        action="store_true",
+        help="Confirm this operator-only incident procedure.",
+    )
     p_runs_resume = runs_sub.add_parser(
         "resume", help="Re-attach interrupted app-server workers from a run and re-synthesize."
     )
@@ -148,6 +184,17 @@ def dispatch(args) -> int:
         return _control_request(args.run, cwd=args.cwd, runs_dir=args.runs_dir, payload=payload)
     if args.runs_command == "recover":
         return runs_cmd.recover(args.run, cwd=args.cwd, runs_dir=args.runs_dir)
+    if args.runs_command == "redact":
+        return runs_cmd.redact(
+            args.run,
+            cwd=args.cwd,
+            runs_dir=args.runs_dir,
+            sequence_start=args.sequence_start,
+            sequence_end=args.sequence_end,
+            reason=args.reason,
+            operator_confirmed=args.operator_confirm,
+            cleanup_operation=args.cleanup_operation,
+        )
     if args.runs_command == "resume":
         return runs_cmd.resume(args.run_dir)
     args._brigade_parser.error(f"unknown runs command: {args.runs_command}")

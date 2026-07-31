@@ -17,6 +17,7 @@ from brigade import run_events
 from brigade import run_journal
 from brigade import run_lifecycle
 from brigade import run_resume
+from brigade import run_redaction
 from brigade import runguard
 from brigade import runs_cmd
 from brigade import tools_cmd
@@ -897,6 +898,115 @@ def test_runs_recover_cli_dispatches_resolved_run(tmp_path, monkeypatch):
 
     assert rc == 0
     assert seen == {"run": str(run_dir), "cwd": tmp_path, "runs_dir": None}
+
+
+def test_runs_redact_cli_dispatches_operator_procedure(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    seen = {}
+
+    def fake_redact(run, **kwargs):
+        seen.update(run=run, **kwargs)
+        return 0
+
+    monkeypatch.setattr(runs_cmd, "redact", fake_redact, raising=False)
+
+    rc = cli.main(
+        [
+            "runs",
+            "redact",
+            str(run_dir),
+            "--from-sequence",
+            "2",
+            "--to-sequence",
+            "4",
+            "--reason",
+            "credential-exposure",
+            "--operator-confirm",
+            "--cwd",
+            str(tmp_path),
+        ]
+    )
+
+    assert rc == 0
+    assert seen == {
+        "run": str(run_dir),
+        "cwd": tmp_path,
+        "runs_dir": None,
+        "sequence_start": 2,
+        "sequence_end": 4,
+        "reason": "credential-exposure",
+        "operator_confirmed": True,
+        "cleanup_operation": None,
+    }
+
+
+def test_runs_redact_cli_dispatches_explicit_cleanup(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    seen = {}
+    monkeypatch.setattr(
+        runs_cmd,
+        "redact",
+        lambda run, **kwargs: seen.update(run=run, **kwargs) or 0,
+        raising=False,
+    )
+
+    rc = cli.main(
+        [
+            "runs",
+            "redact",
+            str(run_dir),
+            "--cleanup-quarantine",
+            "redact-abc123",
+            "--operator-confirm",
+            "--cwd",
+            str(tmp_path),
+        ]
+    )
+
+    assert rc == 0
+    assert seen == {
+        "run": str(run_dir),
+        "cwd": tmp_path,
+        "runs_dir": None,
+        "sequence_start": None,
+        "sequence_end": None,
+        "reason": None,
+        "operator_confirmed": True,
+        "cleanup_operation": "redact-abc123",
+    }
+
+
+def test_runs_redact_cli_reports_removed_quarantine_on_cleaned_replay(tmp_path, monkeypatch, capsys):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(
+        run_redaction,
+        "redact_journal",
+        lambda *args, **kwargs: run_redaction.RedactionReport(
+            operation_id="redact-0123456789abcdef",
+            sequence_start=2,
+            sequence_end=2,
+            quarantine_path=run_dir / "events" / "redactions" / "redact-0123456789abcdef" / "original.jsonl",
+            record_path=run_dir / "events" / "redactions" / "redact-0123456789abcdef" / "record.json",
+            cleaned=True,
+        ),
+    )
+
+    rc = runs_cmd.redact(
+        run_dir,
+        cwd=tmp_path,
+        sequence_start=2,
+        sequence_end=2,
+        reason="credential-exposure",
+        operator_confirmed=True,
+    )
+
+    assert rc == 0
+    output = capsys.readouterr().out
+    assert "quarantine: removed" in output
+    assert "quarantine: retained" not in output
 
 
 def test_runs_recover_marks_dead_owner_run_terminal(tmp_path, capsys):
