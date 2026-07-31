@@ -91,7 +91,6 @@ const HTML_SUFFIX: &str = r###"</script>
     const location = document.createElement('p');
     location.textContent = `${node.file_path}:${node.start_line}`;
     details.replaceChildren(heading, location);
-    details.focus();
   };
   const makeNodeButton = (node) => {
     const button = document.createElement('button');
