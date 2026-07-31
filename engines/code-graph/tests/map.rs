@@ -304,8 +304,13 @@ fn selected_node_and_edge_limits_cap_data_and_report_omissions() {
     assert!(data["edges"].as_array().unwrap().len() <= 1);
     assert_eq!(data["status"]["rendered_nodes"], 2);
     assert_eq!(data["status"]["omitted_nodes"], 3);
-    assert_eq!(data["status"]["rendered_edges"], 1);
-    assert_eq!(data["status"]["omitted_edges"], 3);
+    assert_eq!(data["status"]["rendered_edges"], 0);
+    assert_eq!(data["status"]["omitted_edges"], 4);
+    let node_ids = ids(&data);
+    for edge in data["edges"].as_array().unwrap() {
+        assert!(node_ids.contains(edge["source"].as_str().unwrap()));
+        assert!(node_ids.contains(edge["target"].as_str().unwrap()));
+    }
     assert!(html.contains("role=\"status\""));
     assert!(html.contains("nodes rendered, ${graph.status.omitted_nodes} omitted"));
     assert!(html.contains("edges rendered, ${graph.status.omitted_edges} omitted"));
