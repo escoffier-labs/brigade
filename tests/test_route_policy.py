@@ -13,6 +13,7 @@ from brigade import aboyeur, outcome_cmd, route_policy, scorecard, verify_manife
 from brigade.roster import Agent, Roster
 from brigade.route_receipts import route_decision_payload, write_route_decision
 
+from tests.run_test_helpers import run_aboyeur_guarded
 from tests.test_scorecard import (
     _SCORECARD_MANIFEST_ID,
     _effectiveness_command,
@@ -1045,7 +1046,7 @@ def test_direct_worker_binds_scoped_candidate_skill(monkeypatch, scoreable_targe
         return [aboyeur.WorkerResult(worker="coder", task="implement helper in src", text="done", ok=True)]
 
     monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "implement helper in src",
         _plan_mode_roster("codex"),
         cwd=scoreable_target,
@@ -1109,7 +1110,7 @@ def test_direct_worker_rejects_shadow_without_quota_consumption(monkeypatch, sco
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "implement helper",
         _plan_mode_roster("codex"),
         cwd=scoreable_target,
@@ -1164,7 +1165,7 @@ def test_run_receipt_preserves_skill_route_policy_through_status_writes(monkeypa
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "implement helper",
         _plan_mode_roster("codex"),
         cwd=scoreable_target,

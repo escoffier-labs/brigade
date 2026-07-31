@@ -373,6 +373,47 @@ Common `brigade run` flags:
 - `--read-only` tells the orchestrator and workers to inspect and recommend only.
 - `--sandbox {read-only,workspace-write,danger-full-access}` overrides the native Codex sandbox mode from the roster.
 
+### Run journal authority and upgrade behavior
+
+Every new run directory records `lifecycle_journal_requested: true` and
+`run_journal_authority_requested: true`. Once the run holds its matching lock,
+`events/lifecycle.jsonl` becomes the lifecycle authority and `run.json` stays the
+`brigade.run.v1` compatibility snapshot. There is no environment setting that
+disables journal authority for a new run.
+
+Existing run directories are classified from their stored artifacts. A run whose
+`run.json` lacks both durable request fields remains snapshot-only, even when a
+newer Brigade release records another start attempt. Do not add the fields or
+create `events/lifecycle.jsonl` by hand. Keep legacy runs on the snapshot path, or
+start a new run after upgrading.
+
+The compatibility snapshot keeps schema version 1 and changes additively. Readers
+must ignore unknown keys. A paused approval still projects the known nonterminal
+status `running`. `approval_reference.decision_state` carries the pause state for
+new readers. This lets the previous release inspect `run.json` during the
+compatibility window, but it must not resume or write a journal-authoritative run.
+Upgrade the writer before using `runs recover` or `runs resume` on one of those
+runs.
+
+Use `brigade runs show <run>` or `brigade runs watch <run>` for inspection. Use
+`brigade runs recover <run>` when the snapshot is missing, corrupt, or behind a
+verified journal checkpoint. Recovery validates the bounded event chain and
+checkpoint before replacing `run.json`. If rollback leaves an older Brigade
+unable to interpret a journal event or projector version, stop that writer and
+roll forward. The append-only journal format is a one-way storage boundary.
+
+If the approved action completed but the process exited before recording
+`approval.consumed` and `run.resumed`, run `brigade runs resume <run>` again.
+Brigade verifies that the redeemed claim belongs to the same run and still
+matches the stored approval fingerprints. For a Daily action, it also requires
+the lock-bound completion reference to match the exact successful receipt under
+`.brigade/daily/runs/`. A missing, failed, or changed receipt fails closed. After
+those checks, Brigade retains the source-store lock while it records only the
+missing journal facts and refreshes `run.json`. Review changes wait for that
+transaction and cannot rewrite a consumed Daily approval or completed Tool
+call. Recovery does not consume the approval or run the action again. A
+redeemed claim owned by another run still fails closed.
+
 For `codex` agents, `--read-only` also passes `codex exec --sandbox read-only`.
 Combine `--sandbox` with `--read-only` to keep prompt-level read-only rules while overriding native Codex sandbox behavior. This override does not weaken adapters whose read-only flag takes precedence, including Cursor plan mode, Antigravity's sandbox, Kimi's plan mode, Aider's dry run, and Codex Cloud's remote isolation. Brigade's warning follows the command each adapter will execute.
 

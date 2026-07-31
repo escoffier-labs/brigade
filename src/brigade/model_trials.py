@@ -688,17 +688,28 @@ def execute(
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
         try:
-            rc = aboyeur.run(
-                cell.prompt,
-                roster,
-                worker=cell.seat,
+            read_only = cell.execution_mode == "read-only"
+            aboyeur.record_run_start(
+                run_dir,
+                task=cell.prompt,
                 cwd=cell_workspace,
-                output_dir=run_dir,
-                route_enabled=False,
-                read_only=cell.execution_mode == "read-only",
-                authorized_writable_worktree=cell.execution_mode == "writable-worktree",
+                roster=roster,
+                read_only=read_only,
+                worker=cell.seat,
                 lock_workspace=workspace,
             )
+            with runguard.run_lock(workspace, run_dir=run_dir):
+                rc = aboyeur.run(
+                    cell.prompt,
+                    roster,
+                    worker=cell.seat,
+                    cwd=cell_workspace,
+                    output_dir=run_dir,
+                    route_enabled=False,
+                    read_only=read_only,
+                    authorized_writable_worktree=cell.execution_mode == "writable-worktree",
+                    lock_workspace=workspace,
+                )
             try:
                 text = (run_dir / "final.txt").read_text()
             except OSError:

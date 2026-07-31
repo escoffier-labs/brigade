@@ -20,6 +20,7 @@ from brigade import roadmap_cmd
 from brigade import runguard
 from brigade import run_journal
 from brigade import run_resume
+from brigade import run_shadow
 from brigade import runs_cmd
 from brigade import security_cmd
 from brigade import tools_cmd
@@ -1494,7 +1495,6 @@ role = "code"
         ]
 
     monkeypatch.setattr(aboyeur, "dispatch", dispatch_with_approval_request)
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
 
     assert (
@@ -1653,7 +1653,6 @@ def test_tools_resume_claim_rechecks_store_after_authorization(
     _write_script_tool_config(tmp_path, script='print("ok")\n')
     assert tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"pending"}', json_output=True) == 0
     pending = json.loads(capsys.readouterr().out)["call"]
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     marker = "q" * 43
     monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
@@ -1747,7 +1746,6 @@ def test_tools_reserved_claim_rechecks_contract_before_redemption_and_action(
         == 0
     )
     pending = json.loads(capsys.readouterr().out)["call"]
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     marker = "s" * 43
     monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
@@ -1821,7 +1819,7 @@ def test_tools_reserved_claim_rechecks_contract_before_redemption_and_action(
     assert "run.resumed" not in event_types
 
 
-def test_tools_redeemed_action_crash_fails_closed_without_second_execution(
+def test_tools_redeemed_action_crash_reconciles_without_second_execution(
     tmp_path,
     monkeypatch,
     capsys,
@@ -1847,7 +1845,6 @@ def test_tools_redeemed_action_crash_fails_closed_without_second_execution(
         == 0
     )
     pending = json.loads(capsys.readouterr().out)["call"]
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     marker = "r" * 43
     monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)
@@ -1915,13 +1912,36 @@ def test_tools_redeemed_action_crash_fails_closed_without_second_execution(
 
     assert cli.main(["runs", "resume", str(run_dir)]) == 2
     assert (tmp_path / "redeemed-count").read_text() == "1"
-    assert cli.main(["runs", "resume", str(run_dir)]) == 2
+    assert "injected outcome persistence crash" in capsys.readouterr().err
+    journal_path = run_dir / "events" / "lifecycle.jsonl"
+    before_reconciliation = run_journal.read_journal(journal_path).events
+    assert "approval.consumed" not in [event.event_type for event in before_reconciliation]
+    assert "run.resumed" not in [event.event_type for event in before_reconciliation]
+
+    assert cli.main(["runs", "resume", str(run_dir)]) == 0
     assert (tmp_path / "redeemed-count").read_text() == "1"
     assert provider_calls == [run_dir]
     stored = next(item for item in tools_cmd._read_calls(tmp_path) if item["id"] == pending["id"])
     assert stored["approval_claim"]["state"] == "redeemed"
+    assert stored["approval_claim"]["run_id"] == run_dir.name
     assert raw_tokens[0] not in json.dumps(stored)
-    assert "outcome reconciliation is required" in capsys.readouterr().err
+    events = run_journal.read_journal(journal_path).events
+    event_types = [event.event_type for event in events]
+    for fact in ("approval.consumed", "run.resumed"):
+        assert event_types.count(fact) == 1
+        assert event_types[event_types.index(fact) - 1] == "run.snapshot.checkpointed"
+    snapshot = json.loads((run_dir / "run.json").read_text())
+    assert snapshot["approval_reference"]["decision_state"] == "consumed"
+    assert snapshot["approval_reference"]["consuming_run_id"] == run_dir.name
+    assert snapshot["journal_last_sequence"] == events[-1].sequence
+    assert snapshot["journal_last_event_digest"] == events[-1].event_digest
+    assert run_shadow.check_projection_readiness(run_dir).ready is True
+
+    reconciled_journal = journal_path.read_bytes()
+    assert cli.main(["runs", "resume", str(run_dir)]) == 0
+    assert journal_path.read_bytes() == reconciled_journal
+    assert (tmp_path / "redeemed-count").read_text() == "1"
+    assert provider_calls == [run_dir]
 
 
 def test_tools_approval_pauses_real_run_and_cli_resume_consumes_store_once(
@@ -1950,7 +1970,6 @@ def test_tools_approval_pauses_real_run_and_cli_resume_consumes_store_once(
         == 0
     )
     pending = json.loads(capsys.readouterr().out)["call"]
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     marker = "t" * 43
     monkeypatch.setenv(runs_cmd._APPROVAL_CORRELATION_ENV, marker)

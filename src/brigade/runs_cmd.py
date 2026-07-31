@@ -890,38 +890,18 @@ def _refresh_resumed_snapshot(
     aboyeur._write_json(run_dir / "run.json", receipt_schema.stamp_run_receipt(refreshed))
 
 
-def _finalize_redeemed_approval(
+def _commit_redeemed_approval_facts(
     run_dir: Path,
     workspace: Path,
     reference: Mapping[str, str],
+    *,
+    decided_at: str,
+    claimed_at: str,
 ) -> None:
-    """Commit consumed/resumed facts only after the source CAS redeemed."""
+    """Commit outcome facts while the caller retains the source-store lock."""
     from . import run_lifecycle
 
     run_id = run_dir.name
-    source = reference["source"]
-    record: Mapping[str, Any] | None
-    if source == "daily":
-        from .daily_cmd import approvals as daily_approvals
-
-        record = daily_approvals._find_approval(workspace, reference["approval_id"])
-    elif source == "tool":
-        from .tools_cmd import calls as tool_calls
-
-        record, _calls, _error = tool_calls._resolve_call(workspace, reference["approval_id"])
-    else:
-        raise ApprovalResumeError(f"unsupported approval source: {source}")
-    if not isinstance(record, Mapping):
-        raise ApprovalResumeError("approval source record disappeared after resumed action")
-    _reference_matches_record(reference, record)
-    claim = record.get("approval_claim")
-    if (
-        not isinstance(claim, Mapping)
-        or claim.get("run_id") != run_id
-        or claim.get("state") != "redeemed"
-        or not isinstance(claim.get("redeemed_at"), str)
-    ):
-        raise ApprovalResumeError("approval action did not redeem its reserved claim")
     run_lifecycle.record_lifecycle_event(
         run_dir,
         event_type="approval.consumed",
@@ -950,14 +930,64 @@ def _finalize_redeemed_approval(
     meta = _read_json(run_dir / "run.json")
     if meta is None:
         raise ApprovalResumeError("approval run receipt disappeared after resumed action")
-    decided_at = record.get("reviewed_at")
     _refresh_resumed_snapshot(
         run_dir,
         meta,
         reference,
-        decided_at=decided_at if isinstance(decided_at, str) else None,
-        claimed_at=str(claim["redeemed_at"]),
+        decided_at=decided_at,
+        claimed_at=claimed_at,
     )
+
+
+def _finalize_redeemed_approval(
+    run_dir: Path,
+    workspace: Path,
+    reference: Mapping[str, str],
+) -> None:
+    """Validate and commit outcome facts in one source-store transaction."""
+    run_id = run_dir.name
+    source = reference["source"]
+    if source == "daily":
+        from .daily_cmd import approvals as daily_approvals
+
+        try:
+            with daily_approvals.redeemed_reconciliation_guard(
+                workspace,
+                reference["approval_id"],
+                reference,
+                run_id,
+            ) as claim:
+                _commit_redeemed_approval_facts(
+                    run_dir,
+                    workspace,
+                    reference,
+                    decided_at=claim.decided_at,
+                    claimed_at=claim.claimed_at,
+                )
+        except daily_approvals.ApprovalClaimError as exc:
+            raise ApprovalResumeError(str(exc)) from exc
+        return
+    if source == "tool":
+        from .tools_cmd import calls as tool_calls
+
+        try:
+            with tool_calls.redeemed_reconciliation_guard(
+                workspace,
+                reference["approval_id"],
+                reference,
+                run_id,
+            ) as claim:
+                _commit_redeemed_approval_facts(
+                    run_dir,
+                    workspace,
+                    reference,
+                    decided_at=claim.decided_at,
+                    claimed_at=claim.claimed_at,
+                )
+        except tool_calls.CallClaimError as exc:
+            raise ApprovalResumeError(str(exc)) from exc
+        return
+    raise ApprovalResumeError(f"unsupported approval source: {source}")
 
 
 def resume(run_dir: Path) -> int:
@@ -1022,7 +1052,8 @@ def resume(run_dir: Path) -> int:
                 )
                 raise ApprovalResumeError(f"approval is {authorization.status}")
             if authorization.status == "redeemed":
-                raise ApprovalResumeError("approval claim is already redeemed; outcome reconciliation is required")
+                _finalize_redeemed_approval(run_dir, workspace, reference)
+                return 0
             if authorization.status in {"consumed", "reserved"}:
                 if authorization.consumed_by != run_dir.name:
                     owner = authorization.consumed_by or "another run"

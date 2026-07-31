@@ -1,5 +1,10 @@
 # Issue #568 Slice 6: Journal Authority
 
+> Historical slice note. This document records the slice 6 opt-in rollout.
+> Slice 11 superseded that rollout: new runs request journal authority by
+> default, and `BRIGADE_RUN_JOURNAL_AUTHORITY` no longer controls runtime
+> behavior.
+
 Reviewed design specification for the approved slice 6 boundary of GitHub issue #568
 (https://github.com/escoffier-labs/brigade/issues/568). Slices 1 through 5 landed the
 append-only journal kernel (`run_journal`, `run_events`), opt-in lifecycle journaling

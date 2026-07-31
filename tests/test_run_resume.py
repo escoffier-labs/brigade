@@ -629,7 +629,6 @@ def test_authority_resume_failed_synthesis_receipt_write_retains_lock(tmp_path, 
     run_meta["cwd"] = str(tmp_path)
     run_meta["lock_workspace"] = str(tmp_path)
     (run_dir / "run.json").write_text(json.dumps(run_meta))
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
     monkeypatch.setattr(
@@ -674,7 +673,6 @@ def test_authority_resume_successful_synthesis_receipt_write_retains_lock(tmp_pa
     run_meta["cwd"] = str(tmp_path)
     run_meta["lock_workspace"] = str(tmp_path)
     (run_dir / "run.json").write_text(json.dumps(run_meta))
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
     monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
     monkeypatch.setattr(

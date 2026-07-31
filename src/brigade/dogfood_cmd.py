@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import aboyeur, localio, toml_compat
+from . import aboyeur, localio, runguard, toml_compat
 from . import agents
 from . import runs_cmd
 from .roster import Agent, Roster
@@ -526,16 +526,31 @@ def run(
             else default_handoff_inbox(effective_target, effective_agent_cli)
         )
 
-    rc = aboyeur.run(
-        task or DEFAULT_TASK,
-        _dogfood_roster(effective_timeout, effective_agent_cli),
-        show_plan=True,
-        cwd=effective_target,
-        output_dir=chosen_output_dir,
-        handoff_inbox=chosen_handoff_inbox,
-        read_only=True,
-        sandbox="read-only" if effective_native else None,
-    )
+    run_task = task or DEFAULT_TASK
+    roster = _dogfood_roster(effective_timeout, effective_agent_cli)
+    try:
+        aboyeur.record_run_start(
+            chosen_output_dir,
+            task=run_task,
+            cwd=effective_target,
+            roster=roster,
+            read_only=True,
+            lock_workspace=effective_target,
+        )
+        with runguard.run_lock(effective_target, run_dir=chosen_output_dir):
+            rc = aboyeur.run(
+                run_task,
+                roster,
+                show_plan=True,
+                cwd=effective_target,
+                output_dir=chosen_output_dir,
+                handoff_inbox=chosen_handoff_inbox,
+                read_only=True,
+                sandbox="read-only" if effective_native else None,
+            )
+    except runguard.RunGuardError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if chosen_output_dir.is_dir():
         _write_summary(chosen_output_dir)
     print(f"artifacts: {chosen_output_dir}", file=sys.stderr)

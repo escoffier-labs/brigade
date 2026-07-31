@@ -17,6 +17,7 @@ from brigade import evidence_brief
 from brigade import proc
 from brigade import runguard
 from brigade.roster import Agent, Roster
+from tests.run_test_helpers import run_aboyeur_guarded
 from tests.work_cmd_test_helpers import _init_git_repo
 
 
@@ -876,7 +877,7 @@ def test_code_graph_context_is_prepended_once_to_plan_worker_and_synthesis(monke
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), code_graph=brief, route_enabled=False) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), code_graph=brief, route_enabled=False) == 0
     assert len(calls) == 3
 
 
@@ -905,7 +906,7 @@ def test_evidence_context_is_prepended_once_to_plan_worker_and_synthesis(monkeyp
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), evidence=evidence, route_enabled=False) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), evidence=evidence, route_enabled=False) == 0
     assert len(calls) == 3
 
 
@@ -940,7 +941,10 @@ def test_run_json_records_code_graph_brief_fields(monkeypatch, tmp_path):
     )
 
     assert (
-        aboyeur.run("build feature", _roster(), cwd=tmp_path / "work", output_dir=output_dir, drift_impact=drift) == 0
+        run_aboyeur_guarded(
+            "build feature", _roster(), cwd=tmp_path / "work", output_dir=output_dir, drift_impact=drift
+        )
+        == 0
     )
 
     run_meta = json.loads((output_dir / "run.json").read_text())
@@ -977,7 +981,10 @@ def test_run_json_records_evidence_brief_fields(monkeypatch, tmp_path):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), cwd=tmp_path / "work", output_dir=output_dir, evidence=evidence) == 0
+    assert (
+        run_aboyeur_guarded("build feature", _roster(), cwd=tmp_path / "work", output_dir=output_dir, evidence=evidence)
+        == 0
+    )
 
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["evidence_brief"] == {
@@ -1016,7 +1023,7 @@ def test_run_json_records_disabled_code_graph(monkeypatch, tmp_path):
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature",
             _roster(),
             cwd=tmp_path / "work",
@@ -1053,7 +1060,7 @@ def test_run_no_evidence_skips_miseledger_and_records_disabled_state(monkeypatch
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature",
             _roster(),
             cwd=tmp_path / "work",
@@ -1105,7 +1112,7 @@ def test_run_dry_run_stops_after_plan(monkeypatch, capsys):
         )
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    rc = aboyeur.run("build feature", _roster(), dry_run=True, route_enabled=False)
+    rc = run_aboyeur_guarded("build feature", _roster(), dry_run=True, route_enabled=False)
     out = capsys.readouterr().out
     assert rc == 0
     assert "implement it" in out
@@ -1132,7 +1139,7 @@ def test_run_dry_run_records_code_graph_delta_skip_without_graphtrail(monkeypatc
     )
 
     output_dir = tmp_path / "run"
-    assert aboyeur.run("build feature", _roster(), dry_run=True, output_dir=output_dir) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), dry_run=True, output_dir=output_dir) == 0
 
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["code_graph_delta"] == {
@@ -1161,7 +1168,7 @@ def test_run_dispatches_and_synthesizes(monkeypatch, capsys):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    rc = aboyeur.run("build feature", _roster(), route_enabled=False)
+    rc = run_aboyeur_guarded("build feature", _roster(), route_enabled=False)
     out = capsys.readouterr().out
     assert rc == 0
     assert out.strip() == "final answer"
@@ -1178,7 +1185,7 @@ def test_run_direct_worker_skips_plan_and_synthesis(monkeypatch, capsys, tmp_pat
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "do exactly this",
         _roster(),
         worker="coder",
@@ -1218,7 +1225,7 @@ def test_lifecycle_run_dispatch_emits_only_identified_worker_dispatch_facts(monk
 
     with runguard.run_lock(tmp_path, run_dir=output_dir):
         assert (
-            aboyeur.run(
+            run_aboyeur_guarded(
                 "do exactly this",
                 _roster(),
                 worker="coder",
@@ -1261,7 +1268,7 @@ def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "do exactly this",
         _roster(),
         worker="coder",
@@ -1301,7 +1308,7 @@ def test_run_direct_grok_progress_only_output_fails_with_honest_artifacts(monkey
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "Review the current documentation diff and report only actionable findings.",
         _grok_roster(),
         cwd=tmp_path,
@@ -1348,7 +1355,7 @@ def test_run_direct_grok_structured_final_succeeds_with_honest_artifacts(monkeyp
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "Review the current documentation diff and report only actionable findings.",
         _grok_roster(),
         cwd=tmp_path,
@@ -1382,7 +1389,7 @@ def test_run_direct_grok_continuation_recovery_preserves_both_attempts(monkeypat
     )
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "Review the current diff.",
         _grok_roster(),
         cwd=tmp_path,
@@ -1428,7 +1435,7 @@ def test_run_direct_grok_fallback_recovery_selects_explicit_acpx_seat(monkeypatc
     )
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "Review the current diff.",
         _grok_roster(fallback=True),
         cwd=tmp_path,
@@ -1463,7 +1470,7 @@ def test_run_direct_grok_missing_fallback_is_typed_after_continuation(monkeypatc
     )
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "Review the current diff.",
         _grok_roster(),
         cwd=tmp_path,
@@ -1503,7 +1510,7 @@ def test_run_direct_grok_all_attempts_invalid_preserves_terminal_failure(monkeyp
     )
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "Review the current diff.",
         _grok_roster(fallback=True),
         cwd=tmp_path,
@@ -1534,7 +1541,7 @@ def test_run_direct_grok_operational_envelope_never_enters_recovery(monkeypatch,
     calls = _stub_grok_process(monkeypatch, agents.proc.Result(0, envelope + "\n", ""))
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "Review the current diff.",
         _grok_roster(fallback=True),
         cwd=tmp_path,
@@ -1569,7 +1576,7 @@ def test_run_direct_grok_operational_diagnostic_outside_answer_never_enters_reco
     )
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "Review the current diff.",
         _grok_roster(fallback=True),
         cwd=tmp_path,
@@ -1602,7 +1609,7 @@ def test_run_defers_success_until_worktree_artifact_collection(monkeypatch, tmp_
     monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "Implement the requested change.",
         _grok_roster(),
         cwd=tmp_path,
@@ -1620,14 +1627,16 @@ def test_run_defers_success_until_worktree_artifact_collection(monkeypatch, tmp_
     assert "duration_seconds" not in run_payload
     assert (output_dir / "final.txt").read_text().strip() == answer
 
-    aboyeur.record_artifact_collection(
-        output_dir,
-        status="ok",
-        patch_ref="changes.patch",
-        changed=False,
-        tracked_count=0,
-        untracked_count=0,
-    )
+    lock_workspace = Path(run_payload["lock_workspace"])
+    with runguard.run_lock(lock_workspace, run_dir=output_dir):
+        aboyeur.record_artifact_collection(
+            output_dir,
+            status="ok",
+            patch_ref="changes.patch",
+            changed=False,
+            tracked_count=0,
+            untracked_count=0,
+        )
 
     run_payload = json.loads((output_dir / "run.json").read_text())
     assert run_payload["status"] == "ok"
@@ -1738,7 +1747,7 @@ def test_post_dispatch_escape_clears_worker_phase_owner(monkeypatch, tmp_path, e
     expected_kind = "signal" if escape == "sigterm" else "keyboard-interrupt"
     expected_exception = SystemExit if escape == "sigterm" else KeyboardInterrupt
     with pytest.raises(expected_exception):
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature",
             _roster(),
             worker="coder",
@@ -1831,7 +1840,7 @@ def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "do exactly this",
         _roster(),
         worker="coder",
@@ -1865,7 +1874,7 @@ def test_run_direct_worker_preserves_timeout_as_terminal_status(monkeypatch, tmp
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "do exactly this",
             _roster(),
             worker="coder",
@@ -1896,7 +1905,7 @@ def test_run_direct_worker_dry_run_skips_agents_and_writes_synthetic_plan(monkey
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "fix the bug",
         _roster(),
         worker="coder",
@@ -1945,7 +1954,7 @@ def test_run_dispatches_stages_in_order_with_earlier_context(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("build feature", _roster()) == 0
+    assert run_aboyeur_guarded("build feature", _roster()) == 0
 
     worker_calls = [call for call in calls if "You are Brigade worker" in call[1]]
     assert [call[0] for call in worker_calls] == ["ollama:llama3.3", "codex"]
@@ -1982,7 +1991,7 @@ def test_run_stage_two_interruption_records_current_stage_seat(monkeypatch, tmp_
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
     with pytest.raises(KeyboardInterrupt):
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature",
             _roster(),
             output_dir=output_dir,
@@ -2012,7 +2021,7 @@ def test_run_terminalizes_keyboard_interrupt_during_planning_without_cli(monkeyp
     monkeypatch.setattr(aboyeur, "plan", interrupted_plan)
 
     with pytest.raises(KeyboardInterrupt):
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature",
             _roster(),
             output_dir=output_dir,
@@ -2050,7 +2059,7 @@ def test_run_terminalizes_unexpected_synthesis_error_without_cli(monkeypatch, tm
     monkeypatch.setattr(aboyeur, "_run_orchestrator", failed_synthesis)
 
     with pytest.raises(RuntimeError, match="synthesis exploded"):
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature",
             _roster(),
             output_dir=output_dir,
@@ -2074,9 +2083,12 @@ def test_direct_run_terminalizes_sigterm_in_subprocess(tmp_path):
     script = f"""
 import time
 from pathlib import Path
-from brigade import aboyeur
+from brigade import aboyeur, runguard
 from brigade.roster import Agent, Roster
 
+run_dir = Path({str(output_dir)!r})
+workspace = run_dir.parent / "workspace"
+workspace.mkdir()
 roster = Roster(
     orchestrator="chef",
     agents={{
@@ -2090,13 +2102,16 @@ def blocked_plan(*args, **kwargs):
         time.sleep(0.05)
 
 aboyeur.plan = blocked_plan
-aboyeur.run(
-    "build feature",
-    roster,
-    output_dir=Path({str(output_dir)!r}),
-    code_graph_enabled=False,
-    route_enabled=False,
-)
+with runguard.run_lock(workspace, run_dir=run_dir):
+    aboyeur.run(
+        "build feature",
+        roster,
+        cwd=workspace,
+        lock_workspace=workspace,
+        output_dir=run_dir,
+        code_graph_enabled=False,
+        route_enabled=False,
+    )
 """
     child_env = os.environ.copy()
     child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
@@ -2148,7 +2163,7 @@ def test_run_uses_roster_timeouts(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("build feature", _timeout_roster(), route_enabled=False) == 0
+    assert run_aboyeur_guarded("build feature", _timeout_roster(), route_enabled=False) == 0
     assert calls == [("codex", 45.0), ("ollama:llama3.3", 12.0), ("codex", 45.0)]
 
 
@@ -2167,7 +2182,7 @@ def test_run_passes_agent_models(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("build feature", _model_roster(), route_enabled=False) == 0
+    assert run_aboyeur_guarded("build feature", _model_roster(), route_enabled=False) == 0
     assert calls == [
         ("claude", "claude-fable-5"),
         ("codex", "gpt-5.5-codex"),
@@ -2256,7 +2271,7 @@ def test_direct_acpx_auth_failure_reaches_worker_run_receipt_and_human_summary(m
     )
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "inspect",
         roster,
         worker="composer",
@@ -2330,7 +2345,7 @@ def test_direct_acpx_late_permission_preserves_final_in_artifacts(monkeypatch, t
     )
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "inspect",
         roster,
         worker="composer",
@@ -2406,7 +2421,7 @@ def test_direct_acpx_late_permission_output_validation_failure_preserves_warning
     )
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "inspect",
         roster,
         worker="composer",
@@ -2460,7 +2475,7 @@ def test_roster_payload_includes_read_only_capability():
     assert payload["agents"]["coder"]["read_only_capable"] is False
 
 
-def test_direct_worker_rejects_incapable_read_only_seat_before_artifacts(monkeypatch, tmp_path, capsys):
+def test_direct_worker_rejects_incapable_read_only_seat_after_bootstrap_only(monkeypatch, tmp_path, capsys):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(
         aboyeur,
@@ -2468,7 +2483,7 @@ def test_direct_worker_rejects_incapable_read_only_seat_before_artifacts(monkeyp
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("validation happened too late")),
     )
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "inspect feature",
         _roster_with_incapable_worker(),
         worker="coder",
@@ -2478,7 +2493,12 @@ def test_direct_worker_rejects_incapable_read_only_seat_before_artifacts(monkeyp
     )
 
     assert rc == 2
-    assert not output_dir.exists()
+    bootstrap = json.loads((output_dir / "run.json").read_text())
+    assert bootstrap["status"] == "started"
+    assert bootstrap["task"] == "inspect feature"
+    assert bootstrap[_AUTHORITY_REQUEST_FIELD] is True
+    assert not (output_dir / "plan.json").exists()
+    assert not (output_dir / "worker-results.json").exists()
     err = capsys.readouterr().err
     assert "coder" in err
     assert "agents.coder.read_only_capable is false" in err
@@ -2509,7 +2529,7 @@ def test_read_only_mode_is_in_all_prompts_and_artifacts(monkeypatch, tmp_path):
 
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("inspect feature", _roster(), output_dir=output_dir, read_only=True) == 0
+    assert run_aboyeur_guarded("inspect feature", _roster(), output_dir=output_dir, read_only=True) == 0
     assert all("READ-ONLY MODE" in prompt for _, prompt, _ in calls)
     assert all("Do not modify files" in prompt for _, prompt, _ in calls)
     assert all(read_only for _, _, read_only in calls)
@@ -2541,7 +2561,7 @@ def test_read_only_mode_skips_code_graph_delta_without_graphtrail(monkeypatch, t
     )
 
     output_dir = tmp_path / "run"
-    assert aboyeur.run("inspect feature", _roster(), output_dir=output_dir, read_only=True) == 0
+    assert run_aboyeur_guarded("inspect feature", _roster(), output_dir=output_dir, read_only=True) == 0
 
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["code_graph_delta"]["status"] == "skipped_read_only"
@@ -2564,7 +2584,7 @@ def test_prompt_read_only_can_disable_native_sandbox(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("inspect feature", _roster(), read_only=True, sandbox_read_only=False) == 0
+    assert run_aboyeur_guarded("inspect feature", _roster(), read_only=True, sandbox_read_only=False) == 0
     assert all("READ-ONLY MODE" in prompt for _, prompt, _ in calls)
     assert all(read_only is False for _, _, read_only in calls)
 
@@ -2584,7 +2604,7 @@ def test_prompt_read_only_can_set_explicit_sandbox(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("inspect feature", _roster(), read_only=True, sandbox="danger-full-access") == 0
+    assert run_aboyeur_guarded("inspect feature", _roster(), read_only=True, sandbox="danger-full-access") == 0
     assert all("READ-ONLY MODE" in prompt for _, prompt, _, _ in calls)
     assert all(sandbox == "danger-full-access" for _, _, _, sandbox in calls)
 
@@ -2601,7 +2621,7 @@ def test_show_plan_prints_assignments(monkeypatch, capsys):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    rc = aboyeur.run("build feature", _roster(), show_plan=True)
+    rc = run_aboyeur_guarded("build feature", _roster(), show_plan=True)
     out = capsys.readouterr().out
     assert rc == 0
     assert "plan:" in out
@@ -2621,7 +2641,7 @@ def test_verbose_prints_worker_status(monkeypatch, capsys):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    rc = aboyeur.run("build feature", _roster(), verbose=True)
+    rc = run_aboyeur_guarded("build feature", _roster(), verbose=True)
     out = capsys.readouterr().out
     assert rc == 0
     assert "workers:" in out
@@ -2644,7 +2664,7 @@ def test_worker_failure_is_sent_to_synthesis(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("build feature", _roster()) == 3
+    assert run_aboyeur_guarded("build feature", _roster()) == 3
     assert "not installed" in calls[-1][1]
 
 
@@ -2671,7 +2691,7 @@ def test_run_writes_artifacts(monkeypatch, tmp_path):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
     assert (output_dir / "plan.json").is_file()
     assert (output_dir / "plan-attempts.json").is_file()
     assert (output_dir / "roster.json").is_file()
@@ -2934,7 +2954,7 @@ def test_run_marks_suspected_noop_for_ok_write_worker_with_no_non_brigade_change
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature",
             _roster(),
             cwd=run_cwd,
@@ -2948,7 +2968,7 @@ def test_run_marks_suspected_noop_for_ok_write_worker_with_no_non_brigade_change
     assert worker_results["results"][0]["ok"] is True
     assert worker_results["results"][0]["detail"] == "no-op"
     assert worker_results["ground_truth"]["changed_files"] == []
-    assert worker_results["ground_truth"]["untracked_files"] == [".brigade/scratch.txt"]
+    assert worker_results["ground_truth"]["untracked_files"] == []
     assert worker_results["ground_truth"]["suspected_noop"] is True
     assert json.loads((output_dir / "run.json").read_text())["suspected_noop"] is True
 
@@ -2975,7 +2995,7 @@ def test_run_does_not_mark_suspected_noop_for_read_only(monkeypatch, tmp_path):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("inspect feature", _roster(), cwd=run_cwd, output_dir=output_dir, read_only=True) == 0
+    assert run_aboyeur_guarded("inspect feature", _roster(), cwd=run_cwd, output_dir=output_dir, read_only=True) == 0
 
     worker_results = json.loads((output_dir / "worker-results.json").read_text())
     assert worker_results["results"][0]["detail"] == ""
@@ -3006,7 +3026,7 @@ def test_run_does_not_mark_suspected_noop_when_worker_changes_real_file(monkeypa
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
 
     worker_results = json.loads((output_dir / "worker-results.json").read_text())
     assert worker_results["results"][0]["detail"] == ""
@@ -3058,7 +3078,7 @@ def test_run_writes_code_graph_delta_to_artifacts_and_synthesis(monkeypatch, tmp
     monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", fake_capture_before)
     monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
 
-    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
 
     assert delta_calls == [
         ("before", run_cwd, output_dir),
@@ -3124,7 +3144,7 @@ def test_run_writes_context_eval_when_brief_and_delta_sidecar_overlap(monkeypatc
     monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
     monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
 
-    assert aboyeur.run("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
 
     expected = {
         "counts": {
@@ -3168,7 +3188,7 @@ def test_run_omits_context_eval_without_brief(monkeypatch, tmp_path):
     monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature",
             _roster(),
             cwd=tmp_path,
@@ -3210,7 +3230,7 @@ def test_run_omits_context_eval_when_delta_failed(monkeypatch, tmp_path):
         lambda target, run_dir, before: {"status": "sync_failed", "ok": False, "summary": "failed"},
     )
 
-    assert aboyeur.run("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
 
     ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
     assert "context_eval" not in ground_truth
@@ -3245,7 +3265,7 @@ def test_run_omits_context_eval_when_delta_has_no_files(monkeypatch, tmp_path):
     monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
     monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
 
-    assert aboyeur.run("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
 
     ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
     assert "context_eval" not in ground_truth
@@ -3308,7 +3328,7 @@ def test_run_worker_results_include_latest_verification_receipt_commands(monkeyp
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
 
     ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
     assert [receipt["run_id"] for receipt in ground_truth["verify_receipts"]] == ["99990101-000000-work-verify-abc123"]
@@ -3343,7 +3363,7 @@ def test_run_worker_results_ground_truth_unavailable_outside_git(monkeypatch, tm
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
 
     ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
     assert ground_truth["available"] is False
@@ -3359,7 +3379,7 @@ def test_dry_run_writes_plan_artifact(monkeypatch, tmp_path):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), dry_run=True, output_dir=output_dir) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), dry_run=True, output_dir=output_dir) == 0
     assert json.loads((output_dir / "plan.json").read_text())["assignments"][0]["worker"] == "coder"
     assert json.loads((output_dir / "plan-attempts.json").read_text())["attempts"][0]["parsed"] is True
     run_meta = json.loads((output_dir / "run.json").read_text())
@@ -3383,7 +3403,7 @@ def test_invalid_plan_writes_attempt_artifact(monkeypatch, tmp_path, capsys):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), output_dir=output_dir) == 2
+    assert run_aboyeur_guarded("build feature", _roster(), output_dir=output_dir) == 2
     assert "invalid plan" in capsys.readouterr().err
     assert len(calls) == 2
     run_meta = json.loads((output_dir / "run.json").read_text())
@@ -3511,7 +3531,7 @@ def test_plan_timeout_writes_terminal_timeout_receipt(monkeypatch, tmp_path):
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature",
             _roster(),
             output_dir=output_dir,
@@ -3548,7 +3568,7 @@ def test_plan_output_validation_failure_preserves_typed_receipts(monkeypatch, tm
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), output_dir=output_dir) == 2
+    assert run_aboyeur_guarded("build feature", _roster(), output_dir=output_dir) == 2
     attempt = json.loads((output_dir / "plan-attempts.json").read_text())["attempts"][0]
     assert attempt["failure_phase"] == "output-validation"
     assert attempt["failure_kind"] == "non-final-output"
@@ -3589,7 +3609,7 @@ def test_orchestrator_cloudflare_preflight_fails_before_plan_and_reaches_run_jso
     monkeypatch.delenv("CLOUDFLARE_GATEWAY_ID", raising=False)
 
     output_dir = tmp_path / "run"
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "build feature",
         roster,
         output_dir=output_dir,
@@ -3636,7 +3656,7 @@ def test_synthesis_failure_writes_artifact(monkeypatch, tmp_path, capsys):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), output_dir=output_dir) == 2
+    assert run_aboyeur_guarded("build feature", _roster(), output_dir=output_dir) == 2
     assert "synthesis failed" in capsys.readouterr().err
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["status"] == "failed"
@@ -3682,7 +3702,7 @@ def test_run_writes_handoff(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(aboyeur, "write_run_handoff", observed_write_handoff)
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature\n## task heading",
             _roster(),
             output_dir=output_dir,
@@ -3732,7 +3752,9 @@ def test_handoff_failure_preserves_final_artifacts(monkeypatch, tmp_path, capsys
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     monkeypatch.setattr(aboyeur, "write_run_handoff", fail_handoff)
 
-    assert aboyeur.run("build feature", _roster(), output_dir=output_dir, handoff_inbox=tmp_path / "handoffs") == 2
+    assert (
+        run_aboyeur_guarded("build feature", _roster(), output_dir=output_dir, handoff_inbox=tmp_path / "handoffs") == 2
+    )
     captured = capsys.readouterr()
     assert captured.out.strip() == "final answer"
     assert "handoff failed: cannot write handoff" in captured.err
@@ -3785,7 +3807,7 @@ def test_handoff_escape_terminalizes_nonterminal_receipt(monkeypatch, tmp_path, 
     monkeypatch.setattr(aboyeur, "write_run_handoff", fail_handoff)
 
     with pytest.raises(type(exception)):
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature",
             _roster(),
             output_dir=output_dir,
@@ -3810,9 +3832,12 @@ def test_handoff_sigterm_terminalizes_nonterminal_receipt(tmp_path):
 import json
 import time
 from pathlib import Path
-from brigade import aboyeur, agents
+from brigade import aboyeur, agents, runguard
 from brigade.roster import Agent, Roster
 
+run_dir = Path({str(output_dir)!r})
+workspace = run_dir.parent / "workspace"
+workspace.mkdir()
 roster = Roster(
     orchestrator="chef",
     agents={{
@@ -3836,14 +3861,17 @@ def blocked_handoff(*args, **kwargs):
         time.sleep(0.05)
 aboyeur.agents.run_agent = fake_run_agent
 aboyeur.write_run_handoff = blocked_handoff
-aboyeur.run(
-    "build feature",
-    roster,
-    output_dir=Path({str(output_dir)!r}),
-    handoff_inbox=Path({str(tmp_path / "handoffs")!r}),
-    code_graph_enabled=False,
-    route_enabled=False,
-)
+with runguard.run_lock(workspace, run_dir=run_dir):
+    aboyeur.run(
+        "build feature",
+        roster,
+        cwd=workspace,
+        lock_workspace=workspace,
+        output_dir=run_dir,
+        handoff_inbox=Path({str(tmp_path / "handoffs")!r}),
+        code_graph_enabled=False,
+        route_enabled=False,
+    )
 """
     child_env = os.environ.copy()
     child_env["PYTHONPATH"] = str(Path(__file__).parents[1] / "src")
@@ -3899,7 +3927,7 @@ def test_run_reuses_one_process_registry_across_all_cli_phases(monkeypatch, tmp_
     monkeypatch.setattr(aboyeur, "_run_orchestrator", fake_orchestrator)
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "build feature",
             _roster(),
             output_dir=tmp_path / "run",
@@ -3928,7 +3956,7 @@ def test_disallowed_worker_is_recorded_not_run(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("build feature", _restricted_roster(), route_enabled=False) == 3
+    assert run_aboyeur_guarded("build feature", _restricted_roster(), route_enabled=False) == 3
     assert [call[0] for call in calls] == ["codex", "codex"]
     assert "not allowed by limits.allow_models" in calls[-1][1]
 
@@ -4137,7 +4165,7 @@ def test_direct_appserver_failure_receipt_preserves_terminal_semantics(
     output_dir = tmp_path / "run"
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "task",
             _appserver_roster(),
             worker="cook",
@@ -4172,7 +4200,7 @@ def test_run_appserver_worker_rejects_non_final_output_in_receipts(monkeypatch, 
     monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", _IntentOnlyAppServer)
     output_dir = tmp_path / "run"
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "review the repository",
         _appserver_roster(),
         worker="cook",
@@ -4216,7 +4244,7 @@ def test_run_reuses_dispatch_process_registry_for_appserver(monkeypatch, tmp_pat
     monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "task",
             _appserver_roster(),
             worker="cook",
@@ -4264,7 +4292,7 @@ def test_run_falls_back_to_exec_when_appserver_unavailable(monkeypatch, tmp_path
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     out = tmp_path / "run"
-    rc = aboyeur.run("task", roster, cwd=tmp_path, output_dir=out)
+    rc = run_aboyeur_guarded("task", roster, cwd=tmp_path, output_dir=out)
     assert rc == 0
     assert "falling back to exec" in capsys.readouterr().err
     run_json = json.loads((out / "run.json").read_text())
@@ -4293,7 +4321,7 @@ def test_appserver_error_fallback_closes_partially_started_candidate(monkeypatch
     monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "task",
             _appserver_roster(),
             worker="cook",
@@ -4341,7 +4369,7 @@ def test_control_error_closes_partial_server_and_preserves_warning_fallback(monk
     monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
 
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "task",
             _appserver_roster(),
             worker="cook",
@@ -4388,7 +4416,7 @@ def test_server_setup_keyboard_interrupt_closes_every_acquired_resource(monkeypa
     output_dir = tmp_path / "run"
 
     with pytest.raises(KeyboardInterrupt):
-        aboyeur.run(
+        run_aboyeur_guarded(
             "task",
             _appserver_roster(),
             worker="cook",
@@ -4522,7 +4550,7 @@ def test_run_records_route_in_run_json(monkeypatch, tmp_path):
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     output_dir = tmp_path / "out"
-    assert aboyeur.run("rename the config loader helper", _roster(), output_dir=output_dir) == 0
+    assert run_aboyeur_guarded("rename the config loader helper", _roster(), output_dir=output_dir) == 0
     payload = json.loads((output_dir / "run.json").read_text())
     assert payload["route"]["signals"] == ["code"]
     assert payload["route"]["route"] == ["implement", "correctness-review", "verify"]
@@ -4612,7 +4640,7 @@ def test_run_route_picks_up_dirty_auth_surface(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     output_dir = tmp_path / "out"
-    assert aboyeur.run("tidy the session helper", _roster(), cwd=tmp_path, output_dir=output_dir) == 0
+    assert run_aboyeur_guarded("tidy the session helper", _roster(), cwd=tmp_path, output_dir=output_dir) == 0
     payload = json.loads((output_dir / "run.json").read_text())
     assert "auth-surface" in payload["route"]["signals"]
     assert "security-review" in payload["route"]["route"]
@@ -4628,7 +4656,7 @@ def test_run_route_template_reaches_derivation(monkeypatch, tmp_path):
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     output_dir = tmp_path / "out"
     assert (
-        aboyeur.run(
+        run_aboyeur_guarded(
             "add pagination to the list endpoint",
             _roster(),
             output_dir=output_dir,
@@ -4801,7 +4829,7 @@ def test_run_persists_pre_run_snapshot(monkeypatch, tmp_path):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
 
     snapshot_file = output_dir / "pre-run-snapshot.json"
     assert snapshot_file.is_file()
@@ -4857,7 +4885,7 @@ def test_run_fails_when_head_drifts_during_dispatch(monkeypatch, tmp_path, capsy
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    rc = aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir, code_graph_enabled=False)
+    rc = run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir, code_graph_enabled=False)
 
     assert rc == 2
     err = capsys.readouterr().err
@@ -4921,7 +4949,7 @@ def test_run_fails_when_head_drifts_during_planning_including_dry_run(monkeypatc
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "build feature",
         _roster(),
         cwd=run_cwd,
@@ -4964,7 +4992,7 @@ def test_run_fails_when_head_drifts_during_synthesis(monkeypatch, tmp_path, caps
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    rc = aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir, code_graph_enabled=False)
+    rc = run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir, code_graph_enabled=False)
 
     assert rc == 2
     err = capsys.readouterr().err
@@ -4988,15 +5016,20 @@ def test_run_fails_when_pre_run_snapshot_capture_fails(monkeypatch, tmp_path, ca
 
     monkeypatch.setattr(aboyeur.runguard, "capture_pre_run_snapshot", boom)
 
-    rc = aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir, code_graph_enabled=False)
+    rc = run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir, code_graph_enabled=False)
 
     assert rc == 2
     err = capsys.readouterr().err
     assert "pre-run snapshot failed" in err
     assert "could not read git state" in err
-    # No run artifacts should have been written: preflight failed before start.
-    assert not (output_dir / "run.json").exists()
+    # The CLI-equivalent bootstrap receipt precedes the guarded run preflight,
+    # but no pre-run snapshot or dispatch artifacts may be written.
+    bootstrap = json.loads((output_dir / "run.json").read_text())
+    assert bootstrap["status"] == "started"
+    assert bootstrap["task"] == "build feature"
+    assert bootstrap[_AUTHORITY_REQUEST_FIELD] is True
     assert not (output_dir / "pre-run-snapshot.json").exists()
+    assert not (output_dir / "plan.json").exists()
 
 
 def test_run_persists_pre_run_snapshot_before_worker_dispatch(monkeypatch, tmp_path):
@@ -5021,7 +5054,7 @@ def test_run_persists_pre_run_snapshot_before_worker_dispatch(monkeypatch, tmp_p
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+    assert run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
     assert dispatched_with_snapshot["value"] is True
 
 
@@ -5202,7 +5235,7 @@ def test_run_allows_authorized_worktree_head_move_with_separate_lock_workspace(m
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "build feature",
         _roster(),
         cwd=worktree,
@@ -5290,7 +5323,7 @@ def test_run_fails_when_canonical_checkout_drifts_during_dispatch_with_separate_
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    rc = aboyeur.run(
+    rc = run_aboyeur_guarded(
         "build feature",
         _roster(),
         cwd=worktree,
@@ -5398,12 +5431,219 @@ def _authority_run_dir(tmp_path: Path) -> tuple[Path, Path]:
     return workspace, run_dir
 
 
-def test_new_run_authority_env_implies_both_durable_request_fields(tmp_path, monkeypatch):
-    """Blocker #1: BRIGADE_RUN_JOURNAL_AUTHORITY=1 alone enrolls a new run with
-    BOTH durable request fields true, even when BRIGADE_LIFECYCLE_JOURNAL is
-    unset. The authority opt-in implies lifecycle journaling.
-    """
-    monkeypatch.setenv(_AUTHORITY_ENV, "1")
+def test_new_run_defaults_to_journal_authority_without_environment_flags(tmp_path, monkeypatch):
+    monkeypatch.delenv(_AUTHORITY_ENV, raising=False)
+    monkeypatch.delenv(_LIFECYCLE_ENV, raising=False)
+    workspace, run_dir = _authority_run_dir(tmp_path)
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="default journal authority",
+            cwd=workspace,
+            roster=_roster(),
+            read_only=False,
+            lock_workspace=workspace,
+        )
+
+    receipt = json.loads((run_dir / "run.json").read_text())
+    assert receipt[_AUTHORITY_REQUEST_FIELD] is True
+    assert receipt[_LIFECYCLE_REQUEST_FIELD] is True
+
+
+def test_default_authority_run_json_remains_readable_by_previous_v1_reader(tmp_path):
+    workspace, run_dir = _authority_run_dir(tmp_path)
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="previous reader compatibility",
+            cwd=workspace,
+            roster=_roster(),
+            read_only=False,
+            lock_workspace=workspace,
+        )
+
+    def previous_v1_reader(path: Path) -> dict[str, object]:
+        payload = json.loads(path.read_text())
+        assert payload["schema"] == "brigade.run.v1"
+        assert payload["schema_version"] == 1
+        assert payload["status"] in {"started", "planning", "dispatching", "running"}
+        return {
+            "task": payload["task"],
+            "status": payload["status"],
+            "started_at": payload["started_at"],
+        }
+
+    previous_view = previous_v1_reader(run_dir / "run.json")
+    assert previous_view["task"] == "previous reader compatibility"
+    assert previous_view["status"] == "started"
+
+    current_payload = json.loads((run_dir / "run.json").read_text())
+    assert current_payload[_AUTHORITY_REQUEST_FIELD] is True
+    assert current_payload[_LIFECYCLE_REQUEST_FIELD] is True
+    assert (run_dir / "events" / "lifecycle.jsonl").is_file()
+
+
+def test_default_authority_bootstrap_precedes_lock_and_dispatch(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / ".gitignore").write_text(".brigade/\n")
+    run_dir = workspace / ".brigade" / "runs" / "bootstrap-lock-dispatch"
+    observed = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        observed.append(
+            (
+                runguard.run_lock_state(workspace, run_dir),
+                (run_dir / "events" / "lifecycle.jsonl").is_file(),
+            )
+        )
+        return agents.AgentResult(text="finished", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    aboyeur.record_run_start(
+        run_dir,
+        task="bootstrap before lock",
+        cwd=workspace,
+        roster=_roster(),
+        read_only=False,
+        worker="coder",
+        lock_workspace=workspace,
+    )
+
+    pre_lock = json.loads((run_dir / "run.json").read_text())
+    assert pre_lock[_AUTHORITY_REQUEST_FIELD] is True
+    assert pre_lock[_LIFECYCLE_REQUEST_FIELD] is True
+    assert not (run_dir / "events").exists()
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        assert (
+            aboyeur.run(
+                "bootstrap before lock",
+                _roster(),
+                cwd=workspace,
+                output_dir=run_dir,
+                worker="coder",
+                lock_workspace=workspace,
+                code_graph_enabled=False,
+                evidence_enabled=False,
+                route_enabled=False,
+            )
+            == 0
+        )
+
+    assert observed == [("live", True)]
+    receipt = json.loads((run_dir / "run.json").read_text())
+    assert receipt[_AUTHORITY_REQUEST_FIELD] is True
+    assert receipt[_LIFECYCLE_REQUEST_FIELD] is True
+    assert receipt["journal_present"] is True
+
+
+def test_guarded_test_helper_bootstraps_before_its_lock_and_dispatches_with_journal(
+    tmp_path,
+    monkeypatch,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _init_git_repo(workspace)
+    run_dir = workspace / ".brigade" / "runs" / "helper-bootstrap-lock"
+    start_states = []
+    dispatch_states = []
+    original_record_run_start = aboyeur.record_run_start
+
+    def tracked_record_run_start(*args, **kwargs):
+        start_states.append(
+            (
+                runguard.run_lock_state(workspace, run_dir),
+                (run_dir / "events" / "lifecycle.jsonl").is_file(),
+            )
+        )
+        return original_record_run_start(*args, **kwargs)
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        dispatch_states.append(
+            (
+                runguard.run_lock_state(workspace, run_dir),
+                (run_dir / "events" / "lifecycle.jsonl").is_file(),
+            )
+        )
+        return agents.AgentResult(text="finished", ok=True)
+
+    monkeypatch.setattr(aboyeur, "record_run_start", tracked_record_run_start)
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert (
+        run_aboyeur_guarded(
+            "helper bootstrap before lock",
+            _roster(),
+            cwd=workspace,
+            output_dir=run_dir,
+            worker="coder",
+            code_graph_enabled=False,
+            evidence_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    assert start_states == [("absent", False), ("live", False)]
+    assert dispatch_states == [("live", True)]
+    receipt = json.loads((run_dir / "run.json").read_text())
+    assert receipt[_AUTHORITY_REQUEST_FIELD] is True
+    assert receipt[_LIFECYCLE_REQUEST_FIELD] is True
+
+
+def test_removed_authority_environment_switch_cannot_disable_new_run_enrollment(tmp_path, monkeypatch):
+    monkeypatch.setenv(_AUTHORITY_ENV, "0")
+    monkeypatch.delenv(_LIFECYCLE_ENV, raising=False)
+    workspace, run_dir = _authority_run_dir(tmp_path)
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur.record_run_start(
+            run_dir,
+            task="environment switch removed",
+            cwd=workspace,
+            roster=_roster(),
+            read_only=False,
+            lock_workspace=workspace,
+        )
+
+    receipt = json.loads((run_dir / "run.json").read_text())
+    assert receipt[_AUTHORITY_REQUEST_FIELD] is True
+    assert receipt[_LIFECYCLE_REQUEST_FIELD] is True
+    assert not hasattr(aboyeur, "is_run_journal_authority_enabled")
+
+
+def test_unguarded_enrolled_direct_run_fails_closed_before_dispatch(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = tmp_path / "run"
+
+    with pytest.raises(
+        runguard.RetainRunLockError,
+        match="failed to record dispatch lifecycle fact: enrolled lifecycle journal is missing",
+    ):
+        aboyeur.run(
+            "unguarded direct run",
+            _roster(),
+            cwd=workspace,
+            output_dir=run_dir,
+            worker="coder",
+            code_graph_enabled=False,
+            evidence_enabled=False,
+            route_enabled=False,
+        )
+
+    receipt = json.loads((run_dir / "run.json").read_text())
+    assert receipt[_AUTHORITY_REQUEST_FIELD] is True
+    assert receipt[_LIFECYCLE_REQUEST_FIELD] is True
+    assert not (run_dir / "events" / "lifecycle.jsonl").exists()
+
+
+def test_default_journal_authority_implies_lifecycle_without_lifecycle_environment(tmp_path, monkeypatch):
+    """Default authority enrollment carries both durable request fields."""
     monkeypatch.delenv(_LIFECYCLE_ENV, raising=False)
     workspace, run_dir = _authority_run_dir(tmp_path)
 
@@ -5422,29 +5662,13 @@ def test_new_run_authority_env_implies_both_durable_request_fields(tmp_path, mon
     assert meta[_LIFECYCLE_REQUEST_FIELD] is True
 
 
-def test_existing_legacy_run_not_enrolled_by_later_authority_env(tmp_path, monkeypatch):
-    """Blocker #1 guard: an existing legacy run never picks up journal authority
-    from a later environment change. The durable field is set at run creation
-    only; a later BRIGADE_RUN_JOURNAL_AUTHORITY=1 must not enroll it.
-    """
-    monkeypatch.delenv(_AUTHORITY_ENV, raising=False)
-    monkeypatch.delenv(_LIFECYCLE_ENV, raising=False)
+def test_existing_legacy_run_remains_snapshot_only_when_rerecorded(tmp_path, monkeypatch):
+    """A pre-cutover receipt without enrollment fields stays snapshot-only."""
     workspace, run_dir = _authority_run_dir(tmp_path)
+    (run_dir / "run.json").write_text(json.dumps(_legacy_status_payload("started")))
 
-    with runguard.run_lock(workspace, run_dir=run_dir):
-        aboyeur.record_run_start(
-            run_dir,
-            task="legacy run",
-            cwd=workspace,
-            roster=_roster(),
-            read_only=False,
-            lock_workspace=workspace,
-        )
-    meta = json.loads((run_dir / "run.json").read_text())
-    assert _AUTHORITY_REQUEST_FIELD not in meta
-    assert _LIFECYCLE_REQUEST_FIELD not in meta
-
-    # A later env change must not enroll the existing run.
+    # The removed authority setting and the still-supported lifecycle setting
+    # cannot migrate an existing snapshot-only run.
     monkeypatch.setenv(_AUTHORITY_ENV, "1")
     monkeypatch.setenv(_LIFECYCLE_ENV, "1")
     with runguard.run_lock(workspace, run_dir=run_dir):
@@ -5637,19 +5861,9 @@ def test_legacy_status_write_tolerates_corrupt_existing_run_json(tmp_path, monke
 
 
 def test_run_preserves_authority_enrollment_through_first_follow_up_receipt_rewrite(monkeypatch, tmp_path):
-    """Blocker #2: a new run enrolled via BRIGADE_RUN_JOURNAL_AUTHORITY=1 (with
-    BRIGADE_LIFECYCLE_JOURNAL unset) carries BOTH durable request fields on its
-    initial run.json. The first follow-up receipt rewrite that aboyeur.run
-    performs after record_run_start (the nested run._payload rebuild) must
-    preserve BOTH durable fields, not just lifecycle_journal_requested.
-    Without that, _write_json classifies the rewrite as legacy and the legacy
-    fast path overwrites run_journal_authority_requested away, silently
-    dropping the run off the authority path before any status transition is
-    recorded.
-    """
+    """The first follow-up receipt rewrite preserves default enrollment."""
     import copy
 
-    monkeypatch.setenv(_AUTHORITY_ENV, "1")
     monkeypatch.delenv(_LIFECYCLE_ENV, raising=False)
 
     calls = []
@@ -5686,7 +5900,7 @@ def test_run_preserves_authority_enrollment_through_first_follow_up_receipt_rewr
 
     with runguard.run_lock(run_cwd, run_dir=output_dir):
         assert (
-            aboyeur.run(
+            run_aboyeur_guarded(
                 "build feature",
                 _roster(),
                 cwd=run_cwd,
@@ -5780,10 +5994,9 @@ def test_record_run_start_retains_lock_on_corrupt_existing_run_json(tmp_path, mo
         (run_dir / "run.json").write_text(corrupt_content)
         original_bytes = corrupt_content
 
-    # Environment flags are set to prove they cannot infer unknown durable
-    # state and rescue a corrupt run.json.
+    # Default-on enrollment cannot infer unknown durable state and rescue a
+    # corrupt run.json.
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
 
     with pytest.raises(runguard.RetainRunLockError):
         with runguard.run_lock(workspace, run_dir=run_dir):
@@ -5813,10 +6026,9 @@ def test_record_run_start_retains_lock_on_invalid_utf8_existing_run_json(tmp_pat
     original_bytes = b'{"schema":"brigade.run.v1","lifecycle_journal_requested":true}\xff'
     (run_dir / "run.json").write_bytes(original_bytes)
 
-    # Neither environment flag may replace the unreadable durable state with
-    # inferred enrollment during a re-record attempt.
+    # Configuration cannot replace the unreadable durable state with inferred
+    # enrollment during a re-record attempt.
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
 
     with pytest.raises(
         runguard.RetainRunLockError,
@@ -5859,7 +6071,6 @@ def test_record_run_start_retains_lock_on_other_json_parse_failures(tmp_path, mo
 
     monkeypatch.setattr(aboyeur.json, "loads", failing_loads)
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
 
     with pytest.raises(
         runguard.RetainRunLockError,
@@ -5891,10 +6102,8 @@ def test_record_run_start_preserves_valid_legacy_existing_run_enrollment(tmp_pat
     workspace, run_dir = _corrupt_run_dir(tmp_path)
     (run_dir / "run.json").write_text(json.dumps(_legacy_status_payload("started")))
 
-    # Environment flags are set, but an existing run never enrolls from
-    # environment changes alone.
+    # The remaining lifecycle setting cannot migrate an existing run.
     monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
-    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
 
     with runguard.run_lock(workspace, run_dir=run_dir):
         aboyeur.record_run_start(

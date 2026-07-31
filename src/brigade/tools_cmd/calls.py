@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -218,11 +219,22 @@ def _calls_lock_path(target: Path) -> Path:
     return path.with_name(f"{path.name}.lock")
 
 
+def _acquire_calls_store_lock(path: Path) -> runguard._LockOwnership:
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            return runguard._acquire_lock(path)
+        except runguard.RunLockError as exc:
+            if "another brigade run appears active" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 @contextmanager
 def _calls_store_lock(target: Path) -> Iterator[None]:
     path = _calls_lock_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
-    ownership = runguard._acquire_lock(path)
+    ownership = _acquire_calls_store_lock(path)
     try:
         yield
     finally:
@@ -459,6 +471,72 @@ def redeem_for_run_unlocked(call: dict[str, Any], token: str) -> str:
     claim["state"] = "redeemed"
     claim["redeemed_at"] = redeemed_at
     return redeemed_at
+
+
+def _validate_redeemed_for_run_unlocked(
+    target: Path,
+    approval_id: str,
+    reference: Mapping[str, str],
+    run_id: str,
+) -> CallClaim:
+    """Validate one redeemed Tool claim while its source-store lock is held."""
+    call, _calls, error = _resolve_call(target, approval_id)
+    if call is None:
+        raise CallClaimError(error or f"tool approval not found: {approval_id}")
+    actual = _approval_claim_reference(call)
+    if any(reference.get(field) != actual[field] for field in _APPROVAL_REFERENCE_FIELDS):
+        raise CallClaimError("tool approval fingerprints changed before reconciliation")
+    claim = call.get("approval_claim")
+    if not isinstance(claim, Mapping) or claim.get("state") != "redeemed":
+        raise CallClaimError("tool approval has no redeemed claim to reconcile")
+    claim_run_id = claim.get("run_id")
+    if claim_run_id != run_id:
+        owner = claim_run_id if isinstance(claim_run_id, str) and claim_run_id else "another run"
+        raise CallClaimError(f"tool approval redeemed claim belongs to {owner}")
+    redeemed_at = claim.get("redeemed_at")
+    if not isinstance(redeemed_at, str) or not redeemed_at:
+        raise CallClaimError("tool approval redeemed claim has no redemption timestamp")
+    if call.get("status") != "completed":
+        raise CallClaimError(f"tool approval redeemed source state is {call.get('status') or 'unknown'}")
+    revalidation = dict(call)
+    revalidation["status"] = "approved"
+    revalidation["run_id"] = None
+    revalidation["started_at"] = None
+    revalidation["completed_at"] = None
+    blockers = _call_run_blockers(target, revalidation)
+    if blockers:
+        raise CallClaimError(f"tool approval is stale or blocked: {blockers[0]}")
+    decided_at = call.get("reviewed_at")
+    if not isinstance(decided_at, str) or not decided_at:
+        raise CallClaimError("tool approval decision has no review timestamp")
+    return CallClaim(
+        decided_at=decided_at,
+        claimed_at=redeemed_at,
+        already_claimed=True,
+    )
+
+
+@contextmanager
+def redeemed_reconciliation_guard(
+    target: Path,
+    approval_id: str,
+    reference: Mapping[str, str],
+    run_id: str,
+) -> Iterator[CallClaim]:
+    """Hold the Tool source-store lock through outcome reconciliation."""
+    with _calls_store_lock(target):
+        yield _validate_redeemed_for_run_unlocked(target, approval_id, reference, run_id)
+
+
+def validate_redeemed_for_run(
+    target: Path,
+    approval_id: str,
+    reference: Mapping[str, str],
+    run_id: str,
+) -> CallClaim:
+    """Validate one redeemed Tool claim for outcome-only reconciliation."""
+    with redeemed_reconciliation_guard(target, approval_id, reference, run_id) as claim:
+        return claim
 
 
 def _make_call_record(plan_payload: dict[str, Any]) -> dict[str, Any]:
@@ -942,12 +1020,17 @@ def _call_review(
             else:
                 print(f"error: {error}", file=sys.stderr)
             return 1
-        if call.get("status") == "running":
-            payload = {"target": str(target), "error": "running calls cannot be reviewed", "call": call}
+        current_status = str(call.get("status") or "")
+        if current_status in {"running", "completed"}:
+            payload = {
+                "target": str(target),
+                "error": f"{current_status} calls cannot be reviewed",
+                "call": call,
+            }
             if json_output:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             else:
-                print("error: running calls cannot be reviewed", file=sys.stderr)
+                print(f"error: {current_status} calls cannot be reviewed", file=sys.stderr)
             return 1
         if status == "approved" and call.get("blockers"):
             payload = {"target": str(target), "error": "blocked calls cannot be approved", "call": call}

@@ -1,9 +1,11 @@
 import json
 
 from brigade import aboyeur
+from brigade import agents
 from brigade import cli
 from brigade import dogfood_cmd
 from brigade import localio
+from brigade import runguard
 from brigade import runs_cmd
 
 
@@ -103,6 +105,38 @@ def test_dogfood_can_disable_handoff_and_inspect(tmp_path, monkeypatch, capsys):
     assert "artifacts:" in capsys.readouterr().err
 
 
+def test_dogfood_bootstraps_default_authority_before_locked_dispatch(tmp_path, monkeypatch):
+    run_dir = tmp_path / ".brigade" / "runs" / "dogfood-authority"
+    observed = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        observed.append(
+            (
+                runguard.run_lock_state(tmp_path, run_dir),
+                json.loads((run_dir / "run.json").read_text()),
+                (run_dir / "events" / "lifecycle.jsonl").is_file(),
+            )
+        )
+        if len(observed) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "reviewer", "task": "inspect it"}]}),
+                ok=True,
+            )
+        if len(observed) == 2:
+            return agents.AgentResult(text="review complete", ok=True)
+        return agents.AgentResult(text="dogfood complete", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert dogfood_cmd.run(None, target=tmp_path, output_dir=run_dir, inspect=False) == 0
+    assert observed
+    for lock_state, receipt, journal_present in observed:
+        assert lock_state == "live"
+        assert receipt["run_journal_authority_requested"] is True
+        assert receipt["lifecycle_journal_requested"] is True
+        assert journal_present is True
+
+
 def test_dogfood_writes_summary_with_next_step(tmp_path, monkeypatch):
     def fake_run(
         task,
@@ -117,7 +151,7 @@ def test_dogfood_writes_summary_with_next_step(tmp_path, monkeypatch):
         sandbox_read_only=None,
         sandbox=None,
     ):
-        output_dir.mkdir(parents=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
         _write_json(
             output_dir / "run.json",
             {

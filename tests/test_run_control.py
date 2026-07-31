@@ -12,6 +12,7 @@ import pytest
 
 from brigade import aboyeur, agents, cli, codex_appserver, run_control
 from brigade.roster import Agent, Roster
+from tests.run_test_helpers import run_aboyeur_guarded
 
 FAKE = [sys.executable, str(Path(__file__).parent / "fake_appserver.py")]
 
@@ -225,7 +226,7 @@ def test_run_records_control_socket_and_cli_steers_live_worker(tmp_path, monkeyp
     result: dict[str, int] = {}
 
     thread = threading.Thread(
-        target=lambda: result.update(rc=aboyeur.run("do it", roster, cwd=tmp_path, output_dir=run_dir)),
+        target=lambda: result.update(rc=run_aboyeur_guarded("do it", roster, cwd=tmp_path, output_dir=run_dir)),
         daemon=True,
     )
     thread.start()
@@ -289,7 +290,7 @@ def test_cli_steer_retries_until_worker_turn_registers(tmp_path, monkeypatch, ca
     result: dict[str, int] = {}
 
     thread = threading.Thread(
-        target=lambda: result.update(rc=aboyeur.run("do it", roster, cwd=tmp_path, output_dir=run_dir)),
+        target=lambda: result.update(rc=run_aboyeur_guarded("do it", roster, cwd=tmp_path, output_dir=run_dir)),
         daemon=True,
     )
     thread.start()
@@ -360,7 +361,7 @@ def test_cli_interrupt_leaves_live_worker_resumable(tmp_path, monkeypatch, capsy
 
     thread = threading.Thread(
         target=lambda: result.update(
-            rc=aboyeur.run(
+            rc=run_aboyeur_guarded(
                 "HANG until interrupted",
                 roster,
                 worker="cook",
