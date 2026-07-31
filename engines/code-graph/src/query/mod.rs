@@ -11,6 +11,7 @@ pub mod graph;
 mod graph_tests;
 pub mod health;
 pub mod map;
+mod map_html;
 pub mod search;
 pub mod stats;
 
@@ -29,7 +30,6 @@ pub use graph::{
 };
 pub use health::{CycleReport, DeadCodeReport, cycles, dead_code};
 pub use map::{MapDirection, MapOptions, MAX_MAP_DEPTH, MAX_MAP_EDGES, MAX_MAP_NODES};
-#[allow(unused_imports)]
-pub(crate) use map::{MapEdge, MapGraph, MapNode, MapStatus, build_file_map};
+pub use map_html::export_html_map;
 pub use search::{search_symbols, search_symbols_with_path};
 pub use stats::stats;
