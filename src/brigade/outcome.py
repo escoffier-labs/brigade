@@ -400,6 +400,24 @@ def split_by_capability(
     return CapabilityCohorts(current_capability, pooled, capability, shrunk, off_capability, capability_legacy)
 
 
+def candidate_regression_withheld(helped: int, hurt: int) -> bool:
+    """Return True when a candidate cohort should stay withheld for regressions.
+
+    One verified hurt used to withhold the unchanged content-fingerprint cohort
+    forever. Later verified clears in that same cohort can release the hold once
+    they strictly outnumber hurts. Append-only evidence is never rewritten;
+    demotion of an already promoted artifact stays a separate policy.
+    """
+    return hurt > 0 and helped <= hurt
+
+
+def candidate_install_reason(helped: int, hurt: int) -> str:
+    """Reason string for a candidate install that cleared the hurt gate."""
+    if hurt > 0:
+        return "verified helped outnumbers regressions"
+    return "verified helped, no regressions"
+
+
 def decide(
     score: OutcomeScore,
     *,
@@ -418,10 +436,15 @@ def decide(
         return Decision(score.artifact_id, "hold", current_status, "cooldown active")
 
     if current_status == "candidate":
-        if score.hurt > 0:
+        if candidate_regression_withheld(score.helped, score.hurt):
             return Decision(score.artifact_id, "hold", "candidate", "withheld: verified regression present")
-        if score.helped >= config.install_min_helped:
-            return Decision(score.artifact_id, "install", "promoted", "verified helped, no regressions")
+        if score.helped >= config.install_min_helped and score.helped > score.hurt:
+            return Decision(
+                score.artifact_id,
+                "install",
+                "promoted",
+                candidate_install_reason(score.helped, score.hurt),
+            )
         return Decision(score.artifact_id, "hold", "candidate", "insufficient verified evidence")
 
     if current_status == "promoted":

@@ -5421,6 +5421,7 @@ _PROJECTION_METADATA_FIELDS = (
     "journal_last_sequence",
     "journal_last_event_digest",
 )
+_V1_READER_CONTRACT_PATH = Path(__file__).resolve().parent / "fixtures" / "run-compat" / "v1-reader-contract.json"
 
 
 def _authority_run_dir(tmp_path: Path) -> tuple[Path, Path]:
@@ -5429,6 +5430,31 @@ def _authority_run_dir(tmp_path: Path) -> tuple[Path, Path]:
     run_dir = workspace / ".brigade" / "runs" / "20260730-104300-deadbeef"
     run_dir.mkdir(parents=True)
     return workspace, run_dir
+
+
+def _load_v1_reader_contract() -> dict[str, object]:
+    contract = json.loads(_V1_READER_CONTRACT_PATH.read_text())
+    assert isinstance(contract, dict)
+    assert contract["derived_from"]["tag"] == "v0.25.0"
+    return contract
+
+
+def _previous_v1_reader(path: Path, contract: dict[str, object] | None = None) -> dict[str, object]:
+    """Validate run.json against the pinned pre-journal previous-release reader contract."""
+    contract = contract if contract is not None else _load_v1_reader_contract()
+    payload = json.loads(path.read_text())
+    parse_behavior = contract["parse_behavior"]
+    assert isinstance(parse_behavior, dict)
+    if parse_behavior["require_json_object"]:
+        assert isinstance(payload, dict)
+    assert payload["schema"] == contract["schema"]
+    for field in contract["required_fields"]:
+        assert field in payload
+    accepted = set(contract["accepted_nonterminal_statuses"])
+    assert payload["status"] in accepted
+    # Unknown keys (authority flags, journal cursor, approval_reference, ...) are ignored.
+    assert parse_behavior["ignore_unknown_keys"] is True
+    return {field: payload[field] for field in contract["inspected_fields"]}
 
 
 def test_new_run_defaults_to_journal_authority_without_environment_flags(tmp_path, monkeypatch):
@@ -5452,6 +5478,7 @@ def test_new_run_defaults_to_journal_authority_without_environment_flags(tmp_pat
 
 
 def test_default_authority_run_json_remains_readable_by_previous_v1_reader(tmp_path):
+    contract = _load_v1_reader_contract()
     workspace, run_dir = _authority_run_dir(tmp_path)
 
     with runguard.run_lock(workspace, run_dir=run_dir):
@@ -5464,25 +5491,54 @@ def test_default_authority_run_json_remains_readable_by_previous_v1_reader(tmp_p
             lock_workspace=workspace,
         )
 
-    def previous_v1_reader(path: Path) -> dict[str, object]:
-        payload = json.loads(path.read_text())
-        assert payload["schema"] == "brigade.run.v1"
-        assert payload["schema_version"] == 1
-        assert payload["status"] in {"started", "planning", "dispatching", "running"}
-        return {
-            "task": payload["task"],
-            "status": payload["status"],
-            "started_at": payload["started_at"],
-        }
-
-    previous_view = previous_v1_reader(run_dir / "run.json")
-    assert previous_view["task"] == "previous reader compatibility"
-    assert previous_view["status"] == "started"
+    authoritative_view = _previous_v1_reader(run_dir / "run.json", contract)
+    assert authoritative_view["task"] == "previous reader compatibility"
+    assert authoritative_view["status"] == "started"
 
     current_payload = json.loads((run_dir / "run.json").read_text())
     assert current_payload[_AUTHORITY_REQUEST_FIELD] is True
     assert current_payload[_LIFECYCLE_REQUEST_FIELD] is True
     assert (run_dir / "events" / "lifecycle.jsonl").is_file()
+
+    approval_reference = {
+        "approval_id": "approval-compat-1",
+        "source": "daily",
+        "fingerprint": "approval-fingerprint-1",
+        "source_fingerprint": "source-fingerprint-1",
+        "contract_fingerprint": "contract-fingerprint-1",
+        "evidence_fingerprint": "evidence-fingerprint-1",
+    }
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur.record_approval_pause(run_dir, approval_reference)
+
+    paused_payload = json.loads((run_dir / "run.json").read_text())
+    paused_view = _previous_v1_reader(run_dir / "run.json", contract)
+    assert paused_view["status"] == "running"
+    assert paused_payload["status"] == "running"
+    assert paused_payload["approval_reference"]["decision_state"] == "pending"
+    for field in ("journal_last_sequence", "journal_last_event_digest"):
+        assert field in paused_payload
+    # Additive journal cursor / projector fields stay opaque to the previous reader.
+    assert set(paused_view) == set(contract["inspected_fields"])
+
+    legacy_path = run_dir / "legacy-run.json"
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run.v1",
+                "task": "legacy snapshot",
+                "status": "planning",
+                "started_at": "2026-07-30T10:43:00+00:00",
+            }
+        )
+        + "\n"
+    )
+    legacy_view = _previous_v1_reader(legacy_path, contract)
+    assert legacy_view == {
+        "task": "legacy snapshot",
+        "status": "planning",
+        "started_at": "2026-07-30T10:43:00+00:00",
+    }
 
 
 def test_default_authority_bootstrap_precedes_lock_and_dispatch(tmp_path, monkeypatch):

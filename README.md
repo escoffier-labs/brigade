@@ -261,6 +261,10 @@ Kitchen language (*brigade de cuisine*, *mise en place*, station nicknames) is b
 
 Nineteen harnesses get handoff inboxes and ingest coverage, from Codex, Claude Code, and Cursor to Goose, Aider, and OpenHands. Most also get projected tools and skills in their native format. The per-harness matrix is in the [technical guide](docs/technical-guide.md).
 
+## Questions
+
+[@brigadeclaw](https://x.com/brigadeclaw) answers questions about Brigade on X. Every sentence it posts cites the pinned documentation it came from, and it stays silent rather than guessing. How it works, including the gates and the refusals: [brigade.tools/brigadeclaw](https://brigade.tools/brigadeclaw).
+
 ## Docs
 
 - [First 10 minutes](docs/first-10-minutes.md) · [Overview](docs/overview.md) · [Technical guide](docs/technical-guide.md)

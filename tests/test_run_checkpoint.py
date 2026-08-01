@@ -9,6 +9,7 @@ import errno
 import hashlib
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -3266,3 +3267,80 @@ def test_write_text_atomic_sigkill_during_temp_window_preserves_one_valid_payloa
     )
     for run_dir in attempt_run_dirs:
         assert _write_text_atomic_temp_paths(run_dir) == []
+
+
+# -- Issue #636: checkpoint export privacy -----------------------------------
+
+
+def test_strip_checkpoint_bodies_for_export_replaces_private_body(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    private_task = "SECRET_TASK_PROMPT_do_not_export"
+    private_error = "SECRET_ERROR_TRACE_do_not_export"
+    body = _writer_bytes(
+        {
+            "schema": "brigade.run.v1",
+            "status": "failed",
+            "task": private_task,
+            "error": private_error,
+        }
+    )
+    placed = _place_checkpoint_file(run_dir, body)
+    assert private_task in placed.read_text(encoding="utf-8")
+
+    export_copy = tmp_path / "export-copy"
+    shutil.copytree(run_dir, export_copy)
+
+    refs = run_checkpoint.strip_checkpoint_bodies_for_export(export_copy)
+    assert len(refs) == 1
+    assert run_checkpoint.is_checkpoint_artifact_reference(refs[0])
+    assert refs[0]["privacy_class"] == "private"
+    assert refs[0]["sha256"] == hashlib.sha256(body).hexdigest()
+    assert refs[0]["byte_size"] == len(body)
+
+    exported = (export_copy / "events" / "recovery-checkpoints" / placed.name).read_text(encoding="utf-8")
+    assert private_task not in exported
+    assert private_error not in exported
+    assert '"task"' not in exported
+    assert json.loads(exported) == refs[0]
+
+    # Local recovery source is unchanged.
+    assert placed.read_bytes() == body
+    run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(export_copy)
+
+
+def test_assert_export_tree_refuses_checkpoint_body(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    body = _writer_bytes({"schema": "brigade.run.v1", "status": "planning", "task": "keep-private"})
+    _place_checkpoint_file(run_dir, body)
+
+    with pytest.raises(run_checkpoint.CheckpointError, match="privacy_class=private") as exc_info:
+        run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(run_dir)
+    assert exc_info.value.category == "export-privacy"
+
+
+def test_refuse_checkpoint_body_export_names_privacy_class():
+    with pytest.raises(run_checkpoint.CheckpointError, match="privacy_class=private") as exc_info:
+        run_checkpoint.refuse_checkpoint_body_export()
+    assert exc_info.value.category == "export-privacy"
+
+
+def test_local_recovery_round_trips_after_export_strip_of_copy(tmp_path):
+    """Export stripping a copy must not change local recovery semantics."""
+    workspace = _workspace(tmp_path)
+    run_dir = _run_dir(tmp_path)
+    run_json_obj = {
+        "schema": "brigade.run.v1",
+        "status": "planning",
+        "task": "SECRET_TASK_for_local_recovery_only",
+    }
+    _activated_journal_with_checkpoint(workspace, run_dir, run_json_obj)
+
+    export_copy = tmp_path / "export-copy"
+    shutil.copytree(run_dir, export_copy)
+    run_checkpoint.strip_checkpoint_bodies_for_export(export_copy)
+    run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(export_copy)
+
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired == run_json_obj
+    assert (run_dir / "run.json").read_bytes() == _writer_bytes(run_json_obj)

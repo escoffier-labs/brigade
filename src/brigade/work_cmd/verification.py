@@ -551,24 +551,59 @@ def _verify_archive_tree_manifest(root: Path) -> dict[str, tuple[str, str | None
     return manifest
 
 
+def _expected_verify_archive_manifest(
+    run_dir: Path, source_manifest: dict[str, tuple[str, str | None]]
+) -> dict[str, tuple[str, str | None]]:
+    """Return the tree manifest after recovery-checkpoint export stripping (#636)."""
+    from brigade import run_checkpoint
+
+    expected = dict(source_manifest)
+    prefix = f"events/{run_checkpoint.CHECKPOINT_DIR_NAME}/"
+    for relative, (kind, _digest) in list(expected.items()):
+        if kind != "file" or not relative.startswith(prefix) or not relative.endswith(".json"):
+            continue
+        path = run_dir / relative
+        raw = path.read_bytes()
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, dict) and run_checkpoint.is_checkpoint_artifact_reference(parsed):
+            continue
+        sha = hashlib.sha256(raw).hexdigest()
+        if path.name != f"{sha}.json":
+            raise OSError(f"verify archive checkpoint export filename digest mismatch: {relative}")
+        reference = run_checkpoint.checkpoint_artifact_reference(sha256=sha, byte_size=len(raw))
+        ref_bytes = (json.dumps(reference, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        expected[relative] = ("file", hashlib.sha256(ref_bytes).hexdigest())
+    return expected
+
+
 def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
     """Copy one run dir into the archive and append an index entry. Raises on failure.
 
     Integrity is checked twice: the archived receipt bytes must match the source
     bytes, and a receipt that carries ``digests.receipt_sha256`` must still
     re-hash to that value after the copy. Callers must treat any exception as
-    "do not delete the original".
+    "do not delete the original". Recovery-checkpoint bodies are private and are
+    replaced with the closed artifact-reference shape before the archive lands
+    (issue #636); local source run dirs are left unchanged.
     """
+    from brigade import run_checkpoint
+
     run_id = run_dir.name
     dest = archive_root / run_id
     source_manifest = _verify_archive_tree_manifest(run_dir)
+    expected_manifest = _expected_verify_archive_manifest(run_dir, source_manifest)
     receipt_path = run_dir / "receipt.json"
     source_receipt_sha = localio.file_sha256(receipt_path) if receipt_path.is_file() else None
     if dest.is_symlink():
         raise OSError(f"verify archive conflict: {dest} is a symlink")
     if dest.exists():
-        # Re-archive of the same run id is only safe when the evidence is identical.
-        if _verify_archive_tree_manifest(dest) != source_manifest:
+        # Re-archive is safe when evidence matches the source, or when the
+        # existing archive is already the privacy-normalized export of source.
+        dest_manifest = _verify_archive_tree_manifest(dest)
+        if dest_manifest not in (source_manifest, expected_manifest):
             raise OSError(f"verify archive conflict: {dest} already exists with different evidence")
         dest_receipt = dest / "receipt.json"
         dest_sha = localio.file_sha256(dest_receipt) if dest_receipt.is_file() else None
@@ -576,6 +611,8 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
             raise OSError(f"verify archive conflict: {dest} already exists with different evidence")
         if dest_sha is not None:
             _assert_archived_receipt_integrity(dest_receipt)
+        run_checkpoint.strip_checkpoint_bodies_for_export(dest)
+        run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(dest)
         entry = _verify_archive_index_entry(run_dir, dest, dest_sha, already_archived=True)
         _append_verify_archive_index(archive_root, entry)
         return entry
@@ -590,6 +627,13 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
             if copied_sha != source_receipt_sha:
                 raise OSError(f"verify archive copy integrity check failed: {run_id}")
             _assert_archived_receipt_integrity(staging / "receipt.json")
+        # Export boundary (#636): never archive private recovery-checkpoint
+        # bodies. Replace them with the closed artifact-reference shape after
+        # the byte-identical copy check so local recovery semantics stay intact.
+        run_checkpoint.strip_checkpoint_bodies_for_export(staging)
+        run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(staging)
+        if _verify_archive_tree_manifest(staging) != expected_manifest:
+            raise OSError(f"verify archive export privacy normalize mismatch: {run_id}")
         os.rename(staging, dest)
         if _verify_archive_tree_manifest(run_dir) != source_manifest:
             raise OSError(f"verify archive source changed during copy: {run_id}")
@@ -687,18 +731,45 @@ def _verify_receipt_evidence_ref(receipt: dict[str, Any]) -> str:
     return ""
 
 
+def canonical_verify_evidence_ref(target: Path, receipt: dict[str, Any]) -> str:
+    """Return the stable verification identity, following ``reused_from`` when present.
+
+    A reused receipt points at an earlier command result. Scoring and capture must
+    key both paths as one signal so the same verification cannot inflate helped
+    counts. Receipts that merely share content without ``reused_from`` stay distinct.
+    """
+    target = target.expanduser().resolve()
+    current = receipt
+    seen: set[str] = set()
+    while True:
+        reused = current.get("reused_from")
+        if not isinstance(reused, str) or not reused.strip():
+            return _verify_receipt_evidence_ref(current)
+        run_id = reused.strip()
+        if run_id in seen:
+            return _verify_receipt_evidence_ref(current)
+        seen.add(run_id)
+        next_receipt, _error = _resolve_verify_receipt(target, run_id)
+        if next_receipt is None:
+            return str(helpers._verify_runs_root(target) / run_id / "receipt.json")
+        current = next_receipt
+
+
 def _verify_receipt_has_outcome_capture(target: Path, receipt: dict[str, Any]) -> bool:
     from .. import outcome_cmd
 
-    evidence_ref = _verify_receipt_evidence_ref(receipt)
+    evidence_ref = canonical_verify_evidence_ref(target, receipt)
     if not evidence_ref:
         return False
-    resolved = Path(evidence_ref).expanduser().resolve()
-    for record in outcome_cmd.load_records(target):
+    try:
+        resolved = Path(evidence_ref).expanduser().resolve()
+    except OSError:
+        resolved = None
+    for record in outcome_cmd.load_scoring_records(target):
         if not record.evidence_ref:
             continue
         try:
-            if Path(record.evidence_ref).expanduser().resolve() == resolved:
+            if resolved is not None and Path(record.evidence_ref).expanduser().resolve() == resolved:
                 return True
         except OSError:
             if record.evidence_ref == evidence_ref:

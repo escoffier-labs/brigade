@@ -115,9 +115,9 @@ def test_decide_installs_a_clean_candidate():
     assert decision.new_status == "promoted"
 
 
-def test_decide_withholds_candidate_with_a_verified_regression():
+def test_decide_withholds_candidate_when_regressions_are_not_outnumbered():
     decision = outcome.decide(
-        _score(3, 1),
+        _score(1, 1),
         current_status="candidate",
         last_action_ts=None,
         now=dt.datetime(2026, 6, 21),
@@ -125,6 +125,21 @@ def test_decide_withholds_candidate_with_a_verified_regression():
     )
     assert decision.action == "hold"
     assert decision.new_status == "candidate"
+    assert decision.reason == "withheld: verified regression present"
+
+
+def test_decide_installs_candidate_when_later_clears_outnumber_regression():
+    """#629: helped=10 hurt=1 in one unchanged cohort must not withhold forever."""
+    decision = outcome.decide(
+        _score(10, 1),
+        current_status="candidate",
+        last_action_ts=None,
+        now=dt.datetime(2026, 6, 21),
+        config=outcome.ReconcileConfig(),
+    )
+    assert decision.action == "install"
+    assert decision.new_status == "promoted"
+    assert decision.reason == "verified helped outnumbers regressions"
 
 
 def test_decide_withholds_candidate_with_insufficient_evidence():
@@ -178,6 +193,39 @@ def _fp_record(evidence_ref, ts, fingerprint, signal=1):
     return outcome.OutcomeRecord(
         "skill-x", "skill", "t", "verify", signal, evidence_ref, ts, content_fingerprint=fingerprint
     )
+
+
+def test_decide_scores_new_fingerprint_cohort_separately_from_regressed_cohort():
+    """A content-fingerprint change starts a new cohort; old hurts do not follow."""
+    records = [
+        _fp_record("r1", "2026-07-01T00:00:00+00:00", "old-rev"),
+        _fp_record("r2", "2026-07-02T00:00:00+00:00", "old-rev", signal=-1),
+        _fp_record("r3", "2026-07-03T00:00:00+00:00", "new-rev"),
+        _fp_record("r4", "2026-07-04T00:00:00+00:00", "new-rev"),
+    ]
+    cohorts = outcome.split_by_fingerprint("skill-x", records, "new-rev")
+    assert (cohorts.current.helped, cohorts.current.hurt) == (2, 0)
+    assert (cohorts.lifetime.helped, cohorts.lifetime.hurt) == (3, 1)
+
+    current_decision = outcome.decide(
+        cohorts.current,
+        current_status="candidate",
+        last_action_ts=None,
+        now=dt.datetime(2026, 7, 5),
+        config=outcome.ReconcileConfig(),
+    )
+    assert current_decision.action == "install"
+    assert current_decision.reason == "verified helped, no regressions"
+
+    lifetime_decision = outcome.decide(
+        cohorts.lifetime,
+        current_status="candidate",
+        last_action_ts=None,
+        now=dt.datetime(2026, 7, 5),
+        config=outcome.ReconcileConfig(),
+    )
+    assert lifetime_decision.action == "install"
+    assert lifetime_decision.reason == "verified helped outnumbers regressions"
 
 
 def test_split_by_fingerprint_grandfathers_legacy_and_drops_proven_stale():

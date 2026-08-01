@@ -588,6 +588,38 @@ def load_records(target: Path) -> list[core.OutcomeRecord]:
     return [record for record in records if record is not None]
 
 
+def _canonical_verify_evidence_ref(target: Path, evidence_ref: str) -> str:
+    """Follow ``reused_from`` when ``evidence_ref`` names a verify receipt path."""
+    if not evidence_ref:
+        return evidence_ref
+    path = Path(evidence_ref).expanduser()
+    if path.name != "receipt.json":
+        return evidence_ref
+    payload = localio.read_json_dict(path)
+    if not isinstance(payload, dict):
+        return evidence_ref
+    from .work_cmd import verification as verify_mod
+
+    return verify_mod.canonical_verify_evidence_ref(target, payload)
+
+
+def _with_canonical_verify_evidence(target: Path, record: core.OutcomeRecord) -> core.OutcomeRecord:
+    canonical = _canonical_verify_evidence_ref(target, record.evidence_ref)
+    if canonical == record.evidence_ref:
+        return record
+    return dataclasses.replace(record, evidence_ref=canonical)
+
+
+def load_scoring_records(target: Path) -> list[core.OutcomeRecord]:
+    """Load ledger rows with verify evidence canonicalized through ``reused_from``.
+
+    Append-only disk rows stay untouched; scoring/rank/explain/reconcile see one
+    signal for an original receipt and any reused twin.
+    """
+    target = target.expanduser().resolve()
+    return [_with_canonical_verify_evidence(target, record) for record in load_records(target)]
+
+
 def _last_record_digest(path: Path) -> str | None:
     return _validate_completed_ledger(path)
 
@@ -1029,7 +1061,7 @@ def fork(
     """
     target = target.expanduser().resolve()
     config = config or core.ReconcileConfig()
-    records = load_records(target)
+    records = load_scoring_records(target)
     cohorts_by_artifact = _fingerprint_cohorts_by_artifact(target, records)
     scorecards = _scorecards_by_artifact(target)
     kinds = _artifact_kinds(records, {}, scorecards)
@@ -1343,7 +1375,7 @@ def _capability_breakdown(records: list[core.OutcomeRecord]) -> list[dict] | Non
 
 def score(*, target: Path, artifact_id: str | None = None, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    scores = _scores_by_artifact(load_records(target))
+    scores = _scores_by_artifact(load_scoring_records(target))
     if artifact_id is not None:
         scores = {artifact_id: scores.get(artifact_id, core.score_records(artifact_id, []))}
     ordered = sorted(scores.values(), key=lambda item: item.artifact_id)
@@ -1371,7 +1403,7 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
     its pre-fingerprint shape.
     """
     target = target.expanduser().resolve()
-    records = [record for record in load_records(target) if record.artifact_id == artifact_id]
+    records = [record for record in load_scoring_records(target) if record.artifact_id == artifact_id]
     kind = next((r.artifact_kind for r in records if r.artifact_kind), "skill")
     cohorts = core.split_by_fingerprint(artifact_id, records, artifact_fingerprint(target, artifact_id, kind))
     score_obj = cohorts.current
@@ -1558,7 +1590,7 @@ def capture(
             print(f"error: {error}", file=sys.stderr)
             return 1
         effective_status = str(receipt.get("status") or "")
-        evidence_ref = str(Path(str(receipt.get("path", ""))) / "receipt.json")
+        evidence_ref = verify_mod.canonical_verify_evidence_ref(target, receipt)
         ts = str(receipt.get("completed_at") or receipt.get("started_at") or localio.utc_now_iso())
         code_graph_delta = _compact_code_graph_delta(receipt)
     manifest = context_manifest(run_agent)
@@ -1665,7 +1697,7 @@ def reconcile(
     """
     target = target.expanduser().resolve()
     config = config or core.ReconcileConfig()
-    records = load_records(target)
+    records = load_scoring_records(target)
     cohorts_by_artifact = _fingerprint_cohorts_by_artifact(target, records)
     scorecards = _scorecards_by_artifact(target)
     graph_counts = _graph_delta_counts_by_artifact(records)
@@ -1885,7 +1917,7 @@ def rank(
     output). The ratchet never uses recency; this is retrieval only.
     """
     target = target.expanduser().resolve()
-    records = load_records(target)
+    records = load_scoring_records(target)
     cohorts_by_artifact = _fingerprint_cohorts_by_artifact(target, records)
     current_capability = capability_fingerprint(context_manifest())
     now = now or localio.utc_now()
@@ -2109,7 +2141,7 @@ def health(target: Path) -> dict:
     from .work_cmd import helpers as work_helpers
 
     records = load_records(target)
-    scores = _scores_by_artifact(records)
+    scores = _scores_by_artifact(load_scoring_records(target))
     runs_root = work_helpers._verify_runs_root(target)
     verify_run_count = sum(1 for child in runs_root.iterdir() if child.is_dir()) if runs_root.is_dir() else 0
     record_count = len(records)
