@@ -1481,20 +1481,97 @@ def _refresh_chained_anchors(
         limit=run_checkpoint.MAX_JOURNAL_BYTES,
         category="journal",
     )
+    # Ownership is asserted even on the no-op path so a stale lock cannot
+    # claim a successful refresh without re-checking active ownership.
+    _assert_active_owner(workspace, run_dir)
     if current == data:
         # Anchor payloads already match the record digests; skip journal and
         # projection rewrites so a second verify/cleanup pass is a no-op.
         return _digest(data)
-    _assert_active_owner(workspace, run_dir)
     _replace_journal(journal_path, data)
     snapshot = _load_json_object(run_dir / "run.json", limit=MAX_RUN_JSON_BYTES, category="run projection")
     _replace_projection(run_dir, _projection(snapshot, rewritten))
     return _digest(data)
 
 
+def _preretirement_parent_record_digest(
+    record: Mapping[str, Any],
+    *,
+    operation_id: str,
+    run_id: str,
+    rewritten_sha256: str,
+) -> str:
+    """Reconstruct the parent record digest from before retirement was recorded.
+
+    During the mid-flight window after the parent record gains
+    ``rewritten_digest_retired_by`` but before the child is realigned, the
+    child's ``parent_record_sha256`` still names this prior digest. The prior
+    record is fully determined by validated parent fields plus the still-present
+    state-side rewritten digest.
+    """
+    return _digest(
+        _record_bytes(
+            operation_id=operation_id,
+            run_id=run_id,
+            sequence_start=record["sequence_start"],
+            sequence_end=record["sequence_end"],
+            reason=record["reason_code"],
+            rewritten_sha256=rewritten_sha256,
+            quarantine_retained=record["quarantine_retained"],
+            parent_operation_id=record.get("parent_operation_id"),
+            parent_record_sha256=record.get("parent_record_sha256"),
+            rewritten_digest_retired_by=None,
+        )
+    )
+
+
+def _accepted_parent_record_digests_for_retirement(
+    *,
+    parent_operation_id: str,
+    run_id: str,
+    parent_record: Mapping[str, Any],
+    parent_state: Mapping[str, Any] | None,
+    current_digest: str | None,
+) -> set[str]:
+    """Return digests a retiring child may name for this parent.
+
+    Always includes the current parent record digest when present. During the
+    validated mid-flight split (record already carries
+    ``rewritten_digest_retired_by``, state still holds ``rewritten_sha256``),
+    also accepts the exact pre-retirement digest reconstructed from those
+    fields. Outside that window only the current digest is accepted.
+    """
+    accepted: set[str] = set()
+    if isinstance(current_digest, str) and re.fullmatch(r"[0-9a-f]{64}", current_digest):
+        accepted.add(current_digest)
+    if parent_state is None:
+        return accepted
+    record_retired_by = parent_record.get("rewritten_digest_retired_by")
+    state_digest = parent_state.get("rewritten_sha256")
+    state_retired_by = parent_state.get("rewritten_digest_retired_by")
+    if (
+        isinstance(record_retired_by, str)
+        and state_retired_by is None
+        and isinstance(state_digest, str)
+        and re.fullmatch(r"[0-9a-f]{64}", state_digest)
+    ):
+        accepted.add(
+            _preretirement_parent_record_digest(
+                parent_record,
+                operation_id=parent_operation_id,
+                run_id=run_id,
+                rewritten_sha256=state_digest,
+            )
+        )
+    return accepted
+
+
 def _validate_lineage_graph(
     records: Mapping[str, Mapping[str, Any]],
     record_digests: Mapping[str, str] | None = None,
+    *,
+    states: Mapping[str, Mapping[str, Any]] | None = None,
+    run_id: str | None = None,
 ) -> None:
     if not records:
         return
@@ -1518,11 +1595,18 @@ def _validate_lineage_graph(
         if retired_by is not None and retired_by != descendants[0]:
             raise RedactionError("redaction lineage retirement mismatch")
         # Digest cross-check applies to split/full retirement edges: the child
-        # must name the parent's current record digest after retirement rewrite.
+        # must name the parent's current record digest after retirement rewrite,
+        # or the exact pre-retirement digest during the mid-flight window only.
         if record_digests is not None and retired_by is not None:
             child = records[descendants[0]]
-            expected = record_digests.get(parent)
-            if expected is None or child.get("parent_record_sha256") != expected:
+            accepted = _accepted_parent_record_digests_for_retirement(
+                parent_operation_id=parent,
+                run_id=run_id or "",
+                parent_record=records[parent],
+                parent_state=None if states is None else states.get(parent),
+                current_digest=record_digests.get(parent),
+            )
+            if child.get("parent_record_sha256") not in accepted:
                 raise RedactionError("redaction lineage digest mismatch")
 
     tips = set(records) - set(children)
@@ -1662,6 +1746,13 @@ def _load_operation_inventory(
                 raise RedactionError("redaction transaction state/record mismatch")
             child_state = states.get(split_retired_by)
             child_record = records.get(split_retired_by)
+            accepted_parent_digests = _accepted_parent_record_digests_for_retirement(
+                parent_operation_id=operation_id,
+                run_id=run_id,
+                parent_record=record,
+                parent_state=state,
+                current_digest=record_digests.get(operation_id),
+            )
             if (
                 split_retired_by != resumable_operation_id
                 or child_state is None
@@ -1669,7 +1760,7 @@ def _load_operation_inventory(
                 or child_state.get("phase") != "cleanup-authorized"
                 or child_state.get("parent_operation_id") != operation_id
                 or child_record.get("parent_operation_id") != operation_id
-                or child_record.get("parent_record_sha256") != record_digests.get(operation_id)
+                or child_record.get("parent_record_sha256") not in accepted_parent_digests
                 or not isinstance(split_digest, str)
                 or not re.fullmatch(r"[0-9a-f]{64}", split_digest)
             ):
@@ -1700,7 +1791,7 @@ def _load_operation_inventory(
                 raise RedactionError("redaction lineage parent reference is invalid")
         elif phase not in {"cleanup-authorized", "cleaned"}:
             raise RedactionError("redaction lineage child quarantine is missing")
-    _validate_lineage_graph(records, record_digests)
+    _validate_lineage_graph(records, record_digests, states=states, run_id=run_id)
     return records, states, record_digests
 
 
