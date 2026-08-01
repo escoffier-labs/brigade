@@ -2043,6 +2043,49 @@ def watch(
         time.sleep(interval)
 
 
+def audit(
+    run: str | Path,
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    """Offline coordinator decision audit (#595). Thin wrapper over run_audit."""
+    run_dir, error = _resolve_run_dir(run, cwd=cwd, runs_dir=runs_dir)
+    if error is not None:
+        print(error, file=sys.stderr)
+        return 2
+    assert run_dir is not None
+
+    from . import run_audit
+
+    report = run_audit.audit_run(run_dir)
+    receipt = report.to_receipt()
+    if json_output:
+        print(json.dumps(receipt, indent=2, sort_keys=True))
+    else:
+        print(f"audit: {report.result}")
+        print(f"run: {report.source_run_id}")
+        print(f"projector_version: {report.projector_version}")
+        print(f"code_revision: {report.code_revision}")
+        if report.not_auditable_reason:
+            print(f"not_auditable: {report.not_auditable_reason}")
+        if report.first_divergence is not None:
+            print(f"divergence_class: {report.first_divergence.divergence_class}")
+            print(f"divergence: {report.first_divergence.detail}")
+        transport = report.transport_coverage.get("transport")
+        if transport is not None:
+            print(f"transport: {transport}")
+        coverage = report.transport_coverage.get("coverage")
+        if isinstance(coverage, dict) and isinstance(coverage.get("note"), str):
+            print(f"coverage: {coverage['note']}")
+    if report.result == run_audit.RESULT_MATCH:
+        return 0
+    if report.result == run_audit.RESULT_NOT_AUDITABLE:
+        return 2
+    return 1
+
+
 def show(run_dir: Path) -> int:
     run_dir = run_dir.expanduser()
     if not run_dir.is_dir():
