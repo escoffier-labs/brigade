@@ -832,8 +832,8 @@ def _enforce_capture_before_retry(
     from .. import outcome_cmd
 
     artifact_id = outcome_cmd.resolve_capture_artifact_id(
-        capture_artifact_id,
         _receipt_capture_artifact_id(failed),
+        capture_artifact_id,
     )
     message = _capture_before_retry_message(str(failed.get("run_id") or ""), artifact_id=artifact_id)
     if mode == "block":

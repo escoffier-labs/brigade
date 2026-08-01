@@ -2701,6 +2701,8 @@ def test_archive_verify_run_strips_recovery_checkpoint_bodies(tmp_path):
     assert '"task"' not in archived_cp.read_text(encoding="utf-8")
     # Source verify-run is deleted after archive; the privacy rule is on the export.
     assert not (root / "20260101-000001-a").exists()
+
+
 def test_capture_before_retry_uses_receipt_stamped_artifact(tmp_target, monkeypatch, capsys):
     from brigade.work_cmd import verification
 
@@ -2724,6 +2726,30 @@ def test_capture_before_retry_uses_receipt_stamped_artifact(tmp_target, monkeypa
     err = capsys.readouterr().err
     assert f"warning: brigade outcome capture taste --run-id {failed['run_id']}" in err
     assert "capture brigade-work" not in err
+
+
+def test_capture_before_retry_prefers_receipt_stamp_over_current_capture(tmp_target, monkeypatch, capsys):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    skill_dir = tmp_target / ".claude" / "skills" / "taste"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# taste\n")
+
+    verification.verify_run(target=tmp_target, commands=["false"], timeout=60, capture="taste")
+    failed = verification._verify_receipts(tmp_target)[0]
+    records = tmp_target / "memory" / "outcome" / "records.jsonl"
+    if records.is_file():
+        records.write_text("")
+    capsys.readouterr()
+
+    rc = verification.verify_run(target=tmp_target, commands=["false"], timeout=60, capture="refire")
+
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert f"warning: brigade outcome capture taste --run-id {failed['run_id']}" in err
+    assert f"warning: brigade outcome capture refire --run-id {failed['run_id']}" not in err
 
 
 def test_capture_before_retry_uses_current_capture_when_receipt_unstamped(tmp_target, monkeypatch, capsys):

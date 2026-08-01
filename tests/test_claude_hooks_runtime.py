@@ -1817,6 +1817,27 @@ def test_posttooluse_read_skill_sets_exercised_artifact(tmp_path: Path):
     assert state["exercised_artifact_id"] == "taste"
 
 
+def test_posttooluse_read_external_skill_does_not_set_exercised_artifact(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    reference_skill = tmp_path / "other-repo" / ".claude" / "skills" / "reference-only" / "SKILL.md"
+    reference_skill.parent.mkdir(parents=True)
+    reference_skill.write_text("# reference-only\n")
+
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            tool_name="Read",
+            tool_input={"file_path": str(reference_skill)},
+        ),
+    )
+
+    state = runtime.read_session_state(target, "session-1")
+    assert state is not None
+    assert "exercised_artifact_id" not in state
+
+
 def test_verify_replacement_uses_session_exercised_artifact(tmp_path: Path):
     target = _wired_claude(tmp_path)
     skill = target / ".claude" / "skills" / "taste" / "SKILL.md"

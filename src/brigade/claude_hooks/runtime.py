@@ -1615,7 +1615,7 @@ def _session_fingerprint(session_id: str) -> str:
 
 
 def _skill_id_from_skill_path(target: Path, raw_path: object) -> str | None:
-    """Return a skill id when ``raw_path`` points at ``*/skills/<id>/SKILL.md``."""
+    """Return an installed target skill id when ``raw_path`` names its ``SKILL.md``."""
     if not isinstance(raw_path, str) or not raw_path:
         return None
     path = Path(raw_path).expanduser()
@@ -1626,7 +1626,10 @@ def _skill_id_from_skill_path(target: Path, raw_path: object) -> str | None:
         if part == "skills" and index + 2 < len(parts) and parts[index + 2] == "SKILL.md":
             skill_id = parts[index + 1]
             if skill_id and skill_id not in {".", ".."}:
-                return skill_id
+                from .. import outcome_cmd
+
+                if outcome_cmd._artifact_known(target, skill_id, "skill"):
+                    return skill_id
     return None
 
 
