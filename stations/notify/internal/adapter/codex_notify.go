@@ -12,9 +12,9 @@ import (
 // message. Codex's notify schema is younger than Claude Code's, so this
 // adapter is especially defensive about field name variations.
 func CodexNotify(r io.Reader) (canonical.Message, error) {
-	raw, err := io.ReadAll(r)
+	raw, err := ReadBounded(r)
 	if err != nil {
-		return canonical.Message{}, fmt.Errorf("read input: %w", err)
+		return canonical.Message{}, err
 	}
 	return CodexNotifyFromBytes(raw)
 }
@@ -23,6 +23,9 @@ func CodexNotify(r io.Reader) (canonical.Message, error) {
 // Codex passes the event JSON as the last positional argv argument rather than
 // on stdin, so the command layer can reach this directly with the arg payload.
 func CodexNotifyFromBytes(raw []byte) (canonical.Message, error) {
+	if err := CheckSize(raw); err != nil {
+		return canonical.Message{}, err
+	}
 	var ev map[string]interface{}
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return canonical.Message{}, fmt.Errorf("parse codex event: %w", err)

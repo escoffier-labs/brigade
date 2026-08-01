@@ -45,7 +45,10 @@ type tgRequest struct {
 }
 
 func (t *Telegram) Send(ctx context.Context, m canonical.Message) error {
-	text := formatTelegram(m)
+	text, err := fitTelegramText(m)
+	if err != nil {
+		return err
+	}
 	payload := tgRequest{
 		ChatID:    t.chatID,
 		Text:      text,
@@ -92,6 +95,41 @@ func formatTelegram(m canonical.Message) string {
 		sb.WriteString("_")
 	}
 	return sb.String()
+}
+
+// fitTelegramText formats m and ensures the MarkdownV2 payload stays within
+// TelegramTextMax. Oversized bodies are truncated before escaping so a cut
+// cannot land inside an escape sequence; if the title/tags alone still exceed
+// the ceiling the send fails with a bounded payload_limit error.
+func fitTelegramText(m canonical.Message) (string, error) {
+	text := formatTelegram(m)
+	if len(text) <= TelegramTextMax {
+		return text, nil
+	}
+	// Shrink the body until the escaped payload fits.
+	lo, hi := 0, len(m.Body)
+	best := ""
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		trial := m
+		body, ok := truncateRunes(m.Body, mid)
+		if !ok {
+			hi = mid - 1
+			continue
+		}
+		trial.Body = body
+		candidate := formatTelegram(trial)
+		if len(candidate) <= TelegramTextMax {
+			best = candidate
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if best == "" {
+		return "", payloadLimitError("telegram")
+	}
+	return best, nil
 }
 
 // escapeMDV2 escapes the characters Telegram MarkdownV2 requires escaping
