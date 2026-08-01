@@ -1178,3 +1178,98 @@ def recover_from_checkpoint(
         except run_projector.ProjectionError as exc:
             raise CheckpointError(_bound("projection failed"), category="projection") from exc
     return _restore_run_json_from_checkpoint(run_dir, restore_bytes, run_meta=run_meta)
+
+
+# -- Export boundary (issue #636) ---------------------------------------------
+
+_ARTIFACT_REFERENCE_KEYS = frozenset({"path", "sha256", "media_type", "byte_size", "privacy_class"})
+
+
+def checkpoint_artifact_reference(*, sha256: str, byte_size: int) -> dict[str, Any]:
+    """Return the closed artifact-reference shape used at export boundaries."""
+    if not isinstance(sha256, str) or not _HEX64.fullmatch(sha256):
+        raise CheckpointError(_bound("checkpoint export digest is invalid"), category="export-privacy")
+    if isinstance(byte_size, bool) or not isinstance(byte_size, int) or byte_size < 0:
+        raise CheckpointError(_bound("checkpoint export byte size is invalid"), category="export-privacy")
+    return {
+        "path": f"events/{CHECKPOINT_DIR_NAME}/{sha256}.json",
+        "sha256": sha256,
+        "media_type": CHECKPOINT_MEDIA_TYPE,
+        "byte_size": byte_size,
+        "privacy_class": CHECKPOINT_PRIVACY_CLASS,
+    }
+
+
+def refuse_checkpoint_body_export(*, reason: str = "checkpoint body is private") -> None:
+    """Refuse an export that would emit checkpoint body content."""
+    raise CheckpointError(
+        _bound(f"{reason} (privacy_class={CHECKPOINT_PRIVACY_CLASS})"),
+        category="export-privacy",
+    )
+
+
+def is_checkpoint_artifact_reference(payload: Mapping[str, Any]) -> bool:
+    """True when payload is exactly the closed artifact-reference shape."""
+    if set(payload) != _ARTIFACT_REFERENCE_KEYS:
+        return False
+    sha = payload.get("sha256")
+    path = payload.get("path")
+    byte_size = payload.get("byte_size")
+    return (
+        isinstance(sha, str)
+        and bool(_HEX64.fullmatch(sha))
+        and path == f"events/{CHECKPOINT_DIR_NAME}/{sha}.json"
+        and payload.get("media_type") == CHECKPOINT_MEDIA_TYPE
+        and payload.get("privacy_class") == CHECKPOINT_PRIVACY_CLASS
+        and not isinstance(byte_size, bool)
+        and isinstance(byte_size, int)
+        and byte_size >= 0
+    )
+
+
+def strip_checkpoint_bodies_for_export(run_dir: Path) -> list[dict[str, Any]]:
+    """Replace recovery-checkpoint file bodies with artifact references.
+
+    Local recovery continues to read the original private bodies under the run
+    directory. Call this only on a copy that is about to leave the run tree
+    (archive, bundle, sync, or similar export boundary).
+    """
+    cp_dir = checkpoint_dir(run_dir)
+    if not cp_dir.is_dir():
+        return []
+    replaced: list[dict[str, Any]] = []
+    for path in sorted(cp_dir.glob("*.json")):
+        if not path.is_file() or path.is_symlink():
+            refuse_checkpoint_body_export(reason="checkpoint export path is not a regular file")
+        raw = path.read_bytes()
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, dict) and is_checkpoint_artifact_reference(parsed):
+            replaced.append(dict(parsed))
+            continue
+        sha = hashlib.sha256(raw).hexdigest()
+        if path.name != f"{sha}.json":
+            refuse_checkpoint_body_export(reason="checkpoint export filename digest mismatch")
+        reference = checkpoint_artifact_reference(sha256=sha, byte_size=len(raw))
+        path.write_text(json.dumps(reference, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+        replaced.append(reference)
+    return replaced
+
+
+def assert_export_tree_has_no_checkpoint_bodies(root: Path) -> None:
+    """Fail closed if any recovery-checkpoint file under root still holds a body."""
+    for path in sorted(Path(root).rglob(f"*/{CHECKPOINT_DIR_NAME}/*.json")):
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CheckpointError(
+                _bound("checkpoint export body is unreadable"),
+                category="export-privacy",
+            ) from exc
+        if not isinstance(payload, dict) or not is_checkpoint_artifact_reference(payload):
+            refuse_checkpoint_body_export(reason="checkpoint body crossed an export boundary")

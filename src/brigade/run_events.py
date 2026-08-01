@@ -138,6 +138,16 @@ FORBIDDEN_PAYLOAD_KEYS = frozenset(
     }
 )
 
+# Recovery-checkpoint bodies under ``events/recovery-checkpoints/`` are
+# ``privacy_class: private`` (see ``run_checkpoint.CHECKPOINT_PRIVACY_CLASS``).
+# Journal event payloads only carry the closed artifact-reference shape
+# (relative path, sha256, media type, byte size, privacy class). Any exporter
+# or collector that copies a run directory across a boundary must strip those
+# bodies, replace them with that artifact-reference shape, or refuse with a
+# bounded error naming the privacy class. Local recovery may still read the
+# private bodies in place. Helpers: ``run_checkpoint.strip_checkpoint_bodies_for_export``,
+# ``run_checkpoint.refuse_checkpoint_body_export``.
+
 
 class CanonicalizationError(ValueError):
     """Raised when a value cannot be canonicalized under the strict rules."""
