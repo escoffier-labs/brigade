@@ -10,6 +10,8 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -1808,6 +1810,347 @@ print(json.dumps({
     ]
     assert result["chain_errors"] == []
     assert result["sequences"] == [1, 2]
+
+
+# -- Issue #651: cross-process journal serialization -------------------------
+
+_POSIX_FCNTL_LOCK_ONLY = pytest.mark.skipif(
+    os.name != "posix",
+    reason="the cross-process journal mutation lock is an fcntl.flock sibling file",
+)
+
+_FCNTL_RACE_CHILD = r"""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+from brigade import run_journal
+
+journal_path = Path(sys.argv[1])
+name = sys.argv[2]
+rounds = int(sys.argv[3])
+barrier = Path(sys.argv[4])
+run_id = sys.argv[5]
+micros = sys.argv[6]
+outcomes = []
+
+
+def tail_sequence():
+    report = run_journal.read_journal(journal_path)
+    if report.chain_errors:
+        raise RuntimeError("chain errors: " + "; ".join(report.chain_errors))
+    return report.events[-1].sequence if report.events else 0
+
+
+broken = False
+for r in range(rounds):
+    if not broken:
+        try:
+            tail = tail_sequence()
+        except Exception as exc:
+            outcomes.append({"round": r, "broken": str(exc)})
+            broken = True
+    if broken:
+        # Keep the parent's per-round barrier protocol satisfied without
+        # touching the (possibly forked) journal again.
+        (barrier / f"{name}.ready.{r}").write_text("broken")
+        (barrier / f"{name}.done.{r}").write_text("done")
+        continue
+    (barrier / f"{name}.ready.{r}").write_text(str(tail))
+    go = barrier / f"go.{r}"
+    deadline = time.monotonic() + 30.0
+    while not os.path.lexists(go):
+        if time.monotonic() > deadline:
+            raise SystemExit(f"{name}: go file for round {r} never appeared")
+    appended = False
+    attempts = 0
+    stale = 0
+    while not appended and attempts < 8:
+        attempts += 1
+        try:
+            run_journal.append_event(
+                journal_path,
+                run_id=run_id,
+                event_type="run.planning.started",
+                payload={"detail": f"race round {r} child {name}"},
+                idempotency_key=f"race-r{r:02d}-{name}",
+                expected_previous_sequence=tail,
+                recorded_at=f"2026-07-27T17:{r:02d}:00.{micros}Z",
+            )
+            appended = True
+        except run_journal.StaleSequenceError:
+            stale += 1
+            try:
+                tail = tail_sequence()
+            except Exception as exc:
+                outcomes.append({"round": r, "broken": str(exc)})
+                broken = True
+                break
+        except run_journal.RunJournalError as exc:
+            outcomes.append({"round": r, "error": type(exc).__name__, "detail": exc.diagnostic})
+            broken = True
+            break
+    outcomes.append({"round": r, "appended": appended, "attempts": attempts, "stale": stale})
+    (barrier / f"{name}.done.{r}").write_text("done")
+
+(barrier / f"{name}.result.json").write_text(json.dumps(outcomes))
+"""
+
+
+def _spawn_barrier_child(script_path: Path, *args: str) -> subprocess.Popen:
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    return subprocess.Popen(
+        [sys.executable, str(script_path), *args],
+        env=child_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _wait_for_files(paths: list[Path], deadline_s: float, what: str) -> None:
+    deadline = time.monotonic() + deadline_s
+    while True:
+        missing = [path for path in paths if not path.exists()]
+        if not missing:
+            return
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"timed out waiting for {what}: {[str(p) for p in missing]}")
+        time.sleep(0.01)
+
+
+@_POSIX_FCNTL_LOCK_ONLY
+def test_append_event_fcntl_lock_serializes_two_subprocess_writers(tmp_path):
+    """Two real OS processes racing appends from the same tail must serialize.
+
+    Each round, both children read the same tail, rendezvous, and are released
+    simultaneously to append the next sequence. Without a cross-process lock
+    both children pass the stale check for the same sequence N+1 and both
+    O_APPEND, forking the digest chain.
+    """
+    journal_path = _journal_path(_run_dir(tmp_path))
+    seed_count = 200
+    rounds = 10
+    pad = "x" * 440
+    for i in range(seed_count):
+        _append(
+            journal_path,
+            event_type="run.planning.started",
+            payload={"detail": f"seed {i:03d} {pad}"},
+            idempotency_key=f"seed-{i:03d}",
+            expected_previous_sequence=i,
+            recorded_at=f"2026-07-27T15:{i // 60:02d}:{i % 60:02d}.000000Z",
+        )
+
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    child_script = tmp_path / "race_child.py"
+    child_script.write_text(_FCNTL_RACE_CHILD)
+
+    children = {
+        name: _spawn_barrier_child(
+            child_script,
+            str(journal_path),
+            name,
+            str(rounds),
+            str(barrier),
+            RUN_ID,
+            micros,
+        )
+        for name, micros in (("alpha", "000001"), ("beta", "000002"))
+    }
+    try:
+        for r in range(rounds):
+            ready = [barrier / f"{name}.ready.{r}" for name in children]
+            _wait_for_files(ready, 30.0, f"round {r} ready rendezvous")
+            (barrier / f"go.{r}").write_text("go")
+            done = [barrier / f"{name}.done.{r}" for name in children]
+            _wait_for_files(done, 30.0, f"round {r} done rendezvous")
+    except BaseException:
+        for proc in children.values():
+            proc.kill()
+        for name, proc in children.items():
+            stdout, stderr = proc.communicate(timeout=5.0)
+            raise AssertionError(
+                f"race barrier failed; child {name} rc={proc.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            )
+
+    child_results = {}
+    for name, proc in children.items():
+        stdout, stderr = proc.communicate(timeout=30.0)
+        assert proc.returncode == 0, f"child {name} exited {proc.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        child_results[name] = json.loads((barrier / f"{name}.result.json").read_text())
+
+    report = run_journal.read_journal(journal_path)
+    sequences = [event.sequence for event in report.events]
+    expected = list(range(1, seed_count + 2 * rounds + 1))
+    assert report.chain_errors == [], (
+        f"cross-process append race forked the journal: {report.chain_errors}\n"
+        f"child outcomes: {json.dumps(child_results)}"
+    )
+    assert sequences == expected, (
+        f"expected contiguous unique sequences 1..{seed_count + 2 * rounds}, got "
+        f"{len(sequences)} events (duplicates: {sorted({s for s in sequences if sequences.count(s) > 1})})\n"
+        f"child outcomes: {json.dumps(child_results)}"
+    )
+    for previous, current in zip(report.events, report.events[1:]):
+        assert current.previous_digest == previous.event_digest
+
+
+@_POSIX_FCNTL_LOCK_ONLY
+def test_append_critical_section_releases_fcntl_lock_after_exception(tmp_path, monkeypatch):
+    """A raising mutation must still release the sibling flock file.
+
+    The append critical section must hold an exclusive flock on
+    ``<journal>.lock`` and release it in ``finally`` even when the protected
+    mutation raises, so a later process can acquire the lock and append.
+    """
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+
+    class _InjectedMutationFailure(Exception):
+        pass
+
+    def _exploding_build_event(**kwargs):
+        raise _InjectedMutationFailure("injected mutation failure")
+
+    monkeypatch.setattr(run_events, "build_event", _exploding_build_event)
+
+    with pytest.raises(_InjectedMutationFailure):
+        _append(
+            journal_path,
+            event_type="run.planning.started",
+            payload={"detail": "injected failure"},
+            idempotency_key="plan-injected-failure",
+            expected_previous_sequence=1,
+            recorded_at="2026-07-27T15:30:46.000000Z",
+        )
+
+    lock_path = journal_path.with_name(f"{journal_path.name}.lock")
+    assert lock_path.is_file(), (
+        "append critical section must create the sibling cross-process lock file "
+        f"{lock_path.name!r} even when the protected mutation raises"
+    )
+    assert not lock_path.is_symlink()
+    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+
+    script = r"""
+import fcntl
+import json
+import os
+import sys
+from pathlib import Path
+
+from brigade import run_journal
+
+journal_path = Path(sys.argv[1])
+lock_path = Path(sys.argv[2])
+fd = os.open(lock_path, os.O_RDWR)
+# Blocks forever if the failed append above leaked the exclusive flock; the
+# parent's communicate timeout turns that hang into a test failure.
+fcntl.flock(fd, fcntl.LOCK_EX)
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+event = run_journal.append_event(
+    journal_path,
+    run_id="20260727-153045-a1b2c3d4",
+    event_type="run.planning.started",
+    payload={"detail": "after release"},
+    idempotency_key="plan-after-release",
+    expected_previous_sequence=1,
+    recorded_at="2026-07-27T15:30:47.000000Z",
+)
+print(json.dumps({"sequence": event.sequence}))
+"""
+    rc, stdout, stderr = _run_isolated_child(script, str(journal_path), str(lock_path), timeout=10.0)
+
+    assert rc == 0, f"child exited {rc}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    assert json.loads(stdout) == {"sequence": 2}
+    report = run_journal.read_journal(journal_path)
+    assert report.chain_errors == []
+    assert [event.sequence for event in report.events] == [1, 2]
+
+
+@_POSIX_FCNTL_LOCK_ONLY
+def test_recover_partial_tail_serializes_on_fcntl_lock(tmp_path):
+    """Recovery mutates the journal, so it must take the same cross-process lock.
+
+    While another process holds the exclusive flock on the sibling lock file,
+    ``recover_partial_tail`` must block instead of truncating underneath it.
+    """
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _append_first_event(journal_path)
+    journal_path.write_bytes(journal_path.read_bytes() + b'{"partial-tail')
+    lock_path = journal_path.with_name(f"{journal_path.name}.lock")
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    locked_file = barrier / "locked"
+    release_file = barrier / "release"
+
+    holder_script = tmp_path / "lock_holder.py"
+    holder_script.write_text(
+        """
+import fcntl
+import os
+import sys
+import time
+from pathlib import Path
+
+lock_path, locked_file, release_file = map(Path, sys.argv[1:4])
+fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+locked_file.write_text("locked")
+deadline = time.monotonic() + 60.0
+while not release_file.exists():
+    if time.monotonic() > deadline:
+        raise SystemExit("release file never appeared")
+    time.sleep(0.02)
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+"""
+    )
+    holder = _spawn_barrier_child(holder_script, str(lock_path), str(locked_file), str(release_file))
+    try:
+        _wait_for_files([locked_file], 15.0, "lock holder rendezvous")
+        time.sleep(0.2)
+
+        done = threading.Event()
+        outcome: dict[str, object] = {}
+
+        def run_recovery() -> None:
+            try:
+                outcome["report"] = run_journal.recover_partial_tail(journal_path, tmp_path / "quarantine")
+            except BaseException as exc:  # noqa: BLE001 - recorded for assertion
+                outcome["error"] = exc
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=run_recovery, name="recovery-worker")
+        worker.start()
+        assert not done.wait(timeout=0.75), (
+            "recover_partial_tail completed while another process held the journal "
+            "flock; recovery mutations must serialize on the sibling lock file"
+        )
+        release_file.write_text("release")
+        assert done.wait(timeout=15.0), "recover_partial_tail did not complete after the flock was released"
+        worker.join(timeout=5.0)
+    finally:
+        if not release_file.exists():
+            release_file.write_text("release")
+        stdout, stderr = holder.communicate(timeout=15.0)
+    assert holder.returncode == 0, f"lock holder exited {holder.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+
+    assert "error" not in outcome, f"recovery raised: {outcome['error']!r}"
+    report = outcome["report"]
+    assert report.partial_bytes == b'{"partial-tail'
+    assert report.quarantine_path is not None
+    verified = run_journal.read_journal(journal_path)
+    assert verified.chain_errors == []
+    assert verified.partial_tail is None
+    assert [event.sequence for event in verified.events] == [1]
 
 
 # -- Slice 7 assignment 2: journal directory durability ----------------------

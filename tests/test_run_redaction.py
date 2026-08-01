@@ -2156,3 +2156,142 @@ def test_cleanup_removes_original_digest_oracle_from_durable_metadata(tmp_path):
     assert "original_journal_sha256" not in record
     assert not stale_state.exists()
     assert not stale_quarantine.exists()
+
+
+# -- Issue #651 step 1: redaction rewrite vs concurrent external append ------
+
+_EXTERNAL_APPEND_CHILD = r"""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+from brigade import run_journal
+
+journal_path = Path(sys.argv[1])
+window_open = Path(sys.argv[2])
+child_done = Path(sys.argv[3])
+result_path = Path(sys.argv[4])
+run_id = sys.argv[5]
+
+deadline = time.monotonic() + 60.0
+while not window_open.exists():
+    if time.monotonic() > deadline:
+        raise SystemExit("redaction replace window never opened")
+    time.sleep(0.01)
+
+result = {"appended": False}
+tail = None
+for attempt in range(8):
+    report = run_journal.read_journal(journal_path)
+    if report.chain_errors:
+        result["error"] = "chain errors: " + "; ".join(report.chain_errors)
+        break
+    tail = report.events[-1].sequence if report.events else 0
+    try:
+        event = run_journal.append_event(
+            journal_path,
+            run_id=run_id,
+            event_type="run.planning.started",
+            payload={"detail": "external append during redaction"},
+            idempotency_key="external-append-1",
+            expected_previous_sequence=tail,
+            recorded_at="2026-07-30T19:01:00.000000Z",
+        )
+        result = {"appended": True, "sequence": event.sequence, "attempts": attempt + 1}
+        break
+    except run_journal.StaleSequenceError:
+        result["stale_retries"] = attempt + 1
+        continue
+    except run_journal.RunJournalError as exc:
+        result["error"] = f"{type(exc).__name__}: {exc.diagnostic}"
+        break
+
+child_done.write_text("done")
+result_path.write_text(json.dumps(result))
+"""
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="the cross-process journal mutation lock is an fcntl.flock sibling file",
+)
+def test_redaction_replace_serializes_against_external_journal_append(tmp_path, monkeypatch):
+    """A redaction rewrite must not silently drop a concurrent external append.
+
+    The redaction journal rewrite must hold the cross-process journal lock
+    from its verified read through replacement. A child subprocess appends an
+    external event exactly inside that read-to-replace window (signalled via
+    filesystem barrier files). On the fixed locking behavior the child blocks
+    on the flock until the rewrite finishes and then appends after it; without
+    it, the child's committed append is overwritten by the rewrite and lost.
+    """
+    run_dir, _, _ = _authority_run(tmp_path)
+    journal = _journal_path(run_dir)
+
+    window_open = tmp_path / "redaction-window-open"
+    child_done = tmp_path / "child-append-done"
+    child_result = tmp_path / "child-result.json"
+
+    child_script = tmp_path / "external_append_child.py"
+    child_script.write_text(_EXTERNAL_APPEND_CHILD)
+    child_env = os.environ.copy()
+    child_env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            str(child_script),
+            str(journal),
+            str(window_open),
+            str(child_done),
+            str(child_result),
+            RUN_ID,
+        ],
+        env=child_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    real_replace_journal = run_redaction._replace_journal
+
+    def windowed_replace_journal(journal_path, rewritten):
+        # The rewrite has been computed from the verified read and is about to
+        # replace the journal: this is the read-to-replace window. Signal the
+        # child and give it the opportunity to land its external append. On
+        # fixed code the child is blocked on the journal flock, so the wait
+        # times out and the rewrite proceeds; the child appends afterwards.
+        window_open.write_text("open")
+        deadline = time.monotonic() + 3.0
+        while not child_done.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        real_replace_journal(journal_path, rewritten)
+
+    monkeypatch.setattr(run_redaction, "_replace_journal", windowed_replace_journal)
+
+    try:
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=2,
+            sequence_end=2,
+            reason=REASON_CODE,
+            operator_confirmed=True,
+        )
+    finally:
+        if not window_open.exists():
+            window_open.write_text("open")
+        stdout, stderr = child.communicate(timeout=30.0)
+    assert child.returncode == 0, f"child exited {child.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+
+    outcome = json.loads(child_result.read_text())
+    assert outcome.get("appended") is True, f"external child failed to append: {outcome}"
+
+    verified = run_journal.read_journal_bounded(journal)
+    assert verified.chain_errors == []
+    assert verified.partial_tail is None
+    committed_keys = [event.idempotency_key for event in verified.events]
+    assert "external-append-1" in committed_keys, (
+        "the external append committed during the redaction read-to-replace window "
+        f"was lost; final journal keys: {committed_keys}"
+    )
