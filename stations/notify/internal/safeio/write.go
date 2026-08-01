@@ -33,6 +33,12 @@ func WriteFile(path string, data []byte, mode os.FileMode, force bool) error {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
 
+	// Refuse a symlinked parent before creating or publishing a temp file.
+	// The post-publish fsync below still makes the name durable.
+	if err := fsyncParent(dir); err != nil {
+		return fmt.Errorf("refuse parent of %s: %w", base, err)
+	}
+
 	if !force {
 		if err := refuseExisting(path); err != nil {
 			return err

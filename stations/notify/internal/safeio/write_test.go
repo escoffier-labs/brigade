@@ -67,6 +67,30 @@ func TestWriteFile_ForceReplacesRegularFile(t *testing.T) {
 	}
 }
 
+func TestWriteFile_RefusesSymlinkedParentBeforePublish(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink redirect tests require unix-style link semantics")
+	}
+	dir := t.TempDir()
+	victimDir := filepath.Join(dir, "victim")
+	if err := os.Mkdir(victimDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(dir, "config-parent")
+	if err := os.Symlink(victimDir, parent); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	path := filepath.Join(parent, "config.toml")
+
+	err := safeio.WriteFile(path, []byte("SAFE\n"), 0o600, true)
+	if err == nil {
+		t.Fatal("WriteFile through a symlinked parent succeeded")
+	}
+	if _, statErr := os.Stat(filepath.Join(victimDir, "config.toml")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("published into symlink target: stat error = %v, want not exist", statErr)
+	}
+}
+
 func TestWriteFile_SymlinkCannotRedirectWithoutForce(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink redirect tests require unix-style link semantics")
