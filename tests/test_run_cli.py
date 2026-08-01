@@ -2241,6 +2241,41 @@ def _write_successful_worktree_run(output_dir: Path, cwd: Path, *, final: str = 
     (output_dir / "final.txt").write_text(final + "\n")
 
 
+def _write_terminal_failed_worktree_run(
+    output_dir: Path,
+    cwd: Path,
+    *,
+    final: str = "provider diagnostic",
+    phase: str = "dispatch",
+    kind: str = "provider-error",
+    detail: str = "provider inference failed",
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run.v1",
+                "task": "x",
+                "cwd": str(cwd),
+                "status": "failed",
+                "started_at": "2026-07-09T12:00:00Z",
+                "finished_at": "2026-07-09T12:00:01Z",
+                "duration_seconds": 1,
+                "artifacts": str(output_dir),
+                "error": detail,
+                "failure_phase": phase,
+                "failure": {
+                    "phase": phase,
+                    "kind": kind,
+                    "detail": detail,
+                },
+            }
+        )
+        + "\n"
+    )
+    (output_dir / "final.txt").write_text(final + "\n")
+
+
 def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path, monkeypatch):
     repo = _git_repo_with_roster(tmp_path)
     output_dir = tmp_path / "run"
@@ -2309,6 +2344,144 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
     }
     assert json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
     assert json.loads((output_dir / "synthesis.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
+
+
+def test_run_cli_worktree_retains_failed_checkout_with_changes(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        cwd = kwargs["cwd"]
+        (cwd / "tracked.txt").write_text("changed in worktree\n")
+        _write_terminal_failed_worktree_run(kwargs["output_dir"], cwd)
+        return 2
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    err = capsys.readouterr().err
+    checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    patch_path = output_dir / "changes.patch"
+    assert rc == 2
+    assert checkout.exists()
+    assert (checkout / "tracked.txt").read_text() == "changed in worktree\n"
+    assert "tracked.txt" in patch_path.read_text()
+    assert f"changes: {patch_path} (1 file(s))" in err
+    assert f"worktree kept for recovery: {checkout}" in err
+
+
+def test_run_cli_worktree_prunes_failed_checkout_without_changes(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        _write_terminal_failed_worktree_run(kwargs["output_dir"], kwargs["cwd"])
+        return 2
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    err = capsys.readouterr().err
+    checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    patch_path = output_dir / "changes.patch"
+    assert rc == 2
+    assert not checkout.exists()
+    assert patch_path.read_text() == ""
+    assert f"changes: none ({patch_path})" in err
+    assert "worktree kept for recovery" not in err
+
+
+def test_run_cli_success_prunes_retained_worktree_for_same_target(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir_failed = tmp_path / "run-failed"
+    output_dir_success = tmp_path / "run-success"
+    checkout_failed = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_failed.name}"
+    checkout_success = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_success.name}"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        cwd = kwargs["cwd"]
+        output = kwargs["output_dir"]
+        if output == output_dir_failed:
+            (cwd / "tracked.txt").write_text("changed in worktree\n")
+            _write_terminal_failed_worktree_run(output, cwd)
+            return 2
+        assert output == output_dir_success
+        _write_successful_worktree_run(output, cwd)
+        (output / "worker-results.json").write_text(
+            json.dumps({"results": [], "ground_truth": {"available": True, "patch_ref": None}}) + "\n"
+        )
+        (output / "synthesis.json").write_text(
+            json.dumps({"orchestrator": "chef", "result": {"ok": True}, "ground_truth": {"patch_ref": None}}) + "\n"
+        )
+        return 0
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir_failed), "--worktree"]) == 2
+    assert checkout_failed.exists()
+
+    assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir_success), "--worktree"]) == 0
+
+    err = capsys.readouterr().err
+    assert not checkout_failed.exists()
+    assert not checkout_success.exists()
+    assert f"worktree pruned: {checkout_failed}" in err
+
+
+def test_run_cli_success_prunes_retained_worktree_for_same_target_from_subdirectory(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    repo_src = repo / "src"
+    repo_src.mkdir()
+    roster_path = repo / ".brigade" / "roster.toml"
+    output_dir_failed = tmp_path / "run-failed"
+    output_dir_success = tmp_path / "run-success"
+    checkout_failed = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_failed.name}"
+    checkout_success = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir_success.name}"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        cwd = kwargs["cwd"]
+        output = kwargs["output_dir"]
+        if output == output_dir_failed:
+            (cwd / "tracked.txt").write_text("changed in worktree\n")
+            _write_terminal_failed_worktree_run(output, cwd)
+            return 2
+        assert output == output_dir_success
+        _write_successful_worktree_run(output, cwd)
+        (output / "worker-results.json").write_text(
+            json.dumps({"results": [], "ground_truth": {"available": True, "patch_ref": None}}) + "\n"
+        )
+        (output / "synthesis.json").write_text(
+            json.dumps({"orchestrator": "chef", "result": {"ok": True}, "ground_truth": {"patch_ref": None}}) + "\n"
+        )
+        return 0
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    run_args = [
+        "run",
+        "x",
+        "--roster",
+        str(roster_path),
+        "--cwd",
+        str(repo_src),
+        "--worktree",
+    ]
+
+    assert cli.main([*run_args, "--output-dir", str(output_dir_failed)]) == 2
+    assert checkout_failed.exists()
+
+    assert cli.main([*run_args, "--output-dir", str(output_dir_success)]) == 0
+
+    err = capsys.readouterr().err
+    assert not checkout_failed.exists()
+    assert not checkout_success.exists()
+    assert f"worktree pruned: {checkout_failed}" in err
 
 
 def test_run_cli_worktree_warns_on_empty_changes_patch_noop(tmp_path, monkeypatch, capsys):

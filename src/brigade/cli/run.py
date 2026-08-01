@@ -599,7 +599,7 @@ def dispatch(args) -> int:
                         tracked_count=summary.tracked_count,
                         untracked_count=summary.untracked_count,
                     )
-                    keep_worktree = False
+                    keep_worktree = rc != 0 and summary.changed
                     if summary.changed:
                         print(
                             f"changes: {summary.path} ({summary.tracked_count + summary.untracked_count} file(s))",
@@ -607,6 +607,11 @@ def dispatch(args) -> int:
                         )
                     else:
                         print(f"changes: none ({summary.path})", file=sys.stderr)
+                    if keep_worktree:
+                        print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
+                    elif rc == 0:
+                        for pruned in _prune_retained_worktrees(runguard.git_root(run_cwd), effective_cwd):
+                            print(f"worktree pruned: {pruned}", file=sys.stderr)
     except KeyboardInterrupt:
         print("error: run canceled by user", file=sys.stderr)
         if worktree_cwd is not None and keep_worktree:
@@ -862,6 +867,39 @@ def _poll_detached_start(proc: Popen, output_dir: Path, *, initial_receipt: byte
             return exit_code, False
         time.sleep(_DETACH_POLL_INTERVAL_SECONDS)
     return None, False
+
+
+def _prune_retained_worktrees(repo_root: Path, current_worktree: Path) -> list[Path]:
+    from .. import proc
+    from .. import runguard
+
+    repo_root = repo_root.expanduser().resolve()
+    current_worktree = current_worktree.expanduser().resolve()
+    cache_parent = current_worktree.parent
+    prefix = f"{repo_root.name}-"
+
+    result = proc.run(["git", "worktree", "list", "--porcelain"], cwd=repo_root)
+    if result.code != 0:
+        return []
+
+    candidates: list[Path] = []
+    for line in result.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        path = Path(line.removeprefix("worktree ").strip()).expanduser().resolve()
+        if path == current_worktree:
+            continue
+        if path.parent != cache_parent:
+            continue
+        if not path.name.startswith(prefix):
+            continue
+        candidates.append(path)
+
+    pruned: list[Path] = []
+    for path in candidates:
+        runguard.remove_worktree(repo_root, path)
+        pruned.append(path)
+    return pruned
 
 
 def _worktree_checkout_path(repo_root: Path, output_dir: Path) -> Path:

@@ -233,9 +233,14 @@ takes a local `.brigade/run.lock` (stale locks from dead processes are
 replaced automatically) so two runs do not mutate the same checkout at once.
 Use `--worktree` to run agents in a detached checkout from `HEAD` under
 `~/.cache/brigade/worktrees/`; Brigade writes the resulting diff to
-`changes.patch` in the run artifacts, removes the temporary checkout, and
-leaves the original checkout unchanged. `--worktree` requires run artifacts,
-so it cannot be combined with `--no-artifacts`.
+`changes.patch` in the run artifacts and leaves the original checkout
+unchanged. Successful runs and clean non-success runs remove the temporary
+checkout; failed, timed-out, canceled, and incomplete runs with uncommitted
+changes retain it for recovery. The next successful `--worktree` run for the
+same target prunes older retained entries. Terminal output shows the
+`changes.patch` file count and, when a checkout is retained, its path.
+`--worktree` requires run artifacts, so it cannot be combined with
+`--no-artifacts`.
 
 Start with a roster:
 
