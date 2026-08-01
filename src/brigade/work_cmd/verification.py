@@ -731,18 +731,45 @@ def _verify_receipt_evidence_ref(receipt: dict[str, Any]) -> str:
     return ""
 
 
+def canonical_verify_evidence_ref(target: Path, receipt: dict[str, Any]) -> str:
+    """Return the stable verification identity, following ``reused_from`` when present.
+
+    A reused receipt points at an earlier command result. Scoring and capture must
+    key both paths as one signal so the same verification cannot inflate helped
+    counts. Receipts that merely share content without ``reused_from`` stay distinct.
+    """
+    target = target.expanduser().resolve()
+    current = receipt
+    seen: set[str] = set()
+    while True:
+        reused = current.get("reused_from")
+        if not isinstance(reused, str) or not reused.strip():
+            return _verify_receipt_evidence_ref(current)
+        run_id = reused.strip()
+        if run_id in seen:
+            return _verify_receipt_evidence_ref(current)
+        seen.add(run_id)
+        next_receipt, _error = _resolve_verify_receipt(target, run_id)
+        if next_receipt is None:
+            return str(helpers._verify_runs_root(target) / run_id / "receipt.json")
+        current = next_receipt
+
+
 def _verify_receipt_has_outcome_capture(target: Path, receipt: dict[str, Any]) -> bool:
     from .. import outcome_cmd
 
-    evidence_ref = _verify_receipt_evidence_ref(receipt)
+    evidence_ref = canonical_verify_evidence_ref(target, receipt)
     if not evidence_ref:
         return False
-    resolved = Path(evidence_ref).expanduser().resolve()
-    for record in outcome_cmd.load_records(target):
+    try:
+        resolved = Path(evidence_ref).expanduser().resolve()
+    except OSError:
+        resolved = None
+    for record in outcome_cmd.load_scoring_records(target):
         if not record.evidence_ref:
             continue
         try:
-            if Path(record.evidence_ref).expanduser().resolve() == resolved:
+            if resolved is not None and Path(record.evidence_ref).expanduser().resolve() == resolved:
                 return True
         except OSError:
             if record.evidence_ref == evidence_ref:
