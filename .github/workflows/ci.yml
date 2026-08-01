@@ -296,7 +296,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
       - name: Command Inventory
-        run: brigade roadmap commands --check
+        run: |
+          set +e
+          brigade roadmap commands --check
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error file=docs/command-inventory.md::docs/command-inventory.md is stale; regenerate with BRIGADE_EXTRAS=1 brigade roadmap commands --write"
+          fi
+          exit "$status"
         env:
           BRIGADE_EXTRAS: "1"
       - name: Template Audit

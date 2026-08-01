@@ -182,6 +182,21 @@ def test_ci_workflow_does_not_skip_docs_only_content_guard():
     assert "python -m content_guard scan" in text
 
 
+def test_repo_metadata_command_inventory_failure_is_actionable_and_preserves_status():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "repo-metadata")
+
+    assert "set +e" in section
+    assert "brigade roadmap commands --check" in section
+    assert "status=$?" in section
+    assert "set -e" in section
+    assert (
+        'echo "::error file=docs/command-inventory.md::docs/command-inventory.md is stale; '
+        'regenerate with BRIGADE_EXTRAS=1 brigade roadmap commands --write"'
+    ) in section
+    assert 'exit "$status"' in section
+
+
 def test_ci_component_manifest_provenance_job_installs_dev_test_dependencies():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     section = _workflow_job_section(text, "component-manifest-provenance")

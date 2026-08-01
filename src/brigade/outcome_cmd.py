@@ -858,6 +858,17 @@ def append_records(target: Path, records: list[core.OutcomeRecord]) -> None:
     interrupted batch may leave earlier rows from that call on disk while the
     partial tail is removed before validation and the next append proceeds.
     """
+    resolved_target = target.expanduser().resolve()
+    from .work_cmd import helpers as work_helpers
+
+    repo_root = work_helpers._git_value(resolved_target, "rev-parse", "--show-toplevel")
+    if repo_root is not None:
+        resolved_root = Path(repo_root).resolve()
+        if resolved_target != resolved_root and not (resolved_target / ".brigade" / "config.json").is_file():
+            raise OutcomeLedgerError(
+                f"outcome ledger target {resolved_target} is inside git repository {resolved_root} "
+                f"but lacks .brigade/config.json; rerun with --target {resolved_root}"
+            )
     path = _records_path(target)
     lock_path = _records_lock_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1611,7 +1622,11 @@ def capture(
         route=route,
         route_fingerprint=route_fingerprint(route),
     )
-    append_records(target, [record])
+    try:
+        append_records(target, [record])
+    except OutcomeLedgerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if json_output:
         print(json.dumps({"target": str(target), "record": _record_payload(record)}, indent=2, sort_keys=True))
         return 0
@@ -2121,7 +2136,11 @@ def record(
         context=manifest,
         capability_fingerprint=capability_fingerprint(manifest),
     )
-    append_records(target, [new_record])
+    try:
+        append_records(target, [new_record])
+    except OutcomeLedgerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if json_output:
         print(json.dumps({"target": str(target), "record": _record_payload(new_record)}, indent=2, sort_keys=True))
         return 0

@@ -62,6 +62,14 @@ def _high_risk_command_message(executable: str) -> str:
     )
 
 
+def _missing_python_interpreter_message() -> str:
+    return "verification command interpreter python was not found on PATH; use available interpreter python3 instead"
+
+
+def _unresolvable_command_message(executable: str) -> str:
+    return f"verification command is not resolvable: {executable}"
+
+
 def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None, dict[str, str], str | None]:
     try:
         parts = shlex.split(command)
@@ -93,9 +101,13 @@ def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None,
         if not executable_path.is_absolute():
             executable_path = target / executable_path
         if not executable_path.exists():
-            return None, env, f"verification command is not resolvable: {argv[0]}"
-    elif shutil.which(argv[0]) is None:
-        return None, env, f"verification command is not resolvable: {argv[0]}"
+            return None, env, _unresolvable_command_message(argv[0])
+    else:
+        path_override = env.get("PATH")
+        if shutil.which(argv[0], path=path_override) is None:
+            if argv[0] == "python" and shutil.which("python3", path=path_override) is not None:
+                return None, env, _missing_python_interpreter_message()
+            return None, env, _unresolvable_command_message(argv[0])
     return argv, env, None
 
 
@@ -116,9 +128,11 @@ def _verify_parse_argv(argv: list[str], target: Path) -> tuple[list[str] | None,
         if not executable_path.is_absolute():
             executable_path = target / executable_path
         if not executable_path.exists():
-            return None, {}, f"verification command is not resolvable: {argv[0]}"
+            return None, {}, _unresolvable_command_message(argv[0])
     elif shutil.which(argv[0]) is None:
-        return None, {}, f"verification command is not resolvable: {argv[0]}"
+        if argv[0] == "python" and shutil.which("python3") is not None:
+            return None, {}, _missing_python_interpreter_message()
+        return None, {}, _unresolvable_command_message(argv[0])
     return list(argv), {}, None
 
 
