@@ -768,9 +768,9 @@ def effectiveness_gate_reason(
     hurt = int(effectiveness.get("hurt", 0))
     trials = helped + hurt
     wilson = outcome_core.wilson_lower_bound(helped, trials, config.z)
-    if hurt > 0:
+    if outcome_core.candidate_regression_withheld(helped, hurt):
         return "withheld: verified regression present"
-    if helped < config.install_min_helped:
+    if helped < config.install_min_helped or helped <= hurt:
         return "insufficient verified evidence"
     wilson_min = config.effective_wilson_min
     if wilson < wilson_min:
@@ -790,7 +790,10 @@ def dual_gate_passes(
     utility_reason = utility_gate_reason(card, min_passing_units=config.utility_min_passing_units)
     if utility_reason is not None:
         return False, utility_reason
-    return True, "verified helped, no regressions"
+    effectiveness = card.dimensions.get("effectiveness", {})
+    helped = int(effectiveness.get("helped", 0))
+    hurt = int(effectiveness.get("hurt", 0))
+    return True, outcome_core.candidate_install_reason(helped, hurt)
 
 
 def decide_scorecard(
@@ -826,7 +829,7 @@ def decide_scorecard(
         return outcome_core.Decision(artifact_id, "hold", current_status, "cooldown active")
 
     if current_status == "candidate":
-        if hurt > 0:
+        if outcome_core.candidate_regression_withheld(helped, hurt):
             return outcome_core.Decision(artifact_id, "hold", "candidate", "withheld: verified regression present")
         passes, reason = dual_gate_passes(card, config=config)
         if passes:
