@@ -1953,6 +1953,80 @@ def test_redaction_after_cleaned_parent_uses_active_anchor_reference(tmp_path):
     assert second_record["parent_record_sha256"] == parent_anchor.payload["record_sha256"]
 
 
+def test_second_cleanup_verify_pass_performs_zero_anchor_refresh_writes(tmp_path, monkeypatch):
+    run_dir, _, _ = _authority_run(tmp_path)
+    report = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=2,
+        sequence_end=2,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    cleaned = run_redaction.cleanup_redaction_quarantine(
+        run_dir,
+        operation_id=report.operation_id,
+        operator_confirmed=True,
+    )
+    assert cleaned.cleaned is True
+
+    writes: list[str] = []
+
+    def track_journal(path, data):
+        writes.append("journal")
+        raise AssertionError("second verify pass must not rewrite the journal")
+
+    def track_projection(run_dir_arg, projection):
+        writes.append("projection")
+        raise AssertionError("second verify pass must not rewrite the projection")
+
+    monkeypatch.setattr(run_redaction, "_replace_journal", track_journal)
+    monkeypatch.setattr(run_redaction, "_replace_projection", track_projection)
+
+    again = run_redaction.cleanup_redaction_quarantine(
+        run_dir,
+        operation_id=report.operation_id,
+        operator_confirmed=True,
+    )
+    assert again.cleaned is True
+    assert writes == []
+
+
+def test_tampered_split_retirement_record_fails_digest_cross_check(tmp_path):
+    run_dir, _, _ = _authority_run(tmp_path)
+    first = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=2,
+        sequence_end=2,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    second = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=4,
+        sequence_end=4,
+        reason="personal-data-exposure",
+        operator_confirmed=True,
+    )
+    run_redaction.cleanup_redaction_quarantine(
+        run_dir,
+        operation_id=second.operation_id,
+        operator_confirmed=True,
+    )
+    assert json.loads(first.record_path.read_text())["rewritten_digest_retired_by"] == second.operation_id
+
+    second_record = json.loads(second.record_path.read_text())
+    second_record["parent_record_sha256"] = "0" * 64
+    second.record_path.write_text(json.dumps(second_record, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(run_redaction.RedactionError, match="digest mismatch") as excinfo:
+        run_redaction.cleanup_redaction_quarantine(
+            run_dir,
+            operation_id=first.operation_id,
+            operator_confirmed=True,
+        )
+    assert len(excinfo.value.diagnostic) <= run_events.MAX_DIAGNOSTIC_LEN
+
+
 def test_redaction_inventory_rejects_tampered_parent_record_anchor_reference(tmp_path):
     run_dir, _, _ = _authority_run(tmp_path)
     run_redaction.redact_journal(

@@ -1377,7 +1377,14 @@ def _validate_chained_anchors(
                 and record.get("rewritten_digest_retired_by") == resumable_operation_id
                 and current.get("parent_operation_id") == operation_id
             )
-            if not (allowed_current or allowed_parent):
+            resumable_record = records.get(resumable_operation_id) if resumable_operation_id else None
+            allowed_retiring_child = (
+                current is not None
+                and current.get("phase") in {"cleanup-authorized", "cleaned"}
+                and resumable_record is not None
+                and resumable_record.get("rewritten_digest_retired_by") == operation_id
+            )
+            if not (allowed_current or allowed_parent or allowed_retiring_child):
                 raise RedactionError("redaction chained anchor verification failed")
     missing = set(records) - seen
     if missing:
@@ -1469,6 +1476,15 @@ def _refresh_chained_anchors(
         rewritten.append(rewritten_event)
         previous_digest = rewritten_event.event_digest
     data = _canonical_event_bytes(rewritten)
+    current = _read_bounded_regular(
+        journal_path,
+        limit=run_checkpoint.MAX_JOURNAL_BYTES,
+        category="journal",
+    )
+    if current == data:
+        # Anchor payloads already match the record digests; skip journal and
+        # projection rewrites so a second verify/cleanup pass is a no-op.
+        return _digest(data)
     _assert_active_owner(workspace, run_dir)
     _replace_journal(journal_path, data)
     snapshot = _load_json_object(run_dir / "run.json", limit=MAX_RUN_JSON_BYTES, category="run projection")
@@ -1476,7 +1492,10 @@ def _refresh_chained_anchors(
     return _digest(data)
 
 
-def _validate_lineage_graph(records: Mapping[str, Mapping[str, Any]]) -> None:
+def _validate_lineage_graph(
+    records: Mapping[str, Mapping[str, Any]],
+    record_digests: Mapping[str, str] | None = None,
+) -> None:
     if not records:
         return
     children: dict[str, list[str]] = {}
@@ -1498,6 +1517,13 @@ def _validate_lineage_graph(records: Mapping[str, Mapping[str, Any]]) -> None:
         retired_by = records[parent].get("rewritten_digest_retired_by")
         if retired_by is not None and retired_by != descendants[0]:
             raise RedactionError("redaction lineage retirement mismatch")
+        # Digest cross-check applies to split/full retirement edges: the child
+        # must name the parent's current record digest after retirement rewrite.
+        if record_digests is not None and retired_by is not None:
+            child = records[descendants[0]]
+            expected = record_digests.get(parent)
+            if expected is None or child.get("parent_record_sha256") != expected:
+                raise RedactionError("redaction lineage digest mismatch")
 
     tips = set(records) - set(children)
     if len(tips) != 1:
@@ -1628,8 +1654,10 @@ def _load_operation_inventory(
         if state_digest != record_digest or state_retired_by != record_retired_by:
             if record_retired_by is not None and state_digest is not None:
                 split_retired_by = record_retired_by
+                split_digest = state_digest
             elif state_retired_by is not None and record_digest is not None:
                 split_retired_by = state_retired_by
+                split_digest = record_digest
             else:
                 raise RedactionError("redaction transaction state/record mismatch")
             child_state = states.get(split_retired_by)
@@ -1641,6 +1669,9 @@ def _load_operation_inventory(
                 or child_state.get("phase") != "cleanup-authorized"
                 or child_state.get("parent_operation_id") != operation_id
                 or child_record.get("parent_operation_id") != operation_id
+                or child_record.get("parent_record_sha256") != record_digests.get(operation_id)
+                or not isinstance(split_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", split_digest)
             ):
                 raise RedactionError("redaction transaction state/record mismatch")
         phase = state.get("phase")
@@ -1669,8 +1700,51 @@ def _load_operation_inventory(
                 raise RedactionError("redaction lineage parent reference is invalid")
         elif phase not in {"cleanup-authorized", "cleaned"}:
             raise RedactionError("redaction lineage child quarantine is missing")
-    _validate_lineage_graph(records)
+    _validate_lineage_graph(records, record_digests)
     return records, states, record_digests
+
+
+def _realign_child_parent_record_digest(
+    redactions_dir: Path,
+    *,
+    run_id: str,
+    parent_operation_id: str,
+    child_operation_id: str,
+    records: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Point a child record at the parent's current record digest."""
+    child_record = records.get(child_operation_id)
+    if child_record is None or child_record.get("parent_operation_id") != parent_operation_id:
+        raise RedactionError("redaction lineage retirement mismatch")
+    parent_record_path = redactions_dir / parent_operation_id / "record.json"
+    child_record_path = redactions_dir / child_operation_id / "record.json"
+    parent_record_digest = _redaction_record_sha256(parent_record_path)
+    if child_record.get("parent_record_sha256") == parent_record_digest:
+        return
+    _write_redaction_record(
+        child_record_path,
+        operation_id=child_operation_id,
+        run_id=run_id,
+        sequence_start=child_record["sequence_start"],
+        sequence_end=child_record["sequence_end"],
+        reason=child_record["reason_code"],
+        rewritten_sha256=child_record.get("rewritten_journal_sha256"),
+        quarantine_retained=child_record["quarantine_retained"],
+        parent_operation_id=parent_operation_id,
+        parent_record_sha256=parent_record_digest,
+        rewritten_digest_retired_by=child_record.get("rewritten_digest_retired_by"),
+    )
+    child_operation_dir = child_record_path.parent
+    child_fd = _open_directory_handle(child_operation_dir, category="redaction operation")
+    try:
+        _remove_operation_temps(
+            child_operation_dir,
+            child_fd,
+            patterns=(_RECORD_TEMP_RE,),
+            category="redaction lineage cleanup",
+        )
+    finally:
+        os.close(child_fd)
 
 
 def _retire_rewritten_digest_aliases(
@@ -1717,6 +1791,15 @@ def _retire_rewritten_digest_aliases(
             parent_record_sha256=record.get("parent_record_sha256"),
             rewritten_digest_retired_by=retired_by_operation_id,
         )
+    # Align the retiring child's parent_record_sha256 before the parent state
+    # write so a state-side crash still leaves a digest-consistent split.
+    _realign_child_parent_record_digest(
+        redactions_dir,
+        run_id=run_id,
+        parent_operation_id=parent_operation_id,
+        child_operation_id=retired_by_operation_id,
+        records=records,
+    )
     if state.get("rewritten_digest_retired_by") != retired_by_operation_id:
         _write_state(
             state_path,
@@ -2547,6 +2630,12 @@ def cleanup_redaction_quarantine(
                 retired_by_operation_id=operation_id,
                 records=lineage_records,
             )
+            if parent_operation_id is not None:
+                # Retirement rewrites the parent record and realigns this child's
+                # parent_record_sha256; refresh before the cleaned record write.
+                parent_record_sha256 = _redaction_record_sha256(
+                    operation_dir.parent / parent_operation_id / "record.json"
+                )
             _write_redaction_record(
                 record_path,
                 operation_id=operation_id,
@@ -2560,6 +2649,25 @@ def cleanup_redaction_quarantine(
                 parent_record_sha256=parent_record_sha256,
                 rewritten_digest_retired_by=rewritten_digest_retired_by,
             )
+            if isinstance(rewritten_digest_retired_by, str):
+                # Cleaning a retired parent rewrites its record digest; keep the
+                # retiring child aligned for the lineage digest cross-check.
+                lineage_records = {
+                    **lineage_records,
+                    operation_id: {
+                        **record,
+                        "quarantine_retained": False,
+                        "rewritten_journal_sha256": rewritten_sha256,
+                        "rewritten_digest_retired_by": rewritten_digest_retired_by,
+                    },
+                }
+                _realign_child_parent_record_digest(
+                    operation_dir.parent,
+                    run_id=resolved_run_dir.name,
+                    parent_operation_id=operation_id,
+                    child_operation_id=rewritten_digest_retired_by,
+                    records=lineage_records,
+                )
             _write_state(
                 state_path,
                 operation_id=operation_id,
