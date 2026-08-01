@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade runs audit` provides a read-only audit of recorded lifecycle evidence
+  for coordinator decisions. (#649)
 - Verify-run retention now archives receipt evidence before pruning (#565).
   When `.brigade/work/verify-runs/` grows past the retention cap, each run
   directory is copied into the verify archive (default
@@ -65,6 +67,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The lifecycle journal ceiling is measured for real, representative, and configurable worst-case runs, with the current decision to raise the bound rather than segment journals. (#642)
 
 ### Fixed
+- `brigade init` now refuses a symlinked parent before it creates or publishes a
+  temporary file, and applies permissions through the open descriptor rather
+  than by path, closing symlink and TOCTOU write races. (#643)
+- Dispatch outcome writes are now bound to configured targets and report a
+  bounded error naming the resolved root. Missing Python interpreters suggest
+  `python3`, stale command inventory names its regeneration command, and
+  coverless root assignments no longer fall back to the wave scheduler. (#662)
+- `brigade outcome repair` diagnoses and repairs completed-ledger digest-chain
+  breaks, preserving and re-signing self-consistent records after a break
+  instead of discarding them. Repairs quarantine first and use binary
+  `O_EXCL` writes. (#645)
+- A failed run that holds uncommitted work retains its worktree, reports the
+  retained path and patch-file count, and prunes that retained entry after the
+  next successful run for the same target. (#663)
+- Outcome capture now attributes receipts to the exercised skill instead of the
+  generic `brigade-work` bucket, preferring a failed receipt's own stamp over
+  the current capture value. (#647)
 - Grok/T3 work-loop discovery no longer treats `~/.brigade` (user-level aboyeur
   roster) as a project work root. Hooks and `work resolve-target` require
   `.brigade/config.json`, so sessions under `$HOME` or unwired dirs do not
