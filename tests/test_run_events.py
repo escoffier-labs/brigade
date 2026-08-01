@@ -341,3 +341,59 @@ def test_validate_event_limits_unknown_key_diagnostics():
     errors = run_events.validate_event(env)
     assert errors
     assert len(errors[0]) <= 240
+
+
+@pytest.mark.parametrize(
+    ("event_type", "allowed"),
+    [
+        (
+            "control.requested",
+            frozenset({"op", "worker", "text_digest", "turn_id", "request_id"}),
+        ),
+        (
+            "control.observed",
+            frozenset({"op", "worker", "turn_id", "request_id", "detail"}),
+        ),
+        (
+            "control.failed",
+            frozenset({"op", "worker", "turn_id", "request_id", "code", "detail"}),
+        ),
+    ],
+)
+def test_control_event_types_registered_with_closed_payload_keys(event_type, allowed):
+    assert event_type in run_events.EVENT_TYPES
+    assert run_events.EVENT_TYPES[event_type] == allowed
+
+
+def test_control_requested_rejects_unknown_payload_key_with_bounded_diagnostic():
+    with pytest.raises(run_events.CanonicalizationError) as exc:
+        run_events.build_event(
+            run_id=RUN_ID,
+            sequence=1,
+            event_type="control.requested",
+            payload={
+                "op": "steer",
+                "worker": "coder",
+                "text_digest": "a" * 64,
+                "request_id": "req-1",
+                "steering_text": "do not store me",
+            },
+            idempotency_key="control.requested:req-1",
+            recorded_at=RECORDED_AT,
+            previous_digest=None,
+        )
+    assert len(str(exc.value)) <= 240
+
+
+def test_control_requested_rejects_forbidden_private_payload_keys():
+    with pytest.raises(run_events.CanonicalizationError) as exc:
+        run_events.build_event(
+            run_id=RUN_ID,
+            sequence=1,
+            event_type="control.requested",
+            payload={"op": "steer", "request_id": "req-1", "prompt": "secret"},
+            idempotency_key="control.requested:req-1",
+            recorded_at=RECORDED_AT,
+            previous_digest=None,
+        )
+    assert len(str(exc.value)) <= 240

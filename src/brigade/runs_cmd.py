@@ -1826,6 +1826,132 @@ def redact(
     return 0
 
 
+_TERMINAL_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        "run.completed",
+        "run.failed",
+        "run.interrupted",
+    }
+)
+
+
+def _lifecycle_event_record(event: Any) -> dict[str, object]:
+    from . import run_event_cursor
+
+    payload = event.to_dict()
+    payload["cursor"] = run_event_cursor.encode(
+        run_event_cursor.DecodedCursor(
+            schema=run_event_cursor.SUPPORTED_SCHEMA,
+            run_id=event.run_id,
+            sequence=event.sequence,
+            digest=event.event_digest,
+        )
+    )
+    return payload
+
+
+def _events_return_code(event: Any) -> int:
+    if event.event_type == "run.completed":
+        status = event.payload.get("status") if isinstance(event.payload, Mapping) else None
+        return 0 if status in _SUCCESS_STATUSES else 1
+    return 1
+
+
+def events(
+    run: str | Path,
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    after: str | None = None,
+    follow: bool = False,
+    interval: float = 1.0,
+) -> int:
+    """Emit verified lifecycle journal records as newline-delimited JSON (issue #604)."""
+    from . import run_event_cursor, run_journal, run_lifecycle
+
+    if interval < 0:
+        print("error: --interval must be non-negative", file=sys.stderr)
+        return 2
+    run_dir, error = _resolve_run_dir(run, cwd=cwd, runs_dir=runs_dir)
+    if error is not None:
+        print(error, file=sys.stderr)
+        return 2
+    assert run_dir is not None
+
+    journal_path = run_lifecycle._journal_path(run_dir)
+    if not journal_path.is_file():
+        print("error: legacy-no-journal", file=sys.stderr)
+        return 2
+
+    expected_run_id = run_lifecycle._run_id_from_dir(run_dir)
+    after_sequence = 0
+    if after is not None:
+        try:
+            cursor = run_event_cursor.decode(after)
+        except run_event_cursor.CursorError as exc:
+            print(f"error: {exc.code}: {exc}", file=sys.stderr)
+            return 2
+        if cursor.run_id != expected_run_id:
+            print("error: cursor_run_id_mismatch: cursor run_id does not match the run", file=sys.stderr)
+            return 2
+        try:
+            report = run_journal.read_journal_bounded(journal_path)
+        except run_journal.RunJournalError as exc:
+            print(f"error: {exc.diagnostic}", file=sys.stderr)
+            return 2
+        if report.partial_tail is not None:
+            print("error: lifecycle journal ends in a partial line", file=sys.stderr)
+            return 2
+        if report.chain_errors:
+            print(f"error: {report.chain_errors[0]}", file=sys.stderr)
+            return 2
+        match = next((event for event in report.events if event.sequence == cursor.sequence), None)
+        if match is None:
+            print("error: cursor_sequence_mismatch: cursor sequence is not in the journal", file=sys.stderr)
+            return 2
+        try:
+            run_event_cursor.validate(
+                cursor,
+                expected_run_id=expected_run_id,
+                event_sequence=match.sequence,
+                event_digest=match.event_digest,
+            )
+        except run_event_cursor.CursorError as exc:
+            print(f"error: {exc.code}: {exc}", file=sys.stderr)
+            return 2
+        after_sequence = cursor.sequence
+
+    last_emitted = after_sequence
+    while True:
+        try:
+            report = run_journal.read_journal_bounded(journal_path)
+        except run_journal.RunJournalError as exc:
+            print(f"error: {exc.diagnostic}", file=sys.stderr)
+            return 2
+        if report.partial_tail is not None:
+            print("error: lifecycle journal ends in a partial line", file=sys.stderr)
+            return 2
+        if report.chain_errors:
+            print(f"error: {report.chain_errors[0]}", file=sys.stderr)
+            return 2
+
+        terminal_event = None
+        for event in report.events:
+            if event.sequence <= last_emitted:
+                continue
+            _emit_json(_lifecycle_event_record(event))
+            last_emitted = event.sequence
+            if event.event_type in _TERMINAL_LIFECYCLE_EVENT_TYPES:
+                terminal_event = event
+                break
+
+        if terminal_event is not None:
+            return _events_return_code(terminal_event)
+        if not follow:
+            return 0
+        time.sleep(interval)
+
+
 def watch(
     run: str | Path,
     *,

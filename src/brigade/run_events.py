@@ -116,6 +116,12 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
             "record_sha256",
         }
     ),
+    # Live-control request/observation pairs (issue #604). Reference-only:
+    # digests, op codes, worker names, turn ids, and request ids — never
+    # steering text, model output, or provider bodies.
+    "control.requested": frozenset({"op", "worker", "text_digest", "turn_id", "request_id"}),
+    "control.observed": frozenset({"op", "worker", "turn_id", "request_id", "detail"}),
+    "control.failed": frozenset({"op", "worker", "turn_id", "request_id", "code", "detail"}),
 }
 APPROVAL_DECISION_STATES = frozenset({"pending", "approved", "rejected", "held", "consumed"})
 APPROVAL_DECISION_EVENT_STATES = {

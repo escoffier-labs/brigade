@@ -62,6 +62,45 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=1.0,
         help="Polling interval in seconds.",
     )
+    p_runs_events = runs_sub.add_parser(
+        "events",
+        help="Read verified lifecycle journal events with durable cursors.",
+    )
+    p_runs_events.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_runs_events.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_runs_events.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_runs_events.add_argument(
+        "--after",
+        default=None,
+        help="Opaque cursor; emit only committed lifecycle events after this position.",
+    )
+    p_runs_events.add_argument(
+        "--follow",
+        action="store_true",
+        help="Wait for appended lifecycle events and exit after a terminal event.",
+    )
+    p_runs_events.add_argument(
+        "--json",
+        action="store_true",
+        default=True,
+        help="Emit newline-delimited JSON records (default).",
+    )
+    p_runs_events.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="Polling interval in seconds when --follow is set.",
+    )
     p_runs_steer = runs_sub.add_parser("steer", help="Send steering text to an active app-server worker turn.")
     p_runs_steer.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
     p_runs_steer.add_argument("worker", help="Worker name to steer.")
@@ -78,6 +117,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
     )
+    p_runs_steer.add_argument(
+        "--request-id",
+        default=None,
+        help="Caller request identity for idempotent live control (generated when omitted).",
+    )
     p_runs_interrupt = runs_sub.add_parser("interrupt", help="Interrupt active app-server worker turns.")
     p_runs_interrupt.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
     p_runs_interrupt.add_argument("worker", nargs="?", default=None, help="Optional worker name to interrupt.")
@@ -92,6 +136,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         type=Path,
         default=None,
         help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_runs_interrupt.add_argument(
+        "--request-id",
+        default=None,
+        help="Caller request identity for idempotent live control (generated when omitted).",
     )
     p_runs_recover = runs_sub.add_parser(
         "recover",
@@ -170,18 +219,34 @@ def dispatch(args) -> int:
             json_output=args.json,
             interval=args.interval,
         )
+    if args.runs_command == "events":
+        return runs_cmd.events(
+            args.run,
+            cwd=args.cwd,
+            runs_dir=args.runs_dir,
+            after=args.after,
+            follow=args.follow,
+            interval=args.interval,
+        )
     if args.runs_command == "steer":
         return _control_request(
             args.run,
             cwd=args.cwd,
             runs_dir=args.runs_dir,
             payload={"op": "steer", "worker": args.worker, "text": " ".join(args.text)},
+            request_id=args.request_id,
         )
     if args.runs_command == "interrupt":
         payload = {"op": "interrupt"}
         if args.worker is not None:
             payload["worker"] = args.worker
-        return _control_request(args.run, cwd=args.cwd, runs_dir=args.runs_dir, payload=payload)
+        return _control_request(
+            args.run,
+            cwd=args.cwd,
+            runs_dir=args.runs_dir,
+            payload=payload,
+            request_id=args.request_id,
+        )
     if args.runs_command == "recover":
         return runs_cmd.recover(args.run, cwd=args.cwd, runs_dir=args.runs_dir)
     if args.runs_command == "redact":
@@ -201,20 +266,63 @@ def dispatch(args) -> int:
     return 2
 
 
-def _control_request(run: str, *, cwd: Path, runs_dir: Path | None, payload: Mapping[str, object]) -> int:
+def _control_request(
+    run: str,
+    *,
+    cwd: Path,
+    runs_dir: Path | None,
+    payload: Mapping[str, object],
+    request_id: str | None = None,
+) -> int:
     import sys
 
-    from .. import run_control, runs_cmd
+    from .. import run_control, run_control_journal, runs_cmd
 
     run_dir, error = runs_cmd._resolve_run_dir(run, cwd=cwd, runs_dir=runs_dir)
     if error is not None:
         print(error, file=sys.stderr)
         return 2
     assert run_dir is not None
+
+    # Legacy runs without a lifecycle journal keep the pre-#604 transport path.
+    # An explicit --request-id cannot be honored without a journal.
+    if not run_control_journal.journal_present(run_dir):
+        if request_id is not None:
+            print("error: legacy-no-journal", file=sys.stderr)
+            return 2
+        try:
+            transport = run_control.control_transport_from_run(run_dir)
+            response = run_control.send_request_with_retry(run_dir, transport, dict(payload))
+        except run_control.ControlError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        return run_control.print_control_response(response, op=str(payload["op"]))
+
+    op = str(payload["op"])
+    worker = payload.get("worker")
+    text = payload.get("text")
     try:
-        socket_path = run_control.control_transport_from_run(run_dir)
-        response = run_control.send_request_with_retry(run_dir, socket_path, dict(payload))
+        transport = run_control.control_transport_from_run(run_dir)
+
+        def _send(transport_payload: dict[str, object]) -> dict[str, object]:
+            return run_control.send_request_with_retry(run_dir, transport, transport_payload)
+
+        result = run_control_journal.execute_control_request(
+            run_dir,
+            op=op,
+            request_id=request_id,
+            worker=str(worker) if isinstance(worker, str) else None,
+            text=str(text) if isinstance(text, str) else None,
+            send=_send,
+        )
+    except run_control_journal.ControlJournalError as exc:
+        print(f"error: {exc.code}: {exc}", file=sys.stderr)
+        return 2
     except run_control.ControlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    return run_control.print_control_response(response, op=str(payload["op"]))
+
+    print(f"request_id: {result.request_id}")
+    if result.replayed:
+        print("control: replay")
+    return run_control.print_control_response(result.response, op=op)
