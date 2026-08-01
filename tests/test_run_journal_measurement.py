@@ -39,6 +39,8 @@ def test_measure_runs_returns_report_shape(tmp_path):
     for entry in per_run:
         assert isinstance(entry["journal_bytes"], int)
         assert entry["journal_bytes"] > 0
+        assert isinstance(entry["event_count"], int)
+        assert entry["event_count"] > 0
         latencies = entry["append_latencies_ns"]
         assert isinstance(latencies, list)
         assert latencies
@@ -198,3 +200,76 @@ def test_measure_runs_nested_under_outer_run_lock(tmp_path):
     assert repo_leftovers == [], f"measurement temp dirs left under repo: {repo_leftovers}"
     parent_leftovers = [path.name for path in tmp_path.iterdir() if path.name.startswith("brigade-run-journal-")]
     assert parent_leftovers == [], f"lock workspace temp dirs left under repo parent: {parent_leftovers}"
+
+
+def test_measure_volume_report_shape(tmp_path):
+    module = _load_measure_run_journal_module()
+
+    report = module.measure_volume(
+        tmp_path,
+        roster_seats=2,
+        roster_attempts_per_seat=1,
+        roster_pause_cycles=0,
+        worst_seats=2,
+        worst_attempts_per_seat=2,
+        worst_pause_cycles=1,
+    )
+
+    assert report["issue"] == 635
+    assert report["kind"] == "journal-volume"
+    assert report["bounds"]["max_journal_events"] > 0
+    assert report["bounds"]["max_journal_bytes"] > 0
+    assert {"python_version", "platform", "filesystem_type", "directory_fsync_supported"} <= set(report["environment"])
+    for key in ("representative_synthetic", "roster_sized_synthetic", "worst_case_synthetic"):
+        entry = report[key]
+        assert isinstance(entry["event_count"], int) and entry["event_count"] > 0
+        assert isinstance(entry["journal_bytes"], int) and entry["journal_bytes"] > 0
+        assert "headroom_events" in entry
+        assert "pct_events" in entry
+        assert "event_type_counts" in entry
+    assert report["representative_synthetic"]["event_count"] < report["worst_case_synthetic"]["event_count"]
+    assert report["scanned_real_runs"]["aggregate"]["runs"] == 0
+
+
+def test_scan_lifecycle_journals_reads_existing_files(tmp_path):
+    module = _load_measure_run_journal_module()
+    journal = tmp_path / "runs" / "run-a" / "events" / "lifecycle.jsonl"
+    journal.parent.mkdir(parents=True)
+    # Non-canonical lines still contribute to the volume survey via line count.
+    journal.write_text('{"event_type":"run.created"}\n{"event_type":"run.completed"}\n')
+
+    scanned = module.scan_lifecycle_journals([tmp_path])
+
+    assert scanned["aggregate"]["runs"] == 1
+    assert scanned["aggregate"]["event_count_max"] == 2
+    assert scanned["per_run"][0]["journal_bytes"] == journal.stat().st_size
+
+
+def test_cli_volume_mode_writes_report(tmp_path):
+    output = tmp_path / "out" / "volume.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--mode",
+            "volume",
+            "--worst-seats",
+            "1",
+            "--worst-attempts-per-seat",
+            "1",
+            "--worst-pause-cycles",
+            "0",
+            "--output",
+            str(output),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(output.read_text())
+    assert report["kind"] == "journal-volume"
+    assert "threshold" not in output.read_text()
+    assert "pass" not in output.read_text()
