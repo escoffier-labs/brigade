@@ -356,7 +356,7 @@ def test_validate_event_limits_unknown_key_diagnostics():
         ),
         (
             "control.failed",
-            frozenset({"op", "worker", "turn_id", "request_id", "code", "detail"}),
+            frozenset({"op", "worker", "turn_id", "request_id", "error_class", "detail_digest"}),
         ),
     ],
 )

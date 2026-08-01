@@ -769,8 +769,8 @@ def test_control_events_are_status_neutral_and_advance_chain_cursor(event_type):
             "op": "steer",
             "worker": "coder",
             "request_id": "req-1",
-            "code": "no-active-turn",
-            "detail": "no active turn",
+            "error_class": "transport_rejected",
+            "detail_digest": "a" * 64,
         }
     control = _build_event(
         2,

@@ -452,6 +452,26 @@ def is_active_run_owner(workspace: Path, run_dir: Path) -> bool:
     return _owner_matches_run(owner, run_dir.expanduser().resolve())
 
 
+def has_active_run_owner(workspace: Path, run_dir: Path) -> bool:
+    """True when any live process owns this exact run's workspace lock.
+
+    External control clients use this predicate. Unlike
+    ``is_active_run_owner``, they must not impersonate the owner process.
+    """
+    try:
+        owner = _read_lock_owner(lock_path(workspace))
+    except (OSError, RunGuardError):
+        return False
+    if owner is None:
+        return False
+    owner_pid = owner.get("pid")
+    return (
+        isinstance(owner_pid, int)
+        and _pid_is_active(owner_pid)
+        and _owner_matches_run(owner, run_dir.expanduser().resolve())
+    )
+
+
 def _quarantine_unattributable(path: Path, claimed: Path) -> None:
     quarantined = path.with_name(f".{path.name}.{uuid4().hex}.orphaned")
     try:
