@@ -1,0 +1,50 @@
+{
+  "comment": "Pinned previous-release run.json reader contract for #637. Derived from tag v0.25.0 (949d6df799347d63e5fdf643e2fea0de6a64215d), the last release tag before journal authority landed in #607. Do not edit silently: any change must update this comment and the derived_from.sources entries together.",
+  "derived_from": {
+    "tag": "v0.25.0",
+    "commit": "949d6df799347d63e5fdf643e2fea0de6a64215d",
+    "sources": [
+      {
+        "path": "src/brigade/runs_cmd.py",
+        "lines": "12-36",
+        "captures": "_NONTERMINAL_STATUSES accepted set and _read_json parse behavior (JSON object, no schema_version gate)"
+      },
+      {
+        "path": "src/brigade/run_resume.py",
+        "lines": "19-30",
+        "captures": "_NONTERMINAL_RUN_STATUSES identical accepted set"
+      },
+      {
+        "path": "src/brigade/aboyeur.py",
+        "lines": "1898-1906",
+        "captures": "writer always emits schema, task, status, and started_at on brigade.run.v1"
+      }
+    ]
+  },
+  "schema": "brigade.run.v1",
+  "required_fields": [
+    "schema",
+    "task",
+    "status",
+    "started_at"
+  ],
+  "accepted_nonterminal_statuses": [
+    "started",
+    "planning",
+    "dispatching",
+    "result-processing",
+    "synthesizing",
+    "handoff",
+    "artifact-collection",
+    "running"
+  ],
+  "inspected_fields": [
+    "task",
+    "status",
+    "started_at"
+  ],
+  "parse_behavior": {
+    "require_json_object": true,
+    "ignore_unknown_keys": true
+  }
+}
