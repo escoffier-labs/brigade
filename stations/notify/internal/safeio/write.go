@@ -19,6 +19,10 @@ import (
 // destination already occupied by a regular file, symlink, or other inode.
 var ErrExists = errors.New("destination already exists")
 
+var chmodTemp = func(tmp *os.File, mode os.FileMode) error {
+	return tmp.Chmod(mode)
+}
+
 // WriteFile publishes data at path with mode.
 //
 // Without force, publication is exclusive: a same-directory temp is fsynced
@@ -61,15 +65,16 @@ func WriteFile(path string, data []byte, mode os.FileMode, force bool) error {
 		_ = tmp.Close()
 		return fmt.Errorf("write temp for %s: %w", base, err)
 	}
+	if err := chmodTemp(tmp, mode); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp for %s: %w", base, err)
+	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("sync temp for %s: %w", base, err)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp for %s: %w", base, err)
-	}
-	if err := os.Chmod(tmpName, mode); err != nil {
-		return fmt.Errorf("chmod temp for %s: %w", base, err)
 	}
 
 	if force {
