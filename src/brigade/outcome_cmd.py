@@ -592,34 +592,57 @@ def _last_record_digest(path: Path) -> str | None:
     return _validate_completed_ledger(path)
 
 
+def _ledger_corrupt_message(line_no: int, kind: str, path: Path, *, detail: str = "") -> str:
+    """Bounded capture/append error that points operators at ``outcome repair``."""
+    suffix = f" ({detail})" if detail else ""
+    return f"ledger corrupt at line {line_no}: {kind}{suffix}; run `brigade outcome repair --operator-confirm`: {path}"
+
+
 def _validate_completed_ledger_bytes(raw: bytes, path: Path) -> str | None:
     """Validate every completed ledger row in ``raw`` and return the last signed digest."""
     if not raw:
         return None
     if not raw.endswith(b"\n"):
-        raise OutcomeLedgerError(f"outcome ledger has incomplete trailing record: {path}")
+        raise OutcomeLedgerError(
+            _ledger_corrupt_message(
+                raw.count(b"\n") + 1,
+                "incomplete trailing record",
+                path,
+            )
+        )
     previous_digest: str | None = None
     for line_no, line in enumerate(raw.splitlines(), start=1):
         if not line.strip():
-            raise OutcomeLedgerError(f"outcome ledger line {line_no} is empty: {path}")
+            raise OutcomeLedgerError(_ledger_corrupt_message(line_no, "empty", path, detail="empty ledger line"))
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise OutcomeLedgerError(f"outcome ledger line {line_no} is not valid JSON: {path}: {exc}") from exc
+            raise OutcomeLedgerError(
+                _ledger_corrupt_message(line_no, "is not valid JSON", path, detail=str(exc))
+            ) from exc
         if not isinstance(row, dict):
-            raise OutcomeLedgerError(f"outcome ledger line {line_no} is not an object: {path}")
+            raise OutcomeLedgerError(
+                _ledger_corrupt_message(line_no, "is not an object", path, detail="ledger line is not an object")
+            )
         recorded_digest = row.get("digest")
         if not isinstance(recorded_digest, str) or not recorded_digest:
             continue
         recomputed = localio.canonical_json_digest(row, exclude_keys={"digest"})
         if recomputed != recorded_digest:
-            raise OutcomeLedgerError(f"outcome ledger line {line_no} digest mismatch: {path}")
+            raise OutcomeLedgerError(_ledger_corrupt_message(line_no, "digest mismatch", path))
         if "prev_digest" not in row:
             previous_digest = recorded_digest
             continue
         actual_prev = row.get("prev_digest")
         if actual_prev != previous_digest:
-            raise OutcomeLedgerError(f"outcome ledger line {line_no} digest chain break: {path}")
+            raise OutcomeLedgerError(
+                _ledger_corrupt_message(
+                    line_no,
+                    "digest chain break",
+                    path,
+                    detail=f"expected prev_digest={previous_digest!r}, actual={actual_prev!r}",
+                )
+            )
         previous_digest = recorded_digest
     return previous_digest
 
@@ -1579,7 +1602,11 @@ def capture(
         route=route,
         route_fingerprint=route_fingerprint(route),
     )
-    append_records(target, [record])
+    try:
+        append_records(target, [record])
+    except OutcomeLedgerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if json_output:
         print(json.dumps({"target": str(target), "record": _record_payload(record)}, indent=2, sort_keys=True))
         return 0
@@ -2054,9 +2081,43 @@ def rank(
 
 
 def doctor(*, target: Path, json_output: bool = False) -> int:
-    from . import receipts_cmd
+    from . import outcome_repair, receipts_cmd
 
-    return receipts_cmd.doctor(target=target, json_output=json_output)
+    target = target.expanduser().resolve()
+    payload = receipts_cmd.verify_payload(target)
+    break_info = outcome_repair.diagnose_completed_ledger(_records_path(target))
+    completed_ledger: dict[str, Any]
+    if break_info is None:
+        completed_ledger = {"status": "ok", "path": str(_records_path(target))}
+    else:
+        completed_ledger = {
+            "status": "corrupt",
+            "path": str(break_info.path),
+            "kind": break_info.kind,
+            "line_no": break_info.line_no,
+            "expected_prev": break_info.expected_prev,
+            "actual_prev": break_info.actual_prev,
+            "suspected_cause": break_info.suspected_cause,
+            "invalid_segment_start": break_info.invalid_segment_start,
+            "invalid_segment_end": break_info.invalid_segment_end,
+            "repair_command": "brigade outcome repair --operator-confirm",
+        }
+    payload["completed_ledger"] = completed_ledger
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"outcome doctor: {target}")
+    print(f"receipts: {receipts_cmd.summary_detail(target)}")
+    if break_info is None:
+        print("completed_ledger: ok")
+    else:
+        print(
+            f"completed_ledger: CORRUPT line={break_info.line_no} kind={break_info.kind} "
+            f"expected_prev={break_info.expected_prev!r} actual_prev={break_info.actual_prev!r}"
+        )
+        print(f"suspected_cause: {break_info.suspected_cause}")
+        print("repair: brigade outcome repair --operator-confirm")
+    return 0
 
 
 def record(
@@ -2089,7 +2150,11 @@ def record(
         context=manifest,
         capability_fingerprint=capability_fingerprint(manifest),
     )
-    append_records(target, [new_record])
+    try:
+        append_records(target, [new_record])
+    except OutcomeLedgerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if json_output:
         print(json.dumps({"target": str(target), "record": _record_payload(new_record)}, indent=2, sort_keys=True))
         return 0

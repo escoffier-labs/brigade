@@ -72,6 +72,19 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_doctor.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_doctor.set_defaults(func=_dispatch_doctor)
 
+    p_repair = outcome_sub.add_parser(
+        "repair",
+        help="Quarantine a broken completed outcome ledger and re-chain from the last valid record.",
+    )
+    p_repair.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_repair.add_argument(
+        "--operator-confirm",
+        action="store_true",
+        help="Required confirmation; repair never runs silently.",
+    )
+    p_repair.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
+    p_repair.set_defaults(func=_dispatch_repair)
+
     p_rebuild = outcome_sub.add_parser(
         "rebuild-status", help="Rebuild status.json from decision receipts and report any drift."
     )
@@ -197,6 +210,16 @@ def _dispatch_doctor(args) -> int:
     from .. import outcome_cmd
 
     return outcome_cmd.doctor(target=args.target, json_output=args.json)
+
+
+def _dispatch_repair(args) -> int:
+    from .. import outcome_repair
+
+    return outcome_repair.repair(
+        target=args.target,
+        operator_confirmed=args.operator_confirm,
+        json_output=args.json,
+    )
 
 
 def _dispatch_rebuild_status(args) -> int:
