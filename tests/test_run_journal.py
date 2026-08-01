@@ -1976,7 +1976,7 @@ def test_append_event_fcntl_lock_serializes_two_subprocess_writers(tmp_path):
             stdout, stderr = proc.communicate(timeout=5.0)
             raise AssertionError(
                 f"race barrier failed; child {name} rc={proc.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-            )
+            ) from None
 
     child_results = {}
     for name, proc in children.items():
@@ -1996,7 +1996,7 @@ def test_append_event_fcntl_lock_serializes_two_subprocess_writers(tmp_path):
         f"{len(sequences)} events (duplicates: {sorted({s for s in sequences if sequences.count(s) > 1})})\n"
         f"child outcomes: {json.dumps(child_results)}"
     )
-    for previous, current in zip(report.events, report.events[1:]):
+    for previous, current in zip(report.events, report.events[1:], strict=False):
         assert current.previous_digest == previous.event_digest
 
 

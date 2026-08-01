@@ -31,6 +31,11 @@ Standard library only. Brigade is zero-runtime-dependency.
 from __future__ import annotations
 
 import errno
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows does not provide flock.
+    fcntl = None  # type: ignore[assignment]
 import hashlib
 import json
 import os
@@ -110,8 +115,12 @@ def _defer_sigterm() -> Iterator[None]:
                 raise RunJournalError(_bound("SIGTERM mask restoration failed")) from exc
 
 
+def _journal_lock_path(journal_path: Path) -> Path:
+    return journal_path.with_name(f"{journal_path.name}.lock")
+
+
 @contextmanager
-def _append_critical_section() -> Iterator[None]:
+def _append_critical_section(journal_path: Path | None = None) -> Iterator[None]:
     """Process-wide append guard with per-thread SIGTERM deferral.
 
     ``pthread_sigmask`` is thread-local: a worker inside ``append_event`` does
@@ -123,6 +132,15 @@ def _append_critical_section() -> Iterator[None]:
     free. On hosts without ``pthread_sigmask``, same-thread recursive entry is
     rejected with a bounded error instead of deadlocking on the lock.
     """
+    resolved_journal = Path(journal_path).absolute() if journal_path is not None else None
+    if (
+        resolved_journal is not None
+        and getattr(_APPEND_TLS, "journal_path", None) == resolved_journal
+        and getattr(_APPEND_TLS, "allow_journal_reentry", False)
+    ):
+        yield
+        return
+
     with _defer_sigterm():
         if not _HAS_PTHREAD_SIGMASK:
             if getattr(_APPEND_TLS, "in_append", False):
@@ -130,10 +148,47 @@ def _append_critical_section() -> Iterator[None]:
             _APPEND_TLS.in_append = True
         try:
             with _APPEND_LOCK:
-                yield
+                lock_fd: int | None = None
+                primary: BaseException | None = None
+                try:
+                    if resolved_journal is not None and fcntl is not None:
+                        lock_path = _journal_lock_path(resolved_journal)
+                        lock_fd = _open_nofollow(lock_path, os.O_RDWR | os.O_CREAT, _FILE_MODE)
+                        _chmod_fd_or_path(lock_fd, lock_path, _FILE_MODE)
+                        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                    if resolved_journal is not None:
+                        _APPEND_TLS.journal_path = resolved_journal
+                    try:
+                        yield
+                    except BaseException as exc:
+                        primary = exc
+                        raise
+                finally:
+                    if resolved_journal is not None:
+                        _APPEND_TLS.journal_path = None
+                    if lock_fd is not None:
+                        try:
+                            if fcntl is not None:
+                                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                        except OSError as exc:
+                            if primary is None:
+                                raise RunJournalError(_bound("journal lock release failed")) from exc
+                        finally:
+                            os.close(lock_fd)
         finally:
             if not _HAS_PTHREAD_SIGMASK:
                 _APPEND_TLS.in_append = False
+
+
+@contextmanager
+def journal_mutation(journal_path: Path) -> Iterator[None]:
+    """Serialize a journal read-verify-mutate window across processes."""
+    with _append_critical_section(Path(journal_path)):
+        _APPEND_TLS.allow_journal_reentry = True
+        try:
+            yield
+        finally:
+            _APPEND_TLS.allow_journal_reentry = False
 
 
 class RunJournalError(RuntimeError):
@@ -672,7 +727,7 @@ def lookup_idempotent_event(
     """Return an exact replay or fail on conflict without mutating the journal."""
     journal_path = Path(journal_path)
     rd = run_events.request_digest(event_type=event_type, payload=payload, idempotency_key=idempotency_key)
-    with _append_critical_section():
+    with _append_critical_section(journal_path):
         _sequence, _digest, index, partial_tail, _journal_bytes = _read_tail_state(journal_path)
         if partial_tail is not None:
             raise PartialTailError(_bound("journal ends in a partial line; run recover_partial_tail before appending"))
@@ -712,7 +767,7 @@ def append_event(
 
     rd = run_events.request_digest(event_type=event_type, payload=payload, idempotency_key=idempotency_key)
 
-    with _append_critical_section():
+    with _append_critical_section(journal_path):
         last_sequence, last_digest, index, partial_tail, journal_bytes = _read_tail_state(journal_path)
 
         if partial_tail is not None:
@@ -923,8 +978,11 @@ def recover_partial_tail(journal_path: Path, quarantine_dir: Path) -> RecoveryRe
     and ``quarantine_path`` is None. Normal readers must never call this; it
     is the only API that mutates the journal body.
     """
-    with _append_critical_section():
-        return _recover_partial_tail_locked(Path(journal_path), Path(quarantine_dir))
+    journal_path = Path(journal_path)
+    if not journal_path.exists():
+        raise RunJournalError(_bound(f"journal path does not exist: {journal_path.name}"))
+    with _append_critical_section(journal_path):
+        return _recover_partial_tail_locked(journal_path, Path(quarantine_dir))
 
 
 def _recover_partial_tail_locked(journal_path: Path, quarantine_dir: Path) -> RecoveryReport:

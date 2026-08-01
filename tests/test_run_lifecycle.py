@@ -212,6 +212,7 @@ def test_no_journal_file_until_lock_held(enabled, tmp_path):
     assert _journal_path(run_dir).is_file()
     assert sorted(path.name for path in (run_dir / "events").iterdir()) == [
         "lifecycle.jsonl",
+        "lifecycle.jsonl.lock",
         "recovery-checkpoints",
         "shadow-comparison.json",
     ]

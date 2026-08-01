@@ -1421,59 +1421,60 @@ def _refresh_chained_anchors(
 ) -> str:
     """Re-chain anchor payload hashes after a record lifecycle update."""
     journal_path = run_dir / "events" / "lifecycle.jsonl"
-    events = _verified_events(journal_path, category="journal")
-    records, states, record_digests = _load_operation_inventory(
-        run_dir / "events" / "redactions", run_dir.name, resumable_operation_id=resumable_operation_id
-    )
-    _validate_chained_anchors(
-        events,
-        records,
-        record_digests,
-        states,
-        resumable_operation_id=resumable_operation_id,
-    )
-    rewritten: list[run_journal.RunEvent] = []
-    previous_digest: str | None = None
-    for event in events:
-        payload = (
-            _redaction_anchor_payload(
-                records[event.payload["operation_id"]],
-                record_sha256=record_digests[event.payload["operation_id"]],
+    with run_journal.journal_mutation(journal_path):
+        events = _verified_events(journal_path, category="journal")
+        records, states, record_digests = _load_operation_inventory(
+            run_dir / "events" / "redactions", run_dir.name, resumable_operation_id=resumable_operation_id
+        )
+        _validate_chained_anchors(
+            events,
+            records,
+            record_digests,
+            states,
+            resumable_operation_id=resumable_operation_id,
+        )
+        rewritten: list[run_journal.RunEvent] = []
+        previous_digest: str | None = None
+        for event in events:
+            payload = (
+                _redaction_anchor_payload(
+                    records[event.payload["operation_id"]],
+                    record_sha256=record_digests[event.payload["operation_id"]],
+                )
+                if event.event_type == "run.redaction.recorded"
+                else event.payload
             )
-            if event.event_type == "run.redaction.recorded"
-            else event.payload
-        )
-        envelope = run_events.build_event(
-            run_id=event.run_id,
-            sequence=event.sequence,
-            event_type=event.event_type,
-            payload=payload,
-            idempotency_key=event.idempotency_key,
-            recorded_at=event.recorded_at,
-            previous_digest=previous_digest,
-        )
-        rewritten_event = run_journal.RunEvent(
-            schema=envelope["schema"],
-            schema_version=envelope["schema_version"],
-            event_id=envelope["event_id"],
-            run_id=envelope["run_id"],
-            sequence=envelope["sequence"],
-            event_type=envelope["event_type"],
-            recorded_at=envelope["recorded_at"],
-            idempotency_key=envelope["idempotency_key"],
-            request_digest=envelope["request_digest"],
-            previous_digest=envelope["previous_digest"],
-            event_digest=envelope["event_digest"],
-            payload=dict(envelope["payload"]),
-        )
-        rewritten.append(rewritten_event)
-        previous_digest = rewritten_event.event_digest
-    data = _canonical_event_bytes(rewritten)
-    _assert_active_owner(workspace, run_dir)
-    _replace_journal(journal_path, data)
-    snapshot = _load_json_object(run_dir / "run.json", limit=MAX_RUN_JSON_BYTES, category="run projection")
-    _replace_projection(run_dir, _projection(snapshot, rewritten))
-    return _digest(data)
+            envelope = run_events.build_event(
+                run_id=event.run_id,
+                sequence=event.sequence,
+                event_type=event.event_type,
+                payload=payload,
+                idempotency_key=event.idempotency_key,
+                recorded_at=event.recorded_at,
+                previous_digest=previous_digest,
+            )
+            rewritten_event = run_journal.RunEvent(
+                schema=envelope["schema"],
+                schema_version=envelope["schema_version"],
+                event_id=envelope["event_id"],
+                run_id=envelope["run_id"],
+                sequence=envelope["sequence"],
+                event_type=envelope["event_type"],
+                recorded_at=envelope["recorded_at"],
+                idempotency_key=envelope["idempotency_key"],
+                request_digest=envelope["request_digest"],
+                previous_digest=envelope["previous_digest"],
+                event_digest=envelope["event_digest"],
+                payload=dict(envelope["payload"]),
+            )
+            rewritten.append(rewritten_event)
+            previous_digest = rewritten_event.event_digest
+        data = _canonical_event_bytes(rewritten)
+        _assert_active_owner(workspace, run_dir)
+        _replace_journal(journal_path, data)
+        snapshot = _load_json_object(run_dir / "run.json", limit=MAX_RUN_JSON_BYTES, category="run projection")
+        _replace_projection(run_dir, _projection(snapshot, rewritten))
+        return _digest(data)
 
 
 def _validate_lineage_graph(records: Mapping[str, Mapping[str, Any]]) -> None:
@@ -2065,7 +2066,10 @@ def redact_journal(
     _probe_secure_transaction_directory(resolved_run_dir)
 
     with _PROCESS_LOCK:
-        with _exclusive_redaction_lock(resolved_run_dir) as (snapshot, workspace):
+        with (
+            _exclusive_redaction_lock(resolved_run_dir) as (snapshot, workspace),
+            run_journal.journal_mutation(resolved_run_dir / "events" / "lifecycle.jsonl"),
+        ):
             journal_path = resolved_run_dir / "events" / "lifecycle.jsonl"
             events = _verified_events(journal_path, category="journal")
             if end > len(events):

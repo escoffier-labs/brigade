@@ -1,6 +1,6 @@
 # Issue #651 implementation plan: cross-process journal serialization and safe live control
 
-Status: planned. This plan applies on top of #641, which introduced lifecycle-journal-backed control requests. It is intentionally ordered so the journal serialization primitive lands before callers depend on it.
+Status: implemented. This plan applies on top of #641, which introduced lifecycle-journal-backed control requests. It is intentionally ordered so the journal serialization primitive lands before callers depend on it.
 
 ## Scope and invariants
 

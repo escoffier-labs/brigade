@@ -77,6 +77,7 @@ import os
 import signal
 import stat
 import threading
+import time
 from contextlib import contextmanager
 from collections.abc import Mapping
 from collections.abc import Iterator
@@ -93,6 +94,7 @@ _IDEMPOTENCY_PREFIX = "lifecycle"
 _IO_CATEGORY = "lifecycle journal I/O failure"
 _CANONICALIZATION_CATEGORY = "lifecycle journal canonicalization failure"
 _CHAIN_CATEGORY = "lifecycle journal is not derivable"
+_MAX_OWNER_APPEND_ATTEMPTS = 4
 
 # Map of current run.json status values to the allowlisted run_event.v1
 # event_type that records that transition. Statuses without a mapping are
@@ -431,13 +433,12 @@ def record_dispatch_fact(
                     {"event_type": event_type, "seat": seat, "attempt": attempt, "pairing_key": pairing_key}
                 )
             ).hexdigest()
-            event = run_journal.append_event(
+            event = _append_owner_event(
                 journal_path,
                 run_id=_run_id_from_dir(run_dir),
                 event_type=event_type,
                 payload={"seat": seat, "attempt": attempt, "detail": event_type.rsplit(".", 1)[-1]},
                 idempotency_key=f"dispatch:{key_digest[:32]}",
-                expected_previous_sequence=report.events[-1].sequence if report.events else 0,
             )
             run_shadow.record_shadow_comparison(run_dir, snapshot_obj)
             return event
@@ -533,6 +534,37 @@ def _bound_journal_failure(exc: BaseException) -> LifecycleJournalError:
     if isinstance(exc, OSError):
         return LifecycleJournalError(f"{_IO_CATEGORY} ({type(exc).__name__})")
     return LifecycleJournalError(run_events._bound(str(exc)))
+
+
+def _append_owner_event(
+    journal_path: Path,
+    *,
+    run_id: str,
+    event_type: str,
+    payload: Mapping[str, Any],
+    idempotency_key: str,
+) -> run_journal.RunEvent:
+    """Append an owner event, retrying only an externally-stale tail."""
+    last_stale: run_journal.StaleSequenceError | None = None
+    for attempt in range(_MAX_OWNER_APPEND_ATTEMPTS):
+        report = run_journal.read_journal(journal_path)
+        if report.partial_tail is not None or report.chain_errors:
+            raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
+        try:
+            return run_journal.append_event(
+                journal_path,
+                run_id=run_id,
+                event_type=event_type,
+                payload=dict(payload),
+                idempotency_key=idempotency_key,
+                expected_previous_sequence=report.events[-1].sequence if report.events else 0,
+            )
+        except run_journal.StaleSequenceError as exc:
+            last_stale = exc
+            if attempt + 1 == _MAX_OWNER_APPEND_ATTEMPTS:
+                break
+            time.sleep(0.01 * 2**attempt)
+    raise LifecycleJournalError("lifecycle_append_stale_exhausted") from last_stale
 
 
 def prepare_lifecycle_journal(
@@ -639,13 +671,12 @@ def record_lifecycle_event(
             report = run_journal.read_journal(journal_path)
             if report.partial_tail is not None or report.chain_errors:
                 raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
-            event = run_journal.append_event(
+            event = _append_owner_event(
                 journal_path,
                 run_id=run_id,
                 event_type=event_type,
                 payload=dict(payload),
                 idempotency_key=idempotency_key,
-                expected_previous_sequence=report.events[-1].sequence if report.events else 0,
             )
             run_shadow.record_shadow_comparison(run_dir, snapshot_obj)
             return event
@@ -753,13 +784,12 @@ def record_lifecycle_transition(
             )
         ).hexdigest()
         idempotency_key = f"{_IDEMPOTENCY_PREFIX}:{key_digest[:32]}"
-        return run_journal.append_event(
+        return _append_owner_event(
             journal_path,
             run_id=run_id,
             event_type=event_type,
             payload=payload,
             idempotency_key=idempotency_key,
-            expected_previous_sequence=report.events[-1].sequence if report.events else 0,
         )
     except run_journal.RunJournalError as exc:
         raise _bound_journal_failure(exc) from exc

@@ -816,10 +816,7 @@ def test_concurrent_same_request_id_sends_once(tmp_path, monkeypatch):
     losers = [
         outcome
         for outcome in outcomes.values()
-        if (
-            isinstance(outcome, run_control_journal.ControlResult)
-            and outcome.replayed is True
-        )
+        if (isinstance(outcome, run_control_journal.ControlResult) and outcome.replayed is True)
         or (isinstance(outcome, ControlJournalError) and outcome.code == "indeterminate")
     ]
     assert len(losers) == 1

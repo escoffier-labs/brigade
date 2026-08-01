@@ -121,8 +121,9 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     # steering text, model output, or provider bodies.
     "control.requested": frozenset({"op", "worker", "text_digest", "turn_id", "request_id"}),
     "control.observed": frozenset({"op", "worker", "turn_id", "request_id", "detail"}),
-    "control.failed": frozenset({"op", "worker", "turn_id", "request_id", "code", "detail"}),
+    "control.failed": frozenset({"op", "worker", "turn_id", "request_id", "error_class", "detail_digest"}),
 }
+CONTROL_FAILURE_CLASSES = frozenset({"transport_exception", "transport_rejected", "transport_protocol_error"})
 APPROVAL_DECISION_STATES = frozenset({"pending", "approved", "rejected", "held", "consumed"})
 APPROVAL_DECISION_EVENT_STATES = {
     "approval.granted": "approved",
@@ -346,6 +347,12 @@ def _validate_payload(event_type: str, payload: Any) -> None:
     expected_decision = APPROVAL_DECISION_EVENT_STATES.get(event_type)
     if expected_decision is not None and payload.get("decision_state") != expected_decision:
         raise CanonicalizationError(_bound(f"{event_type} requires decision_state {expected_decision!r}"))
+    if event_type == "control.failed":
+        if payload.get("error_class") not in CONTROL_FAILURE_CLASSES:
+            raise CanonicalizationError("control.failed error_class is invalid")
+        detail_digest = payload.get("detail_digest")
+        if not isinstance(detail_digest, str) or not _HEX64.fullmatch(detail_digest):
+            raise CanonicalizationError("control.failed detail_digest is invalid")
 
 
 def validate_event(env: Any) -> list[str]:
