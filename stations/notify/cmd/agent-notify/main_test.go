@@ -422,6 +422,87 @@ func TestRun_InitWritesSampleConfig(t *testing.T) {
 	}
 }
 
+func TestRun_InitRefusesExistingWithoutForce(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "agent-notify", "config.toml")
+	code, _, stderr := runMain(t, []string{"agent-notify", "init", "--config", cfgPath}, "", nil)
+	if code != 0 {
+		t.Fatalf("first init exit = %d, stderr = %s", code, stderr)
+	}
+	code, _, stderr = runMain(t, []string{"agent-notify", "init", "--config", cfgPath}, "", nil)
+	if code != 2 {
+		t.Fatalf("second init exit = %d, want 2 (stderr=%s)", code, stderr)
+	}
+	if !strings.Contains(stderr, cfgPath) || !strings.Contains(stderr, "use --force") {
+		t.Fatalf("stderr should name refused target and mention --force: %s", stderr)
+	}
+	if strings.Contains(stderr, "DISCORD") || strings.Contains(stderr, "TOKEN") {
+		t.Fatalf("stderr leaked secret-looking material: %s", stderr)
+	}
+}
+
+func TestRun_InitSymlinkCannotRedirectWrite(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.txt")
+	if err := os.WriteFile(victim, []byte("KEEP\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.Symlink(victim, cfgPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	code, _, stderr := runMain(t, []string{"agent-notify", "init", "--config", cfgPath}, "", nil)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (stderr=%s)", code, stderr)
+	}
+	if !strings.Contains(stderr, cfgPath) {
+		t.Fatalf("stderr should identify refused target: %s", stderr)
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "KEEP\n" {
+		t.Fatalf("victim overwritten via symlink: %q", got)
+	}
+}
+
+func TestRun_InitForceReplacesSymlinkWithoutTouchingTarget(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.txt")
+	if err := os.WriteFile(victim, []byte("KEEP\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.Symlink(victim, cfgPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	code, _, stderr := runMain(t, []string{"agent-notify", "init", "--force", "--config", cfgPath}, "", nil)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	fi, err := os.Lstat(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("config path still a symlink after --force")
+	}
+	body, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "[profiles.agent-stop]") {
+		t.Fatalf("sample config missing after force: %s", body)
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "KEEP\n" {
+		t.Fatalf("victim overwritten via --force symlink replace: %q", got)
+	}
+}
+
 func TestRun_DoctorJSONReportsMissingConfigAsUnconfigured(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.toml")
 	for _, k := range []string{"DISCORD_WEBHOOK_URL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "SIGNAL_CLI_URL", "SIGNAL_FROM", "SIGNAL_TO"} {

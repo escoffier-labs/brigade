@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 	"github.com/escoffier-labs/agent-notify/internal/channels"
 	"github.com/escoffier-labs/agent-notify/internal/config"
 	"github.com/escoffier-labs/agent-notify/internal/router"
+	"github.com/escoffier-labs/agent-notify/internal/safeio"
 )
 
 const (
@@ -170,15 +172,15 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "[agent-notify] config path is empty")
 		return exitConfig
 	}
-	if _, err := os.Stat(*configPath); err == nil && !*force {
-		fmt.Fprintf(stderr, "[agent-notify] config already exists: %s (use --force)\n", *configPath)
-		return exitConfig
-	}
 	if err := os.MkdirAll(filepath.Dir(*configPath), 0o700); err != nil {
 		fmt.Fprintf(stderr, "[agent-notify] create config dir: %v\n", err)
 		return exitConfig
 	}
-	if err := os.WriteFile(*configPath, []byte(sampleConfig()), 0o600); err != nil {
+	if err := safeio.WriteFile(*configPath, []byte(sampleConfig()), 0o600, *force); err != nil {
+		if errors.Is(err, safeio.ErrExists) {
+			fmt.Fprintf(stderr, "[agent-notify] config already exists: %s (use --force)\n", *configPath)
+			return exitConfig
+		}
 		fmt.Fprintf(stderr, "[agent-notify] write config: %v\n", err)
 		return exitConfig
 	}
