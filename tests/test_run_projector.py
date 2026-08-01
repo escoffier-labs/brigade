@@ -747,3 +747,40 @@ def test_artifact_collection_started_derives_artifact_collection():
     )
     assert projection.status == "artifact-collection"
     assert projection.snapshot["status"] == "artifact-collection"
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["control.requested", "control.observed", "control.failed"],
+)
+def test_control_events_are_status_neutral_and_advance_chain_cursor(event_type):
+    created = _build_event(1, "run.created", {"status": "started"}, "create-1", RECORDED_AT, None)
+    if event_type == "control.requested":
+        payload = {
+            "op": "steer",
+            "worker": "coder",
+            "text_digest": "b" * 64,
+            "request_id": "req-1",
+        }
+    elif event_type == "control.observed":
+        payload = {"op": "steer", "worker": "coder", "request_id": "req-1", "detail": "ok"}
+    else:
+        payload = {
+            "op": "steer",
+            "worker": "coder",
+            "request_id": "req-1",
+            "code": "no-active-turn",
+            "detail": "no active turn",
+        }
+    control = _build_event(
+        2,
+        event_type,
+        payload,
+        f"{event_type}:req-1",
+        "2026-07-27T15:30:46.000000Z",
+        created["event_digest"],
+    )
+    projection = project_run_snapshot(_minimal_base_snapshot(), [created, control], journal_present=True)
+    assert projection.status == "started"
+    assert projection.last_sequence == 2
+    assert projection.last_event_digest == control["event_digest"]
