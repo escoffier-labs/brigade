@@ -1796,3 +1796,88 @@ def test_heredoc_scanner_is_quote_aware_and_queues_delimiters(tmp_path: Path):
     stripped_bs = runtime._strip_heredoc_bodies(backslash)
     assert stripped_bs == "cat <<\\END\necho done"
     assert "pytest" not in stripped_bs
+
+
+def test_posttooluse_read_skill_sets_exercised_artifact(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    skill = target / ".claude" / "skills" / "taste" / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_text("# taste\n")
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            tool_name="Read",
+            tool_input={"file_path": str(skill)},
+        ),
+    )
+    state = runtime.read_session_state(target, "session-1")
+    assert state is not None
+    assert state["exercised_artifact_id"] == "taste"
+
+
+def test_posttooluse_read_external_skill_does_not_set_exercised_artifact(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    reference_skill = tmp_path / "other-repo" / ".claude" / "skills" / "reference-only" / "SKILL.md"
+    reference_skill.parent.mkdir(parents=True)
+    reference_skill.write_text("# reference-only\n")
+
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            tool_name="Read",
+            tool_input={"file_path": str(reference_skill)},
+        ),
+    )
+
+    state = runtime.read_session_state(target, "session-1")
+    assert state is not None
+    assert "exercised_artifact_id" not in state
+
+
+def test_verify_replacement_uses_session_exercised_artifact(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    skill = target / ".claude" / "skills" / "taste" / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_text("# taste\n")
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            tool_name="Read",
+            tool_input={"file_path": str(skill)},
+        ),
+    )
+    result = runtime.handle_payload(
+        "PreToolUse",
+        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"}),
+    )
+    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "--capture taste" in reason
+    assert "--capture brigade-work" not in reason
+
+
+def test_verify_replacement_falls_back_to_brigade_work(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    result = runtime.handle_payload(
+        "PreToolUse",
+        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"}),
+    )
+    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "--capture brigade-work" in reason
+
+
+def test_posttooluse_routed_verify_records_capture_artifact(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    command = 'brigade work verify run --target . --command "true" --capture ultra-work-scout'
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(target, "PostToolUse", tool_name="Bash", tool_input={"command": command}),
+    )
+    state = runtime.read_session_state(target, "session-1")
+    assert state is not None
+    assert state["exercised_artifact_id"] == "ultra-work-scout"

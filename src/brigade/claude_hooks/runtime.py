@@ -1614,11 +1614,97 @@ def _session_fingerprint(session_id: str) -> str:
     return localio.stable_hash({"claude_session_id": session_id})
 
 
-def _verify_replacement(target: Path, command: str, session_fingerprint: str) -> str:
+def _skill_id_from_skill_path(target: Path, raw_path: object) -> str | None:
+    """Return an installed target skill id when ``raw_path`` names its ``SKILL.md``."""
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = target / path
+    parts = path.parts
+    for index, part in enumerate(parts):
+        if part == "skills" and index + 2 < len(parts) and parts[index + 2] == "SKILL.md":
+            skill_id = parts[index + 1]
+            if skill_id and skill_id not in {".", ".."}:
+                from .. import outcome_cmd
+
+                if outcome_cmd._artifact_known(target, skill_id, "skill"):
+                    return skill_id
+    return None
+
+
+def _parse_capture_flag(command: object) -> str | None:
+    """Extract ``--capture <id>`` from a verify command string when present."""
+    if not isinstance(command, str) or not command.strip():
+        return None
+    try:
+        tokens = shlex.split(command, posix=os.name != "nt")
+    except ValueError:
+        return None
+    for index, token in enumerate(tokens):
+        if token == "--capture" and index + 1 < len(tokens):
+            value = tokens[index + 1]
+            if value and not value.startswith("-"):
+                return value
+        if token.startswith("--capture="):
+            value = token.split("=", 1)[1]
+            if value:
+                return value
+    return None
+
+
+def _record_exercised_artifact(state: dict[str, Any], artifact_id: str | None, *, kind: str = "skill") -> bool:
+    """Persist the most specific non-generic exercised artifact on session state."""
+    from .. import outcome_cmd
+
+    if not isinstance(artifact_id, str):
+        return False
+    trimmed = artifact_id.strip()
+    if not trimmed:
+        return False
+    current = state.get("exercised_artifact_id")
+    if (
+        trimmed == outcome_cmd.DEFAULT_CAPTURE_ARTIFACT_ID
+        and isinstance(current, str)
+        and current.strip()
+        and current.strip() != outcome_cmd.DEFAULT_CAPTURE_ARTIFACT_ID
+    ):
+        return False
+    if current == trimmed and state.get("exercised_artifact_kind") == kind:
+        return False
+    state["exercised_artifact_id"] = trimmed
+    state["exercised_artifact_kind"] = kind
+    return True
+
+
+def exercised_artifact_for_fingerprint(target: Path, session_fingerprint: str) -> str | None:
+    """Look up an exercised artifact id for a Claude session fingerprint."""
+    for state in iter_session_states(target, limit=MAX_RECENT_SESSION_STATES):
+        if state.get("session_fingerprint") != session_fingerprint:
+            continue
+        artifact_id = state.get("exercised_artifact_id")
+        if isinstance(artifact_id, str) and artifact_id.strip():
+            return artifact_id.strip()
+    return None
+
+
+def _verify_replacement(
+    target: Path,
+    command: str,
+    session_fingerprint: str,
+    *,
+    capture_artifact_id: str | None = None,
+) -> str:
+    from .. import outcome_cmd
+
+    artifact_id = outcome_cmd.resolve_capture_artifact_id(
+        capture_artifact_id,
+        exercised_artifact_for_fingerprint(target, session_fingerprint),
+    )
     return (
         f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} "
         f"brigade work verify run --target {shlex.quote(str(target))} "
-        f"--command {shlex.quote(command)} --capture brigade-work"
+        f"--command {shlex.quote(command)} --capture {shlex.quote(artifact_id)}"
     )
 
 
@@ -1684,6 +1770,11 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
     session_repos = payload.get("session_repos")
     if isinstance(session_repos, list) and all(isinstance(item, str) for item in session_repos):
         normalized["session_repos"] = list(session_repos)
+    exercised = payload.get("exercised_artifact_id")
+    if isinstance(exercised, str) and exercised.strip():
+        normalized["exercised_artifact_id"] = exercised.strip()
+        kind = payload.get("exercised_artifact_kind")
+        normalized["exercised_artifact_kind"] = kind if isinstance(kind, str) and kind.strip() else "skill"
     return normalized
 
 
@@ -1769,17 +1860,24 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             return None
         state["verify_denied_count"] = int(state.get("verify_denied_count") or 0) + 1
         write_session_state(target, session_id, state)
+        capture_artifact_id = state.get("exercised_artifact_id")
+        if not isinstance(capture_artifact_id, str):
+            capture_artifact_id = None
         if _has_unsupported_verifier_structure(str(command)):
+            from .. import outcome_cmd
+
+            capture_id = outcome_cmd.resolve_capture_artifact_id(capture_artifact_id)
             reason = (
                 "Route verification through Brigade so failed, rejected, and passing results create receipts.\n"
                 "Split shell grouping, command substitution, pipelines, redirection, or complex directory changes "
-                "from the verifier, then run that verifier with `brigade work verify run --capture brigade-work`."
+                f"from the verifier, then run that verifier with `brigade work verify run --capture {capture_id}`."
             )
         else:
             replacement = _verify_replacement(
                 target,
                 _first_verifier_command(str(command)),
                 str(state["session_fingerprint"]),
+                capture_artifact_id=capture_artifact_id,
             )
             reason = (
                 "Route verification through Brigade so failed, rejected, and passing results create receipts.\n"
@@ -1798,7 +1896,14 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         raw_post_tool_input = payload.get("tool_input")
         post_tool_input: dict[str, Any] = raw_post_tool_input if isinstance(raw_post_tool_input, dict) else {}
         command = post_tool_input.get("command")
+        if tool_name == "Read":
+            skill_id = _skill_id_from_skill_path(target, post_tool_input.get("file_path"))
+            if _record_exercised_artifact(state, skill_id):
+                write_session_state(target, session_id, state)
+            return None
         if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):
+            if _is_routed_verify(command):
+                _record_exercised_artifact(state, _parse_capture_flag(command))
             state.pop("pending_bash_fingerprint", None)
             state.pop("pending_bash_started_at", None)
             write_session_state(target, session_id, state)
@@ -1841,9 +1946,16 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         tool_input = raw_tool_input if isinstance(raw_tool_input, dict) else {}
         command = tool_input.get("command")
         if payload.get("tool_name") == "Bash" and (is_raw_verification(command) or _is_routed_verify(command)):
+            from .. import outcome_cmd
+
+            capture_id = outcome_cmd.resolve_capture_artifact_id(
+                _parse_capture_flag(command),
+                state.get("exercised_artifact_id") if isinstance(state.get("exercised_artifact_id"), str) else None,
+            )
             return _additional_context(
                 "PostToolUseFailure",
-                "The failed or rejected verification must remain recorded in Brigade before retrying. Inspect the receipt, fix the cause, then rerun through `brigade work verify run --capture brigade-work`.",
+                "The failed or rejected verification must remain recorded in Brigade before retrying. Inspect the receipt, fix the cause, then rerun through "
+                f"`brigade work verify run --capture {capture_id}`.",
             )
         return None
 
@@ -1868,7 +1980,13 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
                 or stop_state.get("started_at")
             )
             if not _receipt_since(stop_target, receipt_threshold, session_fingerprint=fingerprint):
-                replacement = _verify_replacement(stop_target, "<test>", fingerprint)
+                exercised = stop_state.get("exercised_artifact_id")
+                replacement = _verify_replacement(
+                    stop_target,
+                    "<test>",
+                    fingerprint,
+                    capture_artifact_id=exercised if isinstance(exercised, str) else None,
+                )
                 blocking_failures.append(f"{stop_target}: run `{replacement}`")
             elif not _handoff_since(stop_target, stop_state.get("started_at")):
                 handoff_target = stop_target

@@ -803,18 +803,53 @@ def _find_uncaptured_failed_verify_receipt(target: Path, planned_identity: list[
     return None
 
 
-def _capture_before_retry_message(run_id: str) -> str:
-    return f"brigade outcome capture brigade-work --run-id {run_id}"
+def _receipt_capture_artifact_id(receipt: dict[str, Any] | None) -> str | None:
+    """Return the artifact id stamped on a verify receipt for outcome capture, if any."""
+    if not isinstance(receipt, dict):
+        return None
+    capture = receipt.get("outcome_capture")
+    if not isinstance(capture, dict):
+        return None
+    artifact_id = capture.get("artifact_id")
+    if isinstance(artifact_id, str) and artifact_id.strip():
+        return artifact_id.strip()
+    return None
 
 
-def _enforce_capture_before_retry(target: Path, planned_identity: list[str], *, mode: str) -> int | None:
+def _stamp_outcome_capture(receipt: dict[str, Any], capture: str | None, capture_kind: str) -> None:
+    """Record the intended outcome artifact on the receipt before digests are sealed."""
+    if not capture:
+        return
+    receipt["outcome_capture"] = {
+        "artifact_id": capture,
+        "artifact_kind": capture_kind,
+    }
+
+
+def _capture_before_retry_message(run_id: str, *, artifact_id: str) -> str:
+    return f"brigade outcome capture {artifact_id} --run-id {run_id}"
+
+
+def _enforce_capture_before_retry(
+    target: Path,
+    planned_identity: list[str],
+    *,
+    mode: str,
+    capture_artifact_id: str | None = None,
+) -> int | None:
     """Block or warn when the latest matching failed receipt has no outcome capture."""
     if mode == "off":
         return None
     failed = _find_uncaptured_failed_verify_receipt(target, planned_identity)
     if failed is None:
         return None
-    message = _capture_before_retry_message(str(failed.get("run_id") or ""))
+    from .. import outcome_cmd
+
+    artifact_id = outcome_cmd.resolve_capture_artifact_id(
+        _receipt_capture_artifact_id(failed),
+        capture_artifact_id,
+    )
+    message = _capture_before_retry_message(str(failed.get("run_id") or ""), artifact_id=artifact_id)
     if mode == "block":
         print(f"error: {message}", file=sys.stderr)
         return 1
@@ -1130,6 +1165,8 @@ def _run_verify_commands(
     *,
     graphtrail_timeout: float,
     manifest: verify_manifest.VerifyManifest | None = None,
+    capture: str | None = None,
+    capture_kind: str = "skill",
 ) -> tuple[dict[str, Any], int]:
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
@@ -1155,6 +1192,7 @@ def _run_verify_commands(
         }
         receipt.update(identity)
         _stamp_harness_session(receipt)
+        _stamp_outcome_capture(receipt, capture, capture_kind)
         try:
             graph_delta_before = graphtrail_delta.capture_before(target, run_dir, timeout=graphtrail_timeout)
         except KeyboardInterrupt:
@@ -1288,6 +1326,9 @@ def _write_reused_receipt(
     latest: dict[str, Any],
     planned_display: list[str],
     timeout: int,
+    *,
+    capture: str | None = None,
+    capture_kind: str = "skill",
 ) -> tuple[dict[str, Any], int]:
     """Write a fresh receipt dir that records a reused passing run (no commands executed)."""
     started = helpers._now()
@@ -1310,6 +1351,7 @@ def _write_reused_receipt(
     }
     receipt.update(identity)
     _stamp_harness_session(receipt)
+    _stamp_outcome_capture(receipt, capture, capture_kind)
     reused_from = latest.get("run_id")
     if isinstance(reused_from, str) and reused_from:
         receipt["reused_from"] = reused_from
@@ -1573,7 +1615,12 @@ def verify_run(
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    blocked_rc = _enforce_capture_before_retry(target, planned_identity, mode=capture_before_retry)
+    blocked_rc = _enforce_capture_before_retry(
+        target,
+        planned_identity,
+        mode=capture_before_retry,
+        capture_artifact_id=capture,
+    )
     if blocked_rc is not None:
         return blocked_rc
     try:
@@ -1588,7 +1635,14 @@ def verify_run(
                 and latest.get("tree_fingerprint") == fingerprint
                 and latest.get("planned_commands") == planned_display
             ):
-                receipt, rc = _write_reused_receipt(target, latest, planned_display, timeout)
+                receipt, rc = _write_reused_receipt(
+                    target,
+                    latest,
+                    planned_display,
+                    timeout,
+                    capture=capture,
+                    capture_kind=capture_kind,
+                )
         if receipt is None:
             receipt, rc = _run_verify_commands(
                 target,
@@ -1596,6 +1650,8 @@ def verify_run(
                 timeout,
                 graphtrail_timeout=effective_graphtrail_timeout,
                 manifest=manifest,
+                capture=capture,
+                capture_kind=capture_kind,
             )
     except KeyboardInterrupt:
         print("error: verification canceled by user", file=sys.stderr)
