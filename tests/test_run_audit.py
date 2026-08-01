@@ -282,6 +282,82 @@ def test_legacy_run_without_journal_reports_not_auditable(tmp_path: Path):
     assert "lifecycle journal" in report.not_auditable_reason
 
 
+def test_legacy_run_symlinked_plan_json_returns_bounded_not_auditable(tmp_path: Path):
+    """Symlinked sidecar evidence must not crash digest computation on legacy runs."""
+    run_dir = tmp_path / "legacy-symlink-plan"
+    run_dir.mkdir()
+    _write_json(
+        run_dir / "run.json",
+        {
+            "schema": "brigade.run.v1",
+            "schema_version": 1,
+            "status": "ok",
+            "task": "legacy",
+            "orchestrator": "chef",
+            "roster": "r",
+            "worker": "coder",
+            "scheduler": "immediate",
+        },
+    )
+    real_plan = tmp_path / "real-plan.json"
+    _write_json(real_plan, {"assignments": [{"worker": "coder", "task": "t"}]})
+    (run_dir / "plan.json").symlink_to(real_plan)
+    report = run_audit.audit_run(run_dir)
+    assert report.result == run_audit.RESULT_NOT_AUDITABLE
+    assert report.not_auditable_reason is not None
+    assert "lifecycle journal" in report.not_auditable_reason
+    assert "run.json" in report.evidence_digests
+    assert "plan.json" not in report.evidence_digests
+
+
+def test_seat_order_permutation_reports_routing_drift(tmp_path: Path):
+    """Dispatch seat order must match plan.json assignments, not just the seat set."""
+    run_dir = _golden_run_dir(tmp_path)
+    _write_json(
+        run_dir / "plan.json",
+        {
+            "assignments": [
+                {"worker": "coder", "task": "first"},
+                {"worker": "chef", "task": "second"},
+            ]
+        },
+    )
+    report = run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl")
+    assert report.chain_errors == []
+    created = report.events[0]
+    # Build a journal with dispatch seats reversed versus plan order.
+    dispatch_chef = run_events.build_event(
+        run_id=created.run_id,
+        sequence=3,
+        event_type="run.dispatch.requested",
+        payload={"attempt": 1, "seat": "chef"},
+        idempotency_key="dispatch-chef",
+        recorded_at="2026-07-27T15:30:47.000000Z",
+        previous_digest=report.events[1].event_digest,
+    )
+    dispatch_coder = run_events.build_event(
+        run_id=created.run_id,
+        sequence=4,
+        event_type="run.dispatch.requested",
+        payload={"attempt": 1, "seat": "coder"},
+        idempotency_key="dispatch-coder",
+        recorded_at="2026-07-27T15:30:48.000000Z",
+        previous_digest=dispatch_chef["event_digest"],
+    )
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    with journal.open("wb") as handle:
+        for env in (report.events[0].to_dict(), report.events[1].to_dict(), dispatch_chef, dispatch_coder):
+            handle.write(run_events.canonical_bytes(env) + b"\n")
+    journal_report = run_journal.read_journal(journal)
+    base = json.loads(GOLDEN_BASE.read_text(encoding="utf-8"))
+    projection = run_projector.project_run_snapshot(base, journal_report.events, journal_present=True)
+    _write_json(run_dir / "run.json", dict(projection.snapshot))
+    drifted = run_audit.audit_run(run_dir)
+    assert drifted.result == run_audit.RESULT_DIVERGE
+    assert drifted.first_divergence is not None
+    assert drifted.first_divergence.divergence_class == run_audit.CLASS_POLICY_OR_ROUTING_DRIFT
+
+
 def test_private_data_fixtures_expose_only_safe_summaries(tmp_path: Path):
     """AC: Reports expose only safe summaries, fingerprints, and classified references."""
     secret = "SUPER-SECRET-PROMPT-BODY-do-not-leak"

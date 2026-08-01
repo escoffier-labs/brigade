@@ -110,6 +110,10 @@ TRANSPORT_COVERAGE: dict[str, dict[str, Any]] = {
     },
 }
 
+# Coordinator-owned lifecycle events audited in the first slice. ``control.*``
+# events from #641 (control.requested / observed / failed) are intentionally
+# outside this set: they record transport observations, not coordinator routing
+# or approval decisions replayed here.
 _COORDINATOR_EVENT_TYPES = frozenset(
     {
         "run.dispatch.requested",
@@ -255,6 +259,8 @@ def _read_json_object(path: Path) -> dict[str, Any] | None:
         raise AuditError(_bound(f"cannot stat evidence: {path.name}")) from exc
     if stat.S_ISLNK(info.st_mode):
         raise AuditError(_bound(f"refusing symlinked evidence: {path.name}"))
+    if not stat.S_ISREG(info.st_mode):
+        raise AuditError(_bound(f"evidence is not a regular file: {path.name}"))
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -718,21 +724,20 @@ def _routing_drift(
             requested.append(seat)
     if not requested:
         return None
-    if requested != planned_seats[: len(requested)] and set(requested) != set(planned_seats):
-        # Allow subset prefix (partial dispatch) when order matches.
-        if requested != planned_seats[: len(requested)]:
-            return Divergence(
-                divergence_class=CLASS_POLICY_OR_ROUTING_DRIFT,
-                sequence=next(
-                    (e.sequence for e in events if e.event_type == "run.dispatch.requested"),
-                    None,
-                ),
-                event_type="run.dispatch.requested",
-                expected={"seats": planned_seats},
-                observed={"seats": requested},
-                detail=_bound("dispatch seat routing drift versus plan.json assignments"),
-            )
-    return None
+    prefix = planned_seats[: len(requested)]
+    if requested == prefix:
+        return None
+    return Divergence(
+        divergence_class=CLASS_POLICY_OR_ROUTING_DRIFT,
+        sequence=next(
+            (e.sequence for e in events if e.event_type == "run.dispatch.requested"),
+            None,
+        ),
+        event_type="run.dispatch.requested",
+        expected={"seats": planned_seats},
+        observed={"seats": requested},
+        detail=_bound("dispatch seat routing drift versus plan.json assignments"),
+    )
 
 
 def audit_run(
@@ -880,7 +885,7 @@ def audit_run(
             CLASS_MISSING_OR_CORRUPT_FIXTURE,
             report.chain_errors[0],
             artifact=str(JOURNAL_REL),
-            sequence=1,
+            sequence=_chain_error_sequence(report),
             transport=_transport_coverage(run_meta.get("codex_transport")),
         )
     if not report.events:
@@ -1043,14 +1048,28 @@ def audit_run(
     )
 
 
+def _chain_error_sequence(report: run_journal.JournalReport) -> int | None:
+    """Best-effort sequence for the first journal chain error."""
+    if report.events:
+        return report.events[-1].sequence + 1
+    return None
+
+
 def _safe_digests(run_dir: Path, *, journal_present: bool) -> dict[str, str]:
+    """Return evidence digests, skipping artifacts that cannot be hashed safely."""
     digests: dict[str, str] = {}
     for name in (RUN_JSON_NAME, PLAN_JSON_NAME, ROSTER_JSON_NAME):
-        digest = _digest_file(run_dir / name)
+        try:
+            digest = _digest_file(run_dir / name)
+        except AuditError:
+            continue
         if digest is not None:
             digests[name] = digest
     if journal_present:
-        digest = _digest_file(run_dir / JOURNAL_REL)
+        try:
+            digest = _digest_file(run_dir / JOURNAL_REL)
+        except AuditError:
+            digest = None
         if digest is not None:
             digests[str(JOURNAL_REL)] = digest
     return digests

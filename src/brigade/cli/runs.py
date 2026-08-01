@@ -201,7 +201,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_runs_resume.add_argument("run_dir", type=Path, help="Path to a Brigade run artifact directory.")
     p_runs_audit = runs_sub.add_parser(
         "audit",
-        help="Offline coordinator decision audit from recorded lifecycle evidence.",
+        help=(
+            "Offline coordinator decision audit from recorded lifecycle evidence. "
+            "Exit 0 on match, 1 on divergence or corrupt journal evidence, "
+            "2 when the run is not auditable or the run id cannot be resolved."
+        ),
     )
     p_runs_audit.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
     p_runs_audit.add_argument(
