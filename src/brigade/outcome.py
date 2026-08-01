@@ -33,7 +33,7 @@ SIGNAL_RULES: dict[tuple[str, str], int] = {
 }
 
 # Sources whose every status is advisory/neutral regardless of value.
-NEUTRAL_SOURCES = frozenset({"aboyeur", "replay"})
+NEUTRAL_SOURCES = frozenset({"aboyeur", "replay", "ledger-repair"})
 
 
 @dataclass(frozen=True)
