@@ -26,9 +26,23 @@ from . import localio, outcome as core, receipt_schema, scorecard as scorecard_m
 _LOCK_WAIT_SECONDS = 30.0
 _LOCK_SENTINEL_BYTE = b"\0"
 
+# Generic fallback when no exercised skill/card is known. Prefer a real artifact
+# id at capture time so distinct skills do not collapse into one rank bucket.
+DEFAULT_CAPTURE_ARTIFACT_ID = "brigade-work"
+
 
 class OutcomeLedgerError(RuntimeError):
     """Outcome ledger persistence failed; callers must not assume the append succeeded."""
+
+
+def resolve_capture_artifact_id(*candidates: str | None) -> str:
+    """Return the first non-empty capture id, else the generic brigade-work fallback."""
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            trimmed = candidate.strip()
+            if trimmed:
+                return trimmed
+    return DEFAULT_CAPTURE_ARTIFACT_ID
 
 
 def _records_lock_path(target: Path) -> Path:
