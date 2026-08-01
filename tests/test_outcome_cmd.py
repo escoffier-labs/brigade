@@ -94,6 +94,80 @@ def test_records_persist_under_git_tracked_memory_dir(tmp_path):
     assert not (tmp_path / ".brigade" / "outcome" / "records.jsonl").exists()
 
 
+def test_append_records_rejects_unconfigured_nested_git_target(tmp_path):
+    _init_git_repo(tmp_path)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    record = outcome.OutcomeRecord("c", "card", "t", "verify", 1, "r", "2026-06-20T00:00:00+00:00")
+
+    with pytest.raises(outcome_cmd.OutcomeLedgerError) as exc_info:
+        outcome_cmd.append_records(nested, [record])
+
+    assert str(nested) in str(exc_info.value)
+    assert str(tmp_path) in str(exc_info.value)
+    assert f"rerun with --target {tmp_path}" in str(exc_info.value)
+    assert not (nested / "memory" / "outcome" / "records.jsonl").exists()
+
+
+def test_append_records_allows_configured_nested_git_target(tmp_path):
+    _init_git_repo(tmp_path)
+    nested = tmp_path / "nested"
+    (nested / ".brigade").mkdir(parents=True)
+    (nested / ".brigade" / "config.json").write_text("{}")
+
+    _seed(nested, [outcome.OutcomeRecord("c", "card", "t", "verify", 1, "r", "2026-06-20T00:00:00+00:00")])
+
+    assert (nested / "memory" / "outcome" / "records.jsonl").is_file()
+
+
+def test_outcome_capture_reports_bounded_error_for_nested_git_target(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    _write_verify_receipt(nested)
+
+    rc = outcome_cmd.capture(target=nested, artifact_id="skill-x", json_output=True)
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    resolved_nested = nested.resolve()
+    resolved_root = tmp_path.resolve()
+    assert str(resolved_nested) in captured.err
+    assert str(resolved_root) in captured.err
+    assert f"rerun with --target {resolved_root}" in captured.err
+    assert "Traceback" not in captured.err
+    assert not (nested / "memory" / "outcome" / "records.jsonl").exists()
+
+
+def test_cli_outcome_record_from_nested_cwd_rejects_unconfigured_git_target(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+
+    rc = cli.main(
+        [
+            "outcome",
+            "record",
+            "skill-x",
+            "--source",
+            "friction",
+            "--status",
+            "cleared",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    resolved_nested = nested.resolve()
+    resolved_root = tmp_path.resolve()
+    assert str(resolved_nested) in captured.err
+    assert str(resolved_root) in captured.err
+    assert f"rerun with --target {resolved_root}" in captured.err
+    assert "Traceback" not in captured.err
+    assert not (nested / "memory" / "outcome" / "records.jsonl").exists()
+
+
 def test_appended_records_carry_tamper_evident_digest_chain(tmp_path):
     first = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref1", "2026-06-20T00:00:00+00:00")
     second = outcome.OutcomeRecord("skill-x", "skill", "t2", "verify", -1, "ref2", "2026-06-20T01:00:00+00:00")

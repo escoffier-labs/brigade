@@ -143,13 +143,22 @@ def test_held_stage_never_dispatched(dag_harness, capsys):
     assert "falling back" not in capsys.readouterr().err
 
 
-def test_uncovered_assignment_falls_back_to_waves(dag_harness, capsys):
+def test_empty_covers_runs_as_independent_dag_root(dag_harness, capsys):
+    # An assignment with no covers is an independent DAG root when every
+    # nonempty covers list names known route stages. Mixed plans must engage
+    # the DAG (no wave-fallback warning).
+    resolved = []
     results = dag_harness(
         assignments=[_a("p", 1, ["plan"]), Assignment(worker="x", task="t", stage=2)],
         dependencies=DEPS,
+        on_scheduler_resolved=lambda used, reason: resolved.append((used, reason)),
     )
-    assert "falling back to wave scheduler" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "falling back to wave scheduler" not in err
+    assert resolved == [("dag", None)]
     assert len(results) == 2
+    assert {r.worker for r in results} == {"p", "x"}
+    assert dag_harness.invocations_set == {"p", "x"}
 
 
 def test_partially_unknown_covers_falls_back_to_waves(dag_harness, capsys):
@@ -161,6 +170,19 @@ def test_partially_unknown_covers_falls_back_to_waves(dag_harness, capsys):
     )
     assert "falling back to wave scheduler" in capsys.readouterr().err
     assert len(results) == 1
+
+
+def test_unknown_covers_still_rejected(dag_harness, capsys):
+    # Empty covers are allowed, but unknown cover stage names still force waves.
+    resolved = []
+    results = dag_harness(
+        assignments=[_a("p", 1, ["plan"]), _a("x", 2, ["made-up-stage"])],
+        dependencies=DEPS,
+        on_scheduler_resolved=lambda used, reason: resolved.append((used, reason)),
+    )
+    assert "falling back to wave scheduler" in capsys.readouterr().err
+    assert resolved == [("waves", "plan not fully covered")]
+    assert len(results) == 2
 
 
 def test_scheduler_resolution_reported_when_dag_engages(dag_harness):
@@ -178,7 +200,7 @@ def test_scheduler_resolution_reported_when_dag_engages(dag_harness):
 def test_scheduler_resolution_reports_wave_fallback(dag_harness):
     resolved = []
     dag_harness(
-        assignments=[_a("p", 1, ["plan"]), Assignment(worker="x", task="t", stage=2)],
+        assignments=[_a("p", 1, ["plan", "made-up-stage"])],
         dependencies=DEPS,
         on_scheduler_resolved=lambda used, reason: resolved.append((used, reason)),
     )

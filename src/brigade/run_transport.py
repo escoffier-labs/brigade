@@ -799,7 +799,9 @@ def _dag_placement_error(
         return "no route dependencies available"
     known = set(route_dependencies)
     for assignment in assignments:
-        if not assignment.covers or not set(assignment.covers) <= known:
+        # Empty covers are an independent DAG root; only nonempty covers must
+        # name known route stages.
+        if assignment.covers and not set(assignment.covers) <= known:
             return "plan not fully covered"
     return None
 

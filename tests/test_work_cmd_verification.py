@@ -51,6 +51,79 @@ def test_verify_run_marks_parser_rejected_command_as_rejected_not_failed(tmp_pat
     assert record["signal_value"] == 0
 
 
+_PYTHON_MISSING_PYTHON3_SUGGESTION = (
+    "verification command interpreter python was not found on PATH; use available interpreter python3 instead"
+)
+
+
+def test_verify_run_rejects_missing_python_with_python3_suggestion(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python3_stub = bin_dir / "python3"
+    python3_stub.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(0)\n")
+    python3_stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    rc = work_cmd.verify_run(
+        target=tmp_path,
+        commands=["python -m pytest -q"],
+        json_output=True,
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert receipt["status"] == "rejected"
+    command = receipt["commands"][0]
+    assert command["status"] == "rejected"
+    assert command["stderr_summary"] == _PYTHON_MISSING_PYTHON3_SUGGESTION
+
+
+def test_verify_run_rejects_missing_python_with_inline_path_and_python3_suggestion(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    parent_bin = tmp_path / "parent_bin"
+    parent_bin.mkdir()
+    fake_python = parent_bin / "python"
+    fake_python.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(0)\n")
+    fake_python.chmod(0o755)
+    monkeypatch.setenv("PATH", str(parent_bin))
+
+    inline_bin = tmp_path / "inline_bin"
+    inline_bin.mkdir()
+    python3_stub = inline_bin / "python3"
+    python3_stub.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(0)\n")
+    python3_stub.chmod(0o755)
+
+    rc = work_cmd.verify_run(
+        target=tmp_path,
+        commands=[f"PATH={inline_bin} python -m pytest -q", f"PATH={inline_bin} nonexistenttool"],
+        json_output=True,
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert receipt["status"] == "rejected"
+    command0 = receipt["commands"][0]
+    assert command0["status"] == "rejected"
+    assert command0["stderr_summary"] == _PYTHON_MISSING_PYTHON3_SUGGESTION
+
+    command1 = receipt["commands"][1]
+    assert command1["status"] == "rejected"
+    assert command1["stderr_summary"] == "verification command is not resolvable: nonexistenttool"
+
+
+def test_verify_run_rejects_missing_relative_executable_with_full_path_message(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    rc = work_cmd.verify_run(
+        target=tmp_path,
+        commands=["./scripts/missing-verify.sh"],
+        json_output=True,
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert receipt["commands"][0]["stderr_summary"] == (
+        "verification command is not resolvable: ./scripts/missing-verify.sh"
+    )
+
+
 def test_verify_run_capture_records_outcome_in_one_step(tmp_path, capsys):
     _init_git_repo(tmp_path)
     from brigade import outcome_cmd
