@@ -199,6 +199,28 @@ def register(sub: argparse._SubParsersAction) -> None:
         "resume", help="Re-attach interrupted app-server workers from a run and re-synthesize."
     )
     p_runs_resume.add_argument("run_dir", type=Path, help="Path to a Brigade run artifact directory.")
+    p_runs_audit = runs_sub.add_parser(
+        "audit",
+        help=(
+            "Offline coordinator decision audit from recorded lifecycle evidence. "
+            "Exit 0 on match, 1 on divergence or corrupt journal evidence, "
+            "2 when the run is not auditable or the run id cannot be resolved."
+        ),
+    )
+    p_runs_audit.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_runs_audit.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_runs_audit.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_runs_audit.add_argument("--json", action="store_true", help="Emit the audit receipt as JSON.")
     p_runs.set_defaults(func=dispatch)
 
 
@@ -262,6 +284,13 @@ def dispatch(args) -> int:
         )
     if args.runs_command == "resume":
         return runs_cmd.resume(args.run_dir)
+    if args.runs_command == "audit":
+        return runs_cmd.audit(
+            args.run,
+            cwd=args.cwd,
+            runs_dir=args.runs_dir,
+            json_output=args.json,
+        )
     args._brigade_parser.error(f"unknown runs command: {args.runs_command}")
     return 2
 
