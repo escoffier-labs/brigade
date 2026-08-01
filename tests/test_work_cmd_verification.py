@@ -2668,3 +2668,36 @@ def test_verify_receipt_identity_preserves_real_index(tmp_target, monkeypatch, c
         text=True,
     ).stdout
     assert after == before
+
+
+def test_archive_verify_run_strips_recovery_checkpoint_bodies(tmp_path):
+    """Export boundary: verify-archive must not emit private checkpoint bodies (#636)."""
+    from brigade import run_checkpoint
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a", sign=True)
+    _write_verify_run_dir(root, "20260101-000002-b")
+
+    private_task = "SECRET_CHECKPOINT_TASK_must_not_archive"
+    body_obj = {"schema": "brigade.run.v1", "status": "failed", "task": private_task, "error": "boom"}
+    body = (json.dumps(body_obj, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    cp_dir = run_dir / "events" / "recovery-checkpoints"
+    cp_dir.mkdir(parents=True)
+    sha = hashlib.sha256(body).hexdigest()
+    (cp_dir / f"{sha}.json").write_bytes(body)
+    os.chmod(cp_dir / f"{sha}.json", 0o600)
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 1
+    archived_cp = archive_root / "20260101-000001-a" / "events" / "recovery-checkpoints" / f"{sha}.json"
+    assert archived_cp.is_file()
+    payload = json.loads(archived_cp.read_text(encoding="utf-8"))
+    assert run_checkpoint.is_checkpoint_artifact_reference(payload)
+    assert private_task not in archived_cp.read_text(encoding="utf-8")
+    assert '"task"' not in archived_cp.read_text(encoding="utf-8")
+    # Source verify-run is deleted after archive; the privacy rule is on the export.
+    assert not (root / "20260101-000001-a").exists()
