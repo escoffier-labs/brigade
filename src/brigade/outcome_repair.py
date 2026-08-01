@@ -62,6 +62,17 @@ class LedgerRepairReport:
     valid_prefix_lines: int
     invalid_segment_start: int
     invalid_segment_end: int
+    re_chained_record_count: int
+    re_chained_line_ranges: tuple[tuple[int, int], ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class RechainedTail:
+    """Verified records salvaged from the raw segment after the first break."""
+
+    rows: list[dict[str, Any]]
+    line_ranges: tuple[tuple[int, int], ...]
+    last_digest: str | None
 
 
 def _payload_without_digests(row: dict[str, Any]) -> dict[str, Any]:
@@ -269,20 +280,6 @@ def diagnose_completed_ledger(path: Path) -> LedgerBreak | None:
     )
 
 
-def format_ledger_corrupt_error(break_info: LedgerBreak) -> str:
-    """Bounded, actionable error used by capture and repair preflight."""
-    expected = break_info.expected_prev
-    actual = break_info.actual_prev
-    digest_tail = ""
-    if break_info.kind == "digest_chain_break":
-        digest_tail = f" (expected prev_digest={expected!r}, actual={actual!r})"
-    return (
-        f"ledger corrupt at line {break_info.line_no}: {break_info.kind}{digest_tail}; "
-        f"suspected cause: {break_info.suspected_cause}; "
-        f"run `brigade outcome repair --operator-confirm`"
-    )
-
-
 def _operation_id(original: bytes, break_info: LedgerBreak) -> str:
     material = {
         "sha256": hashlib.sha256(original).hexdigest(),
@@ -305,7 +302,61 @@ def _repair_paths(target: Path, operation_id: str) -> tuple[Path, Path, Path, Pa
     )
 
 
-def _build_repair_record(break_info: LedgerBreak, *, operation_id: str, quarantine_path: Path) -> core.OutcomeRecord:
+def _line_ranges(line_numbers: list[int]) -> tuple[tuple[int, int], ...]:
+    if not line_numbers:
+        return ()
+    ranges: list[tuple[int, int]] = []
+    start = end = line_numbers[0]
+    for line_no in line_numbers[1:]:
+        if line_no == end + 1:
+            end = line_no
+            continue
+        ranges.append((start, end))
+        start = end = line_no
+    ranges.append((start, end))
+    return tuple(ranges)
+
+
+def _rechain_tail(break_info: LedgerBreak) -> RechainedTail:
+    """Re-sign self-consistent records after the first break onto the valid prefix."""
+    previous_digest = break_info.last_valid_digest
+    rows: list[dict[str, Any]] = []
+    line_numbers: list[int] = []
+    for line_no, line in enumerate(
+        break_info.invalid_segment_bytes.splitlines(keepends=True),
+        start=break_info.invalid_segment_start,
+    ):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        recorded_digest = row.get("digest")
+        if recorded_digest is not None and (
+            not isinstance(recorded_digest, str)
+            or not recorded_digest
+            or localio.canonical_json_digest(row, exclude_keys={"digest"}) != recorded_digest
+        ):
+            continue
+        re_chained = _payload_without_digests(row)
+        re_chained["prev_digest"] = previous_digest
+        re_chained["digest"] = localio.canonical_json_digest(re_chained, exclude_keys={"digest"})
+        previous_digest = re_chained["digest"]
+        rows.append(re_chained)
+        line_numbers.append(line_no)
+    return RechainedTail(rows, _line_ranges(line_numbers), previous_digest)
+
+
+def _build_repair_record(
+    break_info: LedgerBreak,
+    *,
+    operation_id: str,
+    quarantine_path: Path,
+    re_chained_tail: RechainedTail,
+) -> core.OutcomeRecord:
     return core.OutcomeRecord(
         artifact_id=REPAIR_ARTIFACT_ID,
         artifact_kind="skill",
@@ -324,31 +375,35 @@ def _build_repair_record(break_info: LedgerBreak, *, operation_id: str, quaranti
             "invalid_segment_end": break_info.invalid_segment_end,
             "expected_prev": break_info.expected_prev,
             "actual_prev": break_info.actual_prev,
+            "re_chained_record_count": len(re_chained_tail.rows),
+            "re_chained_line_ranges": re_chained_tail.line_ranges,
         },
     )
 
 
-def _write_repaired_ledger(path: Path, prefix: bytes, repair_row: dict[str, Any]) -> None:
-    line = (json.dumps(repair_row, sort_keys=True) + "\n").encode("utf-8")
-    localio.write_bytes_atomic(path, prefix + line)
+def _write_repaired_ledger(
+    path: Path,
+    prefix: bytes,
+    re_chained_tail: RechainedTail,
+    repair_row: dict[str, Any],
+) -> None:
+    rows = [*re_chained_tail.rows, repair_row]
+    body = b"".join((json.dumps(row, sort_keys=True) + "\n").encode("utf-8") for row in rows)
+    localio.write_bytes_atomic(path, prefix + body)
 
 
 def _publish_exclusive_bytes(path: Path, data: bytes) -> None:
-    """Write-once publish for quarantine evidence (UTF-8 when possible)."""
+    """Publish byte-identical quarantine evidence without replacing an existing file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        localio.write_text_exclusive(path, data.decode("utf-8"))
-    except UnicodeDecodeError:
-        # Ledger JSONL is UTF-8 in practice; keep a bytes fallback for evidence only.
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-        except BaseException:
-            path.unlink(missing_ok=True)
-            raise
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def repair_ledger(
@@ -369,7 +424,11 @@ def repair_ledger(
         return 0
 
     with outcome_cmd._records_append_lock(lock_path):
-        outcome_cmd._recover_interrupted_append(path)
+        try:
+            original = path.read_bytes()
+        except OSError as exc:
+            print(f"error: could not read outcome ledger: {path}: {exc}", file=sys.stderr)
+            return 1
         break_info = diagnose_completed_ledger(path)
         if break_info is None:
             if json_output:
@@ -377,12 +436,6 @@ def repair_ledger(
             else:
                 print(f"outcome repair: ledger healthy ({path})")
             return 0
-
-        try:
-            original = path.read_bytes()
-        except OSError as exc:
-            print(f"error: could not read outcome ledger: {path}: {exc}", file=sys.stderr)
-            return 1
 
         operation_id = _operation_id(original, break_info)
         operation_dir, quarantine_path, invalid_path, record_path = _repair_paths(target, operation_id)
@@ -419,9 +472,34 @@ def repair_ledger(
                 print(f"error: could not preserve invalid segment: {exc}", file=sys.stderr)
                 return 1
 
-        repair_record = _build_repair_record(break_info, operation_id=operation_id, quarantine_path=quarantine_path)
+        try:
+            localio._fsync_parent_directory(operation_dir)
+        except OSError as exc:
+            print(f"error: could not durably publish repair quarantine: {exc}", file=sys.stderr)
+            return 1
+
+        if break_info.kind == "incomplete_trailing":
+            # A partial append can now be recovered because its original bytes
+            # are safely quarantined. A prior chain break remains authoritative,
+            # including any trailing bytes it already placed in the evidence.
+            outcome_cmd._recover_interrupted_append(path)
+            break_info = diagnose_completed_ledger(path)
+            if break_info is None:
+                if json_output:
+                    print(json.dumps({"target": str(target), "status": "recovered"}, indent=2, sort_keys=True))
+                else:
+                    print(f"outcome repair: ledger healthy after preserving interrupted bytes ({path})")
+                return 0
+
+        re_chained_tail = _rechain_tail(break_info)
+        repair_record = _build_repair_record(
+            break_info,
+            operation_id=operation_id,
+            quarantine_path=quarantine_path,
+            re_chained_tail=re_chained_tail,
+        )
         row = outcome_cmd._record_payload(repair_record)
-        row["prev_digest"] = break_info.last_valid_digest
+        row["prev_digest"] = re_chained_tail.last_digest
         row["digest"] = localio.canonical_json_digest(row, exclude_keys={"digest"})
 
         audit = {
@@ -439,6 +517,8 @@ def repair_ledger(
             "quarantine_path": str(quarantine_path),
             "invalid_segment_path": str(invalid_path),
             "repair_digest": row["digest"],
+            "re_chained_record_count": len(re_chained_tail.rows),
+            "re_chained_line_ranges": [list(bounds) for bounds in re_chained_tail.line_ranges],
         }
         if not record_path.exists():
             try:
@@ -450,7 +530,7 @@ def repair_ledger(
                 return 1
 
         try:
-            _write_repaired_ledger(path, break_info.valid_prefix_bytes, row)
+            _write_repaired_ledger(path, break_info.valid_prefix_bytes, re_chained_tail, row)
             outcome_cmd._validate_completed_ledger(path)
         except outcome_cmd.OutcomeLedgerError as exc:
             print(f"error: repaired ledger failed verification: {exc}", file=sys.stderr)
@@ -470,6 +550,8 @@ def repair_ledger(
         valid_prefix_lines=break_info.valid_prefix_lines,
         invalid_segment_start=break_info.invalid_segment_start,
         invalid_segment_end=break_info.invalid_segment_end,
+        re_chained_record_count=len(re_chained_tail.rows),
+        re_chained_line_ranges=re_chained_tail.line_ranges,
     )
     if json_output:
         print(json.dumps(dataclasses.asdict(report), indent=2, sort_keys=True, default=str))
@@ -481,6 +563,8 @@ def repair_ledger(
     print(f"invalid_segment: {report.invalid_segment_path}")
     print(f"record: {report.record_path}")
     print(f"kept_prefix_lines: {report.valid_prefix_lines}")
+    print(f"re_chained_records: {report.re_chained_record_count}")
+    print(f"re_chained_line_ranges: {list(report.re_chained_line_ranges)}")
     return 0
 
 

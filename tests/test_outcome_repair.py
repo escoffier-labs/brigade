@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from brigade import cli, localio, outcome, outcome_cmd, outcome_repair
 
 from tests.work_cmd_test_helpers import _init_git_repo
@@ -101,7 +103,7 @@ def test_repair_requires_operator_confirmation(tmp_path, capsys):
     assert path.read_bytes() == before
 
 
-def test_repair_quarantines_rechains_and_reverify(tmp_path):
+def test_repair_quarantines_rechains_tail_and_reverify(tmp_path):
     path, rows = _seed_two_valid(tmp_path)
     original_prefix = path.read_bytes()
     broken = _signed_row(
@@ -118,13 +120,16 @@ def test_repair_quarantines_rechains_and_reverify(tmp_path):
     assert outcome_repair.repair(target=tmp_path, operator_confirmed=True, json_output=False) == 0
 
     repaired_rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    assert len(repaired_rows) == 3
+    assert len(repaired_rows) == 4
     assert repaired_rows[0] == rows[0]
     assert repaired_rows[1] == rows[1]
-    assert repaired_rows[2]["source"] == "ledger-repair"
-    assert repaired_rows[2]["signal_value"] == 0
+    assert repaired_rows[2]["task_id"] == broken["task_id"]
     assert repaired_rows[2]["prev_digest"] == rows[1]["digest"]
     assert repaired_rows[2]["digest"] == localio.canonical_json_digest(repaired_rows[2], exclude_keys={"digest"})
+    assert repaired_rows[3]["source"] == "ledger-repair"
+    assert repaired_rows[3]["signal_value"] == 0
+    assert repaired_rows[3]["prev_digest"] == repaired_rows[2]["digest"]
+    assert repaired_rows[3]["digest"] == localio.canonical_json_digest(repaired_rows[3], exclude_keys={"digest"})
     assert path.read_bytes().startswith(original_prefix)
 
     quarantine_dirs = list((tmp_path / ".brigade" / "outcome" / "repairs").iterdir())
@@ -138,9 +143,139 @@ def test_repair_quarantines_rechains_and_reverify(tmp_path):
     assert audit["kind"] == "digest_chain_break"
     assert audit["suspected_cause"] == "duplicate-writer records"
     assert audit["break_line"] == 3
+    assert audit["re_chained_record_count"] == 1
+    assert audit["re_chained_line_ranges"] == [[3, 3]]
 
-    assert outcome_cmd._validate_completed_ledger(path) == repaired_rows[2]["digest"]
+    assert outcome_cmd._validate_completed_ledger(path) == repaired_rows[3]["digest"]
     assert outcome_repair.diagnose_completed_ledger(path) is None
+
+
+def test_repair_rechains_valid_records_after_break(tmp_path):
+    path, rows = _seed_two_valid(tmp_path)
+    broken = _signed_row(
+        outcome.OutcomeRecord("skill-x", "skill", "t2", "verify", 1, "ref-2", "2026-06-20T02:00:00+00:00"),
+        prev_digest="wrong",
+    )
+    tail = _signed_row(
+        outcome.OutcomeRecord("skill-x", "skill", "t3", "verify", 1, "ref-3", "2026-06-20T03:00:00+00:00"),
+        prev_digest=broken["digest"],
+    )
+    _write_rows(path, [rows[0], rows[1], broken, tail])
+
+    assert outcome_repair.repair(target=tmp_path, operator_confirmed=True) == 0
+
+    repaired_rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert [row["task_id"] for row in repaired_rows] == ["t0", "t1", "t2", "t3", repaired_rows[-1]["task_id"]]
+    assert repaired_rows[-1]["source"] == "ledger-repair"
+    assert repaired_rows[2]["prev_digest"] == rows[1]["digest"]
+    assert repaired_rows[3]["prev_digest"] == repaired_rows[2]["digest"]
+    audit_path = next((tmp_path / ".brigade" / "outcome" / "repairs").glob("*/record.json"))
+    audit = json.loads(audit_path.read_text())
+    assert audit["re_chained_record_count"] == 2
+    assert audit["re_chained_line_ranges"] == [[3, 4]]
+    assert outcome_cmd._validate_completed_ledger(path) == repaired_rows[-1]["digest"]
+
+
+def test_repair_rechains_from_a_first_line_break(tmp_path):
+    path, rows = _seed_two_valid(tmp_path)
+    first = dict(rows[0])
+    first["prev_digest"] = "wrong"
+    first["digest"] = localio.canonical_json_digest(first, exclude_keys={"digest"})
+    third = _signed_row(
+        outcome.OutcomeRecord("skill-x", "skill", "t2", "verify", 1, "ref-2", "2026-06-20T02:00:00+00:00"),
+        prev_digest=rows[1]["digest"],
+    )
+    _write_rows(path, [first, rows[1], third])
+
+    assert outcome_repair.repair(target=tmp_path, operator_confirmed=True) == 0
+
+    repaired_rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert [row["task_id"] for row in repaired_rows[:-1]] == ["t0", "t1", "t2"]
+    assert repaired_rows[0]["prev_digest"] is None
+    assert repaired_rows[1]["prev_digest"] == repaired_rows[0]["digest"]
+    assert repaired_rows[2]["prev_digest"] == repaired_rows[1]["digest"]
+    assert outcome_cmd._validate_completed_ledger(path) == repaired_rows[-1]["digest"]
+
+
+def test_repair_rechains_across_multiple_chain_breaks(tmp_path):
+    path, rows = _seed_two_valid(tmp_path)
+    first_break = _signed_row(
+        outcome.OutcomeRecord("skill-x", "skill", "t2", "verify", 1, "ref-2", "2026-06-20T02:00:00+00:00"),
+        prev_digest="wrong-a",
+    )
+    second_break = _signed_row(
+        outcome.OutcomeRecord("skill-x", "skill", "t3", "verify", 1, "ref-3", "2026-06-20T03:00:00+00:00"),
+        prev_digest="wrong-b",
+    )
+    tail = _signed_row(
+        outcome.OutcomeRecord("skill-x", "skill", "t4", "verify", 1, "ref-4", "2026-06-20T04:00:00+00:00"),
+        prev_digest=second_break["digest"],
+    )
+    _write_rows(path, [rows[0], rows[1], first_break, second_break, tail])
+
+    assert outcome_repair.repair(target=tmp_path, operator_confirmed=True) == 0
+
+    repaired_rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert [row["task_id"] for row in repaired_rows[:-1]] == ["t0", "t1", "t2", "t3", "t4"]
+    assert all(
+        repaired_rows[index]["prev_digest"] == repaired_rows[index - 1]["digest"]
+        for index in range(1, len(repaired_rows))
+    )
+    audit_path = next((tmp_path / ".brigade" / "outcome" / "repairs").glob("*/record.json"))
+    audit = json.loads(audit_path.read_text())
+    assert audit["re_chained_record_count"] == 3
+    assert audit["re_chained_line_ranges"] == [[3, 5]]
+    assert outcome_cmd._validate_completed_ledger(path) == repaired_rows[-1]["digest"]
+
+
+def test_repair_skips_binary_bytes_and_rechains_later_valid_records(tmp_path):
+    path, rows = _seed_two_valid(tmp_path)
+    broken = _signed_row(
+        outcome.OutcomeRecord("skill-x", "skill", "t2", "verify", 1, "ref-2", "2026-06-20T02:00:00+00:00"),
+        prev_digest="wrong",
+    )
+    tail = _signed_row(
+        outcome.OutcomeRecord("skill-x", "skill", "t3", "verify", 1, "ref-3", "2026-06-20T03:00:00+00:00"),
+        prev_digest=broken["digest"],
+    )
+    path.write_bytes(
+        b"".join(
+            [
+                *(json.dumps(row, sort_keys=True).encode() + b"\n" for row in rows),
+                json.dumps(broken, sort_keys=True).encode() + b"\n",
+                b"\xff\n",
+                json.dumps(tail, sort_keys=True).encode() + b"\n",
+            ]
+        )
+    )
+
+    assert outcome_repair.repair(target=tmp_path, operator_confirmed=True) == 0
+
+    repaired_rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert [row["task_id"] for row in repaired_rows[:-1]] == ["t0", "t1", "t2", "t3"]
+    record_path = next((tmp_path / ".brigade" / "outcome" / "repairs").glob("*/record.json"))
+    audit = json.loads(record_path.read_text())
+    assert audit["re_chained_line_ranges"] == [[3, 3], [5, 5]]
+    assert outcome_cmd._validate_completed_ledger(path) == repaired_rows[-1]["digest"]
+
+
+def test_repair_keeps_the_original_tail_range_when_chain_break_precedes_partial_bytes(tmp_path):
+    path, rows = _seed_two_valid(tmp_path)
+    broken = _signed_row(
+        outcome.OutcomeRecord("skill-x", "skill", "t2", "verify", 1, "ref-2", "2026-06-20T02:00:00+00:00"),
+        prev_digest="wrong",
+    )
+    partial = b'{"artifact_id":"partial"'
+    _write_rows(path, [rows[0], rows[1], broken])
+    path.write_bytes(path.read_bytes() + partial)
+
+    assert outcome_repair.repair(target=tmp_path, operator_confirmed=True) == 0
+
+    record_path = next((tmp_path / ".brigade" / "outcome" / "repairs").glob("*/record.json"))
+    audit = json.loads(record_path.read_text())
+    quarantine = record_path.parent / "original.jsonl"
+    assert audit["invalid_segment_end"] == 4
+    assert quarantine.read_bytes().endswith(partial)
 
 
 def test_capture_degrades_with_bounded_error_and_writes_nothing(tmp_path, capsys):
@@ -217,13 +352,7 @@ def test_post_repair_capture_succeeds(tmp_path, capsys):
     assert final_rows[-1]["prev_digest"] == final_rows[-2]["digest"]
 
 
-def test_repair_of_truncated_line_recovers_via_lock_path_and_stays_healthy(tmp_path, capsys):
-    """Incomplete trailing bytes are recovered under the append lock before repair.
-
-    Diagnosis still sees the truncated break (covered above). Repair itself should
-    not rewrite a ledger that recovery already made healthy, and must keep the
-    valid prefix byte-identical.
-    """
+def test_repair_quarantines_incomplete_trailing_bytes_before_recovery(tmp_path, capsys):
     path, rows = _seed_two_valid(tmp_path)
     prefix = path.read_bytes()
     path.write_bytes(prefix + b'{"artifact_id":"truncated"')
@@ -235,3 +364,17 @@ def test_repair_of_truncated_line_recovers_via_lock_path_and_stays_healthy(tmp_p
     assert outcome_repair.diagnose_completed_ledger(path) is None
     rows_after = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     assert rows_after == rows
+    quarantine = next((tmp_path / ".brigade" / "outcome" / "repairs").glob("*/original.jsonl"))
+    assert quarantine.read_bytes() == prefix + b'{"artifact_id":"truncated"'
+
+
+def test_publish_exclusive_bytes_preserves_non_utf8_bytes(tmp_path):
+    path = tmp_path / "quarantine" / "original.jsonl"
+    original = b'\xff\r\n{"partial":"tail"}'
+
+    outcome_repair._publish_exclusive_bytes(path, original)
+
+    assert path.read_bytes() == original
+    with pytest.raises(FileExistsError):
+        outcome_repair._publish_exclusive_bytes(path, b"replacement")
+    assert path.read_bytes() == original
