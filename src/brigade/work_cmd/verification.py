@@ -621,7 +621,16 @@ def _expected_verify_archive_manifest(
             parsed = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             parsed = None
-        if isinstance(parsed, dict) and run_checkpoint.is_checkpoint_artifact_reference(parsed):
+        if (
+            not is_temp
+            and isinstance(parsed, dict)
+            and run_checkpoint.is_checkpoint_artifact_reference(parsed)
+            and path.name == f"{parsed['sha256']}.json"
+        ):
+            # Already the canonical export shape at its canonical ``{sha}.json``
+            # path. A crashed temp is never canonical, and a reference under any
+            # other filename must fall through to the hash/filename validation
+            # below so it is omitted when invalid.
             continue
         sha = hashlib.sha256(raw).hexdigest()
         if is_temp:

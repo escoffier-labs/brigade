@@ -2821,6 +2821,81 @@ def test_archive_verify_run_omits_crashed_checkpoint_temp(tmp_path):
     ]
 
 
+def test_archive_verify_run_omits_artifact_reference_shaped_crashed_temp(tmp_path):
+    """A crashed temp whose body happens to parse as an artifact reference is
+    still a crashed temp: it has no canonical hash path, so it must be omitted
+    rather than early-accepted as already canonical (PR #668)."""
+    from brigade import run_checkpoint
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a", sign=True)
+    _write_verify_run_dir(root, "20260101-000002-b")
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    reference = run_checkpoint.checkpoint_artifact_reference(sha256="a" * 64, byte_size=7)
+    crashed_temp = cp_dir / ".checkpoint.secret-tenant-acme.tmp"
+    crashed_temp.write_text(json.dumps(reference, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 1
+    archived_run = archive_root / run_dir.name
+    # The reference-shaped crashed temp is omitted, not kept as canonical.
+    archived_temp = archived_run / "events" / run_checkpoint.CHECKPOINT_DIR_NAME / crashed_temp.name
+    assert not archived_temp.exists()
+    run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(archived_run)
+    # The private temp filename never reaches the index.
+    index_text = (archive_root / "index.jsonl").read_text(encoding="utf-8")
+    assert "secret-tenant-acme" not in index_text
+    entry = next(e for e in _read_archive_index(archive_root) if e["run_id"] == run_dir.name)
+    assert entry["checkpoint_errors"] == [
+        {
+            "category": "checkpoint-crashed-temp",
+            "detail": "crashed checkpoint temp has no canonical hash path; omitted from verification archive",
+        }
+    ]
+
+
+def test_archive_verify_run_omits_misnamed_artifact_reference(tmp_path):
+    """An artifact-reference payload is canonical only at ``<sha256>.json``. A
+    reference under any other filename must fall through to hash/filename
+    validation and be omitted as a hash mismatch (PR #668)."""
+    from brigade import run_checkpoint
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a", sign=True)
+    _write_verify_run_dir(root, "20260101-000002-b")
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    reference = run_checkpoint.checkpoint_artifact_reference(sha256="b" * 64, byte_size=7)
+    secret_name = "private-tenant-acme-reference.json"
+    (cp_dir / secret_name).write_text(json.dumps(reference, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 1
+    archived_run = archive_root / run_dir.name
+    # The misnamed reference is omitted, not early-accepted as canonical.
+    assert not (archived_run / "events" / run_checkpoint.CHECKPOINT_DIR_NAME / secret_name).exists()
+    run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(archived_run)
+    # The secret-bearing filename never reaches the index.
+    index_text = (archive_root / "index.jsonl").read_text(encoding="utf-8")
+    assert "private-tenant-acme-reference" not in index_text
+    entry = next(e for e in _read_archive_index(archive_root) if e["run_id"] == run_dir.name)
+    assert entry["checkpoint_errors"] == [
+        {
+            "category": "checkpoint-hash-mismatch",
+            "detail": "checkpoint content hash does not match filename; omitted from verification archive",
+        }
+    ]
+
+
 def test_archive_verify_run_fails_closed_when_crashed_temp_not_omitted(tmp_path, monkeypatch):
     """If the omission step is bypassed, the export-boundary assert must fail
     closed rather than archive a private crashed-temp body."""
