@@ -20,7 +20,7 @@ Brigade is the local-first operator CLI for agent memory, handoffs, and reviewab
 
 - Personal details, hostnames, IPs, account IDs, or live auth profiles in templates or tests. The whole point of this kit is to keep that stuff out of public repos. The `content-guard` job in CI will fail if it finds any.
 - Cron jobs or hooks that post or call out to the network without explicit opt-in.
-- Commits must use conventional commits. In-house commits in escoffier-labs organizations and original solomonneas repositories should include a co-author trailer for a coding agent that did substantial work; external repositories and upstream third-party PRs remain trailer-free.
+- Commits must use conventional commits. In-house commits in escoffier-labs organizations and original solomonneas repositories should include a co-author trailer for a coding agent that did substantial work. External repositories and upstream third-party PRs remain trailer-free.
 
 ## Planning artifacts
 
@@ -71,7 +71,9 @@ gh pr view <number> --json reviewDecision,mergeStateStatus
 
 `reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`.
 
-Dispatched sessions should open the pull request, run local verification, push commits, and stop. The external reviewer records the approval after reviewing the final push.
+Those CLI fields do not expose unresolved review conversations. Separately check the pull request's **Files changed** review panel in GitHub and confirm that no conversation remains unresolved.
+
+Dispatched sessions should open the pull request, run local verification, and push commits. After the final push, comment `@coderabbitai full review`. The `coderabbitai[bot]` identity records the formal GitHub review. Wait for its current `APPROVED` review before merging. A green CodeRabbit commit status alone does not satisfy this gate.
 
 ## Adding a harness
 
