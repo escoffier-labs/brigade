@@ -32,7 +32,7 @@ CHECKPOINT_PRIVACY_CLASS = "private"
 CHECKPOINT_DIR_NAME = "recovery-checkpoints"
 MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024
 MAX_JOURNAL_BYTES = 8 * 1024 * 1024
-MAX_JOURNAL_EVENTS = 512
+MAX_JOURNAL_EVENTS = 2048
 
 _CHECKPOINT_PAYLOAD_REQUIRED_KEYS = frozenset(
     {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type"}

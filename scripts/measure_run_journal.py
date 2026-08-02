@@ -45,6 +45,10 @@ _DEFAULT_WORST_ATTEMPTS = 3
 _DEFAULT_WORST_PAUSE_CYCLES = 8
 
 
+class MeasurementInputError(RuntimeError):
+    """Measurement input or scenario state is missing, unreadable, or incomplete."""
+
+
 def _bootstrap_run(run_dir: Path) -> bytes:
     """Write the minimal canonical run.json carrying both durable request fields.
 
@@ -228,7 +232,7 @@ def _count_journal_events(journal_path: Path) -> int:
     return line_count
 
 
-def _journal_volume_entry(journal_path: Path, *, label: str) -> dict[str, Any]:
+def _journal_volume_entry(journal_path: Path, *, label: str, display_path: str | None = None) -> dict[str, Any]:
     journal_bytes = journal_path.stat().st_size
     event_count = _count_journal_events(journal_path)
     event_types: dict[str, int] = {}
@@ -240,7 +244,7 @@ def _journal_volume_entry(journal_path: Path, *, label: str) -> dict[str, Any]:
     bounds = _bounds()
     return {
         "label": label,
-        "path": str(journal_path),
+        "path": display_path or str(journal_path),
         "event_count": event_count,
         "journal_bytes": journal_bytes,
         "event_type_counts": event_types,
@@ -256,9 +260,17 @@ def scan_lifecycle_journals(roots: list[Path]) -> dict[str, Any]:
     journals: list[Path] = []
     for root in roots:
         root = root.expanduser().resolve()
-        if not root.exists():
-            continue
-        journals.extend(sorted(root.rglob("lifecycle.jsonl")))
+        try:
+            if not root.is_dir():
+                raise MeasurementInputError(f"measurement input missing: {root}")
+            discovered = sorted(root.rglob("lifecycle.jsonl"))
+        except MeasurementInputError:
+            raise
+        except OSError as exc:
+            raise MeasurementInputError(f"measurement input unreadable: {root}") from exc
+        if not discovered:
+            raise MeasurementInputError(f"measurement input stale: no lifecycle journals under {root}")
+        journals.extend(discovered)
     per_run = [_journal_volume_entry(path, label=path.parent.parent.name) for path in journals]
     event_counts = sorted(entry["event_count"] for entry in per_run)
     byte_counts = sorted(entry["journal_bytes"] for entry in per_run)
@@ -414,7 +426,11 @@ def _drive_volume_scenario(
                     break
 
     journal_path = run_dir / "events" / "lifecycle.jsonl"
-    entry = _journal_volume_entry(journal_path, label=run_dir.name)
+    entry = _journal_volume_entry(
+        journal_path,
+        label=run_dir.name,
+        display_path=f"runs/{run_dir.name}/events/lifecycle.jsonl",
+    )
     entry["config"] = {
         "seats": seats,
         "attempts_per_seat": attempts_per_seat,
@@ -423,6 +439,8 @@ def _drive_volume_scenario(
     entry["stopped_reason"] = stopped_reason
     entry["hit_event_ceiling"] = entry["event_count"] >= run_checkpoint.MAX_JOURNAL_EVENTS
     entry["hit_byte_ceiling"] = entry["journal_bytes"] >= run_checkpoint.MAX_JOURNAL_BYTES
+    if stopped_reason is not None:
+        raise MeasurementInputError(f"measurement scenario did not complete: {stopped_reason}")
     return entry
 
 
@@ -521,6 +539,11 @@ def measure_volume(
                 attempts_per_seat=worst_attempts_per_seat,
                 pause_cycles=worst_pause_cycles,
             )
+
+    for scenario in (representative, roster_sized, worst_case):
+        stopped_reason = scenario.get("stopped_reason")
+        if stopped_reason is not None:
+            raise MeasurementInputError(f"measurement scenario did not complete: {stopped_reason}")
 
     return {
         "issue": 635,

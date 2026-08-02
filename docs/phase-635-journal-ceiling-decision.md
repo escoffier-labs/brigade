@@ -1,21 +1,20 @@
 # Issue #635: journal ceiling decision (measure, then design)
 
-Status: design decision awaiting grading. No production implementation in this change.
+Status: implemented by issue #653.
 
 ## Measured numbers
 
-Artifact: `.brigade/measurements/issue-635-journal-ceiling.json` (local, same shape family as `issue-568-slice6.json`: environment metadata plus structured aggregates; volume mode adds bounds and scenario blocks).
+Artifact: `docs/measurements/issue-635-journal-ceiling.json`, SHA-256 `db9a585b6c2b80ca5e5bfc2c1411d678754cecc2f8f6911685da5cc00a381c89`.
 
-Current hard bounds: `MAX_JOURNAL_EVENTS = 512`, `MAX_JOURNAL_BYTES = 8 MiB`.
+Current hard bounds: `MAX_JOURNAL_EVENTS = 2048`, `MAX_JOURNAL_BYTES = 8 MiB`.
 
 | Scenario | Events | Bytes | % event ceiling | % byte ceiling | Hit ceiling? |
 | --- | ---: | ---: | ---: | ---: | --- |
-| Scanned real runs (n=13, single-seat journal-hardening runs) | p50/max 17 | p50 14,279 / max 14,286 | 3.3% | 0.17% | no |
-| Synthetic representative (1 seat, 1 attempt, 0 pauses) | 11 | 7,780 | 2.1% | 0.09% | no |
-| Synthetic roster-sized (11 seats, 2 attempts, 3 pause/resume cycles) | 155 | 124,777 | 30.3% | 1.5% | no |
-| Synthetic worst case (32 seats, 3 attempts, 8 pause cycles) | 512 | 420,683 | 100% | 5.0% | yes, mid-dispatch |
+| Synthetic representative (1 seat, 1 attempt, 0 pauses) | 11 | 7,780 | 0.54% | 0.09% | no |
+| Synthetic roster-sized (11 seats, 2 attempts, 3 pause/resume cycles) | 155 | 124,777 | 7.57% | 1.49% | no |
+| Synthetic worst case (32 seats, 3 attempts, 8 pause/resume cycles) | 629 | 510,900 | 30.71% | 6.09% | no |
 
-Worst-case stop reason: `LifecycleJournalError: bound exceeded: journal event sequence above MAX_JOURNAL_EVENTS` at `seat-28` attempt 1. Bytes were still ~5% of the 8 MiB cap.
+The captured synthetic scenarios completed without a stop reason. The artifact has no scanned real-run inputs; supplied scan roots now fail when missing, unreadable, or empty.
 
 ## Decision
 
@@ -23,16 +22,16 @@ Raise the event bound. Do not segment the journal yet.
 
 Reasoning:
 
-1. Event count is the binding constraint. At a full 512-event journal the file is only ~0.4 MiB.
-2. Realistic and roster-sized load stays far from 512 (3% real, 30% for 11 seats with retries and three approval cycles).
-3. The ceiling is reachable, but only under a synthetic fleet larger than today's 11-seat roster with three attempts per seat.
-4. Segmentation (cross-linked `lifecycle.NNNNN.jsonl`, reader/projector/doctor/recovery awareness) is a large surface change. The measured gap does not justify that cost before a cheaper bound raise plus a soft warning.
-5. Keep segmentation as the explicit escape hatch if #593 budget events or larger fleets push roster-sized runs past ~50% of the raised ceiling.
+1. Event count remains the binding constraint. The worst synthetic run reaches 629 events while using 510,900 bytes.
+2. The 11-seat roster scenario reaches 7.57% of the raised event ceiling.
+3. The 32-seat scenario records all eight pause/resume cycles and reaches 30.71% of the raised event ceiling.
+4. At the measured worst-case average event size, 2,048 events consume about one fifth of the byte bound, leaving about 5x byte headroom.
+5. Segmentation remains the escape hatch if #593 budget events or larger fleets push roster-sized runs past about 50% of the raised ceiling.
 
-Recommended production change (separate implementation issue, after this design is graded):
+Implemented production change:
 
 - Raise `MAX_JOURNAL_EVENTS` from 512 to 2048 (4x).
-- Leave `MAX_JOURNAL_BYTES` at 8 MiB for now (still ~20x headroom at 2048 median-sized events).
+- Leave `MAX_JOURNAL_BYTES` at 8 MiB for now (about 5x byte headroom at 2,048 measured-size events).
 - Add a doctor soft threshold at 75% of the event bound (1536 of 2048): `WARN`, not `FAIL`.
 - Keep the hard refuse-to-append behavior only at the new ceiling, and make that failure visible (already true today via `LifecycleJournalError`).
 
@@ -68,6 +67,7 @@ After the bound raise ships:
 ```bash
 python scripts/measure_run_journal.py \
   --mode volume \
-  --scan /path/to/.brigade/runs \
-  --output .brigade/measurements/issue-635-journal-ceiling.json
+  --output docs/measurements/issue-635-journal-ceiling.json
 ```
+
+Add `--scan /path/to/.brigade/runs` only for an existing readable root that contains lifecycle journals.

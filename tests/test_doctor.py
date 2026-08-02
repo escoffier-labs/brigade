@@ -1424,6 +1424,54 @@ def _recovery_check(target: Path, *, full: bool = False) -> tuple[str, str, str]
     return doctor_mod._check_recovery_checkpoints(target, full=full)
 
 
+def _write_headroom_journal(run_dir: Path, event_count: int) -> None:
+    from brigade import run_events
+
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    previous_digest: str | None = None
+    with journal.open("ab") as handle:
+        for sequence in range(1, event_count + 1):
+            envelope = run_events.build_event(
+                run_id=run_dir.name,
+                sequence=sequence,
+                event_type="run.planning.started",
+                payload={"detail": "measurement"},
+                idempotency_key=f"headroom-{sequence}",
+                recorded_at="2026-07-27T15:30:45.000000Z",
+                previous_digest=previous_digest,
+            )
+            handle.write(run_events.canonical_bytes(envelope) + b"\n")
+            previous_digest = envelope["event_digest"]
+
+
+@pytest.mark.parametrize(
+    ("event_count", "expected"),
+    [(1535, []), (1536, [doctor_mod.WARN]), (1537, [doctor_mod.WARN])],
+)
+def test_doctor_journal_event_headroom_warns_at_75_percent_boundary(
+    tmp_path: Path, event_count: int, expected: list[str]
+):
+    from brigade import run_checkpoint
+
+    assert run_checkpoint.MAX_JOURNAL_EVENTS == 2048
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / f"headroom-{event_count}"
+    _write_headroom_journal(run_dir, event_count)
+
+    checks = doctor_mod._check_journal_event_headroom(workspace)
+
+    assert [status for status, _name, _detail in checks] == expected
+    if expected:
+        status, name, detail = checks[0]
+        assert status == doctor_mod.WARN
+        assert name == "runs: journal event headroom"
+        assert detail == (
+            f"lifecycle journal at {event_count}/2048 events "
+            f"({event_count * 100 // 2048}%); raise or segment before the hard ceiling halts appends"
+        )
+
+
 def test_doctor_validates_checkpoint_before_reporting_pending_dispatch(tmp_path: Path):
     from brigade import run_checkpoint, run_journal, run_lifecycle, runguard
 
@@ -2108,8 +2156,8 @@ def test_doctor_invalid_recovered_at_iso_is_fail(tmp_path: Path):
     assert "run.json does not match checkpoint" in detail
 
 
-def test_doctor_513_events_fail_bound_exceeded_without_checkpoint_parsing(tmp_path: Path, monkeypatch):
-    """513 valid chained complete events must FAIL bound exceeded, no checkpoint parse."""
+def test_doctor_events_above_ceiling_fail_bound_exceeded_without_checkpoint_parsing(tmp_path: Path, monkeypatch):
+    """A valid chain above the ceiling must FAIL before checkpoint parsing."""
     from brigade import run_checkpoint, run_events, run_lifecycle
 
     workspace = tmp_path / "workspace"
@@ -2125,7 +2173,7 @@ def test_doctor_513_events_fail_bound_exceeded_without_checkpoint_parsing(tmp_pa
     journal.parent.mkdir(parents=True, exist_ok=True)
     previous_digest: str | None = None
     with journal.open("ab") as handle:
-        for index in range(513):
+        for index in range(run_checkpoint.MAX_JOURNAL_EVENTS + 1):
             env = run_events.build_event(
                 run_id=_RUN_ID,
                 sequence=index + 1,

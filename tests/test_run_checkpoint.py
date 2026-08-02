@@ -69,7 +69,7 @@ def test_checkpoint_constants_have_approved_values():
     assert run_checkpoint.CHECKPOINT_DIR_NAME == "recovery-checkpoints"
     assert run_checkpoint.MAX_CHECKPOINT_BYTES == 16 * 1024 * 1024
     assert run_checkpoint.MAX_JOURNAL_BYTES == 8 * 1024 * 1024
-    assert run_checkpoint.MAX_JOURNAL_EVENTS == 512
+    assert run_checkpoint.MAX_JOURNAL_EVENTS == 2048
 
 
 def test_checkpoint_dir_and_path_helpers():

@@ -1,0 +1,124 @@
+{
+  "bounds": {
+    "max_journal_bytes": 8388608,
+    "max_journal_events": 2048
+  },
+  "environment": {
+    "directory_fsync_supported": true,
+    "filesystem_type": "ext4",
+    "platform": "Linux-6.17.0-1030-oem-x86_64-with-glibc2.39",
+    "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]"
+  },
+  "issue": 635,
+  "kind": "journal-volume",
+  "representative_synthetic": {
+    "config": {
+      "attempts_per_seat": 1,
+      "pause_cycles": 0,
+      "seats": 1
+    },
+    "event_count": 11,
+    "event_type_counts": {
+      "run.completed": 1,
+      "run.dispatch.completed": 1,
+      "run.dispatch.observed": 1,
+      "run.dispatch.requested": 1,
+      "run.dispatching.started": 1,
+      "run.planning.started": 1,
+      "run.result-processing.started": 1,
+      "run.snapshot.checkpointed": 3,
+      "run.synthesis.started": 1
+    },
+    "headroom_bytes": 8380828,
+    "headroom_events": 2037,
+    "hit_byte_ceiling": false,
+    "hit_event_ceiling": false,
+    "journal_bytes": 7780,
+    "label": "representative",
+    "path": "runs/representative/events/lifecycle.jsonl",
+    "pct_bytes": 0.092745,
+    "pct_events": 0.5371,
+    "stopped_reason": null
+  },
+  "roster_sized_synthetic": {
+    "config": {
+      "attempts_per_seat": 2,
+      "pause_cycles": 3,
+      "seats": 11
+    },
+    "event_count": 155,
+    "event_type_counts": {
+      "approval.consumed": 3,
+      "approval.requested": 3,
+      "run.completed": 1,
+      "run.dispatch.completed": 11,
+      "run.dispatch.failed": 11,
+      "run.dispatch.observed": 22,
+      "run.dispatch.requested": 22,
+      "run.dispatching.started": 1,
+      "run.paused": 3,
+      "run.planning.started": 1,
+      "run.result-processing.started": 1,
+      "run.resumed": 3,
+      "run.snapshot.checkpointed": 72,
+      "run.synthesis.started": 1
+    },
+    "headroom_bytes": 8263831,
+    "headroom_events": 1893,
+    "hit_byte_ceiling": false,
+    "hit_event_ceiling": false,
+    "journal_bytes": 124777,
+    "label": "roster-sized",
+    "path": "runs/roster-sized/events/lifecycle.jsonl",
+    "pct_bytes": 1.487458,
+    "pct_events": 7.5684,
+    "stopped_reason": null
+  },
+  "scanned_real_runs": {
+    "aggregate": {
+      "event_count_max": 0,
+      "event_count_p50": 0,
+      "event_count_p95": 0,
+      "journal_bytes_max": 0,
+      "journal_bytes_p50": 0,
+      "journal_bytes_p95": 0,
+      "runs": 0
+    },
+    "per_run": [],
+    "roots": []
+  },
+  "worst_case_synthetic": {
+    "config": {
+      "attempts_per_seat": 3,
+      "pause_cycles": 8,
+      "seats": 32
+    },
+    "event_count": 629,
+    "event_type_counts": {
+      "approval.consumed": 8,
+      "approval.requested": 8,
+      "run.completed": 1,
+      "run.dispatch.completed": 32,
+      "run.dispatch.failed": 64,
+      "run.dispatch.observed": 96,
+      "run.dispatch.requested": 96,
+      "run.dispatching.started": 1,
+      "run.paused": 8,
+      "run.planning.started": 1,
+      "run.result-processing.started": 1,
+      "run.resumed": 8,
+      "run.snapshot.checkpointed": 304,
+      "run.synthesis.started": 1
+    },
+    "headroom_bytes": 7877708,
+    "headroom_events": 1419,
+    "hit_byte_ceiling": false,
+    "hit_event_ceiling": false,
+    "journal_bytes": 510900,
+    "label": "worst-case",
+    "path": "runs/worst-case/events/lifecycle.jsonl",
+    "pct_bytes": 6.090403,
+    "pct_events": 30.7129,
+    "stopped_reason": null
+  }
+}

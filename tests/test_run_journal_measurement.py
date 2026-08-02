@@ -245,6 +245,48 @@ def test_scan_lifecycle_journals_reads_existing_files(tmp_path):
     assert scanned["per_run"][0]["journal_bytes"] == journal.stat().st_size
 
 
+@pytest.mark.parametrize(
+    ("prepare", "message"),
+    [
+        (lambda root: None, "missing"),
+        (lambda root: root.mkdir(), "stale"),
+    ],
+)
+def test_scan_lifecycle_journals_fails_closed_for_missing_or_stale_input(tmp_path, prepare, message):
+    module = _load_measure_run_journal_module()
+    scan_root = tmp_path / "scan-input"
+    prepare(scan_root)
+
+    with pytest.raises(module.MeasurementInputError, match=message):
+        module.scan_lifecycle_journals([scan_root])
+
+
+def test_scan_lifecycle_journals_fails_closed_for_unreadable_input(tmp_path, monkeypatch):
+    module = _load_measure_run_journal_module()
+    scan_root = tmp_path / "scan-input"
+    scan_root.mkdir()
+
+    def _raise_unreadable(_self, _pattern):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "rglob", _raise_unreadable)
+
+    with pytest.raises(module.MeasurementInputError, match="unreadable"):
+        module.scan_lifecycle_journals([scan_root])
+
+
+def test_measure_volume_fails_closed_when_a_scenario_stops_early(tmp_path, monkeypatch):
+    module = _load_measure_run_journal_module()
+
+    def _stopped_scenario(*_args, **_kwargs):
+        return {"stopped_reason": "dispatch failed", "event_count": 0, "journal_bytes": 0}
+
+    monkeypatch.setattr(module, "_drive_volume_scenario", _stopped_scenario)
+
+    with pytest.raises(module.MeasurementInputError, match="scenario did not complete"):
+        module.measure_volume(tmp_path)
+
+
 def test_cli_volume_mode_writes_report(tmp_path):
     output = tmp_path / "out" / "volume.json"
 
