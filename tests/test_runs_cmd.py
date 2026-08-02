@@ -785,9 +785,7 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
     review_result = []
     events = []
     if source == "daily":
-        source_store_lock_path = daily_cmd.approvals._approval_lock_path(
-            tmp_path, record["approval_id"]
-        ).resolve()
+        source_store_lock_path = daily_cmd.approvals._approval_lock_path(tmp_path, record["approval_id"]).resolve()
     else:
         source_store_lock_path = tools_cmd.calls._calls_lock_path(tmp_path).resolve()
     original_acquire_lock = runguard._acquire_lock
@@ -795,11 +793,7 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
     outcome_observed = {"done": False}
 
     def instrumented_acquire_lock(path, *, run_dir=None):
-        if (
-            append_entered.is_set()
-            and not outcome_observed["done"]
-            and Path(path).resolve() == source_store_lock_path
-        ):
+        if append_entered.is_set() and not outcome_observed["done"] and Path(path).resolve() == source_store_lock_path:
             try:
                 ownership = original_acquire_lock(path, run_dir=run_dir)
             except runguard.RunLockError as exc:
