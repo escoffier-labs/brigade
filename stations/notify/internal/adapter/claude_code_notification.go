@@ -11,9 +11,9 @@ import (
 // ClaudeCodeNotification reads a Claude Code Notification hook event JSON
 // and produces a canonical message.
 func ClaudeCodeNotification(r io.Reader) (canonical.Message, error) {
-	raw, err := io.ReadAll(r)
+	raw, err := ReadBounded(r)
 	if err != nil {
-		return canonical.Message{}, fmt.Errorf("read input: %w", err)
+		return canonical.Message{}, err
 	}
 	var ev map[string]interface{}
 	if err := json.Unmarshal(raw, &ev); err != nil {

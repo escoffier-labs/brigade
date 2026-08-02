@@ -42,7 +42,10 @@ type signalRequest struct {
 }
 
 func (s *Signal) Send(ctx context.Context, m canonical.Message) error {
-	text := formatSignal(m)
+	text, err := fitSignalText(m)
+	if err != nil {
+		return err
+	}
 	payload := signalRequest{
 		Message:    text,
 		Number:     s.from,
@@ -87,4 +90,27 @@ func formatSignal(m canonical.Message) string {
 		sb.WriteString("]")
 	}
 	return sb.String()
+}
+
+func fitSignalText(m canonical.Message) (string, error) {
+	text := formatSignal(m)
+	if len(text) <= SignalMessageMax {
+		return text, nil
+	}
+	overhead := len(text) - len(m.Body)
+	budget := SignalMessageMax - overhead
+	if budget < len(truncateSuffix) {
+		return "", payloadLimitError("signal")
+	}
+	body, ok := truncateRunes(m.Body, budget)
+	if !ok {
+		return "", payloadLimitError("signal")
+	}
+	trial := m
+	trial.Body = body
+	out := formatSignal(trial)
+	if len(out) > SignalMessageMax {
+		return "", payloadLimitError("signal")
+	}
+	return out, nil
 }
