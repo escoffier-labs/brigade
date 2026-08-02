@@ -838,7 +838,12 @@ def _iter_lines(raw: bytes) -> Iterator[tuple[bytes | None, bytes | None]]:
 
 
 def read_journal(journal_path: Path) -> JournalReport:
-    """Read the journal without mutating it.
+    """Forensically read the journal without mutating it.
+
+    This compatibility API deliberately has no byte or event-count ceiling and
+    may allocate the complete journal. It is for offline inspection only;
+    runtime mutation and control paths must use ``read_journal_bounded`` so
+    they enforce the shared journal ceilings before allocation.
 
     Each complete line must be a validated canonical envelope; lines that are
     malformed, carry duplicate JSON keys, or differ byte-wise from canonical
@@ -895,7 +900,7 @@ def read_journal_bounded(journal_path: Path) -> JournalReport:
     Mirrors ``read_journal`` semantics but refuses journals above
     ``MAX_JOURNAL_BYTES`` (8 MiB) via ``fstat`` before any whole-file
     allocation, reads in bounded chunks, and fails closed at the first
-    complete event whose sequence exceeds ``MAX_JOURNAL_EVENTS`` (512).
+    complete event whose sequence exceeds ``MAX_JOURNAL_EVENTS`` (2048).
     A bound excess is reported as ``bound exceeded`` and not parsed further.
     The existing ``read_journal`` stays compatible.
     """

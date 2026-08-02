@@ -32,7 +32,7 @@ CHECKPOINT_PRIVACY_CLASS = "private"
 CHECKPOINT_DIR_NAME = "recovery-checkpoints"
 MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024
 MAX_JOURNAL_BYTES = 8 * 1024 * 1024
-MAX_JOURNAL_EVENTS = 512
+MAX_JOURNAL_EVENTS = 2048
 
 _CHECKPOINT_PAYLOAD_REQUIRED_KEYS = frozenset(
     {"path", "sha256", "media_type", "byte_size", "privacy_class", "paired_event_type"}
@@ -824,7 +824,7 @@ def write_checkpoint(
     # lifecycle status append and before run.json replacement.
     publish_checkpoint_file(run_dir, publish_bytes)
     try:
-        report = run_journal.read_journal(journal_path)
+        report = run_journal.read_journal_bounded(journal_path)
         if report.partial_tail is not None or report.chain_errors:
             raise run_journal.ChainIntegrityError(run_events._bound(run_lifecycle._CHAIN_CATEGORY))
         idempotency_key = _checkpoint_idempotency_key(

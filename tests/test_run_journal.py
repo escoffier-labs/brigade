@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import ast
 import hashlib
 import json
 import os
@@ -1001,11 +1002,11 @@ def test_read_journal_bounded_refuses_oversize_journal_before_allocation(tmp_pat
     assert all(p.name == "lifecycle.jsonl" for p, _ in opened)
 
 
-def test_read_journal_bounded_refuses_event_sequence_513(tmp_path):
+def test_read_journal_bounded_refuses_event_sequence_above_ceiling(tmp_path):
     journal_path = _journal_path(_run_dir(tmp_path))
     journal_path.parent.mkdir(parents=True, exist_ok=True)
     previous_digest: str | None = None
-    for sequence in range(1, 514):
+    for sequence in range(1, run_checkpoint.MAX_JOURNAL_EVENTS + 2):
         event_type = "run.planning.started" if sequence % 2 == 0 else "run.dispatch.observed"
         payload = (
             {"detail": "n"} if event_type == "run.planning.started" else {"seat": "c", "attempt": 1, "detail": "n"}
@@ -1029,20 +1030,21 @@ def test_read_journal_bounded_refuses_event_sequence_513(tmp_path):
     assert "bound exceeded" in excinfo.value.diagnostic
 
 
-def test_read_journal_stays_compatible_after_bounded_reader(tmp_path):
-    """read_journal must still parse a journal that read_journal_bounded refuses on bounds.
+def test_read_journal_is_forensic_api_after_bounded_reader(tmp_path):
+    """The forensic reader may inspect an over-limit journal without becoming a runtime path.
 
-    Builds a 513-event journal with efficient direct canonical construction
+    Builds a journal one event past the ceiling with efficient direct canonical construction
     (``run_events.build_event`` + a single appending ``write`` per line, no
-    ``append_event`` fsyncs). ``read_journal_bounded`` refuses it on the 513th
-    complete record (``MAX_JOURNAL_EVENTS`` is 512); ``read_journal`` has no
-    event-count bound and must read the full chain cleanly.
+    ``append_event`` fsyncs). ``read_journal_bounded`` refuses its first event
+    past ``MAX_JOURNAL_EVENTS``. ``read_journal`` intentionally remains an
+    unbounded forensic API, while runtime control and mutation paths are
+    required to call ``read_journal_bounded`` instead.
     """
     journal_path = _journal_path(_run_dir(tmp_path))
     journal_path.parent.mkdir(parents=True, exist_ok=True)
     previous_digest: str | None = None
     with journal_path.open("ab") as handle:
-        for sequence in range(1, 514):
+        for sequence in range(1, run_checkpoint.MAX_JOURNAL_EVENTS + 2):
             event_type = "run.planning.started" if sequence % 2 == 0 else "run.dispatch.observed"
             payload = (
                 {"detail": "n"} if event_type == "run.planning.started" else {"seat": "c", "attempt": 1, "detail": "n"}
@@ -1067,21 +1069,90 @@ def test_read_journal_stays_compatible_after_bounded_reader(tmp_path):
     # read_journal stays compatible: it has no event-count bound and reads the
     # full gap-free, digest-linked chain without raising or reporting errors.
     plain = run_journal.read_journal(journal_path)
-    assert len(plain.events) == 513
+    assert len(plain.events) == run_checkpoint.MAX_JOURNAL_EVENTS + 1
     assert plain.partial_tail is None
     assert plain.chain_errors == []
     assert plain.events[0].sequence == 1
-    assert plain.events[-1].sequence == 513
+    assert plain.events[-1].sequence == run_checkpoint.MAX_JOURNAL_EVENTS + 1
+
+
+def test_runtime_journal_paths_do_not_call_the_unbounded_forensic_reader():
+    """Runtime mutation and recovery control paths must enforce shared reader bounds."""
+    runtime_modules = (
+        "doctor.py",
+        "run_lifecycle.py",
+        "run_checkpoint.py",
+        "run_shadow.py",
+        "runs_cmd.py",
+    )
+    source_root = Path(run_journal.__file__).parent
+    offenders: list[str] = []
+    for module_name in runtime_modules:
+        tree = ast.parse((source_root / module_name).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "run_journal"
+                and node.func.attr == "read_journal"
+            ):
+                offenders.append(f"{module_name}:{node.lineno}")
+    assert offenders == []
+
+
+def test_near_event_ceiling_idempotency_index_and_duplicate_replay_stay_within_budget(tmp_path, record_property):
+    """A 2,047-event journal keeps index construction and exact replay bounded."""
+    journal_path = _journal_path(_run_dir(tmp_path))
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_digest: str | None = None
+    event_count = run_checkpoint.MAX_JOURNAL_EVENTS - 1
+    with journal_path.open("ab") as handle:
+        for sequence in range(1, event_count + 1):
+            env = run_events.build_event(
+                run_id=RUN_ID,
+                sequence=sequence,
+                event_type="run.planning.started",
+                payload={"detail": "performance"},
+                idempotency_key=f"performance-{sequence}",
+                recorded_at="2026-07-27T15:30:45.000000Z",
+                previous_digest=previous_digest,
+            )
+            handle.write(run_events.canonical_bytes(env) + b"\n")
+            previous_digest = env["event_digest"]
+
+    budget_ns = 5_000_000_000
+    started_ns = time.perf_counter_ns()
+    _sequence, _digest, index, partial_tail, _journal_bytes = run_journal._read_tail_state(journal_path)
+    index_build_ns = time.perf_counter_ns() - started_ns
+
+    started_ns = time.perf_counter_ns()
+    replay = run_journal.lookup_idempotent_event(
+        journal_path,
+        event_type="run.planning.started",
+        payload={"detail": "performance"},
+        idempotency_key=f"performance-{event_count}",
+    )
+    duplicate_replay_ns = time.perf_counter_ns() - started_ns
+
+    record_property("idempotency_index_build_ns", index_build_ns)
+    record_property("idempotency_duplicate_replay_ns", duplicate_replay_ns)
+    record_property("idempotency_performance_budget_ns", budget_ns)
+    assert partial_tail is None
+    assert len(index) == event_count
+    assert replay is not None and replay.sequence == event_count
+    assert index_build_ns <= budget_ns, f"idempotency index build took {index_build_ns}ns (budget {budget_ns}ns)"
+    assert duplicate_replay_ns <= budget_ns, f"duplicate replay took {duplicate_replay_ns}ns (budget {budget_ns}ns)"
 
 
 # -- Finding 6: read_journal_bounded must count complete records, not trust sequence --
 
 
-def test_read_journal_bounded_rejects_complete_record_513_even_with_repeated_sequence(tmp_path):
+def test_read_journal_bounded_rejects_complete_record_above_ceiling_even_with_repeated_sequence(tmp_path):
     journal_path = _journal_path(_run_dir(tmp_path))
     journal_path.parent.mkdir(parents=True, exist_ok=True)
     previous_digest: str | None = None
-    for sequence in range(1, 513):
+    for sequence in range(1, run_checkpoint.MAX_JOURNAL_EVENTS + 1):
         event_type = "run.planning.started" if sequence % 2 == 0 else "run.dispatch.observed"
         payload = (
             {"detail": "n"} if event_type == "run.planning.started" else {"seat": "c", "attempt": 1, "detail": "n"}
@@ -1099,20 +1170,20 @@ def test_read_journal_bounded_rejects_complete_record_513_even_with_repeated_seq
             handle.write(run_events.canonical_bytes(env) + b"\n")
         previous_digest = env["event_digest"]
 
-    # 513th complete record: its envelope repeats sequence 1 (and a matching
-    # previous_digest is null), so a sequence-trusting reader would treat it as
-    # a duplicate/chain break rather than a bound excess.
-    env_513 = run_events.build_event(
+    # The first complete record above the shared ceiling repeats sequence 1
+    # with a null previous digest. A sequence-trusting reader would treat it as
+    # a duplicate or chain break instead of a bound excess.
+    env_above_ceiling = run_events.build_event(
         run_id=RUN_ID,
         sequence=1,
         event_type="run.created",
         payload={"status": "started"},
-        idempotency_key="ev-513-repeated",
+        idempotency_key="ev-above-ceiling-repeated",
         recorded_at="2026-07-27T15:30:45.000000Z",
         previous_digest=None,
     )
     with journal_path.open("ab") as handle:
-        handle.write(run_events.canonical_bytes(env_513) + b"\n")
+        handle.write(run_events.canonical_bytes(env_above_ceiling) + b"\n")
 
     with pytest.raises(run_journal.RunJournalError) as excinfo:
         run_journal.read_journal_bounded(journal_path)
@@ -1163,7 +1234,7 @@ def _tracking_write(monkeypatch) -> list[bytes]:
     return write_calls
 
 
-def test_append_event_refuses_513th_distinct_event_before_write(tmp_path, monkeypatch):
+def test_append_event_refuses_distinct_event_above_ceiling_before_write(tmp_path, monkeypatch):
     journal_path = _journal_path(_run_dir(tmp_path))
     _write_journal_events(journal_path, run_checkpoint.MAX_JOURNAL_EVENTS)
     before = journal_path.read_bytes()
@@ -1175,7 +1246,7 @@ def test_append_event_refuses_513th_distinct_event_before_write(tmp_path, monkey
             run_id=RUN_ID,
             event_type="run.created",
             payload={"status": "started"},
-            idempotency_key="ev-513",
+            idempotency_key="ev-above-ceiling",
             expected_previous_sequence=run_checkpoint.MAX_JOURNAL_EVENTS,
             recorded_at="2026-07-27T15:30:50.000000Z",
         )
@@ -1183,6 +1254,29 @@ def test_append_event_refuses_513th_distinct_event_before_write(tmp_path, monkey
     assert "bound exceeded" in excinfo.value.diagnostic
     assert not write_calls
     assert journal_path.read_bytes() == before
+
+
+def test_old_sequence_512_journal_recovers_and_appends_513_without_renumbering(tmp_path):
+    """A chain stopped at the pre-upgrade ceiling remains appendable after the bump."""
+    assert run_checkpoint.MAX_JOURNAL_EVENTS == 2048
+    journal_path = _journal_path(_run_dir(tmp_path))
+    _write_journal_events(journal_path, 512)
+
+    appended = run_journal.append_event(
+        journal_path,
+        run_id=RUN_ID,
+        event_type="run.created",
+        payload={"status": "started"},
+        idempotency_key="ev-513-after-upgrade",
+        expected_previous_sequence=512,
+        recorded_at="2026-07-27T15:30:50.000000Z",
+    )
+
+    report = run_journal.read_journal_bounded(journal_path)
+    assert appended.sequence == 513
+    assert [event.sequence for event in report.events] == list(range(1, 514))
+    assert report.events[511].idempotency_key == "ev-512"
+    assert report.events[512].idempotency_key == "ev-513-after-upgrade"
 
 
 def test_append_event_refuses_growth_past_max_journal_bytes_before_write(tmp_path, monkeypatch):
@@ -1257,12 +1351,12 @@ def test_append_event_refuses_oversize_journal_consistent_with_read_journal_boun
     assert journal_path.read_bytes() == before
 
 
-def test_append_event_refuses_journal_with_513_complete_records_before_write(tmp_path, monkeypatch):
+def test_append_event_refuses_journal_with_records_above_ceiling_before_write(tmp_path, monkeypatch):
     journal_path = _journal_path(_run_dir(tmp_path))
     journal_path.parent.mkdir(parents=True, exist_ok=True)
     previous_digest: str | None = None
     with journal_path.open("ab") as handle:
-        for sequence in range(1, 514):
+        for sequence in range(1, run_checkpoint.MAX_JOURNAL_EVENTS + 2):
             event_type = "run.planning.started" if sequence % 2 == 0 else "run.dispatch.observed"
             payload = (
                 {"detail": "n"} if event_type == "run.planning.started" else {"seat": "c", "attempt": 1, "detail": "n"}
@@ -1288,7 +1382,7 @@ def test_append_event_refuses_journal_with_513_complete_records_before_write(tmp
             event_type="run.created",
             payload={"status": "started"},
             idempotency_key="ev-new",
-            expected_previous_sequence=513,
+            expected_previous_sequence=run_checkpoint.MAX_JOURNAL_EVENTS + 1,
             recorded_at="2026-07-27T15:30:50.000000Z",
         )
 

@@ -96,12 +96,50 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
         checks.extend(_check_hermes(ctx.target))
     checks.extend(_check_orphan_inboxes(ctx.target, ctx.harnesses))
     checks.append(_check_recovery_checkpoints(ctx.target))
+    checks.extend(_check_journal_event_headroom(ctx.target))
     return checks
 
 
 _RECOVERY_CHECKPOINTS_NAME = "runs: recovery checkpoints"
 _RECOVERY_CHECKPOINTS_SCAN_LIMIT = 50
 _RECOVERY_CHECKPOINTS_FAIL_PREVIEW = 8
+_JOURNAL_EVENT_HEADROOM_NAME = "runs: journal event headroom"
+_JOURNAL_EVENT_HEADROOM_NUMERATOR = 3
+_JOURNAL_EVENT_HEADROOM_DENOMINATOR = 4
+
+
+def _check_journal_event_headroom(target: Path) -> List[CheckResult]:
+    """Warn for chain-valid journals at least 75% full through the hard limit."""
+    from brigade import run_checkpoint, run_journal, run_lifecycle
+
+    threshold = (
+        run_checkpoint.MAX_JOURNAL_EVENTS * _JOURNAL_EVENT_HEADROOM_NUMERATOR + _JOURNAL_EVENT_HEADROOM_DENOMINATOR - 1
+    ) // _JOURNAL_EVENT_HEADROOM_DENOMINATOR
+    checks: List[CheckResult] = []
+    run_dirs, _omitted = _immediate_run_dirs(target / ".brigade" / "runs")
+    for run_dir in run_dirs:
+        journal_path = run_lifecycle._journal_path(run_dir)
+        try:
+            if not journal_path.is_file():
+                continue
+            report = run_journal.read_journal_bounded(journal_path)
+        except (OSError, run_journal.RunJournalError):
+            # Recovery checkpoints own malformed and over-limit journal errors.
+            continue
+        if report.partial_tail is not None or report.chain_errors:
+            continue
+        event_count = len(report.events)
+        if threshold <= event_count <= run_checkpoint.MAX_JOURNAL_EVENTS:
+            pct = event_count * 100 // run_checkpoint.MAX_JOURNAL_EVENTS
+            checks.append(
+                (
+                    WARN,
+                    _JOURNAL_EVENT_HEADROOM_NAME,
+                    f"lifecycle journal at {event_count}/{run_checkpoint.MAX_JOURNAL_EVENTS} events "
+                    f"({pct}%); raise or segment before the hard ceiling halts appends",
+                )
+            )
+    return checks
 
 
 def _check_recovery_checkpoints(target: Path, *, full: bool = False) -> CheckResult:
