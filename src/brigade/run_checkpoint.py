@@ -1239,8 +1239,11 @@ def strip_checkpoint_bodies_for_export(run_dir: Path) -> list[dict[str, Any]]:
     if not cp_dir.is_dir():
         return []
     replaced: list[dict[str, Any]] = []
-    paths = sorted((*cp_dir.glob("*.json"), *cp_dir.glob(_CHECKPOINT_TEMP_GLOB)))
-    for path in paths:
+    # Only content-addressed ``{sha}.json`` bodies can be rewritten to a truthful
+    # artifact reference. Crashed ``.checkpoint.*.tmp`` temp bodies have no
+    # canonical hash path, so callers omit them from the export tree before this
+    # runs (see verification._archive_verify_run); they are never rewritten here.
+    for path in sorted(cp_dir.glob("*.json")):
         if not path.is_file() or path.is_symlink():
             refuse_checkpoint_body_export(reason="checkpoint export path is not a regular file")
         raw = path.read_bytes()
@@ -1252,7 +1255,7 @@ def strip_checkpoint_bodies_for_export(run_dir: Path) -> list[dict[str, Any]]:
             replaced.append(dict(parsed))
             continue
         sha = hashlib.sha256(raw).hexdigest()
-        if path.suffix == ".json" and path.name != f"{sha}.json":
+        if path.name != f"{sha}.json":
             refuse_checkpoint_body_export(reason="checkpoint export filename digest mismatch")
         reference = checkpoint_artifact_reference(sha256=sha, byte_size=len(raw))
         path.write_text(json.dumps(reference, indent=2, sort_keys=True) + "\n", encoding="utf-8")
