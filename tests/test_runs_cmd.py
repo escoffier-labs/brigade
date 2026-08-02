@@ -803,20 +803,24 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
     def instrumented_acquire_lock(path, *, run_dir=None):
         if Path(path).resolve() == source_store_lock_path:
             with snapshot_classification:
-                if snapshot_refreshing.is_set() and not snapshot_done.is_set():
+                during_refresh = snapshot_refreshing.is_set() and not snapshot_done.is_set()
+                if during_refresh:
                     attempted_before_snapshot.set()
-                    try:
-                        ownership = original_acquire_lock(path, run_dir=run_dir)
-                    except runguard.RunLockError as exc:
-                        if "another brigade run appears active" in str(exc):
+            if during_refresh:
+                try:
+                    ownership = original_acquire_lock(path, run_dir=run_dir)
+                except runguard.RunLockError as exc:
+                    if "another brigade run appears active" in str(exc):
+                        with snapshot_classification:
                             lock_contended.set()
-                        raise
+                    raise
+                with snapshot_classification:
                     successful_before_snapshot.set()
-                    runguard._release_lock(path, ownership)
-                    raise AssertionError(
-                        "source-store lock acquired before journal commit completed: "
-                        f"events={events!r} refresh_started={refresh_started.is_set()}"
-                    )
+                runguard._release_lock(path, ownership)
+                raise AssertionError(
+                    "source-store lock acquired before journal commit completed: "
+                    f"events={events!r} refresh_started={refresh_started.is_set()}"
+                )
         return original_acquire_lock(path, run_dir=run_dir)
 
     def review_source():
@@ -844,10 +848,10 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
             append_entered.set()
             run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=tmp_path)
             thread_sync.wait_for_predicate(
-                lambda: attempted_before_snapshot.is_set() or not reviewer.is_alive(),
-                description="reviewer source-store lock attempt",
+                lambda: lock_contended.is_set() or successful_before_snapshot.is_set() or not reviewer.is_alive(),
+                description="reviewer source-store lock attempt outcome",
             )
-            if not attempted_before_snapshot.is_set():
+            if not reviewer.is_alive() and not attempted_before_snapshot.is_set():
                 thread_sync.join_thread(reviewer, description="reviewer failed before source-lock attempt")
             assert attempted_before_snapshot.is_set()
             if successful_before_snapshot.is_set():
@@ -892,7 +896,7 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
         try:
             thread_sync.join_thread(reviewer, description="reviewer cleanup", hard_timeout=1.0)
         except BaseException as cleanup_error:
-            primary_error.add_note(f"reviewer cleanup failed: {cleanup_error!r}")
+            thread_sync.note_cleanup_failure(primary_error, cleanup_error)
         raise
 
 
@@ -1064,22 +1068,18 @@ def test_watch_waits_for_consumed_approval_while_provider_lock_is_live(tmp_path,
 
     with runguard.run_lock(tmp_path, run_dir=run_dir):
         worker = thread_sync.start_thread(finish_provider)
-        primary_error = None
         try:
             assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.001) == 0
-        except BaseException as error:
-            primary_error = error
-            raise
-        finally:
-            thread_sync.cancel_thread(worker)
+            thread_sync.join_thread(worker, description="provider worker")
+        except BaseException as primary_error:
             watch_holding_on_live_lock.set()
             provider_finish_gate.open()
+            thread_sync.cancel_thread(worker)
             try:
                 thread_sync.join_thread(worker, description="provider worker cleanup", hard_timeout=1.0)
             except BaseException as cleanup_error:
-                if primary_error is None:
-                    raise
-                primary_error.add_note(f"provider worker cleanup failed: {cleanup_error!r}")
+                thread_sync.note_cleanup_failure(primary_error, cleanup_error)
+            raise
 
 
 def test_watch_consumed_approval_without_lock_requests_resume_reconciliation(tmp_path, capsys):

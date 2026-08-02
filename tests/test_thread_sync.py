@@ -89,3 +89,70 @@ def test_thread_gate_open_close_handoff():
     gate.open()
     thread_sync.wait_for_event(observed, description="worker passed gate")
     thread_sync.join_thread(thread, description="gate worker")
+
+
+def test_note_cleanup_failure_uses_add_note_when_available(monkeypatch):
+    primary = RuntimeError("primary failure")
+    cleanup = ValueError("cleanup failure")
+    notes: list[str] = []
+
+    def fake_add_note(message: str) -> None:
+        notes.append(message)
+
+    monkeypatch.setattr(primary, "add_note", fake_add_note)
+    thread_sync.note_cleanup_failure(primary, cleanup)
+    assert notes == ["cleanup failed: ValueError('cleanup failure')"]
+
+
+def test_note_cleanup_failure_appends_to_args_without_add_note(monkeypatch):
+    import builtins
+
+    primary = RuntimeError("primary failure")
+    cleanup = ValueError("cleanup failure")
+    real_getattr = builtins.getattr
+    sentinel = object()
+
+    def getattr_without_add_note(obj, name, default=sentinel):
+        if obj is primary and name == "add_note":
+            if default is not sentinel:
+                return default
+            raise AttributeError(name)
+        if default is sentinel:
+            return real_getattr(obj, name)
+        return real_getattr(obj, name, default)
+
+    monkeypatch.setattr(builtins, "getattr", getattr_without_add_note)
+    thread_sync.note_cleanup_failure(primary, cleanup)
+    assert primary.args == ("primary failure (cleanup failed: ValueError('cleanup failure'))",)
+
+
+def test_cancel_before_join_suppresses_worker_exception():
+    gate = threading.Event()
+
+    def fail_when_released():
+        gate.wait()
+        raise ValueError("worker failed")
+
+    worker = thread_sync.start_thread(fail_when_released)
+    thread_sync.cancel_thread(worker)
+    gate.set()
+    thread_sync.join_thread(worker, description="cancelled failing worker")
+
+
+def test_wait_for_terminal_outcome_not_intermediate_signal():
+    attempted = threading.Event()
+    contended = threading.Event()
+
+    def slow_acquire():
+        attempted.set()
+        time.sleep(0.05)
+        contended.set()
+
+    worker = thread_sync.start_thread(slow_acquire)
+    thread_sync.wait_for_predicate(
+        lambda: contended.is_set() or not worker.is_alive(),
+        description="lock attempt outcome",
+    )
+    assert attempted.is_set()
+    assert contended.is_set()
+    thread_sync.join_thread(worker, description="slow acquire")

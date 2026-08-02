@@ -27,6 +27,19 @@ def cancel_thread(thread: threading.Thread) -> None:
         cancel.set()
 
 
+def note_cleanup_failure(primary: BaseException, cleanup: BaseException) -> None:
+    """Record a cleanup failure on ``primary`` without requiring Python 3.11 ``add_note``."""
+    detail = f"cleanup failed: {cleanup!r}"
+    add_note = getattr(primary, "add_note", None)
+    if add_note is not None:
+        add_note(detail)
+        return
+    if primary.args:
+        primary.args = (f"{primary.args[0]} ({detail})", *primary.args[1:])
+    else:
+        primary.args = (detail,)
+
+
 def start_thread(target: Callable[[], None]) -> threading.Thread:
     """Start a daemon ``target`` and preserve any target exception for ``join_thread``."""
     failures: list[BaseException] = []
