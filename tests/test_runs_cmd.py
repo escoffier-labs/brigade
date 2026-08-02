@@ -815,7 +815,11 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
                             lock_contended.set()
                     raise
                 with snapshot_classification:
-                    successful_before_snapshot.set()
+                    succeeded_during_refresh = snapshot_refreshing.is_set() and not snapshot_done.is_set()
+                    if succeeded_during_refresh:
+                        successful_before_snapshot.set()
+                if not succeeded_during_refresh:
+                    return ownership
                 runguard._release_lock(path, ownership)
                 raise AssertionError(
                     "source-store lock acquired before journal commit completed: "
