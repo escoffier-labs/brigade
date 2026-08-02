@@ -30,13 +30,42 @@ const (
 	exitOK       = 0
 	exitConfig   = 2 // returned for config / setup errors before any send is attempted
 	exitFailures = 3 // returned when one or more channel sends failed (count logged to stderr)
+
+	defaultTelegramAPIBase = "https://api.telegram.org"
 )
 
 var (
 	version   = "dev"
 	commit    = "unknown"
 	buildDate = "unknown"
+
+	telegramAPIBase = struct {
+		sync.RWMutex
+		url string
+	}{url: defaultTelegramAPIBase}
 )
+
+func currentTelegramAPIBase() string {
+	telegramAPIBase.RLock()
+	defer telegramAPIBase.RUnlock()
+	return telegramAPIBase.url
+}
+
+// setTelegramAPIBaseForTest provides the narrow test seam required to direct
+// Telegram requests to an in-process HTTP server. Production always uses the
+// default endpoint, and the returned cleanup restores the prior value.
+func setTelegramAPIBaseForTest(url string) func() {
+	telegramAPIBase.Lock()
+	previous := telegramAPIBase.url
+	telegramAPIBase.url = url
+	telegramAPIBase.Unlock()
+
+	return func() {
+		telegramAPIBase.Lock()
+		telegramAPIBase.url = previous
+		telegramAPIBase.Unlock()
+	}
+}
 
 func main() {
 	os.Exit(run(os.Args, os.Stdin, os.Stdout, os.Stderr))
@@ -90,7 +119,7 @@ func runSend(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// Build the canonical message.
-	msg, err := buildMessage(*hookFlag, fs.Args(), stdin)
+	msg, err := buildMessage(*hookFlag, fs.Args(), stdin, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "[agent-notify] input error: %v\n", err)
 		return exitConfig
@@ -284,10 +313,13 @@ func defaultConfigPath() string {
 	return filepath.Join(home, ".config", "agent-notify", "config.toml")
 }
 
-func buildMessage(hook string, posArgs []string, stdin io.Reader) (canonical.Message, error) {
+func buildMessage(hook string, posArgs []string, stdin io.Reader, cfg *config.Config) (canonical.Message, error) {
 	switch hook {
 	case "claude-code-stop":
-		return adapter.ClaudeCodeStop(stdin)
+		return adapter.ClaudeCodeStop(stdin, adapter.ClaudeCodeStopOptions{
+			IncludeCWD:       cfg.ClaudeCodeStop.IncludeCWD,
+			IncludeSessionID: cfg.ClaudeCodeStop.IncludeSessionID,
+		})
 	case "claude-code-notification":
 		return adapter.ClaudeCodeNotification(stdin)
 	case "codex-notify":
@@ -338,9 +370,6 @@ func sortedProfileNames(cfg *config.Config) []string {
 }
 
 func buildRegistry(cfg *config.Config, names []string) (*channels.Registry, error) {
-	if cfg.Defaults.TimeoutSeconds <= 0 {
-		return nil, fmt.Errorf("defaults.timeout_seconds must be greater than zero, got %d", cfg.Defaults.TimeoutSeconds)
-	}
 	reg := channels.NewRegistry()
 	timeout := time.Duration(cfg.Defaults.TimeoutSeconds) * time.Second
 
@@ -362,7 +391,7 @@ func buildRegistry(cfg *config.Config, names []string) (*channels.Registry, erro
 			if tok == "" || chat == "" {
 				return nil, fmt.Errorf("channel %q: missing env (token or chat_id)", name)
 			}
-			reg.Register(name, channels.NewTelegram(name, "https://api.telegram.org", tok, chat, timeout))
+			reg.Register(name, channels.NewTelegram(name, currentTelegramAPIBase(), tok, chat, timeout))
 		case "signal":
 			url := os.Getenv(cc.URLEnv)
 			from := os.Getenv(cc.FromEnv)
@@ -381,9 +410,6 @@ func buildRegistry(cfg *config.Config, names []string) (*channels.Registry, erro
 // dispatch sends the message to each named channel concurrently, best-effort.
 // Returns the number of channels that failed.
 func dispatch(reg *channels.Registry, names []string, msg canonical.Message, stderr io.Writer, timeout time.Duration) int {
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
 	type result struct {
 		name    string
 		channel string
@@ -443,7 +469,11 @@ func inspectConfig(configPath, profileName, skip string, skippedNetwork bool) (m
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		addCheck("FAIL", "config", err.Error())
+		if cfgErr, ok := config.AsConfigError(err); ok {
+			addCheck("FAIL", cfgErr.Field, cfgErr.Detail)
+		} else {
+			addCheck("FAIL", "config", err.Error())
+		}
 		return inspectPayload(configPath, configFileExists, false, "", nil, nil, checks, skippedNetwork, "config failed to load"), exitConfig
 	}
 	if configFileExists {
@@ -452,8 +482,17 @@ func inspectConfig(configPath, profileName, skip string, skippedNetwork bool) (m
 		addCheck("WARN", "config", "config file missing; using environment-only discovery")
 	}
 
-	if cfg.Defaults.TimeoutSeconds <= 0 {
-		addCheck("FAIL", "defaults.timeout_seconds", "must be greater than zero")
+	if cfg.ClaudeCodeStop.IncludeCWD || cfg.ClaudeCodeStop.IncludeSessionID {
+		disclosures := make([]string, 0, 2)
+		if cfg.ClaudeCodeStop.IncludeCWD {
+			disclosures = append(disclosures, "cwd")
+		}
+		if cfg.ClaudeCodeStop.IncludeSessionID {
+			disclosures = append(disclosures, "session_id")
+		}
+		addCheck("WARN", "claude_code_stop.privacy", "Stop-hook notifications include "+strings.Join(disclosures, " and "))
+	} else {
+		addCheck("OK", "claude_code_stop.privacy", "Stop-hook notifications omit cwd and session_id")
 	}
 
 	if len(cfg.Channels) == 0 {
@@ -628,6 +667,12 @@ func quoteTOMLArray(parts []string) string {
 func sampleConfig() string {
 	return `[defaults]
 timeout_seconds = 10
+
+# Claude Code Stop-hook notifications omit cwd and session_id by default.
+# Set either option to true only if the receiving channel is trusted.
+[claude_code_stop]
+include_cwd = false
+include_session_id = false
 
 [channels.telegram-personal]
 type = "telegram"

@@ -14,7 +14,7 @@ import (
 // Defensive parsing: tries multiple known field names for cwd, falls back
 // to sensible defaults when fields are missing. Survives most schema
 // additions and aliased renames without changes.
-func ClaudeCodeStop(r io.Reader) (canonical.Message, error) {
+func ClaudeCodeStop(r io.Reader, options ClaudeCodeStopOptions) (canonical.Message, error) {
 	raw, err := ReadBounded(r)
 	if err != nil {
 		return canonical.Message{}, err
@@ -28,10 +28,10 @@ func ClaudeCodeStop(r io.Reader) (canonical.Message, error) {
 	sessionID := firstString(ev, "session_id", "sessionId", "session")
 
 	body := "Session ended"
-	if cwd != "" {
+	if options.IncludeCWD && cwd != "" {
 		body = "Session ended in " + cwd
 	}
-	if sessionID != "" {
+	if options.IncludeSessionID && sessionID != "" {
 		body += " (session " + sessionID + ")"
 	}
 
@@ -40,6 +40,13 @@ func ClaudeCodeStop(r io.Reader) (canonical.Message, error) {
 		Body:   body,
 		Source: "claude-code",
 	}, nil
+}
+
+// ClaudeCodeStopOptions controls the private hook-event fields included in a
+// Claude Code Stop notification. Both disclosures are disabled by default.
+type ClaudeCodeStopOptions struct {
+	IncludeCWD       bool
+	IncludeSessionID bool
 }
 
 // firstString returns the first non-empty string value found at any of the

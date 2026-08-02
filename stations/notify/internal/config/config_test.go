@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +33,9 @@ func TestLoad_EnvOnlyFastPath_DiscordOnly(t *testing.T) {
 	p, ok := cfg.Profiles["default"]
 	if !ok || !p.Default {
 		t.Fatal("expected an implicit default profile named 'default'")
+	}
+	if cfg.ClaudeCodeStop.IncludeCWD || cfg.ClaudeCodeStop.IncludeSessionID {
+		t.Fatalf("Claude Code Stop disclosures = %#v, want both disabled by default", cfg.ClaudeCodeStop)
 	}
 }
 
@@ -74,6 +79,10 @@ default = true
 [profiles.error]
 channels = ["tg-personal"]
 prefix = "🚨 "
+
+[claude_code_stop]
+include_cwd = true
+include_session_id = true
 `
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -95,6 +104,43 @@ prefix = "🚨 "
 	if cfg.Profiles["error"].Prefix != "🚨 " {
 		t.Errorf("expected error prefix '🚨 ', got %q", cfg.Profiles["error"].Prefix)
 	}
+	if !cfg.ClaudeCodeStop.IncludeCWD || !cfg.ClaudeCodeStop.IncludeSessionID {
+		t.Errorf("Claude Code Stop disclosures = %#v, want both enabled", cfg.ClaudeCodeStop)
+	}
+}
+
+func TestLoad_ClaudeCodeStopDisclosureOptions(t *testing.T) {
+	tests := []struct {
+		name                  string
+		body                  string
+		wantCWD               bool
+		wantSessionIdentifier bool
+	}{
+		{name: "cwd only", body: "include_cwd = true\ninclude_session_id = false", wantCWD: true},
+		{name: "session only", body: "include_cwd = false\ninclude_session_id = true", wantSessionIdentifier: true},
+		{name: "both", body: "include_cwd = true\ninclude_session_id = true", wantCWD: true, wantSessionIdentifier: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			body := "[claude_code_stop]\n" + tt.body + "\n"
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.ClaudeCodeStop.IncludeCWD != tt.wantCWD {
+				t.Errorf("IncludeCWD = %t, want %t", cfg.ClaudeCodeStop.IncludeCWD, tt.wantCWD)
+			}
+			if cfg.ClaudeCodeStop.IncludeSessionID != tt.wantSessionIdentifier {
+				t.Errorf("IncludeSessionID = %t, want %t", cfg.ClaudeCodeStop.IncludeSessionID, tt.wantSessionIdentifier)
+			}
+		})
+	}
 }
 
 func TestLoad_DefaultTimeoutIs10s(t *testing.T) {
@@ -107,7 +153,7 @@ func TestLoad_DefaultTimeoutIs10s(t *testing.T) {
 	}
 }
 
-func TestLoad_ZeroTimeoutNormalizesTo10s(t *testing.T) {
+func TestLoad_ZeroTimeoutFails(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	body := `
@@ -118,19 +164,20 @@ timeout_seconds = 0
 		t.Fatal(err)
 	}
 
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load failed: %v", err)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected Load to fail for explicit zero timeout")
 	}
-	if cfg.Defaults.TimeoutSeconds != 10 {
-		t.Errorf("expected zero timeout normalized to 10s, got %d", cfg.Defaults.TimeoutSeconds)
+	cfgErr, ok := AsConfigError(err)
+	if !ok {
+		t.Fatalf("expected ConfigError, got %T: %v", err, err)
+	}
+	if cfgErr.Field != "defaults.timeout_seconds" {
+		t.Errorf("field = %q, want defaults.timeout_seconds", cfgErr.Field)
 	}
 }
 
-func TestLoad_NegativeTimeoutStaysObservable(t *testing.T) {
-	// A negative timeout is invalid configuration, not a request for the
-	// default. Load must surface it so doctor can FAIL on it and the send
-	// path can reject it, instead of silently substituting 10s.
+func TestLoad_NegativeTimeoutFails(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	body := `
@@ -141,11 +188,127 @@ timeout_seconds = -5
 		t.Fatal(err)
 	}
 
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected Load to fail for negative timeout")
+	}
+	cfgErr, ok := AsConfigError(err)
+	if !ok {
+		t.Fatalf("expected ConfigError, got %T: %v", err, err)
+	}
+	if cfgErr.Field != "defaults.timeout_seconds" {
+		t.Errorf("field = %q, want defaults.timeout_seconds", cfgErr.Field)
+	}
+	if !strings.Contains(cfgErr.Detail, "-5") {
+		t.Errorf("detail = %q, want observed value -5", cfgErr.Detail)
+	}
+}
+
+func TestLoad_AbsentTimeoutDefaultsTo10s(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `
+[channels.discord-main]
+type = "discord"
+webhook_url_env = "DISCORD_URL"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if cfg.Defaults.TimeoutSeconds != -5 {
-		t.Errorf("expected negative timeout preserved as -5, got %d", cfg.Defaults.TimeoutSeconds)
+	if cfg.Defaults.TimeoutSeconds != 10 {
+		t.Errorf("expected absent timeout to default to 10s, got %d", cfg.Defaults.TimeoutSeconds)
+	}
+}
+
+func TestLoad_OneSecondTimeoutAccepted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `
+[defaults]
+timeout_seconds = 1
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Defaults.TimeoutSeconds != 1 {
+		t.Errorf("expected timeout 1s, got %d", cfg.Defaults.TimeoutSeconds)
+	}
+}
+
+func TestLoad_MaxTimeoutAccepted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := fmt.Sprintf(`
+[defaults]
+timeout_seconds = %d
+`, MaxTimeoutSeconds)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Defaults.TimeoutSeconds != MaxTimeoutSeconds {
+		t.Errorf("expected timeout %d, got %d", MaxTimeoutSeconds, cfg.Defaults.TimeoutSeconds)
+	}
+}
+
+func TestLoad_TimeoutOverflowRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	overflow := MaxTimeoutSeconds + 1
+	body := fmt.Sprintf(`
+[defaults]
+timeout_seconds = %d
+`, overflow)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected Load to fail for overflowing timeout")
+	}
+	cfgErr, ok := AsConfigError(err)
+	if !ok {
+		t.Fatalf("expected ConfigError, got %T: %v", err, err)
+	}
+	if cfgErr.Field != "defaults.timeout_seconds" {
+		t.Errorf("field = %q, want defaults.timeout_seconds", cfgErr.Field)
+	}
+	if !strings.Contains(cfgErr.Detail, fmt.Sprintf("%d", overflow)) {
+		t.Errorf("detail = %q, want observed overflow value %d", cfgErr.Detail, overflow)
+	}
+}
+
+func TestLoad_PositiveTimeoutUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `
+[defaults]
+timeout_seconds = 30
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Defaults.TimeoutSeconds != 30 {
+		t.Errorf("expected timeout 30s, got %d", cfg.Defaults.TimeoutSeconds)
 	}
 }

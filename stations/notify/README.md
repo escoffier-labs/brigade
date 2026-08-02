@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  Privacy-first push notifications for coding agents: Discord, Telegram, Signal. Zero telemetry, one Go binary. Brigade can plan messages; send is always opt-in.
+  Privacy-first push notifications for coding agents: Discord, Telegram, Signal. Zero telemetry, one Go binary. Brigade can plan messages. Send is always opt-in.
 </p>
 
 <p align="center">
@@ -136,6 +136,17 @@ url_env  = "SIGNAL_CLI_URL"
 from_env = "SIGNAL_FROM"
 to_env   = "SIGNAL_TO"
 
+# Delivery timeout in seconds. Omitted defaults to 10; zero, negative, or
+# unrepresentably large values are rejected when the config loads.
+[defaults]
+timeout_seconds = 10
+
+# Claude Code Stop-hook messages use "Session ended" by default. Local paths
+# and session identifiers are private, so they are omitted unless enabled here.
+[claude_code_stop]
+include_cwd = false
+include_session_id = false
+
 [profiles.agent-stop]
 channels = ["tg-personal", "discord-main"]
 default  = true
@@ -146,6 +157,19 @@ prefix   = "🚨 "
 ```
 
 Secrets stay in env vars (the config references env-var names, not literal tokens).
+
+For Claude Code Stop hooks, omitting `[claude_code_stop]` has the same result as
+setting both options to `false`: the notification body is `Session ended` even
+when the hook supplies `cwd` or `session_id`. Set `include_cwd = true` to add
+only the working directory, `include_session_id = true` to add only the session
+identifier, or set both to `true` to include both values. These controls apply
+only to `--hook claude-code-stop`.
+
+`defaults.timeout_seconds` controls the per-channel delivery timeout. When the
+key is absent, delivery uses 10 seconds. Config load rejects zero, negative, or
+unrepresentably large values (the upper bound is about 9.2 billion seconds, or
+roughly 292 years); a valid positive value sets the timeout for every channel
+send.
 
 Validate the wiring without sending a live notification:
 
@@ -174,6 +198,7 @@ If you set `DISABLE_TELEMETRY=1` to keep your agent harness from phoning home, y
 ```console
 $ agent-notify doctor
 [OK  ] config: loaded
+[OK  ] claude_code_stop.privacy: Stop-hook notifications omit cwd and session_id
 [OK  ] routing: 2 channel(s) selected
 [OK  ] channel:discord-main: env present
 [WARN] channel:signal-personal: inactive channel: url/from/to env missing or empty
@@ -316,7 +341,7 @@ Then point the upstream tool's hook config at `my-tool-notify.sh` instead.
 - **Not a hosted service.** There is no server to sign up for, no API key from us, no dashboard. It is a binary you run.
 - **Not a message queue.** There is no retry queue. A rate-limited or down channel means a dropped notification (exit code `3`), not a redelivery later.
 - **Not a templating engine.** The canonical message goes through as-is. Level, title, body, tags, and source are the whole model.
-- **Not a general-purpose alerting platform.** It does not poll, schedule, or evaluate conditions. Something else decides when to notify; `agent-notify` only delivers.
+- **Not a general-purpose alerting platform.** It does not poll, schedule, or evaluate conditions. Something else decides when to notify. `agent-notify` only delivers.
 - **Not a secrets manager.** Tokens and webhook URLs live in your environment. The config references env-var names, never literal secrets.
 
 ## Limitations (v1)

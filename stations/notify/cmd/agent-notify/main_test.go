@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -180,6 +181,64 @@ func TestRun_NoChannelsConfigured_Exit2(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "no channels configured") {
 		t.Errorf("expected stderr to mention no channels, got %q", stderr)
+	}
+}
+
+func TestBuildMessage_ClaudeCodeStopUsesDisclosureConfig(t *testing.T) {
+	cfg := &config.Config{
+		ClaudeCodeStop: config.ClaudeCodeStopConfig{IncludeSessionID: true},
+	}
+
+	msg, err := buildMessage(
+		"claude-code-stop",
+		nil,
+		strings.NewReader(`{"cwd":"/private/project","session_id":"private-session"}`),
+		cfg,
+	)
+	if err != nil {
+		t.Fatalf("buildMessage failed: %v", err)
+	}
+	if msg.Body != "Session ended (session private-session)" {
+		t.Errorf("body = %q, want only the opted-in session identifier", msg.Body)
+	}
+}
+
+func TestInspectConfig_ReportsClaudeCodeStopPrivacyDisclosure(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus string
+		wantDetail string
+	}{
+		{name: "private by default", body: "", wantStatus: "OK", wantDetail: "omit cwd and session_id"},
+		{name: "cwd disclosed", body: "[claude_code_stop]\ninclude_cwd = true\n", wantStatus: "WARN", wantDetail: "include cwd"},
+		{name: "session disclosed", body: "[claude_code_stop]\ninclude_session_id = true\n", wantStatus: "WARN", wantDetail: "include session_id"},
+		{name: "both disclosed", body: "[claude_code_stop]\ninclude_cwd = true\ninclude_session_id = true\n", wantStatus: "WARN", wantDetail: "include cwd and session_id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tt.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			payload, _ := inspectConfig(path, "", "", true)
+			checks := payload["checks"].([]map[string]string)
+			for _, check := range checks {
+				if check["name"] != "claude_code_stop.privacy" {
+					continue
+				}
+				if check["status"] != tt.wantStatus {
+					t.Errorf("status = %q, want %q", check["status"], tt.wantStatus)
+				}
+				if !strings.Contains(check["detail"], tt.wantDetail) {
+					t.Errorf("detail = %q, want it to contain %q", check["detail"], tt.wantDetail)
+				}
+				return
+			}
+			t.Fatalf("missing claude_code_stop.privacy check in %#v", checks)
+		})
 	}
 }
 
@@ -525,25 +584,21 @@ func TestRun_DoctorJSONReportsMissingConfigAsUnconfigured(t *testing.T) {
 	}
 }
 
-func TestBuildRegistryRejectsNonPositiveTimeout(t *testing.T) {
-	// A non-positive timeout must never reach channel construction: the
-	// registry build fails with a config error naming the offending key.
-	// The webhook URL is required so the pre-fix RED state reaches channel
-	// construction instead of failing earlier with missing credentials.
-	t.Setenv("DISCORD_WEBHOOK_URL", "https://discord.test/webhook/123")
-	for _, timeout := range []int{-5, 0} {
+func TestValidateRejectsNonPositiveTimeout(t *testing.T) {
+	for _, timeout := range []int64{-5, 0} {
 		cfg := &config.Config{
-			Channels: map[string]config.ChannelConfig{
-				"discord-main": {Type: "discord", WebhookURLEnv: "DISCORD_WEBHOOK_URL"},
-			},
 			Defaults: config.Defaults{TimeoutSeconds: timeout},
 		}
-		_, err := buildRegistry(cfg, []string{"discord-main"})
+		err := cfg.Validate()
 		if err == nil {
-			t.Fatalf("timeout %d: expected buildRegistry error, got nil", timeout)
+			t.Fatalf("timeout %d: expected Validate error, got nil", timeout)
 		}
-		if !strings.Contains(err.Error(), "defaults.timeout_seconds") {
-			t.Errorf("timeout %d: error should name defaults.timeout_seconds, got %v", timeout, err)
+		cfgErr, ok := config.AsConfigError(err)
+		if !ok {
+			t.Fatalf("timeout %d: expected ConfigError, got %v", timeout, err)
+		}
+		if cfgErr.Field != "defaults.timeout_seconds" {
+			t.Errorf("timeout %d: field = %q, want defaults.timeout_seconds", timeout, cfgErr.Field)
 		}
 	}
 }
@@ -583,6 +638,49 @@ webhook_url_env = "DISCORD_WEBHOOK_URL"
 			if check["status"] != "FAIL" {
 				t.Fatalf("defaults.timeout_seconds status = %v, want FAIL", check["status"])
 			}
+			if !strings.Contains(check["detail"].(string), "-5") {
+				t.Fatalf("detail = %v, want observed value -5", check["detail"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a defaults.timeout_seconds check in %#v", payload["checks"])
+	}
+}
+
+func TestRun_DoctorJSONFailsOnZeroTimeout(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(`
+[defaults]
+timeout_seconds = 0
+
+[channels.discord-main]
+type = "discord"
+webhook_url_env = "DISCORD_WEBHOOK_URL"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runMain(t,
+		[]string{"agent-notify", "doctor", "--json", "--config", cfgPath},
+		"",
+		map[string]string{"DISCORD_WEBHOOK_URL": "https://discord.test/webhook/123"},
+	)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (stderr=%s)", code, stderr)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout)
+	}
+	found := false
+	for _, c := range payload["checks"].([]interface{}) {
+		check := c.(map[string]interface{})
+		if check["name"] == "defaults.timeout_seconds" {
+			found = true
+			if check["status"] != "FAIL" {
+				t.Fatalf("defaults.timeout_seconds status = %v, want FAIL", check["status"])
+			}
 		}
 	}
 	if !found {
@@ -592,7 +690,7 @@ webhook_url_env = "DISCORD_WEBHOOK_URL"
 
 func TestRun_SendRejectsNegativeTimeout(t *testing.T) {
 	// The send path must refuse a negative timeout with a config error
-	// instead of constructing channels with a non-positive deadline.
+	// before any provider HTTP call is attempted.
 	cfgPath := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(cfgPath, []byte(`
 [defaults]
@@ -605,16 +703,113 @@ webhook_url_env = "DISCORD_WEBHOOK_URL"
 		t.Fatal(err)
 	}
 
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
 	code, _, stderr := runMain(t,
 		[]string{"agent-notify", "--config", cfgPath, "build done"},
 		"",
-		map[string]string{"DISCORD_WEBHOOK_URL": "https://discord.test/webhook/123"},
+		map[string]string{"DISCORD_WEBHOOK_URL": srv.URL},
 	)
 	if code != exitConfig {
 		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitConfig, stderr)
 	}
 	if !strings.Contains(stderr, "defaults.timeout_seconds") {
 		t.Fatalf("stderr should name defaults.timeout_seconds, got %s", stderr)
+	}
+	if got := atomic.LoadInt64(&hits); got != 0 {
+		t.Fatalf("provider HTTP hits = %d, want 0 for invalid timeout", got)
+	}
+}
+
+func TestRun_SendRejectsZeroTimeout(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(`
+[defaults]
+timeout_seconds = 0
+
+[channels.discord-main]
+type = "discord"
+webhook_url_env = "DISCORD_WEBHOOK_URL"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	code, _, stderr := runMain(t,
+		[]string{"agent-notify", "--config", cfgPath, "build done"},
+		"",
+		map[string]string{"DISCORD_WEBHOOK_URL": srv.URL},
+	)
+	if code != exitConfig {
+		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitConfig, stderr)
+	}
+	if !strings.Contains(stderr, "defaults.timeout_seconds") {
+		t.Fatalf("stderr should name defaults.timeout_seconds, got %s", stderr)
+	}
+	if got := atomic.LoadInt64(&hits); got != 0 {
+		t.Fatalf("provider HTTP hits = %d, want 0 for invalid timeout", got)
+	}
+}
+
+func TestRun_DoctorAndSendShareTimeoutDiagnostic(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(`
+[defaults]
+timeout_seconds = -5
+
+[channels.discord-main]
+type = "discord"
+webhook_url_env = "DISCORD_WEBHOOK_URL"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"DISCORD_WEBHOOK_URL": "https://discord.test/webhook/123"}
+
+	doctorCode, doctorOut, _ := runMain(t,
+		[]string{"agent-notify", "doctor", "--json", "--config", cfgPath},
+		"",
+		env,
+	)
+	if doctorCode != exitConfig {
+		t.Fatalf("doctor exit = %d, want %d", doctorCode, exitConfig)
+	}
+	var doctorPayload map[string]interface{}
+	if err := json.Unmarshal([]byte(doctorOut), &doctorPayload); err != nil {
+		t.Fatalf("invalid doctor json: %v", err)
+	}
+	var doctorDetail string
+	for _, c := range doctorPayload["checks"].([]interface{}) {
+		check := c.(map[string]interface{})
+		if check["name"] == "defaults.timeout_seconds" {
+			doctorDetail = check["detail"].(string)
+		}
+	}
+	if doctorDetail == "" {
+		t.Fatal("doctor missing defaults.timeout_seconds detail")
+	}
+
+	sendCode, _, sendErr := runMain(t,
+		[]string{"agent-notify", "--config", cfgPath, "build done"},
+		"",
+		env,
+	)
+	if sendCode != exitConfig {
+		t.Fatalf("send exit = %d, want %d", sendCode, exitConfig)
+	}
+	want := "defaults.timeout_seconds " + doctorDetail
+	if !strings.Contains(sendErr, want) {
+		t.Fatalf("send stderr = %q, want shared diagnostic %q", sendErr, want)
 	}
 }
 
