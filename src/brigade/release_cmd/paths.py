@@ -195,15 +195,63 @@ def _latest_closeout_json(root: Path) -> dict[str, Any] | None:
 
 def _security_summary(target: Path) -> dict[str, Any]:
     health = security_cmd.health(target)
+    checks = [item for item in health.get("checks", []) if isinstance(item, dict)] if isinstance(health, dict) else []
+    open_finding_checks = [
+        item for item in checks if item.get("name") == "security_open_findings" and item.get("status") != OK
+    ]
+    health_warning_checks = [
+        item for item in checks if item.get("name") != "security_open_findings" and item.get("status") != OK
+    ]
+    open_finding_count = health.get("open_finding_count")
+    if open_finding_count is None:
+        open_finding_count = 1 if (open_finding_checks or health.get("top_finding")) else 0
     return {
         "valid": health.get("valid"),
         "issue_count": health.get("issue_count"),
+        "open_finding_count": int(open_finding_count or 0),
+        "raw_open_finding_count": health.get("raw_open_finding_count"),
+        "health_warning_count": len(health_warning_checks),
+        "checks": checks,
         "top_issue": health.get("top_issue"),
         "top_finding": health.get("top_finding"),
         "evidence": health.get("evidence"),
         "template_privacy": health.get("template_privacy"),
         "latest_closeout": health.get("latest_closeout"),
     }
+
+
+def _check_remediation_text(check: dict[str, Any]) -> str:
+    for key in ("remediation", "suggested_next_command", "next_command"):
+        value = check.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    name = str(check.get("name") or "")
+    defaults = {
+        "security_open_findings": "brigade security findings",
+        "security_harness_wiring": "brigade security doctor --json",
+        "security_stale_suppressions": "brigade security scan; review stale suppressions",
+        "security_suppression_reasons": "brigade security suppress --help",
+        "security_config": "brigade security init",
+        "security_evidence": "brigade security scan",
+        "security_template_privacy": "brigade security template-audit",
+        "security_suppressions": "brigade security doctor --json",
+        "security_suppressions_cache": "brigade security doctor --json",
+    }
+    if name in defaults:
+        return defaults[name]
+    if name.startswith("content_guard_"):
+        guard_name = name.removeprefix("content_guard_")
+        return f"brigade content-guard check --name {guard_name}"
+    return f"investigate {name}" if name else "investigate failing check"
+
+
+def _format_readiness_check(check: dict[str, Any]) -> str:
+    name = str(check.get("name") or "unnamed_check")
+    detail = str(check.get("detail") or "").strip()
+    remediation = _check_remediation_text(check)
+    if detail:
+        return f"{name}: {detail}; remediation: {remediation}"
+    return f"{name}; remediation: {remediation}"
 
 
 def _changed_files(target: Path, base_ref: str | None) -> list[str]:

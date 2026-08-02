@@ -535,8 +535,46 @@ def _assess(
     if int(sweep_review.get("issue_count") or 0) > 0:
         blockers.append(f"scanner sweep has unresolved issue(s): {sweep_review.get('issue_count')}")
     security = evidence.get("security") if isinstance(evidence.get("security"), dict) else {}
-    if int(security.get("issue_count") or 0) > 0:
-        blockers.append(f"security has open issue(s): {security.get('issue_count')}")
+    security_checks = [item for item in security.get("checks", []) if isinstance(item, dict)]
+    open_finding_checks = [
+        item for item in security_checks if item.get("name") == "security_open_findings" and item.get("status") != OK
+    ]
+    security_health_checks = [
+        item for item in security_checks if item.get("name") != "security_open_findings" and item.get("status") != OK
+    ]
+    top_finding = security.get("top_finding") if isinstance(security.get("top_finding"), dict) else None
+    open_finding_count = int(security.get("open_finding_count") or 0)
+    if open_finding_count <= 0 and (open_finding_checks or top_finding is not None):
+        open_finding_count = 1
+    if open_finding_count > 0 or open_finding_checks or top_finding is not None:
+        if top_finding is not None:
+            severity = str(top_finding.get("severity") or "unknown")
+            category = str(top_finding.get("category") or "security")
+            finding_id = str(top_finding.get("id") or "unknown")
+            title = str(top_finding.get("title") or "open security finding")
+            path = top_finding.get("path")
+            line = top_finding.get("line")
+            location = f" at {path}:{line}" if path is not None else ""
+            remediation = str(top_finding.get("remediation_hint") or "").strip() or (
+                _check_remediation_text(open_finding_checks[0]) if open_finding_checks else "brigade security findings"
+            )
+            blockers.append(
+                f"security_open_findings [{severity}/{category}]: {finding_id} {title}{location}; "
+                f"remediation: {remediation}"
+            )
+        elif open_finding_checks:
+            for check in open_finding_checks:
+                blockers.append(_format_readiness_check(check))
+        else:
+            blockers.append(
+                f"security_open_findings: {open_finding_count} open finding(s); remediation: brigade security findings"
+            )
+    for check in security_health_checks:
+        message = _format_readiness_check(check)
+        if check.get("status") == FAIL:
+            blockers.append(message)
+        else:
+            warnings.append(message)
     ci_platform = evidence.get("ci_platform") if isinstance(evidence.get("ci_platform"), dict) else {}
     if int(ci_platform.get("issue_count") or 0) > 0:
         top_ci = ci_platform.get("top_issue") if isinstance(ci_platform.get("top_issue"), dict) else {}
@@ -589,9 +627,9 @@ def _assess(
         )
     for check in checks:
         if check.get("status") == FAIL:
-            blockers.append(f"{check.get('name')}: {check.get('detail')}")
+            blockers.append(_format_readiness_check(check))
         elif check.get("status") == WARN:
-            warnings.append(f"{check.get('name')}: {check.get('detail')}")
+            warnings.append(_format_readiness_check(check))
     return blockers, warnings
 
 

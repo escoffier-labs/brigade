@@ -505,6 +505,55 @@ def test_security_scan_harness_wiring_ignores_generated_brigade_evidence(tmp_pat
     assert security_cmd.health(tmp_path)["harness_wiring"]["finding_count"] == 0
 
 
+def test_harness_wiring_excludes_nested_worktree_brigade_work_and_lockfiles(tmp_path):
+    nested = tmp_path / ".claude" / "worktrees" / "nested-one"
+    nested.mkdir(parents=True)
+    (nested / ".git").write_text("gitdir: /tmp/fake-gitdir-for-nested-worktree\n")
+    nested_receipt = nested / ".brigade" / "work" / "verify-runs" / "verify-nested"
+    nested_receipt.mkdir(parents=True)
+    (nested_receipt / "receipt.json").write_text(
+        json.dumps(
+            {
+                "root": "/Users/operator/private",
+                "url": "http://agent.internal/status",
+                "endpoint": "https://agent.private/api",
+            },
+            indent=2,
+        )
+    )
+
+    root_work = tmp_path / ".brigade" / "work" / "verify-runs" / "verify-root"
+    root_work.mkdir(parents=True)
+    (root_work / "receipt.json").write_text(json.dumps({"endpoint": "https://agent.private/root-api"}, indent=2))
+
+    opencode = tmp_path / ".opencode"
+    opencode.mkdir()
+    (opencode / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "packages": {"": {"resolved": "http://agent.internal/pkg.tgz"}},
+                "endpoint": "https://registry.private/api",
+                "root": "/Users/operator/lockfile-root",
+            },
+            indent=2,
+        )
+    )
+
+    codex = tmp_path / ".codex"
+    codex.mkdir()
+    (codex / "config.json").write_text(json.dumps({"workspace": {"root": "/Users/operator/brigade"}}, indent=2))
+
+    wiring = security_cmd.harness_wiring_payload(tmp_path)
+    finding_paths = {finding["path"] for finding in wiring["findings"]}
+    scanned = set(wiring["scanned_files"])
+
+    assert finding_paths == {".codex/config.json"}
+    assert ".codex/config.json" in scanned
+    assert not any("worktrees" in path for path in finding_paths | scanned)
+    assert not any(".brigade/work" in path for path in finding_paths | scanned)
+    assert not any(path.endswith("package-lock.json") for path in finding_paths | scanned)
+
+
 def test_security_scan_supply_chain_surfaces(tmp_path, capsys):
     (tmp_path / "package.json").write_text(
         json.dumps(

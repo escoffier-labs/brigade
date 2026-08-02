@@ -309,6 +309,25 @@ HARNESS_ROOTS = {
 }
 
 
+# Dependency lockfiles under harness roots (for example `.opencode/package-lock.json`)
+# are not harness wiring documents. Exclude them from harness-wiring scans only.
+HARNESS_WIRING_LOCKFILE_NAMES = frozenset(
+    {
+        "Cargo.lock",
+        "Gemfile.lock",
+        "Pipfile.lock",
+        "composer.lock",
+        "go.sum",
+        "npm-shrinkwrap.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+        "uv.lock",
+        "yarn.lock",
+    }
+)
+
+
 HARNESS_PATH_KEYS = {
     "bootstrap_files",
     "cache_path",

@@ -76,6 +76,33 @@ def _contains_private_key_material(line: str) -> bool:
     return bool(PRIVATE_KEY_RE.search(line) and "REDACTED PRIVATE KEY" not in line)
 
 
+def _should_skip_harness_wiring_path(path: Path, target: Path) -> bool:
+    """Exclude nested worktrees, `.brigade/work` artifacts, and lockfiles from wiring scans only."""
+    try:
+        rel = path.relative_to(target)
+    except ValueError:
+        return True
+    if path.name in HARNESS_WIRING_LOCKFILE_NAMES:
+        return True
+    parts = rel.parts
+    if any(parts[index : index + 2] == (".brigade", "work") for index in range(len(parts) - 1)):
+        return True
+    for ancestor in path.parents:
+        if ancestor == target:
+            break
+        try:
+            ancestor.relative_to(target)
+        except ValueError:
+            break
+        git_marker = ancestor / ".git"
+        try:
+            if git_marker.is_file() and git_marker.read_text(errors="replace").strip().startswith("gitdir:"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _template_relpath(target: Path, path: Path) -> str:
     try:
         return str(path.relative_to(target))
@@ -191,6 +218,8 @@ def harness_wiring_payload(target: Path) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     scanned_files: list[str] = []
     for path in _iter_scan_files(target):
+        if _should_skip_harness_wiring_path(path, target):
+            continue
         if not _is_harness_wiring_document(path, target):
             continue
         try:

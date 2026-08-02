@@ -906,3 +906,127 @@ def test_release_candidate_preserves_content_guard_summaries(tmp_path, monkeypat
     checks = evidence["content_guard"]
     assert checks["content_guard_tip"]["status"] == "fail"
     assert checks["content_guard_introduced"]["status"] == "ok"
+
+
+def test_release_readiness_distinguishes_security_findings_from_health_warnings(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+    monkeypatch.setattr(
+        security_cmd,
+        "health",
+        lambda target: {
+            "valid": True,
+            "issue_count": 3,
+            "open_finding_count": 1,
+            "raw_open_finding_count": 1,
+            "top_issue": {
+                "status": "warn",
+                "name": "security_open_findings",
+                "detail": "1 open finding(s), top=sec-1",
+            },
+            "top_finding": {
+                "id": "sec-1",
+                "severity": "high",
+                "category": "secrets",
+                "title": "Exposed API key",
+                "path": "src/app.py",
+                "line": 10,
+                "remediation_hint": "Move the secret to an environment variable.",
+            },
+            "checks": [
+                {
+                    "status": "warn",
+                    "name": "security_open_findings",
+                    "detail": "1 open finding(s), top=sec-1",
+                    "remediation": "brigade security findings",
+                },
+                {
+                    "status": "warn",
+                    "name": "security_harness_wiring",
+                    "detail": "2 harness wiring finding(s), top=.codex/config.json:1",
+                    "remediation": "brigade security doctor --json",
+                },
+                {
+                    "status": "warn",
+                    "name": "security_stale_suppressions",
+                    "detail": "abc123",
+                    "remediation": "brigade security scan; review stale suppressions",
+                },
+            ],
+            "evidence": {"ready": True, "finding_count": 1},
+        },
+    )
+
+    assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    blockers = "\n".join(payload["blockers"])
+    warnings = "\n".join(payload["warnings"])
+
+    assert "security_open_findings" in blockers
+    assert "high" in blockers
+    assert "Exposed API key" in blockers or "sec-1" in blockers
+    assert "Move the secret to an environment variable." in blockers
+    assert "security has open issue(s): 3" not in blockers
+
+    assert "security_harness_wiring" in warnings
+    assert "security_stale_suppressions" in warnings
+    assert "security_open_findings" not in warnings
+    assert "brigade security doctor --json" in warnings
+    assert "brigade security scan; review stale suppressions" in warnings
+
+
+def test_release_readiness_names_failing_checks_and_remediation(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    monkeypatch.setattr(
+        security_cmd,
+        "health",
+        lambda target: {
+            "valid": True,
+            "issue_count": 1,
+            "open_finding_count": 0,
+            "raw_open_finding_count": 0,
+            "top_issue": {
+                "status": "warn",
+                "name": "security_harness_wiring",
+                "detail": "1 harness wiring finding(s), top=.codex/config.json:1",
+            },
+            "top_finding": None,
+            "checks": [
+                {
+                    "status": "warn",
+                    "name": "security_harness_wiring",
+                    "detail": "1 harness wiring finding(s), top=.codex/config.json:1",
+                    "remediation": "brigade security doctor --json",
+                }
+            ],
+            "evidence": {"ready": True, "finding_count": 0},
+        },
+    )
+
+    def fake_check(target, *, name, policy, base_ref=None):
+        return {
+            "name": f"content_guard_{name}",
+            "status": "fail",
+            "detail": f"{name} findings=1",
+            "available": True,
+            "remediation": f"brigade content-guard check --name {name}",
+        }
+
+    monkeypatch.setattr(release_cmd, "_run_content_guard_check", fake_check)
+    monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
+
+    assert release_cmd.doctor(target=tmp_path, base_ref=None, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    blockers = "\n".join(payload["blockers"])
+    warnings = "\n".join(payload["warnings"])
+    combined = f"{blockers}\n{warnings}"
+
+    assert "content_guard_tip" in blockers
+    assert "brigade content-guard check --name tip" in blockers
+    assert "security_harness_wiring" in warnings
+    assert "brigade security doctor --json" in warnings
+    assert "security has open issue(s)" not in combined
