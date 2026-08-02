@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade runs audit` provides a read-only audit of recorded lifecycle evidence
+  for coordinator decisions. (#649)
 - Verify-run retention now archives receipt evidence before pruning (#565).
   When `.brigade/work/verify-runs/` grows past the retention cap, each run
   directory is copied into the verify archive (default
@@ -24,12 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keys: `verify_runs_keep` (default 50), `verify_archive_enabled` (default
   true), and `verify_archive_dir` (default `.brigade/work/verify-archive`).
 
-### Removed
-- Removed the opt-in `brigade run --deliberate` grounded-deliberation mode
-  (planner, `brigade.deliberation.v1` artifact emission, and related runs
-  show/watch/resume surfaces). Recoverable from git history; see #442 / #471.
-
-### Added
 - `brigade work resolve-target --cwd PATH [--harness NAME]` prints the
   Brigade-wired project root (requires `.brigade/config.json`) so shell hooks
   share Claude's discovery contract instead of matching any `.brigade/` dir.
@@ -54,8 +50,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stderr notice (at most once per 24h) when a newer release is on PyPI.
   Anonymous, TTY-only, skipped in CI; disable with `BRIGADE_NO_UPDATE_CHECK=1`.
 - `brigade mcp sync --user-scope` (and `brigade operator sync-mcp --user-scope`) no longer writes stdio MCP servers into a user-wide client config silently: interactive runs show the destination, stdio count, and the servers-times-sessions process formula and ask for confirmation, non-interactive and `--json` runs require `--allow-global-stdio`, and plan/sync items now carry `transport` and `scope`. (#349)
+- The append-only lifecycle journal now defines the canonical `brigade.run_event.v1` event contract, closed payload allowlists, deterministic digest chains, idempotent appends, partial-tail quarantine and recovery, and private journal artifacts. (#607)
+- Enrolled runs record lifecycle transitions before their compatibility `run.json` snapshots advance, while legacy and opt-out runs remain snapshot-only. (#608)
+- A pure, deterministic run snapshot projector derives journal-backed fields while preserving the existing `run.json` contract. (#609)
+- Shadow projection comparison records bounded digest-only evidence of whether each snapshot matches its lifecycle-journal projection, including lag, mismatch, error, and crash-gap states. (#610)
+- Crash-safe recovery checkpoints cover lifecycle events and `run.json` replacements, let recovery restore a verified record after interruption, and add read-only Doctor checks for repairable and unsafe states. (#615)
+- Lifecycle events now pair every worker dispatch request with its observed completion or failure, carrying the selected seat and attempt identity and surfacing unobserved requests as recovery work. (#625)
+- Enrolled runs can pause at Daily and Tool approval boundaries, then resume and redeem the approved action exactly once with redacted, bound approval facts. (#626)
+- `brigade runs redact` provides an operator-confirmed, fail-closed procedure to redact terminal lifecycle journals, reproject their snapshots, and retain chained anchors for overlapping rewrite history. (#627)
+- `brigade runs events` exposes lifecycle-only NDJSON with opaque durable cursors, and `runs steer` and `runs interrupt` accept idempotent request IDs with journaled requested and observed control facts. (#641)
+
+### Changed
+- Newly journal-authoritative runs derive their `run.json` compatibility snapshots from validated lifecycle events and recovery checkpoints, with strict projector readiness and recovery gates. (#622)
+- Lifecycle journals are now authoritative for every new run; existing snapshot-only directories retain their prior behavior, and compatibility snapshots remain readable by the previous v1 reader contract. (#630)
+- The previous-v1-reader compatibility check now uses a versioned fixture derived from `v0.25.0`, covering authoritative, paused, and legacy run snapshots. (#640)
+- The lifecycle journal ceiling is measured for real, representative, and configurable worst-case runs, with the current decision to raise the bound rather than segment journals. (#642)
 
 ### Fixed
+- `brigade init` now refuses a symlinked parent before it creates or publishes a
+  temporary file, and applies permissions through the open descriptor rather
+  than by path, closing symlink and TOCTOU write races. (#643)
+- Dispatch outcome writes are now bound to configured targets and report a
+  bounded error naming the resolved root. Missing Python interpreters suggest
+  `python3`, stale command inventory names its regeneration command, and
+  coverless root assignments no longer fall back to the wave scheduler. (#662)
+- `brigade outcome repair` diagnoses and repairs completed-ledger digest-chain
+  breaks, preserving and re-signing self-consistent records after a break
+  instead of discarding them. Repairs quarantine first and use binary
+  `O_EXCL` writes. (#645)
+- A failed run that holds uncommitted work retains its worktree, reports the
+  retained path and patch-file count, and prunes that retained entry after the
+  next successful run for the same target. (#663)
+- Outcome capture now attributes receipts to the exercised skill instead of the
+  generic `brigade-work` bucket, preferring a failed receipt's own stamp over
+  the current capture value. (#647)
 - Grok/T3 work-loop discovery no longer treats `~/.brigade` (user-level aboyeur
   roster) as a project work root. Hooks and `work resolve-target` require
   `.brigade/config.json`, so sessions under `$HOME` or unwired dirs do not
@@ -77,6 +105,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   25-asset contract as a current stable release. It is now stated as the future
   first stable manifest contract after `agent-notify` publication, with current
   bundled `agent-notify` assets empty/unpublished and no stable release claimed.
+- Lifecycle journal append, recovery, checkpoint, and shadow paths now serialize their critical sections, persist directory updates, enforce event and byte limits, and retain locks when durable enrollment state cannot be safely classified. (#624)
+- Journal enrollment, partial-tail recovery, atomic writes, and redaction anchors are hardened against mid-run enrollment loss, interrupted writes, symlink races, and overlapping redaction histories. (#633)
+- Recovery-checkpoint bodies are stripped from exported verification archives and replaced with privacy-safe artifact references; local recovery retains the private bodies it needs. (#646)
+- Candidate outcome artifacts can recover from earlier regressions when later verified clears outnumber them in the same unchanged content-fingerprint cohort. (#648)
+- Outcome scoring treats receipts linked by `reused_from` as one verification signal while retaining the append-only ledger rows. (#650)
+- Redaction anchor refresh is idempotent, validates split-retirement digests, and safely resumes if cleanup stops between parent retirement and child realignment. (#644)
+- Outcome-ledger writers serialize digest-chain appends and preserve completed rows while recovering interrupted writes. (#612)
+- Journal redaction cleanup remains retryable across the parent-retirement and child-realignment crash window. (#655)
+
+### Removed
+- Removed the opt-in `brigade run --deliberate` grounded-deliberation mode
+  (planner, `brigade.deliberation.v1` artifact emission, and related runs
+  show/watch/resume surfaces). Recoverable from git history; see #442 / #471.
+- The `BRIGADE_RUN_JOURNAL_AUTHORITY` environment flag is no longer needed or read at runtime because journal authority is the default for new runs. (#630)
 
 ## [0.25.1] - 2026-07-21
 
