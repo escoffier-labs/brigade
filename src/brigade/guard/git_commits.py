@@ -119,16 +119,31 @@ def _commit_revs(args: argparse.Namespace) -> list[str]:
 
 
 def _default_range() -> str:
-    proc = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    upstream = proc.stdout.strip()
-    if proc.returncode == 0 and upstream:
-        return f"{upstream}..HEAD"
-    return "HEAD"
+    try:
+        upstream = subprocess.run(
+            ["git", "rev-parse", "--symbolic-full-name", "@{upstream}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if upstream.returncode != 0 or not upstream.stdout.strip():
+            return "HEAD"
+
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", "@{upstream}^{commit}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        print("git command failed", file=sys.stderr)
+        raise SystemExit(2) from None
+
+    upstream_commit = resolved.stdout.strip()
+    if resolved.returncode != 0 or not upstream_commit:
+        print("git rev-parse failed", file=sys.stderr)
+        raise SystemExit(2)
+    return f"{upstream_commit}..HEAD"
 
 
 def _git(args: list[str], *, bounded_error: str | None = None) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from brigade.guard.git_commits import _commit_revs
+from brigade.guard.git_commits import _commit_revs, _default_range
 from brigade.guard.git_scan import _history_revs
 from brigade.guard.rev_range import validate_rev_range_operand
 
@@ -142,6 +143,80 @@ class RevRangeValidationTests(unittest.TestCase):
         ):
             self.assertEqual(_commit_revs(args), [])
         git.assert_called_once_with(["rev-list", "--reverse", "HEAD"], bounded_error=None)
+
+    def test_default_commit_range_preserves_option_shaped_upstream_ref(self) -> None:
+        for upstream in (
+            "refs/heads/--glob=refs/heads/NOMATCH",
+            "--glob=refs/heads/NOMATCH/x",
+        ):
+            with self.subTest(upstream=upstream):
+                self._assert_default_commit_range_scans_head(upstream)
+
+    def test_default_range_fails_when_configured_upstream_cannot_resolve(self) -> None:
+        def run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if "--symbolic-full-name" in args:
+                return subprocess.CompletedProcess(args, 0, "refs/remotes/origin/main\n", "")
+            return subprocess.CompletedProcess(args, 128, "", "fatal: needed a single revision\n")
+
+        stderr = io.StringIO()
+        with (
+            mock.patch("brigade.guard.git_commits.subprocess.run", side_effect=run),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            _default_range()
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(stderr.getvalue(), "git rev-parse failed\n")
+
+    def _assert_default_commit_range_scans_head(self, upstream: str) -> None:
+        import argparse
+
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            old = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            (repo / "README.md").write_text("changed\n")
+            subprocess.run(["git", "commit", "-am", "fix: changed"], cwd=repo, check=True)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(["git", "update-ref", "--", upstream, old], cwd=repo, check=True)
+            branch = subprocess.run(
+                ["git", "symbolic-ref", "--short", "HEAD"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            subprocess.run(
+                ["git", "config", f"branch.{branch}.remote", "."],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", f"branch.{branch}.merge", upstream],
+                cwd=repo,
+                check=True,
+            )
+
+            previous = Path.cwd()
+            try:
+                os.chdir(repo)
+                actual = _commit_revs(argparse.Namespace(rev_range=None, all=False))
+            finally:
+                os.chdir(previous)
+
+        self.assertEqual(actual, [head])
 
     def test_history_revs_reports_process_failure_separately_from_invalid_range(self) -> None:
         import argparse
