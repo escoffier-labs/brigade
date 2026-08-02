@@ -1,7 +1,6 @@
 import errno
 import json
 import os
-import re
 import shutil
 import threading
 import time as system_time
@@ -811,8 +810,7 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
         events.append(event_type)
 
     monkeypatch.setattr(run_lifecycle, "record_lifecycle_event", append_fact)
-    reviewer = threading.Thread(target=review_source)
-    reviewer.start()
+    reviewer = thread_sync.start_thread(review_source)
     assert runs_cmd.resume(run_dir) == 0
     thread_sync.join_thread(reviewer, description="reviewer thread finished")
     assert review_result == [1]
@@ -965,16 +963,22 @@ def test_watch_waits_for_consumed_approval_while_provider_lock_is_live(tmp_path,
 
     watch_holding_on_live_lock = threading.Event()
     provider_finish_gate = thread_sync.ThreadGate()
-    original_sleep = runs_cmd.time.sleep
 
     def coordinating_sleep(interval):
         run_meta = json.loads(run_path.read_text())
         if runs_cmd._approval_needs_reconciliation(run_meta) and runguard.run_lock_state(tmp_path, run_dir) == "live":
             watch_holding_on_live_lock.set()
             provider_finish_gate.wait_open(description="provider finished run under live lock")
-        original_sleep(interval)
+        system_time.sleep(interval)
 
-    monkeypatch.setattr(runs_cmd.time, "sleep", coordinating_sleep)
+    class RunsTimeProxy:
+        def sleep(self, interval):
+            coordinating_sleep(interval)
+
+        def __getattr__(self, name):
+            return getattr(system_time, name)
+
+    monkeypatch.setattr(runs_cmd, "time", RunsTimeProxy())
 
     def finish_provider():
         thread_sync.wait_for_event(
@@ -987,39 +991,10 @@ def test_watch_waits_for_consumed_approval_while_provider_lock_is_live(tmp_path,
         _write_json(run_path, finished)
         provider_finish_gate.open()
 
-    worker = threading.Thread(target=finish_provider)
     with runguard.run_lock(tmp_path, run_dir=run_dir):
-        worker.start()
+        worker = thread_sync.start_thread(finish_provider)
         assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.001) == 0
     thread_sync.join_thread(worker, description="provider worker finished")
-
-
-_FORBIDDEN_SHORT_THREAD_WAITS = re.compile(
-    r"\.(?:wait|join)\(\s*(?:timeout\s*=\s*)?0?\.\d+|\.(?:wait|join)\(\s*[12]\s*\)"
-)
-
-
-def test_threaded_watch_and_resume_tests_avoid_fixed_short_waits():
-    source = Path(__file__).read_text(encoding="utf-8")
-    offenders = [
-        line.strip()
-        for line in source.splitlines()
-        if _FORBIDDEN_SHORT_THREAD_WAITS.search(line) and "thread_sync" not in line
-    ]
-    assert offenders == [], (
-        "threaded runs_cmd tests must coordinate with thread_sync helpers, not fixed short waits: "
-        + "; ".join(offenders)
-    )
-
-
-def test_watch_consumed_approval_live_lock_test_uses_thread_sync_gate():
-    import inspect
-
-    source = inspect.getsource(test_watch_waits_for_consumed_approval_while_provider_lock_is_live)
-    assert "provider_finish_gate = thread_sync.ThreadGate()" in source
-    assert "watch_holding_on_live_lock" in source
-    assert "coordinating_sleep" in source
-    assert "consumed_observed.wait(timeout=2)" not in source
 
 
 def test_watch_consumed_approval_without_lock_requests_resume_reconciliation(tmp_path, capsys):

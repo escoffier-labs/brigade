@@ -14,6 +14,22 @@ DEFAULT_HARD_TIMEOUT = 30.0
 DEFAULT_POLL_INTERVAL = 0.001
 
 
+def start_thread(target: Callable[[], None]) -> threading.Thread:
+    """Start ``target`` and preserve any target exception for ``join_thread``."""
+    failures: list[BaseException] = []
+
+    def capture_failure() -> None:
+        try:
+            target()
+        except BaseException as error:
+            failures.append(error)
+
+    thread = threading.Thread(target=capture_failure)
+    thread._thread_sync_failures = failures
+    thread.start()
+    return thread
+
+
 def wait_for_event(
     event: threading.Event,
     *,
@@ -52,14 +68,15 @@ def join_thread(
     hard_timeout: float = DEFAULT_HARD_TIMEOUT,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
 ) -> None:
-    """Join ``thread``, failing on ``hard_timeout`` instead of a short guess."""
+    """Join a thread from ``start_thread``, raising its target exception if any."""
     deadline = time.monotonic() + hard_timeout
     while thread.is_alive():
         thread.join(timeout=poll_interval)
-        if not thread.is_alive():
-            return
-        if time.monotonic() >= deadline:
+        if thread.is_alive() and time.monotonic() >= deadline:
             raise AssertionError(f"timed out waiting for thread: {description}")
+    failures = getattr(thread, "_thread_sync_failures", [])
+    if failures:
+        raise failures[0]
 
 
 class ThreadGate:
