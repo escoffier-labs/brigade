@@ -585,7 +585,7 @@ func TestRun_DoctorJSONReportsMissingConfigAsUnconfigured(t *testing.T) {
 }
 
 func TestValidateRejectsNonPositiveTimeout(t *testing.T) {
-	for _, timeout := range []int{-5, 0} {
+	for _, timeout := range []int64{-5, 0} {
 		cfg := &config.Config{
 			Defaults: config.Defaults{TimeoutSeconds: timeout},
 		}

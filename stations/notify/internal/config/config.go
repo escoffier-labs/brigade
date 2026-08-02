@@ -67,7 +67,7 @@ type ProfileConfig struct {
 }
 
 type Defaults struct {
-	TimeoutSeconds int `toml:"timeout_seconds"`
+	TimeoutSeconds int64 `toml:"timeout_seconds"`
 }
 
 // ClaudeCodeStopConfig controls which private Claude Code Stop-hook fields
@@ -114,14 +114,13 @@ func Load(path string) (*Config, error) {
 // explicit zero, negative, or unrepresentably large value in TOML is
 // rejected here before any network call.
 func (c *Config) Validate() error {
-	secs := int64(c.Defaults.TimeoutSeconds)
-	if secs <= 0 {
+	if c.Defaults.TimeoutSeconds <= 0 {
 		return &ConfigError{
 			Field:  "defaults.timeout_seconds",
 			Detail: fmt.Sprintf("must be greater than zero, got %d", c.Defaults.TimeoutSeconds),
 		}
 	}
-	if secs > MaxTimeoutSeconds {
+	if c.Defaults.TimeoutSeconds > MaxTimeoutSeconds {
 		return &ConfigError{
 			Field: "defaults.timeout_seconds",
 			Detail: fmt.Sprintf(

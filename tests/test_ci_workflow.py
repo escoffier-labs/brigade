@@ -153,10 +153,12 @@ def test_ci_workflow_runs_notify_go_commands_from_notify_directory():
         "go build ./...",
         "go vet ./...",
         "go test -race ./...",
+        "go test ./internal/config/...",
         "go install golang.org/x/vuln/cmd/govulncheck@v1.3.0",
         "govulncheck ./...",
     ):
         assert command in ubuntu
+    assert "GOARCH: 386" in ubuntu
 
     windows = _workflow_job_section(text, "notify-windows")
     assert "runs-on: windows-latest" in windows

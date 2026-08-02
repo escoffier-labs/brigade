@@ -260,7 +260,7 @@ timeout_seconds = %d
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if int64(cfg.Defaults.TimeoutSeconds) != MaxTimeoutSeconds {
+	if cfg.Defaults.TimeoutSeconds != MaxTimeoutSeconds {
 		t.Errorf("expected timeout %d, got %d", MaxTimeoutSeconds, cfg.Defaults.TimeoutSeconds)
 	}
 }

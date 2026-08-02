@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `defaults.timeout_seconds` rejects zero, negative, or unrepresentably large values at config load (upper bound about 9.2 billion seconds). An omitted key keeps the 10-second delivery default.
 
 ### Fixed
-- Multi-provider fan-out now has coverage for partial channel failures and concurrent delivery behavior.
+- Multi-provider fan-out now has end-to-end coverage for successful two-provider delivery and for best-effort delivery when one provider fails.
 - Channel transport failures now return bounded provider, stage, status, and cause fields without retaining request URLs or credentials. The dispatcher sanitizes errors again before writing stderr.
 
 ### Documentation
