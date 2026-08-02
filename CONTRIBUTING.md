@@ -20,7 +20,7 @@ Brigade is the local-first operator CLI for agent memory, handoffs, and reviewab
 
 - Personal details, hostnames, IPs, account IDs, or live auth profiles in templates or tests. The whole point of this kit is to keep that stuff out of public repos. The `content-guard` job in CI will fail if it finds any.
 - Cron jobs or hooks that post or call out to the network without explicit opt-in.
-- Commits must use conventional commits. In-house commits in escoffier-labs organizations and original solomonneas repositories should include a co-author trailer for a coding agent that did substantial work; external repositories and upstream third-party PRs remain trailer-free.
+- Commits must use conventional commits. In-house commits in escoffier-labs organizations and original solomonneas repositories should include a co-author trailer for a coding agent that did substantial work. External repositories and upstream third-party PRs remain trailer-free.
 
 ## Planning artifacts
 
@@ -46,6 +46,34 @@ git init -q -b main "$target"
 python -m brigade init --target "$target" --depth workspace --harnesses claude,codex,openclaw
 python -m brigade doctor --target "$target"
 ```
+
+## Pull requests
+
+`main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request, and GitHub enforces the gate regardless of the dispatch prompt.
+
+The current rule set requires all of the following before a pull request can merge:
+
+- All 22 required GitHub Actions checks pass. The checks are pinned to GitHub Actions app id 15368, and the branch must be up to date with `main`.
+- A current formal `APPROVED` review exists from a non-author reviewer.
+- All review conversations are resolved.
+- The approval was recorded after the last push. New commits dismiss stale approvals.
+
+The pull request author cannot approve their own pull request. `gh pr review --approve` fails with "Can not approve your own pull request" when the author and reviewer share one GitHub identity.
+
+CodeRabbit is the current external review identity. Its green commit status is not the grading artifact because the status can be green while the formal GitHub review is still `CHANGES_REQUESTED`. The artifacts that count are a current formal non-author `APPROVED` review and all required checks passing.
+
+Inspect the gate before attempting a merge:
+
+```bash
+gh pr checks <number> --required
+gh pr view <number> --json reviewDecision,mergeStateStatus
+```
+
+`reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`.
+
+Those CLI fields do not expose unresolved review conversations. Separately check the pull request's **Files changed** review panel in GitHub and confirm that no conversation remains unresolved.
+
+Dispatched sessions should open the pull request, run local verification, and push commits. After the final push, comment `@coderabbitai full review`. The `coderabbitai[bot]` identity records the formal GitHub review. Wait for its current `APPROVED` review before merging. A green CodeRabbit commit status alone does not satisfy this gate.
 
 ## Adding a harness
 
