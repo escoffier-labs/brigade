@@ -10,7 +10,7 @@ from pathlib import Path
 from .engine import scan_text
 from .policy import Policy, default_policy, load_policy
 from .report import to_text
-from .rev_range import validate_rev_range_operand
+from .rev_range import fail_invalid_rev_range_operand, git_has_head, validate_rev_range_operand
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -182,37 +182,24 @@ def _history_revs(args: argparse.Namespace) -> list[str]:
         cmd = ["git", "rev-list", "--all"]
     elif args.rev_range is not None:
         validate_rev_range_operand(args.rev_range)
-        cmd = ["git", "rev-list", args.rev_range]
+        cmd = ["git", "rev-list", "--end-of-options", args.rev_range]
     else:
-        if not _has_head():
+        if not git_has_head():
             return []
         cmd = ["git", "rev-list", "HEAD"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except OSError:
+        if args.rev_range is not None:
+            fail_invalid_rev_range_operand()
+        print("git rev-list failed", file=sys.stderr)
+        raise SystemExit(2) from None
     if proc.returncode != 0:
+        if args.rev_range is not None:
+            fail_invalid_rev_range_operand()
         print((proc.stderr or "git rev-list failed").strip(), file=sys.stderr)
         raise SystemExit(2)
     return [line for line in proc.stdout.splitlines() if line.strip()]
-
-
-def _has_head() -> bool:
-    head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], capture_output=True, text=True, check=False)
-    if head.returncode == 0:
-        return True
-
-    symbolic = subprocess.run(["git", "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True, check=False)
-    branch_ref = symbolic.stdout.strip()
-    if symbolic.returncode == 0 and branch_ref:
-        branch = subprocess.run(
-            ["git", "show-ref", "--verify", "--quiet", branch_ref],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if branch.returncode == 1:
-            return False
-
-    print((head.stderr or symbolic.stderr or "git rev-parse failed").strip(), file=sys.stderr)
-    raise SystemExit(2)
 
 
 def _added_lines(rev: str) -> str:

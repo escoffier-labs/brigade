@@ -22,21 +22,10 @@ class RevRangeValidationTests(unittest.TestCase):
         for operand in (
             "--max-count=0",
             "--all",
-            " --max-count=0",
             "--max-count=0 ",
             "-HEAD",
             "",
             "   ",
-            "..",
-            "...",
-            "a....b",
-            "a.....b",
-            "a...b..c",
-            "a..b...c",
-            ".",
-            "./README.md",
-            "HEAD;id",
-            "HEAD|id",
             "HEAD\n--all",
         ):
             with self.subTest(operand=operand):
@@ -61,6 +50,11 @@ class RevRangeValidationTests(unittest.TestCase):
             "HEAD^!",
             "@{upstream}",
             "v1.0.0+build.1",
+            "café",
+            "feature#1",
+            "release(v1)",
+            "foo=bar",
+            ":/search text",
         ):
             with self.subTest(operand=operand):
                 validate_rev_range_operand(operand)
@@ -111,7 +105,7 @@ class RevRangeValidationTests(unittest.TestCase):
             with self.subTest(operand=operand):
                 args = argparse.Namespace(rev_range=operand, all=False)
                 with (
-                    mock.patch("brigade.guard.git_commits._has_head") as has_head,
+                    mock.patch("brigade.guard.git_commits.git_has_head") as has_head,
                     mock.patch("brigade.guard.git_commits._git") as git,
                 ):
                     with self.assertRaises(SystemExit) as ctx:
@@ -328,6 +322,53 @@ class RevRangeValidationTests(unittest.TestCase):
                 )
             self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
 
+    def test_history_clis_accept_valid_punctuation_and_unicode_refs(self) -> None:
+        invocations = (
+            ("brigade.guard.git_scan", "--history", "--range="),
+            ("brigade.guard.git_commits", "--range="),
+            ("brigade.guard.publish_check", "--commit-range="),
+        )
+        for ref_name in ("café", "feature#1", "release(v1)", "foo=bar"):
+            for module, *prefix in invocations:
+                with self.subTest(module=module, ref_name=ref_name), TemporaryDirectory() as tmp:
+                    repo = Path(tmp)
+                    self._init_repo(repo)
+                    subprocess.run(["git", "branch", ref_name], cwd=repo, check=True)
+                    range_arg = f"{prefix[-1]}{ref_name}"
+                    proc = subprocess.run(
+                        [sys.executable, "-m", module, *prefix[:-1], range_arg, "--json"],
+                        cwd=repo,
+                        env={"PYTHONPATH": str(ROOT / "src")},
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+
+    def test_history_clis_bound_git_errors_for_user_ranges(self) -> None:
+        invocations = (
+            ("brigade.guard.git_scan", "--history", "--range="),
+            ("brigade.guard.git_commits", "--range="),
+            ("brigade.guard.publish_check", "--commit-range="),
+        )
+        for operand in (".", "./README.md", "a....b", "A" * 10_000):
+            for module, *prefix in invocations:
+                with self.subTest(module=module, operand=operand[:20]), TemporaryDirectory() as tmp:
+                    repo = Path(tmp)
+                    self._init_repo(repo)
+                    range_arg = f"{prefix[-1]}{operand}"
+                    proc = subprocess.run(
+                        [sys.executable, "-m", module, *prefix[:-1], range_arg, "--json"],
+                        cwd=repo,
+                        env={"PYTHONPATH": str(ROOT / "src")},
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                self.assertEqual(proc.returncode, 2)
+                self.assertEqual(proc.stderr, "invalid revision range operand\n")
+                self.assertEqual(proc.stdout, "")
+
     def test_git_scan_history_handles_repository_without_head(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -361,6 +402,20 @@ class RevRangeValidationTests(unittest.TestCase):
                     "--history",
                     "--json",
                 ],
+                cwd=tmp,
+                env={"PYTHONPATH": str(ROOT / "src")},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not a git repository", proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
+    def test_git_commits_fails_outside_repository(self) -> None:
+        with TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                [sys.executable, "-m", "brigade.guard.git_commits", "--json"],
                 cwd=tmp,
                 env={"PYTHONPATH": str(ROOT / "src")},
                 capture_output=True,

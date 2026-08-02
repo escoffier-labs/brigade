@@ -1,54 +1,58 @@
 from __future__ import annotations
 
-import re
+import os
+import subprocess
 import sys
+from typing import NoReturn
 
 _INVALID_OPERAND = "invalid revision range operand"
-
-_ALLOWED_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~/^:@{}-+!")
-_FORBIDDEN_METACHAR = frozenset(";|&$`()<>\\\"' \t\n\r*?[]%=")
+_MAX_OPERAND_BYTES = 65_536
 
 
 def validate_rev_range_operand(operand: str) -> None:
-    """Reject user-controlled revision/range operands before git rev-list."""
+    """Reject option-shaped or unbounded operands before git rev-list."""
     if _operand_invalid(operand):
-        print(_INVALID_OPERAND, file=sys.stderr)
-        raise SystemExit(2)
+        fail_invalid_rev_range_operand()
 
 
 def _operand_invalid(operand: str) -> bool:
-    if not operand or operand != operand.strip():
+    if not operand or operand.isspace():
         return True
     if operand[0] == "-":
         return True
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in operand):
         return True
-    if any(ch in _FORBIDDEN_METACHAR for ch in operand):
+    if len(os.fsencode(operand)) > _MAX_OPERAND_BYTES:
         return True
-    components = _split_rev_range(operand)
-    if components is None:
-        return True
-    for component in components:
-        if not component or component[0] == "-":
-            return True
-        if component == "." or component.startswith("./"):
-            return True
-        if not all(ch in _ALLOWED_CHARS for ch in component):
-            return True
     return False
 
 
-def _split_rev_range(operand: str) -> list[str] | None:
-    separators = list(re.finditer(r"\.{2,}", operand))
-    if not separators:
-        return [operand]
-    if len(separators) != 1:
-        return None
-    separator = separators[0]
-    if separator.end() - separator.start() not in (2, 3):
-        return None
-    left = operand[: separator.start()]
-    right = operand[separator.end() :]
-    if not left and not right:
-        return None
-    return [component for component in (left, right) if component]
+def fail_invalid_rev_range_operand() -> NoReturn:
+    print(_INVALID_OPERAND, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def git_has_head() -> bool:
+    """Return false only for an unborn branch; fail on other Git errors."""
+    try:
+        head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], capture_output=True, text=True, check=False)
+        if head.returncode == 0:
+            return True
+
+        symbolic = subprocess.run(["git", "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True, check=False)
+        branch_ref = symbolic.stdout.strip()
+        if symbolic.returncode == 0 and branch_ref:
+            branch = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", branch_ref],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if branch.returncode == 1:
+                return False
+    except OSError:
+        print("git command failed", file=sys.stderr)
+        raise SystemExit(2) from None
+
+    print((head.stderr or symbolic.stderr or "git rev-parse failed").strip(), file=sys.stderr)
+    raise SystemExit(2)

@@ -8,7 +8,7 @@ import sys
 from .engine import scan_text
 from .policy import Policy, load_policy
 from .report import to_text
-from .rev_range import validate_rev_range_operand
+from .rev_range import fail_invalid_rev_range_operand, git_has_head, validate_rev_range_operand
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,12 +108,12 @@ def _commit_revs(args: argparse.Namespace) -> list[str]:
         if args.rev_range is not None:
             rev_range = args.rev_range
         else:
-            if not _has_head():
+            if not git_has_head():
                 return []
             rev_range = _default_range()
-        cmd = ["rev-list", "--reverse", rev_range]
+        cmd = ["rev-list", "--reverse", "--end-of-options", rev_range]
 
-    output = _git(cmd)
+    output = _git(cmd, invalid_range_on_error=args.rev_range is not None)
     return [line for line in output.splitlines() if line.strip()]
 
 
@@ -130,14 +130,17 @@ def _default_range() -> str:
     return "HEAD"
 
 
-def _has_head() -> bool:
-    proc = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], capture_output=True, text=True, check=False)
-    return proc.returncode == 0
-
-
-def _git(args: list[str]) -> str:
-    proc = subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+def _git(args: list[str], *, invalid_range_on_error: bool = False) -> str:
+    try:
+        proc = subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+    except OSError:
+        if invalid_range_on_error:
+            fail_invalid_rev_range_operand()
+        print("git command failed", file=sys.stderr)
+        raise SystemExit(2) from None
     if proc.returncode != 0:
+        if invalid_range_on_error:
+            fail_invalid_rev_range_operand()
         print((proc.stderr or proc.stdout or "git command failed").strip(), file=sys.stderr)
         raise SystemExit(2)
     return proc.stdout
