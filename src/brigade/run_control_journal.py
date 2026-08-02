@@ -21,10 +21,11 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from brigade import run_events, run_journal, run_lifecycle, run_shadow
+from brigade import runguard, run_events, run_journal, run_lifecycle, run_shadow
 from brigade.run_events import MAX_DIAGNOSTIC_LEN, MAX_PAYLOAD_STR_LEN
 
 CONTROL_REQUESTED = "control.requested"
@@ -44,6 +45,12 @@ class ControlJournalError(RuntimeError):
         self.diagnostic = (
             message if len(message) <= MAX_DIAGNOSTIC_LEN else message[: MAX_DIAGNOSTIC_LEN - 1] + "\u2026"
         )
+
+
+class ControlFailureClass(str, Enum):
+    TRANSPORT_EXCEPTION = "transport_exception"
+    TRANSPORT_REJECTED = "transport_rejected"
+    TRANSPORT_PROTOCOL_ERROR = "transport_protocol_error"
 
 
 @dataclass(frozen=True)
@@ -179,13 +186,11 @@ def _response_from_terminal(event: run_journal.RunEvent) -> dict[str, Any]:
             except ValueError:
                 response["detail"] = detail
         return response
-    response = {
-        "ok": False,
-        "op": payload.get("op"),
-        "error": payload.get("detail") or "control request failed",
-    }
-    if isinstance(payload.get("code"), str):
-        response["code"] = payload["code"]
+    response = {"ok": False, "op": payload.get("op"), "error": "control request failed"}
+    if isinstance(payload.get("error_class"), str):
+        response["error_class"] = payload["error_class"]
+    if isinstance(payload.get("detail_digest"), str):
+        response["detail_digest"] = payload["detail_digest"]
     if isinstance(payload.get("worker"), str):
         response["worker"] = payload["worker"]
     return response
@@ -201,6 +206,27 @@ def _load_run_snapshot(run_dir: Path) -> dict[str, Any] | None:
     except (ValueError, UnicodeDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _preflight_live_control(run_dir: Path) -> None:
+    """Reject persisted terminal or unlocked runs before any control mutation."""
+    snapshot = _load_run_snapshot(run_dir)
+    # Journal-only runs predate persisted control metadata and remain readable
+    # for compatibility. A persisted receipt, however, is authoritative.
+    if snapshot is None:
+        return
+    status = snapshot.get("status")
+    if (
+        not isinstance(status, str)
+        or status not in runguard._NONTERMINAL_RUN_STATUSES
+        or snapshot.get("finished_at") is not None
+    ):
+        raise ControlJournalError("control run is not live", code="control_run_not_live")
+    if "lock_workspace" not in snapshot:
+        return
+    workspace = runguard.resolve_run_lock_workspace(snapshot, run_dir)
+    if workspace is None or not runguard.has_active_run_owner(workspace, run_dir):
+        raise ControlJournalError("control run owner is not active", code="control_owner_not_active")
 
 
 def _sync_shadow_after_control(run_dir: Path) -> None:
@@ -266,6 +292,42 @@ def _append_control_event(
     )
 
 
+def _claim_control_request(
+    journal_path: Path,
+    *,
+    run_dir: Path,
+    run_id: str,
+    request_id: str,
+    fingerprint: Mapping[str, Any],
+) -> tuple[str, run_journal.RunEvent | None, run_journal.RunEvent | None]:
+    """Inspect and claim ``control.requested`` under one journal lock."""
+    with run_lifecycle.checkpoint_event_pair():
+        with run_journal.journal_mutation(journal_path):
+            state, requested, terminal = _inspect_control_request(
+                run_dir,
+                request_id=request_id,
+                fingerprint=fingerprint,
+            )
+            if state != "absent":
+                return state, requested, terminal
+            events = _read_verified(journal_path)
+            try:
+                requested = run_journal.append_event(
+                    journal_path,
+                    run_id=run_id,
+                    event_type=CONTROL_REQUESTED,
+                    payload=dict(fingerprint),
+                    idempotency_key=requested_idempotency_key(request_id),
+                    expected_previous_sequence=events[-1].sequence if events else 0,
+                )
+            except run_journal.IdempotencyConflict as exc:
+                raise ControlJournalError(_bound(exc.diagnostic), code="control_fingerprint_conflict") from exc
+            except run_events.CanonicalizationError as exc:
+                raise ControlJournalError(_bound(str(exc)), code="control_payload_invalid") from exc
+            _sync_shadow_after_control(run_dir)
+            return "claimed", requested, None
+
+
 def inspect_control_request(
     run_dir: Path,
     *,
@@ -273,6 +335,15 @@ def inspect_control_request(
     fingerprint: Mapping[str, Any],
 ) -> tuple[str, run_journal.RunEvent | None, run_journal.RunEvent | None]:
     """Classify a prior control request: ``absent``, ``replay``, ``indeterminate``, or raise conflict."""
+    return _inspect_control_request(run_dir, request_id=request_id, fingerprint=fingerprint)
+
+
+def _inspect_control_request(
+    run_dir: Path,
+    *,
+    request_id: str,
+    fingerprint: Mapping[str, Any],
+) -> tuple[str, run_journal.RunEvent | None, run_journal.RunEvent | None]:
     journal_path = _journal_path(run_dir)
     events = _read_verified(journal_path)
     requested, terminal = _find_control_pair(events, request_id=request_id)
@@ -311,6 +382,7 @@ def execute_control_request(
     run_dir = Path(run_dir)
     if not journal_present(run_dir):
         raise ControlJournalError("legacy-no-journal", code="legacy-no-journal")
+    _preflight_live_control(run_dir)
 
     resolved_id = request_id if request_id is not None else generate_request_id()
     fingerprint = control_fingerprint_payload(
@@ -343,14 +415,29 @@ def execute_control_request(
             terminal_event=prior_terminal,
         )
 
-    requested_event = _append_control_event(
+    state, prior_requested, prior_terminal = _claim_control_request(
         journal_path,
         run_dir=run_dir,
         run_id=run_id,
-        event_type=CONTROL_REQUESTED,
-        payload=fingerprint,
-        idempotency_key=requested_idempotency_key(resolved_id),
+        request_id=resolved_id,
+        fingerprint=fingerprint,
     )
+    if state == "indeterminate":
+        raise ControlJournalError(
+            _bound(f"control request {resolved_id!r} is indeterminate"),
+            code="indeterminate",
+        )
+    if state == "replay":
+        assert prior_terminal is not None
+        return ControlResult(
+            request_id=resolved_id,
+            response=_response_from_terminal(prior_terminal),
+            replayed=True,
+            requested_event=prior_requested,
+            terminal_event=prior_terminal,
+        )
+    assert prior_requested is not None
+    requested_event = prior_requested
 
     transport_payload: dict[str, object] = {"op": op}
     if worker is not None:
@@ -361,32 +448,9 @@ def execute_control_request(
     try:
         response = send(transport_payload)
     except Exception as exc:
-        detail = _bound(str(exc))
-        failed_payload: dict[str, Any] = {
-            "op": op,
-            "request_id": resolved_id,
-            "code": "transport-error",
-            "detail": detail[:MAX_PAYLOAD_STR_LEN],
-        }
-        if worker is not None:
-            failed_payload["worker"] = worker
-        terminal = _append_control_event(
-            journal_path,
-            run_dir=run_dir,
-            run_id=run_id,
-            event_type=CONTROL_FAILED,
-            payload=failed_payload,
-            idempotency_key=failed_idempotency_key(resolved_id),
-        )
-        return ControlResult(
-            request_id=resolved_id,
-            response={"ok": False, "error": detail, "code": "transport-error"},
-            replayed=False,
-            requested_event=requested_event,
-            terminal_event=terminal,
-        )
+        response = {"_transport_exception": exc}
 
-    if response.get("ok") is True:
+    if isinstance(response, Mapping) and response.get("ok") is True:
         observed_payload: dict[str, Any] = {
             "op": op,
             "request_id": resolved_id,
@@ -420,11 +484,20 @@ def execute_control_request(
             terminal_event=terminal,
         )
 
-    failed_payload = {
+    if isinstance(response, Mapping) and "_transport_exception" in response:
+        failure_class = ControlFailureClass.TRANSPORT_EXCEPTION
+        detail = str(response["_transport_exception"])
+    elif isinstance(response, Mapping) and response.get("ok") is False:
+        failure_class = ControlFailureClass.TRANSPORT_REJECTED
+        detail = str(response.get("error") or "control request failed")
+    else:
+        failure_class = ControlFailureClass.TRANSPORT_PROTOCOL_ERROR
+        detail = str(response.get("error") if isinstance(response, Mapping) else response)
+    failed_payload: dict[str, Any] = {
         "op": op,
         "request_id": resolved_id,
-        "code": str(response.get("code") or "control-failed")[:MAX_PAYLOAD_STR_LEN],
-        "detail": str(response.get("error") or "control request failed")[:MAX_PAYLOAD_STR_LEN],
+        "error_class": failure_class.value,
+        "detail_digest": hashlib.sha256(detail.encode("utf-8")).hexdigest(),
     }
     if worker is not None:
         failed_payload["worker"] = worker
@@ -438,7 +511,12 @@ def execute_control_request(
     )
     return ControlResult(
         request_id=resolved_id,
-        response=dict(response),
+        response={
+            "ok": False,
+            "error": "control request failed",
+            "error_class": failure_class.value,
+            "detail_digest": failed_payload["detail_digest"],
+        },
         replayed=False,
         requested_event=requested_event,
         terminal_event=terminal,
@@ -450,6 +528,7 @@ __all__ = [
     "CONTROL_OBSERVED",
     "CONTROL_REQUESTED",
     "ControlJournalError",
+    "ControlFailureClass",
     "ControlResult",
     "control_fingerprint_payload",
     "execute_control_request",

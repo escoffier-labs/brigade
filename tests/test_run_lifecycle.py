@@ -212,6 +212,7 @@ def test_no_journal_file_until_lock_held(enabled, tmp_path):
     assert _journal_path(run_dir).is_file()
     assert sorted(path.name for path in (run_dir / "events").iterdir()) == [
         "lifecycle.jsonl",
+        "lifecycle.jsonl.lock",
         "recovery-checkpoints",
         "shadow-comparison.json",
     ]
@@ -2509,3 +2510,112 @@ def test_authority_dispatch_checkpoint_is_base_stripped_and_recovers_exact_tail(
     assert repaired["journal_last_sequence"] == events[-1].sequence
     assert repaired["journal_last_event_digest"] == events[-1].event_digest
     assert repaired["projector_version"] == run_projector.PROJECTOR_VERSION
+
+
+# -- Issue #651 step 2: owner lifecycle appends retry a stale tail -----------
+
+
+def test_owner_lifecycle_append_retries_stale_tail_and_preserves_idempotency(enabled, tmp_path, monkeypatch):
+    """A StaleSequenceError from the journal tail is retried with the same request.
+
+    The owner append path must re-read and verify the chain head, then retry
+    the SAME payload and idempotency key (backoff 0.01 * 2**retry_index), so a
+    single cross-process append interleaving does not surface as a failure.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+
+    calls: list[tuple] = []
+    sleeps: list[float] = []
+    stale_budget = {"count": 1}
+    real_append = run_journal.append_event
+    real_read = run_journal.read_journal
+
+    def tracking_append(journal_path, **kwargs):
+        if kwargs["event_type"] == "run.planning.started":
+            calls.append(
+                (
+                    "append",
+                    kwargs["idempotency_key"],
+                    kwargs["expected_previous_sequence"],
+                )
+            )
+            if stale_budget["count"]:
+                stale_budget["count"] -= 1
+                raise run_journal.StaleSequenceError("stale sequence: injected stale tail")
+        return real_append(journal_path, **kwargs)
+
+    def tracking_read(journal_path):
+        report = real_read(journal_path)
+        calls.append(("read", report.events[-1].sequence if report.events else 0))
+        return report
+
+    monkeypatch.setattr(run_journal, "append_event", tracking_append)
+    monkeypatch.setattr(run_journal, "read_journal", tracking_read)
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+
+    try:
+        with runguard.run_lock(repo, run_dir=run_dir):
+            event = run_lifecycle.record_lifecycle_transition(run_dir, status="planning", workspace=repo)
+    except run_lifecycle.LifecycleJournalError as exc:
+        pytest.fail(f"owner lifecycle append did not retry the stale tail: {exc}")
+
+    assert event is not None
+    append_attempts = [call for call in calls if call[0] == "append"]
+    assert len(append_attempts) == 2, f"expected the initial attempt plus one retry, got {append_attempts}"
+    assert append_attempts[0][1] == append_attempts[1][1], "retry must reuse the original idempotency key"
+    first_attempt_index = calls.index(append_attempts[0])
+    second_attempt_index = calls.index(append_attempts[1], first_attempt_index + 1)
+    fresh_reads = [call for call in calls[first_attempt_index + 1 : second_attempt_index] if call[0] == "read"]
+    assert fresh_reads, "the retry must re-read the journal chain head before re-appending"
+    assert sleeps == [0.01]
+
+    status_events = _status_events(run_dir)
+    assert [e.event_type for e in status_events] == ["run.created", "run.planning.started"]
+    committed = [e for e in status_events if e.idempotency_key == append_attempts[0][1]]
+    assert len(committed) == 1, "exactly one event may be committed for the retried append"
+    assert event.event_id == committed[0].event_id
+    assert run_journal.read_journal(_journal_path(run_dir)).chain_errors == []
+
+
+def test_owner_lifecycle_append_stale_retries_exhausted_blocks_run_json(enabled, tmp_path, monkeypatch):
+    """Exhausted stale retries surface a bounded category and block run.json.
+
+    After the initial attempt plus three retries all hit StaleSequenceError,
+    the owner append path raises LifecycleJournalError with the bounded
+    category ``lifecycle_append_stale_exhausted`` and the run.json snapshot
+    does not advance.
+    """
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started")
+    _write_run_json_locked(repo, run_dir, "started")
+    run_json_before = (run_dir / "run.json").read_bytes()
+
+    attempts: list[dict] = []
+    sleeps: list[float] = []
+    real_append = run_journal.append_event
+
+    def always_stale(journal_path, **kwargs):
+        if kwargs["event_type"] == "run.planning.started":
+            attempts.append(kwargs)
+            raise run_journal.StaleSequenceError("stale sequence: injected stale tail")
+        return real_append(journal_path, **kwargs)
+
+    monkeypatch.setattr(run_journal, "append_event", always_stale)
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        with pytest.raises(run_lifecycle.LifecycleJournalError, match="lifecycle_append_stale_exhausted"):
+            _write_run_json(run_dir, "planning")
+
+    assert len(attempts) == 4, f"expected the initial attempt plus three retries, got {len(attempts)}"
+    assert len({kwargs["idempotency_key"] for kwargs in attempts}) == 1, (
+        "every attempt must reuse the original idempotency key"
+    )
+    assert sleeps == [0.01, 0.02, 0.04], f"expected exponential backoff sleeps, got {sleeps}"
+    assert (run_dir / "run.json").read_bytes() == run_json_before, "run.json must not advance past the bounded failure"

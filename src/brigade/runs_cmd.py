@@ -1885,6 +1885,7 @@ def events(
 
     expected_run_id = run_lifecycle._run_id_from_dir(run_dir)
     after_sequence = 0
+    last_digest: str | None = None
     if after is not None:
         try:
             cursor = run_event_cursor.decode(after)
@@ -1920,6 +1921,7 @@ def events(
             print(f"error: {exc.code}: {exc}", file=sys.stderr)
             return 2
         after_sequence = cursor.sequence
+        last_digest = cursor.digest
 
     last_emitted = after_sequence
     while True:
@@ -1935,15 +1937,26 @@ def events(
             print(f"error: {report.chain_errors[0]}", file=sys.stderr)
             return 2
 
+        if last_emitted:
+            retained = next((event for event in report.events if event.sequence == last_emitted), None)
+            if retained is None or retained.event_digest != last_digest:
+                print("error: cursor continuity changed in an emitted journal prefix", file=sys.stderr)
+                return 2
+
         terminal_event = None
+        first_suffix = True
         for event in report.events:
             if event.sequence <= last_emitted:
                 continue
+            if first_suffix and last_digest is not None and event.previous_digest != last_digest:
+                print("error: cursor continuity failed for journal suffix", file=sys.stderr)
+                return 2
             _emit_json(_lifecycle_event_record(event))
             last_emitted = event.sequence
-            if event.event_type in _TERMINAL_LIFECYCLE_EVENT_TYPES:
+            last_digest = event.event_digest
+            first_suffix = False
+            if terminal_event is None and event.event_type in _TERMINAL_LIFECYCLE_EVENT_TYPES:
                 terminal_event = event
-                break
 
         if terminal_event is not None:
             return _events_return_code(terminal_event)
