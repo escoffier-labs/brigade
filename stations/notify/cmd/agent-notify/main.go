@@ -338,9 +338,6 @@ func sortedProfileNames(cfg *config.Config) []string {
 }
 
 func buildRegistry(cfg *config.Config, names []string) (*channels.Registry, error) {
-	if cfg.Defaults.TimeoutSeconds <= 0 {
-		return nil, fmt.Errorf("defaults.timeout_seconds must be greater than zero, got %d", cfg.Defaults.TimeoutSeconds)
-	}
 	reg := channels.NewRegistry()
 	timeout := time.Duration(cfg.Defaults.TimeoutSeconds) * time.Second
 
@@ -381,9 +378,6 @@ func buildRegistry(cfg *config.Config, names []string) (*channels.Registry, erro
 // dispatch sends the message to each named channel concurrently, best-effort.
 // Returns the number of channels that failed.
 func dispatch(reg *channels.Registry, names []string, msg canonical.Message, stderr io.Writer, timeout time.Duration) int {
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
 	type result struct {
 		name    string
 		channel string
@@ -443,17 +437,17 @@ func inspectConfig(configPath, profileName, skip string, skippedNetwork bool) (m
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		addCheck("FAIL", "config", err.Error())
+		if cfgErr, ok := config.AsConfigError(err); ok {
+			addCheck("FAIL", cfgErr.Field, cfgErr.Detail)
+		} else {
+			addCheck("FAIL", "config", err.Error())
+		}
 		return inspectPayload(configPath, configFileExists, false, "", nil, nil, checks, skippedNetwork, "config failed to load"), exitConfig
 	}
 	if configFileExists {
 		addCheck("OK", "config", "loaded")
 	} else {
 		addCheck("WARN", "config", "config file missing; using environment-only discovery")
-	}
-
-	if cfg.Defaults.TimeoutSeconds <= 0 {
-		addCheck("FAIL", "defaults.timeout_seconds", "must be greater than zero")
 	}
 
 	if len(cfg.Channels) == 0 {

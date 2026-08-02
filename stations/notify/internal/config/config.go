@@ -10,6 +10,26 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// ConfigError is a stable, field-scoped configuration diagnostic shared by
+// doctor and send. Its Error() text is the single contract both surfaces use.
+type ConfigError struct {
+	Field  string
+	Detail string
+}
+
+func (e *ConfigError) Error() string {
+	return e.Field + " " + e.Detail
+}
+
+// AsConfigError reports whether err is or wraps a *ConfigError.
+func AsConfigError(err error) (*ConfigError, bool) {
+	var cfgErr *ConfigError
+	if errors.As(err, &cfgErr) {
+		return cfgErr, true
+	}
+	return nil, false
+}
+
 // Config is the parsed configuration tree.
 type Config struct {
 	Channels map[string]ChannelConfig `toml:"channels"`
@@ -56,6 +76,9 @@ func Load(path string) (*Config, error) {
 	_, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		populateFromEnv(cfg)
+		if err := cfg.Validate(); err != nil {
+			return nil, err
+		}
 		return cfg, nil
 	}
 	if err != nil {
@@ -66,14 +89,23 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
 
-	// Zero means "not set" (absent or explicit) and falls back to the
-	// default. A negative value is invalid configuration and stays
-	// observable: doctor reports it as FAIL and the send path rejects it
-	// rather than silently substituting the default.
-	if cfg.Defaults.TimeoutSeconds == 0 {
-		cfg.Defaults.TimeoutSeconds = 10
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 	return cfg, nil
+}
+
+// Validate checks semantic constraints after TOML decode or env discovery.
+// Absent defaults.timeout_seconds keeps the pre-decode default of 10; an
+// explicit zero or negative value in TOML is rejected here.
+func (c *Config) Validate() error {
+	if c.Defaults.TimeoutSeconds <= 0 {
+		return &ConfigError{
+			Field:  "defaults.timeout_seconds",
+			Detail: fmt.Sprintf("must be greater than zero, got %d", c.Defaults.TimeoutSeconds),
+		}
+	}
+	return nil
 }
 
 // populateFromEnv builds an implicit config from environment variables only.
