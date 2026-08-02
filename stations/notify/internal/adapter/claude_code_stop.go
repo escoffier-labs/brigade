@@ -15,9 +15,9 @@ import (
 // to sensible defaults when fields are missing. Survives most schema
 // additions and aliased renames without changes.
 func ClaudeCodeStop(r io.Reader) (canonical.Message, error) {
-	raw, err := io.ReadAll(r)
+	raw, err := ReadBounded(r)
 	if err != nil {
-		return canonical.Message{}, fmt.Errorf("read input: %w", err)
+		return canonical.Message{}, err
 	}
 	var ev map[string]interface{}
 	if err := json.Unmarshal(raw, &ev); err != nil {

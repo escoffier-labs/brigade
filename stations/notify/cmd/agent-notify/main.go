@@ -303,7 +303,11 @@ func buildMessage(hook string, posArgs []string, stdin io.Reader) (canonical.Mes
 	case "", "custom":
 		// Prefer positional arg; otherwise read stdin.
 		if len(posArgs) > 0 {
-			return adapter.FromString(strings.Join(posArgs, " ")), nil
+			joined := strings.Join(posArgs, " ")
+			if err := adapter.CheckSize([]byte(joined)); err != nil {
+				return canonical.Message{}, err
+			}
+			return adapter.FromString(joined), nil
 		}
 		return adapter.AutoDetect(stdin)
 	default:

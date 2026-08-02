@@ -32,6 +32,7 @@ func (e *DeliveryError) Error() string {
 	cause := boundedValue(
 		e.Cause,
 		"encoding",
+		"payload_limit",
 		"invalid_request",
 		"dns",
 		"tls",
@@ -82,6 +83,14 @@ func encodingError(provider string) error {
 		Provider: provider,
 		Stage:    "encode",
 		Cause:    "encoding",
+	}
+}
+
+func payloadLimitError(provider string) error {
+	return &DeliveryError{
+		Provider: provider,
+		Stage:    "encode",
+		Cause:    "payload_limit",
 	}
 }
 
