@@ -328,6 +328,34 @@ HARNESS_WIRING_LOCKFILE_NAMES = frozenset(
 )
 
 
+def _should_skip_harness_wiring_path(path: Path, target: Path) -> bool:
+    """Exclude nested worktrees, Brigade work artifacts, and lockfiles from wiring scans only."""
+    try:
+        rel = path.relative_to(target)
+    except ValueError:
+        return True
+    if path.name in HARNESS_WIRING_LOCKFILE_NAMES:
+        return True
+    parts = rel.parts
+    if any(parts[index : index + 2] == (".brigade", "work") for index in range(len(parts) - 1)):
+        return True
+    for ancestor in path.parents:
+        if ancestor == target:
+            break
+        try:
+            ancestor.relative_to(target)
+        except ValueError:
+            break
+        git_marker = ancestor / ".git"
+        try:
+            marker_text = git_marker.read_text(encoding="utf-8", errors="replace") if git_marker.is_file() else ""
+        except OSError:
+            continue
+        if marker_text.strip().startswith("gitdir:"):
+            return True
+    return False
+
+
 HARNESS_PATH_KEYS = {
     "bootstrap_files",
     "cache_path",
@@ -573,13 +601,13 @@ def inspect_evidence_bundle(path: Path) -> dict[str, Any]:
     if missing:
         return {"ready": False, "path": str(path), "reason": f"missing {', '.join(missing)}"}
     try:
-        payload = json.loads(json_path.read_text())
-    except OSError as exc:
-        return {"ready": False, "path": str(path), "reason": f"unreadable security-report.json: {exc}"}
-    except UnicodeDecodeError as exc:
-        return {"ready": False, "path": str(path), "reason": f"security-report.json must be UTF-8: {exc}"}
-    except json.JSONDecodeError as exc:
-        return {"ready": False, "path": str(path), "reason": f"invalid JSON: {exc}"}
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except OSError:
+        return {"ready": False, "path": str(path), "reason": "unreadable security-report.json"}
+    except UnicodeDecodeError:
+        return {"ready": False, "path": str(path), "reason": "security-report.json must be UTF-8"}
+    except json.JSONDecodeError:
+        return {"ready": False, "path": str(path), "reason": "security-report.json is invalid JSON"}
     if not isinstance(payload, dict):
         return {"ready": False, "path": str(path), "reason": "security-report.json must contain an object"}
     findings = payload.get("findings")

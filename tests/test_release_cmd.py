@@ -977,6 +977,92 @@ def test_release_readiness_distinguishes_security_findings_from_health_warnings(
     assert "brigade security scan; review stale suppressions" in warnings
 
 
+def test_release_readiness_redacts_and_bounds_report_controlled_top_finding(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+    marker = "SECURITY_REPORT_PRIVATE_MARKER"
+    private_url = "https://agent.private.invalid/report"
+    sensitive_value = "abcd" * 5
+    controlled = f"{marker}\n{private_url} report_token={sensitive_value} " + ("x" * 2_000)
+    monkeypatch.setattr(
+        security_cmd,
+        "health",
+        lambda target: {
+            "valid": True,
+            "issue_count": 1,
+            "open_finding_count": 1,
+            "raw_open_finding_count": 1,
+            "top_issue": None,
+            "top_finding": {
+                "id": controlled,
+                "severity": controlled,
+                "category": controlled,
+                "title": controlled,
+                "path": controlled,
+                "line": controlled,
+                "remediation_hint": controlled,
+            },
+            "checks": [
+                {
+                    "status": "warn",
+                    "name": "security_open_findings",
+                    "detail": f"1 open finding(s), top={controlled}",
+                    "remediation": controlled,
+                }
+            ],
+            "evidence": {"ready": True, "finding_count": 1},
+        },
+    )
+
+    assert release_cmd.run(target=tmp_path, base_ref=None, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    serialized = json.dumps(payload)
+    blocker = next(item for item in payload["blockers"] if item.startswith("security_open_findings"))
+    receipt = json.loads(Path(payload["path"], "receipt.json").read_text(encoding="utf-8"))
+    serialized_receipt = json.dumps(receipt)
+
+    assert private_url not in serialized
+    assert sensitive_value not in serialized
+    assert private_url not in serialized_receipt
+    assert sensitive_value not in serialized_receipt
+    assert "\n" not in blocker
+    assert "[redacted-url]" in blocker
+    assert "[redacted]" in blocker
+    assert len(blocker) <= 1_000
+
+
+def test_release_security_health_warning_count_excludes_failures(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+    monkeypatch.setattr(
+        security_cmd,
+        "health",
+        lambda target: {
+            "valid": False,
+            "issue_count": 3,
+            "open_finding_count": 0,
+            "raw_open_finding_count": 0,
+            "top_issue": None,
+            "top_finding": None,
+            "checks": [
+                {"status": "ok", "name": "security_open_findings", "detail": "none"},
+                {"status": "warn", "name": "security_harness_wiring", "detail": "warning"},
+                {"status": "fail", "name": "security_report", "detail": "invalid"},
+            ],
+            "evidence": {"ready": True, "finding_count": 0},
+        },
+    )
+
+    assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["evidence"]["security"]["health_warning_count"] == 1
+
+
 def test_release_readiness_blocks_unusable_security_evidence(tmp_path, monkeypatch, capsys):
     _init_repo(tmp_path)
     _seed_ready_evidence(tmp_path)

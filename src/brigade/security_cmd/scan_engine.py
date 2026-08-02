@@ -1565,10 +1565,9 @@ def _scan_handoff_inboxes(
     """Screen pending handoff notes for injection signals.
 
     Handoff inboxes are excluded from the line scanner via SKIP_PREFIXES so
-    untrusted note content is not attributed to the repo author. This pass
-    reports the same content through the untrusted-context lens instead:
-    a pending note carrying injection-style instructions should be reviewed
-    before any ingester reads it. `processed/` and TEMPLATE.md are skipped.
+    untrusted note content is not attributed to the repo author. Injection-style
+    instructions are reported through the untrusted-context lens for review before
+    any ingester reads them. `processed/` and TEMPLATE.md are skipped.
     """
     scanned: list[str] = []
     for inbox_rel in sorted(set(WRITER_INBOXES.values())):
@@ -1644,7 +1643,8 @@ def scan_target(
                 classification=classification,
             )
         _scan_mcp_document(findings, target=target, path=path, text=text, classification=classification)
-        _scan_harness_wiring_document(findings, target=target, path=path, text=text, classification=classification)
+        if not _should_skip_harness_wiring_path(path, target):
+            _scan_harness_wiring_document(findings, target=target, path=path, text=text, classification=classification)
         _scan_package_json(findings, target=target, path=path, text=text, classification=classification)
         _scan_github_actions(findings, target=target, path=path, text=text, classification=classification)
         _scan_python_project(findings, target=target, path=path, text=text, classification=classification)

@@ -253,8 +253,15 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
             raw_open_findings = [
                 item for item in _report_findings_for_review(target, report) if item.get("status") != "suppressed"
             ]
-        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            checks.append({"status": "fail", "name": "security_report", "detail": f"unreadable or invalid: {exc}"})
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            checks.append(
+                {
+                    "status": "fail",
+                    "name": "security_report",
+                    "detail": "unreadable or invalid security report",
+                    "remediation": "brigade security scan",
+                }
+            )
         else:
             quieted_findings = [
                 item

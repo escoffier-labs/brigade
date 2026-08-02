@@ -551,16 +551,23 @@ def _assess(
     )
     if (open_finding_count is not None and open_finding_count > 0) or open_finding_checks or top_finding is not None:
         if top_finding is not None:
-            severity = str(top_finding.get("severity") or "unknown")
-            category = str(top_finding.get("category") or "security")
-            finding_id = str(top_finding.get("id") or "unknown")
-            title = str(top_finding.get("title") or "open security finding")
+            severity = _release_report_safe_text(top_finding.get("severity"), fallback="unknown", limit=32)
+            category = _release_report_safe_text(top_finding.get("category"), fallback="security", limit=48)
+            finding_id = _release_report_safe_text(top_finding.get("id"), fallback="unknown", limit=120)
+            title = _release_report_safe_text(top_finding.get("title"), fallback="open security finding", limit=180)
             path = top_finding.get("path")
             line = top_finding.get("line")
-            location = f" at {path}:{line}" if path is not None else ""
-            remediation = str(top_finding.get("remediation_hint") or "").strip() or (
-                _check_remediation_text(open_finding_checks[0]) if open_finding_checks else "brigade security findings"
-            )
+            safe_path = _release_report_safe_text(path, limit=160) if path is not None else ""
+            safe_line = _release_report_safe_text(line, limit=32) if line is not None else ""
+            location = f" at {safe_path}:{safe_line}" if safe_path else ""
+            remediation = _release_report_safe_text(top_finding.get("remediation_hint"), limit=220)
+            if not remediation:
+                remediation = _release_report_safe_text(
+                    _check_remediation_text(open_finding_checks[0])
+                    if open_finding_checks
+                    else "brigade security findings",
+                    limit=220,
+                )
             blockers.append(
                 f"security_open_findings [{severity}/{category}]: {finding_id} {title}{location}; "
                 f"remediation: {remediation}"

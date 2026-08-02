@@ -36,7 +36,10 @@ def _load_report_file(path: Path) -> dict[str, Any]:
     path = path.expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
-    data = json.loads(path.read_text())
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"security report must be UTF-8: {path}") from exc
     if not isinstance(data, dict):
         raise ValueError(f"security report must be a JSON object: {path}")
     return data
