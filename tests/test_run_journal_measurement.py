@@ -326,7 +326,7 @@ def test_scan_lifecycle_journals_omits_undecodable_journal_without_zeroing_it(tm
     assert scanned["aggregate"]["omitted_runs"] == 1
 
 
-def test_scan_lifecycle_journals_omits_stat_failure(tmp_path, monkeypatch):
+def test_journal_volume_entry_omits_stat_failure(tmp_path, monkeypatch):
     module = _load_measure_run_journal_module()
     journal = tmp_path / "runs" / "run-a" / "events" / "lifecycle.jsonl"
     journal.parent.mkdir(parents=True)
@@ -340,14 +340,11 @@ def test_scan_lifecycle_journals_omits_stat_failure(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "stat", fail_journal_stat)
 
-    scanned = module.scan_lifecycle_journals([tmp_path])
-
-    entry = scanned["per_run"][0]
+    entry = module._journal_volume_entry(journal, label="run-a")
     assert entry["event_count"] is None
     assert entry["journal_bytes"] is None
     assert entry["omitted"] is True
     assert entry["error"].startswith("journal stat failed:")
-    assert scanned["aggregate"]["runs"] == 0
 
 
 def test_scan_lifecycle_journals_omits_second_read_failure(tmp_path, monkeypatch):

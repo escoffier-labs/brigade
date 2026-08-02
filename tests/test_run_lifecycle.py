@@ -2512,6 +2512,179 @@ def test_authority_dispatch_checkpoint_is_base_stripped_and_recovers_exact_tail(
     assert repaired["projector_version"] == run_projector.PROJECTOR_VERSION
 
 
+def test_authoritative_dispatch_requested_recovers_exact_old_ceiling_checkpoint(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        snapshot = (run_dir / "run.json").read_bytes()
+        pairing_key = run_checkpoint.dispatch_pairing_key("run.dispatch.requested", "coder", 1)
+        checkpoint = run_checkpoint.write_checkpoint(
+            run_dir,
+            snapshot,
+            workspace=repo,
+            paired_event_type="run.dispatch.requested",
+            body_kind=run_checkpoint._BODY_KIND_BASE_STRIPPED,
+            pairing_key=pairing_key,
+        )
+        assert checkpoint is not None
+        real_write_checkpoint = run_checkpoint.write_checkpoint
+        monkeypatch.setattr(
+            run_checkpoint,
+            "write_checkpoint",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("new checkpoint")),
+        )
+
+        requested = run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.requested",
+            seat="coder",
+        )
+        monkeypatch.setattr(run_checkpoint, "write_checkpoint", real_write_checkpoint)
+
+    assert requested is not None
+    assert requested.sequence == checkpoint.sequence + 1
+    assert requested.payload == {"seat": "coder", "attempt": 1, "detail": "requested"}
+    assert requested.idempotency_key.startswith("dispatch:")
+    assert _events(run_dir)[-2].sequence == checkpoint.sequence
+    assert run_shadow.check_projection_readiness(run_dir).ready is True
+
+
+@pytest.mark.parametrize("mismatch", ["checkpoint-bytes", "checkpoint-payload", "checkpoint-key", "forged-cursor"])
+def test_authoritative_dispatch_rejects_nonexact_incomplete_checkpoint(tmp_path, monkeypatch, mismatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        snapshot = (run_dir / "run.json").read_bytes()
+        if mismatch == "checkpoint-bytes":
+            snapshot_obj = json.loads(snapshot)
+            snapshot_obj["task"] = "other-task"
+            checkpoint_snapshot = (json.dumps(snapshot_obj, indent=2, sort_keys=True) + "\n").encode()
+            pairing_key = run_checkpoint.dispatch_pairing_key("run.dispatch.requested", "coder", 1)
+            run_checkpoint.write_checkpoint(
+                run_dir,
+                checkpoint_snapshot,
+                workspace=repo,
+                paired_event_type="run.dispatch.requested",
+                body_kind=run_checkpoint._BODY_KIND_BASE_STRIPPED,
+                pairing_key=pairing_key,
+            )
+        elif mismatch == "checkpoint-payload":
+            pairing_key = run_checkpoint.dispatch_pairing_key("run.dispatch.observed", "coder", 1)
+            run_checkpoint.write_checkpoint(
+                run_dir,
+                snapshot,
+                workspace=repo,
+                paired_event_type="run.dispatch.observed",
+                body_kind=run_checkpoint._BODY_KIND_BASE_STRIPPED,
+                pairing_key=pairing_key,
+            )
+        elif mismatch == "checkpoint-key":
+            pairing_key = run_checkpoint.dispatch_pairing_key("run.dispatch.requested", "coder", 1)
+            stripped = run_checkpoint._strip_journal_metadata_from_base(snapshot)
+            run_checkpoint.publish_checkpoint_file(run_dir, stripped)
+            report = run_journal.read_journal_bounded(_journal_path(run_dir))
+            run_journal.append_event(
+                _journal_path(run_dir),
+                run_id=run_dir.name,
+                event_type=run_checkpoint.CHECKPOINT_EVENT_TYPE,
+                payload=run_checkpoint._checkpoint_payload(
+                    stripped,
+                    paired_event_type="run.dispatch.requested",
+                    body_kind=run_checkpoint._BODY_KIND_BASE_STRIPPED,
+                    pairing_key=pairing_key,
+                ),
+                idempotency_key="forged-checkpoint-key",
+                expected_previous_sequence=report.events[-1].sequence,
+            )
+        else:
+            pairing_key = run_checkpoint.dispatch_pairing_key("run.dispatch.requested", "coder", 1)
+            run_checkpoint.write_checkpoint(
+                run_dir,
+                snapshot,
+                workspace=repo,
+                paired_event_type="run.dispatch.requested",
+                body_kind=run_checkpoint._BODY_KIND_BASE_STRIPPED,
+                pairing_key=pairing_key,
+            )
+            artifact_path = run_shadow.shadow_artifact_path(run_dir)
+            artifact = json.loads(artifact_path.read_text())
+            artifact["last_compared_event_digest"] = "f" * 64
+            artifact_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
+
+        run_json_before = (run_dir / "run.json").read_bytes()
+        journal_before = _journal_path(run_dir).read_bytes()
+        shadow_before = run_shadow.shadow_artifact_path(run_dir).read_bytes()
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            run_lifecycle.record_dispatch_fact(
+                run_dir,
+                workspace=repo,
+                event_type="run.dispatch.requested",
+                seat="coder",
+            )
+
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+    assert _journal_path(run_dir).read_bytes() == journal_before
+    assert run_shadow.shadow_artifact_path(run_dir).read_bytes() == shadow_before
+
+
+def test_authoritative_dispatch_checkpoint_recovery_does_not_retry_an_interleaving_tail(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        snapshot = (run_dir / "run.json").read_bytes()
+        pairing_key = run_checkpoint.dispatch_pairing_key("run.dispatch.requested", "coder", 1)
+        checkpoint = run_checkpoint.write_checkpoint(
+            run_dir,
+            snapshot,
+            workspace=repo,
+            paired_event_type="run.dispatch.requested",
+            body_kind=run_checkpoint._BODY_KIND_BASE_STRIPPED,
+            pairing_key=pairing_key,
+        )
+        assert checkpoint is not None
+        run_json_before = (run_dir / "run.json").read_bytes()
+        shadow_before = run_shadow.shadow_artifact_path(run_dir).read_bytes()
+        real_append = run_journal.append_event
+        calls = 0
+
+        def interleaving_append(path, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                real_append(
+                    path,
+                    run_id=run_dir.name,
+                    event_type="run.dispatch.requested",
+                    payload={"seat": "other", "attempt": 1, "detail": "requested"},
+                    idempotency_key="interleaving-dispatch",
+                    expected_previous_sequence=checkpoint.sequence,
+                )
+            return real_append(path, **kwargs)
+
+        monkeypatch.setattr(run_journal, "append_event", interleaving_append)
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            run_lifecycle.record_dispatch_fact(
+                run_dir,
+                workspace=repo,
+                event_type="run.dispatch.requested",
+                seat="coder",
+            )
+
+    assert calls == 1
+    assert (run_dir / "run.json").read_bytes() == run_json_before
+    assert run_shadow.shadow_artifact_path(run_dir).read_bytes() == shadow_before
+    events = _events(run_dir)
+    assert events[-1].payload["seat"] == "other"
+    assert all(event.payload.get("seat") != "coder" for event in events[checkpoint.sequence :])
+
+
 # -- Issue #651 step 2: owner lifecycle appends retry a stale tail -----------
 
 

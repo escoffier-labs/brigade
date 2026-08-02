@@ -390,27 +390,47 @@ def record_dispatch_fact(
             if not isinstance(snapshot_obj, dict):
                 raise LifecycleJournalError(run_events._bound("dispatch run receipt is not a JSON object"))
             authority_state = aboyeur._resolve_authority_state(run_dir)
-            if authority_state == "authoritative":
-                # The shared prior gate catches up exactly one verified
-                # checkpoint/event pair before any new dispatch or aggregate
-                # status pair can advance the journal again.
-                aboyeur._authoritative_prior_decision(run_dir, snapshot_obj)
+            report = run_journal.read_journal_bounded(journal_path)
+            if report.partial_tail is not None or report.chain_errors:
+                raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
             if attempt is None:
-                report = run_journal.read_journal_bounded(journal_path)
-                if report.partial_tail is not None or report.chain_errors:
-                    raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
                 attempts: list[int] = []
-                for event in report.events:
-                    candidate = event.payload.get("attempt")
+                for prior_event in report.events:
+                    candidate = prior_event.payload.get("attempt")
                     if (
-                        event.payload.get("seat") == seat
+                        prior_event.payload.get("seat") == seat
                         and isinstance(candidate, int)
                         and not isinstance(candidate, bool)
                     ):
                         attempts.append(candidate)
                 attempt = max(attempts, default=0) + 1
             assert attempt is not None
+            payload = {"seat": seat, "attempt": attempt, "detail": event_type.rsplit(".", 1)[-1]}
             pairing_key = run_checkpoint.dispatch_pairing_key(event_type, seat, attempt)
+            key_digest = hashlib.sha256(
+                run_events.canonical_bytes(
+                    {"event_type": event_type, "seat": seat, "attempt": attempt, "pairing_key": pairing_key}
+                )
+            ).hexdigest()
+            idempotency_key = f"dispatch:{key_digest[:32]}"
+            if authority_state == "authoritative":
+                recovered = _recover_authoritative_dispatch_checkpoint(
+                    run_dir,
+                    journal_path=journal_path,
+                    journal_report=report,
+                    snapshot=snapshot,
+                    snapshot_obj=snapshot_obj,
+                    event_type=event_type,
+                    pairing_key=pairing_key,
+                    payload=payload,
+                    idempotency_key=idempotency_key,
+                )
+                if recovered is not None:
+                    return recovered
+                # The shared prior gate catches up exactly one verified
+                # checkpoint/event pair before any new dispatch or aggregate
+                # status pair can advance the journal again.
+                aboyeur._authoritative_prior_decision(run_dir, snapshot_obj)
             checkpoint = run_checkpoint.write_checkpoint(
                 run_dir,
                 snapshot,
@@ -428,17 +448,12 @@ def record_dispatch_fact(
             report = run_journal.read_journal_bounded(journal_path)
             if report.partial_tail is not None or report.chain_errors:
                 raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
-            key_digest = hashlib.sha256(
-                run_events.canonical_bytes(
-                    {"event_type": event_type, "seat": seat, "attempt": attempt, "pairing_key": pairing_key}
-                )
-            ).hexdigest()
             event = _append_owner_event(
                 journal_path,
                 run_id=_run_id_from_dir(run_dir),
                 event_type=event_type,
-                payload={"seat": seat, "attempt": attempt, "detail": event_type.rsplit(".", 1)[-1]},
-                idempotency_key=f"dispatch:{key_digest[:32]}",
+                payload=payload,
+                idempotency_key=idempotency_key,
             )
             run_shadow.record_shadow_comparison(run_dir, snapshot_obj)
             return event
@@ -448,6 +463,94 @@ def record_dispatch_fact(
             raise _bound_journal_failure(exc) from exc
         except OSError as exc:
             raise _bound_journal_failure(exc) from exc
+
+
+def _recover_authoritative_dispatch_checkpoint(
+    run_dir: Path,
+    *,
+    journal_path: Path,
+    journal_report: run_journal.JournalReport,
+    snapshot: bytes,
+    snapshot_obj: dict[str, object],
+    event_type: str,
+    pairing_key: str,
+    payload: dict[str, object],
+    idempotency_key: str,
+) -> run_journal.RunEvent | None:
+    """Finish only the exact dispatch fact left after its durable checkpoint.
+
+    A checkpoint-only tail is a narrow crash window: the original dispatch
+    request identity is recoverable, but a generic authority catch-up would
+    treat it as ordinary journal-ahead evidence. Every field below binds the
+    missing fact to this run's current base-stripped receipt. Any divergence
+    raises before a new checkpoint, retry, shadow write, or run.json write.
+    """
+    from brigade import run_shadow
+
+    readiness = run_shadow.check_projection_readiness(run_dir)
+    if readiness.reasons != (run_shadow.REASON_JOURNAL_AHEAD,):
+        return None
+    if not journal_report.events or journal_report.events[-1].event_type != run_checkpoint.CHECKPOINT_EVENT_TYPE:
+        return None
+
+    checkpoint = journal_report.events[-1]
+    artifact_path = run_shadow.shadow_artifact_path(run_dir)
+    try:
+        artifact = json.loads(artifact_path.read_text())
+    except (OSError, ValueError) as exc:
+        raise LifecycleJournalError(
+            run_events._bound("authoritative dispatch checkpoint recovery evidence is unreadable")
+        ) from exc
+    if not isinstance(artifact, dict):
+        raise LifecycleJournalError(run_events._bound("authoritative dispatch checkpoint recovery evidence is invalid"))
+    baseline = run_shadow._verify_stale_baseline(
+        run_dir,
+        run_dir.name,
+        artifact.get("last_compared_sequence"),
+        artifact.get("last_compared_event_digest"),
+    )
+    if baseline is None or checkpoint.sequence != baseline[0] + 1:
+        raise LifecycleJournalError(run_events._bound("authoritative dispatch checkpoint recovery is not exact"))
+    if run_checkpoint._writer_canonical_bytes(snapshot_obj) != snapshot:
+        raise LifecycleJournalError(run_events._bound("authoritative dispatch checkpoint recovery is not exact"))
+    try:
+        expected_bytes = run_checkpoint._strip_journal_metadata_from_base(snapshot)
+        checkpoint_bytes = run_checkpoint.validate_checkpoint(run_dir, checkpoint)
+    except (run_checkpoint.CheckpointError, RecursionError) as exc:
+        raise LifecycleJournalError(
+            run_events._bound("authoritative dispatch checkpoint recovery is not exact")
+        ) from exc
+
+    expected_payload = run_checkpoint._checkpoint_payload(
+        expected_bytes,
+        paired_event_type=event_type,
+        body_kind=run_checkpoint._BODY_KIND_BASE_STRIPPED,
+        pairing_key=pairing_key,
+    )
+    expected_checkpoint_key = run_checkpoint._checkpoint_idempotency_key(
+        expected_payload["sha256"],
+        paired_event_type=event_type,
+        body_kind=run_checkpoint._BODY_KIND_BASE_STRIPPED,
+        pairing_key=pairing_key,
+    )
+    if (
+        checkpoint.run_id != run_dir.name
+        or checkpoint.event_type != run_checkpoint.CHECKPOINT_EVENT_TYPE
+        or checkpoint.payload != expected_payload
+        or checkpoint.idempotency_key != expected_checkpoint_key
+        or checkpoint_bytes != expected_bytes
+    ):
+        raise LifecycleJournalError(run_events._bound("authoritative dispatch checkpoint recovery is not exact"))
+    event = run_journal.append_event(
+        journal_path,
+        run_id=run_dir.name,
+        event_type=event_type,
+        payload=payload,
+        idempotency_key=idempotency_key,
+        expected_previous_sequence=checkpoint.sequence,
+    )
+    run_shadow.record_shadow_comparison(run_dir, snapshot_obj)
+    return event
 
 
 def normalize_approval_reference(reference: Mapping[str, Any]) -> dict[str, str]:

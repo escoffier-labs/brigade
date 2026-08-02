@@ -109,7 +109,7 @@ _JOURNAL_EVENT_HEADROOM_DENOMINATOR = 4
 
 
 def _check_journal_event_headroom(target: Path) -> List[CheckResult]:
-    """Warn for readable journals at least 75% full and below their hard limit."""
+    """Warn for chain-valid journals at least 75% full through the hard limit."""
     from brigade import run_checkpoint, run_journal, run_lifecycle
 
     threshold = (
@@ -122,11 +122,14 @@ def _check_journal_event_headroom(target: Path) -> List[CheckResult]:
         try:
             if not journal_path.is_file():
                 continue
-            event_count = len(run_journal.read_journal_bounded(journal_path).events)
+            report = run_journal.read_journal_bounded(journal_path)
         except (OSError, run_journal.RunJournalError):
             # Recovery checkpoints own malformed and over-limit journal errors.
             continue
-        if threshold <= event_count < run_checkpoint.MAX_JOURNAL_EVENTS:
+        if report.partial_tail is not None or report.chain_errors:
+            continue
+        event_count = len(report.events)
+        if threshold <= event_count <= run_checkpoint.MAX_JOURNAL_EVENTS:
             pct = event_count * 100 // run_checkpoint.MAX_JOURNAL_EVENTS
             checks.append(
                 (

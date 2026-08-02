@@ -1447,7 +1447,7 @@ def _write_headroom_journal(run_dir: Path, event_count: int) -> None:
 
 @pytest.mark.parametrize(
     ("event_count", "expected"),
-    [(1535, []), (1536, [doctor_mod.WARN]), (1537, [doctor_mod.WARN])],
+    [(1535, []), (1536, [doctor_mod.WARN]), (1537, [doctor_mod.WARN]), (2048, [doctor_mod.WARN])],
 )
 def test_doctor_journal_event_headroom_warns_at_75_percent_boundary(
     tmp_path: Path, event_count: int, expected: list[str]
@@ -1470,6 +1470,24 @@ def test_doctor_journal_event_headroom_warns_at_75_percent_boundary(
             f"lifecycle journal at {event_count}/2048 events "
             f"({event_count * 100 // 2048}%); raise or segment before the hard ceiling halts appends"
         )
+
+
+def test_doctor_journal_event_headroom_skips_partial_tail_and_chain_errors(tmp_path: Path):
+    from brigade import run_journal
+
+    workspace = tmp_path / "workspace"
+    partial_run = workspace / ".brigade" / "runs" / "partial"
+    chain_run = workspace / ".brigade" / "runs" / "chain"
+    _write_headroom_journal(partial_run, 1536)
+    _write_headroom_journal(chain_run, 1536)
+    partial_journal = partial_run / "events" / "lifecycle.jsonl"
+    chain_journal = chain_run / "events" / "lifecycle.jsonl"
+    partial_journal.write_bytes(partial_journal.read_bytes() + b'{"partial":')
+    chain_journal.write_bytes(chain_journal.read_bytes().replace(b'"previous_digest":"', b'"previous_digest":"f', 1))
+
+    assert run_journal.read_journal_bounded(partial_journal).partial_tail is not None
+    assert run_journal.read_journal_bounded(chain_journal).chain_errors
+    assert doctor_mod._check_journal_event_headroom(workspace) == []
 
 
 def test_doctor_validates_checkpoint_before_reporting_pending_dispatch(tmp_path: Path):
