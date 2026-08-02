@@ -26,9 +26,9 @@ func FromString(s string) canonical.Message {
 //   - JSON arrays, scalars, and other non-object inputs are treated as
 //     plain string bodies.
 func AutoDetect(r io.Reader) (canonical.Message, error) {
-	raw, err := io.ReadAll(r)
+	raw, err := ReadBounded(r)
 	if err != nil {
-		return canonical.Message{}, fmt.Errorf("read input: %w", err)
+		return canonical.Message{}, err
 	}
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" {
