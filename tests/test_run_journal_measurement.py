@@ -275,6 +275,26 @@ def test_scan_lifecycle_journals_fails_closed_for_unreadable_input(tmp_path, mon
         module.scan_lifecycle_journals([scan_root])
 
 
+def test_count_journal_events_unreadable_or_undecodable_fallback(tmp_path, monkeypatch):
+    module = _load_measure_run_journal_module()
+    undecodable_journal = tmp_path / "undecodable.jsonl"
+    undecodable_journal.write_bytes(b"\x80abc\n\xff")
+
+    # Non-UTF-8 bytes fail read_text and fall back to zero without aborting the survey.
+    assert module._count_journal_events(undecodable_journal) == 0
+
+    unreadable_journal = tmp_path / "unreadable.jsonl"
+    unreadable_journal.write_text("line 1\nline 2\n")
+
+    def _raise_oserror(*_args, **_kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "read_text", _raise_oserror)
+
+    # Read errors fail safely without aborting the survey.
+    assert module._count_journal_events(unreadable_journal) == 0
+
+
 def test_measure_volume_fails_closed_when_a_scenario_stops_early(tmp_path, monkeypatch):
     module = _load_measure_run_journal_module()
 

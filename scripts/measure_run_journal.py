@@ -222,8 +222,9 @@ def _count_journal_events(journal_path: Path) -> int:
     exceeded, corrupt chain) or returns no parseable events while the file
     still has content. Volume surveys must not abort on a single bad journal.
     """
-    line_count = sum(1 for line in journal_path.read_text(encoding="utf-8").splitlines() if line.strip())
+    line_count = 0
     try:
+        line_count = sum(1 for line in journal_path.read_text(encoding="utf-8").splitlines() if line.strip())
         report = run_journal.read_journal(journal_path)
     except (run_journal.RunJournalError, OSError, UnicodeError):
         return line_count
