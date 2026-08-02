@@ -1,6 +1,7 @@
 import errno
 import json
 import os
+import re
 import shutil
 import threading
 import time as system_time
@@ -8,6 +9,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+
+from tests import thread_sync
 
 from brigade import aboyeur
 from brigade import cli
@@ -783,7 +786,7 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
     events = []
 
     def review_source():
-        assert append_entered.wait(2)
+        thread_sync.wait_for_event(append_entered, description="journal append entered")
         review_started.set()
         if source == "daily":
             rc = daily_cmd.approvals_hold(
@@ -803,16 +806,15 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
     def append_fact(*args, event_type, **kwargs):
         if not events:
             append_entered.set()
-            assert review_started.wait(2)
-            assert not review_finished.wait(0.2)
+            thread_sync.wait_for_event(review_started, description="reviewer thread started")
+            assert not review_finished.is_set()
         events.append(event_type)
 
     monkeypatch.setattr(run_lifecycle, "record_lifecycle_event", append_fact)
     reviewer = threading.Thread(target=review_source)
     reviewer.start()
     assert runs_cmd.resume(run_dir) == 0
-    reviewer.join(2)
-    assert not reviewer.is_alive()
+    thread_sync.join_thread(reviewer, description="reviewer thread finished")
     assert review_result == [1]
     assert events == ["approval.consumed", "run.resumed"]
     if source == "daily":
@@ -961,31 +963,63 @@ def test_watch_waits_for_consumed_approval_while_provider_lock_is_live(tmp_path,
     meta["approval_reference"]["consuming_run_id"] = run_dir.name
     _write_json(run_path, meta)
 
-    consumed_observed = threading.Event()
-    original_poll = runs_cmd._poll_watch_artifacts
+    watch_holding_on_live_lock = threading.Event()
+    provider_finish_gate = thread_sync.ThreadGate()
+    original_sleep = runs_cmd.time.sleep
 
-    def observe_poll(*args, **kwargs):
-        result = original_poll(*args, **kwargs)
-        current = result[0]
-        if current is not None and runs_cmd._approval_needs_reconciliation(current):
-            consumed_observed.set()
-        return result
+    def coordinating_sleep(interval):
+        run_meta = json.loads(run_path.read_text())
+        if runs_cmd._approval_needs_reconciliation(run_meta) and runguard.run_lock_state(tmp_path, run_dir) == "live":
+            watch_holding_on_live_lock.set()
+            provider_finish_gate.wait_open(description="provider finished run under live lock")
+        original_sleep(interval)
 
-    monkeypatch.setattr(runs_cmd, "_poll_watch_artifacts", observe_poll)
+    monkeypatch.setattr(runs_cmd.time, "sleep", coordinating_sleep)
 
     def finish_provider():
-        assert consumed_observed.wait(timeout=2)
+        thread_sync.wait_for_event(
+            watch_holding_on_live_lock,
+            description="watch entered live-lock wait for consumed approval",
+        )
         finished = json.loads(run_path.read_text())
         finished["status"] = "ok"
         finished["finished_at"] = "2026-07-30T18:10:00+00:00"
         _write_json(run_path, finished)
+        provider_finish_gate.open()
 
     worker = threading.Thread(target=finish_provider)
     with runguard.run_lock(tmp_path, run_dir=run_dir):
         worker.start()
         assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.001) == 0
-    worker.join(timeout=2)
-    assert not worker.is_alive()
+    thread_sync.join_thread(worker, description="provider worker finished")
+
+
+_FORBIDDEN_SHORT_THREAD_WAITS = re.compile(
+    r"\.(?:wait|join)\(\s*(?:timeout\s*=\s*)?0?\.\d+|\.(?:wait|join)\(\s*[12]\s*\)"
+)
+
+
+def test_threaded_watch_and_resume_tests_avoid_fixed_short_waits():
+    source = Path(__file__).read_text(encoding="utf-8")
+    offenders = [
+        line.strip()
+        for line in source.splitlines()
+        if _FORBIDDEN_SHORT_THREAD_WAITS.search(line) and "thread_sync" not in line
+    ]
+    assert offenders == [], (
+        "threaded runs_cmd tests must coordinate with thread_sync helpers, not fixed short waits: "
+        + "; ".join(offenders)
+    )
+
+
+def test_watch_consumed_approval_live_lock_test_uses_thread_sync_gate():
+    import inspect
+
+    source = inspect.getsource(test_watch_waits_for_consumed_approval_while_provider_lock_is_live)
+    assert "provider_finish_gate = thread_sync.ThreadGate()" in source
+    assert "watch_holding_on_live_lock" in source
+    assert "coordinating_sleep" in source
+    assert "consumed_observed.wait(timeout=2)" not in source
 
 
 def test_watch_consumed_approval_without_lock_requests_resume_reconciliation(tmp_path, capsys):
