@@ -85,6 +85,39 @@ def test_run_lock_reports_regular_file_lock_as_typed_error_and_preserves_it(tmp_
     assert lock_path.read_text() == "malformed lock\n"
 
 
+def test_acquire_lock_retries_when_release_removes_lock_during_type_probe(tmp_path, monkeypatch):
+    lock_path = tmp_path / "run.lock"
+    lock_path.mkdir()
+    released_path = tmp_path / "released.lock"
+    original_publish = runguard._publish_lock
+    original_stat = Path.stat
+    publish_calls = 0
+
+    def publish_after_release(path, *, run_dir=None):
+        nonlocal publish_calls
+        publish_calls += 1
+        if publish_calls == 1:
+            raise FileExistsError(path)
+        return original_publish(path, run_dir=run_dir)
+
+    def release_during_type_probe(self, *args, **kwargs):
+        if self == lock_path and publish_calls == 1:
+            lock_path.rename(released_path)
+            released_path.rmdir()
+            raise FileNotFoundError(self)
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(runguard, "_publish_lock", publish_after_release)
+    monkeypatch.setattr(Path, "stat", release_during_type_probe)
+
+    ownership = runguard._acquire_lock(lock_path)
+
+    assert publish_calls == 2
+    assert lock_path.is_dir()
+    runguard._release_lock(lock_path, ownership)
+    assert not lock_path.exists()
+
+
 def test_run_lock_handles_windows_missing_process_error_as_stale(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     lock_path = runguard.lock_path(repo)

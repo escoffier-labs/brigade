@@ -736,16 +736,28 @@ def run_recovery_status(cwd: Path, run_dir: Path) -> str:
     return "unknown" if saw_unreadable else "cleared"
 
 
+def _lock_path_is_directory(path: Path) -> bool | None:
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
+    if not stat.S_ISDIR(mode):
+        raise RunLockError(f"malformed run lock is not a directory: {path}")
+    return True
+
+
 def _acquire_lock(path: Path, *, run_dir: Path | None = None) -> _LockOwnership:
     for _ in range(8):
         try:
             ownership = _publish_lock(path, run_dir=run_dir)
         except FileExistsError:
-            if path.exists() and not path.is_dir():
-                raise RunLockError(f"malformed run lock is not a directory: {path}") from None
+            if _lock_path_is_directory(path) is None:
+                continue
             stale = _claim_stale_lock(path)
             if stale is None:
-                if not path.exists():
+                if _lock_path_is_directory(path) is None:
                     continue
                 raise RunLockError(
                     f"another brigade run appears active: {path}. Remove the lock only if no run is active."
