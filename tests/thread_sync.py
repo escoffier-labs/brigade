@@ -14,18 +14,34 @@ DEFAULT_HARD_TIMEOUT = 30.0
 DEFAULT_POLL_INTERVAL = 0.001
 
 
+def current_thread_cancelled() -> bool:
+    """Return whether ``join_thread`` requested cancellation for this worker."""
+    cancel = getattr(threading.current_thread(), "_thread_sync_cancel", None)
+    return cancel is not None and cancel.is_set()
+
+
+def cancel_thread(thread: threading.Thread) -> None:
+    """Request cooperative cancellation for a thread started by ``start_thread``."""
+    cancel = getattr(thread, "_thread_sync_cancel", None)
+    if cancel is not None:
+        cancel.set()
+
+
 def start_thread(target: Callable[[], None]) -> threading.Thread:
-    """Start ``target`` and preserve any target exception for ``join_thread``."""
+    """Start a daemon ``target`` and preserve any target exception for ``join_thread``."""
     failures: list[BaseException] = []
+    cancel = threading.Event()
 
     def capture_failure() -> None:
         try:
             target()
         except BaseException as error:
-            failures.append(error)
+            if not cancel.is_set():
+                failures.append(error)
 
-    thread = threading.Thread(target=capture_failure)
+    thread = threading.Thread(target=capture_failure, daemon=True)
     thread._thread_sync_failures = failures
+    thread._thread_sync_cancel = cancel
     thread.start()
     return thread
 
@@ -73,6 +89,7 @@ def join_thread(
     while thread.is_alive():
         thread.join(timeout=poll_interval)
         if thread.is_alive() and time.monotonic() >= deadline:
+            cancel_thread(thread)
             raise AssertionError(f"timed out waiting for thread: {description}")
     failures = getattr(thread, "_thread_sync_failures", [])
     if failures:

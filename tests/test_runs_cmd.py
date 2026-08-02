@@ -764,6 +764,9 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
         record = _tool_call()
         record["status"] = "completed"
     run_dir, _ = _approval_run(tmp_path, source=source, record=record)
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["lifecycle_journal_requested"] = True
+    _write_json(run_dir / "run.json", run_meta)
     redeemed_at = _mark_redeemed(record, run_dir.name)
     if source == "daily":
         record["consumed_at"] = redeemed_at
@@ -784,34 +787,43 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
     review_finished = threading.Event()
     review_result = []
     events = []
+    snapshot_refreshing = threading.Event()
+    refresh_started = threading.Event()
+    snapshot_done = threading.Event()
     if source == "daily":
         source_store_lock_path = daily_cmd.approvals._approval_lock_path(tmp_path, record["approval_id"]).resolve()
     else:
         source_store_lock_path = tools_cmd.calls._calls_lock_path(tmp_path).resolve()
     original_acquire_lock = runguard._acquire_lock
-    outcome_recorded = threading.Lock()
-    outcome_observed = {"done": False}
+    original_record_lifecycle_event = run_lifecycle.record_lifecycle_event
+    original_refresh_resumed_snapshot = runs_cmd._refresh_resumed_snapshot
 
     def instrumented_acquire_lock(path, *, run_dir=None):
-        if append_entered.is_set() and not outcome_observed["done"] and Path(path).resolve() == source_store_lock_path:
+        if (
+            snapshot_refreshing.is_set()
+            and not snapshot_done.is_set()
+            and Path(path).resolve() == source_store_lock_path
+        ):
             try:
                 ownership = original_acquire_lock(path, run_dir=run_dir)
             except runguard.RunLockError as exc:
                 if "another brigade run appears active" in str(exc):
-                    with outcome_recorded:
-                        if not outcome_observed["done"]:
-                            lock_contended.set()
-                            outcome_observed["done"] = True
+                    lock_contended.set()
                 raise
-            with outcome_recorded:
-                if not outcome_observed["done"]:
-                    lock_acquired.set()
-                    outcome_observed["done"] = True
-            return ownership
+            if snapshot_done.is_set():
+                return ownership
+            lock_acquired.set()
+            runguard._release_lock(path, ownership)
+            raise AssertionError(
+                "source-store lock acquired before journal commit completed: "
+                f"events={events!r} refresh_started={refresh_started.is_set()}"
+            )
         return original_acquire_lock(path, run_dir=run_dir)
 
     def review_source():
         thread_sync.wait_for_event(append_entered, description="journal append entered")
+        if thread_sync.current_thread_cancelled():
+            return
         if source == "daily":
             rc = daily_cmd.approvals_hold(
                 target=tmp_path,
@@ -828,8 +840,10 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
         review_finished.set()
 
     def append_fact(*args, event_type, **kwargs):
-        if not events:
+        if not snapshot_refreshing.is_set():
+            snapshot_refreshing.set()
             append_entered.set()
+            run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=tmp_path)
             thread_sync.wait_for_predicate(
                 lambda: lock_contended.is_set() or lock_acquired.is_set(),
                 description="source-store lock contention outcome",
@@ -838,25 +852,44 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
                 raise AssertionError("source-store lock released before journal commit")
             assert lock_contended.is_set()
             assert not review_finished.is_set()
+        original_record_lifecycle_event(*args, event_type=event_type, **kwargs)
         events.append(event_type)
+
+    def refresh_resumed_snapshot(*args, **kwargs):
+        refresh_started.set()
+        result = original_refresh_resumed_snapshot(*args, **kwargs)
+        snapshot_done.set()
+        return result
 
     monkeypatch.setattr(runguard, "_acquire_lock", instrumented_acquire_lock)
     monkeypatch.setattr(run_lifecycle, "record_lifecycle_event", append_fact)
+    monkeypatch.setattr(runs_cmd, "_refresh_resumed_snapshot", refresh_resumed_snapshot)
     reviewer = thread_sync.start_thread(review_source)
-    assert runs_cmd.resume(run_dir) == 0
-    thread_sync.join_thread(reviewer, description="reviewer thread finished")
-    assert review_result == [1]
-    assert events == ["approval.consumed", "run.resumed"]
-    if source == "daily":
-        stored = daily_cmd.approvals._find_approval(tmp_path, record["approval_id"])
-        assert stored is not None
-        assert stored["status"] == "consumed"
-    else:
-        stored, _calls, error = tools_cmd.calls._resolve_call(tmp_path, record["id"])
-        assert error is None
-        assert stored is not None
-        assert stored["status"] == "completed"
-    capsys.readouterr()
+    try:
+        assert runs_cmd.resume(run_dir) == 0
+        thread_sync.join_thread(reviewer, description="reviewer thread finished")
+        assert snapshot_done.is_set()
+        assert not lock_acquired.is_set()
+        assert review_result == [1]
+        assert events == ["approval.consumed", "run.resumed"]
+        if source == "daily":
+            stored = daily_cmd.approvals._find_approval(tmp_path, record["approval_id"])
+            assert stored is not None
+            assert stored["status"] == "consumed"
+        else:
+            stored, _calls, error = tools_cmd.calls._resolve_call(tmp_path, record["id"])
+            assert error is None
+            assert stored is not None
+            assert stored["status"] == "completed"
+        capsys.readouterr()
+    except BaseException:
+        append_entered.set()
+        thread_sync.cancel_thread(reviewer)
+        try:
+            thread_sync.join_thread(reviewer, description="reviewer cleanup", hard_timeout=1.0)
+        except BaseException:
+            pass
+        raise
 
 
 @pytest.mark.parametrize("source", ["daily", "tool"])
