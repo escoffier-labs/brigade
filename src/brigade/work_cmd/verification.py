@@ -483,10 +483,11 @@ def _verify_archive_index_entry(
     receipt_file_sha256: str | None,
     *,
     already_archived: bool,
+    checkpoint_errors: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     receipt = _verify_read_receipt(dest)
     digests = receipt.get("digests") if receipt is not None and isinstance(receipt.get("digests"), dict) else {}
-    return {
+    entry: dict[str, Any] = {
         "schema": VERIFY_ARCHIVE_INDEX_SCHEMA,
         "schema_version": VERIFY_ARCHIVE_INDEX_SCHEMA_VERSION,
         "run_id": run_dir.name,
@@ -503,6 +504,9 @@ def _verify_archive_index_entry(
         "started_at": receipt.get("started_at") if receipt is not None else None,
         "completed_at": receipt.get("completed_at") if receipt is not None else None,
     }
+    if checkpoint_errors:
+        entry["checkpoint_errors"] = checkpoint_errors
+    return entry
 
 
 def _append_verify_archive_index(archive_root: Path, entry: dict[str, Any]) -> None:
@@ -565,32 +569,86 @@ def _verify_archive_tree_manifest(root: Path) -> dict[str, tuple[str, str | None
     return manifest
 
 
+# Bounded, constant diagnostics recorded when a checkpoint body cannot be
+# exported as a truthful artifact reference. The text is a fixed per-category
+# string; it never carries the private checkpoint filename or body.
+_CHECKPOINT_OMISSION_DETAIL = {
+    "checkpoint-hash-mismatch": "checkpoint content hash does not match filename; omitted from verification archive",
+    "checkpoint-crashed-temp": "crashed checkpoint temp has no canonical hash path; omitted from verification archive",
+}
+
+
+def _exported_checkpoint_errors(omissions: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Project internal omission records into a privacy-safe index diagnostic.
+
+    The internal record carries the raw checkpoint relative path so the archive
+    writer can locate the body to omit. The exported shape must never leak that
+    path (a private filename) or a raw-body digest: it emits only a bounded
+    category and a constant per-category detail string.
+    """
+    return [
+        {
+            "category": omission["category"],
+            "detail": _CHECKPOINT_OMISSION_DETAIL[omission["category"]],
+        }
+        for omission in omissions
+    ]
+
+
 def _expected_verify_archive_manifest(
     run_dir: Path, source_manifest: dict[str, tuple[str, str | None]]
-) -> dict[str, tuple[str, str | None]]:
-    """Return the tree manifest after recovery-checkpoint export stripping (#636)."""
+) -> tuple[dict[str, tuple[str, str | None]], list[dict[str, str]]]:
+    """Return the privacy-normalized manifest and internal checkpoint omissions.
+
+    Omission records carry ``relative`` (the raw path, for the archive writer to
+    delete the body) alongside a bounded ``category``. Callers export only the
+    privacy-safe projection via ``_exported_checkpoint_errors``; the raw path
+    is used only while writing the staging tree and never reaches the index.
+    """
     from brigade import run_checkpoint
 
     expected = dict(source_manifest)
+    omissions: list[dict[str, str]] = []
     prefix = f"events/{run_checkpoint.CHECKPOINT_DIR_NAME}/"
     for relative, (kind, _digest) in list(expected.items()):
-        if kind != "file" or not relative.startswith(prefix) or not relative.endswith(".json"):
+        name = Path(relative).name
+        is_temp = name.startswith(".checkpoint.") and name.endswith(".tmp")
+        if kind != "file" or not relative.startswith(prefix) or not (relative.endswith(".json") or is_temp):
+            continue
+        # A crashed temp has no canonical hash path; classify and omit it before
+        # reading or decoding its arbitrary body bytes (PR #668).
+        if is_temp:
+            expected.pop(relative)
+            omissions.append({"category": "checkpoint-crashed-temp", "relative": relative})
             continue
         path = run_dir / relative
         raw = path.read_bytes()
         try:
             parsed = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError, MemoryError):
+            # JSON parsing here is only used to detect an already-canonical
+            # artifact reference. Decoder/resource failures are treated as
+            # non-reference checkpoint content and continue to hash/filename
+            # validation; they never pin retention (PR #668).
             parsed = None
-        if isinstance(parsed, dict) and run_checkpoint.is_checkpoint_artifact_reference(parsed):
+        if (
+            isinstance(parsed, dict)
+            and run_checkpoint.is_checkpoint_artifact_reference(parsed)
+            and path.name == f"{parsed['sha256']}.json"
+        ):
+            # Already the canonical export shape at its canonical ``{sha}.json``
+            # path. A reference under any other filename must fall through to
+            # the hash/filename validation below so it is omitted when invalid.
             continue
         sha = hashlib.sha256(raw).hexdigest()
         if path.name != f"{sha}.json":
-            raise OSError(f"verify archive checkpoint export filename digest mismatch: {relative}")
+            expected.pop(relative)
+            omissions.append({"category": "checkpoint-hash-mismatch", "relative": relative})
+            continue
         reference = run_checkpoint.checkpoint_artifact_reference(sha256=sha, byte_size=len(raw))
         ref_bytes = (json.dumps(reference, indent=2, sort_keys=True) + "\n").encode("utf-8")
         expected[relative] = ("file", hashlib.sha256(ref_bytes).hexdigest())
-    return expected
+    return expected, omissions
 
 
 def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
@@ -608,16 +666,18 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
     run_id = run_dir.name
     dest = archive_root / run_id
     source_manifest = _verify_archive_tree_manifest(run_dir)
-    expected_manifest = _expected_verify_archive_manifest(run_dir, source_manifest)
+    expected_manifest, omissions = _expected_verify_archive_manifest(run_dir, source_manifest)
+    checkpoint_errors = _exported_checkpoint_errors(omissions)
     receipt_path = run_dir / "receipt.json"
     source_receipt_sha = localio.file_sha256(receipt_path) if receipt_path.is_file() else None
     if dest.is_symlink():
         raise OSError(f"verify archive conflict: {dest} is a symlink")
     if dest.exists():
-        # Re-archive is safe when evidence matches the source, or when the
-        # existing archive is already the privacy-normalized export of source.
+        # Existing archives are immutable. Re-archive only when the destination
+        # is already the exact privacy-normalized export of the source. A legacy
+        # raw destination must fail closed so it cannot be normalized in place.
         dest_manifest = _verify_archive_tree_manifest(dest)
-        if dest_manifest not in (source_manifest, expected_manifest):
+        if dest_manifest != expected_manifest:
             raise OSError(f"verify archive conflict: {dest} already exists with different evidence")
         dest_receipt = dest / "receipt.json"
         dest_sha = localio.file_sha256(dest_receipt) if dest_receipt.is_file() else None
@@ -625,9 +685,16 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
             raise OSError(f"verify archive conflict: {dest} already exists with different evidence")
         if dest_sha is not None:
             _assert_archived_receipt_integrity(dest_receipt)
-        run_checkpoint.strip_checkpoint_bodies_for_export(dest)
+        # The equal manifest proves normalization has already happened. Do not
+        # call a writer on this live destination: archival retries are read-only.
         run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(dest)
-        entry = _verify_archive_index_entry(run_dir, dest, dest_sha, already_archived=True)
+        entry = _verify_archive_index_entry(
+            run_dir,
+            dest,
+            dest_sha,
+            already_archived=True,
+            checkpoint_errors=checkpoint_errors,
+        )
         _append_verify_archive_index(archive_root, entry)
         return entry
     archive_root.mkdir(parents=True, exist_ok=True)
@@ -641,6 +708,13 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
             if copied_sha != source_receipt_sha:
                 raise OSError(f"verify archive copy integrity check failed: {run_id}")
             _assert_archived_receipt_integrity(staging / "receipt.json")
+        # A hash-mismatched or crashed-temp checkpoint cannot be represented as
+        # a truthful artifact reference. Omit only that private body from the
+        # archive and record the bounded diagnostic in the archive index so one
+        # corrupt checkpoint cannot pin the run. The raw relative path is used
+        # here only to locate the staged body; it never reaches the index.
+        for omission in omissions:
+            (staging / omission["relative"]).unlink()
         # Export boundary (#636): never archive private recovery-checkpoint
         # bodies. Replace them with the closed artifact-reference shape after
         # the byte-identical copy check so local recovery semantics stay intact.
@@ -655,7 +729,13 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     archived_receipt_sha = localio.file_sha256(dest / "receipt.json") if source_receipt_sha is not None else None
-    entry = _verify_archive_index_entry(run_dir, dest, archived_receipt_sha, already_archived=False)
+    entry = _verify_archive_index_entry(
+        run_dir,
+        dest,
+        archived_receipt_sha,
+        already_archived=False,
+        checkpoint_errors=checkpoint_errors,
+    )
     _append_verify_archive_index(archive_root, entry)
     return entry
 

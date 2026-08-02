@@ -1183,6 +1183,7 @@ def recover_from_checkpoint(
 # -- Export boundary (issue #636) ---------------------------------------------
 
 _ARTIFACT_REFERENCE_KEYS = frozenset({"path", "sha256", "media_type", "byte_size", "privacy_class"})
+_CHECKPOINT_TEMP_GLOB = ".checkpoint.*.tmp"
 
 
 def checkpoint_artifact_reference(*, sha256: str, byte_size: int) -> dict[str, Any]:
@@ -1238,13 +1239,21 @@ def strip_checkpoint_bodies_for_export(run_dir: Path) -> list[dict[str, Any]]:
     if not cp_dir.is_dir():
         return []
     replaced: list[dict[str, Any]] = []
+    # Only content-addressed ``{sha}.json`` bodies can be rewritten to a truthful
+    # artifact reference. Crashed ``.checkpoint.*.tmp`` temp bodies have no
+    # canonical hash path, so callers omit them from the export tree before this
+    # runs (see verification._archive_verify_run); they are never rewritten here.
     for path in sorted(cp_dir.glob("*.json")):
         if not path.is_file() or path.is_symlink():
             refuse_checkpoint_body_export(reason="checkpoint export path is not a regular file")
         raw = path.read_bytes()
         try:
             parsed = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError, MemoryError):
+            # JSON parsing here is only used to detect an already-canonical
+            # artifact reference. Decoder/resource failures are treated as
+            # non-reference checkpoint content and continue to hash/filename
+            # validation (PR #668).
             parsed = None
         if isinstance(parsed, dict) and is_checkpoint_artifact_reference(parsed):
             replaced.append(dict(parsed))
@@ -1261,7 +1270,14 @@ def strip_checkpoint_bodies_for_export(run_dir: Path) -> list[dict[str, Any]]:
 
 def assert_export_tree_has_no_checkpoint_bodies(root: Path) -> None:
     """Fail closed if any recovery-checkpoint file under root still holds a body."""
-    for path in sorted(Path(root).rglob(f"*/{CHECKPOINT_DIR_NAME}/*.json")):
+    root = Path(root)
+    paths = sorted(
+        (
+            *root.rglob(f"*/{CHECKPOINT_DIR_NAME}/*.json"),
+            *root.rglob(f"*/{CHECKPOINT_DIR_NAME}/{_CHECKPOINT_TEMP_GLOB}"),
+        )
+    )
+    for path in paths:
         if not path.is_file():
             continue
         try:
