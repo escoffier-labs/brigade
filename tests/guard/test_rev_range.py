@@ -27,6 +27,10 @@ class RevRangeValidationTests(unittest.TestCase):
             "   ",
             "origin/main..",
             "..HEAD",
+            "a....b",
+            "a.....b",
+            "a...b..c",
+            "a..b...c",
             "HEAD;id",
             "HEAD|id",
             "HEAD\n--all",
@@ -46,7 +50,9 @@ class RevRangeValidationTests(unittest.TestCase):
             "feature/foo_bar",
             "main...HEAD",
             "^HEAD",
+            "HEAD^!",
             "@{upstream}",
+            "v1.0.0+build.1",
         ):
             with self.subTest(operand=operand):
                 validate_rev_range_operand(operand)
@@ -236,6 +242,29 @@ class RevRangeValidationTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
         payload = __import__("json").loads(proc.stdout)
         self.assertGreaterEqual(payload["commits_scanned"], 1)
+
+    def test_git_scan_history_handles_repository_without_head(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "brigade.guard.git_scan",
+                    "--history",
+                    "--json",
+                ],
+                cwd=repo,
+                env={"PYTHONPATH": str(ROOT / "src")},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        payload = __import__("json").loads(proc.stdout)
+        self.assertEqual(payload["commits_scanned"], 0)
+        self.assertEqual(payload["commits_with_findings"], 0)
 
     def _init_repo(self, repo: Path) -> None:
         subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)

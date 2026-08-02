@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
 import sys
 
 _INVALID_OPERAND = "invalid revision range operand"
 
-_ALLOWED_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~/^:@{}-")
-_FORBIDDEN_METACHAR = frozenset(";|&$`()<>\\\"' \t\n\r*?[]!%=")
+_ALLOWED_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~/^:@{}-+!")
+_FORBIDDEN_METACHAR = frozenset(";|&$`()<>\\\"' \t\n\r*?[]%=")
 
 
 def validate_rev_range_operand(operand: str) -> None:
@@ -36,18 +37,16 @@ def _operand_invalid(operand: str) -> bool:
 
 
 def _split_rev_range(operand: str) -> list[str] | None:
-    if "..." in operand:
-        if operand.count("...") != 1:
-            return None
-        left, _, right = operand.partition("...")
-        if not left or not right:
-            return None
-        return [left, right]
-    if ".." in operand:
-        if operand.count("..") != 1:
-            return None
-        left, _, right = operand.partition("..")
-        if not left or not right:
-            return None
-        return [left, right]
-    return [operand]
+    separators = list(re.finditer(r"\.{2,}", operand))
+    if not separators:
+        return [operand]
+    if len(separators) != 1:
+        return None
+    separator = separators[0]
+    if separator.end() - separator.start() not in (2, 3):
+        return None
+    left = operand[: separator.start()]
+    right = operand[separator.end() :]
+    if not left or not right:
+        return None
+    return [left, right]

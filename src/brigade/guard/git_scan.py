@@ -184,12 +184,19 @@ def _history_revs(args: argparse.Namespace) -> list[str]:
         validate_rev_range_operand(args.rev_range)
         cmd = ["git", "rev-list", args.rev_range]
     else:
+        if not _has_head():
+            return []
         cmd = ["git", "rev-list", "HEAD"]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         print((proc.stderr or "git rev-list failed").strip(), file=sys.stderr)
         raise SystemExit(2)
     return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _has_head() -> bool:
+    proc = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], capture_output=True, text=True, check=False)
+    return proc.returncode == 0
 
 
 def _added_lines(rev: str) -> str:
