@@ -2,7 +2,9 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -2814,7 +2816,6 @@ def test_archive_verify_run_omits_crashed_checkpoint_temp(tmp_path):
     assert entry["checkpoint_errors"] == [
         {
             "category": "checkpoint-crashed-temp",
-            "digest": hashlib.sha256(body).hexdigest(),
             "detail": "crashed checkpoint temp has no canonical hash path; omitted from verification archive",
         }
     ]
@@ -2881,7 +2882,6 @@ def test_prune_verify_runs_omits_hash_mismatched_checkpoint_and_remains_bounded(
     assert bad_entry["checkpoint_errors"] == [
         {
             "category": "checkpoint-hash-mismatch",
-            "digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
             "detail": "checkpoint content hash does not match filename; omitted from verification archive",
         }
     ]
@@ -2929,6 +2929,47 @@ def test_archive_verify_run_does_not_mutate_already_archived_destination(tmp_pat
     )
     assert not (dest / "events" / run_checkpoint.CHECKPOINT_DIR_NAME / ".checkpoint.crashed.tmp").exists()
     assert (cp_dir / f"{good_sha}.json").read_bytes() == good_body
+
+
+@pytest.mark.parametrize("checkpoint_name", ["valid", "crashed-temp"])
+def test_archive_verify_run_rejects_legacy_raw_destination_without_mutation(tmp_path, checkpoint_name):
+    """Existing legacy raw archives fail closed and remain byte-for-byte immutable."""
+    from brigade import run_checkpoint
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a", sign=True)
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    body = b'{"task":"legacy checkpoint body"}\n'
+    if checkpoint_name == "valid":
+        sha = hashlib.sha256(body).hexdigest()
+        checkpoint = cp_dir / f"{sha}.json"
+    else:
+        checkpoint = cp_dir / ".checkpoint.crashed.tmp"
+    checkpoint.write_bytes(body)
+    os.chmod(checkpoint, 0o640)
+
+    archive_root = tmp_path / "verify-archive"
+    archive_root.mkdir()
+    dest = archive_root / run_dir.name
+    shutil.copytree(run_dir, dest)
+
+    def _snapshot(tree):
+        return {
+            path.relative_to(tree).as_posix(): (
+                stat.S_IMODE(path.lstat().st_mode),
+                path.read_bytes() if path.is_file() else None,
+            )
+            for path in sorted((tree, *tree.rglob("*")), key=lambda path: path.as_posix())
+        }
+
+    before = _snapshot(dest)
+    for _attempt in range(2):
+        with pytest.raises(OSError, match="already exists with different evidence"):
+            verification._archive_verify_run(run_dir, archive_root)
+        assert _snapshot(dest) == before
 
 
 def test_capture_before_retry_uses_receipt_stamped_artifact(tmp_target, monkeypatch, capsys):

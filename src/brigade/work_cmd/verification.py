@@ -583,13 +583,12 @@ def _exported_checkpoint_errors(omissions: list[dict[str, str]]) -> list[dict[st
 
     The internal record carries the raw checkpoint relative path so the archive
     writer can locate the body to omit. The exported shape must never leak that
-    path (a private filename): it emits only a bounded category, a
-    non-reversible content digest, and a constant per-category detail string.
+    path (a private filename) or a raw-body digest: it emits only a bounded
+    category and a constant per-category detail string.
     """
     return [
         {
             "category": omission["category"],
-            "digest": omission["digest"],
             "detail": _CHECKPOINT_OMISSION_DETAIL[omission["category"]],
         }
         for omission in omissions
@@ -602,9 +601,9 @@ def _expected_verify_archive_manifest(
     """Return the privacy-normalized manifest and internal checkpoint omissions.
 
     Omission records carry ``relative`` (the raw path, for the archive writer to
-    delete the body) alongside a bounded ``category`` and a non-reversible
-    content ``digest``. Callers export only the privacy-safe projection via
-    ``_exported_checkpoint_errors``; the raw path never leaves this module.
+    delete the body) alongside a bounded ``category``. Callers export only the
+    privacy-safe projection via ``_exported_checkpoint_errors``; the raw path
+    is used only while writing the staging tree and never reaches the index.
     """
     from brigade import run_checkpoint
 
@@ -630,11 +629,11 @@ def _expected_verify_archive_manifest(
             # cannot be rewritten to a truthful artifact reference. Omit the
             # private body from the export tree and record a bounded diagnostic.
             expected.pop(relative)
-            omissions.append({"category": "checkpoint-crashed-temp", "relative": relative, "digest": sha})
+            omissions.append({"category": "checkpoint-crashed-temp", "relative": relative})
             continue
         if path.name != f"{sha}.json":
             expected.pop(relative)
-            omissions.append({"category": "checkpoint-hash-mismatch", "relative": relative, "digest": sha})
+            omissions.append({"category": "checkpoint-hash-mismatch", "relative": relative})
             continue
         reference = run_checkpoint.checkpoint_artifact_reference(sha256=sha, byte_size=len(raw))
         ref_bytes = (json.dumps(reference, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -664,10 +663,11 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
     if dest.is_symlink():
         raise OSError(f"verify archive conflict: {dest} is a symlink")
     if dest.exists():
-        # Re-archive is safe when evidence matches the source, or when the
-        # existing archive is already the privacy-normalized export of source.
+        # Existing archives are immutable. Re-archive only when the destination
+        # is already the exact privacy-normalized export of the source. A legacy
+        # raw destination must fail closed so it cannot be normalized in place.
         dest_manifest = _verify_archive_tree_manifest(dest)
-        if dest_manifest not in (source_manifest, expected_manifest):
+        if dest_manifest != expected_manifest:
             raise OSError(f"verify archive conflict: {dest} already exists with different evidence")
         dest_receipt = dest / "receipt.json"
         dest_sha = localio.file_sha256(dest_receipt) if dest_receipt.is_file() else None
@@ -675,13 +675,8 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
             raise OSError(f"verify archive conflict: {dest} already exists with different evidence")
         if dest_sha is not None:
             _assert_archived_receipt_integrity(dest_receipt)
-        # No pathname unlink here: dest_manifest already matched source_manifest
-        # or expected_manifest, which proves the omitted bodies are absent from
-        # (or already normalized in) the destination. Deleting by pathname would
-        # be redundant and would race a concurrent reader of the live archive.
-        # strip is idempotent on an already-normalized tree (references skip)
-        # and assert is read-only, so a re-archive never mutates the destination.
-        run_checkpoint.strip_checkpoint_bodies_for_export(dest)
+        # The equal manifest proves normalization has already happened. Do not
+        # call a writer on this live destination: archival retries are read-only.
         run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(dest)
         entry = _verify_archive_index_entry(
             run_dir,
