@@ -91,7 +91,7 @@ def test_acquire_lock_retries_when_release_removes_lock_during_type_probe(tmp_pa
     lock_path.mkdir()
     released_path = tmp_path / "released.lock"
     original_publish = runguard._publish_lock
-    original_stat = Path.stat
+    original_lstat = Path.lstat
     publish_calls = 0
 
     def publish_after_release(path, *, run_dir=None):
@@ -106,10 +106,10 @@ def test_acquire_lock_retries_when_release_removes_lock_during_type_probe(tmp_pa
             lock_path.rename(released_path)
             released_path.rmdir()
             raise FileNotFoundError(self)
-        return original_stat(self, *args, **kwargs)
+        return original_lstat(self, *args, **kwargs)
 
     monkeypatch.setattr(runguard, "_publish_lock", publish_after_release)
-    monkeypatch.setattr(Path, "stat", release_during_type_probe)
+    monkeypatch.setattr(Path, "lstat", release_during_type_probe)
 
     ownership = runguard._acquire_lock(lock_path)
 
@@ -1390,21 +1390,20 @@ def test_run_lock_state_never_raises_for_unresolvable_workspace(tmp_path, monkey
     assert runguard.run_lock_state(cyclic, run_dir) == "invalid"
 
 
-def test_run_lock_state_returns_invalid_for_exists_suppressed_oserror(tmp_path, monkeypatch):
-    """``Path.exists()`` can return absent for some ``stat`` failures; the
-    single-stat probe must classify those as ``invalid`` instead."""
+def test_run_lock_state_returns_invalid_for_lstat_oserror(tmp_path, monkeypatch):
+    """The single-lstat probe must classify inspection errors as invalid."""
     repo = _repo(tmp_path)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     lock_path = runguard.lock_path(repo)
-    real_stat = Path.stat
+    real_lstat = Path.lstat
 
-    def stat_raises_eacces(self, *args, **kwargs):
+    def lstat_raises_eacces(self, *args, **kwargs):
         if self == lock_path:
             raise PermissionError(13, "Permission denied")
-        return real_stat(self, *args, **kwargs)
+        return real_lstat(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", stat_raises_eacces)
+    monkeypatch.setattr(Path, "lstat", lstat_raises_eacces)
 
     assert runguard.run_lock_state(repo, run_dir) == "invalid"
 
@@ -1827,21 +1826,41 @@ def test_recover_stale_run_continues_to_pending_claim_when_lock_vanishes_during_
     lock_path.mkdir(parents=True)
     stale = _matching_stale_claim(repo, run_dir)
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid != 99999999)
-    original_stat = Path.stat
+    original_lstat = Path.lstat
     vanished = False
 
-    def vanish_after_successful_stat(self, *args, **kwargs):
+    def vanish_after_successful_lstat(self, *args, **kwargs):
         nonlocal vanished
-        result = original_stat(self, *args, **kwargs)
+        result = original_lstat(self, *args, **kwargs)
         if self == lock_path and not vanished:
             shutil.rmtree(lock_path)
             vanished = True
         return result
 
-    monkeypatch.setattr(Path, "stat", vanish_after_successful_stat)
+    monkeypatch.setattr(Path, "lstat", vanish_after_successful_lstat)
 
     assert runguard.recover_stale_run(repo, run_dir) is True
     assert vanished is True
+    assert not lock_path.exists()
+    assert not stale.exists()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+
+
+def test_recover_stale_run_uses_pending_claim_when_matching_lock_disappears_after_failed_claim(tmp_path, monkeypatch):
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    _write_lock_owner_metadata(lock_path, owner_token="visible-owner", pid=99999999, run_dir=run_dir)
+    stale = _matching_stale_claim(repo, run_dir, owner_token="pending-owner")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    def lose_visible_lock(path):
+        assert path == lock_path
+        shutil.rmtree(lock_path)
+        return None
+
+    monkeypatch.setattr(runguard, "_claim_stale_lock", lose_visible_lock)
+
+    assert runguard.recover_stale_run(repo, run_dir) is True
     assert not lock_path.exists()
     assert not stale.exists()
     assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
@@ -1851,18 +1870,18 @@ def test_run_recovery_status_is_cleared_when_lock_vanishes_during_probe(tmp_path
     repo, run_dir = _abandoned_run(tmp_path)
     lock_path = runguard.lock_path(repo)
     lock_path.mkdir(parents=True)
-    original_stat = Path.stat
+    original_lstat = Path.lstat
     vanished = False
 
-    def vanish_after_successful_stat(self, *args, **kwargs):
+    def vanish_after_successful_lstat(self, *args, **kwargs):
         nonlocal vanished
-        result = original_stat(self, *args, **kwargs)
+        result = original_lstat(self, *args, **kwargs)
         if self == lock_path and not vanished:
             lock_path.rmdir()
             vanished = True
         return result
 
-    monkeypatch.setattr(Path, "stat", vanish_after_successful_stat)
+    monkeypatch.setattr(Path, "lstat", vanish_after_successful_lstat)
 
     assert runguard.run_recovery_status(repo, run_dir) == "cleared"
     assert vanished is True
@@ -1881,18 +1900,18 @@ def test_recover_stale_run_rejects_malformed_lock_as_typed_error(tmp_path):
     assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
 
 
-def test_recover_stale_run_fails_closed_when_lock_stat_raises_oserror(tmp_path, monkeypatch):
+def test_recover_stale_run_fails_closed_when_lock_lstat_raises_oserror(tmp_path, monkeypatch):
     repo, run_dir = _abandoned_run(tmp_path)
     lock_path = runguard.lock_path(repo)
     lock_path.mkdir(parents=True)
-    original_stat = Path.stat
+    original_lstat = Path.lstat
 
     def fail_lock_stat(self, *args, **kwargs):
         if self == lock_path:
             raise OSError("probe failed")
-        return original_stat(self, *args, **kwargs)
+        return original_lstat(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", fail_lock_stat)
+    monkeypatch.setattr(Path, "lstat", fail_lock_stat)
 
     with pytest.raises(runguard.RunLockError, match="could not inspect run lock.*probe failed"):
         runguard.recover_stale_run(repo, run_dir)
@@ -1908,16 +1927,33 @@ def test_run_recovery_status_is_unknown_for_uninspectable_lock(tmp_path, monkeyp
     if probe_error is None:
         lock_path.write_text("malformed lock\n")
     else:
-        original_stat = Path.stat
+        original_lstat = Path.lstat
 
         def fail_lock_stat(self, *args, **kwargs):
             if self == lock_path:
                 raise probe_error
-            return original_stat(self, *args, **kwargs)
+            return original_lstat(self, *args, **kwargs)
 
-        monkeypatch.setattr(Path, "stat", fail_lock_stat)
+        monkeypatch.setattr(Path, "lstat", fail_lock_stat)
 
     assert runguard.run_recovery_status(repo, run_dir) == "unknown"
+
+
+def test_dangling_symlink_lock_fails_closed_across_recovery_status_and_state(tmp_path):
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.symlink_to(lock_path.parent / "missing-lock-target", target_is_directory=True)
+
+    assert runguard.run_lock_state(repo, run_dir) == "invalid"
+    assert runguard.run_recovery_status(repo, run_dir) == "unknown"
+    with pytest.raises(runguard.RunLockError, match="malformed run lock is not a directory"):
+        runguard.recover_stale_run(repo, run_dir)
+    with pytest.raises(runguard.RunLockError, match="malformed run lock is not a directory"):
+        runguard._lock_is_stale(lock_path)
+    with pytest.raises(runguard.RunLockError, match="malformed run lock is not a directory"):
+        with runguard.run_lock(repo):
+            pass
 
 
 def test_claim_is_activated_normalizes_runtime_error_from_expanduser(monkeypatch):

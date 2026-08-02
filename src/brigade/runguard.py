@@ -206,7 +206,7 @@ def _publish_lock(path: Path, *, run_dir: Path | None) -> _LockOwnership:
         try:
             candidate.rename(path)
         except OSError:
-            if path.exists():
+            if _lock_path_is_directory(path) is not None:
                 raise FileExistsError(path) from None
             raise
     finally:
@@ -742,7 +742,7 @@ def run_recovery_status(cwd: Path, run_dir: Path) -> str:
 
 def _lock_path_is_directory(path: Path) -> bool | None:
     try:
-        mode = path.stat().st_mode
+        mode = path.lstat().st_mode
     except FileNotFoundError:
         return None
     except OSError as exc:

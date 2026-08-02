@@ -1033,12 +1033,12 @@ def test_watch_handles_artifact_collection_lock_vanishing_during_probe(tmp_path,
     _write_json(run_path, payload)
     lock_path = runguard.lock_path(tmp_path)
     lock_path.mkdir(parents=True)
-    original_stat = Path.stat
+    original_lstat = Path.lstat
     vanished = False
 
-    def finish_after_successful_lock_stat(self, *args, **kwargs):
+    def finish_after_successful_lock_lstat(self, *args, **kwargs):
         nonlocal vanished
-        result = original_stat(self, *args, **kwargs)
+        result = original_lstat(self, *args, **kwargs)
         if self == lock_path and not vanished:
             shutil.rmtree(lock_path)
             payload["status"] = "ok"
@@ -1047,7 +1047,7 @@ def test_watch_handles_artifact_collection_lock_vanishing_during_probe(tmp_path,
             vanished = True
         return result
 
-    monkeypatch.setattr(Path, "stat", finish_after_successful_lock_stat)
+    monkeypatch.setattr(Path, "lstat", finish_after_successful_lock_lstat)
 
     assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 0
     assert vanished is True
