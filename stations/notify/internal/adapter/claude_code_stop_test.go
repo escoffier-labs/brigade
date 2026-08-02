@@ -35,28 +35,63 @@ func TestClaudeCodeStop_OmitsPrivateFieldsByDefaultForEveryAlias(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeStop_IncludesPrivateFieldsOnlyWhenOptedIn(t *testing.T) {
-	in := `{"cwd":"/private/project","session_id":"private-session"}`
+func TestClaudeCodeStop_IncludesCWDOnlyWhenOptedInForEveryAlias(t *testing.T) {
 	tests := []struct {
-		name    string
-		options ClaudeCodeStopOptions
-		want    string
+		name  string
+		input string
 	}{
-		{name: "cwd only", options: ClaudeCodeStopOptions{IncludeCWD: true}, want: "Session ended in /private/project"},
-		{name: "session only", options: ClaudeCodeStopOptions{IncludeSessionID: true}, want: "Session ended (session private-session)"},
-		{name: "both", options: ClaudeCodeStopOptions{IncludeCWD: true, IncludeSessionID: true}, want: "Session ended in /private/project (session private-session)"},
+		{name: "cwd", input: `{"cwd":"/private/project"}`},
+		{name: "working directory", input: `{"working_directory":"/private/project"}`},
+		{name: "workdir", input: `{"workdir":"/private/project"}`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m, err := ClaudeCodeStop(strings.NewReader(in), tt.options)
+			m, err := ClaudeCodeStop(strings.NewReader(tt.input), ClaudeCodeStopOptions{IncludeCWD: true})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if m.Body != tt.want {
-				t.Errorf("body = %q, want %q", m.Body, tt.want)
+			want := "Session ended in /private/project"
+			if m.Body != want {
+				t.Errorf("body = %q, want %q", m.Body, want)
 			}
 		})
+	}
+}
+
+func TestClaudeCodeStop_IncludesSessionIDOnlyWhenOptedInForEveryAlias(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "session id", input: `{"session_id":"private-session"}`},
+		{name: "session ID", input: `{"sessionId":"private-session"}`},
+		{name: "session", input: `{"session":"private-session"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, err := ClaudeCodeStop(strings.NewReader(tt.input), ClaudeCodeStopOptions{IncludeSessionID: true})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			want := "Session ended (session private-session)"
+			if m.Body != want {
+				t.Errorf("body = %q, want %q", m.Body, want)
+			}
+		})
+	}
+}
+
+func TestClaudeCodeStop_IncludesBothPrivateFieldsWhenBothOptedIn(t *testing.T) {
+	in := `{"cwd":"/private/project","session_id":"private-session"}`
+	m, err := ClaudeCodeStop(strings.NewReader(in), ClaudeCodeStopOptions{IncludeCWD: true, IncludeSessionID: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "Session ended in /private/project (session private-session)"
+	if m.Body != want {
+		t.Errorf("body = %q, want %q", m.Body, want)
 	}
 }
 

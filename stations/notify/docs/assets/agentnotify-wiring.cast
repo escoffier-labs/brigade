@@ -1,4 +1,4 @@
-{"version": 2, "width": 88, "height": 18, "timestamp": 0, "env": {"TERM": "xterm-256color", "SHELL": "/bin/bash"}}
+{"version": 2, "width": 88, "height": 19, "timestamp": 0, "env": {"TERM": "xterm-256color", "SHELL": "/bin/bash"}}
 [0.6, "o", "\u001b[1;32m$ \u001b[0m"]
 [0.64, "o", "a"]
 [0.68, "o", "g"]
@@ -41,6 +41,7 @@
 [4.39, "o", "r"]
 [4.84, "o", "\r\n"]
 [5.14, "o", "[OK  ] config: loaded\r\n"]
+[5.17, "o", "[OK  ] claude_code_stop.privacy: Stop-hook notifications omit cwd and session_id\r\n"]
 [5.2, "o", "[OK  ] routing: 2 channel(s) selected\r\n"]
 [5.26, "o", "[FAIL] channel:discord-main: webhook env missing or empty\r\n"]
 [5.32, "o", "[WARN] channel:signal-personal: inactive channel: url/from/to env missing or empty\r\n"]
@@ -137,6 +138,7 @@
 [12.51, "o", "r"]
 [12.96, "o", "\r\n"]
 [13.26, "o", "[OK  ] config: loaded\r\n"]
+[13.29, "o", "[OK  ] claude_code_stop.privacy: Stop-hook notifications omit cwd and session_id\r\n"]
 [13.32, "o", "[OK  ] routing: 2 channel(s) selected\r\n"]
 [13.38, "o", "[OK  ] channel:discord-main: env present\r\n"]
 [13.44, "o", "[WARN] channel:signal-personal: inactive channel: url/from/to env missing or empty\r\n"]

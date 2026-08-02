@@ -136,6 +136,11 @@ url_env  = "SIGNAL_CLI_URL"
 from_env = "SIGNAL_FROM"
 to_env   = "SIGNAL_TO"
 
+# Delivery timeout in seconds. Omitted defaults to 10; explicit zero or
+# negative values are rejected when the config loads.
+[defaults]
+timeout_seconds = 10
+
 # Claude Code Stop-hook messages use "Session ended" by default. Local paths
 # and session identifiers are private, so they are omitted unless enabled here.
 [claude_code_stop]
@@ -159,6 +164,10 @@ when the hook supplies `cwd` or `session_id`. Set `include_cwd = true` to add
 only the working directory, `include_session_id = true` to add only the session
 identifier, or set both to `true` to include both values. These controls apply
 only to `--hook claude-code-stop`.
+
+`defaults.timeout_seconds` controls the per-channel delivery timeout. When the
+key is absent, delivery uses 10 seconds. Config load rejects explicit zero or
+negative values; a valid positive value sets the timeout for every channel send.
 
 Validate the wiring without sending a live notification:
 
@@ -187,6 +196,7 @@ If you set `DISABLE_TELEMETRY=1` to keep your agent harness from phoning home, y
 ```console
 $ agent-notify doctor
 [OK  ] config: loaded
+[OK  ] claude_code_stop.privacy: Stop-hook notifications omit cwd and session_id
 [OK  ] routing: 2 channel(s) selected
 [OK  ] channel:discord-main: env present
 [WARN] channel:signal-personal: inactive channel: url/from/to env missing or empty

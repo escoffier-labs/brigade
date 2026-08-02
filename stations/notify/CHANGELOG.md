@@ -9,8 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Codex notifications now show the verified per-turn model from the notify payload or matching local rollout metadata. Informational Telegram and Signal messages use an OpenAI text mark instead of the generic information symbol.
+- Stop-hook cwd and session_id disclosure is opt-in via `[claude_code_stop]`; `doctor` reports the `claude_code_stop.privacy` check.
+- `defaults.timeout_seconds` rejects zero or negative values at config load; omitted key keeps the 10-second delivery default.
 
 ### Fixed
+- Multi-provider fan-out now has coverage for partial channel failures and concurrent delivery behavior.
 - Channel transport failures now return bounded provider, stage, status, and cause fields without retaining request URLs or credentials; the dispatcher sanitizes errors again before writing stderr.
 
 ### Documentation
