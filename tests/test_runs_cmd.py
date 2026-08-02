@@ -782,14 +782,16 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
         monkeypatch.setattr(tools_cmd.calls, "_call_run_blockers", lambda target, call: [])
 
     append_entered = threading.Event()
+    attempted_before_snapshot = threading.Event()
     lock_contended = threading.Event()
-    lock_acquired = threading.Event()
+    successful_before_snapshot = threading.Event()
     review_finished = threading.Event()
     review_result = []
     events = []
     snapshot_refreshing = threading.Event()
     refresh_started = threading.Event()
     snapshot_done = threading.Event()
+    snapshot_classification = threading.Lock()
     if source == "daily":
         source_store_lock_path = daily_cmd.approvals._approval_lock_path(tmp_path, record["approval_id"]).resolve()
     else:
@@ -799,25 +801,22 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
     original_refresh_resumed_snapshot = runs_cmd._refresh_resumed_snapshot
 
     def instrumented_acquire_lock(path, *, run_dir=None):
-        if (
-            snapshot_refreshing.is_set()
-            and not snapshot_done.is_set()
-            and Path(path).resolve() == source_store_lock_path
-        ):
-            try:
-                ownership = original_acquire_lock(path, run_dir=run_dir)
-            except runguard.RunLockError as exc:
-                if "another brigade run appears active" in str(exc):
-                    lock_contended.set()
-                raise
-            if snapshot_done.is_set():
-                return ownership
-            lock_acquired.set()
-            runguard._release_lock(path, ownership)
-            raise AssertionError(
-                "source-store lock acquired before journal commit completed: "
-                f"events={events!r} refresh_started={refresh_started.is_set()}"
-            )
+        if Path(path).resolve() == source_store_lock_path:
+            with snapshot_classification:
+                if snapshot_refreshing.is_set() and not snapshot_done.is_set():
+                    attempted_before_snapshot.set()
+                    try:
+                        ownership = original_acquire_lock(path, run_dir=run_dir)
+                    except runguard.RunLockError as exc:
+                        if "another brigade run appears active" in str(exc):
+                            lock_contended.set()
+                        raise
+                    successful_before_snapshot.set()
+                    runguard._release_lock(path, ownership)
+                    raise AssertionError(
+                        "source-store lock acquired before journal commit completed: "
+                        f"events={events!r} refresh_started={refresh_started.is_set()}"
+                    )
         return original_acquire_lock(path, run_dir=run_dir)
 
     def review_source():
@@ -845,10 +844,13 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
             append_entered.set()
             run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=tmp_path)
             thread_sync.wait_for_predicate(
-                lambda: lock_contended.is_set() or lock_acquired.is_set(),
-                description="source-store lock contention outcome",
+                lambda: attempted_before_snapshot.is_set() or not reviewer.is_alive(),
+                description="reviewer source-store lock attempt",
             )
-            if lock_acquired.is_set():
+            if not attempted_before_snapshot.is_set():
+                thread_sync.join_thread(reviewer, description="reviewer failed before source-lock attempt")
+            assert attempted_before_snapshot.is_set()
+            if successful_before_snapshot.is_set():
                 raise AssertionError("source-store lock released before journal commit")
             assert lock_contended.is_set()
             assert not review_finished.is_set()
@@ -858,7 +860,8 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
     def refresh_resumed_snapshot(*args, **kwargs):
         refresh_started.set()
         result = original_refresh_resumed_snapshot(*args, **kwargs)
-        snapshot_done.set()
+        with snapshot_classification:
+            snapshot_done.set()
         return result
 
     monkeypatch.setattr(runguard, "_acquire_lock", instrumented_acquire_lock)
@@ -869,7 +872,8 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
         assert runs_cmd.resume(run_dir) == 0
         thread_sync.join_thread(reviewer, description="reviewer thread finished")
         assert snapshot_done.is_set()
-        assert not lock_acquired.is_set()
+        assert attempted_before_snapshot.is_set()
+        assert not successful_before_snapshot.is_set()
         assert review_result == [1]
         assert events == ["approval.consumed", "run.resumed"]
         if source == "daily":
@@ -882,13 +886,13 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
             assert stored is not None
             assert stored["status"] == "completed"
         capsys.readouterr()
-    except BaseException:
+    except BaseException as primary_error:
         append_entered.set()
         thread_sync.cancel_thread(reviewer)
         try:
             thread_sync.join_thread(reviewer, description="reviewer cleanup", hard_timeout=1.0)
-        except BaseException:
-            pass
+        except BaseException as cleanup_error:
+            primary_error.add_note(f"reviewer cleanup failed: {cleanup_error!r}")
         raise
 
 
@@ -1050,6 +1054,8 @@ def test_watch_waits_for_consumed_approval_while_provider_lock_is_live(tmp_path,
             watch_holding_on_live_lock,
             description="watch entered live-lock wait for consumed approval",
         )
+        if thread_sync.current_thread_cancelled():
+            return
         finished = json.loads(run_path.read_text())
         finished["status"] = "ok"
         finished["finished_at"] = "2026-07-30T18:10:00+00:00"
@@ -1058,8 +1064,22 @@ def test_watch_waits_for_consumed_approval_while_provider_lock_is_live(tmp_path,
 
     with runguard.run_lock(tmp_path, run_dir=run_dir):
         worker = thread_sync.start_thread(finish_provider)
-        assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.001) == 0
-    thread_sync.join_thread(worker, description="provider worker finished")
+        primary_error = None
+        try:
+            assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.001) == 0
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            thread_sync.cancel_thread(worker)
+            watch_holding_on_live_lock.set()
+            provider_finish_gate.open()
+            try:
+                thread_sync.join_thread(worker, description="provider worker cleanup", hard_timeout=1.0)
+            except BaseException as cleanup_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note(f"provider worker cleanup failed: {cleanup_error!r}")
 
 
 def test_watch_consumed_approval_without_lock_requests_resume_reconciliation(tmp_path, capsys):
