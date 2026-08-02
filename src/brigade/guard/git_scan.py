@@ -10,7 +10,7 @@ from pathlib import Path
 from .engine import scan_text
 from .policy import Policy, default_policy, load_policy
 from .report import to_text
-from .rev_range import fail_invalid_rev_range_operand, git_has_head, validate_rev_range_operand
+from .rev_range import git_has_head, validate_rev_range_operand
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -57,6 +57,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="emit JSON report")
     args = parser.parse_args(argv)
+    if args.rev_range is not None and not args.history:
+        parser.error("--range requires --history")
+    if args.all and not args.history:
+        parser.error("--all requires --history")
     if args.revs_stdin and not args.history:
         parser.error("--revs-stdin requires --history")
 
@@ -182,7 +186,7 @@ def _history_revs(args: argparse.Namespace) -> list[str]:
         cmd = ["git", "rev-list", "--all"]
     elif args.rev_range is not None:
         validate_rev_range_operand(args.rev_range)
-        cmd = ["git", "rev-list", "--end-of-options", args.rev_range]
+        cmd = ["git", "rev-list", args.rev_range]
     else:
         if not git_has_head():
             return []
@@ -190,13 +194,12 @@ def _history_revs(args: argparse.Namespace) -> list[str]:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     except OSError:
-        if args.rev_range is not None:
-            fail_invalid_rev_range_operand()
         print("git rev-list failed", file=sys.stderr)
         raise SystemExit(2) from None
     if proc.returncode != 0:
         if args.rev_range is not None:
-            fail_invalid_rev_range_operand()
+            print("git rev-list failed", file=sys.stderr)
+            raise SystemExit(2)
         print((proc.stderr or "git rev-list failed").strip(), file=sys.stderr)
         raise SystemExit(2)
     return [line for line in proc.stdout.splitlines() if line.strip()]

@@ -48,7 +48,7 @@ def git_has_head() -> bool:
                 text=True,
                 check=False,
             )
-            if branch.returncode == 1:
+            if branch.returncode == 1 and branch_ref.startswith("refs/heads/"):
                 return False
     except OSError:
         print("git command failed", file=sys.stderr)

@@ -66,6 +66,13 @@ class RevRangeValidationTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
         self.assertEqual(stderr.getvalue(), "invalid revision range operand\n")
 
+    def test_rejects_an_operand_larger_than_the_process_bound(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as ctx:
+            validate_rev_range_operand("A" * 65_537)
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(stderr.getvalue(), "invalid revision range operand\n")
+
     def test_history_revs_rejects_injection_before_rev_list(self) -> None:
         import argparse
 
@@ -123,6 +130,46 @@ class RevRangeValidationTests(unittest.TestCase):
                 _commit_revs(args)
             git.assert_not_called()
         self.assertEqual(ctx.exception.code, 2)
+
+    def test_default_commit_scan_does_not_require_end_of_options(self) -> None:
+        import argparse
+
+        args = argparse.Namespace(rev_range=None, all=False)
+        with (
+            mock.patch("brigade.guard.git_commits.git_has_head", return_value=True),
+            mock.patch("brigade.guard.git_commits._default_range", return_value="HEAD"),
+            mock.patch("brigade.guard.git_commits._git", return_value="") as git,
+        ):
+            self.assertEqual(_commit_revs(args), [])
+        git.assert_called_once_with(["rev-list", "--reverse", "HEAD"], bounded_error=None)
+
+    def test_history_revs_reports_process_failure_separately_from_invalid_range(self) -> None:
+        import argparse
+
+        args = argparse.Namespace(rev_range="HEAD", all=False, revs_stdin=False)
+        stderr = io.StringIO()
+        with (
+            mock.patch("brigade.guard.git_scan.subprocess.run", side_effect=OSError),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            _history_revs(args)
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(stderr.getvalue(), "git rev-list failed\n")
+
+    def test_commit_revs_reports_process_failure_separately_from_invalid_range(self) -> None:
+        import argparse
+
+        args = argparse.Namespace(rev_range="HEAD", all=False)
+        stderr = io.StringIO()
+        with (
+            mock.patch("brigade.guard.git_commits.subprocess.run", side_effect=OSError),
+            redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            _commit_revs(args)
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(stderr.getvalue(), "git command failed\n")
 
     def test_git_scan_history_rejects_injected_range_cli(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -366,8 +413,25 @@ class RevRangeValidationTests(unittest.TestCase):
                         check=False,
                     )
                 self.assertEqual(proc.returncode, 2)
-                self.assertEqual(proc.stderr, "invalid revision range operand\n")
+                self.assertEqual(proc.stderr, "git rev-list failed\n")
                 self.assertEqual(proc.stdout, "")
+
+    def test_git_scan_range_and_all_require_history_mode(self) -> None:
+        for source_arg in ("--range=HEAD", "--all"):
+            with self.subTest(source_arg=source_arg), TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                self._init_repo(repo)
+                proc = subprocess.run(
+                    [sys.executable, "-m", "brigade.guard.git_scan", source_arg, "--json"],
+                    cwd=repo,
+                    env={"PYTHONPATH": str(ROOT / "src")},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("requires --history", proc.stderr)
+            self.assertEqual(proc.stdout, "")
 
     def test_git_scan_history_handles_repository_without_head(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -425,6 +489,32 @@ class RevRangeValidationTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("not a git repository", proc.stderr)
         self.assertEqual(proc.stdout, "")
+
+    def test_history_clis_reject_missing_non_branch_head_target(self) -> None:
+        invocations = (
+            ("brigade.guard.git_scan", "--history"),
+            ("brigade.guard.git_commits",),
+        )
+        for invocation in invocations:
+            with self.subTest(module=invocation[0]), TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                self._init_repo(repo)
+                subprocess.run(
+                    ["git", "symbolic-ref", "HEAD", "refs/tags/missing"],
+                    cwd=repo,
+                    check=True,
+                )
+                proc = subprocess.run(
+                    [sys.executable, "-m", *invocation, "--json"],
+                    cwd=repo,
+                    env={"PYTHONPATH": str(ROOT / "src")},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            self.assertEqual(proc.returncode, 2)
+            self.assertNotIn("invalid revision range operand", proc.stderr)
+            self.assertEqual(proc.stdout, "")
 
     def _init_repo(self, repo: Path) -> None:
         subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
