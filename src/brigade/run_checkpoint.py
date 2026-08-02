@@ -1249,7 +1249,11 @@ def strip_checkpoint_bodies_for_export(run_dir: Path) -> list[dict[str, Any]]:
         raw = path.read_bytes()
         try:
             parsed = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError, MemoryError):
+            # JSON parsing here is only used to detect an already-canonical
+            # artifact reference. Decoder/resource failures are treated as
+            # non-reference checkpoint content and continue to hash/filename
+            # validation (PR #668).
             parsed = None
         if isinstance(parsed, dict) and is_checkpoint_artifact_reference(parsed):
             replaced.append(dict(parsed))

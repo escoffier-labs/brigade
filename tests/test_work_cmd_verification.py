@@ -304,6 +304,11 @@ def _read_archive_index(archive_root):
     return localio.read_jsonl_dicts(archive_root / "index.jsonl")
 
 
+def _deeply_nested_json(depth: int) -> str:
+    """Return a JSON string nested ``depth`` levels deep."""
+    return '{"a":' * depth + '"x"' + "}" * depth
+
+
 def test_prune_verify_runs_archives_evidence_before_delete(tmp_path):
     from brigade.work_cmd import helpers, verification
 
@@ -2857,6 +2862,78 @@ def test_archive_verify_run_omits_artifact_reference_shaped_crashed_temp(tmp_pat
             "detail": "crashed checkpoint temp has no canonical hash path; omitted from verification archive",
         }
     ]
+
+
+def test_archive_verify_run_omits_deeply_nested_crashed_checkpoint_temp(tmp_path):
+    """A deeply nested crashed .checkpoint.*.tmp must be omitted before JSON
+    decoding raises RecursionError; pruning succeeds and no private temp body
+    or filename enters the archive or index (PR #668)."""
+    from brigade import run_checkpoint
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a", sign=True)
+    _write_verify_run_dir(root, "20260101-000002-b")
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    private_task = "SECRET_NESTED_CRASHED_CHECKPOINT_must_not_archive"
+    body = _deeply_nested_json(1100).replace('"x"', f'"task":"{private_task}"')
+    crashed_temp = cp_dir / ".checkpoint.secret-tenant-acme.tmp"
+    crashed_temp.write_text(body, encoding="utf-8")
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 1
+    archived_run = archive_root / run_dir.name
+    archived_temp = archived_run / "events" / run_checkpoint.CHECKPOINT_DIR_NAME / crashed_temp.name
+    assert not archived_temp.exists()
+    for path in archived_run.rglob("*"):
+        if path.is_file():
+            assert private_task not in path.read_text(encoding="utf-8", errors="ignore")
+    run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(archived_run)
+    index_text = (archive_root / "index.jsonl").read_text(encoding="utf-8")
+    assert "secret-tenant-acme" not in index_text
+    entry = next(e for e in _read_archive_index(archive_root) if e["run_id"] == run_dir.name)
+    assert entry["checkpoint_errors"] == [
+        {
+            "category": "checkpoint-crashed-temp",
+            "detail": "crashed checkpoint temp has no canonical hash path; omitted from verification archive",
+        }
+    ]
+
+
+def test_archive_verify_run_exports_deeply_nested_hash_named_checkpoint_as_reference(tmp_path):
+    """A canonical hash-named checkpoint whose JSON body nests beyond the decoder
+    recursion limit must still be rewritten to an artifact reference and archived
+    without aborting (PR #668)."""
+    from brigade import run_checkpoint
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a", sign=True)
+    _write_verify_run_dir(root, "20260101-000002-b")
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    body = _deeply_nested_json(1100).encode("utf-8")
+    sha = hashlib.sha256(body).hexdigest()
+    (cp_dir / f"{sha}.json").write_bytes(body)
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 1
+    archived_run = archive_root / run_dir.name
+    archived_cp = archived_run / "events" / run_checkpoint.CHECKPOINT_DIR_NAME / f"{sha}.json"
+    assert archived_cp.is_file()
+    payload = json.loads(archived_cp.read_text(encoding="utf-8"))
+    assert run_checkpoint.is_checkpoint_artifact_reference(payload)
+    assert payload["sha256"] == sha
+    assert payload["byte_size"] == len(body)
+    entry = next(e for e in _read_archive_index(archive_root) if e["run_id"] == run_dir.name)
+    assert entry.get("checkpoint_errors", []) == []
 
 
 def test_archive_verify_run_omits_misnamed_artifact_reference(tmp_path):

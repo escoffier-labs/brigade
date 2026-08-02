@@ -615,31 +615,32 @@ def _expected_verify_archive_manifest(
         is_temp = name.startswith(".checkpoint.") and name.endswith(".tmp")
         if kind != "file" or not relative.startswith(prefix) or not (relative.endswith(".json") or is_temp):
             continue
+        # A crashed temp has no canonical hash path; classify and omit it before
+        # reading or decoding its arbitrary body bytes (PR #668).
+        if is_temp:
+            expected.pop(relative)
+            omissions.append({"category": "checkpoint-crashed-temp", "relative": relative})
+            continue
         path = run_dir / relative
         raw = path.read_bytes()
         try:
             parsed = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError, MemoryError):
+            # JSON parsing here is only used to detect an already-canonical
+            # artifact reference. Decoder/resource failures are treated as
+            # non-reference checkpoint content and continue to hash/filename
+            # validation; they never pin retention (PR #668).
             parsed = None
         if (
-            not is_temp
-            and isinstance(parsed, dict)
+            isinstance(parsed, dict)
             and run_checkpoint.is_checkpoint_artifact_reference(parsed)
             and path.name == f"{parsed['sha256']}.json"
         ):
             # Already the canonical export shape at its canonical ``{sha}.json``
-            # path. A crashed temp is never canonical, and a reference under any
-            # other filename must fall through to the hash/filename validation
-            # below so it is omitted when invalid.
+            # path. A reference under any other filename must fall through to
+            # the hash/filename validation below so it is omitted when invalid.
             continue
         sha = hashlib.sha256(raw).hexdigest()
-        if is_temp:
-            # A crashed temp body has no canonical ``{sha}.json`` path, so it
-            # cannot be rewritten to a truthful artifact reference. Omit the
-            # private body from the export tree and record a bounded diagnostic.
-            expected.pop(relative)
-            omissions.append({"category": "checkpoint-crashed-temp", "relative": relative})
-            continue
         if path.name != f"{sha}.json":
             expected.pop(relative)
             omissions.append({"category": "checkpoint-hash-mismatch", "relative": relative})
