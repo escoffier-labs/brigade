@@ -690,14 +690,12 @@ def recover_stale_run(
 ) -> bool:
     run_dir = run_dir.expanduser().resolve()
     path = lock_path(cwd)
-    if path.exists() and not path.is_dir():
-        raise RunLockError(f"malformed run lock is not a directory: {path}")
-    if path.is_dir():
+    if _lock_path_is_directory(path) is not None:
         owner = _read_lock_owner(path)
         if owner is not None and _owner_matches_run(owner, run_dir):
             stale = _claim_stale_lock(path)
             if stale is None:
-                if path.exists():
+                if _lock_path_is_directory(path) is not None:
                     raise RunLockError(f"run owner process is still active: {path}")
             else:
                 claimed, claimed_owner = stale
@@ -721,13 +719,21 @@ def run_recovery_status(cwd: Path, run_dir: Path) -> str:
     if not cwd.is_dir():
         return "unknown"
     path = lock_path(cwd)
-    if path.exists() and not path.is_dir():
+    try:
+        lock_is_directory = _lock_path_is_directory(path)
+    except RunLockError:
         return "unknown"
-    candidates = ([path] if path.is_dir() else []) + _stale_claims(path)
+    candidates = ([path] if lock_is_directory is not None else []) + _stale_claims(path)
     saw_unreadable = False
     for candidate in candidates:
         owner = _read_lock_owner(candidate)
         if owner is None:
+            if candidate == path:
+                try:
+                    if _lock_path_is_directory(path) is None:
+                        continue
+                except RunLockError:
+                    return "unknown"
             saw_unreadable = True
         elif _owner_matches_run(owner, run_dir):
             return "required"

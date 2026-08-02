@@ -1020,6 +1020,40 @@ def test_watch_handles_artifact_collection_completion_race(tmp_path, monkeypatch
     assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 0
 
 
+def test_watch_handles_artifact_collection_lock_vanishing_during_probe(tmp_path, monkeypatch, capsys):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_path = run_dir / "run.json"
+    payload = {
+        "status": "artifact-collection",
+        "cwd": str(tmp_path),
+        "lock_workspace": str(tmp_path),
+        "started_at": "2026-07-17T00:00:00Z",
+    }
+    _write_json(run_path, payload)
+    lock_path = runguard.lock_path(tmp_path)
+    lock_path.mkdir(parents=True)
+    original_stat = Path.stat
+    vanished = False
+
+    def finish_after_successful_lock_stat(self, *args, **kwargs):
+        nonlocal vanished
+        result = original_stat(self, *args, **kwargs)
+        if self == lock_path and not vanished:
+            shutil.rmtree(lock_path)
+            payload["status"] = "ok"
+            payload["finished_at"] = "2026-07-17T00:00:01Z"
+            _write_json(run_path, payload)
+            vanished = True
+        return result
+
+    monkeypatch.setattr(Path, "stat", finish_after_successful_lock_stat)
+
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 0
+    assert vanished is True
+    assert "artifact-collection recovery failed" not in capsys.readouterr().err
+
+
 def test_watch_stops_on_pending_approval_with_no_lock(tmp_path, capsys):
     approval = _daily_approval(status="pending")
     run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)

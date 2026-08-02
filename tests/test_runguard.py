@@ -1821,6 +1821,105 @@ def _matching_stale_claim(repo, run_dir, *, owner_token="dead-owner", pid=999999
     return stale
 
 
+def test_recover_stale_run_continues_to_pending_claim_when_lock_vanishes_during_probe(tmp_path, monkeypatch):
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    stale = _matching_stale_claim(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid != 99999999)
+    original_stat = Path.stat
+    vanished = False
+
+    def vanish_after_successful_stat(self, *args, **kwargs):
+        nonlocal vanished
+        result = original_stat(self, *args, **kwargs)
+        if self == lock_path and not vanished:
+            shutil.rmtree(lock_path)
+            vanished = True
+        return result
+
+    monkeypatch.setattr(Path, "stat", vanish_after_successful_stat)
+
+    assert runguard.recover_stale_run(repo, run_dir) is True
+    assert vanished is True
+    assert not lock_path.exists()
+    assert not stale.exists()
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+
+
+def test_run_recovery_status_is_cleared_when_lock_vanishes_during_probe(tmp_path, monkeypatch):
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    original_stat = Path.stat
+    vanished = False
+
+    def vanish_after_successful_stat(self, *args, **kwargs):
+        nonlocal vanished
+        result = original_stat(self, *args, **kwargs)
+        if self == lock_path and not vanished:
+            lock_path.rmdir()
+            vanished = True
+        return result
+
+    monkeypatch.setattr(Path, "stat", vanish_after_successful_stat)
+
+    assert runguard.run_recovery_status(repo, run_dir) == "cleared"
+    assert vanished is True
+
+
+def test_recover_stale_run_rejects_malformed_lock_as_typed_error(tmp_path):
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("malformed lock\n")
+
+    with pytest.raises(runguard.RunLockError, match="malformed run lock is not a directory"):
+        runguard.recover_stale_run(repo, run_dir)
+
+    assert lock_path.read_text() == "malformed lock\n"
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+
+
+def test_recover_stale_run_fails_closed_when_lock_stat_raises_oserror(tmp_path, monkeypatch):
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    original_stat = Path.stat
+
+    def fail_lock_stat(self, *args, **kwargs):
+        if self == lock_path:
+            raise OSError("probe failed")
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_lock_stat)
+
+    with pytest.raises(runguard.RunLockError, match="could not inspect run lock.*probe failed"):
+        runguard.recover_stale_run(repo, run_dir)
+
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+
+
+@pytest.mark.parametrize("probe_error", [OSError("probe failed"), None])
+def test_run_recovery_status_is_unknown_for_uninspectable_lock(tmp_path, monkeypatch, probe_error):
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if probe_error is None:
+        lock_path.write_text("malformed lock\n")
+    else:
+        original_stat = Path.stat
+
+        def fail_lock_stat(self, *args, **kwargs):
+            if self == lock_path:
+                raise probe_error
+            return original_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", fail_lock_stat)
+
+    assert runguard.run_recovery_status(repo, run_dir) == "unknown"
+
+
 def test_claim_is_activated_normalizes_runtime_error_from_expanduser(monkeypatch):
     """A ``RuntimeError`` from ``expanduser`` (no HOME for a ``~`` run_dir) must
     normalize to ``False``: the activation probe is best-effort and never raises."""
