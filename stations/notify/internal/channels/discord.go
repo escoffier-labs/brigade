@@ -62,20 +62,9 @@ type discordRequest struct {
 }
 
 func (d *Discord) Send(ctx context.Context, m canonical.Message) error {
-	embed := discordEmbed{
-		Title:       titleFor(m),
-		Description: m.Body,
-		Color:       colorFor(m.Level),
-	}
-	if m.Source != "" {
-		embed.Footer = &discordFooter{Text: m.Source}
-	}
-	if len(m.Tags) > 0 {
-		embed.Fields = []discordField{{
-			Name:   "tags",
-			Value:  strings.Join(m.Tags, ", "),
-			Inline: true,
-		}}
+	embed, err := fitDiscordEmbed(m)
+	if err != nil {
+		return err
 	}
 
 	payload := discordRequest{Embeds: []discordEmbed{embed}}
@@ -113,4 +102,66 @@ func colorFor(level string) int {
 	default:
 		return colorInfo
 	}
+}
+
+func fitDiscordEmbed(m canonical.Message) (discordEmbed, error) {
+	title, ok := truncateRunes(titleFor(m), DiscordTitleMax)
+	if !ok {
+		return discordEmbed{}, payloadLimitError("discord")
+	}
+	desc, ok := truncateRunes(m.Body, DiscordDescriptionMax)
+	if !ok {
+		return discordEmbed{}, payloadLimitError("discord")
+	}
+	embed := discordEmbed{
+		Title:       title,
+		Description: desc,
+		Color:       colorFor(m.Level),
+	}
+	if m.Source != "" {
+		footer, ok := truncateRunes(m.Source, DiscordFooterMax)
+		if !ok {
+			return discordEmbed{}, payloadLimitError("discord")
+		}
+		embed.Footer = &discordFooter{Text: footer}
+	}
+	if len(m.Tags) > 0 {
+		tags, ok := truncateRunes(strings.Join(m.Tags, ", "), DiscordFieldValueMax)
+		if !ok {
+			return discordEmbed{}, payloadLimitError("discord")
+		}
+		embed.Fields = []discordField{{
+			Name:   "tags",
+			Value:  tags,
+			Inline: true,
+		}}
+	}
+	if embedCharCount(embed) > DiscordEmbedTotalMax {
+		// Shrink description until the documented total embed ceiling fits.
+		overhead := embedCharCount(embed) - len(embed.Description)
+		budget := DiscordEmbedTotalMax - overhead
+		if budget < len(truncateSuffix) {
+			return discordEmbed{}, payloadLimitError("discord")
+		}
+		desc, ok = truncateRunes(m.Body, budget)
+		if !ok {
+			return discordEmbed{}, payloadLimitError("discord")
+		}
+		embed.Description = desc
+		if embedCharCount(embed) > DiscordEmbedTotalMax {
+			return discordEmbed{}, payloadLimitError("discord")
+		}
+	}
+	return embed, nil
+}
+
+func embedCharCount(e discordEmbed) int {
+	n := len(e.Title) + len(e.Description)
+	if e.Footer != nil {
+		n += len(e.Footer.Text)
+	}
+	for _, f := range e.Fields {
+		n += len(f.Name) + len(f.Value)
+	}
+	return n
 }
