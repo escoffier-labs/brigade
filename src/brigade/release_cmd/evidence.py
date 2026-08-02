@@ -543,10 +543,13 @@ def _assess(
         item for item in security_checks if item.get("name") != "security_open_findings" and item.get("status") != OK
     ]
     top_finding = security.get("top_finding") if isinstance(security.get("top_finding"), dict) else None
-    open_finding_count = int(security.get("open_finding_count") or 0)
-    if open_finding_count <= 0 and (open_finding_checks or top_finding is not None):
-        open_finding_count = 1
-    if open_finding_count > 0 or open_finding_checks or top_finding is not None:
+    reported_open_finding_count = security.get("open_finding_count")
+    open_finding_count = (
+        reported_open_finding_count
+        if isinstance(reported_open_finding_count, int) and not isinstance(reported_open_finding_count, bool)
+        else None
+    )
+    if (open_finding_count is not None and open_finding_count > 0) or open_finding_checks or top_finding is not None:
         if top_finding is not None:
             severity = str(top_finding.get("severity") or "unknown")
             category = str(top_finding.get("category") or "security")

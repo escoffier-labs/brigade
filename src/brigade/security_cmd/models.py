@@ -574,10 +574,22 @@ def inspect_evidence_bundle(path: Path) -> dict[str, Any]:
         return {"ready": False, "path": str(path), "reason": f"missing {', '.join(missing)}"}
     try:
         payload = json.loads(json_path.read_text())
+    except OSError as exc:
+        return {"ready": False, "path": str(path), "reason": f"unreadable security-report.json: {exc}"}
+    except UnicodeDecodeError as exc:
+        return {"ready": False, "path": str(path), "reason": f"security-report.json must be UTF-8: {exc}"}
     except json.JSONDecodeError as exc:
         return {"ready": False, "path": str(path), "reason": f"invalid JSON: {exc}"}
     if not isinstance(payload, dict):
         return {"ready": False, "path": str(path), "reason": "security-report.json must contain an object"}
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
+        return {"ready": False, "path": str(path), "reason": "security-report.json findings must be a list"}
+    suppressed_findings = payload.get("suppressed_findings", [])
+    if not isinstance(suppressed_findings, list):
+        return {"ready": False, "path": str(path), "reason": "security-report.json suppressed_findings must be a list"}
+    if any(not isinstance(item, dict) for item in [*findings, *suppressed_findings]):
+        return {"ready": False, "path": str(path), "reason": "security-report.json findings must contain objects"}
     return {
         "ready": True,
         "path": str(path),

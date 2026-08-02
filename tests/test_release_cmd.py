@@ -977,6 +977,70 @@ def test_release_readiness_distinguishes_security_findings_from_health_warnings(
     assert "brigade security scan; review stale suppressions" in warnings
 
 
+def test_release_readiness_blocks_unusable_security_evidence(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+    monkeypatch.setattr(
+        security_cmd,
+        "health",
+        lambda target: {
+            "valid": False,
+            "issue_count": 1,
+            "open_finding_count": None,
+            "raw_open_finding_count": None,
+            "top_issue": {"status": "fail", "name": "security_evidence", "detail": "missing security report"},
+            "top_finding": None,
+            "checks": [
+                {
+                    "status": "fail",
+                    "name": "security_evidence",
+                    "detail": "missing security report",
+                    "remediation": "brigade security scan",
+                }
+            ],
+            "evidence": {"ready": False, "reason": "missing"},
+        },
+    )
+
+    assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    blockers = "\n".join(payload["blockers"])
+
+    assert payload["status"] == "blocked"
+    assert payload["evidence"]["security"]["open_finding_count"] is None
+    assert "security_evidence: missing security report; remediation: brigade security scan" in blockers
+    assert "security_open_findings" not in blockers
+
+
+def test_release_readiness_formats_exact_open_security_count_without_top_finding(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+    monkeypatch.setattr(
+        security_cmd,
+        "health",
+        lambda target: {
+            "valid": True,
+            "issue_count": 1,
+            "open_finding_count": 2,
+            "raw_open_finding_count": 2,
+            "top_issue": None,
+            "top_finding": None,
+            "checks": [],
+            "evidence": {"ready": True, "finding_count": 2},
+        },
+    )
+
+    assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["evidence"]["security"]["open_finding_count"] == 2
+    assert "security_open_findings: 2 open finding(s); remediation: brigade security findings" in payload["blockers"]
+
+
 def test_release_readiness_names_failing_checks_and_remediation(tmp_path, monkeypatch, capsys):
     _init_repo(tmp_path)
     _seed_ready_evidence(tmp_path)

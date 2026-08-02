@@ -554,6 +554,67 @@ def test_harness_wiring_excludes_nested_worktree_brigade_work_and_lockfiles(tmp_
     assert not any(path.endswith("package-lock.json") for path in finding_paths | scanned)
 
 
+def test_security_health_fails_closed_without_usable_evidence_bundle(tmp_path):
+    payload = security_cmd.health(tmp_path)
+
+    evidence_check = next(check for check in payload["checks"] if check["name"] == "security_evidence")
+    assert payload["valid"] is False
+    assert evidence_check["status"] == "fail"
+    assert payload["open_finding_count"] is None
+
+
+def test_security_health_fails_closed_for_malformed_security_report(tmp_path):
+    evidence_dir = tmp_path / ".brigade" / "security" / "latest"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "security-report.json").write_text('{"findings": {}}\n')
+    (evidence_dir / "security-report.md").write_text("# malformed fixture\n")
+
+    payload = security_cmd.health(tmp_path)
+
+    evidence_check = next(check for check in payload["checks"] if check["name"] == "security_evidence")
+    assert payload["valid"] is False
+    assert evidence_check["status"] == "fail"
+    assert "findings must be a list" in evidence_check["detail"]
+    assert payload["open_finding_count"] is None
+
+
+def test_security_health_fails_closed_for_non_utf8_security_report(tmp_path):
+    evidence_dir = tmp_path / ".brigade" / "security" / "latest"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "security-report.json").write_bytes(b'{"findings": []}\xff')
+    (evidence_dir / "security-report.md").write_text("# invalid encoding fixture\n")
+
+    payload = security_cmd.health(tmp_path)
+
+    evidence_check = next(check for check in payload["checks"] if check["name"] == "security_evidence")
+    assert payload["valid"] is False
+    assert evidence_check["status"] == "fail"
+    assert "must be UTF-8" in evidence_check["detail"]
+    assert payload["open_finding_count"] is None
+
+
+@pytest.mark.parametrize(
+    ("report", "expected_detail"),
+    [
+        ({"findings": [1]}, "findings must contain objects"),
+        ({"findings": [], "suppressed_findings": {}}, "suppressed_findings must be a list"),
+    ],
+)
+def test_security_health_fails_closed_for_invalid_finding_shapes(tmp_path, report, expected_detail):
+    evidence_dir = tmp_path / ".brigade" / "security" / "latest"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "security-report.json").write_text(json.dumps(report))
+    (evidence_dir / "security-report.md").write_text("# invalid shape fixture\n")
+
+    payload = security_cmd.health(tmp_path)
+
+    evidence_check = next(check for check in payload["checks"] if check["name"] == "security_evidence")
+    assert payload["valid"] is False
+    assert evidence_check["status"] == "fail"
+    assert expected_detail in evidence_check["detail"]
+    assert payload["open_finding_count"] is None
+
+
 def test_security_scan_supply_chain_surfaces(tmp_path, capsys):
     (tmp_path / "package.json").write_text(
         json.dumps(

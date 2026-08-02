@@ -196,19 +196,13 @@ def _latest_closeout_json(root: Path) -> dict[str, Any] | None:
 def _security_summary(target: Path) -> dict[str, Any]:
     health = security_cmd.health(target)
     checks = [item for item in health.get("checks", []) if isinstance(item, dict)] if isinstance(health, dict) else []
-    open_finding_checks = [
-        item for item in checks if item.get("name") == "security_open_findings" and item.get("status") != OK
-    ]
     health_warning_checks = [
         item for item in checks if item.get("name") != "security_open_findings" and item.get("status") != OK
     ]
-    open_finding_count = health.get("open_finding_count")
-    if open_finding_count is None:
-        open_finding_count = 1 if (open_finding_checks or health.get("top_finding")) else 0
     return {
         "valid": health.get("valid"),
         "issue_count": health.get("issue_count"),
-        "open_finding_count": int(open_finding_count or 0),
+        "open_finding_count": health.get("open_finding_count"),
         "raw_open_finding_count": health.get("raw_open_finding_count"),
         "health_warning_count": len(health_warning_checks),
         "checks": checks,

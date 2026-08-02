@@ -112,7 +112,7 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
             }
         )
     else:
-        checks.append({"status": "warn", "name": "security_evidence", "detail": str(bundle.get("reason"))})
+        checks.append({"status": "fail", "name": "security_evidence", "detail": str(bundle.get("reason"))})
     template_audit_payload = template_privacy_payload(target)
     if template_audit_payload["finding_count"]:
         top_template = (
@@ -246,45 +246,48 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
     top_finding: dict[str, Any] | None = None
     raw_open_findings: list[dict[str, Any]] = []
     quieted_findings: list[dict[str, Any]] = []
+    open_finding_count: int | None = None
     if bundle.get("ready"):
         try:
             report = _load_report(default_artifacts_dir(target))
             raw_open_findings = [
                 item for item in _report_findings_for_review(target, report) if item.get("status") != "suppressed"
             ]
-        except (OSError, ValueError, json.JSONDecodeError):
-            raw_open_findings = []
-        quieted_findings = [
-            item
-            for item in raw_open_findings
-            if _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
-        ]
-        if isinstance(latest_closeout, dict) and quieted_findings:
-            migrated_closeout = _migrate_closeout_fingerprints(latest_closeout, quieted_findings)
-            if migrated_closeout is not None:
-                latest_closeout = migrated_closeout
-                accepted_fingerprints = {
-                    str(fingerprint)
-                    for fingerprint in latest_closeout.get("source_fingerprints", [])
-                    if isinstance(fingerprint, str) and fingerprint
-                }
-                accepted_fingerprints = _expand_suppression_fingerprints(accepted_fingerprints, migration_map)
-        records = [
-            item
-            for item in raw_open_findings
-            if not _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
-        ]
-        if records:
-            top_finding = records[0]
-            checks.append(
-                {
-                    "status": "warn",
-                    "name": "security_open_findings",
-                    "detail": f"{len(records)} open finding(s), top={top_finding.get('id')}",
-                }
-            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            checks.append({"status": "fail", "name": "security_report", "detail": f"unreadable or invalid: {exc}"})
         else:
-            checks.append({"status": "ok", "name": "security_open_findings", "detail": "none"})
+            quieted_findings = [
+                item
+                for item in raw_open_findings
+                if _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
+            ]
+            if isinstance(latest_closeout, dict) and quieted_findings:
+                migrated_closeout = _migrate_closeout_fingerprints(latest_closeout, quieted_findings)
+                if migrated_closeout is not None:
+                    latest_closeout = migrated_closeout
+                    accepted_fingerprints = {
+                        str(fingerprint)
+                        for fingerprint in latest_closeout.get("source_fingerprints", [])
+                        if isinstance(fingerprint, str) and fingerprint
+                    }
+                    accepted_fingerprints = _expand_suppression_fingerprints(accepted_fingerprints, migration_map)
+            records = [
+                item
+                for item in raw_open_findings
+                if not _finding_matches_fingerprints(item, accepted_fingerprints, migration_map=migration_map)
+            ]
+            open_finding_count = len(records)
+            if records:
+                top_finding = records[0]
+                checks.append(
+                    {
+                        "status": "warn",
+                        "name": "security_open_findings",
+                        "detail": f"{open_finding_count} open finding(s), top={top_finding.get('id')}",
+                    }
+                )
+            else:
+                checks.append({"status": "ok", "name": "security_open_findings", "detail": "none"})
     issues = [item for item in checks if item["status"] != "ok"]
     return {
         "target": str(target),
@@ -298,6 +301,7 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
         "template_privacy": template_audit_payload,
         "harness_wiring": harness_wiring,
         "suppression_cache": suppression_cache,
+        "open_finding_count": open_finding_count,
         "raw_open_finding_count": len(raw_open_findings),
         "quieted_findings": quieted_findings,
         "quieted_finding_count": len(quieted_findings),
