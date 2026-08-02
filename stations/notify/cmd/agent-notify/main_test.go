@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/escoffier-labs/agent-notify/internal/adapter"
 	"github.com/escoffier-labs/agent-notify/internal/canonical"
 	"github.com/escoffier-labs/agent-notify/internal/channels"
 	"github.com/escoffier-labs/agent-notify/internal/config"
@@ -773,5 +774,95 @@ func TestRun_CodexNotifyResolvesModelIdentity(t *testing.T) {
 	embed, _ := embeds[0].(map[string]interface{})
 	if embed["title"] != "OpenAI · gpt-5.6-sol" {
 		t.Errorf("embed title = %#v, want OpenAI · gpt-5.6-sol", embed["title"])
+	}
+}
+
+func TestRun_OversizedStdinRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("provider must not be called for oversized input")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	oversized := strings.Repeat("x", adapter.MaxInputBytes+1)
+	code, _, stderr := runMain(t,
+		[]string{"agent-notify"},
+		oversized,
+		map[string]string{"DISCORD_WEBHOOK_URL": srv.URL},
+	)
+	if code != exitConfig {
+		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitConfig, stderr)
+	}
+	if !strings.Contains(stderr, "input exceeds") {
+		t.Fatalf("stderr should mention input limit, got %q", stderr)
+	}
+	if strings.Contains(stderr, oversized[:32]) {
+		t.Fatalf("stderr must not echo oversized payload: %q", stderr)
+	}
+}
+
+func TestRun_PartialFailurePayloadLimitVisible(t *testing.T) {
+	// Discord truncates titles safely; Telegram MarkdownV2 escaping doubles
+	// "." so an oversize title cannot fit. One channel succeeds, one fails
+	// with a bounded payload_limit diagnostic and exitFailures.
+	var discordHits int
+	discordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		discordHits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer discordSrv.Close()
+
+	var telegramHits int
+	telegramSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		telegramHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer telegramSrv.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(`
+[channels.discord-main]
+type = "discord"
+webhook_url_env = "DISCORD_WEBHOOK_URL"
+
+[channels.telegram-personal]
+type = "telegram"
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+chat_id_env = "TELEGRAM_CHAT_ID"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"title": strings.Repeat(".", channels.TelegramTextMax+10),
+		"body":  "done",
+	})
+	code, _, stderr := runMain(t,
+		[]string{"agent-notify", "--config", cfgPath, "--to", "discord-main,telegram-personal"},
+		string(body),
+		map[string]string{
+			"DISCORD_WEBHOOK_URL": discordSrv.URL,
+			"TELEGRAM_BOT_TOKEN":  "SECRET-BOT-TOKEN",
+			"TELEGRAM_CHAT_ID":    "12345",
+		},
+	)
+	if code != exitFailures {
+		t.Fatalf("exit = %d, want %d (stderr=%s)", code, exitFailures, stderr)
+	}
+	if discordHits != 1 {
+		t.Fatalf("discord hits = %d, want 1", discordHits)
+	}
+	if telegramHits != 0 {
+		t.Fatalf("telegram hits = %d, want 0 (payload rejected before send)", telegramHits)
+	}
+	if !strings.Contains(stderr, "FAIL channel=telegram-personal") {
+		t.Fatalf("stderr missing telegram FAIL line: %q", stderr)
+	}
+	if !strings.Contains(stderr, "payload_limit") {
+		t.Fatalf("stderr missing payload_limit cause: %q", stderr)
+	}
+	if strings.Contains(stderr, "SECRET-BOT-TOKEN") {
+		t.Fatalf("stderr leaked bot token: %q", stderr)
 	}
 }
