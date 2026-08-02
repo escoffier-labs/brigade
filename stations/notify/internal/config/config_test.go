@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,6 +242,54 @@ timeout_seconds = 1
 	}
 	if cfg.Defaults.TimeoutSeconds != 1 {
 		t.Errorf("expected timeout 1s, got %d", cfg.Defaults.TimeoutSeconds)
+	}
+}
+
+func TestLoad_MaxTimeoutAccepted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := fmt.Sprintf(`
+[defaults]
+timeout_seconds = %d
+`, MaxTimeoutSeconds)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if int64(cfg.Defaults.TimeoutSeconds) != MaxTimeoutSeconds {
+		t.Errorf("expected timeout %d, got %d", MaxTimeoutSeconds, cfg.Defaults.TimeoutSeconds)
+	}
+}
+
+func TestLoad_TimeoutOverflowRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	overflow := MaxTimeoutSeconds + 1
+	body := fmt.Sprintf(`
+[defaults]
+timeout_seconds = %d
+`, overflow)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected Load to fail for overflowing timeout")
+	}
+	cfgErr, ok := AsConfigError(err)
+	if !ok {
+		t.Fatalf("expected ConfigError, got %T: %v", err, err)
+	}
+	if cfgErr.Field != "defaults.timeout_seconds" {
+		t.Errorf("field = %q, want defaults.timeout_seconds", cfgErr.Field)
+	}
+	if !strings.Contains(cfgErr.Detail, fmt.Sprintf("%d", overflow)) {
+		t.Errorf("detail = %q, want observed overflow value %d", cfgErr.Detail, overflow)
 	}
 }
 

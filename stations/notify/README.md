@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  Privacy-first push notifications for coding agents: Discord, Telegram, Signal. Zero telemetry, one Go binary. Brigade can plan messages; send is always opt-in.
+  Privacy-first push notifications for coding agents: Discord, Telegram, Signal. Zero telemetry, one Go binary. Brigade can plan messages. Send is always opt-in.
 </p>
 
 <p align="center">
@@ -136,8 +136,8 @@ url_env  = "SIGNAL_CLI_URL"
 from_env = "SIGNAL_FROM"
 to_env   = "SIGNAL_TO"
 
-# Delivery timeout in seconds. Omitted defaults to 10; explicit zero or
-# negative values are rejected when the config loads.
+# Delivery timeout in seconds. Omitted defaults to 10; zero, negative, or
+# unrepresentably large values are rejected when the config loads.
 [defaults]
 timeout_seconds = 10
 
@@ -166,8 +166,10 @@ identifier, or set both to `true` to include both values. These controls apply
 only to `--hook claude-code-stop`.
 
 `defaults.timeout_seconds` controls the per-channel delivery timeout. When the
-key is absent, delivery uses 10 seconds. Config load rejects explicit zero or
-negative values; a valid positive value sets the timeout for every channel send.
+key is absent, delivery uses 10 seconds. Config load rejects zero, negative, or
+unrepresentably large values (the upper bound is about 9.2 billion seconds, or
+roughly 292 years); a valid positive value sets the timeout for every channel
+send.
 
 Validate the wiring without sending a live notification:
 
@@ -339,7 +341,7 @@ Then point the upstream tool's hook config at `my-tool-notify.sh` instead.
 - **Not a hosted service.** There is no server to sign up for, no API key from us, no dashboard. It is a binary you run.
 - **Not a message queue.** There is no retry queue. A rate-limited or down channel means a dropped notification (exit code `3`), not a redelivery later.
 - **Not a templating engine.** The canonical message goes through as-is. Level, title, body, tags, and source are the whole model.
-- **Not a general-purpose alerting platform.** It does not poll, schedule, or evaluate conditions. Something else decides when to notify; `agent-notify` only delivers.
+- **Not a general-purpose alerting platform.** It does not poll, schedule, or evaluate conditions. Something else decides when to notify. `agent-notify` only delivers.
 - **Not a secrets manager.** Tokens and webhook URLs live in your environment. The config references env-var names, never literal secrets.
 
 ## Limitations (v1)

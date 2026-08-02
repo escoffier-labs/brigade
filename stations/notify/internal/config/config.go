@@ -5,10 +5,16 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
+
+// MaxTimeoutSeconds is the largest defaults.timeout_seconds value whose
+// conversion to time.Duration does not overflow.
+const MaxTimeoutSeconds = int64(time.Duration(math.MaxInt64) / time.Second)
 
 // ConfigError is a stable, field-scoped configuration diagnostic shared by
 // doctor and send. Its Error() text is the single contract both surfaces use.
@@ -105,12 +111,24 @@ func Load(path string) (*Config, error) {
 
 // Validate checks semantic constraints after TOML decode or env discovery.
 // Absent defaults.timeout_seconds keeps the pre-decode default of 10; an
-// explicit zero or negative value in TOML is rejected here.
+// explicit zero, negative, or unrepresentably large value in TOML is
+// rejected here before any network call.
 func (c *Config) Validate() error {
-	if c.Defaults.TimeoutSeconds <= 0 {
+	secs := int64(c.Defaults.TimeoutSeconds)
+	if secs <= 0 {
 		return &ConfigError{
 			Field:  "defaults.timeout_seconds",
 			Detail: fmt.Sprintf("must be greater than zero, got %d", c.Defaults.TimeoutSeconds),
+		}
+	}
+	if secs > MaxTimeoutSeconds {
+		return &ConfigError{
+			Field: "defaults.timeout_seconds",
+			Detail: fmt.Sprintf(
+				"must not exceed %d seconds, got %d",
+				MaxTimeoutSeconds,
+				c.Defaults.TimeoutSeconds,
+			),
 		}
 	}
 	return nil

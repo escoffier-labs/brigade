@@ -64,6 +64,8 @@ func TestE2E_TwoChannelsBothReceiveOneMessage(t *testing.T) {
 	discordRequests := make(chan capturedRequest, 2)
 	telegramRequests := make(chan capturedRequest, 2)
 
+	const discordWebhookPath = "/api/webhooks/e2e-id/e2e-token"
+
 	discordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		discordRequests <- captureRequest(r)
 		w.WriteHeader(http.StatusNoContent)
@@ -83,7 +85,7 @@ func TestE2E_TwoChannelsBothReceiveOneMessage(t *testing.T) {
 		[]string{"agent-notify", message},
 		"",
 		map[string]string{
-			"DISCORD_WEBHOOK_URL": discordSrv.URL,
+			"DISCORD_WEBHOOK_URL": discordSrv.URL + discordWebhookPath,
 			"TELEGRAM_BOT_TOKEN":  "TESTTOKEN",
 			"TELEGRAM_CHAT_ID":    "12345",
 		},
@@ -95,6 +97,9 @@ func TestE2E_TwoChannelsBothReceiveOneMessage(t *testing.T) {
 	discordRequest := receiveOneRequest(t, discordRequests)
 	if discordRequest.method != http.MethodPost || discordRequest.contentType != "application/json" {
 		t.Fatalf("Discord request = method %q, Content-Type %q", discordRequest.method, discordRequest.contentType)
+	}
+	if discordRequest.path != discordWebhookPath {
+		t.Fatalf("Discord path = %q, want %q", discordRequest.path, discordWebhookPath)
 	}
 	var discordPayload struct {
 		Embeds []struct {
@@ -163,8 +168,24 @@ func TestE2E_DiscordFailureStillDeliversToTelegram(t *testing.T) {
 	if code != exitFailures {
 		t.Fatalf("exit = %d, want partial-failure code %d (stderr = %s)", code, exitFailures, stderr)
 	}
-	if !strings.Contains(stderr, "FAIL channel=discord type=discord") {
+	const wantDiscordErr = "provider=discord stage=response status=500 cause=http_status"
+	var discordFailLine string
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		if strings.Contains(line, "FAIL channel=discord type=discord") {
+			discordFailLine = line
+			break
+		}
+	}
+	if discordFailLine == "" {
 		t.Fatalf("stderr does not report the Discord failure: %q", stderr)
+	}
+	const errPrefix = "error="
+	errIdx := strings.Index(discordFailLine, errPrefix)
+	if errIdx < 0 {
+		t.Fatalf("Discord FAIL line missing error field: %q", discordFailLine)
+	}
+	if got := discordFailLine[errIdx+len(errPrefix):]; got != wantDiscordErr {
+		t.Fatalf("Discord error classification = %q, want exactly %q", got, wantDiscordErr)
 	}
 	if strings.Contains(stderr, "FAIL channel=telegram") {
 		t.Fatalf("stderr reports a spurious Telegram failure: %q", stderr)
