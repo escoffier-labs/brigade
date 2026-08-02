@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time as stdlib_time
 from pathlib import Path
@@ -1360,8 +1361,8 @@ def test_run_lock_state_returns_invalid_for_cyclic_requested_run_dir(tmp_path, m
 def test_run_lock_state_never_raises_for_lock_path_resolution_errors(tmp_path, monkeypatch, exc):
     """``OSError``/``RuntimeError`` from ``lock_path`` resolution (``cwd.resolve``
     on a cyclic or vanished workspace, or ``expanduser`` with no HOME) must not
-    escape the never-raises predicate; the lock normalizes to ``absent`` so
-    callers fail closed, mirroring ``has_matching_stale_claim``."""
+    escape the never-raises predicate; the lock normalizes to ``invalid`` so
+    resume/watch refuse rather than treating the lock as absent."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     run_dir = tmp_path / "run"
@@ -1375,18 +1376,58 @@ def test_run_lock_state_never_raises_for_lock_path_resolution_errors(tmp_path, m
 
     monkeypatch.setattr(runguard, "lock_path", boom)
 
-    assert runguard.run_lock_state(workspace, run_dir) == "absent"
+    assert runguard.run_lock_state(workspace, run_dir) == "invalid"
 
 
 def test_run_lock_state_never_raises_for_unresolvable_workspace(tmp_path, monkeypatch):
     """A real unresolvable workspace (cyclic symlink) must normalize to
-    ``absent`` rather than escape ``run_lock_state`` with ``OSError``."""
+    ``invalid`` rather than escape ``run_lock_state`` with ``OSError``."""
     cyclic = tmp_path / "cyclic"
     cyclic.symlink_to(cyclic, target_is_directory=True)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
-    assert runguard.run_lock_state(cyclic, run_dir) == "absent"
+    assert runguard.run_lock_state(cyclic, run_dir) == "invalid"
+
+
+def test_run_lock_state_returns_invalid_for_exists_suppressed_oserror(tmp_path, monkeypatch):
+    """``Path.exists()`` can return absent for some ``stat`` failures; the
+    single-stat probe must classify those as ``invalid`` instead."""
+    repo = _repo(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    lock_path = runguard.lock_path(repo)
+    real_stat = Path.stat
+
+    def stat_raises_eacces(self, *args, **kwargs):
+        if self == lock_path:
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_raises_eacces)
+
+    assert runguard.run_lock_state(repo, run_dir) == "invalid"
+
+
+def test_lock_is_stale_treats_vanished_path_as_stale_not_malformed(tmp_path, monkeypatch):
+    """A lock path that vanishes between probes must not be reported malformed."""
+    lock_path = tmp_path / "run.lock"
+    lock_path.mkdir()
+    (lock_path / "pid").write_text("99999999\n")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    shutil.rmtree(lock_path)
+
+    assert runguard._lock_is_stale(lock_path) is True
+
+
+def test_lock_is_stale_still_rejects_non_directory_lock(tmp_path):
+    lock_path = tmp_path / "run.lock"
+    lock_path.write_text("not a directory\n")
+
+    with pytest.raises(runguard.RunLockError, match="malformed run lock"):
+        runguard._lock_is_stale(lock_path)
+
+    assert lock_path.is_file()
 
 
 def test_recover_stale_run_invokes_before_terminalize_after_token_check(tmp_path, monkeypatch):

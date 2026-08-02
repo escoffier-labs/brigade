@@ -163,8 +163,7 @@ def _pid_is_active(pid: int) -> bool:
 
 
 def _lock_is_stale(path: Path) -> bool:
-    if path.exists() and not path.is_dir():
-        raise RunLockError(f"malformed run lock is not a directory: {path}")
+    _lock_path_is_directory(path)
     recorded_pids: list[int] = []
     try:
         recorded_pids.append(int((path / "pid").read_text().strip()))
@@ -550,14 +549,13 @@ def run_lock_state(workspace: Path, run_dir: Path) -> str:
         # and ``OSError``/``RuntimeError`` from path resolution (``resolve``,
         # or ``expanduser`` when HOME is unavailable) for a non-worktree
         # workspace. The predicate is never-raises: an unresolvable workspace
-        # normalizes to ``absent`` so callers fail closed.
-        return "absent"
+        # normalizes to ``invalid`` so resume/watch refuse rather than treating
+        # the lock as absent.
+        return "invalid"
     try:
-        if not path.exists():
+        if _lock_path_is_directory(path) is None:
             return "absent"
-        if not path.is_dir():
-            return "invalid"
-    except OSError:
+    except RunLockError:
         return "invalid"
     owner = _read_lock_owner(path)
     if owner is None:

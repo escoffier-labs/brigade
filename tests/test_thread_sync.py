@@ -91,17 +91,22 @@ def test_thread_gate_open_close_handoff():
     thread_sync.join_thread(thread, description="gate worker")
 
 
-def test_note_cleanup_failure_uses_add_note_when_available(monkeypatch):
-    primary = RuntimeError("primary failure")
+class _ExceptionWithAddNote(Exception):
+    """Portable stand-in for PEP 678 ``add_note`` on interpreters before 3.11."""
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+        self._notes: list[str] = []
+
+    def add_note(self, message: str) -> None:
+        self._notes.append(message)
+
+
+def test_note_cleanup_failure_uses_add_note_when_available():
+    primary = _ExceptionWithAddNote("primary failure")
     cleanup = ValueError("cleanup failure")
-    notes: list[str] = []
-
-    def fake_add_note(message: str) -> None:
-        notes.append(message)
-
-    monkeypatch.setattr(primary, "add_note", fake_add_note)
     thread_sync.note_cleanup_failure(primary, cleanup)
-    assert notes == ["cleanup failed: ValueError('cleanup failure')"]
+    assert primary._notes == ["cleanup failed: ValueError('cleanup failure')"]
 
 
 def test_note_cleanup_failure_appends_to_args_without_add_note(monkeypatch):
