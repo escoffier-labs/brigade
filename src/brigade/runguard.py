@@ -163,8 +163,7 @@ def _pid_is_active(pid: int) -> bool:
 
 
 def _lock_is_stale(path: Path) -> bool:
-    if path.exists() and not path.is_dir():
-        raise RunLockError(f"malformed run lock is not a directory: {path}")
+    _lock_path_is_directory(path)
     recorded_pids: list[int] = []
     try:
         recorded_pids.append(int((path / "pid").read_text().strip()))
@@ -207,7 +206,7 @@ def _publish_lock(path: Path, *, run_dir: Path | None) -> _LockOwnership:
         try:
             candidate.rename(path)
         except OSError:
-            if path.exists():
+            if _lock_path_is_directory(path) is not None:
                 raise FileExistsError(path) from None
             raise
     finally:
@@ -550,14 +549,13 @@ def run_lock_state(workspace: Path, run_dir: Path) -> str:
         # and ``OSError``/``RuntimeError`` from path resolution (``resolve``,
         # or ``expanduser`` when HOME is unavailable) for a non-worktree
         # workspace. The predicate is never-raises: an unresolvable workspace
-        # normalizes to ``absent`` so callers fail closed.
-        return "absent"
+        # normalizes to ``invalid`` so resume/watch refuse rather than treating
+        # the lock as absent.
+        return "invalid"
     try:
-        if not path.exists():
+        if _lock_path_is_directory(path) is None:
             return "absent"
-        if not path.is_dir():
-            return "invalid"
-    except OSError:
+    except RunLockError:
         return "invalid"
     owner = _read_lock_owner(path)
     if owner is None:
@@ -692,14 +690,12 @@ def recover_stale_run(
 ) -> bool:
     run_dir = run_dir.expanduser().resolve()
     path = lock_path(cwd)
-    if path.exists() and not path.is_dir():
-        raise RunLockError(f"malformed run lock is not a directory: {path}")
-    if path.is_dir():
+    if _lock_path_is_directory(path) is not None:
         owner = _read_lock_owner(path)
         if owner is not None and _owner_matches_run(owner, run_dir):
             stale = _claim_stale_lock(path)
             if stale is None:
-                if path.exists():
+                if _lock_path_is_directory(path) is not None:
                     raise RunLockError(f"run owner process is still active: {path}")
             else:
                 claimed, claimed_owner = stale
@@ -723,17 +719,37 @@ def run_recovery_status(cwd: Path, run_dir: Path) -> str:
     if not cwd.is_dir():
         return "unknown"
     path = lock_path(cwd)
-    if path.exists() and not path.is_dir():
+    try:
+        lock_is_directory = _lock_path_is_directory(path)
+    except RunLockError:
         return "unknown"
-    candidates = ([path] if path.is_dir() else []) + _stale_claims(path)
+    candidates = ([path] if lock_is_directory is not None else []) + _stale_claims(path)
     saw_unreadable = False
     for candidate in candidates:
         owner = _read_lock_owner(candidate)
         if owner is None:
+            if candidate == path:
+                try:
+                    if _lock_path_is_directory(path) is None:
+                        continue
+                except RunLockError:
+                    return "unknown"
             saw_unreadable = True
         elif _owner_matches_run(owner, run_dir):
             return "required"
     return "unknown" if saw_unreadable else "cleared"
+
+
+def _lock_path_is_directory(path: Path) -> bool | None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
+    if not stat.S_ISDIR(mode):
+        raise RunLockError(f"malformed run lock is not a directory: {path}")
+    return True
 
 
 def _acquire_lock(path: Path, *, run_dir: Path | None = None) -> _LockOwnership:
@@ -741,11 +757,11 @@ def _acquire_lock(path: Path, *, run_dir: Path | None = None) -> _LockOwnership:
         try:
             ownership = _publish_lock(path, run_dir=run_dir)
         except FileExistsError:
-            if path.exists() and not path.is_dir():
-                raise RunLockError(f"malformed run lock is not a directory: {path}") from None
+            if _lock_path_is_directory(path) is None:
+                continue
             stale = _claim_stale_lock(path)
             if stale is None:
-                if not path.exists():
+                if _lock_path_is_directory(path) is None:
                     continue
                 raise RunLockError(
                     f"another brigade run appears active: {path}. Remove the lock only if no run is active."

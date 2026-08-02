@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import thread_sync
+
 from brigade import aboyeur
 from brigade import cli
 from brigade import daily_cmd
@@ -762,6 +764,9 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
         record = _tool_call()
         record["status"] = "completed"
     run_dir, _ = _approval_run(tmp_path, source=source, record=record)
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["lifecycle_journal_requested"] = True
+    _write_json(run_dir / "run.json", run_meta)
     redeemed_at = _mark_redeemed(record, run_dir.name)
     if source == "daily":
         record["consumed_at"] = redeemed_at
@@ -777,14 +782,55 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
         monkeypatch.setattr(tools_cmd.calls, "_call_run_blockers", lambda target, call: [])
 
     append_entered = threading.Event()
-    review_started = threading.Event()
+    attempted_before_snapshot = threading.Event()
+    lock_contended = threading.Event()
+    successful_before_snapshot = threading.Event()
     review_finished = threading.Event()
     review_result = []
     events = []
+    snapshot_refreshing = threading.Event()
+    refresh_started = threading.Event()
+    snapshot_done = threading.Event()
+    snapshot_classification = threading.Lock()
+    if source == "daily":
+        source_store_lock_path = daily_cmd.approvals._approval_lock_path(tmp_path, record["approval_id"]).resolve()
+    else:
+        source_store_lock_path = tools_cmd.calls._calls_lock_path(tmp_path).resolve()
+    original_acquire_lock = runguard._acquire_lock
+    original_record_lifecycle_event = run_lifecycle.record_lifecycle_event
+    original_refresh_resumed_snapshot = runs_cmd._refresh_resumed_snapshot
+
+    def instrumented_acquire_lock(path, *, run_dir=None):
+        if Path(path).resolve() == source_store_lock_path:
+            with snapshot_classification:
+                during_refresh = snapshot_refreshing.is_set() and not snapshot_done.is_set()
+                if during_refresh:
+                    attempted_before_snapshot.set()
+            if during_refresh:
+                try:
+                    ownership = original_acquire_lock(path, run_dir=run_dir)
+                except runguard.RunLockError as exc:
+                    if "another brigade run appears active" in str(exc):
+                        with snapshot_classification:
+                            lock_contended.set()
+                    raise
+                with snapshot_classification:
+                    succeeded_during_refresh = snapshot_refreshing.is_set() and not snapshot_done.is_set()
+                    if succeeded_during_refresh:
+                        successful_before_snapshot.set()
+                if not succeeded_during_refresh:
+                    return ownership
+                runguard._release_lock(path, ownership)
+                raise AssertionError(
+                    "source-store lock acquired before journal commit completed: "
+                    f"events={events!r} refresh_started={refresh_started.is_set()}"
+                )
+        return original_acquire_lock(path, run_dir=run_dir)
 
     def review_source():
-        assert append_entered.wait(2)
-        review_started.set()
+        thread_sync.wait_for_event(append_entered, description="journal append entered")
+        if thread_sync.current_thread_cancelled():
+            return
         if source == "daily":
             rc = daily_cmd.approvals_hold(
                 target=tmp_path,
@@ -801,30 +847,61 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
         review_finished.set()
 
     def append_fact(*args, event_type, **kwargs):
-        if not events:
+        if not snapshot_refreshing.is_set():
+            snapshot_refreshing.set()
             append_entered.set()
-            assert review_started.wait(2)
-            assert not review_finished.wait(0.2)
+            run_lifecycle.prepare_lifecycle_journal(run_dir, workspace=tmp_path)
+            thread_sync.wait_for_predicate(
+                lambda: lock_contended.is_set() or successful_before_snapshot.is_set() or not reviewer.is_alive(),
+                description="reviewer source-store lock attempt outcome",
+            )
+            if not reviewer.is_alive() and not attempted_before_snapshot.is_set():
+                thread_sync.join_thread(reviewer, description="reviewer failed before source-lock attempt")
+            assert attempted_before_snapshot.is_set()
+            if successful_before_snapshot.is_set():
+                raise AssertionError("source-store lock released before journal commit")
+            assert lock_contended.is_set()
+            assert not review_finished.is_set()
+        original_record_lifecycle_event(*args, event_type=event_type, **kwargs)
         events.append(event_type)
 
+    def refresh_resumed_snapshot(*args, **kwargs):
+        refresh_started.set()
+        result = original_refresh_resumed_snapshot(*args, **kwargs)
+        with snapshot_classification:
+            snapshot_done.set()
+        return result
+
+    monkeypatch.setattr(runguard, "_acquire_lock", instrumented_acquire_lock)
     monkeypatch.setattr(run_lifecycle, "record_lifecycle_event", append_fact)
-    reviewer = threading.Thread(target=review_source)
-    reviewer.start()
-    assert runs_cmd.resume(run_dir) == 0
-    reviewer.join(2)
-    assert not reviewer.is_alive()
-    assert review_result == [1]
-    assert events == ["approval.consumed", "run.resumed"]
-    if source == "daily":
-        stored = daily_cmd.approvals._find_approval(tmp_path, record["approval_id"])
-        assert stored is not None
-        assert stored["status"] == "consumed"
-    else:
-        stored, _calls, error = tools_cmd.calls._resolve_call(tmp_path, record["id"])
-        assert error is None
-        assert stored is not None
-        assert stored["status"] == "completed"
-    capsys.readouterr()
+    monkeypatch.setattr(runs_cmd, "_refresh_resumed_snapshot", refresh_resumed_snapshot)
+    reviewer = thread_sync.start_thread(review_source)
+    try:
+        assert runs_cmd.resume(run_dir) == 0
+        thread_sync.join_thread(reviewer, description="reviewer thread finished")
+        assert snapshot_done.is_set()
+        assert attempted_before_snapshot.is_set()
+        assert not successful_before_snapshot.is_set()
+        assert review_result == [1]
+        assert events == ["approval.consumed", "run.resumed"]
+        if source == "daily":
+            stored = daily_cmd.approvals._find_approval(tmp_path, record["approval_id"])
+            assert stored is not None
+            assert stored["status"] == "consumed"
+        else:
+            stored, _calls, error = tools_cmd.calls._resolve_call(tmp_path, record["id"])
+            assert error is None
+            assert stored is not None
+            assert stored["status"] == "completed"
+        capsys.readouterr()
+    except BaseException as primary_error:
+        append_entered.set()
+        thread_sync.cancel_thread(reviewer)
+        try:
+            thread_sync.join_thread(reviewer, description="reviewer cleanup", hard_timeout=1.0)
+        except BaseException as cleanup_error:
+            thread_sync.note_cleanup_failure(primary_error, cleanup_error)
+        raise
 
 
 @pytest.mark.parametrize("source", ["daily", "tool"])
@@ -943,6 +1020,40 @@ def test_watch_handles_artifact_collection_completion_race(tmp_path, monkeypatch
     assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 0
 
 
+def test_watch_handles_artifact_collection_lock_vanishing_during_probe(tmp_path, monkeypatch, capsys):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_path = run_dir / "run.json"
+    payload = {
+        "status": "artifact-collection",
+        "cwd": str(tmp_path),
+        "lock_workspace": str(tmp_path),
+        "started_at": "2026-07-17T00:00:00Z",
+    }
+    _write_json(run_path, payload)
+    lock_path = runguard.lock_path(tmp_path)
+    lock_path.mkdir(parents=True)
+    original_lstat = Path.lstat
+    vanished = False
+
+    def finish_after_successful_lock_lstat(self, *args, **kwargs):
+        nonlocal vanished
+        result = original_lstat(self, *args, **kwargs)
+        if self == lock_path and not vanished:
+            shutil.rmtree(lock_path)
+            payload["status"] = "ok"
+            payload["finished_at"] = "2026-07-17T00:00:01Z"
+            _write_json(run_path, payload)
+            vanished = True
+        return result
+
+    monkeypatch.setattr(Path, "lstat", finish_after_successful_lock_lstat)
+
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 0
+    assert vanished is True
+    assert "artifact-collection recovery failed" not in capsys.readouterr().err
+
+
 def test_watch_stops_on_pending_approval_with_no_lock(tmp_path, capsys):
     approval = _daily_approval(status="pending")
     run_dir, _ = _approval_run(tmp_path, source="daily", record=approval)
@@ -961,31 +1072,52 @@ def test_watch_waits_for_consumed_approval_while_provider_lock_is_live(tmp_path,
     meta["approval_reference"]["consuming_run_id"] = run_dir.name
     _write_json(run_path, meta)
 
-    consumed_observed = threading.Event()
-    original_poll = runs_cmd._poll_watch_artifacts
+    watch_holding_on_live_lock = threading.Event()
+    provider_finish_gate = thread_sync.ThreadGate()
 
-    def observe_poll(*args, **kwargs):
-        result = original_poll(*args, **kwargs)
-        current = result[0]
-        if current is not None and runs_cmd._approval_needs_reconciliation(current):
-            consumed_observed.set()
-        return result
+    def coordinating_sleep(interval):
+        run_meta = json.loads(run_path.read_text())
+        if runs_cmd._approval_needs_reconciliation(run_meta) and runguard.run_lock_state(tmp_path, run_dir) == "live":
+            watch_holding_on_live_lock.set()
+            provider_finish_gate.wait_open(description="provider finished run under live lock")
+        system_time.sleep(interval)
 
-    monkeypatch.setattr(runs_cmd, "_poll_watch_artifacts", observe_poll)
+    class RunsTimeProxy:
+        def sleep(self, interval):
+            coordinating_sleep(interval)
+
+        def __getattr__(self, name):
+            return getattr(system_time, name)
+
+    monkeypatch.setattr(runs_cmd, "time", RunsTimeProxy())
 
     def finish_provider():
-        assert consumed_observed.wait(timeout=2)
+        thread_sync.wait_for_event(
+            watch_holding_on_live_lock,
+            description="watch entered live-lock wait for consumed approval",
+        )
+        if thread_sync.current_thread_cancelled():
+            return
         finished = json.loads(run_path.read_text())
         finished["status"] = "ok"
         finished["finished_at"] = "2026-07-30T18:10:00+00:00"
         _write_json(run_path, finished)
+        provider_finish_gate.open()
 
-    worker = threading.Thread(target=finish_provider)
     with runguard.run_lock(tmp_path, run_dir=run_dir):
-        worker.start()
-        assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.001) == 0
-    worker.join(timeout=2)
-    assert not worker.is_alive()
+        worker = thread_sync.start_thread(finish_provider)
+        try:
+            assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.001) == 0
+            thread_sync.join_thread(worker, description="provider worker")
+        except BaseException as primary_error:
+            watch_holding_on_live_lock.set()
+            provider_finish_gate.open()
+            thread_sync.cancel_thread(worker)
+            try:
+                thread_sync.join_thread(worker, description="provider worker cleanup", hard_timeout=1.0)
+            except BaseException as cleanup_error:
+                thread_sync.note_cleanup_failure(primary_error, cleanup_error)
+            raise
 
 
 def test_watch_consumed_approval_without_lock_requests_resume_reconciliation(tmp_path, capsys):
