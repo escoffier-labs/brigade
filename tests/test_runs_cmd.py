@@ -779,14 +779,45 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
         monkeypatch.setattr(tools_cmd.calls, "_call_run_blockers", lambda target, call: [])
 
     append_entered = threading.Event()
-    review_started = threading.Event()
+    lock_contended = threading.Event()
+    lock_acquired = threading.Event()
     review_finished = threading.Event()
     review_result = []
     events = []
+    if source == "daily":
+        source_store_lock_path = daily_cmd.approvals._approval_lock_path(
+            tmp_path, record["approval_id"]
+        ).resolve()
+    else:
+        source_store_lock_path = tools_cmd.calls._calls_lock_path(tmp_path).resolve()
+    original_acquire_lock = runguard._acquire_lock
+    outcome_recorded = threading.Lock()
+    outcome_observed = {"done": False}
+
+    def instrumented_acquire_lock(path, *, run_dir=None):
+        if (
+            append_entered.is_set()
+            and not outcome_observed["done"]
+            and Path(path).resolve() == source_store_lock_path
+        ):
+            try:
+                ownership = original_acquire_lock(path, run_dir=run_dir)
+            except runguard.RunLockError as exc:
+                if "another brigade run appears active" in str(exc):
+                    with outcome_recorded:
+                        if not outcome_observed["done"]:
+                            lock_contended.set()
+                            outcome_observed["done"] = True
+                raise
+            with outcome_recorded:
+                if not outcome_observed["done"]:
+                    lock_acquired.set()
+                    outcome_observed["done"] = True
+            return ownership
+        return original_acquire_lock(path, run_dir=run_dir)
 
     def review_source():
         thread_sync.wait_for_event(append_entered, description="journal append entered")
-        review_started.set()
         if source == "daily":
             rc = daily_cmd.approvals_hold(
                 target=tmp_path,
@@ -805,10 +836,17 @@ def test_redeemed_reconciliation_holds_source_lock_through_journal_commit(
     def append_fact(*args, event_type, **kwargs):
         if not events:
             append_entered.set()
-            thread_sync.wait_for_event(review_started, description="reviewer thread started")
+            thread_sync.wait_for_predicate(
+                lambda: lock_contended.is_set() or lock_acquired.is_set(),
+                description="source-store lock contention outcome",
+            )
+            if lock_acquired.is_set():
+                raise AssertionError("source-store lock released before journal commit")
+            assert lock_contended.is_set()
             assert not review_finished.is_set()
         events.append(event_type)
 
+    monkeypatch.setattr(runguard, "_acquire_lock", instrumented_acquire_lock)
     monkeypatch.setattr(run_lifecycle, "record_lifecycle_event", append_fact)
     reviewer = thread_sync.start_thread(review_source)
     assert runs_cmd.resume(run_dir) == 0
