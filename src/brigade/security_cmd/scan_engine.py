@@ -16,10 +16,9 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import urlparse
 
-from .. import work_cmd
+from .. import localio, work_cmd
 from ..selection import WRITER_INBOXES
 from ..untrusted import PROMPT_INJECTION_RE, scan_untrusted
-from .. import localio
 from ..localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
 from . import models as _family_base
@@ -212,13 +211,14 @@ def _is_harness_wiring_document(path: Path, target: Path) -> bool:
         return False
     if parts and parts[0] == ".brigade":
         return path.name == "handoff-sources.json" or (len(parts) >= 2 and parts[1] in {"hermes", "openclaw"})
-    if parts and parts[0] in HARNESS_ROOTS:
-        return True
-    if len(parts) >= 4 and parts[0] == "src" and parts[1] == "brigade" and parts[2] == "templates":
-        return True
-    if parts and parts[0] == "templates":
-        return True
-    return False
+    return bool(
+        parts
+        and (
+            parts[0] in HARNESS_ROOTS
+            or parts[0] == "templates"
+            or (len(parts) >= 4 and parts[:3] == ("src", "brigade", "templates"))
+        )
+    )
 
 
 def _scan_harness_wiring_document(
@@ -1565,10 +1565,9 @@ def _scan_handoff_inboxes(
     """Screen pending handoff notes for injection signals.
 
     Handoff inboxes are excluded from the line scanner via SKIP_PREFIXES so
-    untrusted note content is not attributed to the repo author. This pass
-    reports the same content through the untrusted-context lens instead:
-    a pending note carrying injection-style instructions should be reviewed
-    before any ingester reads it. `processed/` and TEMPLATE.md are skipped.
+    untrusted note content is not attributed to the repo author. Injection-style
+    instructions are reported through the untrusted-context lens for review before
+    any ingester reads them. `processed/` and TEMPLATE.md are skipped.
     """
     scanned: list[str] = []
     for inbox_rel in sorted(set(WRITER_INBOXES.values())):
@@ -1644,7 +1643,8 @@ def scan_target(
                 classification=classification,
             )
         _scan_mcp_document(findings, target=target, path=path, text=text, classification=classification)
-        _scan_harness_wiring_document(findings, target=target, path=path, text=text, classification=classification)
+        if not _should_skip_harness_wiring_path(path, target):
+            _scan_harness_wiring_document(findings, target=target, path=path, text=text, classification=classification)
         _scan_package_json(findings, target=target, path=path, text=text, classification=classification)
         _scan_github_actions(findings, target=target, path=path, text=text, classification=classification)
         _scan_python_project(findings, target=target, path=path, text=text, classification=classification)

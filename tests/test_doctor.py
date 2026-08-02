@@ -356,6 +356,7 @@ def test_doctor_reports_security_config_and_evidence_bundle(tmp_target: Path, ca
             {
                 "generated_at": "2026-05-26T12:00:00Z",
                 "finding_count": 0,
+                "findings": [],
                 "policy": "personal",
             }
         )

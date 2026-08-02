@@ -309,6 +309,53 @@ HARNESS_ROOTS = {
 }
 
 
+# Dependency lockfiles under harness roots (for example `.opencode/package-lock.json`)
+# are not harness wiring documents. Exclude them from harness-wiring scans only.
+HARNESS_WIRING_LOCKFILE_NAMES = frozenset(
+    {
+        "Cargo.lock",
+        "Gemfile.lock",
+        "Pipfile.lock",
+        "composer.lock",
+        "go.sum",
+        "npm-shrinkwrap.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+        "uv.lock",
+        "yarn.lock",
+    }
+)
+
+
+def _should_skip_harness_wiring_path(path: Path, target: Path) -> bool:
+    """Exclude nested worktrees, Brigade work artifacts, and lockfiles from wiring scans only."""
+    try:
+        rel = path.relative_to(target)
+    except ValueError:
+        return True
+    if path.name in HARNESS_WIRING_LOCKFILE_NAMES:
+        return True
+    parts = rel.parts
+    if any(parts[index : index + 2] == (".brigade", "work") for index in range(len(parts) - 1)):
+        return True
+    for ancestor in path.parents:
+        if ancestor == target:
+            break
+        try:
+            ancestor.relative_to(target)
+        except ValueError:
+            break
+        git_marker = ancestor / ".git"
+        try:
+            marker_text = git_marker.read_text(encoding="utf-8", errors="replace") if git_marker.is_file() else ""
+        except OSError:
+            continue
+        if marker_text.strip().startswith("gitdir:"):
+            return True
+    return False
+
+
 HARNESS_PATH_KEYS = {
     "bootstrap_files",
     "cache_path",
@@ -554,11 +601,23 @@ def inspect_evidence_bundle(path: Path) -> dict[str, Any]:
     if missing:
         return {"ready": False, "path": str(path), "reason": f"missing {', '.join(missing)}"}
     try:
-        payload = json.loads(json_path.read_text())
-    except json.JSONDecodeError as exc:
-        return {"ready": False, "path": str(path), "reason": f"invalid JSON: {exc}"}
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except OSError:
+        return {"ready": False, "path": str(path), "reason": "unreadable security-report.json"}
+    except UnicodeDecodeError:
+        return {"ready": False, "path": str(path), "reason": "security-report.json must be UTF-8"}
+    except json.JSONDecodeError:
+        return {"ready": False, "path": str(path), "reason": "security-report.json is invalid JSON"}
     if not isinstance(payload, dict):
         return {"ready": False, "path": str(path), "reason": "security-report.json must contain an object"}
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
+        return {"ready": False, "path": str(path), "reason": "security-report.json findings must be a list"}
+    suppressed_findings = payload.get("suppressed_findings", [])
+    if not isinstance(suppressed_findings, list):
+        return {"ready": False, "path": str(path), "reason": "security-report.json suppressed_findings must be a list"}
+    if any(not isinstance(item, dict) for item in [*findings, *suppressed_findings]):
+        return {"ready": False, "path": str(path), "reason": "security-report.json findings must contain objects"}
     return {
         "ready": True,
         "path": str(path),

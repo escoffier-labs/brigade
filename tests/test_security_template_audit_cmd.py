@@ -43,6 +43,11 @@ def test_security_template_audit_flags_private_values_and_integrates_with_releas
     assert "abcd1234" not in rendered
     assert "[REDACTED]" in rendered
 
+    security_dir = tmp_path / ".brigade" / "security" / "latest"
+    security_dir.mkdir(parents=True)
+    (security_dir / "security-report.json").write_text(json.dumps({"finding_count": 0, "findings": []}))
+    (security_dir / "security-report.md").write_text("# Brigade Security Report\n")
+
     assert cli.main(["security", "doctor", "--target", str(tmp_path), "--json"]) == 0
     doctor = json.loads(capsys.readouterr().out)
     assert doctor["template_privacy"]["finding_count"] == 3

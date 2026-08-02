@@ -53,6 +53,13 @@ RELEASE_PRIVATE_VALUE_RE = re.compile(
 
 RELEASE_PRIVATE_PATH_RE = re.compile(r"(?<!`)/(?:home|Users|private|mnt|Volumes)/[^\s`)]+")
 
+RELEASE_REPORT_URL_RE = re.compile(r"(?i)https?://[^\s]+")
+
+RELEASE_REPORT_TOKEN_RE = re.compile(
+    r"(?i)\b(?:bearer\s+[A-Za-z0-9._~+/=-]{8,}|github_pat_[A-Za-z0-9_]{8,}|ghp_[A-Za-z0-9]{8,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{8,}|sk-(?:live|test|proj)-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{12,})\b"
+)
+
 SCHEMA_MANIFEST_VERSION = 1
 
 INSTALL_SMOKE_STALE_HOURS = 168
@@ -193,17 +200,115 @@ def _latest_closeout_json(root: Path) -> dict[str, Any] | None:
     return None
 
 
+def _release_report_safe_text(value: object, *, fallback: str = "", limit: int = 180) -> str:
+    rendered = str(value if value is not None else fallback)
+    rendered = RELEASE_REPORT_URL_RE.sub("[redacted-url]", rendered)
+    rendered = RELEASE_REPORT_TOKEN_RE.sub("[redacted]", rendered)
+    rendered = RELEASE_PRIVATE_VALUE_RE.sub(lambda match: f"{match.group(1)}=[redacted]", rendered)
+    rendered = RELEASE_PRIVATE_PATH_RE.sub("[redacted-path]", rendered)
+    rendered = " ".join(rendered.split())
+    if len(rendered) <= limit:
+        return rendered
+    return rendered[: limit - 3].rstrip() + "..."
+
+
+def _release_safe_security_check(check: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {
+        "status": _release_report_safe_text(check.get("status"), fallback="unknown", limit=16),
+        "name": _release_report_safe_text(check.get("name"), fallback="unnamed_check", limit=80),
+        "detail": _release_report_safe_text(check.get("detail"), limit=240),
+    }
+    for key in ("remediation", "suggested_next_command", "next_command"):
+        if key in check:
+            safe[key] = _release_report_safe_text(check.get(key), limit=180)
+    return safe
+
+
+def _release_safe_top_finding(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    safe: dict[str, Any] = {}
+    limits = {
+        "id": 120,
+        "severity": 32,
+        "category": 48,
+        "title": 180,
+        "path": 160,
+    }
+    for key, limit in limits.items():
+        if key in value:
+            safe[key] = _release_report_safe_text(value.get(key), limit=limit)
+    line = value.get("line")
+    if isinstance(line, int) and not isinstance(line, bool):
+        safe["line"] = line
+    elif line is not None:
+        safe["line"] = _release_report_safe_text(line, limit=32)
+    remediation = value.get("remediation_hint") or value.get("suggestion")
+    if remediation is not None:
+        safe["remediation_hint"] = _release_report_safe_text(remediation, limit=220)
+    return safe
+
+
 def _security_summary(target: Path) -> dict[str, Any]:
     health = security_cmd.health(target)
+    checks = (
+        [_release_safe_security_check(item) for item in health.get("checks", []) if isinstance(item, dict)]
+        if isinstance(health, dict)
+        else []
+    )
+    health_warning_checks = [
+        item for item in checks if item.get("name") != "security_open_findings" and item.get("status") == WARN
+    ]
     return {
         "valid": health.get("valid"),
         "issue_count": health.get("issue_count"),
-        "top_issue": health.get("top_issue"),
-        "top_finding": health.get("top_finding"),
+        "open_finding_count": health.get("open_finding_count"),
+        "raw_open_finding_count": health.get("raw_open_finding_count"),
+        "health_warning_count": len(health_warning_checks),
+        "checks": checks,
+        "top_issue": _release_safe_security_check(health["top_issue"])
+        if isinstance(health.get("top_issue"), dict)
+        else None,
+        "top_finding": _release_safe_top_finding(health.get("top_finding")),
         "evidence": health.get("evidence"),
         "template_privacy": health.get("template_privacy"),
         "latest_closeout": health.get("latest_closeout"),
     }
+
+
+def _check_remediation_text(check: dict[str, Any]) -> str:
+    for key in ("remediation", "suggested_next_command", "next_command"):
+        value = check.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    name = str(check.get("name") or "")
+    defaults = {
+        "security_open_findings": "brigade security findings",
+        "security_harness_wiring": "brigade security doctor --json",
+        "security_stale_suppressions": "brigade security scan; review stale suppressions",
+        "security_suppression_reasons": "brigade security suppress --help",
+        "security_config": "brigade security init",
+        "security_evidence": "brigade security scan",
+        "security_report": "brigade security scan",
+        "security_template_privacy": "brigade security template-audit",
+        "security_suppressions": "brigade security doctor --json",
+        "security_suppressions_cache": "brigade security doctor --json",
+    }
+    if name in defaults:
+        return defaults[name]
+    if name.startswith("content_guard_"):
+        guard_name = name.removeprefix("content_guard_")
+        return f"brigade content-guard check --name {guard_name}"
+    return f"investigate {name}" if name else "investigate failing check"
+
+
+def _format_readiness_check(check: dict[str, Any]) -> str:
+    name = _release_report_safe_text(check.get("name"), fallback="unnamed_check", limit=80)
+    detail = _release_report_safe_text(check.get("detail"), limit=240)
+    remediation = _release_report_safe_text(_check_remediation_text(check), limit=180)
+    if detail:
+        return f"{name}: {detail}; remediation: {remediation}"
+    return f"{name}; remediation: {remediation}"
 
 
 def _changed_files(target: Path, base_ref: str | None) -> list[str]:

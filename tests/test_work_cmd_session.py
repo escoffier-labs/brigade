@@ -82,7 +82,7 @@ def test_work_doctor_reports_ready_repo(tmp_path, monkeypatch, capsys):
     security_dir.mkdir(parents=True)
     _write_json(
         security_dir / "security-report.json",
-        {"generated_at": "2026-05-26T12:00:00Z", "finding_count": 0, "policy": "personal"},
+        {"generated_at": "2026-05-26T12:00:00Z", "finding_count": 0, "findings": [], "policy": "personal"},
     )
     (security_dir / "security-report.md").write_text("# Brigade Security Report\n")
     run_dir = tmp_path / ".brigade" / "runs" / "latest"

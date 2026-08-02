@@ -191,6 +191,8 @@ def harness_wiring_payload(target: Path) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     scanned_files: list[str] = []
     for path in _iter_scan_files(target):
+        if _should_skip_harness_wiring_path(path, target):
+            continue
         if not _is_harness_wiring_document(path, target):
             continue
         try:

