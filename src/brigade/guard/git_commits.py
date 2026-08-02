@@ -8,6 +8,7 @@ import sys
 from .engine import scan_text
 from .policy import Policy, load_policy
 from .report import to_text
+from .rev_range import git_has_head, validate_rev_range_operand
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -16,8 +17,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Scan Git commit messages before publishing or pushing.",
     )
     parser.add_argument("--policy", help="JSON policy file")
-    parser.add_argument("--range", dest="rev_range", help="revision range to scan, for example origin/main..HEAD")
-    parser.add_argument("--all", action="store_true", help="scan all reachable commits")
+    history_source = parser.add_mutually_exclusive_group()
+    history_source.add_argument(
+        "--range", dest="rev_range", help="revision range to scan, for example origin/main..HEAD"
+    )
+    history_source.add_argument("--all", action="store_true", help="scan all reachable commits")
     parser.add_argument("--json", action="store_true", help="emit JSON report")
     args = parser.parse_args(argv)
 
@@ -96,39 +100,62 @@ def _default_commit_policy() -> Policy:
 
 
 def _commit_revs(args: argparse.Namespace) -> list[str]:
+    if args.rev_range is not None:
+        validate_rev_range_operand(args.rev_range)
     if args.all:
         cmd = ["rev-list", "--reverse", "--all"]
     else:
-        if not args.rev_range and not _has_head():
-            return []
-        rev_range = args.rev_range or _default_range()
+        if args.rev_range is not None:
+            rev_range = args.rev_range
+        else:
+            if not git_has_head():
+                return []
+            rev_range = _default_range()
         cmd = ["rev-list", "--reverse", rev_range]
 
-    output = _git(cmd)
+    bounded_error = "git rev-list failed" if args.rev_range is not None else None
+    output = _git(cmd, bounded_error=bounded_error)
     return [line for line in output.splitlines() if line.strip()]
 
 
 def _default_range() -> str:
-    proc = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    upstream = proc.stdout.strip()
-    if proc.returncode == 0 and upstream:
-        return f"{upstream}..HEAD"
-    return "HEAD"
+    try:
+        upstream = subprocess.run(
+            ["git", "rev-parse", "--symbolic-full-name", "@{upstream}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if upstream.returncode != 0 or not upstream.stdout.strip():
+            return "HEAD"
+
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--verify", "@{upstream}^{commit}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        print("git command failed", file=sys.stderr)
+        raise SystemExit(2) from None
+
+    upstream_commit = resolved.stdout.strip()
+    if resolved.returncode != 0 or not upstream_commit:
+        print("git rev-parse failed", file=sys.stderr)
+        raise SystemExit(2)
+    return f"{upstream_commit}..HEAD"
 
 
-def _has_head() -> bool:
-    proc = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], capture_output=True, text=True, check=False)
-    return proc.returncode == 0
-
-
-def _git(args: list[str]) -> str:
-    proc = subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+def _git(args: list[str], *, bounded_error: str | None = None) -> str:
+    try:
+        proc = subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+    except OSError:
+        print("git command failed", file=sys.stderr)
+        raise SystemExit(2) from None
     if proc.returncode != 0:
+        if bounded_error is not None:
+            print(bounded_error, file=sys.stderr)
+            raise SystemExit(2)
         print((proc.stderr or proc.stdout or "git command failed").strip(), file=sys.stderr)
         raise SystemExit(2)
     return proc.stdout
