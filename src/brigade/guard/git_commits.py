@@ -17,8 +17,11 @@ def main(argv: list[str] | None = None) -> int:
         description="Scan Git commit messages before publishing or pushing.",
     )
     parser.add_argument("--policy", help="JSON policy file")
-    parser.add_argument("--range", dest="rev_range", help="revision range to scan, for example origin/main..HEAD")
-    parser.add_argument("--all", action="store_true", help="scan all reachable commits")
+    history_source = parser.add_mutually_exclusive_group()
+    history_source.add_argument(
+        "--range", dest="rev_range", help="revision range to scan, for example origin/main..HEAD"
+    )
+    history_source.add_argument("--all", action="store_true", help="scan all reachable commits")
     parser.add_argument("--json", action="store_true", help="emit JSON report")
     args = parser.parse_args(argv)
 
@@ -97,11 +100,12 @@ def _default_commit_policy() -> Policy:
 
 
 def _commit_revs(args: argparse.Namespace) -> list[str]:
+    if args.rev_range is not None:
+        validate_rev_range_operand(args.rev_range)
     if args.all:
         cmd = ["rev-list", "--reverse", "--all"]
     else:
         if args.rev_range is not None:
-            validate_rev_range_operand(args.rev_range)
             rev_range = args.rev_range
         else:
             if not _has_head():

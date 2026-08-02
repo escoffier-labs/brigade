@@ -31,6 +31,8 @@ def _operand_invalid(operand: str) -> bool:
     for component in components:
         if not component or component[0] == "-":
             return True
+        if component == "." or component.startswith("./"):
+            return True
         if not all(ch in _ALLOWED_CHARS for ch in component):
             return True
     return False
@@ -47,6 +49,6 @@ def _split_rev_range(operand: str) -> list[str] | None:
         return None
     left = operand[: separator.start()]
     right = operand[separator.end() :]
-    if not left or not right:
+    if not left and not right:
         return None
-    return [left, right]
+    return [component for component in (left, right) if component]

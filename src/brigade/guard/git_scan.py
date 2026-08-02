@@ -195,8 +195,24 @@ def _history_revs(args: argparse.Namespace) -> list[str]:
 
 
 def _has_head() -> bool:
-    proc = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], capture_output=True, text=True, check=False)
-    return proc.returncode == 0
+    head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], capture_output=True, text=True, check=False)
+    if head.returncode == 0:
+        return True
+
+    symbolic = subprocess.run(["git", "symbolic-ref", "-q", "HEAD"], capture_output=True, text=True, check=False)
+    branch_ref = symbolic.stdout.strip()
+    if symbolic.returncode == 0 and branch_ref:
+        branch = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", branch_ref],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if branch.returncode == 1:
+            return False
+
+    print((head.stderr or symbolic.stderr or "git rev-parse failed").strip(), file=sys.stderr)
+    raise SystemExit(2)
 
 
 def _added_lines(rev: str) -> str:

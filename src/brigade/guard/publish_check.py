@@ -30,8 +30,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-policy", help="repo policy file, default: policies/public-repo.json near project root")
     parser.add_argument("--out-dir", help="PR body output directory, default: .content-guard/pr-drafts")
     parser.add_argument("--name", help="PR body output basename, default: PR body stem")
-    parser.add_argument("--commit-range", dest="rev_range", help="commit revision range to scan")
-    parser.add_argument("--all-commits", action="store_true", help="scan all reachable commit messages")
+    commit_source = parser.add_mutually_exclusive_group()
+    commit_source.add_argument("--commit-range", dest="rev_range", help="commit revision range to scan")
+    commit_source.add_argument("--all-commits", action="store_true", help="scan all reachable commit messages")
     parser.add_argument("--all-tracked", action="store_true", help="also scan all tracked files")
     parser.add_argument(
         "--include-git-config", action="store_true", help="include .git/config in file scans when present"

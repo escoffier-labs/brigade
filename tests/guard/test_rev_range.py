@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -25,12 +27,14 @@ class RevRangeValidationTests(unittest.TestCase):
             "-HEAD",
             "",
             "   ",
-            "origin/main..",
-            "..HEAD",
+            "..",
+            "...",
             "a....b",
             "a.....b",
             "a...b..c",
             "a..b...c",
+            ".",
+            "./README.md",
             "HEAD;id",
             "HEAD|id",
             "HEAD\n--all",
@@ -44,11 +48,15 @@ class RevRangeValidationTests(unittest.TestCase):
         for operand in (
             "HEAD",
             "origin/main..HEAD",
+            "origin/main..",
+            "..HEAD",
             "HEAD~1..HEAD",
             "refs/tags/v1.2.3",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             "feature/foo_bar",
             "main...HEAD",
+            "main...",
+            "...HEAD",
             "^HEAD",
             "HEAD^!",
             "@{upstream}",
@@ -56,6 +64,13 @@ class RevRangeValidationTests(unittest.TestCase):
         ):
             with self.subTest(operand=operand):
                 validate_rev_range_operand(operand)
+
+    def test_rejection_uses_a_fixed_bounded_error(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as ctx:
+            validate_rev_range_operand("-" + "x" * 10_000)
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(stderr.getvalue(), "invalid revision range operand\n")
 
     def test_history_revs_rejects_injection_before_rev_list(self) -> None:
         import argparse
@@ -104,6 +119,16 @@ class RevRangeValidationTests(unittest.TestCase):
                     has_head.assert_not_called()
                     git.assert_not_called()
                 self.assertEqual(ctx.exception.code, 2)
+
+    def test_commit_revs_validates_range_even_when_all_is_set(self) -> None:
+        import argparse
+
+        args = argparse.Namespace(rev_range="--max-count=0", all=True)
+        with mock.patch("brigade.guard.git_commits._git") as git:
+            with self.assertRaises(SystemExit) as ctx:
+                _commit_revs(args)
+            git.assert_not_called()
+        self.assertEqual(ctx.exception.code, 2)
 
     def test_git_scan_history_rejects_injected_range_cli(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -174,6 +199,26 @@ class RevRangeValidationTests(unittest.TestCase):
         self.assertIn("invalid revision range operand", proc.stderr)
         self.assertNotIn("Clean", proc.stdout)
 
+    def test_git_commits_rejects_all_with_range_cli(self) -> None:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "brigade.guard.git_commits",
+                "--all",
+                "--range=HEAD",
+                "--json",
+            ],
+            cwd=ROOT,
+            env={"PYTHONPATH": str(ROOT / "src")},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not allowed with argument", proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
     def test_publish_check_rejects_injected_commit_range_cli(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -194,6 +239,26 @@ class RevRangeValidationTests(unittest.TestCase):
             )
         self.assertEqual(proc.returncode, 2)
         self.assertIn("invalid revision range operand", proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
+    def test_publish_check_rejects_all_commits_with_commit_range_cli(self) -> None:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "brigade.guard.publish_check",
+                "--all-commits",
+                "--commit-range=HEAD",
+                "--json",
+            ],
+            cwd=ROOT,
+            env={"PYTHONPATH": str(ROOT / "src")},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not allowed with argument", proc.stderr)
         self.assertEqual(proc.stdout, "")
 
     def test_publish_check_rejects_explicit_empty_commit_range_cli(self) -> None:
@@ -243,6 +308,26 @@ class RevRangeValidationTests(unittest.TestCase):
         payload = __import__("json").loads(proc.stdout)
         self.assertGreaterEqual(payload["commits_scanned"], 1)
 
+    def test_history_clis_accept_range_with_omitted_endpoint(self) -> None:
+        invocations = (
+            ("brigade.guard.git_scan", "--history", "--range=HEAD.."),
+            ("brigade.guard.git_commits", "--range=HEAD.."),
+            ("brigade.guard.publish_check", "--commit-range=HEAD.."),
+        )
+        for invocation in invocations:
+            with self.subTest(module=invocation[0]), TemporaryDirectory() as tmp:
+                repo = Path(tmp)
+                self._init_repo(repo)
+                proc = subprocess.run(
+                    [sys.executable, "-m", *invocation, "--json"],
+                    cwd=repo,
+                    env={"PYTHONPATH": str(ROOT / "src")},
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+
     def test_git_scan_history_handles_repository_without_head(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -265,6 +350,26 @@ class RevRangeValidationTests(unittest.TestCase):
         payload = __import__("json").loads(proc.stdout)
         self.assertEqual(payload["commits_scanned"], 0)
         self.assertEqual(payload["commits_with_findings"], 0)
+
+    def test_git_scan_history_fails_outside_repository(self) -> None:
+        with TemporaryDirectory() as tmp:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "brigade.guard.git_scan",
+                    "--history",
+                    "--json",
+                ],
+                cwd=tmp,
+                env={"PYTHONPATH": str(ROOT / "src")},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not a git repository", proc.stderr)
+        self.assertEqual(proc.stdout, "")
 
     def _init_repo(self, repo: Path) -> None:
         subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
