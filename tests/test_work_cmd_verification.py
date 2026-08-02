@@ -2776,6 +2776,82 @@ def test_archive_verify_run_strips_recovery_checkpoint_bodies(tmp_path):
     assert not (root / "20260101-000001-a").exists()
 
 
+def test_archive_verify_run_strips_crashed_checkpoint_temp(tmp_path):
+    from brigade import run_checkpoint
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a", sign=True)
+    _write_verify_run_dir(root, "20260101-000002-b")
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    private_task = "SECRET_CRASHED_CHECKPOINT_must_not_archive"
+    body = (json.dumps({"task": private_task}, sort_keys=True) + "\n").encode()
+    crashed_temp = cp_dir / ".checkpoint.crashed.tmp"
+    crashed_temp.write_bytes(body)
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 1
+    archived_temp = archive_root / run_dir.name / "events" / run_checkpoint.CHECKPOINT_DIR_NAME / crashed_temp.name
+    payload = json.loads(archived_temp.read_text(encoding="utf-8"))
+    assert run_checkpoint.is_checkpoint_artifact_reference(payload)
+    assert payload["sha256"] == hashlib.sha256(body).hexdigest()
+    assert private_task not in archived_temp.read_text(encoding="utf-8")
+    run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(archive_root / run_dir.name)
+
+
+def test_archive_verify_run_asserts_when_crashed_temp_stripping_is_bypassed(tmp_path, monkeypatch):
+    from brigade import run_checkpoint
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a", sign=True)
+    cp_dir = run_dir / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    (cp_dir / ".checkpoint.crashed.tmp").write_text('{"task":"SECRET_PRIVATE_BODY"}\n')
+    monkeypatch.setattr(run_checkpoint, "strip_checkpoint_bodies_for_export", lambda _run_dir: [])
+
+    archive_root = tmp_path / "verify-archive"
+    with pytest.raises(run_checkpoint.CheckpointError, match="checkpoint body crossed an export boundary"):
+        verification._archive_verify_run(run_dir, archive_root)
+
+    assert not (archive_root / run_dir.name).exists()
+
+
+def test_prune_verify_runs_omits_hash_mismatched_checkpoint_and_remains_bounded(tmp_path):
+    from brigade import run_checkpoint
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    bad_run, _ = _write_verify_run_dir(root, "20260101-000001-a", sign=True)
+    _write_verify_run_dir(root, "20260101-000002-b")
+    _write_verify_run_dir(root, "20260101-000003-c")
+    cp_dir = bad_run / "events" / run_checkpoint.CHECKPOINT_DIR_NAME
+    cp_dir.mkdir(parents=True)
+    mismatched = cp_dir / f"{'0' * 64}.json"
+    mismatched.write_text('{"task":"PRIVATE_HASH_MISMATCH"}\n')
+
+    archive_root = tmp_path / "verify-archive"
+    removed = verification._prune_verify_runs(tmp_path, keep=1, archive_root=archive_root)
+
+    assert removed == 2
+    assert [path.name for path in root.iterdir()] == ["20260101-000003-c"]
+    assert not (archive_root / bad_run.name / "events" / run_checkpoint.CHECKPOINT_DIR_NAME / mismatched.name).exists()
+    bad_entry = next(entry for entry in _read_archive_index(archive_root) if entry["run_id"] == bad_run.name)
+    assert bad_entry["checkpoint_errors"] == [
+        {
+            "category": "checkpoint-hash-mismatch",
+            "path": f"events/{run_checkpoint.CHECKPOINT_DIR_NAME}/{mismatched.name}",
+            "error": "checkpoint content hash does not match filename; omitted from verification archive",
+        }
+    ]
+
+
 def test_capture_before_retry_uses_receipt_stamped_artifact(tmp_target, monkeypatch, capsys):
     from brigade.work_cmd import verification
 

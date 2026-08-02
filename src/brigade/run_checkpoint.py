@@ -1183,6 +1183,7 @@ def recover_from_checkpoint(
 # -- Export boundary (issue #636) ---------------------------------------------
 
 _ARTIFACT_REFERENCE_KEYS = frozenset({"path", "sha256", "media_type", "byte_size", "privacy_class"})
+_CHECKPOINT_TEMP_GLOB = ".checkpoint.*.tmp"
 
 
 def checkpoint_artifact_reference(*, sha256: str, byte_size: int) -> dict[str, Any]:
@@ -1238,7 +1239,8 @@ def strip_checkpoint_bodies_for_export(run_dir: Path) -> list[dict[str, Any]]:
     if not cp_dir.is_dir():
         return []
     replaced: list[dict[str, Any]] = []
-    for path in sorted(cp_dir.glob("*.json")):
+    paths = sorted((*cp_dir.glob("*.json"), *cp_dir.glob(_CHECKPOINT_TEMP_GLOB)))
+    for path in paths:
         if not path.is_file() or path.is_symlink():
             refuse_checkpoint_body_export(reason="checkpoint export path is not a regular file")
         raw = path.read_bytes()
@@ -1250,7 +1252,7 @@ def strip_checkpoint_bodies_for_export(run_dir: Path) -> list[dict[str, Any]]:
             replaced.append(dict(parsed))
             continue
         sha = hashlib.sha256(raw).hexdigest()
-        if path.name != f"{sha}.json":
+        if path.suffix == ".json" and path.name != f"{sha}.json":
             refuse_checkpoint_body_export(reason="checkpoint export filename digest mismatch")
         reference = checkpoint_artifact_reference(sha256=sha, byte_size=len(raw))
         path.write_text(json.dumps(reference, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1261,7 +1263,14 @@ def strip_checkpoint_bodies_for_export(run_dir: Path) -> list[dict[str, Any]]:
 
 def assert_export_tree_has_no_checkpoint_bodies(root: Path) -> None:
     """Fail closed if any recovery-checkpoint file under root still holds a body."""
-    for path in sorted(Path(root).rglob(f"*/{CHECKPOINT_DIR_NAME}/*.json")):
+    root = Path(root)
+    paths = sorted(
+        (
+            *root.rglob(f"*/{CHECKPOINT_DIR_NAME}/*.json"),
+            *root.rglob(f"*/{CHECKPOINT_DIR_NAME}/{_CHECKPOINT_TEMP_GLOB}"),
+        )
+    )
+    for path in paths:
         if not path.is_file():
             continue
         try:

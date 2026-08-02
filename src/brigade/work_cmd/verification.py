@@ -483,10 +483,11 @@ def _verify_archive_index_entry(
     receipt_file_sha256: str | None,
     *,
     already_archived: bool,
+    checkpoint_errors: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     receipt = _verify_read_receipt(dest)
     digests = receipt.get("digests") if receipt is not None and isinstance(receipt.get("digests"), dict) else {}
-    return {
+    entry: dict[str, Any] = {
         "schema": VERIFY_ARCHIVE_INDEX_SCHEMA,
         "schema_version": VERIFY_ARCHIVE_INDEX_SCHEMA_VERSION,
         "run_id": run_dir.name,
@@ -503,6 +504,9 @@ def _verify_archive_index_entry(
         "started_at": receipt.get("started_at") if receipt is not None else None,
         "completed_at": receipt.get("completed_at") if receipt is not None else None,
     }
+    if checkpoint_errors:
+        entry["checkpoint_errors"] = checkpoint_errors
+    return entry
 
 
 def _append_verify_archive_index(archive_root: Path, entry: dict[str, Any]) -> None:
@@ -567,14 +571,17 @@ def _verify_archive_tree_manifest(root: Path) -> dict[str, tuple[str, str | None
 
 def _expected_verify_archive_manifest(
     run_dir: Path, source_manifest: dict[str, tuple[str, str | None]]
-) -> dict[str, tuple[str, str | None]]:
-    """Return the tree manifest after recovery-checkpoint export stripping (#636)."""
+) -> tuple[dict[str, tuple[str, str | None]], list[dict[str, str]]]:
+    """Return the privacy-normalized manifest and bounded checkpoint errors."""
     from brigade import run_checkpoint
 
     expected = dict(source_manifest)
+    checkpoint_errors: list[dict[str, str]] = []
     prefix = f"events/{run_checkpoint.CHECKPOINT_DIR_NAME}/"
     for relative, (kind, _digest) in list(expected.items()):
-        if kind != "file" or not relative.startswith(prefix) or not relative.endswith(".json"):
+        name = Path(relative).name
+        is_temp = name.startswith(".checkpoint.") and name.endswith(".tmp")
+        if kind != "file" or not relative.startswith(prefix) or not (relative.endswith(".json") or is_temp):
             continue
         path = run_dir / relative
         raw = path.read_bytes()
@@ -585,12 +592,20 @@ def _expected_verify_archive_manifest(
         if isinstance(parsed, dict) and run_checkpoint.is_checkpoint_artifact_reference(parsed):
             continue
         sha = hashlib.sha256(raw).hexdigest()
-        if path.name != f"{sha}.json":
-            raise OSError(f"verify archive checkpoint export filename digest mismatch: {relative}")
+        if not is_temp and path.name != f"{sha}.json":
+            expected.pop(relative)
+            checkpoint_errors.append(
+                {
+                    "category": "checkpoint-hash-mismatch",
+                    "path": relative,
+                    "error": "checkpoint content hash does not match filename; omitted from verification archive",
+                }
+            )
+            continue
         reference = run_checkpoint.checkpoint_artifact_reference(sha256=sha, byte_size=len(raw))
         ref_bytes = (json.dumps(reference, indent=2, sort_keys=True) + "\n").encode("utf-8")
         expected[relative] = ("file", hashlib.sha256(ref_bytes).hexdigest())
-    return expected
+    return expected, checkpoint_errors
 
 
 def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
@@ -608,7 +623,7 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
     run_id = run_dir.name
     dest = archive_root / run_id
     source_manifest = _verify_archive_tree_manifest(run_dir)
-    expected_manifest = _expected_verify_archive_manifest(run_dir, source_manifest)
+    expected_manifest, checkpoint_errors = _expected_verify_archive_manifest(run_dir, source_manifest)
     receipt_path = run_dir / "receipt.json"
     source_receipt_sha = localio.file_sha256(receipt_path) if receipt_path.is_file() else None
     if dest.is_symlink():
@@ -625,9 +640,17 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
             raise OSError(f"verify archive conflict: {dest} already exists with different evidence")
         if dest_sha is not None:
             _assert_archived_receipt_integrity(dest_receipt)
+        for checkpoint_error in checkpoint_errors:
+            (dest / checkpoint_error["path"]).unlink(missing_ok=True)
         run_checkpoint.strip_checkpoint_bodies_for_export(dest)
         run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(dest)
-        entry = _verify_archive_index_entry(run_dir, dest, dest_sha, already_archived=True)
+        entry = _verify_archive_index_entry(
+            run_dir,
+            dest,
+            dest_sha,
+            already_archived=True,
+            checkpoint_errors=checkpoint_errors,
+        )
         _append_verify_archive_index(archive_root, entry)
         return entry
     archive_root.mkdir(parents=True, exist_ok=True)
@@ -641,6 +664,11 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
             if copied_sha != source_receipt_sha:
                 raise OSError(f"verify archive copy integrity check failed: {run_id}")
             _assert_archived_receipt_integrity(staging / "receipt.json")
+        # A hash-mismatched checkpoint cannot be represented truthfully. Omit
+        # only that private body from the archive and record the bounded error
+        # in the archive index so one corrupt checkpoint cannot pin the run.
+        for checkpoint_error in checkpoint_errors:
+            (staging / checkpoint_error["path"]).unlink()
         # Export boundary (#636): never archive private recovery-checkpoint
         # bodies. Replace them with the closed artifact-reference shape after
         # the byte-identical copy check so local recovery semantics stay intact.
@@ -655,7 +683,13 @@ def _archive_verify_run(run_dir: Path, archive_root: Path) -> dict[str, Any]:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     archived_receipt_sha = localio.file_sha256(dest / "receipt.json") if source_receipt_sha is not None else None
-    entry = _verify_archive_index_entry(run_dir, dest, archived_receipt_sha, already_archived=False)
+    entry = _verify_archive_index_entry(
+        run_dir,
+        dest,
+        archived_receipt_sha,
+        already_archived=False,
+        checkpoint_errors=checkpoint_errors,
+    )
     _append_verify_archive_index(archive_root, entry)
     return entry
 
