@@ -61,43 +61,32 @@ func TestDiscord_Send_TruncatesDescriptionToLimit(t *testing.T) {
 	}
 }
 
-func TestDiscord_Send_PayloadLimitErrorHasNoSecrets(t *testing.T) {
-	// Title alone cannot exceed DiscordTitleMax after truncateRunes; force the
-	// total-embed failure path by stuffing title, footer, tags, and body so
-	// the remaining description budget collapses below the ellipsis size.
-	msg := canonical.Message{
-		Title:  strings.Repeat("t", DiscordTitleMax),
-		Body:   "x",
-		Source: strings.Repeat("s", DiscordFooterMax),
-		Tags:   []string{strings.Repeat("g", DiscordFieldValueMax)},
+func TestDiscord_OverheadCeilingLeavesDescriptionBudget(t *testing.T) {
+	// Guards the arithmetic that makes payload_limit unreachable from
+	// Discord.Send: if per-field ceilings ever grow so the description budget
+	// can collapse below the ellipsis, Send must be tested through Send.
+	maxOverhead := DiscordTitleMax + DiscordFooterMax + len("tags") + DiscordFieldValueMax
+	if budget := DiscordEmbedTotalMax - maxOverhead; budget < len(truncateSuffix) {
+		t.Fatalf("description budget %d < ellipsis %d: payload_limit reachable via Send", budget, len(truncateSuffix))
 	}
-	// Directly exercise fitDiscordEmbed with a crafted embed that cannot fit:
-	// zero description budget after overhead.
-	embed := discordEmbed{
-		Title:       strings.Repeat("t", DiscordTitleMax),
-		Description: "",
-		Footer:      &discordFooter{Text: strings.Repeat("s", DiscordFooterMax)},
-		Fields: []discordField{{
-			Name:  "tags",
-			Value: strings.Repeat("g", DiscordFieldValueMax),
-		}},
-	}
-	if embedCharCount(embed) <= DiscordEmbedTotalMax {
-		t.Skip("fixture does not exceed total embed ceiling on this platform")
-	}
-	_ = msg
-	d := NewDiscord("discord-main", "http://127.0.0.1:9/secret-webhook-token", time.Second)
-	// Oversized title after identity cannot happen; instead verify SafeError
-	// never echoes webhook URLs when payload_limit is returned.
+}
+
+func TestSafeError_PayloadLimitHasNoSecrets(t *testing.T) {
+	// payload_limit is not reachable from Discord.Send under the current
+	// per-field ceilings: maximum non-description overhead is
+	// DiscordTitleMax + DiscordFooterMax + len("tags") + DiscordFieldValueMax
+	// = 3332, leaving a description budget of 6000-3332 = 2668, far above
+	// len(truncateSuffix), so fitDiscordEmbed always truncates and sends (a
+	// large-body Send fixture only truncates). The payload_limit
+	// sanitization contract is therefore tested directly here.
 	err := payloadLimitError("discord")
 	safe := SafeError(err)
-	if strings.Contains(safe, "secret-webhook") || strings.Contains(safe, "http") {
+	if strings.Contains(safe, "http") || strings.Contains(safe, "webhook") {
 		t.Fatalf("SafeError leaked credential material: %q", safe)
 	}
 	if !strings.Contains(safe, "payload_limit") {
 		t.Fatalf("SafeError = %q, want payload_limit", safe)
 	}
-	_ = d
 }
 
 func TestTelegram_Send_TruncatesToTextMax(t *testing.T) {
@@ -121,6 +110,32 @@ func TestTelegram_Send_TruncatesToTextMax(t *testing.T) {
 	}
 	if len(got.Text) > TelegramTextMax {
 		t.Fatalf("text len %d exceeds %d", len(got.Text), TelegramTextMax)
+	}
+}
+
+func TestTelegram_FitShortBodyNearLimitOverhead(t *testing.T) {
+	// Regression: fitTelegramText's binary search shrank hi when truncateRunes
+	// rejected a too-small mid, discarding every larger candidate. A short
+	// body whose fixed overhead lands just under TelegramTextMax then failed
+	// with payload_limit even though an ellipsis-only body fits.
+	msg := canonical.Message{Level: "info", Body: "abcde"}
+	// Grow a plain (escape-free) title until the full text just exceeds
+	// TelegramTextMax; collapsing the 5-byte body to the ellipsis then fits.
+	fixed := len(formatTelegram(msg))           // indicator + " " + body, no title
+	titleLen := TelegramTextMax + 2 - fixed - 3 // 3 = "*", title, "*\n"
+	msg.Title = strings.Repeat("x", titleLen)
+	if got := len(formatTelegram(msg)); got <= TelegramTextMax {
+		t.Fatalf("fixture must exceed TelegramTextMax, got %d", got)
+	}
+	text, err := fitTelegramText(msg)
+	if err != nil {
+		t.Fatalf("fitTelegramText: %v; short body near-limit overhead must truncate, not fail", err)
+	}
+	if len(text) > TelegramTextMax {
+		t.Fatalf("text len %d exceeds %d", len(text), TelegramTextMax)
+	}
+	if !strings.Contains(text, truncateSuffix) {
+		t.Fatal("expected truncation marker in fitted text")
 	}
 }
 

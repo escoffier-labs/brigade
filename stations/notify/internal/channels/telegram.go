@@ -114,7 +114,8 @@ func fitTelegramText(m canonical.Message) (string, error) {
 		trial := m
 		body, ok := truncateRunes(m.Body, mid)
 		if !ok {
-			hi = mid - 1
+			// mid is too small to hold the ellipsis; only larger cuts can work.
+			lo = mid + 1
 			continue
 		}
 		trial.Body = body

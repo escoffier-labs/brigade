@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/escoffier-labs/agent-notify/internal/adapter"
 	"github.com/escoffier-labs/agent-notify/internal/canonical"
 	"github.com/escoffier-labs/agent-notify/internal/channels"
 	"github.com/escoffier-labs/agent-notify/internal/config"
@@ -783,7 +784,7 @@ func TestRun_OversizedStdinRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	oversized := strings.Repeat("x", adapterMaxInputBytes()+1)
+	oversized := strings.Repeat("x", adapter.MaxInputBytes+1)
 	code, _, stderr := runMain(t,
 		[]string{"agent-notify"},
 		oversized,
@@ -864,10 +865,4 @@ chat_id_env = "TELEGRAM_CHAT_ID"
 	if strings.Contains(stderr, "SECRET-BOT-TOKEN") {
 		t.Fatalf("stderr leaked bot token: %q", stderr)
 	}
-}
-
-// adapterMaxInputBytes mirrors adapter.MaxInputBytes without importing the
-// adapter package into every CLI assertion helper.
-func adapterMaxInputBytes() int {
-	return 256 * 1024
 }
