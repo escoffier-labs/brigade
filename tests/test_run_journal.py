@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import ast
 import hashlib
 import json
 import os
@@ -1029,14 +1030,15 @@ def test_read_journal_bounded_refuses_event_sequence_above_ceiling(tmp_path):
     assert "bound exceeded" in excinfo.value.diagnostic
 
 
-def test_read_journal_stays_compatible_after_bounded_reader(tmp_path):
-    """read_journal must still parse a journal that read_journal_bounded refuses on bounds.
+def test_read_journal_is_forensic_api_after_bounded_reader(tmp_path):
+    """The forensic reader may inspect an over-limit journal without becoming a runtime path.
 
     Builds a journal one event past the ceiling with efficient direct canonical construction
     (``run_events.build_event`` + a single appending ``write`` per line, no
     ``append_event`` fsyncs). ``read_journal_bounded`` refuses its first event
-    past ``MAX_JOURNAL_EVENTS``; ``read_journal`` has no
-    event-count bound and must read the full chain cleanly.
+    past ``MAX_JOURNAL_EVENTS``. ``read_journal`` intentionally remains an
+    unbounded forensic API, while runtime control and mutation paths are
+    required to call ``read_journal_bounded`` instead.
     """
     journal_path = _journal_path(_run_dir(tmp_path))
     journal_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1074,6 +1076,75 @@ def test_read_journal_stays_compatible_after_bounded_reader(tmp_path):
     assert plain.events[-1].sequence == run_checkpoint.MAX_JOURNAL_EVENTS + 1
 
 
+def test_runtime_journal_paths_do_not_call_the_unbounded_forensic_reader():
+    """Runtime mutation and recovery control paths must enforce shared reader bounds."""
+    runtime_modules = (
+        "doctor.py",
+        "run_lifecycle.py",
+        "run_checkpoint.py",
+        "run_shadow.py",
+        "runs_cmd.py",
+    )
+    source_root = Path(run_journal.__file__).parent
+    offenders: list[str] = []
+    for module_name in runtime_modules:
+        tree = ast.parse((source_root / module_name).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "run_journal"
+                and node.func.attr == "read_journal"
+            ):
+                offenders.append(f"{module_name}:{node.lineno}")
+    assert offenders == []
+
+
+def test_near_event_ceiling_idempotency_index_and_duplicate_replay_stay_within_budget(tmp_path, record_property):
+    """A 2,047-event journal keeps index construction and exact replay bounded."""
+    journal_path = _journal_path(_run_dir(tmp_path))
+    journal_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_digest: str | None = None
+    event_count = run_checkpoint.MAX_JOURNAL_EVENTS - 1
+    with journal_path.open("ab") as handle:
+        for sequence in range(1, event_count + 1):
+            env = run_events.build_event(
+                run_id=RUN_ID,
+                sequence=sequence,
+                event_type="run.planning.started",
+                payload={"detail": "performance"},
+                idempotency_key=f"performance-{sequence}",
+                recorded_at="2026-07-27T15:30:45.000000Z",
+                previous_digest=previous_digest,
+            )
+            handle.write(run_events.canonical_bytes(env) + b"\n")
+            previous_digest = env["event_digest"]
+
+    budget_ns = 5_000_000_000
+    started_ns = time.perf_counter_ns()
+    _sequence, _digest, index, partial_tail, _journal_bytes = run_journal._read_tail_state(journal_path)
+    index_build_ns = time.perf_counter_ns() - started_ns
+
+    started_ns = time.perf_counter_ns()
+    replay = run_journal.lookup_idempotent_event(
+        journal_path,
+        event_type="run.planning.started",
+        payload={"detail": "performance"},
+        idempotency_key=f"performance-{event_count}",
+    )
+    duplicate_replay_ns = time.perf_counter_ns() - started_ns
+
+    record_property("idempotency_index_build_ns", index_build_ns)
+    record_property("idempotency_duplicate_replay_ns", duplicate_replay_ns)
+    record_property("idempotency_performance_budget_ns", budget_ns)
+    assert partial_tail is None
+    assert len(index) == event_count
+    assert replay is not None and replay.sequence == event_count
+    assert index_build_ns <= budget_ns, f"idempotency index build took {index_build_ns}ns (budget {budget_ns}ns)"
+    assert duplicate_replay_ns <= budget_ns, f"duplicate replay took {duplicate_replay_ns}ns (budget {budget_ns}ns)"
+
+
 # -- Finding 6: read_journal_bounded must count complete records, not trust sequence --
 
 
@@ -1099,10 +1170,10 @@ def test_read_journal_bounded_rejects_complete_record_above_ceiling_even_with_re
             handle.write(run_events.canonical_bytes(env) + b"\n")
         previous_digest = env["event_digest"]
 
-    # 513th complete record: its envelope repeats sequence 1 (and a matching
-    # previous_digest is null), so a sequence-trusting reader would treat it as
-    # a duplicate/chain break rather than a bound excess.
-    env_513 = run_events.build_event(
+    # The first complete record above the shared ceiling repeats sequence 1
+    # with a null previous digest. A sequence-trusting reader would treat it as
+    # a duplicate or chain break instead of a bound excess.
+    env_above_ceiling = run_events.build_event(
         run_id=RUN_ID,
         sequence=1,
         event_type="run.created",
@@ -1112,7 +1183,7 @@ def test_read_journal_bounded_rejects_complete_record_above_ceiling_even_with_re
         previous_digest=None,
     )
     with journal_path.open("ab") as handle:
-        handle.write(run_events.canonical_bytes(env_513) + b"\n")
+        handle.write(run_events.canonical_bytes(env_above_ceiling) + b"\n")
 
     with pytest.raises(run_journal.RunJournalError) as excinfo:
         run_journal.read_journal_bounded(journal_path)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import runguard
+from brigade import run_events, runguard
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "measure_run_journal.py"
@@ -275,24 +275,99 @@ def test_scan_lifecycle_journals_fails_closed_for_unreadable_input(tmp_path, mon
         module.scan_lifecycle_journals([scan_root])
 
 
-def test_count_journal_events_unreadable_or_undecodable_fallback(tmp_path, monkeypatch):
+def test_scan_lifecycle_journals_uses_complete_raw_count_after_valid_prefix_corruption(tmp_path):
     module = _load_measure_run_journal_module()
-    undecodable_journal = tmp_path / "undecodable.jsonl"
-    undecodable_journal.write_bytes(b"\x80abc\n\xff")
+    journal = tmp_path / "runs" / "run-a" / "events" / "lifecycle.jsonl"
+    journal.parent.mkdir(parents=True)
+    first = run_events.build_event(
+        run_id="20260727-153045-a1b2c3d4",
+        sequence=1,
+        event_type="run.created",
+        payload={"status": "started"},
+        idempotency_key="first",
+        recorded_at="2026-07-27T15:30:45.000000Z",
+        previous_digest=None,
+    )
+    second = run_events.build_event(
+        run_id="20260727-153045-a1b2c3d4",
+        sequence=2,
+        event_type="run.planning.started",
+        payload={"detail": "planning"},
+        idempotency_key="second",
+        recorded_at="2026-07-27T15:30:46.000000Z",
+        previous_digest=first["event_digest"],
+    )
+    journal.write_bytes(
+        run_events.canonical_bytes(first) + b"\n{not-json}\n" + run_events.canonical_bytes(second) + b"\n"
+    )
 
-    # Non-UTF-8 bytes fail read_text and fall back to zero without aborting the survey.
-    assert module._count_journal_events(undecodable_journal) == 0
+    scanned = module.scan_lifecycle_journals([tmp_path])
 
-    unreadable_journal = tmp_path / "unreadable.jsonl"
-    unreadable_journal.write_text("line 1\nline 2\n")
+    assert scanned["per_run"][0]["event_count"] == 3
+    assert scanned["per_run"][0]["omitted"] is False
+    assert scanned["per_run"][0]["integrity_error"]
+    assert scanned["aggregate"]["runs"] == 1
+    assert scanned["aggregate"]["event_count_max"] == 3
 
-    def _raise_oserror(*_args, **_kwargs):
-        raise OSError("permission denied")
 
-    monkeypatch.setattr(Path, "read_text", _raise_oserror)
+def test_scan_lifecycle_journals_omits_undecodable_journal_without_zeroing_it(tmp_path):
+    module = _load_measure_run_journal_module()
+    journal = tmp_path / "runs" / "run-a" / "events" / "lifecycle.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_bytes(b"\x80abc\n\xff")
 
-    # Read errors fail safely without aborting the survey.
-    assert module._count_journal_events(unreadable_journal) == 0
+    scanned = module.scan_lifecycle_journals([tmp_path])
+
+    entry = scanned["per_run"][0]
+    assert entry["event_count"] == 1
+    assert entry["omitted"] is True
+    assert entry["error"] == "undecodable journal"
+    assert scanned["aggregate"]["runs"] == 0
+    assert scanned["aggregate"]["omitted_runs"] == 1
+
+
+def test_scan_lifecycle_journals_omits_stat_failure(tmp_path, monkeypatch):
+    module = _load_measure_run_journal_module()
+    journal = tmp_path / "runs" / "run-a" / "events" / "lifecycle.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("record\n")
+    real_stat = Path.stat
+
+    def fail_journal_stat(self, *args, **kwargs):
+        if self == journal:
+            raise OSError("stat race")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_journal_stat)
+
+    scanned = module.scan_lifecycle_journals([tmp_path])
+
+    entry = scanned["per_run"][0]
+    assert entry["event_count"] is None
+    assert entry["journal_bytes"] is None
+    assert entry["omitted"] is True
+    assert entry["error"].startswith("journal stat failed:")
+    assert scanned["aggregate"]["runs"] == 0
+
+
+def test_scan_lifecycle_journals_omits_second_read_failure(tmp_path, monkeypatch):
+    module = _load_measure_run_journal_module()
+    journal = tmp_path / "runs" / "run-a" / "events" / "lifecycle.jsonl"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("record\n")
+
+    def fail_second_read(*_args, **_kwargs):
+        raise OSError("second read race")
+
+    monkeypatch.setattr(module.run_journal, "read_journal_bounded", fail_second_read)
+
+    scanned = module.scan_lifecycle_journals([tmp_path])
+
+    entry = scanned["per_run"][0]
+    assert entry["event_count"] == 1
+    assert entry["omitted"] is True
+    assert entry["error"].startswith("journal read failed:")
+    assert scanned["aggregate"]["runs"] == 0
 
 
 def test_measure_volume_fails_closed_when_a_scenario_stops_early(tmp_path, monkeypatch):

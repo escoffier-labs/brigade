@@ -21,6 +21,7 @@ no third-party runtime dependencies.
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import math
 import os
@@ -31,6 +32,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +49,17 @@ _DEFAULT_WORST_PAUSE_CYCLES = 8
 
 class MeasurementInputError(RuntimeError):
     """Measurement input or scenario state is missing, unreadable, or incomplete."""
+
+
+@dataclass(frozen=True)
+class _JournalMeasurement:
+    """Raw volume data plus the validity of the matching bounded parse."""
+
+    event_count: int
+    event_types: dict[str, int]
+    omitted: bool = False
+    error: str | None = None
+    integrity_error: str | None = None
 
 
 def _bootstrap_run(run_dir: Path) -> bytes:
@@ -97,11 +110,13 @@ def _measure_run(run_dir: Path, workspace: Path) -> dict[str, Any]:
         )
         latencies.append(time.perf_counter_ns() - start)
     journal_path = run_dir / "events" / "lifecycle.jsonl"
-    journal_bytes = journal_path.stat().st_size
-    event_count = _count_journal_events(journal_path)
+    journal_entry = _journal_volume_entry(journal_path, label=run_dir.name)
+    if journal_entry["omitted"] or journal_entry["integrity_error"]:
+        detail = journal_entry["error"] or journal_entry["integrity_error"]
+        raise MeasurementInputError(f"measurement journal could not be verified: {detail}")
     return {
-        "journal_bytes": journal_bytes,
-        "event_count": event_count,
+        "journal_bytes": journal_entry["journal_bytes"],
+        "event_count": journal_entry["event_count"],
         "append_latencies_ns": latencies,
     }
 
@@ -215,45 +230,146 @@ def _lock_workspace_parent(root: Path, staging_root: Path) -> Path | None:
     return staging_root
 
 
-def _count_journal_events(journal_path: Path) -> int:
-    """Count complete journal events, preferring the journal reader.
+def _stream_count_complete_nonblank_records(journal_path: Path) -> tuple[int, bool]:
+    """Return complete raw record count and whether the bytes decode as UTF-8.
 
-    Falls back to nonempty line count when the reader rejects the file (bound
-    exceeded, corrupt chain) or returns no parseable events while the file
-    still has content. Volume surveys must not abort on a single bad journal.
+    The counter is deliberately independent of JSON parsing. It reads fixed
+    chunks, preserves a record's nonblank state across chunk boundaries, and
+    counts only records terminated by a newline. A partial tail is therefore
+    never treated as a complete event.
     """
-    line_count = 0
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    decodable = True
+    complete_count = 0
+    pending_nonblank = False
+    with journal_path.open("rb") as handle:
+        while chunk := handle.read(65536):
+            if decodable:
+                try:
+                    decoder.decode(chunk)
+                except UnicodeDecodeError:
+                    decodable = False
+            parts = chunk.split(b"\n")
+            for record in parts[:-1]:
+                if pending_nonblank or record.strip():
+                    complete_count += 1
+                pending_nonblank = False
+            pending_nonblank = pending_nonblank or bool(parts[-1].strip())
+    if decodable:
+        try:
+            decoder.decode(b"", final=True)
+        except UnicodeDecodeError:
+            decodable = False
+    return complete_count, decodable
+
+
+def _measure_journal_events(journal_path: Path) -> _JournalMeasurement:
+    """Measure raw volume and parse health without silently converting errors to zero."""
+    raw_count, decodable = _stream_count_complete_nonblank_records(journal_path)
+    if not decodable:
+        return _JournalMeasurement(raw_count, {}, omitted=True, error="undecodable journal")
     try:
-        line_count = sum(1 for line in journal_path.read_text(encoding="utf-8").splitlines() if line.strip())
-        report = run_journal.read_journal(journal_path)
-    except (run_journal.RunJournalError, OSError, UnicodeError):
-        return line_count
-    if report.events:
-        return len(report.events)
-    return line_count
+        report = run_journal.read_journal_bounded(journal_path)
+    except OSError as exc:
+        return _JournalMeasurement(
+            raw_count,
+            {},
+            omitted=True,
+            error=f"journal read failed: {type(exc).__name__}: {exc}",
+        )
+    except run_journal.RunJournalError as exc:
+        return _JournalMeasurement(raw_count, {}, integrity_error=exc.diagnostic)
+    if report.chain_errors:
+        return _JournalMeasurement(raw_count, {}, integrity_error="; ".join(report.chain_errors))
+    if report.partial_tail is not None:
+        return _JournalMeasurement(raw_count, {}, integrity_error="journal has a partial tail")
+    return _JournalMeasurement(
+        len(report.events),
+        dict(sorted(Counter(event.event_type for event in report.events).items())),
+    )
+
+
+def _count_journal_events(journal_path: Path) -> int:
+    """Return the measurement count, preserving raw-count fallback for corrupt journals."""
+    return _measure_journal_events(journal_path).event_count
+
+
+def _journal_entry(
+    *,
+    label: str,
+    path: str,
+    journal_bytes: int | None,
+    measurement: _JournalMeasurement | None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Build one stable report entry, including explicit omitted/error state."""
+    bounds = _bounds()
+    event_count = measurement.event_count if measurement is not None else None
+    omitted = error is not None or (measurement is not None and measurement.omitted)
+    entry_error = error if error is not None else (measurement.error if measurement is not None else None)
+    integrity_error = measurement.integrity_error if measurement is not None else None
+    return {
+        "label": label,
+        "path": path,
+        "event_count": event_count,
+        "journal_bytes": journal_bytes,
+        "event_type_counts": measurement.event_types if measurement is not None else {},
+        "headroom_events": bounds["max_journal_events"] - event_count if event_count is not None else None,
+        "headroom_bytes": bounds["max_journal_bytes"] - journal_bytes if journal_bytes is not None else None,
+        "pct_events": round(100.0 * event_count / bounds["max_journal_events"], 4) if event_count is not None else None,
+        "pct_bytes": round(100.0 * journal_bytes / bounds["max_journal_bytes"], 6)
+        if journal_bytes is not None
+        else None,
+        "omitted": omitted,
+        "error": entry_error,
+        "integrity_error": integrity_error,
+    }
 
 
 def _journal_volume_entry(journal_path: Path, *, label: str, display_path: str | None = None) -> dict[str, Any]:
-    journal_bytes = journal_path.stat().st_size
-    event_count = _count_journal_events(journal_path)
-    event_types: dict[str, int] = {}
+    """Measure one journal, omitting unreadable or changing files from aggregates."""
+    display = display_path or str(journal_path)
     try:
-        report = run_journal.read_journal(journal_path)
-        event_types = dict(sorted(Counter(event.event_type for event in report.events).items()))
-    except run_journal.RunJournalError:
-        event_types = {}
-    bounds = _bounds()
-    return {
-        "label": label,
-        "path": display_path or str(journal_path),
-        "event_count": event_count,
-        "journal_bytes": journal_bytes,
-        "event_type_counts": event_types,
-        "headroom_events": bounds["max_journal_events"] - event_count,
-        "headroom_bytes": bounds["max_journal_bytes"] - journal_bytes,
-        "pct_events": round(100.0 * event_count / bounds["max_journal_events"], 4),
-        "pct_bytes": round(100.0 * journal_bytes / bounds["max_journal_bytes"], 6),
-    }
+        before = journal_path.stat()
+    except OSError as exc:
+        return _journal_entry(
+            label=label,
+            path=display,
+            journal_bytes=None,
+            measurement=None,
+            error=f"journal stat failed: {type(exc).__name__}: {exc}",
+        )
+    try:
+        measurement = _measure_journal_events(journal_path)
+    except OSError as exc:
+        return _journal_entry(
+            label=label,
+            path=display,
+            journal_bytes=before.st_size,
+            measurement=None,
+            error=f"journal read failed: {type(exc).__name__}: {exc}",
+        )
+    try:
+        after = journal_path.stat()
+    except OSError as exc:
+        return _journal_entry(
+            label=label,
+            path=display,
+            journal_bytes=before.st_size,
+            measurement=measurement,
+            error=f"journal stat failed after read: {type(exc).__name__}: {exc}",
+        )
+    before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    if before_identity != after_identity:
+        return _journal_entry(
+            label=label,
+            path=display,
+            journal_bytes=after.st_size,
+            measurement=measurement,
+            error="journal changed during measurement",
+        )
+    return _journal_entry(label=label, path=display, journal_bytes=after.st_size, measurement=measurement)
 
 
 def scan_lifecycle_journals(roots: list[Path]) -> dict[str, Any]:
@@ -273,12 +389,14 @@ def scan_lifecycle_journals(roots: list[Path]) -> dict[str, Any]:
             raise MeasurementInputError(f"measurement input stale: no lifecycle journals under {root}")
         journals.extend(discovered)
     per_run = [_journal_volume_entry(path, label=path.parent.parent.name) for path in journals]
-    event_counts = sorted(entry["event_count"] for entry in per_run)
-    byte_counts = sorted(entry["journal_bytes"] for entry in per_run)
+    healthy_entries = [entry for entry in per_run if not entry["omitted"]]
+    event_counts = sorted(entry["event_count"] for entry in healthy_entries)
+    byte_counts = sorted(entry["journal_bytes"] for entry in healthy_entries)
     aggregate: dict[str, Any]
     if event_counts:
         aggregate = {
-            "runs": len(per_run),
+            "runs": len(healthy_entries),
+            "omitted_runs": len(per_run) - len(healthy_entries),
             "event_count_p50": _percentile_nearest_rank(event_counts, 50),
             "event_count_p95": _percentile_nearest_rank(event_counts, 95),
             "event_count_max": int(event_counts[-1]),
@@ -289,6 +407,7 @@ def scan_lifecycle_journals(roots: list[Path]) -> dict[str, Any]:
     else:
         aggregate = {
             "runs": 0,
+            "omitted_runs": len(per_run),
             "event_count_p50": 0,
             "event_count_p95": 0,
             "event_count_max": 0,

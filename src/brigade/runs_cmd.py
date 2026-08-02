@@ -1553,7 +1553,7 @@ def _print_pending_dispatch_recovery(run_dir: Path) -> None:
     from . import run_journal, run_lifecycle
 
     try:
-        events = run_journal.read_journal(run_lifecycle._journal_path(run_dir)).events
+        events = run_journal.read_journal_bounded(run_lifecycle._journal_path(run_dir)).events
     except (OSError, run_journal.RunJournalError):
         return
     for seat, attempt in run_lifecycle.pending_dispatch_requests(events):

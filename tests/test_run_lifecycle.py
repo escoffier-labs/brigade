@@ -2532,7 +2532,7 @@ def test_owner_lifecycle_append_retries_stale_tail_and_preserves_idempotency(ena
     sleeps: list[float] = []
     stale_budget = {"count": 1}
     real_append = run_journal.append_event
-    real_read = run_journal.read_journal
+    real_read = run_journal.read_journal_bounded
 
     def tracking_append(journal_path, **kwargs):
         if kwargs["event_type"] == "run.planning.started":
@@ -2554,7 +2554,7 @@ def test_owner_lifecycle_append_retries_stale_tail_and_preserves_idempotency(ena
         return report
 
     monkeypatch.setattr(run_journal, "append_event", tracking_append)
-    monkeypatch.setattr(run_journal, "read_journal", tracking_read)
+    monkeypatch.setattr(run_journal, "read_journal_bounded", tracking_read)
     monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
 
     try:
@@ -2578,7 +2578,7 @@ def test_owner_lifecycle_append_retries_stale_tail_and_preserves_idempotency(ena
     committed = [e for e in status_events if e.idempotency_key == append_attempts[0][1]]
     assert len(committed) == 1, "exactly one event may be committed for the retried append"
     assert event.event_id == committed[0].event_id
-    assert run_journal.read_journal(_journal_path(run_dir)).chain_errors == []
+    assert run_journal.read_journal_bounded(_journal_path(run_dir)).chain_errors == []
 
 
 def test_owner_lifecycle_append_stale_retries_exhausted_blocks_run_json(enabled, tmp_path, monkeypatch):

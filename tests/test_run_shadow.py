@@ -811,19 +811,19 @@ def test_run_journal_error_in_shadow_is_contained(enabled, tmp_path, monkeypatch
     _write_run_json(run_dir, "started")
     _write_run_json_locked(repo, run_dir, "started")  # match, seq 1
 
-    # The shadow path reads the journal through read_journal_bounded; the
-    # legacy lifecycle path (record_lifecycle_transition) still reads through
-    # read_journal. Raise only on the bounded read so the legacy write still
-    # commits, then the shadow hook sees the RunJournalError and must contain
-    # it as journal-unreadable.
+    # Runtime lifecycle writes also use the bounded reader, so first make the
+    # normal write. Then inject the bounded-read failure into the observational
+    # shadow hook, which must contain it as journal-unreadable.
+    run_before = (run_dir / "run.json").read_bytes()
+    _write_run_json_locked(repo, run_dir, "planning")
+    assert (run_dir / "run.json").read_bytes() != run_before
+
     def raising_bounded(path):
         raise run_journal.RunJournalError("simulated chain failure")
 
     monkeypatch.setattr(run_journal, "read_journal_bounded", raising_bounded)
 
-    run_before = (run_dir / "run.json").read_bytes()
-    _write_run_json_locked(repo, run_dir, "planning")  # legacy write must still advance
-    assert (run_dir / "run.json").read_bytes() != run_before
+    run_shadow.record_shadow_comparison(run_dir, json.loads((run_dir / "run.json").read_text()))
     data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
     assert data["errors"] >= 1
     assert data["last_error_category"] == "journal-unreadable"
@@ -1462,19 +1462,20 @@ def test_bounded_journal_reads_map_bound_failure_to_journal_unreadable(enabled, 
     _write_run_json_locked(repo, run_dir, "started")  # clean current-version artifact
 
     # A bound-exceeded journal read must map to journal-unreadable on both the
-    # comparison path and the readiness path. read_journal_bounded is the
-    # only journal reader run_shadow uses; the legacy lifecycle path keeps
-    # using unbounded read_journal, so the legacy write still commits.
+    # comparison path and the readiness path. The lifecycle write itself uses
+    # the same bounded reader, so complete it before injecting the observer's
+    # read failure.
+    run_before = (run_dir / "run.json").read_bytes()
+    _write_run_json_locked(repo, run_dir, "planning")
+    assert (run_dir / "run.json").read_bytes() != run_before
+
     def raising_bounded(path):
         raise run_journal.RunJournalError("bound exceeded: journal above MAX_JOURNAL_BYTES")
 
     monkeypatch.setattr(run_journal, "read_journal_bounded", raising_bounded)
 
-    # Comparison path: legacy write still advances, shadow records
-    # journal-unreadable.
-    run_before = (run_dir / "run.json").read_bytes()
-    _write_run_json_locked(repo, run_dir, "planning")
-    assert (run_dir / "run.json").read_bytes() != run_before
+    # Comparison path: shadow records journal-unreadable without propagating.
+    run_shadow.record_shadow_comparison(run_dir, json.loads((run_dir / "run.json").read_text()))
     data = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
     assert data["errors"] >= 1
     assert data["last_error_category"] == "journal-unreadable"

@@ -396,7 +396,7 @@ def record_dispatch_fact(
                 # status pair can advance the journal again.
                 aboyeur._authoritative_prior_decision(run_dir, snapshot_obj)
             if attempt is None:
-                report = run_journal.read_journal(journal_path)
+                report = run_journal.read_journal_bounded(journal_path)
                 if report.partial_tail is not None or report.chain_errors:
                     raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
                 attempts: list[int] = []
@@ -425,7 +425,7 @@ def record_dispatch_fact(
             )
             if checkpoint is None:
                 raise LifecycleJournalError(run_events._bound("enrolled lifecycle journal checkpoint was not recorded"))
-            report = run_journal.read_journal(journal_path)
+            report = run_journal.read_journal_bounded(journal_path)
             if report.partial_tail is not None or report.chain_errors:
                 raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
             key_digest = hashlib.sha256(
@@ -547,7 +547,7 @@ def _append_owner_event(
     """Append an owner event, retrying only an externally-stale tail."""
     last_stale: run_journal.StaleSequenceError | None = None
     for attempt in range(_MAX_OWNER_APPEND_ATTEMPTS):
-        report = run_journal.read_journal(journal_path)
+        report = run_journal.read_journal_bounded(journal_path)
         if report.partial_tail is not None or report.chain_errors:
             raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
         try:
@@ -668,7 +668,7 @@ def record_lifecycle_event(
             )
             if checkpoint is None:
                 raise LifecycleJournalError(run_events._bound("enrolled lifecycle journal checkpoint was not recorded"))
-            report = run_journal.read_journal(journal_path)
+            report = run_journal.read_journal_bounded(journal_path)
             if report.partial_tail is not None or report.chain_errors:
                 raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
             event = _append_owner_event(
@@ -749,7 +749,7 @@ def record_lifecycle_transition(
         raise LifecycleJournalError("lifecycle journal append requires the active run lock for this run")
 
     try:
-        report = run_journal.read_journal(journal_path)
+        report = run_journal.read_journal_bounded(journal_path)
         if report.partial_tail is not None or report.chain_errors:
             raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
         prior_status, prior_digest = _run_snapshot_state(run_dir)
