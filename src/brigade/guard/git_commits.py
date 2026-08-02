@@ -8,6 +8,7 @@ import sys
 from .engine import scan_text
 from .policy import Policy, load_policy
 from .report import to_text
+from .rev_range import validate_rev_range_operand
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -99,9 +100,13 @@ def _commit_revs(args: argparse.Namespace) -> list[str]:
     if args.all:
         cmd = ["rev-list", "--reverse", "--all"]
     else:
-        if not args.rev_range and not _has_head():
-            return []
-        rev_range = args.rev_range or _default_range()
+        if args.rev_range is not None:
+            validate_rev_range_operand(args.rev_range)
+            rev_range = args.rev_range
+        else:
+            if not _has_head():
+                return []
+            rev_range = _default_range()
         cmd = ["rev-list", "--reverse", rev_range]
 
     output = _git(cmd)

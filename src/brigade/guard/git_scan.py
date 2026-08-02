@@ -10,6 +10,7 @@ from pathlib import Path
 from .engine import scan_text
 from .policy import Policy, default_policy, load_policy
 from .report import to_text
+from .rev_range import validate_rev_range_operand
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -179,7 +180,8 @@ def _history_revs(args: argparse.Namespace) -> list[str]:
         return revs
     if args.all:
         cmd = ["git", "rev-list", "--all"]
-    elif args.rev_range:
+    elif args.rev_range is not None:
+        validate_rev_range_operand(args.rev_range)
         cmd = ["git", "rev-list", args.rev_range]
     else:
         cmd = ["git", "rev-list", "HEAD"]
