@@ -119,7 +119,7 @@ func runSend(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// Build the canonical message.
-	msg, err := buildMessage(*hookFlag, fs.Args(), stdin)
+	msg, err := buildMessage(*hookFlag, fs.Args(), stdin, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "[agent-notify] input error: %v\n", err)
 		return exitConfig
@@ -313,10 +313,13 @@ func defaultConfigPath() string {
 	return filepath.Join(home, ".config", "agent-notify", "config.toml")
 }
 
-func buildMessage(hook string, posArgs []string, stdin io.Reader) (canonical.Message, error) {
+func buildMessage(hook string, posArgs []string, stdin io.Reader, cfg *config.Config) (canonical.Message, error) {
 	switch hook {
 	case "claude-code-stop":
-		return adapter.ClaudeCodeStop(stdin)
+		return adapter.ClaudeCodeStop(stdin, adapter.ClaudeCodeStopOptions{
+			IncludeCWD:       cfg.ClaudeCodeStop.IncludeCWD,
+			IncludeSessionID: cfg.ClaudeCodeStop.IncludeSessionID,
+		})
 	case "claude-code-notification":
 		return adapter.ClaudeCodeNotification(stdin)
 	case "codex-notify":
@@ -477,6 +480,19 @@ func inspectConfig(configPath, profileName, skip string, skippedNetwork bool) (m
 		addCheck("OK", "config", "loaded")
 	} else {
 		addCheck("WARN", "config", "config file missing; using environment-only discovery")
+	}
+
+	if cfg.ClaudeCodeStop.IncludeCWD || cfg.ClaudeCodeStop.IncludeSessionID {
+		disclosures := make([]string, 0, 2)
+		if cfg.ClaudeCodeStop.IncludeCWD {
+			disclosures = append(disclosures, "cwd")
+		}
+		if cfg.ClaudeCodeStop.IncludeSessionID {
+			disclosures = append(disclosures, "session_id")
+		}
+		addCheck("WARN", "claude_code_stop.privacy", "Stop-hook notifications include "+strings.Join(disclosures, " and "))
+	} else {
+		addCheck("OK", "claude_code_stop.privacy", "Stop-hook notifications omit cwd and session_id")
 	}
 
 	if len(cfg.Channels) == 0 {
@@ -651,6 +667,12 @@ func quoteTOMLArray(parts []string) string {
 func sampleConfig() string {
 	return `[defaults]
 timeout_seconds = 10
+
+# Claude Code Stop-hook notifications omit cwd and session_id by default.
+# Set either option to true only if the receiving channel is trusted.
+[claude_code_stop]
+include_cwd = false
+include_session_id = false
 
 [channels.telegram-personal]
 type = "telegram"

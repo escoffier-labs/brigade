@@ -184,6 +184,64 @@ func TestRun_NoChannelsConfigured_Exit2(t *testing.T) {
 	}
 }
 
+func TestBuildMessage_ClaudeCodeStopUsesDisclosureConfig(t *testing.T) {
+	cfg := &config.Config{
+		ClaudeCodeStop: config.ClaudeCodeStopConfig{IncludeSessionID: true},
+	}
+
+	msg, err := buildMessage(
+		"claude-code-stop",
+		nil,
+		strings.NewReader(`{"cwd":"/private/project","session_id":"private-session"}`),
+		cfg,
+	)
+	if err != nil {
+		t.Fatalf("buildMessage failed: %v", err)
+	}
+	if msg.Body != "Session ended (session private-session)" {
+		t.Errorf("body = %q, want only the opted-in session identifier", msg.Body)
+	}
+}
+
+func TestInspectConfig_ReportsClaudeCodeStopPrivacyDisclosure(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus string
+		wantDetail string
+	}{
+		{name: "private by default", body: "", wantStatus: "OK", wantDetail: "omit cwd and session_id"},
+		{name: "cwd disclosed", body: "[claude_code_stop]\ninclude_cwd = true\n", wantStatus: "WARN", wantDetail: "include cwd"},
+		{name: "session disclosed", body: "[claude_code_stop]\ninclude_session_id = true\n", wantStatus: "WARN", wantDetail: "include session_id"},
+		{name: "both disclosed", body: "[claude_code_stop]\ninclude_cwd = true\ninclude_session_id = true\n", wantStatus: "WARN", wantDetail: "include cwd and session_id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tt.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			payload, _ := inspectConfig(path, "", "", true)
+			checks := payload["checks"].([]map[string]string)
+			for _, check := range checks {
+				if check["name"] != "claude_code_stop.privacy" {
+					continue
+				}
+				if check["status"] != tt.wantStatus {
+					t.Errorf("status = %q, want %q", check["status"], tt.wantStatus)
+				}
+				if !strings.Contains(check["detail"], tt.wantDetail) {
+					t.Errorf("detail = %q, want it to contain %q", check["detail"], tt.wantDetail)
+				}
+				return
+			}
+			t.Fatalf("missing claude_code_stop.privacy check in %#v", checks)
+		})
+	}
+}
+
 func TestRun_OneChannelFails_ExitsSendFailureCode(t *testing.T) {
 	failingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

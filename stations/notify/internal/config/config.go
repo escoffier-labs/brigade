@@ -32,9 +32,10 @@ func AsConfigError(err error) (*ConfigError, bool) {
 
 // Config is the parsed configuration tree.
 type Config struct {
-	Channels map[string]ChannelConfig `toml:"channels"`
-	Profiles map[string]ProfileConfig `toml:"profiles"`
-	Defaults Defaults                 `toml:"defaults"`
+	Channels       map[string]ChannelConfig `toml:"channels"`
+	Profiles       map[string]ProfileConfig `toml:"profiles"`
+	Defaults       Defaults                 `toml:"defaults"`
+	ClaudeCodeStop ClaudeCodeStopConfig     `toml:"claude_code_stop"`
 }
 
 type ChannelConfig struct {
@@ -61,6 +62,13 @@ type ProfileConfig struct {
 
 type Defaults struct {
 	TimeoutSeconds int `toml:"timeout_seconds"`
+}
+
+// ClaudeCodeStopConfig controls which private Claude Code Stop-hook fields
+// are included in outbound notification bodies. Both disclosures are opt-in.
+type ClaudeCodeStopConfig struct {
+	IncludeCWD       bool `toml:"include_cwd"`
+	IncludeSessionID bool `toml:"include_session_id"`
 }
 
 // Load reads the TOML file at path, falling back to env-only mode if it

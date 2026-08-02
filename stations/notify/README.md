@@ -136,6 +136,12 @@ url_env  = "SIGNAL_CLI_URL"
 from_env = "SIGNAL_FROM"
 to_env   = "SIGNAL_TO"
 
+# Claude Code Stop-hook messages use "Session ended" by default. Local paths
+# and session identifiers are private, so they are omitted unless enabled here.
+[claude_code_stop]
+include_cwd = false
+include_session_id = false
+
 [profiles.agent-stop]
 channels = ["tg-personal", "discord-main"]
 default  = true
@@ -146,6 +152,13 @@ prefix   = "🚨 "
 ```
 
 Secrets stay in env vars (the config references env-var names, not literal tokens).
+
+For Claude Code Stop hooks, omitting `[claude_code_stop]` has the same result as
+setting both options to `false`: the notification body is `Session ended` even
+when the hook supplies `cwd` or `session_id`. Set `include_cwd = true` to add
+only the working directory, `include_session_id = true` to add only the session
+identifier, or set both to `true` to include both values. These controls apply
+only to `--hook claude-code-stop`.
 
 Validate the wiring without sending a live notification:
 

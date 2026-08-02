@@ -33,6 +33,9 @@ func TestLoad_EnvOnlyFastPath_DiscordOnly(t *testing.T) {
 	if !ok || !p.Default {
 		t.Fatal("expected an implicit default profile named 'default'")
 	}
+	if cfg.ClaudeCodeStop.IncludeCWD || cfg.ClaudeCodeStop.IncludeSessionID {
+		t.Fatalf("Claude Code Stop disclosures = %#v, want both disabled by default", cfg.ClaudeCodeStop)
+	}
 }
 
 func TestLoad_EnvOnlyFastPath_AllThreeChannels(t *testing.T) {
@@ -75,6 +78,10 @@ default = true
 [profiles.error]
 channels = ["tg-personal"]
 prefix = "🚨 "
+
+[claude_code_stop]
+include_cwd = true
+include_session_id = true
 `
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -95,6 +102,43 @@ prefix = "🚨 "
 	}
 	if cfg.Profiles["error"].Prefix != "🚨 " {
 		t.Errorf("expected error prefix '🚨 ', got %q", cfg.Profiles["error"].Prefix)
+	}
+	if !cfg.ClaudeCodeStop.IncludeCWD || !cfg.ClaudeCodeStop.IncludeSessionID {
+		t.Errorf("Claude Code Stop disclosures = %#v, want both enabled", cfg.ClaudeCodeStop)
+	}
+}
+
+func TestLoad_ClaudeCodeStopDisclosureOptions(t *testing.T) {
+	tests := []struct {
+		name                  string
+		body                  string
+		wantCWD               bool
+		wantSessionIdentifier bool
+	}{
+		{name: "cwd only", body: "include_cwd = true\ninclude_session_id = false", wantCWD: true},
+		{name: "session only", body: "include_cwd = false\ninclude_session_id = true", wantSessionIdentifier: true},
+		{name: "both", body: "include_cwd = true\ninclude_session_id = true", wantCWD: true, wantSessionIdentifier: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			body := "[claude_code_stop]\n" + tt.body + "\n"
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.ClaudeCodeStop.IncludeCWD != tt.wantCWD {
+				t.Errorf("IncludeCWD = %t, want %t", cfg.ClaudeCodeStop.IncludeCWD, tt.wantCWD)
+			}
+			if cfg.ClaudeCodeStop.IncludeSessionID != tt.wantSessionIdentifier {
+				t.Errorf("IncludeSessionID = %t, want %t", cfg.ClaudeCodeStop.IncludeSessionID, tt.wantSessionIdentifier)
+			}
+		})
 	}
 }
 
