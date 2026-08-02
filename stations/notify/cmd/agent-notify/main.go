@@ -30,13 +30,42 @@ const (
 	exitOK       = 0
 	exitConfig   = 2 // returned for config / setup errors before any send is attempted
 	exitFailures = 3 // returned when one or more channel sends failed (count logged to stderr)
+
+	defaultTelegramAPIBase = "https://api.telegram.org"
 )
 
 var (
 	version   = "dev"
 	commit    = "unknown"
 	buildDate = "unknown"
+
+	telegramAPIBase = struct {
+		sync.RWMutex
+		url string
+	}{url: defaultTelegramAPIBase}
 )
+
+func currentTelegramAPIBase() string {
+	telegramAPIBase.RLock()
+	defer telegramAPIBase.RUnlock()
+	return telegramAPIBase.url
+}
+
+// setTelegramAPIBaseForTest provides the narrow test seam required to direct
+// Telegram requests to an in-process HTTP server. Production always uses the
+// default endpoint, and the returned cleanup restores the prior value.
+func setTelegramAPIBaseForTest(url string) func() {
+	telegramAPIBase.Lock()
+	previous := telegramAPIBase.url
+	telegramAPIBase.url = url
+	telegramAPIBase.Unlock()
+
+	return func() {
+		telegramAPIBase.Lock()
+		telegramAPIBase.url = previous
+		telegramAPIBase.Unlock()
+	}
+}
 
 func main() {
 	os.Exit(run(os.Args, os.Stdin, os.Stdout, os.Stderr))
@@ -359,7 +388,7 @@ func buildRegistry(cfg *config.Config, names []string) (*channels.Registry, erro
 			if tok == "" || chat == "" {
 				return nil, fmt.Errorf("channel %q: missing env (token or chat_id)", name)
 			}
-			reg.Register(name, channels.NewTelegram(name, "https://api.telegram.org", tok, chat, timeout))
+			reg.Register(name, channels.NewTelegram(name, currentTelegramAPIBase(), tok, chat, timeout))
 		case "signal":
 			url := os.Getenv(cc.URLEnv)
 			from := os.Getenv(cc.FromEnv)
