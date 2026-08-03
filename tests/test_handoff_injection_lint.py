@@ -133,7 +133,9 @@ def test_handoff_lint_content_guard_info_only_injection_does_not_fail(tmp_path, 
 
 
 def test_handoff_lint_content_guard_unreadable_path_not_clean_injection_verdict(
-    tmp_path, capsys, monkeypatch,
+    tmp_path,
+    capsys,
+    monkeypatch,
 ):
     unreadable = tmp_path / "not-a-handoff"
     unreadable.mkdir()
