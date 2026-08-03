@@ -6,9 +6,69 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from brigade import friction_cmd, localio, outcome, outcome_cmd, verify_trial
+import pytest
+
+from brigade import friction_cmd, localio, outcome, outcome_cmd, verify_trial, worker_failure
 
 from tests.test_outcome_cmd import _write_run_receipt, _write_verify_receipt
+
+
+def _write_run_receipt_with_failure(
+    target: Path,
+    run_id: str,
+    *,
+    status: str = "failed",
+    failure_kind: str | None = None,
+    failure_phase: str | None = None,
+    failure: dict | None = None,
+    started_at: str = "2026-06-20T00:00:00+00:00",
+) -> Path:
+    run_dir = target / ".brigade" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    receipt: dict = {
+        "task": "fixture task",
+        "cwd": str(target),
+        "status": status,
+        "dry_run": False,
+        "read_only": False,
+        "started_at": started_at,
+        "completed_at": started_at,
+        "artifacts": str(run_dir),
+    }
+    if failure_kind is not None:
+        receipt["failure_kind"] = failure_kind
+    if failure_phase is not None:
+        receipt["failure_phase"] = failure_phase
+    if failure is not None:
+        receipt["failure"] = failure
+    path = run_dir / "run.json"
+    localio.write_json(path, receipt)
+    return path
+
+
+def _ok_worker(*, worker: str = "implementer") -> dict:
+    return {
+        "worker": worker,
+        "task": "fixture task",
+        "ok": True,
+        "detail": "done",
+        "text": "done",
+    }
+
+
+def _capture_signal(tmp_path, run_id: str) -> tuple[int, dict]:
+    import io
+    import sys
+
+    buffer = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buffer
+    try:
+        rc = outcome_cmd.capture(target=tmp_path, artifact_id="skill-x", run_receipt=run_id, json_output=True)
+    finally:
+        sys.stdout = old_stdout
+    payload = json.loads(buffer.getvalue())
+    return rc, payload
 
 
 def _write_worker_results(
@@ -375,3 +435,237 @@ def test_verify_failure_classes_are_read_from_verify_trial(monkeypatch):
     assert outcome_cmd._verify_summary_failed_verification({"failure_class": "verification"}) is False
     # The status fallback must consult the patched infrastructure set.
     assert outcome_cmd._verify_summary_failed_verification({"status": "failed", "failure_class": "harness"}) is False
+
+
+def test_nested_only_infrastructure_kind_is_neutral_with_evidence_ref(tmp_path):
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "nested-branch-drift",
+        status="failed",
+        failure={"kind": "branch-head-drift", "phase": "run-isolation"},
+    )
+    _write_worker_results(tmp_path, "nested-branch-drift", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "nested-branch-drift")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == 0
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_legacy_top_level_failure_kind_fallback_still_works(tmp_path):
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "legacy-worker-failure",
+        status="failed",
+        failure_kind="worker-failure",
+    )
+    _write_worker_results(tmp_path, "legacy-worker-failure", results=[_infra_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "legacy-worker-failure")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == 0
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_legacy_top_level_only_infrastructure_kind_is_neutral(tmp_path):
+    # A receipt written before nested failure taxonomy existed: top-level kind only,
+    # no nested failure block. The fallback must still neutralize it.
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "legacy-branch-drift",
+        status="failed",
+        failure_kind="branch-head-drift",
+    )
+    _write_worker_results(tmp_path, "legacy-branch-drift", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "legacy-branch-drift")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == 0
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_legacy_top_level_catch_all_uses_top_level_phase(tmp_path):
+    # Top-level kind + top-level phase, no nested block: catch-all in a model phase
+    # must stay negative rather than fall through to the legacy neutral path.
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "legacy-agent-error-planning",
+        status="failed",
+        failure_kind="agent-error",
+        failure_phase="planning",
+    )
+    _write_worker_results(tmp_path, "legacy-agent-error-planning", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "legacy-agent-error-planning")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_nested_failure_kind_wins_when_both_present(tmp_path):
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "nested-wins",
+        status="failed",
+        failure_kind="orchestrator-error",
+        failure_phase="planning",
+        failure={"kind": "branch-head-drift", "phase": "run-isolation"},
+    )
+    _write_worker_results(tmp_path, "nested-wins", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "nested-wins")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == 0
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_catch_all_in_infrastructure_phase_is_neutral(tmp_path):
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "agent-error-dispatch",
+        status="failed",
+        failure={"kind": "agent-error", "phase": "dispatch"},
+    )
+    _write_worker_results(tmp_path, "agent-error-dispatch", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "agent-error-dispatch")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == 0
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_catch_all_in_model_phase_stays_negative(tmp_path):
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "orchestrator-planning",
+        status="failed",
+        failure={"kind": "orchestrator-error", "phase": "planning"},
+    )
+    _write_worker_results(tmp_path, "orchestrator-planning", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "orchestrator-planning")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_catch_all_with_missing_phase_stays_negative(tmp_path):
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "agent-error-no-phase",
+        status="failed",
+        failure={"kind": "agent-error"},
+    )
+    _write_worker_results(tmp_path, "agent-error-no-phase", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "agent-error-no-phase")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_catch_all_with_unknown_phase_stays_negative(tmp_path):
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "unexpected-unknown-phase",
+        status="failed",
+        failure={"kind": "unexpected-error", "phase": "artifact-collection"},
+    )
+    _write_worker_results(tmp_path, "unexpected-unknown-phase", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "unexpected-unknown-phase")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+@pytest.mark.parametrize(
+    ("kind", "phase"),
+    [
+        ("invalid-plan", "dispatch"),
+        ("non-final-output", "run-isolation"),
+    ],
+)
+def test_model_contract_failures_stay_negative_even_in_infrastructure_phase(tmp_path, kind, phase):
+    run_id = f"model-contract-{kind}"
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        run_id,
+        status="failed",
+        failure={"kind": kind, "phase": phase},
+    )
+    _write_worker_results(tmp_path, run_id, results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, run_id)
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_neither_failure_field_present_behavior_unchanged(tmp_path):
+    run_json = _write_run_receipt_with_failure(tmp_path, "no-failure-fields", status="failed")
+    _write_worker_results(tmp_path, "no-failure-fields", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "no-failure-fields")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_run_580_regression_nested_branch_head_drift_all_workers_ok(tmp_path):
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "run-580-regression",
+        status="failed",
+        failure={"kind": "branch-head-drift", "phase": "run-isolation"},
+    )
+    _write_worker_results(
+        tmp_path,
+        "run-580-regression",
+        results=[_ok_worker(worker="planner"), _ok_worker(worker="implementer")],
+    )
+
+    rc, payload = _capture_signal(tmp_path, "run-580-regression")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == 0
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_run_failure_phase_sets_are_disjoint():
+    """The two phase sets must not overlap, or the catch-all rule is ambiguous."""
+    assert not (worker_failure.RUN_INFRASTRUCTURE_FAILURE_PHASES & worker_failure.RUN_MODEL_FAILURE_PHASES)
+
+
+@pytest.mark.parametrize("phase", sorted(worker_failure.RUN_MODEL_FAILURE_PHASES))
+def test_catch_all_in_every_declared_model_phase_stays_negative(tmp_path, phase):
+    """Pins the enumerated policy: no model phase may neutralize a catch-all kind.
+
+    The rule is implemented as "not an infrastructure phase", so this locks the
+    declared model phases against someone later adding one to the infra set.
+    """
+    run_id = f"catch-all-{phase}"
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        run_id,
+        status="failed",
+        failure={"kind": "agent-error", "phase": phase},
+    )
+    _write_worker_results(tmp_path, run_id, results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, run_id)
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
