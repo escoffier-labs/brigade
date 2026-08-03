@@ -27,6 +27,44 @@ def _extras_enabled_for_suite(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _seat_health_probe_reports_healthy(monkeypatch, request):
+    """Report declared seats healthy so the bare-host baseline cannot abort runs.
+
+    ``_no_managed_tools_on_path`` deliberately pins the condition that no host
+    binary resolves, so under pytest every declared seat probes
+    ``executable-unavailable``.  Since #578 slice B an unhealthy orchestrator
+    with no healthy declared fallback aborts before planning, which is right in
+    production and, here, only a statement about the sandbox: these tests stub
+    ``agents.run_agent`` and never launch a CLI.  Left live, ~90 tests that
+    exercise ``run()`` fail on an abort unrelated to what they assert.
+
+    This hides one behaviour: ``run()`` rerouting or aborting on an unhealthy
+    orchestrator.  The modules below opt out and drive the probe themselves, so
+    that behaviour stays covered rather than stubbed away everywhere.
+    """
+    if request.module.__name__.rsplit(".", 1)[-1] in {
+        "test_seat_health",
+        "test_aboyeur_seat_health_probe",
+        "test_aboyeur_orchestrator_health_routing",
+    }:
+        return
+
+    from brigade import seat_health
+
+    real_probe = seat_health.SeatHealthProbe
+
+    class _HealthyAdapter:
+        def check(self, name, *, seat, roster, workspace, timeout_seconds):
+            return seat_health.SeatHealthCheck(name, "passed", "healthy under test")
+
+    monkeypatch.setattr(
+        seat_health,
+        "SeatHealthProbe",
+        lambda **kwargs: real_probe(adapter=_HealthyAdapter()),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_hermes_home(tmp_path_factory, monkeypatch):
     """Point HERMES_HOME at a dedicated temp dir (outside the test's tmp_path so
     it never pollutes workspace assertions) so hermes-harness skill installs

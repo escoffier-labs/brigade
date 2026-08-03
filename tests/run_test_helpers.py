@@ -31,6 +31,30 @@ def _ignore_brigade_runtime(workspace: Path) -> None:
     exclude_path.write_text(f"{existing}{separator}{pattern}\n")
 
 
+# Pin seat health healthy inside a child script that must reach a later phase.
+#
+# A child process inherits none of tests/conftest.py, so the autouse
+# _seat_health_probe_reports_healthy fixture cannot reach it. What the child
+# does inherit is the bare-host condition: no seat CLI resolves on a clean
+# runner, so every declared seat probes executable-unavailable and #578 slice B
+# aborts the run before planning. A subprocess test that waits on a phase past
+# admission never sees it. Tests that only need the run to start, and care about
+# how fast it gets there, stub _write_run_seat_health_receipt instead.
+HEALTHY_SEAT_HEALTH_CHILD_SETUP = """
+from brigade import seat_health as _seat_health
+
+_real_seat_health_probe = _seat_health.SeatHealthProbe
+
+
+class _HealthySeatAdapter:
+    def check(self, name, *, seat, roster, workspace, timeout_seconds):
+        return _seat_health.SeatHealthCheck(name, "passed", "healthy under test")
+
+
+_seat_health.SeatHealthProbe = lambda **kwargs: _real_seat_health_probe(adapter=_HealthySeatAdapter())
+"""
+
+
 def run_aboyeur_guarded(*args: Any, **kwargs: Any) -> int:
     """Call ``aboyeur.run`` under the same run guard used by the CLI."""
     output_dir = kwargs.get("output_dir")

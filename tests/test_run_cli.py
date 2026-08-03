@@ -17,6 +17,7 @@ from brigade import proc
 from brigade import roster
 from brigade import runguard
 from brigade import runs_cmd
+from tests.run_test_helpers import HEALTHY_SEAT_HEALTH_CHILD_SETUP
 
 
 def test_run_cli_missing_roster_errors(tmp_path, capsys, monkeypatch):
@@ -1575,7 +1576,7 @@ import time
 from pathlib import Path
 from brigade import aboyeur, cli
 from brigade.codex_appserver import AppServer
-
+{HEALTHY_SEAT_HEALTH_CHILD_SETUP}
 class RecordingAppServer(AppServer):
     def __init__(self, *, cwd):
         super().__init__(argv=[sys.executable, "-c", {stubborn_appserver!r}], cwd=cwd)
