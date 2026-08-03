@@ -242,6 +242,45 @@ _RUN_OWNED_FAILURE_KINDS = frozenset(
         "worker-failure",
     }
 )
+
+# Run-receipt failure taxonomy for outcome capture (#683). Read-time only; never mutate receipts.
+RUN_UNAMBIGUOUS_INFRASTRUCTURE_FAILURE_KINDS = frozenset(
+    {
+        "branch-head-drift",
+        "owner-process-exited",
+        "transport-error",
+        "provider-error",
+        "unsupported-sandbox",
+    }
+)
+RUN_MODEL_CONTRACT_FAILURE_KINDS = frozenset(
+    {
+        "invalid-plan",
+        "non-final-output",
+    }
+)
+RUN_CATCH_ALL_FAILURE_KINDS = frozenset(
+    {
+        "agent-error",
+        "orchestrator-error",
+        "unexpected-error",
+    }
+)
+RUN_INFRASTRUCTURE_FAILURE_PHASES = frozenset(
+    {
+        "startup",
+        "run-isolation",
+        "stale-lock-recovery",
+        "dispatch",
+    }
+)
+RUN_MODEL_FAILURE_PHASES = frozenset(
+    {
+        "planning",
+        "inference",
+        "output-validation",
+    }
+)
 _URL_CREDENTIALS = re.compile(r"(?P<scheme>https?://)[^/@\s:]+:[^/@\s]+@", re.IGNORECASE)
 _URL_QUERY = re.compile(r"(?P<url>https?://[^\s?#]+)(?:\?[^\s#]*)?(?:#[^\s]*)?", re.IGNORECASE)
 _SECRET_ASSIGNMENT = re.compile(
@@ -396,3 +435,60 @@ def normalized_failure(
         cause_code=normalized_kind,
         attempt=attempt,
     )
+
+
+def _normalize_receipt_field(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def resolve_run_failure_taxonomy(receipt: dict[str, object]) -> tuple[str | None, str | None]:
+    """Read nested run failure kind/phase with fallback to legacy top-level fields."""
+
+    failure = receipt.get("failure")
+    if isinstance(failure, dict):
+        nested_kind = _normalize_receipt_field(failure.get("kind"))
+        if nested_kind is not None:
+            # Resolve kind and phase as a unit. Falling back field-by-field could pair a
+            # legacy top-level kind with a nested phase, and the catch-all rule gates one
+            # on the other, so a mixed read can flip the verdict.
+            return nested_kind, _normalize_receipt_field(failure.get("phase"))
+
+    return (
+        _normalize_receipt_field(receipt.get("failure_kind")),
+        _normalize_receipt_field(receipt.get("failure_phase")),
+    )
+
+
+def _is_run_catch_all_failure_kind(kind: str) -> bool:
+    if kind in RUN_CATCH_ALL_FAILURE_KINDS:
+        return True
+    if kind not in _RUN_OWNED_FAILURE_KINDS:
+        return False
+    return (
+        kind not in RUN_UNAMBIGUOUS_INFRASTRUCTURE_FAILURE_KINDS
+        and kind not in RUN_MODEL_CONTRACT_FAILURE_KINDS
+        and kind != "worker-failure"
+    )
+
+
+def run_failure_is_infrastructure_at_read_time(kind: str | None, phase: str | None) -> bool | None:
+    """Return whether a run-owned failure is infrastructure-neutral at read time.
+
+    ``True`` and ``False`` are definitive. ``None`` means defer to the legacy
+    worker-failure / missing-kind path in outcome capture.
+    """
+
+    if kind is None:
+        return None
+    if kind in RUN_MODEL_CONTRACT_FAILURE_KINDS:
+        return False
+    if kind in RUN_UNAMBIGUOUS_INFRASTRUCTURE_FAILURE_KINDS:
+        return True
+    if kind == "worker-failure":
+        return None
+    if _is_run_catch_all_failure_kind(kind):
+        return phase in RUN_INFRASTRUCTURE_FAILURE_PHASES
+    return False

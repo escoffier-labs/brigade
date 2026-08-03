@@ -1117,7 +1117,14 @@ def _run_infrastructure_only(receipt: dict[str, Any], worker_results: list[dict[
     status = _run_receipt_signal_status(receipt)
     if status not in core.RUN_INFRASTRUCTURE_NEUTRAL_STATUSES:
         return False
-    failure_kind = receipt.get("failure_kind")
+    from .worker_failure import resolve_run_failure_taxonomy, run_failure_is_infrastructure_at_read_time
+
+    failure_kind, failure_phase = resolve_run_failure_taxonomy(receipt)
+    run_level_infrastructure = run_failure_is_infrastructure_at_read_time(failure_kind, failure_phase)
+    if run_level_infrastructure is True:
+        return True
+    if run_level_infrastructure is False:
+        return False
     if failure_kind not in _RUN_INFRASTRUCTURE_FAILURE_KINDS:
         return False
     failed_workers = [result for result in worker_results if result.get("ok") is False]
