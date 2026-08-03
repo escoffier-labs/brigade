@@ -49,7 +49,9 @@ def _injection_verdict(hits: tuple[Any, ...]) -> str:
     return FAIL if any(hit.severity == "warning" for hit in hits) else OK
 
 
-def _injection_detail(*, warning_count: int) -> str:
+def _injection_detail(*, warning_count: int, unscanned: bool = False) -> str:
+    if unscanned:
+        return "unscanned"
     if warning_count:
         label = "warning" if warning_count == 1 else "warnings"
         return f"{warning_count} injection {label}"
@@ -83,11 +85,18 @@ def lint(
         for result in results:
             guard_item = _guard_handoff_path(result.path, target=target, policy=guard_policy)
             text = _read_handoff_text(result.path)
-            hits = scan_handoff_injection_heuristics(text or "") if text is not None else ()
-            guard_item["injection_heuristics"] = [_injection_hit_dict(hit) for hit in hits]
-            guard_item["injection_warning_count"] = len([hit for hit in hits if hit.severity == "warning"])
-            guard_item["egress_verdict"] = _egress_verdict(guard_item.get("exit_code"))
-            guard_item["injection_verdict"] = _injection_verdict(hits)
+            if text is None:
+                guard_item["injection_heuristics"] = []
+                guard_item["injection_warning_count"] = 0
+                guard_item["injection_unscanned"] = True
+                guard_item["egress_verdict"] = _egress_verdict(guard_item.get("exit_code"))
+                guard_item["injection_verdict"] = FAIL
+            else:
+                hits = scan_handoff_injection_heuristics(text)
+                guard_item["injection_heuristics"] = [_injection_hit_dict(hit) for hit in hits]
+                guard_item["injection_warning_count"] = len([hit for hit in hits if hit.severity == "warning"])
+                guard_item["egress_verdict"] = _egress_verdict(guard_item.get("exit_code"))
+                guard_item["injection_verdict"] = _injection_verdict(hits)
             guard_results.append(guard_item)
     guard_ok = all(item.get("egress_verdict") == OK and item.get("injection_verdict") == OK for item in guard_results)
     injection_counts: dict[str, int] = {}
@@ -168,9 +177,10 @@ def lint(
             print(f"[{egress_status}] content_guard egress: {item.get('path')} {item.get('detail')}")
             injection_status = item.get("injection_verdict", OK)
             warning_count = int(item.get("injection_warning_count") or 0)
+            unscanned = bool(item.get("injection_unscanned"))
             print(
                 f"[{injection_status}] content_guard injection: {item.get('path')} "
-                f"{_injection_detail(warning_count=warning_count)}"
+                f"{_injection_detail(warning_count=warning_count, unscanned=unscanned)}"
             )
             for hit in hits:
                 if hit.get("severity") == "info":
