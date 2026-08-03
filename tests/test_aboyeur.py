@@ -17,7 +17,7 @@ from brigade import evidence_brief
 from brigade import proc
 from brigade import runguard
 from brigade.roster import Agent, Roster
-from tests.run_test_helpers import run_aboyeur_guarded
+from tests.run_test_helpers import HEALTHY_SEAT_HEALTH_CHILD_SETUP, run_aboyeur_guarded
 from tests.work_cmd_test_helpers import _init_git_repo
 
 
@@ -2085,7 +2085,7 @@ import time
 from pathlib import Path
 from brigade import aboyeur, runguard
 from brigade.roster import Agent, Roster
-
+{HEALTHY_SEAT_HEALTH_CHILD_SETUP}
 run_dir = Path({str(output_dir)!r})
 workspace = run_dir.parent / "workspace"
 workspace.mkdir()
@@ -3834,7 +3834,7 @@ import time
 from pathlib import Path
 from brigade import aboyeur, agents, runguard
 from brigade.roster import Agent, Roster
-
+{HEALTHY_SEAT_HEALTH_CHILD_SETUP}
 run_dir = Path({str(output_dir)!r})
 workspace = run_dir.parent / "workspace"
 workspace.mkdir()
