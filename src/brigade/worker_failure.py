@@ -299,6 +299,71 @@ class WorkerFailure:
         return payload
 
 
+def failure_from_payload(payload: dict[str, object]) -> WorkerFailure | None:
+    """Parse a serialized ``brigade.worker_failure.v1`` object without mutating it."""
+
+    if payload.get("schema") != SCHEMA:
+        return None
+    failure_class_raw = payload.get("class")
+    phase_raw = payload.get("phase")
+    retry_raw = payload.get("retry")
+    detected_by = payload.get("detected_by")
+    detail = payload.get("detail")
+    if not isinstance(failure_class_raw, str) or not isinstance(phase_raw, str) or not isinstance(retry_raw, str):
+        return None
+    if not isinstance(detected_by, str) or not isinstance(detail, str):
+        return None
+    try:
+        failure_class = FailureClass(failure_class_raw)
+        phase = FailurePhase(phase_raw)
+        retry = RetryDisposition(retry_raw)
+    except ValueError:
+        return None
+    domain_raw = payload.get("domain")
+    domain = FailureDomain.INFRASTRUCTURE
+    if isinstance(domain_raw, str):
+        try:
+            domain = FailureDomain(domain_raw)
+        except ValueError:
+            return None
+    cause_code = payload.get("cause_code")
+    attempt = payload.get("attempt")
+    return WorkerFailure(
+        failure_class=failure_class,
+        phase=phase,
+        retry=retry,
+        detected_by=detected_by,
+        detail=detail,
+        cause_code=cause_code if isinstance(cause_code, str) else None,
+        attempt=attempt if isinstance(attempt, int) and not isinstance(attempt, bool) else None,
+        domain=domain,
+    )
+
+
+def worker_result_failure(result: dict[str, object]) -> WorkerFailure | None:
+    """Return the normalized worker failure for a worker-results entry at read time."""
+
+    if result.get("ok") is True:
+        return None
+    failure_payload = result.get("failure")
+    if isinstance(failure_payload, dict) and failure_payload.get("schema") == SCHEMA:
+        # A structured payload is authoritative. Never fall back to the legacy mapping,
+        # which would relabel an unreadable or non-infrastructure domain as infrastructure.
+        return failure_from_payload(failure_payload)
+    failure_phase = result.get("failure_phase")
+    failure_kind = result.get("failure_kind")
+    detail = result.get("detail")
+    timed_out = result.get("timed_out")
+    status = result.get("status")
+    return normalized_failure(
+        failure_phase=failure_phase if isinstance(failure_phase, str) else None,
+        failure_kind=failure_kind if isinstance(failure_kind, str) else None,
+        detail=str(detail or ""),
+        timed_out=bool(timed_out),
+        status=str(status or ""),
+    )
+
+
 def normalized_failure(
     *,
     failure_phase: str | None,

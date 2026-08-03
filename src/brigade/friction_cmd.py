@@ -603,6 +603,7 @@ def _structured_candidate(
     detail: str,
     adapter: str | None = None,
     error_class: str | None = None,
+    cause_code: str | None = None,
 ) -> dict[str, Any]:
     try:
         source = str(path.resolve().relative_to(target))
@@ -627,6 +628,7 @@ def _structured_candidate(
         "workflow": _workflow_from_path(target, path),
         "adapter": adapter,
         "error_class": error_class,
+        "cause_code": cause_code,
         "operation": operation,
         "recurrence_key": recurrence_key,
         "evidence": {"path": source, "line": 1, "snippet": snippet},
@@ -689,6 +691,16 @@ def _structured_families(
             if not isinstance(result, dict) or result.get("ok") is True:
                 continue
             detail = str(result.get("detail") or "worker failed")
+            from .worker_failure import worker_result_failure
+
+            failure = worker_result_failure(result)
+            if failure is not None:
+                error_class = failure.failure_class.value
+                cause_code = failure.cause_code
+            else:
+                error_class = "timeout" if result.get("timed_out") else "adapter_error"
+                failure_kind = result.get("failure_kind")
+                cause_code = str(failure_kind) if failure_kind else None
             families["run"].append(
                 _structured_candidate(
                     target=target,
@@ -700,7 +712,8 @@ def _structured_families(
                     operation=f"run.worker.{result.get('worker') or 'unknown'}",
                     detail=detail,
                     adapter=str(result.get("transport") or "direct"),
-                    error_class="timeout" if result.get("timed_out") else "adapter_error",
+                    error_class=error_class,
+                    cause_code=cause_code,
                 )
             )
     eval_root = target / ".brigade" / "evals"
