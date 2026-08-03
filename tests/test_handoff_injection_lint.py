@@ -132,6 +132,30 @@ def test_handoff_lint_content_guard_info_only_injection_does_not_fail(tmp_path, 
     assert any(hit["severity"] == "info" for hit in guard["injection_heuristics"])
 
 
+def test_handoff_lint_content_guard_unreadable_path_not_clean_injection_verdict(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    unreadable = tmp_path / "not-a-handoff"
+    unreadable.mkdir()
+
+    monkeypatch.setattr("brigade.scrub.run_scan", _clean_egress_scan)
+    assert handoff_cmd.lint(target=tmp_path, paths=[unreadable], content_guard=True, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["content_guard_injection"] == "fail"
+    guard = payload["content_guard"][0]
+    assert guard["injection_verdict"] == "fail"
+    assert guard["injection_warning_count"] == 0
+    assert not guard["injection_heuristics"]
+
+    handoff_cmd.lint(target=tmp_path, paths=[unreadable], content_guard=True)
+    out = capsys.readouterr().out
+    assert "cannot read handoff file" in out
+    assert "[fail] content_guard injection:" in out
+    assert "[ok] content_guard injection:" not in out
+
+
 def test_handoff_lint_content_guard_prints_injection_scope(tmp_path, capsys, monkeypatch):
     evil = FIXTURE_DIR / "evil-disregard-system.md"
     path = tmp_path / "evil.md"
