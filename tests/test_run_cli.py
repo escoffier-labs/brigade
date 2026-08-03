@@ -1954,6 +1954,11 @@ codex_cloud.run_cloud_task = blocked_cloud
 import sys
 from brigade import aboyeur, acpx_adapter, agents, cli, codex_cloud, proc
 from brigade.proc import ExecutableIdentity
+# This test measures how fast the run reaches a blocked phase and then cancels it, on a
+# 5s deadline. The #578 slice A seat-health probe runs before that phase and does real
+# transport work, which pushes the phase past the deadline. Seat health is not under
+# test here, so neutralize it for this child process only.
+aboyeur._write_run_seat_health_receipt = lambda *args, **kwargs: None
 {setup}
 raise SystemExit(cli.main([
     "run", "blocked", "--cwd", {str(repo)!r},

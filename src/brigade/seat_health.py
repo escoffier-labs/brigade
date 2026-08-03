@@ -657,6 +657,19 @@ def _seat_chain_names(roster: Any) -> tuple[str, ...]:
     return tuple(names)
 
 
+def exception_results_for_probe_failure(roster: Any, exc: Exception) -> tuple[SeatHealthResult, ...]:
+    """Return one failed result per declared seat when the probe itself blew up.
+
+    ``probe_roster`` normally covers the whole seat chain, so a caller that recorded
+    only the orchestrator would leave every other seat with no row at all. A reader
+    cannot tell a missing row from a healthy one, so cover the same chain here and
+    mark each seat failed with the probe's own cause.
+    """
+    now = time.monotonic()
+    wall_now = time.time()
+    return tuple(_exception_result(name, roster, now, wall_now, exc) for name in _seat_chain_names(roster))
+
+
 def _exception_result(name: str, roster: Any, now: float, wall_now: float, exc: Exception) -> SeatHealthResult:
     seat = roster.agents[name]
     check = SeatHealthCheck("declaration", "failed", safe_detail(str(exc)), cause_code="probe-exception")

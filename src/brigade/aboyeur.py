@@ -34,6 +34,7 @@ from . import run_journal
 from . import run_lifecycle
 from . import run_projector
 from . import run_shadow
+from . import seat_health
 from .result_integrity import validate_final_output
 from .run_receipts import (
     agent_result_from_worker as _agent_result_from_worker,
@@ -2998,6 +2999,37 @@ def _terminalize_run_lifecycle(function: Callable[..., int]) -> Callable[..., in
     return wrapped
 
 
+def _write_run_seat_health_receipt(
+    output_dir: Path,
+    roster: Roster,
+    *,
+    cwd: Path | None = None,
+    probe: seat_health.SeatHealthProbe | None = None,
+) -> None:
+    """Probe declared seats and write seat-health.json beside run.json.
+
+    Observation only: the run receipt is already on disk when this runs, and
+    nothing here changes seat selection or aborts the run.  A probe that raises
+    is receipted as a failed seat instead of propagating, so probe trouble can
+    never take down a run that has already been receipted.  ``allow_model_smoke``
+    stays off: paying for a model call per seat on every run is a routing
+    decision that does not belong to admission.
+    """
+    active_probe = probe or seat_health.SeatHealthProbe(collect_executable_version=False)
+    try:
+        results = active_probe.probe_roster(roster, workspace=cwd, allow_model_smoke=False)
+    except Exception as exc:
+        results = seat_health.exception_results_for_probe_failure(roster, exc)
+    try:
+        seat_health.write_seat_health_receipt(
+            output_dir / "seat-health.json",
+            results,
+            run_id=output_dir.name,
+        )
+    except OSError as exc:
+        print(f"error: seat health receipt failed: {exc}", file=sys.stderr)
+
+
 @_terminalize_run_lifecycle
 def run(
     task: str,
@@ -3234,6 +3266,8 @@ def run(
                 worker=worker,
             ),
         )
+        # After the initial run receipt, before planning: a probe failure stays receipted.
+        _write_run_seat_health_receipt(output_dir, roster, cwd=cwd)
 
     if cwd is not None and route is not None and route.attached:
         from .route_policy import decide_route_skills, route_policy_extensions_from_decision

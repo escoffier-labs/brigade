@@ -4304,6 +4304,7 @@ def test_appserver_error_fallback_closes_partially_started_candidate(monkeypatch
 
     class FailingAppServer:
         def __init__(self, *, cwd):
+            self.cwd = cwd
             self.closed = 0
             instances.append(self)
 
@@ -4331,7 +4332,12 @@ def test_appserver_error_fallback_closes_partially_started_candidate(monkeypatch
         )
         == 0
     )
-    assert instances[0].closed == 1
+    # The seat-health probe (#578 slice A) also builds an AppServer, against its own
+    # throwaway repo rather than the caller's tree, so select this run's candidate by
+    # cwd instead of construction order.
+    run_candidates = [instance for instance in instances if instance.cwd == tmp_path]
+    assert len(run_candidates) == 1
+    assert run_candidates[0].closed == 1
 
 
 def test_control_error_closes_partial_server_and_preserves_warning_fallback(monkeypatch, tmp_path, capsys):
