@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import localio, outcome as core, receipt_schema, scorecard as scorecard_mod
+from . import localio, outcome as core, receipt_schema, scorecard as scorecard_mod, verify_trial
 
 _LOCK_WAIT_SECONDS = 30.0
 _LOCK_SENTINEL_BYTE = b"\0"
@@ -1011,6 +1011,143 @@ def _run_receipt_signal_status(receipt: dict) -> str:
     return str(receipt.get("status") or "")
 
 
+def _load_worker_results(run_json: Path) -> list[dict[str, Any]]:
+    worker_results_path = run_json.parent / "worker-results.json"
+    if not worker_results_path.is_file():
+        return []
+    payload = localio.read_json_dict(worker_results_path)
+    if payload is None:
+        return []
+    results = payload.get("results")
+    if not isinstance(results, list):
+        return []
+    return [item for item in results if isinstance(item, dict)]
+
+
+def _worker_results_ground_truth(run_json: Path) -> dict[str, Any] | None:
+    worker_results_path = run_json.parent / "worker-results.json"
+    if not worker_results_path.is_file():
+        return None
+    payload = localio.read_json_dict(worker_results_path)
+    if payload is None:
+        return None
+    ground_truth = payload.get("ground_truth")
+    return ground_truth if isinstance(ground_truth, dict) else None
+
+
+def worker_result_failure(result: dict[str, Any]):
+    """Read-time worker failure attribution for a worker-results entry."""
+    from .worker_failure import worker_result_failure as _worker_result_failure
+
+    return _worker_result_failure(result)
+
+
+def _verify_summary_failed_verification(summary: dict[str, Any]) -> bool:
+    """Return True when a verify receipt blames the subject rather than the harness.
+
+    The failure-class vocabulary is owned by ``verify_trial``, which is what stamps
+    these receipts. Read it from there rather than matching literals, so adding a
+    class there cannot silently reclassify runs here.
+    """
+    failure_class = summary.get("failure_class")
+    if failure_class in verify_trial.VERIFY_SKILL_FAILURE_CLASSES:
+        return True
+    commands = summary.get("commands")
+    if isinstance(commands, list):
+        stamped = [command for command in commands if isinstance(command, dict) and command.get("failure_class")]
+        if any(command.get("failure_class") in verify_trial.VERIFY_SKILL_FAILURE_CLASSES for command in stamped):
+            return True
+        if stamped:
+            return False
+    status = str(summary.get("status") or "")
+    if status == "failed":
+        return failure_class not in verify_trial.VERIFY_INFRASTRUCTURE_FAILURE_CLASSES
+    return False
+
+
+def _resolve_verify_summary(target: Path, summary: dict[str, Any]) -> dict[str, Any]:
+    run_id = summary.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return summary
+    from .work_cmd import verification as verify_mod
+
+    receipt, error = verify_mod._resolve_verify_receipt(target, run_id)
+    if receipt is None:
+        return summary
+    return receipt
+
+
+def _run_has_verifier_failure(target: Path, run_json: Path, receipt: dict[str, Any]) -> bool:
+    ground_truth = _worker_results_ground_truth(run_json)
+    if ground_truth is not None and ("latest_verify" in ground_truth or "verify_receipts" in ground_truth):
+        # The run recorded which verifications belong to it. Trust that record and never
+        # fall back to the workspace-wide latest receipt, which may belong to a later,
+        # unrelated verification run.
+        latest_verify = ground_truth.get("latest_verify")
+        if isinstance(latest_verify, dict):
+            resolved = _resolve_verify_summary(target, latest_verify)
+            if _verify_summary_failed_verification(resolved):
+                return True
+        verify_receipts = ground_truth.get("verify_receipts")
+        if isinstance(verify_receipts, list):
+            for item in verify_receipts:
+                if isinstance(item, dict) and _verify_summary_failed_verification(
+                    _resolve_verify_summary(target, item)
+                ):
+                    return True
+        return False
+    started_at = receipt.get("started_at")
+    if not isinstance(started_at, str):
+        return False
+    from .work_cmd import verification as verify_mod
+
+    verify_receipt, error = verify_mod._resolve_verify_receipt(target, "latest")
+    if verify_receipt is None:
+        return False
+    verify_started = str(verify_receipt.get("started_at") or "")
+    if verify_started < started_at:
+        return False
+    return _verify_summary_failed_verification(verify_receipt)
+
+
+_RUN_INFRASTRUCTURE_FAILURE_KINDS = frozenset({"worker-failure", None})
+
+
+def _run_infrastructure_only(receipt: dict[str, Any], worker_results: list[dict[str, Any]]) -> bool:
+    status = _run_receipt_signal_status(receipt)
+    if status not in core.RUN_INFRASTRUCTURE_NEUTRAL_STATUSES:
+        return False
+    failure_kind = receipt.get("failure_kind")
+    if failure_kind not in _RUN_INFRASTRUCTURE_FAILURE_KINDS:
+        return False
+    failed_workers = [result for result in worker_results if result.get("ok") is False]
+    if not failed_workers:
+        return failure_kind == "worker-failure"
+    for result in failed_workers:
+        failure = worker_result_failure(result)
+        if failure is None:
+            return False
+        if failure.domain.value != "infrastructure":
+            return False
+    return True
+
+
+def _run_capture_signal_value(
+    target: Path,
+    run_json: Path,
+    receipt: dict[str, Any],
+    effective_status: str,
+) -> int:
+    worker_results = _load_worker_results(run_json)
+    infrastructure_only = _run_infrastructure_only(receipt, worker_results)
+    verifier_failed = _run_has_verifier_failure(target, run_json, receipt)
+    return core.run_capture_signal_value(
+        effective_status,
+        infrastructure_only=infrastructure_only,
+        verifier_failed=verifier_failed,
+    )
+
+
 def _decisions_dir(target: Path) -> Path:
     return target / "memory" / "outcome" / "decisions"
 
@@ -1609,6 +1746,7 @@ def capture(
     source = "verify"
     effective_status = ""
     evidence_ref = ""
+    signal: int | None = None
     ts = localio.utc_now_iso()
     code_graph_delta: dict[str, Any] | None = None
     context_eval: dict[str, Any] | None = None
@@ -1623,6 +1761,7 @@ def capture(
         source = "run"
         effective_status = _run_receipt_signal_status(receipt)
         evidence_ref = str(run_json)
+        signal = _run_capture_signal_value(target, run_json, receipt, effective_status)
         ts = str(receipt.get("completed_at") or receipt.get("started_at") or localio.utc_now_iso())
         code_graph_delta = _compact_code_graph_delta(receipt)
         context_eval = _compact_context_eval(receipt)
@@ -1641,14 +1780,17 @@ def capture(
         evidence_ref = verify_mod.canonical_verify_evidence_ref(target, receipt)
         ts = str(receipt.get("completed_at") or receipt.get("started_at") or localio.utc_now_iso())
         code_graph_delta = _compact_code_graph_delta(receipt)
+        signal = core.signal_value(source, effective_status)
     manifest = context_manifest(run_agent)
     route = route_manifest(route_run_payload, route_run_json)
+    if signal is None:
+        signal = core.signal_value(source, effective_status)
     record = core.OutcomeRecord(
         artifact_id=artifact_id,
         artifact_kind=artifact_kind,
         task_id=task_id or "",
         source=source,
-        signal_value=core.signal_value(source, effective_status),
+        signal_value=signal,
         evidence_ref=evidence_ref,
         ts=ts,
         code_graph_delta=code_graph_delta,

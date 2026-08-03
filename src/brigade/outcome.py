@@ -129,6 +129,25 @@ def signal_value(source: str, status: str) -> int:
     return SIGNAL_RULES.get((source, status), 0)
 
 
+RUN_INFRASTRUCTURE_NEUTRAL_STATUSES = frozenset({"failed", "error", "incomplete"})
+
+
+def run_capture_signal_value(
+    status: str,
+    *,
+    infrastructure_only: bool,
+    verifier_failed: bool,
+) -> int:
+    """Return the run-receipt capture weight, neutralizing infrastructure-only failures."""
+    if status in ("dry-run", "read-only"):
+        return 0
+    if verifier_failed:
+        return -1
+    if infrastructure_only and status in RUN_INFRASTRUCTURE_NEUTRAL_STATUSES:
+        return 0
+    return signal_value("run", status)
+
+
 def scored_records(records: list[OutcomeRecord]) -> list[OutcomeRecord]:
     """Return the de-duplicated records that contribute to scoring.
 
