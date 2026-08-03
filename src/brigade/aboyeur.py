@@ -2999,26 +2999,123 @@ def _terminalize_run_lifecycle(function: Callable[..., int]) -> Callable[..., in
     return wrapped
 
 
+@dataclass(frozen=True)
+class OrchestratorHealthRoutingDecision:
+    roster: Roster
+    warning: str | None = None
+    abort_detail: str | None = None
+    abort_failure_phase: str = "preflight"
+    abort_failure_kind: str = "unclassified"
+    receipt: dict[str, object] | None = None
+
+
+def _seat_health_result_for(
+    results: tuple[seat_health.SeatHealthResult, ...] | None,
+    seat: str,
+) -> seat_health.SeatHealthResult | None:
+    if results is None:
+        return None
+    return next((result for result in results if result.seat == seat), None)
+
+
+def _seat_health_typed_cause(result: seat_health.SeatHealthResult) -> str:
+    if result.failure is not None:
+        return result.failure.failure_class.value
+    failed = next((check for check in result.checks if check.status == "failed"), None)
+    if failed is not None and failed.cause_code:
+        return failed.cause_code
+    return "unclassified"
+
+
+def resolve_orchestrator_health_routing(
+    roster: Roster,
+    results: tuple[seat_health.SeatHealthResult, ...] | None,
+) -> OrchestratorHealthRoutingDecision:
+    """Return the effective roster and any orchestrator fallback or abort action."""
+    orchestrator_result = _seat_health_result_for(results, roster.orchestrator)
+    if orchestrator_result is None or orchestrator_result.status != "unhealthy":
+        return OrchestratorHealthRoutingDecision(roster=roster)
+
+    requested = roster.orchestrator
+    typed_cause = _seat_health_typed_cause(orchestrator_result)
+    failure = orchestrator_result.failure
+    rejected: list[dict[str, str]] = []
+
+    for fallback_name in roster.agents[requested].fallback:
+        if fallback_name not in roster.agents:
+            continue
+        fallback_result = _seat_health_result_for(results, fallback_name)
+        if fallback_result is not None and fallback_result.status == "healthy":
+            return OrchestratorHealthRoutingDecision(
+                roster=replace(roster, orchestrator=fallback_name),
+                warning=(
+                    f"warning: orchestrator {requested} is unhealthy [{typed_cause}]; "
+                    f"using declared fallback {fallback_name}"
+                ),
+                receipt={
+                    "schema": "brigade.seat_routing.v1",
+                    "requested_orchestrator": requested,
+                    "effective_orchestrator": fallback_name,
+                    "outcome": "fallback",
+                    "typed_cause": typed_cause,
+                    "rejected_fallbacks": rejected,
+                },
+            )
+        status = fallback_result.status if fallback_result is not None else "missing"
+        cause = _seat_health_typed_cause(fallback_result) if fallback_result is not None else "missing"
+        rejected.append({"seat": fallback_name, "status": status, "cause": cause})
+
+    if rejected:
+        rejected_detail = "; rejected fallbacks: " + ", ".join(
+            f"{entry['seat']} ({entry['status']}[{entry['cause']}])" for entry in rejected
+        )
+    else:
+        rejected_detail = "; no declared fallbacks"
+    detail = f"orchestrator {requested} is unhealthy [{typed_cause}]{rejected_detail}"
+    return OrchestratorHealthRoutingDecision(
+        roster=roster,
+        abort_detail=detail,
+        abort_failure_phase=failure.phase.value if failure is not None else "preflight",
+        abort_failure_kind=failure.failure_class.value if failure is not None else "unclassified",
+        receipt={
+            "schema": "brigade.seat_routing.v1",
+            "requested_orchestrator": requested,
+            "effective_orchestrator": None,
+            "outcome": "abort",
+            "typed_cause": typed_cause,
+            "rejected_fallbacks": rejected,
+        },
+    )
+
+
+def _write_seat_routing_receipt(output_dir: Path, receipt: dict[str, object]) -> None:
+    try:
+        _write_json(output_dir / "seat-routing.json", receipt)
+    except OSError as exc:
+        print(f"error: seat routing receipt failed: {exc}", file=sys.stderr)
+
+
 def _write_run_seat_health_receipt(
     output_dir: Path,
     roster: Roster,
     *,
     cwd: Path | None = None,
     probe: seat_health.SeatHealthProbe | None = None,
-) -> None:
+) -> tuple[seat_health.SeatHealthResult, ...] | None:
     """Probe declared seats and write seat-health.json beside run.json.
 
-    Observation only: the run receipt is already on disk when this runs, and
-    nothing here changes seat selection or aborts the run.  A probe that raises
-    is receipted as a failed seat instead of propagating, so probe trouble can
-    never take down a run that has already been receipted.  ``allow_model_smoke``
-    stays off: paying for a model call per seat on every run is a routing
-    decision that does not belong to admission.
+    Returns probe results on success, including when the receipt write fails.
+    Returns ``None`` when the probe itself raised so routing treats the run as
+    observation-only.  ``allow_model_smoke`` stays off: paying for a model call
+    per seat on every run is a routing decision that does not belong to
+    admission.
     """
     active_probe = probe or seat_health.SeatHealthProbe(collect_executable_version=False)
+    probe_failed = False
     try:
         results = active_probe.probe_roster(roster, workspace=cwd, allow_model_smoke=False)
     except Exception as exc:
+        probe_failed = True
         results = seat_health.exception_results_for_probe_failure(roster, exc)
     try:
         seat_health.write_seat_health_receipt(
@@ -3028,6 +3125,9 @@ def _write_run_seat_health_receipt(
         )
     except OSError as exc:
         print(f"error: seat health receipt failed: {exc}", file=sys.stderr)
+    if probe_failed:
+        return None
+    return results
 
 
 @_terminalize_run_lifecycle
@@ -3267,7 +3367,26 @@ def run(
             ),
         )
         # After the initial run receipt, before planning: a probe failure stays receipted.
-        _write_run_seat_health_receipt(output_dir, roster, cwd=cwd)
+        health_results = _write_run_seat_health_receipt(output_dir, roster, cwd=cwd)
+        routing = resolve_orchestrator_health_routing(roster, health_results)
+        roster = routing.roster
+        if routing.warning is not None:
+            print(routing.warning, file=sys.stderr)
+        if routing.receipt is not None:
+            routing_receipt = dict(routing.receipt)
+            routing_receipt["run_id"] = output_dir.name
+            _write_seat_routing_receipt(output_dir, routing_receipt)
+        if routing.abort_detail is not None:
+            record_run_termination(
+                output_dir,
+                status="failed",
+                failure_phase=routing.abort_failure_phase,
+                failure_kind=routing.abort_failure_kind,
+                detail=routing.abort_detail,
+                seat=roster.orchestrator,
+            )
+            print(f"error: {routing.abort_detail}", file=sys.stderr)
+            return 2
 
     if cwd is not None and route is not None and route.attached:
         from .route_policy import decide_route_skills, route_policy_extensions_from_decision
