@@ -669,3 +669,51 @@ def test_catch_all_in_every_declared_model_phase_stays_negative(tmp_path, phase)
     assert rc == 0
     assert payload["record"]["signal_value"] == -1
     assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+@pytest.mark.parametrize("failure_class", list(worker_failure.FailureClass))
+def test_failure_class_kind_is_infrastructure_at_read_time(failure_class):
+    """Typed abort receipts write FailureClass values; all are infrastructure-neutral."""
+
+    assert worker_failure.run_failure_is_infrastructure_at_read_time(failure_class.value, "preflight") is True
+
+
+def test_isolation_breach_failure_class_is_infrastructure_at_read_time():
+    assert worker_failure.run_failure_is_infrastructure_at_read_time("isolation-breach", "postflight") is True
+
+
+def test_model_contract_kind_wins_over_legacy_failure_class_map():
+    # ``non-final-output`` maps to ``output-contract-violation`` in LEGACY_FAILURE_KIND_MAP,
+    # but RUN_MODEL_CONTRACT_FAILURE_KINDS must win before the FailureClass check.
+    assert worker_failure.run_failure_is_infrastructure_at_read_time("non-final-output", "run-isolation") is False
+    assert worker_failure.run_failure_is_infrastructure_at_read_time("invalid-plan", "dispatch") is False
+
+
+def test_catch_all_classifier_in_model_phase_stays_negative():
+    assert worker_failure.run_failure_is_infrastructure_at_read_time("agent-error", "planning") is False
+
+
+def test_catch_all_classifier_missing_phase_fails_closed():
+    assert worker_failure.run_failure_is_infrastructure_at_read_time("agent-error", None) is False
+
+
+def test_catch_all_classifier_unknown_phase_fails_closed():
+    assert worker_failure.run_failure_is_infrastructure_at_read_time("unexpected-error", "artifact-collection") is False
+
+
+def test_slice_b_typed_failure_class_run_receipt_is_neutral(tmp_path):
+    """Slice-B abort writes FailureClass values into nested failure.kind; capture stays neutral."""
+
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "slice-b-auth-required",
+        status="failed",
+        failure={"kind": "auth-required", "phase": "preflight"},
+    )
+    _write_worker_results(tmp_path, "slice-b-auth-required", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "slice-b-auth-required")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == 0
+    assert payload["record"]["evidence_ref"] == str(run_json)
