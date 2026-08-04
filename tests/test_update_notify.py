@@ -208,6 +208,99 @@ def test_update_notify_refresh_flag_dispatches(monkeypatch):
     assert called == [True]
 
 
+def test_available_update_none_on_missing_cache(tmp_path):
+    assert update_notify.available_update(env=_env(tmp_path)) is None
+
+
+def test_available_update_none_when_latest_equals_installed(tmp_path):
+    _write_state(tmp_path, checked_at=100.0, latest=__version__)
+    assert update_notify.available_update(env=_env(tmp_path)) is None
+
+
+def test_available_update_none_when_latest_older(tmp_path):
+    _write_state(tmp_path, checked_at=100.0, latest="0.0.1")
+    assert update_notify.available_update(env=_env(tmp_path)) is None
+
+
+def test_available_update_returns_dict_when_newer(tmp_path):
+    _write_state(tmp_path, checked_at=100.0, latest="99.0.0")
+    result = update_notify.available_update(env=_env(tmp_path))
+    assert result == {
+        "latest": "99.0.0",
+        "installed": __version__,
+        "checked_at": 100.0,
+    }
+
+
+def test_available_update_checked_at_none_when_absent_or_invalid(tmp_path):
+    _write_state(tmp_path, latest="99.0.0")
+    assert update_notify.available_update(env=_env(tmp_path))["checked_at"] is None
+
+    _write_state(tmp_path, checked_at="soon", latest="99.0.0")
+    assert update_notify.available_update(env=_env(tmp_path))["checked_at"] is None
+
+
+def test_available_update_none_when_opted_out(tmp_path):
+    _write_state(tmp_path, checked_at=100.0, latest="99.0.0")
+    assert update_notify.available_update(env=_env(tmp_path, BRIGADE_NO_UPDATE_CHECK="1")) is None
+
+
+def test_available_update_none_on_malformed_cache(tmp_path):
+    path = _write_state(tmp_path, checked_at=100.0, latest="99.0.0")
+    path.write_text("{not json")
+    assert update_notify.available_update(env=_env(tmp_path)) is None
+
+
+def test_available_update_swallows_exceptions(tmp_path, monkeypatch):
+    def boom(_env):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(update_notify, "cache_path", boom)
+    assert update_notify.available_update(env=_env(tmp_path)) is None
+
+
+def _run_brief(tmp_path, cache_home: Path, monkeypatch, capsys) -> str:
+    """Render a work brief with the update cache pointed at ``cache_home``.
+
+    The brief calls ``available_update()`` with no env, so it reads the real
+    process environment; without this redirect the assertions below would
+    depend on the developer's own ~/.cache/brigade/update-notify.json.
+    """
+    from datetime import datetime, timezone
+
+    from brigade import dogfood_cmd, work_cmd
+
+    from tests.work_cmd_test_helpers import _init_git_repo
+
+    monkeypatch.setenv("HOME", str(cache_home))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home / "cache"))
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    capsys.readouterr()  # drop setup chatter so the brief owns the captured output
+    assert work_cmd.brief(target=tmp_path, limit=2) == 0
+    return capsys.readouterr().out
+
+
+def test_work_brief_prints_no_update_line_without_update(tmp_path, tmp_path_factory, monkeypatch, capsys):
+    cache_home = tmp_path_factory.mktemp("update_cache_empty")
+    out = _run_brief(tmp_path, cache_home, monkeypatch, capsys)
+    assert "update_available:" not in out
+
+
+def test_work_brief_prints_update_line_when_newer(tmp_path, tmp_path_factory, monkeypatch, capsys):
+    cache_home = tmp_path_factory.mktemp("update_cache_newer")
+    _write_state(cache_home, checked_at=100.0, latest="99.0.0")
+    lines = _run_brief(tmp_path, cache_home, monkeypatch, capsys).splitlines()
+    assert lines[0].startswith("work brief: ")
+    assert lines[1] == f'update_available: 99.0.0 (installed {__version__}); run "brigade update"'
+
+
 def test_main_invokes_notify_after_command(monkeypatch):
     from brigade import cli
 
