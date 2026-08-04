@@ -59,12 +59,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enrolled runs can pause at Daily and Tool approval boundaries, then resume and redeem the approved action exactly once with redacted, bound approval facts. (#626)
 - `brigade runs redact` provides an operator-confirmed, fail-closed procedure to redact terminal lifecycle journals, reproject their snapshots, and retain chained anchors for overlapping rewrite history. (#627)
 - `brigade runs events` exposes lifecycle-only NDJSON with opaque durable cursors, and `runs steer` and `runs interrupt` accept idempotent request IDs with journaled requested and observed control facts. (#641)
+- Runs probe declared seat health after writing the initial run receipt and
+  before planning, so probe failures are themselves receipted. The probe issues
+  no model traffic: per-seat checks run in parallel under a 30s cap, results are
+  fingerprint-cached, and a transport smoke occurs only on cache miss. (#685)
+- A failed orchestrator seat now selects a healthy declared fallback, or aborts
+  with its typed cause, before planning begins. (#688)
+- Four packaged roster presets (`minimal-single-cli`, `budget-open-weight`, `full-multi-lane`, `review-heavy`) and optional per-seat `purpose`, `requires`, `fallback`, `stats`, and `caveats` metadata, with one-hop capability-based fallback resolution when host requirements are not met. (#454)
+- `brigade roster suggest --preset NAME` assembles a preset roster from installed host capabilities, emitting per-seat resolution lines and substituting local receipt stats when available, and `brigade roster stats` summarizes per-seat median duration and failure rate from local worker receipts. (#463)
+- `brigade model trial regrade OUTPUT_DIR` re-runs graders from stored trial output without re-running seats. Trial summaries record `measurement_failures` and `partial_scores`, cells carry `failure_reason`, and trial processes exit `3` when measurement failures are present, `1` for rejected or execution errors, and `0` otherwise. (#457)
+- The `oracle` CLI adapter (`cli = "oracle"`) runs browser research via `oracle --engine browser`, reports stale cookie auth with a `brigade pantry` next step instead of `workspace-trust`, and lets a researcher seat's `timeout_seconds` raise the research engine LLM timeout floor. (#535)
+- `run.json` records a `scheduler` block with `requested`, `used`, and `fallback_reason`, written at run start and filled when dispatch resolves the effective scheduler (`--scheduler`, then `limits.scheduler`, then `waves`), so a receipt distinguishes a real DAG dispatch from a silent degrade to waves. (#543)
+- Failed worker results and per-attempt records in run receipts include a typed `failure` object (`brigade.worker_failure.v1`) with `failure_class`, `phase`, and `retry_disposition`, mapped from the legacy `failure_kind` and `failure_phase` fields. (#589)
+- `brigade roster doctor` runs a shared seat health probe per declared seat, covering declaration, executable identity, authentication, transport liveness, version gates, model reachability, and isolation compatibility, without model smoke prompts. (#590)
+- Runs probe declared seat health after the initial `run.json` is written and before planning, recording `seat-health.json` beside the run receipt, then route the orchestrator from those results: an unhealthy orchestrator walks its declared `fallback` chain to the first healthy seat and rebinds the roster for planning and dispatch, or aborts with the typed failure cause before planning when no healthy fallback exists. (#685, #688)
+- `brigade mcp pi-bridge` exposes `discover`, `call`, `install`, and `uninstall` to project the canonical `.brigade/mcp.json` catalog into Pi's managed extension at `~/.pi/agent`, names tools `server__tool`, rejects catalog server names containing the reserved `__` separator, preserves server and tool identity on MCP failures, and tracks the generated extension and catalog projection through install receipts. (#438, #453)
+- `brigade harness install` accepts `--surface cursor-cli|cursor-gui` to select a vendor surface explicitly, and `--projection-only` (which requires `--surface`) to let a runtime-absent surface receive Brigade projections without claiming a native runtime; install records the decision in `.brigade/surface-evidence.json`. (#464)
+- `brigade harness sync`, `brigade harness uninstall`, and `brigade harness doctor` support Claude Code and Codex user-scope profiles (`--target claude|codex|all --scope user`), dry-run by default, with receipt-based ownership, idempotent sync, and uninstall that removes only Brigade-owned artifacts. (#465)
+- User-scope harness profiles extend to OpenClaw, Kimi, Grok, Cursor, and OpenCode under the same sync, doctor, and uninstall contract, so `brigade harness sync --target all --scope user` covers all seven harnesses. (#467)
+- `brigade evidence show`, `brigade evidence explain`, and `brigade evidence stats` query the evidence ledger without invoking the engine binary directly; help, status, doctor, and plan text use the evidence engine branding, timeouts honor `BRIGADE_EVIDENCE_TIMEOUT_SECONDS` and `BRIGADE_EVIDENCE_STATUS_TIMEOUT_SECONDS`, and exit `124` prints a retry hint that doubles the current timeout. (#430)
+- `brigade mcp sync --user-scope` and `brigade operator sync-mcp --user-scope` no longer write stdio MCP servers into a user-wide client config silently: interactive runs show the destination, the stdio count, and the servers-times-sessions process formula before asking for confirmation, non-interactive and `--json` runs require `--allow-global-stdio`, and plan and sync items now carry `transport` and `scope`. (#425)
+- After a successful command, Brigade prints a one-line stderr notice at most once per 24 hours when a newer release is on PyPI. It is anonymous, TTY-only, skipped in CI, and disabled with `BRIGADE_NO_UPDATE_CHECK=1`. (#426)
+- `brigade code` exposes the full GraphTrail verb set (`callers`, `callees`, `affected`, `search`, `neighbors`, `dead-code`, `cycles`, `evaluate`, `explain`, `export`, `stats`, `doctor`, `diff`) and accepts `--target <dir>` on every verb, so engine paths resolve against the wired project root. (#427)
+- `agent-notify` ships inside the Brigade monorepo under `stations/notify/` with release CI coverage, and installs as a native component through `brigade setup`. (#433)
+- `brigade model trial execute --resume` freezes eval cell identity (`cell_id`, `manifest_digest`, attempt numbering) so resumed cells keep stable identity, reports stale cells on stderr, and allocates the next attempt from both the attempt directories and `cell.json` instead of reusing deleted numbers. (#436)
+- `brigade handoff lint --content-guard` flags prompt-injection heuristics with line numbers alongside the existing leak scan. (#477, #515)
+- The default scanner registry schedules `brigade friction scan --json` weekly (`weekly@05:00`) with cadence-aware stale thresholds for seven-day freshness. (#526)
+- `brigade handoff lint` accepts synonym section headings (for example `TL;DR` for `Summary`, `Kind` for `Type`) and resolves them in draft summaries. (#527)
+- `agent-notify` resolves the per-turn Codex model from notify metadata or the matching local rollout and includes provider identity in Discord, Telegram, and Signal messages. (#533)
 
 ### Changed
 - Newly journal-authoritative runs derive their `run.json` compatibility snapshots from validated lifecycle events and recovery checkpoints, with strict projector readiness and recovery gates. (#622)
 - Lifecycle journals are now authoritative for every new run; existing snapshot-only directories retain their prior behavior, and compatibility snapshots remain readable by the previous v1 reader contract. (#630)
 - The previous-v1-reader compatibility check now uses a versioned fixture derived from `v0.25.0`, covering authoritative, paused, and legacy run snapshots. (#640)
 - The lifecycle journal ceiling is measured for real, representative, and configurable worst-case runs, with the current decision to raise the bound rather than segment journals. (#642)
+- Worker infrastructure failures no longer lower skill scores. Friction records
+  carry `failure.class` as `error_class` with an optional adapter `cause_code`,
+  and a run that failed only for infrastructure reasons produces neutral
+  artifact evidence while retaining its evidence reference. Verifier failures
+  remain negative evidence and verifier success remains positive. (#682)
+- **Outcome scores are recomputed from stored receipts at read time, so the two
+  classifier changes below re-score existing evidence with no new runs.** Two
+  vocabularies now feed one classifier: run-owned failure kinds and typed
+  `FailureClass` causes. Most visibly, `timeout` exists in both, so historical
+  timeout failures that previously scored negative now score neutral. Rankings
+  produced before upgrading will differ afterward; re-read them rather than
+  comparing across the upgrade. (#686, #689)
+- Outcome capture reads the nested `failure.kind` taxonomy, retaining the legacy
+  top-level `failure_kind` as a fallback. Of 56 recorded failed runs, 19 carried
+  only the nested field and 16 carried both, which is why the fallback stays.
+  Classification also consults the failure phase: `agent-error` and
+  `orchestrator-error` are catch-all else-branches rather than infrastructure
+  evidence, so kind alone would have forgiven real model failures. (#686)
+- Typed `FailureClass` causes are classified as infrastructure, so a run aborted
+  with a typed cause is no longer scored as a skill failure. Unknown kinds still
+  resolve to a real failure, and model-contract kinds are matched before the
+  typed parse so `non-final-output` stays a model failure. (#689)
+- The `kimi` adapter targets Kimi Code 0.28 prompt mode (`kimi -p`), dropping `--print`, `--final-message-only`, and the interactive `--plan` and `--yolo` flags that cannot combine with `-p`. Read-only kimi dispatches now rely on prompt-based enforcement, and `READ_ONLY_ENFORCEMENT` for `kimi` is `soft` rather than `hard`. (#401)
+- `brigade doctor` scopes default output to `--target`, hiding host-global operator checks (components, managed tools, OpenClaw, content guard) unless `--operator` is passed, and prefixes target-scoped finding detail with `target=`. (#478)
+- `brigade doctor` no longer assumes Claude for targets without Brigade config or an explicit `--harness`. Harness-native checks run only when a harness is declared, and handoff, skills, and orphan projection checks are labeled with an `adapter:` prefix. (#449)
+- `brigade friction` regex scans skip default denylisted suggestion and skill paths, damp prose hits in markdown outside run artifacts, and collapse identical snippets into one candidate with occurrence counts and source paths. (#473, #513)
+- `brigade receipts export miseledger` now carries stable `project` and `workspace_dir` metadata so MiseLedger project filters work across generated worktree paths. (#540)
+- `brigade release` readiness treats open security findings and unreadable security evidence as blockers rather than warnings, naming the top finding with severity, location, and remediation. (#670)
+- `brigade skills diff` defaults to the bundled package template so a stale registry copy cannot mask drift from newer bundled skills; pass `--against registry` for the previous baseline. (#514)
+- `miseledger init` no longer writes an unused `config.toml`; it creates only the private data and cache directories and opens the archive database. (#538)
+- `agent-notify` validates `defaults.timeout_seconds` at config load with stable field-scoped errors, and Claude Code Stop-hook `cwd` and `session_id` disclosures are now opt-in through `[claude_code_stop]` (`include_cwd`, `include_session_id`, both default false). (#671)
 
 ### Fixed
 - `brigade init` now refuses a symlinked parent before it creates or publishes a
@@ -113,6 +172,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Redaction anchor refresh is idempotent, validates split-retirement digests, and safely resumes if cleanup stops between parent retirement and child realignment. (#644)
 - Outcome-ledger writers serialize digest-chain appends and preserve completed rows while recovering interrupted writes. (#612)
 - Journal redaction cleanup remains retryable across the parent-retirement and child-realignment crash window. (#655)
+- `brigade handoff lint --content-guard` no longer reports a clean injection
+  verdict for a handoff whose text could not be read. An unreadable path now
+  reports `unscanned` and fails that check, so neither the printed line nor the
+  `content_guard_injection` field can be mistaken for a passing security scan.
+  Readable handoffs are unaffected. (#679)
+- Proxy seat `_REF` overrides accept `env-file:/absolute/path#VARIABLE` references to load secrets from systemd-style env files. Roster validation and runtime resolution share one classifier, so a malformed `env-file:` reference fails dispatch instead of silently falling through to a parent environment variable. (#411)
+- `brigade run` schema-forces the corrective plan turn with an explicit JSON-only output contract and tells orchestrator seats that launch without write tools not to create plan files, so a failed harness plan write no longer replaces plan JSON with hook rebuttal prose. (#520)
+- Branch and HEAD drift detection compares against a snapshot from the resolved `lock_workspace` (the canonical checkout) rather than the assigned worktree `cwd` when the two differ, so canonical-checkout movement is detected without false positives from an isolated worktree. (#599)
+- Cursor model inventory captures the full `cursor-agent models` list through a tempfile, since piped output truncates at 8 KiB, and treats the list as complete only after the `Tip: use --model <id>` trailer, so `brigade roster doctor` `allow_models` checks see every installed model. (#601)
+- Read-only Claude workers insert `--` between the `--disallowedTools` deny list and the positional prompt, so plan text is no longer parsed as additional deny rules. (#451)
+- Read-only Claude workers deny `WebSearch` and `WebFetch`, so non-interactive runs under `--permission-mode plan` no longer stall on an approval prompt. (#461)
+- `brigade operator` adopt plans count guidance inventory entries by filesystem type, so directories such as `memory/cards` no longer inflate the `guidance_files` count. (#479, #509)
+- Agent Pantry health messages report dev and prerelease builds as a deliberate version-policy rejection rather than a parse failure, keeping the fixed `invalid-version` label and never echoing raw version strings. (#480, #511)
+- The Claude work-loop closeout gate no longer treats detached `brigade run` output under `.brigade/` or `brigade run` bash commands as verification writes that bump `last_verification_write_at`. (#483, #516)
+- `brigade harness sync` upgrades a legacy version-1 `~/.cursor/brigade/install-state.json` to profile schema v2 instead of deadlocking, preserving files, hooks, and MCP attestations so uninstall still works. (#510)
+- `brigade work hooks install` adopts legacy `brigade-work-loop.py` handlers found in an unwired `~/.claude/settings.json`, and refuses when `.brigade/config.json` is present but unreadable. (#525)
+- The Claude work-loop closeout gate treats an unavailable worktree fingerprint as a pending write and records the unavailable sentinel on every `Bash` pre-hook, so mutations are not missed when git state cannot be read at bash start. (#600)
+- `brigade work verify run` names the supported fix when it rejects a shell interpreter as the verification executable. (#416)
+- `brigade outcome reconcile` preserves colliding decision receipts by writing each one exclusively with microsecond timestamps and a random token instead of overwriting the prior file. (#603)
+- Run sidecar files such as `worker-results.json` and `synthesis.json` append immutable revisions under `revisions/` instead of replacing prior evidence when updated mid-run. (#605)
+- The content-guard `pre-push` hook derives the exclusion set for brand-new branches from `git ls-remote` rather than stale local tracking refs, scans only commits not advertised on the remote, and batches them through `--revs-stdin`. (#606)
+- Content guard rejects unsafe `--range` operands for history scans while preserving valid Git revision grammar, and fails closed on `git rev-list` errors. (#677)
+- Component reports and install checks honor the verified exact-release manifest from `brigade setup` instead of falling back to the bundled compatibility manifest whenever `installed.json` disagrees. (#408)
+- GraphTrail, MiseLedger, and other managed engine consumers resolve binaries through a shared `component_bins` resolver (`GRAPHTRAIL_BIN`, `MISELEDGER_BIN`, then `installed.json`, then `PATH`, then legacy locations) and emit absolute paths in generated Cursor MCP config and search plans. (#419)
+- `brigade work verify` catches Ctrl-C, terminates the child process group, and writes a `canceled` receipt with preserved evidence instead of leaving a running receipt or printing a traceback; a repeated interrupt retries termination with zero grace. (#448)
+- `brigade work verify` archive export validates recovery-checkpoint references, omits crashed `.checkpoint.*.tmp` bodies without decoding them, keeps existing archive trees immutable, and records privacy-safe `checkpoint_errors` in the verify archive index when a checkpoint cannot be exported truthfully. (#668)
+- Lifecycle journal appends serialize across processes through `lifecycle.jsonl.lock` (`fcntl.flock`), `brigade runs steer` and `brigade runs interrupt` refuse completed runs instead of appending into a terminal chain, and `control.failed` payloads carry a bounded error class plus digest reference rather than free transport text. (#651)
+- The lifecycle journal event ceiling rises from 512 to 2048 with bounded runtime reads that enforce byte and event limits before allocation, and authoritative dispatch recovery reuses a stranded dispatch checkpoint instead of duplicating journal events after a crash between checkpoint write and event append. (#672)
+- `agent-notify` caps hook and stdin reads at 256 KiB and truncates or refuses Discord, Telegram, and Signal payloads against documented ceilings, returning a bounded `payload_limit` diagnostic instead of failing delivery silently. (#618, #666)
+- `brigade handoff lint --content-guard` reports `unscanned` for unreadable handoff paths instead of printing a `clean` injection verdict when no heuristic scan ran. (#679)
+- `agent-notify` channel transport failures return bounded provider, stage, status, and cause fields instead of wrapped transport errors that could carry webhook URLs or bot tokens into stderr. (#671)
 
 ### Removed
 - Removed the opt-in `brigade run --deliberate` grounded-deliberation mode
