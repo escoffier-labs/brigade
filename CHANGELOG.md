@@ -59,12 +59,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enrolled runs can pause at Daily and Tool approval boundaries, then resume and redeem the approved action exactly once with redacted, bound approval facts. (#626)
 - `brigade runs redact` provides an operator-confirmed, fail-closed procedure to redact terminal lifecycle journals, reproject their snapshots, and retain chained anchors for overlapping rewrite history. (#627)
 - `brigade runs events` exposes lifecycle-only NDJSON with opaque durable cursors, and `runs steer` and `runs interrupt` accept idempotent request IDs with journaled requested and observed control facts. (#641)
+- Runs probe declared seat health after writing the initial run receipt and
+  before planning, so probe failures are themselves receipted. The probe issues
+  no model traffic: per-seat checks run in parallel under a 30s cap, results are
+  fingerprint-cached, and a transport smoke occurs only on cache miss. (#685)
+- A failed orchestrator seat now selects a healthy declared fallback, or aborts
+  with its typed cause, before planning begins. (#688)
 
 ### Changed
 - Newly journal-authoritative runs derive their `run.json` compatibility snapshots from validated lifecycle events and recovery checkpoints, with strict projector readiness and recovery gates. (#622)
 - Lifecycle journals are now authoritative for every new run; existing snapshot-only directories retain their prior behavior, and compatibility snapshots remain readable by the previous v1 reader contract. (#630)
 - The previous-v1-reader compatibility check now uses a versioned fixture derived from `v0.25.0`, covering authoritative, paused, and legacy run snapshots. (#640)
 - The lifecycle journal ceiling is measured for real, representative, and configurable worst-case runs, with the current decision to raise the bound rather than segment journals. (#642)
+- Worker infrastructure failures no longer lower skill scores. Friction records
+  carry `failure.class` as `error_class` with an optional adapter `cause_code`,
+  and a run that failed only for infrastructure reasons produces neutral
+  artifact evidence while retaining its evidence reference. Verifier failures
+  remain negative evidence and verifier success remains positive. (#682)
+- **Outcome scores are recomputed from stored receipts at read time, so the two
+  classifier changes below re-score existing evidence with no new runs.** Two
+  vocabularies now feed one classifier: run-owned failure kinds and typed
+  `FailureClass` causes. Most visibly, `timeout` exists in both, so historical
+  timeout failures that previously scored negative now score neutral. Rankings
+  produced before upgrading will differ afterward; re-read them rather than
+  comparing across the upgrade. (#686, #689)
+- Outcome capture reads the nested `failure.kind` taxonomy, retaining the legacy
+  top-level `failure_kind` as a fallback. Of 56 recorded failed runs, 19 carried
+  only the nested field and 16 carried both, which is why the fallback stays.
+  Classification also consults the failure phase: `agent-error` and
+  `orchestrator-error` are catch-all else-branches rather than infrastructure
+  evidence, so kind alone would have forgiven real model failures. (#686)
+- Typed `FailureClass` causes are classified as infrastructure, so a run aborted
+  with a typed cause is no longer scored as a skill failure. Unknown kinds still
+  resolve to a real failure, and model-contract kinds are matched before the
+  typed parse so `non-final-output` stays a model failure. (#689)
 
 ### Fixed
 - `brigade init` now refuses a symlinked parent before it creates or publishes a
@@ -113,6 +141,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Redaction anchor refresh is idempotent, validates split-retirement digests, and safely resumes if cleanup stops between parent retirement and child realignment. (#644)
 - Outcome-ledger writers serialize digest-chain appends and preserve completed rows while recovering interrupted writes. (#612)
 - Journal redaction cleanup remains retryable across the parent-retirement and child-realignment crash window. (#655)
+- `brigade handoff lint --content-guard` no longer reports a clean injection
+  verdict for a handoff whose text could not be read. An unreadable path now
+  reports `unscanned` and fails that check, so neither the printed line nor the
+  `content_guard_injection` field can be mistaken for a passing security scan.
+  Readable handoffs are unaffected. (#679)
 
 ### Removed
 - Removed the opt-in `brigade run --deliberate` grounded-deliberation mode
