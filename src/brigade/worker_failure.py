@@ -491,4 +491,8 @@ def run_failure_is_infrastructure_at_read_time(kind: str | None, phase: str | No
         return None
     if _is_run_catch_all_failure_kind(kind):
         return phase in RUN_INFRASTRUCTURE_FAILURE_PHASES
-    return False
+    try:
+        FailureClass(kind)
+    except ValueError:
+        return False
+    return True
