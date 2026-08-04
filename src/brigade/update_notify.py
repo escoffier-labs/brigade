@@ -51,6 +51,33 @@ def is_newer(candidate: str, current: str) -> bool:
     return parsed_candidate > parsed_current
 
 
+def available_update(*, env: Mapping[str, str] | None = None, now: float | None = None) -> dict[str, Any] | None:
+    """Return cached update info when a newer release exists, else None.
+
+    Reads the on-disk cache only; never raises, never touches the network.
+    """
+    try:
+        environment = os.environ if env is None else env
+        if environment.get("BRIGADE_NO_UPDATE_CHECK"):
+            return None
+
+        path = cache_path(environment)
+        state = localio.read_json_dict(path) or {}
+
+        latest = state.get("latest")
+        if isinstance(latest, str) and is_newer(latest, __version__):
+            checked_at = state.get("checked_at")
+            checked_at_value = float(checked_at) if isinstance(checked_at, (int, float)) else None
+            return {
+                "latest": latest,
+                "installed": __version__,
+                "checked_at": checked_at_value,
+            }
+        return None
+    except Exception:
+        return None
+
+
 def _gated(argv: list[str], exit_code: int, env: Mapping[str, str], stderr: Any) -> bool:
     if env.get("BRIGADE_NO_UPDATE_CHECK") or env.get("CI"):
         return True

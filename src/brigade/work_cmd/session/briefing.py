@@ -257,6 +257,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         roadmap_cmd,
         security_cmd,
         tools_cmd,
+        update_notify,
     )
 
     target = target.expanduser().resolve()
@@ -515,6 +516,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "next_issue": ledger_mod._task_issue_metadata(ledger_task) if ledger_task else None,
         "next": str(resolved["task"]),
         "suggested_command": suggested,
+        "update": update_notify.available_update(),
     }
 
 
@@ -538,6 +540,9 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         return 0
 
     print(f"work brief: {target}")
+    update = payload.get("update")
+    if isinstance(update, dict):
+        print(f'update_available: {update.get("latest")} (installed {update.get("installed")}); run "brigade update"')
     git = payload["git"]
     if isinstance(git, dict) and git.get("available"):
         print(f"branch: {git.get('branch')}")
