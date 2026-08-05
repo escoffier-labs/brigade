@@ -100,7 +100,7 @@ def test_roster_init_force_overwrites_with_options(tmp_target):
 def test_roster_init_refuses_to_shadow_user_roster(_hermetic_home, tmp_target, capsys):
     user = _hermetic_home / ".brigade" / "roster.toml"
     user.parent.mkdir(parents=True)
-    user.write_text("orchestrator = \"chef\"\n[agents.chef]\ncli = \"claude\"\n")
+    user.write_text('orchestrator = "chef"\n[agents.chef]\ncli = "claude"\n')
 
     rc = roster_cmd.init(tmp_target)
 
@@ -122,7 +122,7 @@ def test_roster_init_refuses_to_shadow_worktree_parent_roster(_hermetic_home, tm
     (worktree / ".git").write_text(f"gitdir: {admin}\n")
     parent_roster = parent / ".brigade" / "roster.toml"
     parent_roster.parent.mkdir(parents=True)
-    parent_roster.write_text("orchestrator = \"chef\"\n[agents.chef]\ncli = \"claude\"\n")
+    parent_roster.write_text('orchestrator = "chef"\n[agents.chef]\ncli = "claude"\n')
 
     rc = roster_cmd.init(worktree)
 
@@ -137,7 +137,7 @@ def test_roster_init_refuses_to_shadow_worktree_parent_roster(_hermetic_home, tm
 def test_roster_init_force_scaffolds_despite_user_roster(_hermetic_home, tmp_target):
     user = _hermetic_home / ".brigade" / "roster.toml"
     user.parent.mkdir(parents=True)
-    user.write_text("orchestrator = \"chef\"\n[agents.chef]\ncli = \"claude\"\n")
+    user.write_text('orchestrator = "chef"\n[agents.chef]\ncli = "claude"\n')
 
     assert roster_cmd.init(tmp_target, force=True) == 0
     assert (tmp_target / ".brigade" / "roster.toml").is_file()

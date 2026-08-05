@@ -52,7 +52,10 @@ def register(sub: argparse._SubParsersAction) -> None:
         parser.add_argument("manifest", type=Path, help="brigade.eval_manifest.v1 JSON file.")
         parser.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace used by trial runs.")
         parser.add_argument(
-            "--roster", type=Path, default=None, help="Roster path. Uses normal workspace/worktree-parent/user fallback."
+            "--roster",
+            type=Path,
+            default=None,
+            help="Roster path. Uses normal workspace/worktree-parent/user fallback.",
         )
         parser.add_argument("--output-dir", type=Path, default=None, help="Trial artifact directory.")
         parser.set_defaults(func=_dispatch_trial)
