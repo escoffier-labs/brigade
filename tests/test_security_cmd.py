@@ -105,7 +105,7 @@ def test_security_scan_avoids_source_false_positives(tmp_path):
 
 def test_security_scan_ignores_own_detector_literals():
     findings = []
-    path = security_cmd.Path("src/brigade/security_cmd.py")
+    path = security_cmd.Path("src/brigade/security_cmd/scan_engine.py")
     lines = [
         '                suggestion="Pin npx package versions or move execution behind a reviewed lockfile.",',
         '    if "danger-full-access" in line or "sandbox_permissions" in line and "require_escalated" in line:',
@@ -128,6 +128,92 @@ def test_security_scan_ignores_own_detector_literals():
         line="Use sandbox_permissions require_escalated for all tasks.",
     )
     assert findings
+
+
+def test_security_scan_secrets_false_positive_suppressions(tmp_path):
+    """Regression guards for secrets-scanner false-positive fixes."""
+    target = tmp_path
+    (target / "secrets_module.py").write_text(
+        "\n".join(
+            [
+                "import secrets",
+                "token = secrets.token_hex(16)",
+                "token = secrets.token_urlsafe(32)",
+                "owner_token = secrets.token_hex(16)",
+                "",
+            ]
+        )
+    )
+    (target / "env_read.py").write_text(
+        "\n".join(
+            [
+                "import os",
+                "token = os.environ['SERVICE_TOKEN']",
+                "api_key = os.getenv('API_KEY')",
+                "token = runs_cmd._approval_marker_from_env(runs_cmd._APPROVAL_RESUME_TOKEN_ENV)",
+                "",
+            ]
+        )
+    )
+    (target / "real_secret.py").write_text('api_key = "sk-live-abcd1234efgh5678"\n')
+    (target / "jwt.env").write_text(
+        "AUTH_TOKEN=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c\n"
+    )
+    (target / "dual_match.py").write_text("token=abc123abc123abc123abc123abc123\n")
+    (target / "attribute_read.py").write_text("approval_token=reservation.token,\n")
+    # A quoted value is a committed literal even when its text opens with a runtime
+    # expression, so the runtime exemption must not reach inside the quotes.
+    (target / "quoted_runtime_prefix.py").write_text(
+        "\n".join(
+            [
+                'api_key = "os.environ.sk-live-abcd1234efgh5678"',
+                "token = 'secrets.token_hex_abcd1234efgh5678'",
+                "",
+            ]
+        )
+    )
+    (target / "mixed_line.py").write_text(
+        "\n".join(
+            [
+                'client = Client(api_key="sk-live-abcd1234efgh5678", base=os.environ["URL"])',
+                'api_key = "sk-live-abcd1234efgh5678"; nonce = secrets.token_hex(4)',
+                "",
+            ]
+        )
+    )
+    guard_examples = target / "src" / "brigade" / "guard" / "examples" / "fixture"
+    guard_examples.mkdir(parents=True)
+    (guard_examples / "blocked-secret-token.json").write_text('{"text": "token=abc123abc123abc123abc123abc123"}\n')
+    scanner_pkg = target / "src" / "brigade" / "security_cmd"
+    scanner_pkg.mkdir(parents=True)
+    (scanner_pkg / "models.py").write_text("PLAINTEXT_PASSWORD_RE = re.compile(\n")
+    (scanner_pkg / "scan_engine.py").write_text(
+        "    password_match = PLAINTEXT_PASSWORD_RE.search(line)\n"
+        "    password_emitted = bool(password_match and not _is_placeholder(password_match.group(2)))\n"
+    )
+
+    report = security_cmd.scan_target(target)
+    secrets = [f for f in report["findings"] if f["category"] == "secrets" and f["severity"] == "high"]
+    paths_lines = {(f["path"], f["line"]) for f in secrets}
+
+    assert "secrets_module.py" not in {p for p, _ in paths_lines}
+    assert "env_read.py" not in {p for p, _ in paths_lines}
+    assert "attribute_read.py" not in {p for p, _ in paths_lines}
+    assert ("real_secret.py", 1) in paths_lines
+    # JWT-shaped values are dot-separated like attribute reads but must still report.
+    assert ("jwt.env", 1) in paths_lines
+    assert ("dual_match.py", 1) in paths_lines
+    assert sum(1 for f in secrets if f["path"] == "dual_match.py" and f["line"] == 1) == 1
+    # A runtime read on the same line must not mask a committed credential.
+    assert ("mixed_line.py", 1) in paths_lines
+    assert ("mixed_line.py", 2) in paths_lines
+    # A quoted literal that merely starts with a runtime expression still reports, once.
+    assert ("quoted_runtime_prefix.py", 1) in paths_lines
+    assert ("quoted_runtime_prefix.py", 2) in paths_lines
+    assert sum(1 for f in secrets if f["path"] == "quoted_runtime_prefix.py" and f["line"] == 1) == 1
+    assert sum(1 for f in secrets if f["path"] == "quoted_runtime_prefix.py" and f["line"] == 2) == 1
+    assert not any("guard/examples" in f["path"] for f in secrets)
+    assert not any("security_cmd" in f["path"] for f in secrets)
 
 
 def test_security_policy_presets_and_template_inclusion(tmp_path, capsys):
