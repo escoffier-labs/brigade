@@ -161,6 +161,17 @@ def test_security_scan_secrets_false_positive_suppressions(tmp_path):
     )
     (target / "dual_match.py").write_text("token=abc123abc123abc123abc123abc123\n")
     (target / "attribute_read.py").write_text("approval_token=reservation.token,\n")
+    # A quoted value is a committed literal even when its text opens with a runtime
+    # expression, so the runtime exemption must not reach inside the quotes.
+    (target / "quoted_runtime_prefix.py").write_text(
+        "\n".join(
+            [
+                'api_key = "os.environ.sk-live-abcd1234efgh5678"',
+                "token = 'secrets.token_hex_abcd1234efgh5678'",
+                "",
+            ]
+        )
+    )
     (target / "mixed_line.py").write_text(
         "\n".join(
             [
@@ -196,6 +207,11 @@ def test_security_scan_secrets_false_positive_suppressions(tmp_path):
     # A runtime read on the same line must not mask a committed credential.
     assert ("mixed_line.py", 1) in paths_lines
     assert ("mixed_line.py", 2) in paths_lines
+    # A quoted literal that merely starts with a runtime expression still reports, once.
+    assert ("quoted_runtime_prefix.py", 1) in paths_lines
+    assert ("quoted_runtime_prefix.py", 2) in paths_lines
+    assert sum(1 for f in secrets if f["path"] == "quoted_runtime_prefix.py" and f["line"] == 1) == 1
+    assert sum(1 for f in secrets if f["path"] == "quoted_runtime_prefix.py" and f["line"] == 2) == 1
     assert not any("guard/examples" in f["path"] for f in secrets)
     assert not any("security_cmd" in f["path"] for f in secrets)
 

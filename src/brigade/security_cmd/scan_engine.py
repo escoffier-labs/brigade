@@ -1305,7 +1305,9 @@ def _first_committed_secret_match(pattern: re.Pattern[str], line: str) -> re.Mat
     """
     for match in pattern.finditer(line):
         value = match.group(2)
-        if _is_placeholder(value) or _is_runtime_secret_value(value):
+        if _is_placeholder(value):
+            continue
+        if not _match_value_is_quoted(line, match) and _is_runtime_secret_value(value):
             continue
         return match
     return None

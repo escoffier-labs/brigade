@@ -204,8 +204,25 @@ SECRETS_TITLE_RANK = {
 
 
 def _is_runtime_secret_value(value: str) -> bool:
-    """True when the assigned value is generated or read at runtime instead of committed."""
-    return RUNTIME_SECRET_VALUE_RE.match(value.strip().strip("'\"")) is not None
+    """True when the assigned value is generated or read at runtime instead of committed.
+
+    Quotes are deliberately not stripped here. A quoted value is a committed literal even
+    when its text opens with a runtime expression, so ``api_key = "os.environ.sk-live-..."``
+    must stay reportable. Callers that can still see the source line decide whether the
+    value was quoted; see :func:`_match_value_is_quoted`.
+    """
+    return RUNTIME_SECRET_VALUE_RE.match(value.strip()) is not None
+
+
+def _match_value_is_quoted(line: str, match: re.Match[str]) -> bool:
+    """True when the captured secret value was wrapped in quotes on the source line.
+
+    ``SECRET_VALUE_RE`` and ``PLAINTEXT_PASSWORD_RE`` both put the optional quote *outside*
+    their value group, so the quote never reaches the captured text and has to be read back
+    off the line.
+    """
+    start = match.start(2)
+    return start > 0 and line[start - 1] in "'\""
 
 
 def _is_attribute_secret_value(value: str) -> bool:
