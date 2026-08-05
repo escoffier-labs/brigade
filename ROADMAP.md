@@ -48,7 +48,8 @@ The proving-ground milestone still holds: the maintainer workspace runs Brigade 
 ## Next: deepen what already sits on the loop
 
 - **Security plugin depth**: richer rule packs for agent workspaces (hooks, MCP configs, prompt-injection patterns), policy packs per audience, optional offline threat-intel enrichment.
-- **Memory care depth**: smarter staleness, contradiction, and evidence checks for cards, with safe gated metadata repairs.
+- **Memory care depth**: smarter staleness, contradiction, and evidence checks for cards, with safe gated metadata repairs. Two retrieval-adjacent slices join this line: reinforcement dedup (re-ingesting a durable fact that already exists as a card strengthens that card's review record instead of filing a near-duplicate, keyed by a normalized content fingerprint) and a standalone-chunk lint for handoffs (flag unresolved references like "that file" or "the fix above" in durable facts, since a card that needs its session to be understood is a card retrieval cannot surface usefully).
+- **Retrieval honesty**: memory search stays keyword-first until an eval proves otherwise. A small local retrieval harness (fixture corpus, plain-grep baseline, precision/recall at K) gates any semantic upgrade, and a label-free recall signal (a repeat search with disjoint results shortly after the first counts as a miss) feeds memory-care status from real usage.
 - **Scorecard and lane ops**: per-model orchestrator success rate, clearer DNF vs worker-fail, documented probe protocol for new CLI lanes (file write in cwd, never trust reply text alone).
 - **MCP and harness fidelity**: continue adapter round-trips (empty args, url-only remotes, headless approvals) as harnesses change; prefer fix-the-adapter over more docs.
 - **Evidence quality**: raise brief_hit_rate as a second-class signal only (install/rollback still exit-code only); optional MiseLedger import on capture remain fail-open.
@@ -60,8 +61,8 @@ Chat surface scanners and backup visibility already shipped; remaining slices (s
 
 The CLI is the skeleton that carries everything. Every future surface sits on top of an existing command plus its JSON contract, never a parallel implementation.
 
-- A workspace UI that is a view over the CLI: model comparison (scorecard-backed), a document editor, a viewer for research reports and operator-center state.
-- Optional local semantic memory retrieval (on-device embeddings over `memory/cards/`), staying file-first and optional.
+- A workspace UI that is a view over the CLI: model comparison (scorecard-backed), a document editor, a viewer for research reports and operator-center state. First slice: a read-only operator dashboard served locally on explicit command, loopback-bound, rendering only what existing `--json` contracts already emit (work status, handoff inbox, memory cards, outcome rank, run timelines). It ships with a strict security floor from day one: nonce-based CSP with no inline handlers, a Host-header allowlist against DNS rebinding, and a refusal to bind beyond loopback without a token plus an explicit host list.
+- Optional local semantic memory retrieval (on-device embeddings over `memory/cards/`), staying file-first and optional, and landing only after the retrieval harness above shows a real win over the grep baseline.
 - Owner-scoped tool gating so a publicly reachable instance refuses high-risk tools by default.
 - Multi-channel operator notifications beyond the terminal, still opt-in (`agent-notify` and friends).
 - Personal-data surfaces such as calendar and email triage, behind the same privacy and approval gates.
