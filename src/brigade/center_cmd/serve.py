@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hmac
-import html
 import ipaddress
 import secrets
 import socket
@@ -11,53 +10,13 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import urlparse
+
+from brigade.center_cmd.dashboard import render
+from brigade.center_cmd.dashboard.views import all_views, render_nav, view_by_name
 
 _DEFAULT_PORT = 8765
-
-_INDEX_TEMPLATE = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<style nonce="{nonce}">
-body {{
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  line-height: 1.5;
-  margin: 2rem;
-  color: #111;
-  background: #fff;
-}}
-h1 {{
-  font-size: 1.5rem;
-  color: #0066cc;
-}}
-button {{
-  background: #0066cc;
-  color: #fff;
-  border: none;
-  padding: 0.5rem 1rem;
-  border-radius: 0.25rem;
-  cursor: pointer;
-}}
-</style>
-</head>
-<body>
-<h1>{title}</h1>
-<p>Dashboard views will land in a follow-up.</p>
-<button type="button" data-action="demo">Show greeting</button>
-<script nonce="{nonce}">
-document.addEventListener("DOMContentLoaded", function() {{
-  document.body.addEventListener("click", function(e) {{
-    var target = e.target.closest('[data-action="demo"]');
-    if (!target) return;
-    target.textContent = "Hello from the dashboard skeleton";
-  }});
-}});
-</script>
-</body>
-</html>
-"""
+_VIEW_PREFIX = "/view/"
 
 
 def _has_port(host: str) -> bool:
@@ -118,6 +77,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
     _token: str | None = None
     _allowed_exact: set[str] = set()
     _allowed_bare: set[str] = set()
+    _target: Path = Path(".")
 
     def _write_response(
         self,
@@ -209,22 +169,53 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self.log_error("Request timed out: %r", exc)
             self.close_connection = True
 
-    def _render_index(self, nonce: str) -> bytes:
-        title = html.escape("Brigade Center", quote=True)
-        nonce_escaped = html.escape(nonce, quote=True)
-        page = _INDEX_TEMPLATE.format(title=title, nonce=nonce_escaped)
+    def _parse_view_name(self, path: str) -> str | None:
+        parsed = urlparse(path)
+        route = parsed.path
+        if route == "/":
+            views = all_views()
+            return views[0].NAME if views else None
+        if not route.startswith(_VIEW_PREFIX):
+            return None
+        slug = route[len(_VIEW_PREFIX) :]
+        if not slug or "/" in slug:
+            return None
+        return slug
+
+    def _render_view(self, view_name: str, nonce: str) -> bytes:
+        module = view_by_name(view_name)
+        if module is None:
+            raise KeyError(view_name)
+        # A view that raises must degrade to an inline panel, not a 500. The
+        # default error path would answer without the security headers and
+        # would put a traceback on the page.
+        try:
+            payload = module.fetch(self._target)
+            fragment = module.render(payload, nonce)
+        except Exception:  # noqa: BLE001 - one broken panel must not take the page down
+            fragment = render.error_panel(module.TITLE, "This view failed to render.")
+        title = render.esc(f"{module.TITLE} - Brigade Center")
+        heading = f'<h1 class="page-title">{render.esc(module.TITLE)}</h1>'
+        body = f"{heading}{fragment}"
+        nav = render_nav(view_name)
+        page = render.page(title, nonce, nav, body)
         return page.encode("utf-8")
 
     def do_GET(self) -> None:
-        if self.path != "/":
+        view_name = self._parse_view_name(self.path)
+        if view_name is None:
+            self._write_response(404, "Not found.\n")
+            return
+        if view_by_name(view_name) is None:
             self._write_response(404, "Not found.\n")
             return
         nonce = secrets.token_urlsafe(16)
-        body = self._render_index(nonce)
+        body = self._render_view(view_name, nonce)
         self._write_response(200, body, "text/html; charset=utf-8", nonce)
 
     def do_HEAD(self) -> None:
-        if self.path != "/":
+        view_name = self._parse_view_name(self.path)
+        if view_name is None or view_by_name(view_name) is None:
             self._write_response(404, b"")
             return
         self._write_response(200, b"", "text/html; charset=utf-8")
@@ -239,6 +230,7 @@ def _make_server(
     port: int = _DEFAULT_PORT,
     token: str | None = None,
     allowed_hosts: Sequence[str] | None = None,
+    target: Path | None = None,
 ) -> ThreadingHTTPServer:
     """Build and bind the server without starting it."""
     validate_bind_security(host, token, allowed_hosts)
@@ -256,6 +248,7 @@ def _make_server(
 
     class _BoundHandler(_DashboardHandler):
         _token = token
+        _target = target if target is not None else Path(".")
 
     host_lc = host.strip().lower()
     server = ThreadingHTTPServer((host, port), _BoundHandler)
@@ -292,7 +285,7 @@ def serve(
     Prints the bound URL and runs until interrupted, then returns 0.
     """
     try:
-        server = _make_server(host=host, port=port, token=token, allowed_hosts=allowed_hosts)
+        server = _make_server(host=host, port=port, token=token, allowed_hosts=allowed_hosts, target=target)
     except ValueError as exc:
         print(f"brigade center serve: {exc}", file=sys.stderr)
         return 2
