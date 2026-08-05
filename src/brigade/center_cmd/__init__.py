@@ -15,6 +15,7 @@ _MODULE_NAMES = (
     "reports",
     "report_review",
     "actions",
+    "serve",
 )
 _MODULE_ALIASES = {
     "schema": "schema_ops",
@@ -89,6 +90,7 @@ _module_readiness = importlib.import_module(f"{__name__}.readiness")
 _module_reports = importlib.import_module(f"{__name__}.reports")
 _module_report_review = _facade_module("report_review")
 _module_actions = importlib.import_module(f"{__name__}.actions")
+_module_serve = importlib.import_module(f"{__name__}.serve")
 
 from .schema_ops import *
 from .core import *
@@ -96,6 +98,7 @@ from .readiness import *
 from .reports import *
 from .report_review_ops import *
 from .actions import *
+from .serve import *
 
 _MODULES = (
     _module_schema,
@@ -104,6 +107,7 @@ _MODULES = (
     _module_reports,
     _module_report_review,
     _module_actions,
+    _module_serve,
 )
 
 
