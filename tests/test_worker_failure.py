@@ -62,6 +62,8 @@ EXPECTED_LEGACY_CLASSIFICATIONS = {
     "rate-limit-error": FailureClass.CAPACITY_EXHAUSTED,
     "timeout": FailureClass.TIMEOUT,
     "tool-only-output": FailureClass.OUTPUT_CONTRACT_VIOLATION,
+    # #703: a seat that calls no tools and ships no deliverable is a model-quality failure.
+    "suspected-noop-run": FailureClass.OUTPUT_CONTRACT_VIOLATION,
     "transport-error": FailureClass.TRANSPORT_UNAVAILABLE,
     "unsafe-worktree": FailureClass.CONFIGURATION_INVALID,
     "unsupported-command-shim": FailureClass.EXECUTABLE_UNAVAILABLE,

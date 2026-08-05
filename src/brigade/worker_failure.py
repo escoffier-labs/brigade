@@ -47,6 +47,7 @@ class RetryDisposition(str, Enum):
 
 class FailureDomain(str, Enum):
     INFRASTRUCTURE = "infrastructure"
+    MODEL_OUTPUT = "model-output"
 
 
 @dataclass(frozen=True)
@@ -200,6 +201,7 @@ LEGACY_FAILURE_KIND_MAP: dict[str, FailureClass] = {
     "rate-limit-error": FailureClass.CAPACITY_EXHAUSTED,
     "timeout": FailureClass.TIMEOUT,
     "tool-only-output": FailureClass.OUTPUT_CONTRACT_VIOLATION,
+    "suspected-noop-run": FailureClass.OUTPUT_CONTRACT_VIOLATION,
     "transport-error": FailureClass.TRANSPORT_UNAVAILABLE,
     "unsafe-worktree": FailureClass.CONFIGURATION_INVALID,
     "unsupported-command-shim": FailureClass.EXECUTABLE_UNAVAILABLE,
@@ -251,19 +253,47 @@ RUN_UNAMBIGUOUS_INFRASTRUCTURE_FAILURE_KINDS = frozenset(
         "transport-error",
         "provider-error",
         "unsupported-sandbox",
+        # #711: Brigade-internal unexpected-error is infrastructure at kind level regardless of phase.
+        "unexpected-error",
     }
 )
-RUN_MODEL_CONTRACT_FAILURE_KINDS = frozenset(
+# #703: a seat that produced no deliverable. Detected on the run receipt as ``suspected_noop``
+# and read back through this kind so it scores like any other model-quality failure.
+SUSPECTED_NOOP_FAILURE_KIND = "suspected-noop-run"
+# Unified model-quality kind set (#707, #709): run-receipt path and worker-results path share this.
+MODEL_QUALITY_FAILURE_KINDS = frozenset(
     {
         "invalid-plan",
         "non-final-output",
+        "empty-output",
+        "malformed-final-output",
+        "tool-only-output",
+        SUSPECTED_NOOP_FAILURE_KIND,
     }
 )
+RUN_MODEL_CONTRACT_FAILURE_KINDS = MODEL_QUALITY_FAILURE_KINDS
 RUN_CATCH_ALL_FAILURE_KINDS = frozenset(
     {
         "agent-error",
         "orchestrator-error",
-        "unexpected-error",
+    }
+)
+RUN_LEVEL_INFRASTRUCTURE_FAILURE_CLASS_ALLOWLIST = frozenset(
+    {
+        "configuration-invalid",
+        "executable-unavailable",
+        "auth-required",
+        "entitlement-denied",
+        "version-gate",
+        "model-unavailable",
+        "capacity-exhausted",
+        "network-unavailable",
+        "transport-unavailable",
+        "transport-hang",
+        "interactive-blocked",
+        "worker-crash",
+        "timeout",
+        "provider-rejected",
     }
 )
 RUN_INFRASTRUCTURE_FAILURE_PHASES = frozenset(
@@ -403,6 +433,30 @@ def worker_result_failure(result: dict[str, object]) -> WorkerFailure | None:
     )
 
 
+def is_model_quality_failure_kind(kind: str | None) -> bool:
+    """Return whether a failure kind counts against the seat (model-quality), not infrastructure."""
+
+    return kind is not None and kind in MODEL_QUALITY_FAILURE_KINDS
+
+
+def failure_domain_for_legacy_kind(
+    normalized_kind: str | None,
+    failure_class: FailureClass,
+) -> FailureDomain:
+    """Map a legacy worker adapter kind to an outcome domain at read time."""
+
+    if is_model_quality_failure_kind(normalized_kind):
+        return FailureDomain.MODEL_OUTPUT
+    if failure_class == FailureClass.OUTPUT_CONTRACT_VIOLATION:
+        return FailureDomain.MODEL_OUTPUT
+    # #712: an adapter kind nobody mapped counts against the seat, not infrastructure. Kinds
+    # mapped to ``unclassified`` on purpose (the auth-status probe results) stay infrastructure,
+    # because they describe a probe Brigade could not run, not output the seat produced.
+    if failure_class == FailureClass.UNCLASSIFIED and normalized_kind not in LEGACY_FAILURE_KIND_MAP:
+        return FailureDomain.MODEL_OUTPUT
+    return FailureDomain.INFRASTRUCTURE
+
+
 def normalized_failure(
     *,
     failure_phase: str | None,
@@ -422,10 +476,12 @@ def normalized_failure(
     if normalized_kind is None and timed_out:
         failure_class = FailureClass.TIMEOUT
     else:
+        # #712: unknown adapter kinds count against the seat (model-output domain), not infrastructure.
         failure_class = LEGACY_FAILURE_KIND_MAP.get(normalized_kind or "", FailureClass.UNCLASSIFIED)
     spec = FAILURE_CLASS_SPECS[failure_class]
     legacy_phase = _LEGACY_PHASE_MAP.get((failure_phase or "").strip().lower(), FailurePhase.DISPATCH)
     phase = legacy_phase if legacy_phase in spec.phases else spec.default_phase
+    domain = failure_domain_for_legacy_kind(normalized_kind, failure_class)
     return WorkerFailure(
         failure_class=failure_class,
         phase=phase,
@@ -434,6 +490,7 @@ def normalized_failure(
         detail=detail,
         cause_code=normalized_kind,
         attempt=attempt,
+        domain=domain,
     )
 
 
@@ -483,16 +540,21 @@ def run_failure_is_infrastructure_at_read_time(kind: str | None, phase: str | No
 
     if kind is None:
         return None
-    if kind in RUN_MODEL_CONTRACT_FAILURE_KINDS:
+    if is_model_quality_failure_kind(kind):
         return False
     if kind in RUN_UNAMBIGUOUS_INFRASTRUCTURE_FAILURE_KINDS:
         return True
     if kind == "worker-failure":
         return None
     if _is_run_catch_all_failure_kind(kind):
+        # #710: explicit model phases stay negative; infrastructure phases neutralize; unknown fails closed.
+        if phase in RUN_MODEL_FAILURE_PHASES:
+            return False
         return phase in RUN_INFRASTRUCTURE_FAILURE_PHASES
     try:
-        FailureClass(kind)
+        failure_class = FailureClass(kind)
     except ValueError:
+        # #712: unrecognized run-level kinds count against the seat (same direction as worker level).
         return False
-    return True
+    # #708: only explicit infrastructure classes neutralize; no blanket FailureClass fallthrough.
+    return failure_class.value in RUN_LEVEL_INFRASTRUCTURE_FAILURE_CLASS_ALLOWLIST

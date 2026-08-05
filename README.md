@@ -188,6 +188,8 @@ $ brigade outcome rank
 - `brigade outcome reconcile` is the gate: dry-run by default, `--apply` installs a skill that earned it or rolls a regressed one back.
 - `brigade outcome explain` prints the full signal trail behind any decision, so every promotion is as auditable as the runs that earned it.
 
+Scores are recomputed from the stored receipts every time you read them, so upgrading Brigade can move numbers with no new runs. Which failures count against a seat and which neutralize is in [docs/outcome-scoring.md](docs/outcome-scoring.md).
+
 The ledger is plain JSON and markdown under `memory/outcome/`, tracked in git, readable without Brigade. `brigade init` wires a `brigade-work` skill into each harness so agents run this loop without being told. With Claude Code it also installs project-scoped hooks that redirect raw test commands through verify runs.
 
 ## Optional stations
