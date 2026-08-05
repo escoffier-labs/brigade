@@ -1667,6 +1667,7 @@ def test_handoff_lint_cli(tmp_path, monkeypatch):
         "content_guard": False,
         "guard_policy": "personal",
         "json_output": True,
+        "strict": False,
     }
 
 

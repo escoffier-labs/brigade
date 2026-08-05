@@ -53,6 +53,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--guard-policy", default="personal", help="Content Guard policy name or path for --content-guard."
     )
     p_handoff_lint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_lint.add_argument(
+        "--strict",
+        action="store_true",
+        help="Promote standalone-readability warnings to lint failures.",
+    )
     p_handoff_draft = handoff_sub.add_parser("draft", help="Write a linted Memory Handoff draft in Brigade style.")
     p_handoff_draft.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_handoff_draft.add_argument(
@@ -273,6 +278,7 @@ def dispatch(args) -> int:
             content_guard=args.content_guard,
             guard_policy=args.guard_policy,
             json_output=args.json,
+            strict=args.strict,
         )
     if args.handoff_command == "draft":
         return handoff_cmd.draft(
