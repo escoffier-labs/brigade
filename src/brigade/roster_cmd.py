@@ -306,6 +306,19 @@ def init(
     if path.exists() and not force:
         print(f"error: roster already exists at {path}; pass --force to overwrite", file=sys.stderr)
         return 2
+    if not path.exists() and not force:
+        try:
+            fallback = roster_mod.resolve_roster(target)
+        except FileNotFoundError:
+            fallback = None
+        if fallback is not None:
+            print(
+                f"error: {fallback.source} roster {fallback.path} already applies here via fallback; "
+                f"a starter at {path} would shadow it with codex+ollama-only seats. "
+                "Pass --force to scaffold a workspace roster anyway.",
+                file=sys.stderr,
+            )
+            return 2
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

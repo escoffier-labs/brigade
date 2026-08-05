@@ -28,7 +28,7 @@ def _resolve_backend(target: Path):
     from . import roster as roster_mod
     from .research import llm
 
-    r = roster_mod.load_roster(target / ".brigade" / "roster.toml")
+    r = roster_mod.load_roster(roster_mod.resolve_roster_path(target))
     return llm.resolve_backend(r)
 
 

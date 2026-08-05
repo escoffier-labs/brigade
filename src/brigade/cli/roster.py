@@ -13,7 +13,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     roster_sub.required = True
     p_roster_init = roster_sub.add_parser("init", help="Write a starter .brigade/roster.toml.")
     p_roster_init.add_argument("--target", "-t", type=Path, default=Path("."))
-    p_roster_init.add_argument("--force", action="store_true", help="Overwrite an existing roster.")
+    p_roster_init.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing roster, or scaffold over a fallback roster "
+        "(worktree-parent or user) that already applies to this target.",
+    )
     p_roster_init.add_argument(
         "--ollama-model",
         default=None,

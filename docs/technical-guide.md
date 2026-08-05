@@ -249,6 +249,12 @@ brigade roster init
 brigade roster doctor
 ```
 
+`roster init` refuses to scaffold when a roster already applies to the target
+through fallback, either the parent clone's roster (when the target is a linked
+git worktree) or the user roster at `~/.brigade/roster.toml`, because the
+minimal starter would shadow every seat that roster configures. Pass `--force`
+to scaffold a workspace roster anyway.
+
 Pass `--review-model <id>` to add a reviewer seat pinned to a different model than the coder (for example `brigade roster init --review-model gpt-5.3-codex-spark`). A same-model reviewer tends to agree with the coder's narration; pinning the review seat to another model makes that independence structural, and `roster doctor` validates the pin like any other seat.
 
 That writes `.brigade/roster.toml` with a Codex orchestrator, a Codex coder, and an optional Ollama local researcher:
