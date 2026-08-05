@@ -1911,3 +1911,16 @@ def test_posttooluse_routed_verify_records_capture_artifact(tmp_path: Path):
     state = runtime.read_session_state(target, "session-1")
     assert state is not None
     assert state["exercised_artifact_id"] == "ultra-work-scout"
+
+
+def test_init_hint_quotes_hostile_directory_names(tmp_path: Path):
+    repo = tmp_path / "evil;rm -rf tmp"
+    (repo / ".git").mkdir(parents=True)
+    result = runtime.handle_payload("SessionStart", _payload(repo, "SessionStart"))
+    context = result["hookSpecificOutput"]["additionalContext"]
+    import shlex as _shlex
+
+    assert _shlex.quote(str(repo.resolve())) in context
+    tokens = _shlex.split(context.split(": brigade ", 1)[1].splitlines()[0])
+    assert tokens[:2] == ["init", "--target"]
+    assert tokens[2] == str(repo.resolve())

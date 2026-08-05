@@ -66,7 +66,7 @@ def hook_script_text() -> str:
 
 
 def managed_user_command(event: str, script_path: Path) -> str:
-    return f"{script_path} --event {event}"
+    return f"{shlex.quote(str(script_path))} --event {event}"
 
 
 def managed_user_handler(event: str, script_path: Path) -> dict[str, Any]:

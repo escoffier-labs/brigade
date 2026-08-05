@@ -1839,7 +1839,9 @@ def _unwired_init_hint(payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if cwd == Path.home() or not (cwd / ".git").exists():
         return None
-    command = f"brigade init --target {cwd} --depth repo --harnesses claude --owner claude --git-exclude"
+    command = (
+        f"brigade init --target {shlex.quote(str(cwd))} --depth repo --harnesses claude --owner claude --git-exclude"
+    )
     return _additional_context(
         "SessionStart",
         "This git repository is not Brigade-wired. Configure it before real work so "
