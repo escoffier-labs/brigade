@@ -5,6 +5,10 @@ detached child process so no user command ever waits on it. The endpoint
 request carries no parameters and no install id - the User-Agent (version +
 OS) plus the request itself is the entire signal. BRIGADE_NO_UPDATE_CHECK
 disables both the notice and all network activity.
+
+The stderr notice is TTY-only (interactive shells). The background cache
+refresh runs even when stderr is piped so agent harness installs populate
+the on-disk cache for ``available_update()`` / work-brief.
 """
 
 from __future__ import annotations
@@ -78,7 +82,7 @@ def available_update(*, env: Mapping[str, str] | None = None, now: float | None 
         return None
 
 
-def _gated(argv: list[str], exit_code: int, env: Mapping[str, str], stderr: Any) -> bool:
+def _notice_gated(argv: list[str], exit_code: int, env: Mapping[str, str], stderr: Any) -> bool:
     if env.get("BRIGADE_NO_UPDATE_CHECK") or env.get("CI"):
         return True
     if exit_code != 0:
@@ -87,6 +91,14 @@ def _gated(argv: list[str], exit_code: int, env: Mapping[str, str], stderr: Any)
         return True
     isatty = getattr(stderr, "isatty", None)
     return not callable(isatty) or not isatty()
+
+
+def _refresh_gated(argv: list[str], env: Mapping[str, str]) -> bool:
+    if env.get("BRIGADE_NO_UPDATE_CHECK") or env.get("CI"):
+        return True
+    if argv and argv[0] in _SKIP_COMMANDS:
+        return True
+    return False
 
 
 def _spawn_refresh() -> None:
@@ -113,37 +125,48 @@ def maybe_notify(
 ) -> None:
     """Print a cached update notice and kick off a background refresh.
 
-    Never raises, never blocks on the network, never alters the exit code.
+    The notice honors all interactive gates (TTY, success exit, opt-out, CI,
+    skip commands). The background refresh ignores TTY and exit code so piped
+    agent harnesses still populate the cache; it still honors opt-out, CI, and
+    skip commands. Never raises, never blocks on the network, never alters the
+    exit code.
     """
     try:
         environment = os.environ if env is None else env
         err = sys.stderr if stderr is None else stderr
         current_time = time.time() if now is None else now
         spawn_refresh = _spawn_refresh if spawn is None else spawn
-        if _gated(list(argv), exit_code, environment, err):
-            return
+        command_argv = list(argv)
 
         path = cache_path(environment)
         state = localio.read_json_dict(path) or {}
 
-        latest = state.get("latest")
-        if isinstance(latest, str) and is_newer(latest, __version__):
-            notified_at = state.get("notified_at")
-            notified_recently = (
-                isinstance(notified_at, (int, float)) and current_time - float(notified_at) < NOTIFY_INTERVAL_SECONDS
-            )
-            if not notified_recently:
-                err.write(
-                    f'A new brigade release is available: {latest} (installed {__version__}). Run "brigade update".\n'
+        if not _notice_gated(command_argv, exit_code, environment, err):
+            latest = state.get("latest")
+            if isinstance(latest, str) and is_newer(latest, __version__):
+                notified_at = state.get("notified_at")
+                notified_recently = (
+                    isinstance(notified_at, (int, float))
+                    and current_time - float(notified_at) < NOTIFY_INTERVAL_SECONDS
                 )
-                state["notified_at"] = current_time
-                state["notified_version"] = latest
-                localio.write_json(path, state)
+                if not notified_recently:
+                    err.write(
+                        f'A new brigade release is available: {latest} (installed {__version__}). Run "brigade update".\n'
+                    )
+                    state["notified_at"] = current_time
+                    state["notified_version"] = latest
+                    localio.write_json(path, state)
 
-        checked_at = state.get("checked_at")
-        stale = not isinstance(checked_at, (int, float)) or current_time - float(checked_at) >= CHECK_INTERVAL_SECONDS
-        if stale:
-            spawn_refresh()
+        # Exit code is intentionally not gated here: failed agent commands should
+        # still warm the cache so work-brief can surface available updates.
+        if not _refresh_gated(command_argv, environment):
+            checked_at = state.get("checked_at")
+            stale = (
+                not isinstance(checked_at, (int, float))
+                or current_time - float(checked_at) >= CHECK_INTERVAL_SECONDS
+            )
+            if stale:
+                spawn_refresh()
     except Exception:
         return
 
