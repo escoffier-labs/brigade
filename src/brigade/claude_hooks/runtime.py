@@ -582,10 +582,16 @@ def _run_brief(target: Path) -> str:
             timeout=BRIEF_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return f"Brigade is wired for this repo. Run `brigade work brief --target {target}` before real work."
+        return (
+            "Brigade is wired for this repo. Run `brigade work brief --target "
+            f"{shlex.quote(str(target))}` before real work."
+        )
     text = result.stdout.strip()
     if result.returncode != 0 or not text:
-        return f"Brigade is wired for this repo. Run `brigade work brief --target {target}` before real work."
+        return (
+            "Brigade is wired for this repo. Run `brigade work brief --target "
+            f"{shlex.quote(str(target))}` before real work."
+        )
     if len(text) > BRIEF_MAX_CHARS:
         text = text[:BRIEF_MAX_CHARS] + "\n[Brigade brief truncated]"
     return text
@@ -1839,7 +1845,9 @@ def _unwired_init_hint(payload: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if cwd == Path.home() or not (cwd / ".git").exists():
         return None
-    command = f"brigade init --target {cwd} --depth repo --harnesses claude --owner claude --git-exclude"
+    command = (
+        f"brigade init --target {shlex.quote(str(cwd))} --depth repo --harnesses claude --owner claude --git-exclude"
+    )
     return _additional_context(
         "SessionStart",
         "This git repository is not Brigade-wired. Configure it before real work so "

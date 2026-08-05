@@ -215,3 +215,13 @@ def test_user_hooks_uninstall_preserves_edited_script(claude_home: Path):
     script.write_text("# user-edited\n")
     assert hooks_uninstall(target=Path("."), scope="user") == 0
     assert script.read_text() == "# user-edited\n"
+
+
+def test_managed_user_command_quotes_paths_with_spaces(tmp_path):
+    import shlex
+
+    script = tmp_path / "Application Support" / "hooks" / "brigade-work-loop.py"
+    command = managed_user_command("SessionStart", script)
+    tokens = shlex.split(command)
+    assert tokens[0] == str(script)
+    assert tokens[1:] == ["--event", "SessionStart"]
