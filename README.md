@@ -64,11 +64,25 @@ The agent installs, runs `brigade setup`, wires harnesses, and leaves files on d
 **If you prefer a shell** (same commands the agent would run):
 
 ```bash
-pipx install brigade-cli
+pipx install brigade-cli  # or: uv tool install brigade-cli
 pipx ensurepath           # then open a new shell so `brigade` is on PATH
 brigade setup             # install the verified native engines
 brigade operator quickstart --target ./my-repo --harnesses codex
 ```
+
+**One and done (Claude Code).** Instead of wiring repos one at a time, install
+the work-loop hooks once at user scope:
+
+```bash
+brigade work hooks install --scope user
+```
+
+From then on, every repo the agent opens gets the work brief injected at
+session start, and an unwired repo gets the exact `brigade init` command
+printed for the agent to run - so agents wire new repos themselves and the
+verified-work loop closes everywhere without another human command. Remove it
+any time with `brigade work hooks uninstall --scope user`; only Brigade-owned
+hook entries are touched.
 
 Brigade prints a one-line notice when a new release is out. It checks at most
 once a day through an anonymous request. Set `BRIGADE_NO_UPDATE_CHECK=1` to

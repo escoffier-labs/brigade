@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would shadow every seat configured there. Pass `--force` to scaffold a
   workspace roster anyway. `brigade research` now resolves its roster through
   the same fallback chain instead of requiring a workspace roster. (#741)
+- One-and-done onboarding: `brigade work hooks install|update|status|uninstall`
+  gain `--scope user` (default `project`, prior behavior unchanged), installing
+  the managed Claude work-loop hooks once at user scope so every repo the agent
+  opens gets the work brief injected and an unwired repo gets the exact
+  `brigade init` command printed. User settings merge non-destructively,
+  Brigade-owned entries are tagged so uninstall removes only them, and status
+  detects a stale script by hash. `operator quickstart` now suggests the
+  user-scope install once when wiring the claude harness, and the README
+  documents the flow. (#740)
 - `brigade status --json` carries the same `available_update` field the work
   brief gained, so machine consumers can watch for releases without parsing the
   brief. Cache-read only; never touches the network. (#717)
