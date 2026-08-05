@@ -246,6 +246,6 @@ def test_publish_workflow_verifies_version_check_endpoint_after_pypi_upload():
     assert "scripts/verify_version_check_endpoint.py" in section
     assert "EXPECTED_VERSION: ${{ github.ref_name }}" in section
     assert '--expected-version "${EXPECTED_VERSION#v}"' in section
-    assert "https://check.brigade.tools/v1/version" in (
-        ROOT / "scripts" / "verify_version_check_endpoint.py"
-    ).read_text()
+    assert (
+        "https://check.brigade.tools/v1/version" in (ROOT / "scripts" / "verify_version_check_endpoint.py").read_text()
+    )
