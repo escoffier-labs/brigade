@@ -1,5 +1,6 @@
 from pathlib import Path
-
+import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -215,3 +216,36 @@ def test_publish_release_gate_requires_27_release_assets():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     gate = text[text.index("  release-asset-gate:") : text.index("  build-and-publish:")]
     assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 27' in gate
+
+
+def _load_workflow_yaml(path: Path):
+    try:
+        import yaml
+    except ImportError:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "pyyaml", "-q"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        import yaml
+    return yaml.safe_load(path.read_text())
+
+
+def test_publish_workflow_yaml_is_valid():
+    _load_workflow_yaml(ROOT / ".github" / "workflows" / "publish.yml")
+
+
+def test_publish_workflow_verifies_version_check_endpoint_after_pypi_upload():
+    text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
+    publish = text.index("      - name: Publish to PyPI")
+    verify = text.index("      - name: Verify check.brigade.tools reports the published version")
+    acceptance = text.index("  published-artifact-acceptance:")
+
+    assert publish < verify < acceptance
+    section = text[verify : text.index("  published-artifact-acceptance:")]
+    assert "scripts/verify_version_check_endpoint.py" in section
+    assert "EXPECTED_VERSION: ${{ github.ref_name }}" in section
+    assert '--expected-version "${EXPECTED_VERSION#v}"' in section
+    assert "https://check.brigade.tools/v1/version" in (
+        ROOT / "scripts" / "verify_version_check_endpoint.py"
+    ).read_text()
