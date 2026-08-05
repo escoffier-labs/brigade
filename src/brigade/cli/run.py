@@ -72,6 +72,11 @@ def _terminalize_escaped_run(
             aboyeur_mod.record_run_termination(
                 output_dir,
                 status="failed",
+                # #711: unexpected-error is infrastructure-neutral at kind level; phase is omitted
+                # because record_run_termination derives a status-based phase that may fall outside
+                # RUN_INFRASTRUCTURE_FAILURE_PHASES. Kind-level membership in
+                # RUN_UNAMBIGUOUS_INFRASTRUCTURE_FAILURE_KINDS keeps outcome capture neutral here
+                # and in run_failure_is_infrastructure_at_read_time regardless of stamped phase.
                 failure_phase=None,
                 failure_kind="unexpected-error",
                 detail=detail,
@@ -915,8 +920,10 @@ def _print_suspected_noop_warning(output_dir: Path) -> None:
     except (OSError, json.JSONDecodeError):
         return
     if isinstance(payload, dict) and payload.get("suspected_noop") is True:
+        # #703: name the scoring consequence here so the negative capture is not a surprise.
         print(
-            "warning: suspected no-op run; ok workers produced no non-.brigade file changes.",
+            "warning: suspected no-op run; ok workers produced no non-.brigade file changes. "
+            "outcome capture scores this run negative (see docs/outcome-scoring.md).",
             file=sys.stderr,
         )
 

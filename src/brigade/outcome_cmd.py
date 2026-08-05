@@ -1114,6 +1114,12 @@ _RUN_INFRASTRUCTURE_FAILURE_KINDS = frozenset({"worker-failure", None})
 
 
 def _run_infrastructure_only(receipt: dict[str, Any], worker_results: list[dict[str, Any]]) -> bool:
+    """Return whether a failed/incomplete run scores neutral (infrastructure-only).
+
+    Classification is read-time only; see docs/outcome-scoring.md. Run-level kinds
+    are resolved by ``run_failure_is_infrastructure_at_read_time``; deferred kinds
+    consult worker ``domain`` (``infrastructure`` neutralizes, ``model-output`` scores negative).
+    """
     status = _run_receipt_signal_status(receipt)
     if status not in core.RUN_INFRASTRUCTURE_NEUTRAL_STATUSES:
         return False
@@ -1139,12 +1145,29 @@ def _run_infrastructure_only(receipt: dict[str, Any], worker_results: list[dict[
     return True
 
 
+def _run_is_suspected_noop(receipt: dict[str, Any], effective_status: str) -> bool:
+    """Return whether the run receipt records a seat that produced no deliverable (#703).
+
+    Dry runs and read-only runs are expected to change nothing, so they keep their own
+    neutral statuses and never reach this check.
+    """
+    if effective_status in ("dry-run", "read-only"):
+        return False
+    return receipt.get("suspected_noop") is True
+
+
 def _run_capture_signal_value(
     target: Path,
     run_json: Path,
     receipt: dict[str, Any],
     effective_status: str,
 ) -> int:
+    if _run_is_suspected_noop(receipt, effective_status):
+        # #703: the seat exited clean but shipped nothing. That is a model-quality
+        # failure, so the run scores against the seat instead of counting as a success.
+        # ``suspected-noop-run`` carries the same direction in MODEL_QUALITY_FAILURE_KINDS
+        # for receipts that name the kind directly.
+        return core.signal_value("run", "failed")
     worker_results = _load_worker_results(run_json)
     infrastructure_only = _run_infrastructure_only(receipt, worker_results)
     verifier_failed = _run_has_verifier_failure(target, run_json, receipt)
