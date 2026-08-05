@@ -207,9 +207,10 @@ def _is_runtime_secret_value(value: str) -> bool:
     """True when the assigned value is generated or read at runtime instead of committed.
 
     Quotes are deliberately not stripped here. A quoted value is a committed literal even
-    when its text opens with a runtime expression, so ``api_key = "os.environ.sk-live-..."``
-    must stay reportable. Callers that can still see the source line decide whether the
-    value was quoted; see :func:`_match_value_is_quoted`.
+    when its text opens with a runtime expression: a string literal whose contents begin
+    with ``os.environ.`` followed by key material must stay reportable. Callers that can
+    still see the source line decide whether the value was quoted; see
+    :func:`_match_value_is_quoted`.
     """
     return RUNTIME_SECRET_VALUE_RE.match(value.strip()) is not None
 
