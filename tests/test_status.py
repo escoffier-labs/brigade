@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from brigade import __version__
 from brigade import doctor
 from brigade import registry
 from brigade import status as status_mod
@@ -139,3 +140,56 @@ def test_status_json_output_is_structured(tmp_target: Path, capsys):
     assert {"core", "memory", "guard", "security"} <= names
     first = payload["stations"][0]
     assert {"station", "health", "ok", "warn", "fail", "summary"} <= set(first)
+
+
+def _write_update_cache(cache_home: Path, **state) -> Path:
+    path = cache_home / "cache" / "brigade" / "update-notify.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state))
+    return path
+
+
+def _run_status(tmp_target: Path, cache_home: Path, monkeypatch, capsys, *, json_output: bool = False) -> str:
+    monkeypatch.setenv("HOME", str(cache_home))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home / "cache"))
+    capsys.readouterr()
+    assert status_mod.run(tmp_target, json_output=json_output) == 0
+    return capsys.readouterr().out
+
+
+def test_status_json_update_none_without_cache(tmp_target, tmp_path_factory, monkeypatch, capsys):
+    cache_home = tmp_path_factory.mktemp("update_cache_empty")
+    payload = json.loads(_run_status(tmp_target, cache_home, monkeypatch, capsys, json_output=True))
+    assert payload["update"] is None
+
+
+def test_status_json_update_present_when_newer(tmp_target, tmp_path_factory, monkeypatch, capsys):
+    cache_home = tmp_path_factory.mktemp("update_cache_newer")
+    _write_update_cache(cache_home, checked_at=100.0, latest="99.0.0")
+    payload = json.loads(_run_status(tmp_target, cache_home, monkeypatch, capsys, json_output=True))
+    update = payload["update"]
+    assert isinstance(update, dict)
+    assert update["latest"] == "99.0.0"
+    assert update["installed"] == __version__
+
+
+def test_status_json_update_none_when_opted_out(tmp_target, tmp_path_factory, monkeypatch, capsys):
+    cache_home = tmp_path_factory.mktemp("update_cache_opted_out")
+    _write_update_cache(cache_home, checked_at=100.0, latest="99.0.0")
+    monkeypatch.setenv("BRIGADE_NO_UPDATE_CHECK", "1")
+    payload = json.loads(_run_status(tmp_target, cache_home, monkeypatch, capsys, json_output=True))
+    assert payload["update"] is None
+
+
+def test_status_prints_no_update_line_without_update(tmp_target, tmp_path_factory, monkeypatch, capsys):
+    cache_home = tmp_path_factory.mktemp("update_cache_empty_text")
+    out = _run_status(tmp_target, cache_home, monkeypatch, capsys)
+    assert "update_available:" not in out
+
+
+def test_status_prints_update_line_when_newer(tmp_target, tmp_path_factory, monkeypatch, capsys):
+    cache_home = tmp_path_factory.mktemp("update_cache_newer_text")
+    _write_update_cache(cache_home, checked_at=100.0, latest="99.0.0")
+    lines = _run_status(tmp_target, cache_home, monkeypatch, capsys).splitlines()
+    assert lines[0].startswith("brigade status: ")
+    assert lines[1] == f'update_available: 99.0.0 (installed {__version__}); run "brigade update"'
