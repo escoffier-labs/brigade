@@ -117,7 +117,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_run.add_argument(
         "--resolved-roster-source",
-        choices=("explicit", "workspace", "user"),
+        choices=("explicit", "workspace", "worktree-parent", "user"),
         default=None,
         help=argparse.SUPPRESS,
     )
@@ -333,12 +333,15 @@ def dispatch(args) -> int:
         print(f"error: invalid roster at {roster_path}: {exc}", file=sys.stderr)
         return 2
     print(f"roster: {roster_resolution.path} ({roster_resolution.source})", file=sys.stderr)
-    for shadowed in roster_resolution.shadowed:
-        print(
-            f"warning: workspace roster {roster_resolution.path} shadows user roster {shadowed}; "
-            "pass --roster PATH to choose either file explicitly.",
-            file=sys.stderr,
-        )
+    # A worktree-parent roster shadowing the user roster is the designed
+    # outcome for worktrees of a wired repo, so only a workspace roster warns.
+    if roster_resolution.source == "workspace":
+        for shadowed in roster_resolution.shadowed:
+            print(
+                f"warning: workspace roster {roster_resolution.path} shadows user roster {shadowed}; "
+                "pass --roster PATH to choose either file explicitly.",
+                file=sys.stderr,
+            )
     if args.worker is not None:
         worker_error = _direct_worker_error(
             args.worker,

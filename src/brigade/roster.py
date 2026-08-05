@@ -17,7 +17,7 @@ SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
 CODEX_TRANSPORT_CHOICES = ("exec", "app-server")
 AGENT_TRANSPORT_CHOICES = ("direct", "acpx")
 ACPX_TRANSPORT_VERSION = "0.12.0"
-RosterSource = Literal["explicit", "workspace", "user"]
+RosterSource = Literal["explicit", "workspace", "worktree-parent", "user"]
 
 
 @dataclass(frozen=True)
@@ -273,6 +273,41 @@ def _allowed(cli_ref: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(cli_ref, pattern) for pattern in patterns)
 
 
+def _linked_worktree_parent(target: Path) -> Path | None:
+    """Root of the parent clone when target is a linked git worktree, else None.
+
+    A linked worktree has a `.git` FILE with a "gitdir:" pointer into the parent
+    clone's admin dir (`<clone>/.git/worktrees/<name>`), which in turn holds a
+    `commondir` file naming the shared `.git` dir. A submodule's `.git` file
+    points at `.git/modules/<name>`, which has no `commondir`, so it (and any
+    malformed pointer) resolves to None.
+    """
+    git_file = target / ".git"
+    if not git_file.is_file():
+        return None
+    try:
+        content = git_file.read_text().strip()
+    except OSError:
+        return None
+    if not content.startswith("gitdir:"):
+        return None
+    gitdir = Path(content.split(":", 1)[1].strip())
+    if not gitdir.is_absolute():
+        gitdir = (target / gitdir).resolve()
+    try:
+        common_raw = (gitdir / "commondir").read_text().strip()
+    except OSError:
+        return None
+    common = Path(common_raw)
+    if not common.is_absolute():
+        common = (gitdir / common).resolve()
+    if common.name != ".git" or not common.is_dir():
+        # A bare repo's shared dir is the repo itself (foo.git), so its parent
+        # is just whatever directory contains the repo, not a clone root.
+        return None
+    return common.parent
+
+
 def resolve_roster(target: Path, explicit: Path | None = None) -> RosterResolution:
     if explicit is not None:
         path = explicit.expanduser().resolve()
@@ -280,14 +315,23 @@ def resolve_roster(target: Path, explicit: Path | None = None) -> RosterResoluti
             return RosterResolution(path=path, source="explicit")
         raise FileNotFoundError(f"roster not found: {path}")
 
-    workspace_path = (target.expanduser() / ".brigade" / "roster.toml").resolve()
+    target = target.expanduser()
+    workspace_path = (target / ".brigade" / "roster.toml").resolve()
     user_path = (Path.home() / ".brigade" / "roster.toml").expanduser().resolve()
+    parent_root = _linked_worktree_parent(target)
+    parent_path = (parent_root / ".brigade" / "roster.toml").resolve() if parent_root is not None else None
+    if parent_path in (workspace_path, user_path):
+        parent_path = None
     if workspace_path.exists():
         shadowed = (user_path,) if user_path != workspace_path and user_path.exists() else ()
         return RosterResolution(path=workspace_path, source="workspace", shadowed=shadowed)
+    if parent_path is not None and parent_path.exists():
+        shadowed = (user_path,) if user_path != parent_path and user_path.exists() else ()
+        return RosterResolution(path=parent_path, source="worktree-parent", shadowed=shadowed)
     if user_path.exists():
         return RosterResolution(path=user_path, source="user")
-    raise FileNotFoundError(f"roster not found: checked {workspace_path} and {user_path}")
+    checked = [workspace_path] + ([parent_path] if parent_path is not None else []) + [user_path]
+    raise FileNotFoundError("roster not found: checked " + " and ".join(str(path) for path in checked))
 
 
 def resolve_roster_path(target: Path, explicit: Path | None = None) -> Path:

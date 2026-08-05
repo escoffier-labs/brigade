@@ -637,6 +637,66 @@ def test_run_cli_records_workspace_roster_provenance_and_shadow_warning(tmp_path
     }
 
 
+def test_run_cli_worktree_parent_roster_resolves_without_shadow_warning(tmp_path, monkeypatch, capsys):
+    parent = tmp_path / "clone"
+    admin = parent / ".git" / "worktrees" / "wt"
+    admin.mkdir(parents=True)
+    (admin / "commondir").write_text("../..\n")
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {admin}\n")
+    parent_roster = parent / ".brigade" / "roster.toml"
+    home = tmp_path / "home"
+    user_roster = home / ".brigade" / "roster.toml"
+    parent_roster.parent.mkdir(parents=True)
+    user_roster.parent.mkdir(parents=True)
+    roster_text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.coder]\ncli = "codex"\nrole = "code"\n'
+    )
+    parent_roster.write_text(roster_text)
+    user_roster.write_text(roster_text)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(
+        aboyeur.agents,
+        "run_agent",
+        lambda *args, **kwargs: agents.AgentResult(
+            text=json.dumps({"assignments": [{"worker": "coder", "task": "inspect"}]}),
+            ok=True,
+        ),
+    )
+
+    rc = cli.main(
+        [
+            "run",
+            "inspect",
+            "--cwd",
+            str(worktree),
+            "--output-dir",
+            str(output_dir),
+            "--dry-run",
+            "--no-code-graph",
+            "--no-evidence",
+            "--no-route",
+        ]
+    )
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert f"roster: {parent_roster.resolve()} (worktree-parent)" in err
+    # Falling back to the parent clone's roster with a user roster present is
+    # the designed outcome, not a conflict worth warning about on every run.
+    assert "shadows user roster" not in err
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["roster"] == {
+        "path": str(parent_roster.resolve()),
+        "source": "worktree-parent",
+        "shadowed": [str(user_roster.resolve())],
+    }
+
+
 def test_run_cli_explicit_direct_worker_reports_choice_without_shadow_warning(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     user_roster = home / ".brigade" / "roster.toml"

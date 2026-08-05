@@ -177,6 +177,174 @@ def test_resolve_roster_reports_user_fallback_source(monkeypatch, tmp_path):
     assert resolution.shadowed == ()
 
 
+def _make_linked_worktree(tmp_path):
+    """Lay out a parent clone and a linked git worktree the way git does."""
+    parent = tmp_path / "clone"
+    admin = parent / ".git" / "worktrees" / "wt"
+    admin.mkdir(parents=True)
+    (admin / "commondir").write_text("../..\n")
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {admin}\n")
+    return parent, worktree
+
+
+def test_resolve_roster_worktree_falls_back_to_parent_clone(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    parent, worktree = _make_linked_worktree(tmp_path)
+    parent_roster = parent / ".brigade" / "roster.toml"
+    parent_roster.parent.mkdir(parents=True)
+    parent_roster.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(worktree)
+
+    assert resolution.path == parent_roster.resolve()
+    assert resolution.source == "worktree-parent"
+    assert resolution.shadowed == ()
+
+
+def test_resolve_roster_worktree_parent_shadows_user_roster(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    parent, worktree = _make_linked_worktree(tmp_path)
+    parent_roster = parent / ".brigade" / "roster.toml"
+    user = home / ".brigade" / "roster.toml"
+    parent_roster.parent.mkdir(parents=True)
+    user.parent.mkdir(parents=True)
+    parent_roster.write_text(VALID)
+    user.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(worktree)
+
+    assert resolution.path == parent_roster.resolve()
+    assert resolution.source == "worktree-parent"
+    assert resolution.shadowed == (user.resolve(),)
+
+
+def test_resolve_roster_worktree_own_workspace_roster_wins(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    parent, worktree = _make_linked_worktree(tmp_path)
+    parent_roster = parent / ".brigade" / "roster.toml"
+    local = worktree / ".brigade" / "roster.toml"
+    parent_roster.parent.mkdir(parents=True)
+    local.parent.mkdir(parents=True)
+    parent_roster.write_text(VALID)
+    local.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(worktree)
+
+    assert resolution.path == local.resolve()
+    assert resolution.source == "workspace"
+
+
+def test_resolve_roster_worktree_without_parent_roster_uses_user(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    _parent, worktree = _make_linked_worktree(tmp_path)
+    user = home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(worktree)
+
+    assert resolution.path == user.resolve()
+    assert resolution.source == "user"
+
+
+def test_resolve_roster_relative_gitdir_pointer_finds_parent(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    parent = tmp_path / "clone"
+    admin = parent / ".git" / "worktrees" / "wt"
+    admin.mkdir(parents=True)
+    (admin / "commondir").write_text("../..\n")
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text("gitdir: ../clone/.git/worktrees/wt\n")
+    parent_roster = parent / ".brigade" / "roster.toml"
+    parent_roster.parent.mkdir(parents=True)
+    parent_roster.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(worktree)
+
+    assert resolution.path == parent_roster.resolve()
+    assert resolution.source == "worktree-parent"
+
+
+def test_resolve_roster_bare_repo_worktree_has_no_parent_tier(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    admin = tmp_path / "bare.git" / "worktrees" / "wt"
+    admin.mkdir(parents=True)
+    (admin / "commondir").write_text("../..\n")
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {admin}\n")
+    # A roster in the directory that merely CONTAINS the bare repo is not the
+    # parent clone's roster and must not be adopted.
+    stray = tmp_path / ".brigade" / "roster.toml"
+    stray.parent.mkdir()
+    stray.write_text(VALID)
+    user = home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(worktree)
+
+    assert resolution.path == user.resolve()
+    assert resolution.source == "user"
+
+
+def test_resolve_roster_parent_same_as_user_reports_user(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    admin = home / ".git" / "worktrees" / "wt"
+    admin.mkdir(parents=True)
+    (admin / "commondir").write_text("../..\n")
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {admin}\n")
+    user = home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(worktree)
+
+    assert resolution.path == user.resolve()
+    assert resolution.source == "user"
+    assert resolution.shadowed == ()
+
+
+def test_resolve_roster_malformed_git_file_is_not_a_worktree(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".git").write_text("not a gitdir pointer\n")
+    user = home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    resolution = roster_mod.resolve_roster(workspace)
+
+    assert resolution.path == user.resolve()
+    assert resolution.source == "user"
+
+
+def test_resolve_roster_worktree_missing_names_parent_candidate(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    parent, worktree = _make_linked_worktree(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    with pytest.raises(FileNotFoundError) as exc:
+        roster_mod.resolve_roster(worktree)
+    message = str(exc.value)
+    assert str(worktree / ".brigade" / "roster.toml") in message
+    assert str((parent / ".brigade" / "roster.toml").resolve()) in message
+    assert str(home / ".brigade" / "roster.toml") in message
+
+
 def test_resolve_roster_path_explicit_never_falls_back(monkeypatch, tmp_path):
     home = tmp_path / "home"
     user = home / ".brigade" / "roster.toml"

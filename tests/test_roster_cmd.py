@@ -12,6 +12,18 @@ from brigade import roster_cmd
 from brigade import toml_compat
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_home(tmp_path_factory, monkeypatch):
+    """Keep the machine's real ~/.brigade/roster.toml out of init's shadow guard.
+
+    Tests that need a specific home (with or without a user roster) re-patch
+    Path.home in their own body, which takes precedence over this fixture.
+    """
+    home = tmp_path_factory.mktemp("roster-cmd-home")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    return home
+
+
 def test_roster_init_writes_default_roster(tmp_target, capsys):
     rc = roster_cmd.init(tmp_target)
     out = capsys.readouterr().out
@@ -83,6 +95,52 @@ def test_roster_init_force_overwrites_with_options(tmp_target):
     text = (tmp_target / ".brigade" / "roster.toml").read_text()
     assert 'cli = "ollama:mistral"' in text
     assert "max_workers = 2" in text
+
+
+def test_roster_init_refuses_to_shadow_user_roster(_hermetic_home, tmp_target, capsys):
+    user = _hermetic_home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text('orchestrator = "chef"\n[agents.chef]\ncli = "claude"\n')
+
+    rc = roster_cmd.init(tmp_target)
+
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert not (tmp_target / ".brigade" / "roster.toml").exists()
+    assert str(user) in err
+    assert "shadow" in err
+    assert "--force" in err
+
+
+def test_roster_init_refuses_to_shadow_worktree_parent_roster(_hermetic_home, tmp_path, capsys):
+    parent = tmp_path / "clone"
+    admin = parent / ".git" / "worktrees" / "wt"
+    admin.mkdir(parents=True)
+    (admin / "commondir").write_text("../..\n")
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {admin}\n")
+    parent_roster = parent / ".brigade" / "roster.toml"
+    parent_roster.parent.mkdir(parents=True)
+    parent_roster.write_text('orchestrator = "chef"\n[agents.chef]\ncli = "claude"\n')
+
+    rc = roster_cmd.init(worktree)
+
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert not (worktree / ".brigade" / "roster.toml").exists()
+    assert str(parent_roster.resolve()) in err
+    assert "worktree-parent" in err
+    assert "--force" in err
+
+
+def test_roster_init_force_scaffolds_despite_user_roster(_hermetic_home, tmp_target):
+    user = _hermetic_home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text('orchestrator = "chef"\n[agents.chef]\ncli = "claude"\n')
+
+    assert roster_cmd.init(tmp_target, force=True) == 0
+    assert (tmp_target / ".brigade" / "roster.toml").is_file()
 
 
 def test_roster_doctor_missing_file_fails(monkeypatch, tmp_target, tmp_path, capsys):

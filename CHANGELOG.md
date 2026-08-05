@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Roster resolution now understands linked git worktrees: when a worktree has
+  no `.brigade/roster.toml` of its own, `brigade run` and `roster doctor` fall
+  back to the parent clone's roster (new `worktree-parent` source, reported in
+  the run provenance line) before the user roster at `~/.brigade/roster.toml`.
+  A fresh worktree of a wired repo keeps the repo's seats instead of silently
+  downgrading to whatever the user roster or a scaffold provides. (#741)
+- `brigade roster init` refuses to scaffold a starter roster when a fallback
+  roster already applies to the target (the parent clone's roster in a linked
+  worktree, or `~/.brigade/roster.toml`), since the codex+ollama-only starter
+  would shadow every seat configured there. Pass `--force` to scaffold a
+  workspace roster anyway. `brigade research` now resolves its roster through
+  the same fallback chain instead of requiring a workspace roster. (#741)
 - `brigade status --json` carries the same `available_update` field the work
   brief gained, so machine consumers can watch for releases without parsing the
   brief. Cache-read only; never touches the network. (#717)
