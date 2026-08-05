@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade status --json` carries the same `available_update` field the work
+  brief gained, so machine consumers can watch for releases without parsing the
+  brief. Cache-read only; never touches the network. (#717)
+- The publish workflow verifies https://check.brigade.tools/v1/version reports
+  the just-published release after the PyPI upload and fails loudly with
+  update-and-rerun instructions on drift, and `release doctor` warns when
+  pyproject declares a version with no matching git tag, catching
+  version-bump-without-release before it ships. (#719)
+- `docs/outcome-scoring.md` documents read-time re-scoring and the full failure
+  kind-to-verdict table. (#718)
 - `brigade runs audit` provides a read-only audit of recorded lifecycle evidence
   for coordinator decisions. (#649)
 - Verify-run retention now archives receipt evidence before pruning (#598).
@@ -88,6 +98,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work brief` reports an `update_available` line when the cached update check knows of a newer release, and the brief's JSON payload carries the same data under an `update` key (`null` when none). The read is cache-only, never touches the network, and honors `BRIGADE_NO_UPDATE_CHECK`. (#699)
 
 ### Changed
+- Outcome scoring counts model-quality failures against seats instead of
+  neutralizing them: `FailureDomain` gains `MODEL_OUTPUT` (empty-output,
+  malformed-final-output, tool-only-output, non-final-output), the blanket
+  FailureClass-to-infrastructure fallthrough becomes an explicit allowlist,
+  run-level and worker-level verdicts agree for the same kind, unknown kinds
+  fail closed to negative, and a suspected no-op run scores negative. Scores
+  recompute from stored receipts at read time, so rankings can shift after
+  upgrading; re-read them rather than comparing across the upgrade. (#718)
 - Newly journal-authoritative runs derive their `run.json` compatibility snapshots from validated lifecycle events and recovery checkpoints, with strict projector readiness and recovery gates. (#622)
 - Lifecycle journals are now authoritative for every new run; existing snapshot-only directories retain their prior behavior, and compatibility snapshots remain readable by the previous v1 reader contract. (#630)
 - The previous-v1-reader compatibility check now uses a versioned fixture derived from `v0.25.0`, covering authoritative, paused, and legacy run snapshots. (#640)
@@ -127,6 +145,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade handoff lint --content-guard` fails the lint with exit `1` on any warning-severity injection heuristic hit instead of passing with a printed warning, and reports split `content_guard_egress` and `content_guard_injection` verdicts in both text and JSON output. Info-only hits still pass. (#559)
 
 ### Fixed
+- The security scanner's secrets detectors no longer flag their own regex
+  literals (the old guard pointed at a file path retired by the package split),
+  runtime reads (`os.environ`, `os.getenv`, `secrets.*`, `*_from_env`),
+  attribute reads, or guard example fixtures, and one ranked finding is emitted
+  per line instead of duplicates. Committed credentials still report: quoted
+  literals are never exempted, dotted JWT-shaped values stay flagged, and
+  regression tests pin both directions. (#701)
+- The passive update check's background version refresh runs even when stderr
+  is piped, so agent-only installs populate the version cache and the work
+  brief's `update_available` line can actually fire; the printed notice stays
+  TTY-only. (#716)
+- A bare `brigade` invocation prints the start-here command block before the
+  usage error instead of a dead end. (#720)
 - `agent-notify init` now refuses a symlinked parent before it creates or publishes its config file, publishes by hard link so an existing path is never followed, and applies permissions and fsync through the open descriptor rather than by path, closing symlink and TOCTOU write races. (#643)
 - Dispatch outcome writes are now bound to configured targets and report a
   bounded error naming the resolved root. Missing Python interpreters suggest
