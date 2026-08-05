@@ -18,6 +18,7 @@ from ..budgets import HANDOFF_BACKLOG_STALE_SECONDS
 from ..config import load_config as load_brigade_config
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
+from .readability import ReadabilityFinding
 
 OK = "ok"
 
@@ -181,6 +182,7 @@ class HandoffLintResult:
     errors: tuple[str, ...]
     warnings: tuple[str, ...]
     hints: tuple[str, ...] = ()
+    readability: tuple[ReadabilityFinding, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -190,6 +192,7 @@ class HandoffLintResult:
             "errors": list(self.errors),
             "warnings": list(self.warnings),
             "hints": list(self.hints),
+            "readability": [finding.as_dict() for finding in self.readability],
         }
 
 

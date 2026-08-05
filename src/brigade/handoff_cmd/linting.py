@@ -20,8 +20,29 @@ from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
 from . import models as _family_base
+from .readability import ReadabilityFinding, scan_standalone_readability
 
 globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
+
+
+def _readability_kind(category: str) -> str:
+    return "relative date" if category == "relative-date" else "unresolved reference"
+
+
+def _readability_warning(finding: ReadabilityFinding) -> str:
+    kind = _readability_kind(finding.category)
+    return (
+        f"line {finding.line}: warning: [readability/{finding.category}] "
+        f'{finding.section}: {kind} ("{finding.match}"): {finding.suggestion}'
+    )
+
+
+def _readability_error(finding: ReadabilityFinding) -> str:
+    kind = _readability_kind(finding.category)
+    return (
+        f"line {finding.line}: [readability/{finding.category}] "
+        f'{finding.section}: {kind} ("{finding.match}"): {finding.suggestion}'
+    )
 
 
 def _injection_hit_dict(hit: Any) -> dict[str, Any]:
@@ -72,6 +93,7 @@ def lint(
     content_guard: bool = False,
     guard_policy: str = "personal",
     json_output: bool = False,
+    strict: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -125,9 +147,30 @@ def lint(
                 errors=result.errors,
                 warnings=result.warnings + injection_messages,
                 hints=result.hints,
+                readability=result.readability,
             )
         )
+    if strict:
+        strict_results: list[HandoffLintResult] = []
+        for result in enriched_results:
+            if not result.readability:
+                strict_results.append(result)
+                continue
+            promoted = tuple(_readability_error(finding) for finding in result.readability)
+            strict_results.append(
+                HandoffLintResult(
+                    path=result.path,
+                    action=result.action,
+                    valid=False,
+                    errors=result.errors + promoted,
+                    warnings=result.warnings,
+                    hints=result.hints,
+                    readability=result.readability,
+                )
+            )
+        enriched_results = strict_results
     results = tuple(enriched_results)
+    readability_flagged_count = sum(1 for result in results if result.readability)
     result_dicts = []
     for result in results:
         row = result.as_dict()
@@ -141,6 +184,8 @@ def lint(
         "count": len(results),
         "valid": all(result.valid for result in results) and guard_ok,
         "injection_flagged_count": len(injection_counts),
+        "readability_flagged_count": readability_flagged_count,
+        "strict": strict,
         "results": result_dicts,
         "content_guard": guard_results,
     }
@@ -169,6 +214,13 @@ def lint(
                 print(f"  {warning}")
             else:
                 print(f"  warning: {warning}")
+    if readability_flagged_count:
+        finding_count = sum(len(result.readability) for result in results)
+        suffix = "(--strict: failing)" if strict else "(--strict to fail)"
+        print(
+            f"readability: {finding_count} standalone-readability warning(s) "
+            f"in {readability_flagged_count} file(s) {suffix}"
+        )
     if content_guard:
         print(f"content_guard_policy: {guard_policy} (egress leak scan + injection heuristics)")
         for item in guard_results:
@@ -261,6 +313,9 @@ def lint_file(path: Path) -> HandoffLintResult:
     elif action == NO_CARD_ACTION:
         _lint_no_card_action(sections, errors)
 
+    readability = scan_standalone_readability(text)
+    warnings.extend(_readability_warning(finding) for finding in readability)
+
     return HandoffLintResult(
         path=path,
         action=action,
@@ -268,6 +323,7 @@ def lint_file(path: Path) -> HandoffLintResult:
         errors=tuple(errors),
         warnings=tuple(warnings),
         hints=tuple(hints),
+        readability=readability,
     )
 
 
