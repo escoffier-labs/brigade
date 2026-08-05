@@ -42,8 +42,11 @@ background process sends one HTTPS GET to
 `https://check.brigade.tools/v1/version`. The request has no query
 parameters, no body, and no install id. The User-Agent carries the brigade
 version and OS name. Raw IPs are never stored server-side (a weekly-salted
-hash backs an aggregate weekly-active count). The notice is skipped entirely
-when stderr is not a TTY, when `CI` is set, or when the command failed.
+hash backs an aggregate weekly-active count). The stderr notice is skipped
+when stderr is not a TTY, when `CI` is set, or when the command failed. The
+background cache refresh still runs when stderr is piped (agent harnesses) so
+`work brief` can surface available updates; it is skipped when `CI` is set or
+`BRIGADE_NO_UPDATE_CHECK` is set.
 
 Opt out completely (no notice, no network, ever):
 

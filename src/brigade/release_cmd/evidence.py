@@ -38,6 +38,7 @@ from ..localio import (
 )
 
 from . import paths as _family_base
+from .version_guard import version_tag_check
 
 globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
 
@@ -650,6 +651,7 @@ def _payload(target: Path, *, base_ref: str | None, run_checks: bool, policy: st
         checks.append(_run_content_guard_check(target, name="tip", policy=policy, base_ref=base_ref))
         if base_ref:
             checks.append(_run_content_guard_check(target, name="introduced", policy=policy, base_ref=base_ref))
+        checks.append(version_tag_check(target))
     elif not _content_guard_available(target):
         checks.append(
             {"name": "content_guard", "status": WARN, "detail": "content-guard not available", "available": False}

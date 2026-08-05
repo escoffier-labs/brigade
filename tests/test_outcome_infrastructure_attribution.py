@@ -12,6 +12,36 @@ from brigade import friction_cmd, localio, outcome, outcome_cmd, verify_trial, w
 
 from tests.test_outcome_cmd import _write_run_receipt, _write_verify_receipt
 
+# #708: only these FailureClass values may neutralize at run level; all others score negative.
+RUN_LEVEL_INFRASTRUCTURE_FAILURE_CLASS_ALLOWLIST = frozenset(
+    {
+        "configuration-invalid",
+        "executable-unavailable",
+        "auth-required",
+        "entitlement-denied",
+        "version-gate",
+        "model-unavailable",
+        "capacity-exhausted",
+        "network-unavailable",
+        "transport-unavailable",
+        "transport-hang",
+        "interactive-blocked",
+        "worker-crash",
+        "timeout",
+        "provider-rejected",
+    }
+)
+
+# #707: legacy adapter kinds that must map to model-output domain and score negative.
+MODEL_OUTPUT_LEGACY_KINDS = frozenset(
+    {
+        "empty-output",
+        "malformed-final-output",
+        "tool-only-output",
+        "non-final-output",
+    }
+)
+
 
 def _write_run_receipt_with_failure(
     target: Path,
@@ -86,6 +116,22 @@ def _write_worker_results(
     path = run_dir / "worker-results.json"
     localio.write_json(path, payload)
     return path
+
+
+def _legacy_model_output_worker(
+    *,
+    worker: str = "implementer",
+    failure_kind: str = "non-final-output",
+    failure_phase: str = "dispatch",
+) -> dict:
+    return {
+        "worker": worker,
+        "task": "fixture task",
+        "ok": False,
+        "detail": "model output contract violated",
+        "failure_kind": failure_kind,
+        "failure_phase": failure_phase,
+    }
 
 
 def _infra_worker(
@@ -268,6 +314,8 @@ def test_legacy_worker_result_maps_unknown_kind_at_read_time_without_mutation(tm
 
     assert failure is not None
     assert failure.failure_class.value == "unclassified"
+    # #712: unknown adapter kinds count against the seat at worker level (model-output domain).
+    assert failure.domain.value == "model-output"
     assert path.read_bytes() == original_bytes
 
 
@@ -389,7 +437,8 @@ def test_infra_run_ignores_unrelated_later_verify_receipt(tmp_path, capsys):
 def test_non_infrastructure_domain_is_not_neutralized(tmp_path, capsys):
     run_json = _write_run_receipt(tmp_path, run_id="product-failed", status="failed")
     worker = _infra_worker()
-    worker["failure"]["domain"] = "product"
+    # #707: model-output domain failures must not neutralize even when class is infrastructure-shaped.
+    worker["failure"]["domain"] = "model-output"
     worker["failure_kind"] = "timeout"
     worker["failure_phase"] = "dispatch"
     _write_worker_results(tmp_path, "product-failed", results=[worker])
@@ -572,6 +621,29 @@ def test_catch_all_with_missing_phase_stays_negative(tmp_path):
     assert payload["record"]["evidence_ref"] == str(run_json)
 
 
+@pytest.mark.parametrize("phase", [None, "dispatch", "artifact-collection"])
+def test_unexpected_error_one_verdict_regardless_of_phase(tmp_path, phase):
+    """#711: Brigade-internal unexpected-error must not flip verdict based on phase presence."""
+    run_id = f"unexpected-error-phase-{phase or 'none'}"
+    failure: dict = {"kind": "unexpected-error"}
+    if phase is not None:
+        failure["phase"] = phase
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        run_id,
+        status="failed",
+        failure=failure,
+    )
+    _write_worker_results(tmp_path, run_id, results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, run_id)
+
+    assert rc == 0
+    # #711: same neutral verdict as dispatch-phase receipts (cli/run.py failure_phase=None path).
+    assert payload["record"]["signal_value"] == 0
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
 def test_catch_all_with_unknown_phase_stays_negative(tmp_path):
     run_json = _write_run_receipt_with_failure(
         tmp_path,
@@ -584,7 +656,8 @@ def test_catch_all_with_unknown_phase_stays_negative(tmp_path):
     rc, payload = _capture_signal(tmp_path, "unexpected-unknown-phase")
 
     assert rc == 0
-    assert payload["record"]["signal_value"] == -1
+    # #711: unexpected-error is infrastructure-neutral regardless of phase (was -1 via fail-closed).
+    assert payload["record"]["signal_value"] == 0
     assert payload["record"]["evidence_ref"] == str(run_json)
 
 
@@ -673,13 +746,20 @@ def test_catch_all_in_every_declared_model_phase_stays_negative(tmp_path, phase)
 
 @pytest.mark.parametrize("failure_class", list(worker_failure.FailureClass))
 def test_failure_class_kind_is_infrastructure_at_read_time(failure_class):
-    """Typed abort receipts write FailureClass values; all are infrastructure-neutral."""
+    """Typed abort receipts write FailureClass values; only #708 allowlist classes neutralize."""
 
-    assert worker_failure.run_failure_is_infrastructure_at_read_time(failure_class.value, "preflight") is True
+    if failure_class.value in RUN_LEVEL_INFRASTRUCTURE_FAILURE_CLASS_ALLOWLIST:
+        # #708: explicit infrastructure allowlist still neutralizes at run level.
+        expected = True
+    else:
+        # #708: output-contract-violation, unclassified, isolation-breach, and others score negative.
+        expected = False
+    assert worker_failure.run_failure_is_infrastructure_at_read_time(failure_class.value, "preflight") is expected
 
 
 def test_isolation_breach_failure_class_is_infrastructure_at_read_time():
-    assert worker_failure.run_failure_is_infrastructure_at_read_time("isolation-breach", "postflight") is True
+    # #708: isolation-breach is not on the infrastructure allowlist; must not neutralize.
+    assert worker_failure.run_failure_is_infrastructure_at_read_time("isolation-breach", "postflight") is False
 
 
 def test_model_contract_kind_wins_over_legacy_failure_class_map():
@@ -698,7 +778,8 @@ def test_catch_all_classifier_missing_phase_fails_closed():
 
 
 def test_catch_all_classifier_unknown_phase_fails_closed():
-    assert worker_failure.run_failure_is_infrastructure_at_read_time("unexpected-error", "artifact-collection") is False
+    # #711: unexpected-error is infrastructure-neutral even when phase is outside both phase sets.
+    assert worker_failure.run_failure_is_infrastructure_at_read_time("unexpected-error", "artifact-collection") is True
 
 
 def test_slice_b_typed_failure_class_run_receipt_is_neutral(tmp_path):
@@ -717,3 +798,295 @@ def test_slice_b_typed_failure_class_run_receipt_is_neutral(tmp_path):
     assert rc == 0
     assert payload["record"]["signal_value"] == 0
     assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+@pytest.mark.parametrize("failure_kind", sorted(MODEL_OUTPUT_LEGACY_KINDS))
+def test_model_output_legacy_kinds_use_model_output_domain(failure_kind):
+    """#707: output-contract adapter kinds map to model-output domain at worker read time."""
+
+    failure = worker_failure.normalized_failure(
+        failure_phase="dispatch",
+        failure_kind=failure_kind,
+        detail="contract violated",
+    )
+
+    assert failure is not None
+    assert failure.failure_class == worker_failure.FailureClass.OUTPUT_CONTRACT_VIOLATION
+    assert failure.domain.value == "model-output"
+
+
+@pytest.mark.parametrize("failure_kind", sorted(MODEL_OUTPUT_LEGACY_KINDS))
+def test_model_output_legacy_kinds_score_negative_via_worker_results(tmp_path, failure_kind):
+    """#707: model-quality output failures count against the seat via worker-results path."""
+
+    run_id = f"model-output-{failure_kind}"
+    run_json = _write_run_receipt(
+        tmp_path,
+        run_id=run_id,
+        status="failed",
+    )
+    _write_worker_results(
+        tmp_path,
+        run_id,
+        results=[_legacy_model_output_worker(failure_kind=failure_kind)],
+    )
+
+    rc, payload = _capture_signal(tmp_path, run_id)
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_non_final_output_run_and_worker_paths_agree_negative(tmp_path):
+    """#709: non-final-output scores negative on both run-receipt and worker-results paths."""
+
+    run_id = "non-final-output-both-paths"
+    # Run-level receipt carries non-final-output directly (run path).
+    run_json_run_level = _write_run_receipt_with_failure(
+        tmp_path,
+        f"{run_id}-run-receipt",
+        status="failed",
+        failure={"kind": "non-final-output", "phase": "run-isolation"},
+    )
+    _write_worker_results(tmp_path, f"{run_id}-run-receipt", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, f"{run_id}-run-receipt")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json_run_level)
+
+    # Worker-results path: defer via worker-failure so capture consults failed workers.
+    run_json_worker_level = _write_run_receipt_with_failure(
+        tmp_path,
+        f"{run_id}-worker-results",
+        status="failed",
+        failure_kind="worker-failure",
+    )
+    _write_worker_results(
+        tmp_path,
+        f"{run_id}-worker-results",
+        results=[_legacy_model_output_worker(failure_kind="non-final-output")],
+    )
+
+    rc, payload = _capture_signal(tmp_path, f"{run_id}-worker-results")
+
+    assert rc == 0
+    # #709: worker-results path must match the run-receipt path.
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json_worker_level)
+
+
+@pytest.mark.parametrize("phase", [None, "dispatch", "artifact-collection"])
+def test_unexpected_error_classifier_one_verdict_regardless_of_phase(phase):
+    """#711: classify_run_failure_kind must not flip unexpected-error on phase presence."""
+
+    assert worker_failure.run_failure_is_infrastructure_at_read_time("unexpected-error", phase) is True
+
+
+def test_unknown_run_failure_kind_is_not_infrastructure_at_read_time():
+    """#712: unrecognized run-level kinds count against the seat (same direction as worker level)."""
+
+    assert worker_failure.run_failure_is_infrastructure_at_read_time("future-run-kind", "dispatch") is False
+
+
+def test_unknown_run_failure_kind_capture_scores_negative(tmp_path):
+    """#712: unknown run-level failure kinds must score negative at capture time."""
+
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "unknown-run-kind",
+        status="failed",
+        failure={"kind": "future-run-kind", "phase": "dispatch"},
+    )
+    _write_worker_results(tmp_path, "unknown-run-kind", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "unknown-run-kind")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_unknown_worker_kind_capture_scores_negative(tmp_path):
+    """#712: unknown worker adapter kinds must score negative (aligned with run-level default)."""
+
+    run_json = _write_run_receipt(tmp_path, run_id="unknown-worker-kind", status="failed")
+    _write_worker_results(
+        tmp_path,
+        "unknown-worker-kind",
+        results=[
+            {
+                "worker": "implementer",
+                "ok": False,
+                "detail": "mystery adapter failure",
+                "failure_phase": "dispatch",
+                "failure_kind": "future-adapter-code",
+            }
+        ],
+    )
+
+    rc, payload = _capture_signal(tmp_path, "unknown-worker-kind")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_output_contract_violation_run_receipt_scores_negative(tmp_path):
+    """#708: output-contract-violation is not on the infrastructure allowlist."""
+
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "ocv-run-receipt",
+        status="failed",
+        failure={"kind": "output-contract-violation", "phase": "validation"},
+    )
+    _write_worker_results(tmp_path, "ocv-run-receipt", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "ocv-run-receipt")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_suspected_noop_run_worker_kind_scores_negative(tmp_path):
+    """#703: suspected no-op seats must score negative in the model-quality domain."""
+
+    run_json = _write_run_receipt(
+        tmp_path,
+        run_id="suspected-noop-run",
+        status="failed",
+    )
+    _write_worker_results(
+        tmp_path,
+        "suspected-noop-run",
+        results=[
+            {
+                "worker": "implementer",
+                "task": "fixture task",
+                "ok": False,
+                "detail": "ok worker produced no non-.brigade file changes",
+                "failure_kind": "suspected-noop-run",
+                "failure_phase": "dispatch",
+            }
+        ],
+    )
+
+    failure = outcome_cmd.worker_result_failure(
+        {
+            "worker": "implementer",
+            "ok": False,
+            "detail": "ok worker produced no non-.brigade file changes",
+            "failure_kind": "suspected-noop-run",
+            "failure_phase": "dispatch",
+        }
+    )
+    assert failure is not None
+    assert failure.failure_class == worker_failure.FailureClass.OUTPUT_CONTRACT_VIOLATION
+    # #703 depends on #707 model-output domain for negative capture scoring.
+    assert failure.domain.value == "model-output"
+
+    rc, payload = _capture_signal(tmp_path, "suspected-noop-run")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def test_timeout_failure_class_on_allowlist_still_neutralizes(tmp_path):
+    """#708: allowlisted infrastructure classes (timeout) still neutralize at capture time."""
+
+    run_json = _write_run_receipt_with_failure(
+        tmp_path,
+        "timeout-allowlist",
+        status="failed",
+        failure={"kind": "timeout", "phase": "dispatch"},
+    )
+    _write_worker_results(tmp_path, "timeout-allowlist", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "timeout-allowlist")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == 0
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+@pytest.mark.parametrize("failure_kind", ["auth-status-unavailable", "auth-status-unrecognized"])
+def test_deliberately_unclassified_probe_kinds_stay_infrastructure(tmp_path, failure_kind):
+    """#712 boundary: kinds mapped to unclassified on purpose are probe failures, not seat output.
+
+    Only kinds absent from LEGACY_FAILURE_KIND_MAP count against the seat.
+    """
+
+    failure = outcome_cmd.worker_result_failure(
+        {
+            "worker": "implementer",
+            "ok": False,
+            "detail": "auth status probe did not report",
+            "failure_kind": failure_kind,
+            "failure_phase": "preflight",
+        }
+    )
+    assert failure is not None
+    assert failure.failure_class == worker_failure.FailureClass.UNCLASSIFIED
+    assert failure.domain.value == "infrastructure"
+
+    run_json = _write_run_receipt(tmp_path, run_id=f"probe-{failure_kind}", status="failed")
+    _write_worker_results(
+        tmp_path,
+        f"probe-{failure_kind}",
+        results=[
+            {
+                "worker": "implementer",
+                "task": "fixture task",
+                "ok": False,
+                "detail": "auth status probe did not report",
+                "failure_kind": failure_kind,
+                "failure_phase": "preflight",
+            }
+        ],
+    )
+
+    rc, payload = _capture_signal(tmp_path, f"probe-{failure_kind}")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == 0
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+def _write_noop_run_receipt(target: Path, run_id: str, *, status: str = "ok", **flags) -> Path:
+    run_json = _write_run_receipt(target, run_id=run_id, status=status, **flags)
+    receipt = localio.read_json_dict(run_json) or {}
+    receipt["suspected_noop"] = True
+    localio.write_json(run_json, receipt)
+    return run_json
+
+
+def test_suspected_noop_ok_run_receipt_scores_negative(tmp_path):
+    """#703: an ok run whose seats shipped no deliverable scores against the seat, not +1."""
+
+    run_json = _write_noop_run_receipt(tmp_path, "noop-ok-run")
+    _write_worker_results(tmp_path, "noop-ok-run", results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, "noop-ok-run")
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
+@pytest.mark.parametrize("flags", [{"dry_run": True}, {"read_only": True}])
+def test_suspected_noop_dry_and_read_only_runs_stay_neutral(tmp_path, flags):
+    """#703: runs that are expected to change nothing keep their existing neutral verdict."""
+
+    run_id = "noop-" + "-".join(sorted(flags))
+    _write_noop_run_receipt(tmp_path, run_id, **flags)
+    _write_worker_results(tmp_path, run_id, results=[_ok_worker()])
+
+    rc, payload = _capture_signal(tmp_path, run_id)
+
+    assert rc == 0
+    assert payload["record"]["signal_value"] == 0

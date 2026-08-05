@@ -54,7 +54,8 @@ def test_worker_payload_serializes_required_attempt_fields_with_null_exit_code()
         "failure": {
             "schema": "brigade.worker_failure.v1",
             "class": "output-contract-violation",
-            "domain": "infrastructure",
+            # #707: malformed-final-output is model output, so it no longer neutralizes.
+            "domain": "model-output",
             "phase": "validation",
             "retry": "never",
             "detected_by": "legacy-failure-kind",

@@ -41,7 +41,7 @@ def test_is_newer_table():
     assert not update_notify.is_newer("0.26.0", "garbage")
 
 
-def test_gates_skip_everything(tmp_path):
+def test_optout_and_ci_skip_notice_and_refresh(tmp_path):
     err = _Tty()
     calls: list[str] = []
 
@@ -52,13 +52,50 @@ def test_gates_skip_everything(tmp_path):
 
     update_notify.maybe_notify(["work"], 0, **{**base, "env": _env(tmp_path, BRIGADE_NO_UPDATE_CHECK="1")})
     update_notify.maybe_notify(["work"], 0, **{**base, "env": _env(tmp_path, CI="true")})
-    update_notify.maybe_notify(["work"], 1, **base)
     update_notify.maybe_notify(["update"], 0, **base)
     update_notify.maybe_notify(["completions"], 0, **base)
-    update_notify.maybe_notify(["work"], 0, **{**base, "stderr": io.StringIO()})  # not a tty
 
     assert calls == []
     assert err.getvalue() == ""
+
+
+def test_nonzero_exit_skips_notice_but_still_spawns_refresh(tmp_path):
+    _write_state(tmp_path, checked_at=0.0, latest="99.0.0")
+    err = _Tty()
+    calls: list[str] = []
+
+    def spawn() -> None:
+        calls.append("spawned")
+
+    update_notify.maybe_notify(["work"], 1, env=_env(tmp_path), now=1_000_000.0, stderr=err, spawn=spawn)
+    assert err.getvalue() == ""
+    assert calls == ["spawned"]
+
+
+def test_piped_stderr_spawns_refresh_without_notice(tmp_path):
+    _write_state(tmp_path, checked_at=0.0, latest="99.0.0")
+    err = io.StringIO()  # not a tty
+    calls: list[str] = []
+
+    def spawn() -> None:
+        calls.append("spawned")
+
+    update_notify.maybe_notify(["work"], 0, env=_env(tmp_path), now=1_000_000.0, stderr=err, spawn=spawn)
+    assert err.getvalue() == ""
+    assert calls == ["spawned"]
+
+
+def test_piped_stderr_exit_zero_spawns_refresh(tmp_path):
+    calls: list[str] = []
+    update_notify.maybe_notify(
+        ["work"],
+        0,
+        env=_env(tmp_path),
+        now=1.0,
+        stderr=io.StringIO(),
+        spawn=lambda: calls.append("spawned"),
+    )
+    assert calls == ["spawned"]
 
 
 def test_notifies_from_cache_and_throttles(tmp_path):

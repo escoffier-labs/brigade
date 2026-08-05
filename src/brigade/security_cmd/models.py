@@ -193,6 +193,92 @@ PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 
 ENV_ASSIGNMENT_RE = re.compile(r"(?i)\b[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|API_KEY)\s*=\s*[A-Za-z0-9_./+=:-]{16,}")
 
+RUNTIME_SECRET_VALUE_RE = re.compile(r"(?i)^(?:secrets\.\w+|os\.environ|os\.getenv|[\w.]*_from_env)\b")
+ATTRIBUTE_SECRET_VALUE_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
+SECRETS_TITLE_RANK = {
+    "Session chat contains exposed credential": 40,
+    "Plaintext password": 30,
+    "Possible hardcoded credential": 20,
+    "Possible sensitive secret material": 10,
+}
+
+
+def _is_runtime_secret_value(value: str) -> bool:
+    """True when the assigned value is generated or read at runtime instead of committed.
+
+    Quotes are deliberately not stripped here. A quoted value is a committed literal even
+    when its text opens with a runtime expression, so ``api_key = "os.environ.sk-live-..."``
+    must stay reportable. Callers that can still see the source line decide whether the
+    value was quoted; see :func:`_match_value_is_quoted`.
+    """
+    return RUNTIME_SECRET_VALUE_RE.match(value.strip()) is not None
+
+
+def _match_value_is_quoted(line: str, match: re.Match[str]) -> bool:
+    """True when the captured secret value was wrapped in quotes on the source line.
+
+    ``SECRET_VALUE_RE`` and ``PLAINTEXT_PASSWORD_RE`` both put the optional quote *outside*
+    their value group, so the quote never reaches the captured text and has to be read back
+    off the line.
+    """
+    start = match.start(2)
+    return start > 0 and line[start - 1] in "'\""
+
+
+def _is_attribute_secret_value(value: str) -> bool:
+    """True when the assigned value is another object's attribute rather than a literal.
+
+    A committed JWT is also dot-separated and can be purely alphanumeric, so
+    JWT-shaped values (base64url header always starts with ``eyJ``, segments far
+    longer than identifier hops) must still report.
+    """
+    candidate = value.strip()
+    if ATTRIBUTE_SECRET_VALUE_RE.match(candidate) is None:
+        return False
+    if candidate.startswith("eyJ"):
+        return False
+    return all(len(part) <= 32 for part in candidate.split("."))
+
+
+def _env_assignment_value(match: re.Match[str]) -> str:
+    _, _, value = match.group(0).partition("=")
+    return value.strip()
+
+
+def _secrets_title_rank(title: str) -> int:
+    return SECRETS_TITLE_RANK.get(title, 0)
+
+
+def _is_security_scanner_literal(path: Path, line: str, target: Path) -> bool:
+    try:
+        rel = path.relative_to(target).as_posix()
+    except ValueError:
+        rel = path.as_posix()
+    if not (rel.startswith("src/brigade/security_cmd/") and rel.endswith(".py")):
+        return False
+    stripped = line.strip()
+    scanner_tokens = (
+        "danger-full-access",
+        "sandbox_permissions",
+        "require_escalated",
+        "npx package",
+        "PLAINTEXT_PASSWORD_RE",
+        "Environment dump or exfiltration pattern",
+        "Plaintext password",
+        "Possible hardcoded credential",
+        "Possible sensitive secret material",
+        "Session chat contains exposed credential",
+    )
+    if any(token in stripped for token in scanner_tokens):
+        return True
+    if stripped.startswith("suggestion=") or stripped.startswith("title="):
+        return True
+    if stripped.startswith(("password_match =", "password_emitted =")):
+        return True
+    return stripped.startswith("if ") and (
+        '"danger-full-access"' in stripped or '"sandbox_permissions"' in stripped or '"require_escalated"' in stripped
+    )
+
 
 REMOTE_SHELL_RE = re.compile(r"\b(curl|wget)\b[^\n|;]*(\||;)\s*(sh|bash)\b")
 

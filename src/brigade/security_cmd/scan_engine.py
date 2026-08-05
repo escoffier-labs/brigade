@@ -1297,31 +1297,29 @@ def _finding(
     )
 
 
-def _is_security_scanner_literal(path: Path, line: str) -> bool:
-    if not path.as_posix().endswith("src/brigade/security_cmd.py"):
-        return False
-    stripped = line.strip()
-    scanner_tokens = (
-        "danger-full-access",
-        "sandbox_permissions",
-        "require_escalated",
-        "npx package",
-        "PLAINTEXT_PASSWORD_RE",
-        "Environment dump or exfiltration pattern",
-        "Plaintext password",
-        "Possible hardcoded credential",
-        "Possible sensitive secret material",
-        "Session chat contains exposed credential",
-    )
-    if any(token in stripped for token in scanner_tokens):
-        return True
-    if stripped.startswith("suggestion=") or stripped.startswith("title="):
-        return True
-    if stripped.startswith(("password_match =", "password_emitted =")):
-        return True
-    return stripped.startswith("if ") and (
-        '"danger-full-access"' in stripped or '"sandbox_permissions"' in stripped or '"require_escalated"' in stripped
-    )
+def _first_committed_secret_match(pattern: re.Pattern[str], line: str) -> re.Match[str] | None:
+    """First match on the line whose value is a committed literal, not a placeholder or runtime read.
+
+    Scoped to the matched value so a line that mixes a real credential with a
+    ``secrets.token_hex()`` call or an environment read still reports the credential.
+    """
+    for match in pattern.finditer(line):
+        value = match.group(2)
+        if _is_placeholder(value):
+            continue
+        if not _match_value_is_quoted(line, match) and _is_runtime_secret_value(value):
+            continue
+        return match
+    return None
+
+
+def _first_committed_env_assignment(line: str) -> re.Match[str] | None:
+    for match in ENV_ASSIGNMENT_RE.finditer(line):
+        value = _env_assignment_value(match)
+        if _is_runtime_secret_value(value) or _is_attribute_secret_value(value):
+            continue
+        return match
+    return None
 
 
 def _scan_line(
@@ -1334,48 +1332,52 @@ def _scan_line(
     classification: FileClassification | None = None,
 ) -> None:
     file_classification = classification or _classification_for(path, target)
-    if _is_security_scanner_literal(path, line):
+    if _is_security_scanner_literal(path, line, target):
         return
-    secret_match = SECRET_VALUE_RE.search(line)
-    password_match = PLAINTEXT_PASSWORD_RE.search(line)
-    password_emitted = bool(password_match and not _is_placeholder(password_match.group(2)))
-    if password_emitted:
-        _finding(
-            findings,
-            target=target,
-            path=path,
-            line=line_number,
-            severity="high",
-            category="secrets",
-            title="Plaintext password",
-            evidence=_redact_secret_evidence(line),
-            suggestion="Move the password into local secret storage or a gitignored environment file, then scrub the raw value from shared files.",
-            classification=file_classification,
-            response_options=_secret_response_options(path, target),
-        )
-    if secret_match and not password_emitted and not _is_placeholder(secret_match.group(2)):
+    best_secret: tuple[str, str] | None = None
+
+    def consider_secret(title: str, suggestion: str) -> None:
+        nonlocal best_secret
+        if best_secret is None or _secrets_title_rank(title) > _secrets_title_rank(best_secret[0]):
+            best_secret = (title, suggestion)
+
+    try:
+        rel_path = path.relative_to(target).as_posix()
+    except ValueError:
+        rel_path = path.as_posix()
+    if not rel_path.startswith("src/brigade/guard/examples/"):
+        secret_match = _first_committed_secret_match(SECRET_VALUE_RE, line)
+        password_match = _first_committed_secret_match(PLAINTEXT_PASSWORD_RE, line)
+        password_emitted = password_match is not None
         session_chat = _is_session_chat_path(path, target)
-        _finding(
-            findings,
-            target=target,
-            path=path,
-            line=line_number,
-            severity="high",
-            category="secrets",
-            title="Session chat contains exposed credential" if session_chat else "Possible hardcoded credential",
-            evidence=_redact_secret_evidence(line),
-            suggestion=(
-                "Redact or archive the session transcript, rotate the credential if real, and move active use to .env, environment variables, or KeePass."
-                if session_chat
-                else "Move the value into local environment or secret storage and commit only a placeholder."
-            ),
-            response_options=_secret_response_options(path, target),
-            classification=file_classification,
+        session_suggestion = (
+            "Redact or archive the session transcript, rotate the credential if real, "
+            "and move active use to .env, environment variables, or KeePass."
         )
-    if _contains_private_key_material(line) or (
-        ENV_ASSIGNMENT_RE.search(line) and not password_emitted and not _is_placeholder(line)
-    ):
-        session_chat = _is_session_chat_path(path, target)
+        if password_emitted:
+            consider_secret(
+                "Plaintext password",
+                "Move the password into local secret storage or a gitignored environment file, "
+                "then scrub the raw value from shared files.",
+            )
+        if secret_match and not password_emitted:
+            consider_secret(
+                "Session chat contains exposed credential" if session_chat else "Possible hardcoded credential",
+                session_suggestion
+                if session_chat
+                else "Move the value into local environment or secret storage and commit only a placeholder.",
+            )
+        if _contains_private_key_material(line) or (
+            _first_committed_env_assignment(line) is not None and not password_emitted and not _is_placeholder(line)
+        ):
+            consider_secret(
+                "Session chat contains exposed credential" if session_chat else "Possible sensitive secret material",
+                session_suggestion
+                if session_chat
+                else "Remove secret material from the repo and rotate the credential if it was real.",
+            )
+    if best_secret is not None:
+        title, suggestion = best_secret
         _finding(
             findings,
             target=target,
@@ -1383,15 +1385,11 @@ def _scan_line(
             line=line_number,
             severity="high",
             category="secrets",
-            title="Session chat contains exposed credential" if session_chat else "Possible sensitive secret material",
+            title=title,
             evidence=_redact_secret_evidence(line),
-            suggestion=(
-                "Redact or archive the session transcript, rotate the credential if real, and move active use to .env, environment variables, or KeePass."
-                if session_chat
-                else "Remove secret material from the repo and rotate the credential if it was real."
-            ),
-            response_options=_secret_response_options(path, target),
+            suggestion=suggestion,
             classification=file_classification,
+            response_options=_secret_response_options(path, target),
         )
     if "danger-full-access" in line or "sandbox_permissions" in line and "require_escalated" in line:
         _finding(

@@ -38,6 +38,13 @@ def test_signal_value_treats_weak_or_unknown_signals_as_neutral():
     assert outcome.signal_value("mystery", "whatever") == 0
 
 
+def test_run_capture_signal_value_distinguishes_infrastructure_from_model_quality():
+    """#707: only infrastructure-only failures neutralize; model-quality failures score negative."""
+
+    assert outcome.run_capture_signal_value("failed", infrastructure_only=False, verifier_failed=False) == -1
+    assert outcome.run_capture_signal_value("failed", infrastructure_only=True, verifier_failed=False) == 0
+
+
 def test_score_records_folds_counts_wilson_and_last_signal():
     records = [
         outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref1", "2026-06-20T00:00:00+00:00"),

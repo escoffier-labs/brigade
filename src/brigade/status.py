@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from . import doctor as _doctor
+from . import update_notify
 from .registry import all_stations
 
 
@@ -121,11 +122,21 @@ def run(target: Path, *, json_output: bool = False) -> int:
             }
         )
 
+    update = update_notify.available_update()
+
     if json_output:
-        print(json.dumps({"target": str(ctx.target), "stations": rows}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {"target": str(ctx.target), "stations": rows, "update": update},
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
 
     print(f"brigade status: {ctx.target}")
+    if isinstance(update, dict):
+        print(f'update_available: {update.get("latest")} (installed {update.get("installed")}); run "brigade update"')
     width = max((len(s.name) for s in all_stations()), default=8)
     for row in rows:
         print(
