@@ -84,6 +84,36 @@ def test_all_events_are_inert_for_unwired_repo(tmp_path: Path, monkeypatch):
     assert runtime.handle_payload("Stop", _payload(tmp_path, "Stop", stop_hook_active=False)) is None
 
 
+def test_session_start_hints_init_for_unwired_git_repo(tmp_path: Path):
+    repo = tmp_path / "fresh-repo"
+    (repo / ".git").mkdir(parents=True)
+    result = runtime.handle_payload("SessionStart", _payload(repo, "SessionStart"))
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert f"brigade init --target {repo.resolve()}" in context
+    assert "--harnesses claude" in context
+    assert "brigade work brief" in context
+
+
+def test_session_start_stays_silent_for_home_directory(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".git").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home.resolve()))
+    assert runtime.handle_payload("SessionStart", _payload(home, "SessionStart")) is None
+
+
+def test_other_events_stay_silent_for_unwired_git_repo(tmp_path: Path):
+    repo = tmp_path / "fresh-repo-2"
+    (repo / ".git").mkdir(parents=True)
+    assert (
+        runtime.handle_payload(
+            "PreToolUse",
+            _payload(repo, "PreToolUse", tool_name="Bash", tool_input={"command": "pytest"}),
+        )
+        is None
+    )
+    assert runtime.handle_payload("Stop", _payload(repo, "Stop", stop_hook_active=False)) is None
+
+
 def test_pretooluse_denies_raw_verification_with_exact_replacement(tmp_path: Path):
     target = _wired_claude(tmp_path)
     result = runtime.handle_payload(

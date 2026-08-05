@@ -1822,9 +1822,37 @@ def _additional_context(event: str, text: str) -> dict[str, Any]:
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
 
 
+def _unwired_init_hint(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Suggest wiring an unwired git repo at session start.
+
+    The user-scope hooks promise one-and-done onboarding: an agent entering an
+    unwired repo must be told the exact init command instead of silence. Only
+    SessionStart hints, only for a real git checkout, and never for the user's
+    home directory itself.
+    """
+    raw_cwd = payload.get("cwd")
+    if not isinstance(raw_cwd, str) or not raw_cwd:
+        return None
+    try:
+        cwd = Path(raw_cwd).expanduser().resolve(strict=False)
+    except OSError:
+        return None
+    if cwd == Path.home() or not (cwd / ".git").exists():
+        return None
+    command = f"brigade init --target {cwd} --depth repo --harnesses claude --owner claude --git-exclude"
+    return _additional_context(
+        "SessionStart",
+        "This git repository is not Brigade-wired. Configure it before real work so "
+        f"verification and memory are captured: {command}\n"
+        "Then start with: brigade work brief --target .",
+    )
+
+
 def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     target = wired_target_from_payload(payload)
     if target is None:
+        if event == "SessionStart":
+            return _unwired_init_hint(payload)
         return None
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
