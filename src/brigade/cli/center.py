@@ -223,6 +223,17 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
     )
     p_center_actions_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_serve = center_sub.add_parser("serve", help="Serve the local operator dashboard.")
+    p_center_serve.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_serve.add_argument("--host", default="127.0.0.1", help="Bind host.")
+    p_center_serve.add_argument("--port", type=int, default=8765, help="Bind port.")
+    p_center_serve.add_argument("--token", default=None, help="Bearer token required for access.")
+    p_center_serve.add_argument(
+        "--allowed-host",
+        action="append",
+        default=None,
+        help="Allowed Host header value. May be repeated.",
+    )
     p_center.set_defaults(func=dispatch)
 
 
@@ -322,5 +333,13 @@ def dispatch(args) -> int:
             return center_cmd.actions_archive_completed(target=args.target, json_output=args.json)
         args._brigade_parser.error(f"unknown center actions command: {args.center_actions_command}")
         return 2
+    if args.center_command == "serve":
+        return center_cmd.serve(
+            target=args.target,
+            host=args.host,
+            port=args.port,
+            token=args.token,
+            allowed_hosts=args.allowed_host,
+        )
     args._brigade_parser.error(f"unknown center command: {args.center_command}")
     return 2
