@@ -60,13 +60,13 @@ def dispatch(args) -> int:
         from ...claude_hooks import install_cmd
 
         if args.hooks_command == "install":
-            return install_cmd.hooks_install(target=args.target)
+            return install_cmd.hooks_install(target=args.target, scope=args.scope)
         if args.hooks_command == "update":
-            return install_cmd.hooks_update(target=args.target)
+            return install_cmd.hooks_update(target=args.target, scope=args.scope)
         if args.hooks_command == "status":
-            return install_cmd.hooks_status(target=args.target, json_output=args.json)
+            return install_cmd.hooks_status(target=args.target, scope=args.scope, json_output=args.json)
         if args.hooks_command == "uninstall":
-            return install_cmd.hooks_uninstall(target=args.target)
+            return install_cmd.hooks_uninstall(target=args.target, scope=args.scope)
         args._brigade_parser.error(f"unknown hooks command: {args.hooks_command}")
         return 2
     if args.work_command == "hook-run":
