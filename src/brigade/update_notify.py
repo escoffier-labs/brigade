@@ -162,8 +162,7 @@ def maybe_notify(
         if not _refresh_gated(command_argv, environment):
             checked_at = state.get("checked_at")
             stale = (
-                not isinstance(checked_at, (int, float))
-                or current_time - float(checked_at) >= CHECK_INTERVAL_SECONDS
+                not isinstance(checked_at, (int, float)) or current_time - float(checked_at) >= CHECK_INTERVAL_SECONDS
             )
             if stale:
                 spawn_refresh()
