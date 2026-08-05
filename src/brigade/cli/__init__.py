@@ -219,6 +219,8 @@ def main(argv=None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parse_argv, engine_args = _peel_passthrough_engine_args(raw_argv)
     parser = _build_parser()
+    if not parse_argv:
+        print(_START_HERE, file=sys.stderr)
     args = parser.parse_args(parse_argv)
     if engine_args is not None:
         args.engine_args = engine_args

@@ -30,6 +30,17 @@ def test_top_level_help_lists_all_commands_and_group_titles():
         assert name in help_text
 
 
+def test_bare_invocation_prints_start_here_then_usage_error(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main([])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert "Start here:" in combined
+    assert "operator quickstart" in combined
+    assert "the following arguments are required" in combined
+
+
 def test_top_level_help_has_start_here_block():
     parser = cli._build_parser()
     help_text = parser.format_help()
