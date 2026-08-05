@@ -64,11 +64,25 @@ The agent installs, runs `brigade setup`, wires harnesses, and leaves files on d
 **If you prefer a shell** (same commands the agent would run):
 
 ```bash
-pipx install brigade-cli
+pipx install brigade-cli  # or: uv tool install brigade-cli
 pipx ensurepath           # then open a new shell so `brigade` is on PATH
 brigade setup             # install the verified native engines
 brigade operator quickstart --target ./my-repo --harnesses codex
 ```
+
+**One and done (Claude Code).** Instead of wiring repos one at a time, install
+the work-loop hooks once at user scope:
+
+```bash
+brigade work hooks install --scope user
+```
+
+From then on, every repo the agent opens gets the work brief injected at
+session start, and an unwired repo gets the exact `brigade init` command
+printed for the agent to run - so agents wire new repos themselves and the
+verified-work loop closes everywhere without another human command. Remove it
+any time with `brigade work hooks uninstall --scope user`; only Brigade-owned
+hook entries are touched.
 
 Brigade prints a one-line notice when a new release is out. It checks at most
 once a day through an anonymous request. Set `BRIGADE_NO_UPDATE_CHECK=1` to
@@ -79,7 +93,7 @@ Stable pinners may deliberately install an exact release with
 `brigade update --channel stable`. Channel ownership, beta rules, and when to
 use `brigade update` are in [docs/update-channels.md](docs/update-channels.md).
 
-`brigade operator doctor --target ./my-repo` prints `ready: yes` when the wiring is healthy. The default footprint is small: `AGENTS.md`, `SAFETY_RULES.md`, a handoff template, and `.brigade/` state. Add `--dry-run` to preview anything before it writes. Nothing leaves your machine.
+`brigade operator doctor --target ./my-repo --profile local-operator` prints `ready: yes` when the wiring is healthy (without the profile flag, doctor runs the stricter internal-dogfood checks and a fresh repo reports not ready). The default footprint is small: `AGENTS.md`, `SAFETY_RULES.md`, a handoff template, and `.brigade/` state. Add `--dry-run` to preview anything before it writes. Nothing leaves your machine.
 
 Per-OS setup (apt, Homebrew, Scoop, PowerShell), workspace depth, and multi-harness installs: [install guide](https://brigade.tools/docs/getting-started/install), [QUICKSTART.md](QUICKSTART.md), [first 10 minutes](docs/first-10-minutes.md). Homegrown setup already? `brigade operator adopt plan`.
 

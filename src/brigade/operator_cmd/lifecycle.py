@@ -646,6 +646,10 @@ def _quickstart_next_commands(harnesses: list[str], *, dry_run: bool) -> list[st
         for harness in harnesses
         if harness in WRITER_INBOXES
     )
+    if "claude" in harnesses:
+        commands.append(
+            "brigade work hooks install --scope user  # once per machine: every repo the agent opens self-wires"
+        )
     return commands
 
 
