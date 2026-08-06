@@ -41,6 +41,7 @@ def test_current_release_has_expected_v0260_release_notes():
     ):
         assert expected in text
 
+
 def test_repo_memory_handoff_template_matches_agents_guidance():
     path = ROOT / ".claude" / "memory-handoffs" / "TEMPLATE.md"
 
