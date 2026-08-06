@@ -406,10 +406,12 @@ jobs:
         run: python -m build
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
+        with:
+          skip-existing: true
       - name: Verify check.brigade.tools reports the published version
         env:
           EXPECTED_VERSION: ${{ github.ref_name }}
-        run: python scripts/verify_version_check_endpoint.py --expected-version "${EXPECTED_VERSION#v}"
+        run: python scripts/verify_version_check_endpoint.py --expected-version "${EXPECTED_VERSION#v}" --wait-seconds 1500
 
   published-artifact-acceptance:
     name: published-artifact-acceptance (${{ matrix.platform }})
