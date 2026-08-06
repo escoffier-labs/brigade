@@ -13,35 +13,33 @@ def _release_changelog(version: str) -> str:
     return text[start:end]
 
 
-def test_current_release_has_expected_v0251_release_notes():
-    assert __version__ == "0.25.1"
+def test_current_release_has_expected_v0260_release_notes():
+    assert __version__ == "0.26.0"
     assert "no release has shipped from this entry" not in (ROOT / "CHANGELOG.md").read_text()
 
     text = _release_changelog(__version__)
 
     assert text.count("### Added") == 1
+    assert text.count("### Changed") == 1
     assert text.count("### Fixed") == 1
     assert text.count("### Removed") == 1
     assert text.count("### Deprecated") == 0
     for expected in (
-        "owns crawler runtime selection",
-        "read-only compatibility check before delegating to MiseLedger",
-        "`NO_PENDING` queue no longer masks a failed producer",
-        "preflight `cloudflare-ai-gateway/` seats",
-        "`CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_GATEWAY_ID`",
-        "more than one enabled producer can write the same memory-care queue artifact",
-        "obsolete standalone `brigade-work-loop.py` hook",
-        "skips an oversized JSONL line instead of aborting",
-        "`solo-mise` command alias",
-        "#404",
-        "#394",
-        "#403",
-        "#397",
-        "#420",
-        "#421",
+        "user-scope",
+        "available_update",
+        "linked git worktree",
+        "MODEL_OUTPUT",
+        "check.brigade.tools",
+        "#740, #743",
+        "(#741)",
+        "(#718)",
+        "(#701)",
+        "(#716)",
+        "(#717)",
+        "(#719)",
+        "(#720)",
     ):
         assert expected in text
-
 
 def test_repo_memory_handoff_template_matches_agents_guidance():
     path = ROOT / ".claude" / "memory-handoffs" / "TEMPLATE.md"
