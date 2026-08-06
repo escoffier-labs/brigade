@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.request
 
 ENDPOINT = "https://check.brigade.tools/v1/version"
@@ -39,22 +40,56 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="version the endpoint must report (without the leading v)",
     )
+    parser.add_argument(
+        "--wait-seconds",
+        type=int,
+        default=0,
+        help=(
+            "keep polling for up to this many seconds before failing; the endpoint "
+            "refreshes from PyPI on a 15-minute cache, so a fresh publish is always "
+            "briefly stale"
+        ),
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=int,
+        default=60,
+        help="seconds between polls while waiting",
+    )
     args = parser.parse_args(argv)
 
-    try:
-        latest = fetch_latest()
-    except Exception as error:  # noqa: BLE001 - any fetch failure fails the gate loudly
-        print(f"::error::version check endpoint fetch failed: {error}")
+    deadline = time.monotonic() + max(args.wait_seconds, 0)
+    latest: str | None = None
+    last_error: Exception | None = None
+    while True:
+        try:
+            latest = fetch_latest()
+            last_error = None
+        except Exception as error:  # noqa: BLE001 - any fetch failure fails the gate loudly
+            latest = None
+            last_error = error
+
+        if latest == args.expected_version:
+            print(f"version check endpoint reports {latest}: ok")
+            return 0
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        status = f"latest={latest!r}" if last_error is None else f"fetch failed: {last_error}"
+        print(
+            f"endpoint not caught up yet ({status}); expected {args.expected_version!r}, "
+            f"retrying for {int(remaining)}s more"
+        )
+        time.sleep(min(args.poll_interval, max(int(remaining), 1)))
+
+    if last_error is not None:
+        print(f"::error::version check endpoint fetch failed: {last_error}")
         return 1
-
-    if latest == args.expected_version:
-        print(f"version check endpoint reports {latest}: ok")
-        return 0
-
     print(
         f"::error::{ENDPOINT} reports latest={latest!r} but this release is "
-        f"{args.expected_version!r}. Update the endpoint to the new version, "
-        "then rerun this job so update discovery does not lag the release."
+        f"{args.expected_version!r}. The endpoint refreshes from PyPI on a "
+        "15-minute cache; if this failed after waiting, check the worker, then "
+        "rerun this job."
     )
     return 1
 
