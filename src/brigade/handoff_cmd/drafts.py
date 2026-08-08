@@ -375,7 +375,7 @@ def _draft_summary(
 ) -> HandoffDraft:
     path = path.expanduser().resolve()
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         text = ""
     raw_sections = _parse_markdown_sections(text)
@@ -457,7 +457,7 @@ def _archive_records(target: Path) -> list[dict[str, Any]]:
         return []
     records: list[dict[str, Any]] = []
     try:
-        lines = path.read_text().splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
     for line in lines:
@@ -676,7 +676,7 @@ def _read_suggested_content(content: str | None, content_file: Path | None) -> s
     if content_file is None:
         raise ValueError("--content or --content-file is required")
     try:
-        return content_file.expanduser().read_text(errors="replace").strip()
+        return content_file.expanduser().read_text(encoding="utf-8", errors="replace").strip()
     except OSError as exc:
         raise ValueError(f"cannot read --content-file: {exc}") from exc
 

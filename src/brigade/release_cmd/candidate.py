@@ -96,7 +96,7 @@ def _changelog_unreleased(path: Path) -> list[str]:
     changelog = path / "CHANGELOG.md"
     if not changelog.is_file():
         return []
-    lines = changelog.read_text().splitlines()
+    lines = changelog.read_text(encoding="utf-8").splitlines()
     capture = False
     items: list[str] = []
     for line in lines:

@@ -610,7 +610,7 @@ def doctor(*, json_output: bool = False) -> int:
 
 def _read_text(path: Path) -> str:
     try:
-        return path.read_text()
+        return path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return ""
 

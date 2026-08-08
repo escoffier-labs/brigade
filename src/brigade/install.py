@@ -185,7 +185,7 @@ def apply_gitignore(target: Path, selection: Selection, *, use_git_exclude: bool
     if not gi.exists():
         gi.write_text(block)
         return f"created ({location})"
-    existing = gi.read_text()
+    existing = gi.read_text(encoding="utf-8")
     markers = (
         (GITIGNORE_BEGIN, GITIGNORE_END),
         (LEGACY_GITIGNORE_BEGIN, LEGACY_GITIGNORE_END),
@@ -385,7 +385,7 @@ def install_selection(
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         if is_text(entry["src"]):
-            dst.write_text(render(src.read_text(), context))
+            dst.write_text(render(src.read_text(encoding="utf-8"), context), encoding="utf-8")
         else:
             shutil.copyfile(src, dst)
         mode_str = entry.get("mode")
@@ -418,7 +418,7 @@ def install_selection(
                     continue
                 dst = target / rel / "SKILL.md"
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_text(skill_src.read_text())
+                dst.write_text(skill_src.read_text(encoding="utf-8"), encoding="utf-8")
                 wired_skills.append((h, skill_id))
 
     # Claude Code project hooks enforce the same work loop described by the

@@ -86,7 +86,7 @@ def _first_nonblank_line(lines: list[str]) -> str:
 
 
 def parse_handoff(path: Path) -> ParsedHandoff:
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
 
     action_lines = _section_lines(text, "Recommended memory action")
     if action_lines is None:

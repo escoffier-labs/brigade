@@ -52,7 +52,7 @@ def migrate(*, target: Path, inbox: str | None = None, apply: bool = False, json
             if lint_file(path).valid:
                 continue
             rel = str(path.relative_to(target))
-            text = path.read_text(errors="replace")
+            text = path.read_text(encoding="utf-8", errors="replace")
             item: dict[str, Any] = {"file": rel}
             if scan_untrusted(text).flagged:
                 item["status"] = "blocked-injection"

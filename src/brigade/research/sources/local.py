@@ -18,7 +18,7 @@ def _tok(text: str) -> List[str]:
 def _read_text(path: Path) -> str:
     if path.suffix.lower() in {".md", ".txt", ""}:
         try:
-            return path.read_text(errors="ignore")
+            return path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             return ""
     return ""  # other types (e.g. pdf) skipped here; logged by caller

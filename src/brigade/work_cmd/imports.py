@@ -139,8 +139,8 @@ def _append_active_context_note(target: Path, rendered: str) -> Path | None:
     helpers._write_json(session_json, payload)
 
     notes_path = session_dir / "notes.md"
-    prefix = "" if notes_path.exists() and notes_path.read_text().endswith("\n") else "\n"
-    with notes_path.open("a") as handle:
+    prefix = "" if notes_path.exists() and notes_path.read_text(encoding="utf-8").endswith("\n") else "\n"
+    with notes_path.open("a", encoding="utf-8") as handle:
         if notes_path.stat().st_size == 0:
             handle.write("# Brigade Work Session Notes\n")
         else:

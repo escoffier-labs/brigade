@@ -214,7 +214,7 @@ def _linked_card_closure(cards_dir: Path, root_id: str) -> list[str]:
         card_path = cards_dir / f"{current}.md"
         if not card_path.is_file():
             continue
-        for raw in extract_wiki_links(card_path.read_text(errors="replace")):
+        for raw in extract_wiki_links(card_path.read_text(encoding="utf-8", errors="replace")):
             slug = _link_target_slug(raw).lower()
             if not slug or slug in visited:
                 continue

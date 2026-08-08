@@ -275,7 +275,7 @@ def _apply_flatten(memory_dir: Path, plan: CompactionPlan) -> None:
             target_path = resolve_card_target(memory_dir, flatten.target_name)
         except UnsafeTargetError:
             continue
-        existing = target_path.read_text()
+        existing = target_path.read_text(encoding="utf-8")
         marker = _flatten_marker(today, flatten)
         if marker in existing:
             # Already applied for this title/date - skip the topic append but
@@ -302,7 +302,7 @@ def _apply_flatten(memory_dir: Path, plan: CompactionPlan) -> None:
             # Dangling link: index may be the only record. Do not move; the
             # whole-file normalization pass below still scrubs unicode in place.
             continue
-        existing = target_path.read_text()
+        existing = target_path.read_text(encoding="utf-8")
         marker = _tighten_marker(today, tighten)
         if marker not in existing:
             sep = "" if existing.endswith("\n\n") else ("\n" if existing.endswith("\n") else "\n\n")

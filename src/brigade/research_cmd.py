@@ -339,7 +339,7 @@ def export_handoff(
         blockers.append(f"handoff artifact missing: {artifact_path}")
         handoff_text = ""
     else:
-        handoff_text = artifact_path.read_text(errors="replace")
+        handoff_text = artifact_path.read_text(encoding="utf-8", errors="replace")
     destination, inbox_label, destination_blockers = _resolve_handoff_destination(
         target, inbox=inbox, handoff_inbox=handoff_inbox
     )
@@ -363,7 +363,7 @@ def export_handoff(
     export_text = _augment_handoff_for_export(handoff_text, rec, source_fingerprint)
     filename = f"{_safe_filename(run_id)}-research-handoff.md"
     out_path = destination / filename
-    if out_path.exists() and out_path.read_text(errors="replace") != export_text and not force:
+    if out_path.exists() and out_path.read_text(encoding="utf-8", errors="replace") != export_text and not force:
         return {
             "status": "blocked",
             "run_id": run_id,
@@ -434,7 +434,7 @@ def handoff_status_payload(*, target: Path) -> dict[str, Any]:
             status = "missing-artifact"
             fingerprint = None
         else:
-            text = artifact_path.read_text(errors="replace")
+            text = artifact_path.read_text(encoding="utf-8", errors="replace")
             fingerprint = _fingerprint_json(_export_source_payload(target, rec, text))
             exports = [item for item in rec.get("handoff_exports", []) if isinstance(item, dict)]
             if not exports:

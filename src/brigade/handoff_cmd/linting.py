@@ -81,7 +81,7 @@ def _injection_detail(*, warning_count: int, unscanned: bool = False) -> str:
 
 def _read_handoff_text(path: Path) -> str | None:
     try:
-        return path.read_text(errors="replace")
+        return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
 
@@ -271,7 +271,7 @@ def lint_file(path: Path) -> HandoffLintResult:
     hints: list[str] = []
     action: str | None = None
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return HandoffLintResult(
             path=path,
