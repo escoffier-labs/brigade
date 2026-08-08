@@ -257,3 +257,70 @@ def test_all_redundant_coverers_failed_skips_dependents(dag_harness):
     by_worker = {r.worker: r for r in results}
     assert by_worker["i"].status == "skipped"
     assert "i" not in dag_harness.invocations_set
+
+
+DEPS_COMPOSITE = {
+    "test-author": (),
+    "implement": ("test-author",),
+}
+
+
+def test_parallel_composite_covers_no_deadlock(dag_harness):
+    """Regression: N parallel seats sharing a composite covers set must all run."""
+    assignments = [_a(f"w{i}", 1, ["test-author", "implement"]) for i in range(4)]
+    results = dag_harness(assignments, dependencies=DEPS_COMPOSITE)
+    by_worker = {r.worker: r for r in results}
+    for i in range(4):
+        worker = f"w{i}"
+        assert by_worker[worker].ok is True, by_worker[worker].detail
+        assert "cycle" not in (by_worker[worker].detail or "").lower()
+    assert dag_harness.invocations_set == {f"w{i}" for i in range(4)}
+
+
+def test_cross_assignment_dependency_enforced(dag_harness):
+    """Cross-assignment edges still order work and skip dependents on failure."""
+    assignments = [_a("ta", 1, ["test-author"]), _a("im", 2, ["implement"])]
+    order = dag_harness.start_order_for(
+        assignments,
+        dependencies=DEPS_COMPOSITE,
+        slow_workers={"ta": 0.3},
+    )
+    assert order.index("ta") < order.index("im")
+
+    results = dag_harness(
+        assignments,
+        dependencies=DEPS_COMPOSITE,
+        outcomes={"ta": WorkerResult(worker="ta", task="task-ta", text="", ok=False, detail="boom")},
+    )
+    by_worker = {r.worker: r for r in results}
+    assert by_worker["im"].status == "skipped"
+    assert "im" not in dag_harness.invocations_set
+
+
+def test_redundant_test_author_coverer_semantics(dag_harness):
+    """Implement runs when either test-author coverer succeeds; skipped only when both fail."""
+    assignments = [
+        _a("ta1", 1, ["test-author"]),
+        _a("ta2", 1, ["test-author"]),
+        _a("im", 2, ["implement"]),
+    ]
+    results = dag_harness(
+        assignments,
+        dependencies=DEPS_COMPOSITE,
+        outcomes={"ta1": WorkerResult(worker="ta1", task="task-ta1", text="", ok=False, detail="boom")},
+    )
+    by_worker = {r.worker: r for r in results}
+    assert by_worker["im"].ok is True
+    assert "im" in dag_harness.invocations_set
+
+    results = dag_harness(
+        assignments,
+        dependencies=DEPS_COMPOSITE,
+        outcomes={
+            "ta1": WorkerResult(worker="ta1", task="task-ta1", text="", ok=False, detail="boom"),
+            "ta2": WorkerResult(worker="ta2", task="task-ta2", text="", ok=False, detail="boom"),
+        },
+    )
+    by_worker = {r.worker: r for r in results}
+    assert by_worker["im"].status == "skipped"
+    assert "im" not in dag_harness.invocations_set
