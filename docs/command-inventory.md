@@ -189,7 +189,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade handoff draft`
 - `brigade handoff import-issues`
 - `brigade handoff issues`
-- `brigade handoff lint` (`--strict` promotes standalone-readability warnings to failures)
+- `brigade handoff lint`
 - `brigade handoff list`
 - `brigade handoff migrate`
 - `brigade handoff receipt plan`
