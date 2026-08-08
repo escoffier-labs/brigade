@@ -67,21 +67,81 @@ def test_ci_workflow_gates_native_engine_jobs_with_valid_expressions():
         assert "self-hosted" not in section
 
 
-def test_ci_workflow_gates_notify_jobs_with_valid_expressions():
+def test_ci_workflow_notify_jobs_always_run_and_gate_steps_not_job_level():
+    """Required notify checks must not skip at job level (issue #692).
+
+    When notify paths are unchanged the job still completes successfully via the
+    explicit skip step; Go build/test steps stay behind step-level guards.
+    """
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     expected_jobs = {
         "notify-build-and-test": "notify",
         "notify-windows": "notify",
     }
+    notify_if = "if: ${{ needs.changes.outputs.notify == 'true' }}"
+    skip_if = "if: ${{ needs.changes.outputs.notify != 'true' }}"
 
     job_names = re.findall(r"^  ([a-z0-9][a-z0-9-]*):$", text, re.MULTILINE)
     assert {name for name in job_names if name.startswith("notify-")} == set(expected_jobs)
 
-    for job_name, output_name in expected_jobs.items():
+    for job_name in expected_jobs:
         section = _workflow_job_section(text, job_name)
         assert "needs: changes" in section
-        assert f"if: ${{{{ needs.changes.outputs.{output_name} == 'true' }}}}" in section
+        # Job-level skip was the root cause of permanently blocked unrelated PRs.
+        assert re.search(r"^    if:", section, re.MULTILINE) is None
         assert "self-hosted" not in section
+        assert "Skip notify tests (unchanged paths)" in section
+        assert skip_if in section
+        # Skip step must not inherit stations/notify (checkout is gated off).
+        skip_at = section.index("Skip notify tests (unchanged paths)")
+        skip_block = section[skip_at : section.index("\n      -", skip_at)]
+        assert skip_if in skip_block
+        assert "working-directory: ${{ github.workspace }}" in skip_block
+        assert section.count(notify_if) >= 3
+
+
+def test_ci_workflow_notify_jobs_run_go_steps_only_when_notify_paths_change():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    notify_if = "if: ${{ needs.changes.outputs.notify == 'true' }}"
+
+    for job_name, commands in (
+        (
+            "notify-build-and-test",
+            (
+                "go build ./...",
+                "go vet ./...",
+                "go test -race ./...",
+                "go test ./internal/config/...",
+                "govulncheck ./...",
+            ),
+        ),
+        (
+            "notify-windows",
+            (
+                "go build ./...",
+                "go vet ./...",
+                "go test -race ./...",
+            ),
+        ),
+    ):
+        section = _workflow_job_section(text, job_name)
+        for uses in ("actions/checkout@v5", "actions/setup-go@v5"):
+            uses_at = 0
+            while True:
+                try:
+                    uses_at = section.index(uses, uses_at)
+                except ValueError:
+                    break
+                step_start = section.rfind("\n      -", 0, uses_at)
+                step_end = section.find("\n      -", uses_at)
+                step_block = section[step_start : step_end if step_end != -1 else None]
+                assert notify_if in step_block, f"{job_name}: {uses!r} missing notify path guard"
+                uses_at += len(uses)
+        for command in commands:
+            command_at = section.index(command)
+            step_start = section.rfind("\n      -", 0, command_at)
+            step_block = section[step_start:command_at]
+            assert notify_if in step_block, f"{job_name}: {command!r} missing notify path guard"
 
 
 def test_ci_workflow_runs_embedded_engine_commands_from_engine_directories():

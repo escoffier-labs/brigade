@@ -162,60 +162,82 @@ jobs:
   notify-build-and-test:
     name: notify-build-and-test (ubuntu-latest)
     needs: changes
-    if: ${{ needs.changes.outputs.notify == 'true' }}
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: stations/notify
     steps:
+      - name: Skip notify tests (unchanged paths)
+        if: ${{ needs.changes.outputs.notify != 'true' }}
+        # Override job default: checkout is gated, so stations/notify is absent.
+        working-directory: ${{ github.workspace }}
+        run: echo "stations/notify unchanged; required check satisfied without running Go tests."
       - uses: actions/checkout@v5
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         with:
           persist-credentials: false
       - uses: actions/setup-go@v5
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         with:
           go-version: '1.22'
           cache-dependency-path: stations/notify/go.sum
       - name: Build
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         run: go build ./...
       - name: Vet
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         run: go vet ./...
       - name: Test
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         run: go test -race ./...
       - name: Test config (GOARCH=386)
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         env:
           GOARCH: 386
         run: go test ./internal/config/...
       - name: Setup stable Go for govulncheck
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         uses: actions/setup-go@v5
         with:
           go-version: stable
           cache-dependency-path: stations/notify/go.sum
       - name: Install govulncheck
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
       - name: Vulncheck
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         run: govulncheck ./...
 
   notify-windows:
     name: notify-build-and-test (windows-latest)
     needs: changes
-    if: ${{ needs.changes.outputs.notify == 'true' }}
     runs-on: windows-latest
     defaults:
       run:
         working-directory: stations/notify
     steps:
+      - name: Skip notify tests (unchanged paths)
+        if: ${{ needs.changes.outputs.notify != 'true' }}
+        # Override job default: checkout is gated, so stations/notify is absent.
+        working-directory: ${{ github.workspace }}
+        run: echo "stations/notify unchanged; required check satisfied without running Go tests."
       - uses: actions/checkout@v5
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         with:
           persist-credentials: false
       - uses: actions/setup-go@v5
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         with:
           go-version: '1.22'
           cache-dependency-path: stations/notify/go.sum
       - name: Build
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         run: go build ./...
       - name: Vet
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         run: go vet ./...
       - name: Test
+        if: ${{ needs.changes.outputs.notify == 'true' }}
         run: go test -race ./...
 
   lint:
