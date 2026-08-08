@@ -297,8 +297,7 @@ def _check_remediation_text(check: dict[str, Any]) -> str:
     if name in defaults:
         return defaults[name]
     if name.startswith("content_guard_"):
-        guard_name = name.removeprefix("content_guard_")
-        return f"brigade content-guard check --name {guard_name}"
+        return "brigade scrub"
     return f"investigate {name}" if name else "investigate failing check"
 
 
