@@ -1,9 +1,12 @@
+import argparse
 import json
 import os
 import shutil
 import subprocess
 import time
 from pathlib import Path
+
+import pytest
 
 from brigade import cli
 from brigade import handoff_cmd
@@ -17,6 +20,26 @@ from brigade import work_cmd
 def _write_json(path: Path, payload: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def _subparsers_action(parser):
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action
+    raise AssertionError("no subparsers action found")
+
+
+def _assert_brigade_remediation_resolves(remediation: str) -> None:
+    tokens = remediation.removeprefix("brigade ").split()
+    assert tokens, f"empty remediation command: {remediation!r}"
+    parser = cli._build_parser()
+    current = parser
+    idx = 0
+    while idx < len(tokens) and not tokens[idx].startswith("-"):
+        sub = _subparsers_action(current)
+        assert tokens[idx] in sub.choices, f"unknown brigade subcommand {tokens[idx]!r} in {remediation!r}"
+        current = sub.choices[tokens[idx]]
+        idx += 1
 
 
 def _init_repo(path: Path):
@@ -1163,7 +1186,6 @@ def test_release_readiness_names_failing_checks_and_remediation(tmp_path, monkey
             "status": "fail",
             "detail": f"{name} findings=1",
             "available": True,
-            "remediation": f"brigade content-guard check --name {name}",
         }
 
     monkeypatch.setattr(release_cmd, "_run_content_guard_check", fake_check)
@@ -1176,7 +1198,8 @@ def test_release_readiness_names_failing_checks_and_remediation(tmp_path, monkey
     combined = f"{blockers}\n{warnings}"
 
     assert "content_guard_tip" in blockers
-    assert "brigade content-guard check --name tip" in blockers
+    assert "remediation: brigade scrub" in blockers
+    _assert_brigade_remediation_resolves("brigade scrub")
     assert "security_harness_wiring" in warnings
     assert "brigade security doctor --json" in warnings
     assert "security has open issue(s)" not in combined
@@ -1223,3 +1246,18 @@ def test_release_candidate_build_reuses_fresh_readiness_receipt(tmp_path, monkey
 
     assert candidate["release_readiness_receipt"]["run_id"] == release_receipt["run_id"]
     assert candidate["git"]["head"] == release_receipt["evidence"]["git"]["head"]
+
+
+@pytest.mark.parametrize(
+    ("check_name",),
+    [
+        ("content_guard_tip",),
+        ("content_guard_introduced",),
+    ],
+)
+def test_release_readiness_content_guard_default_remediation_resolves(check_name):
+    remediation = release_cmd._check_remediation_text(
+        {"name": check_name, "status": "fail", "detail": "content-guard reported findings"}
+    )
+    assert remediation == "brigade scrub"
+    _assert_brigade_remediation_resolves(remediation)
