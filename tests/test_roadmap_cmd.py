@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from brigade import cli
 from brigade import roadmap_cmd
 
@@ -202,3 +204,14 @@ def test_command_inventory_marks_extras_gated_commands(tmp_path):
     assert "- `brigade work brief`\n" in inventory
     # the marker is explained once in the header
     assert "brigade extras on" in inventory
+
+
+def test_command_inventory_includes_memory_care_init_with_runbooks_flag(tmp_path, capsys):
+    payload = roadmap_cmd.command_contract_payload(tmp_path)
+    assert "brigade memory care init" in payload["cli_commands"]
+    assert "- `brigade memory care init`" in payload["expected_inventory"]
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["memory", "care", "init", "--help"])
+    assert exc.value.code == 0
+    assert "--with-runbooks" in capsys.readouterr().out

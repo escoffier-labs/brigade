@@ -1,10 +1,76 @@
 import json
+import shlex
 from datetime import date, datetime, timezone
+from pathlib import Path
+
+import pytest
 
 from brigade import cli
 from brigade import dogfood_cmd
 from brigade import memory_cmd
+from brigade import runbook_cmd
 from brigade import work_cmd
+
+MEMORY_CARE_RUNBOOK_NAMES = (
+    "daily-care-pass.json",
+    "ingest-sweep.json",
+    "weekly-outcome-ratchet.json",
+)
+
+_MODEL_DISPATCH_KEYS = frozenset(
+    {
+        "model",
+        "model_dispatch",
+        "model_seat",
+        "worker",
+        "worker_dispatch",
+        "worker_seat",
+        "seat",
+        "roster",
+        "agent",
+        "harness",
+        "budget_gate",
+        "dispatch",
+    }
+)
+
+_SCHEDULER_KEYS = frozenset(
+    {
+        "scheduler",
+        "schedule",
+        "cron",
+        "crontab",
+        "timer",
+        "systemd",
+    }
+)
+
+
+def _memory_care_runbook_dir(target):
+    return target / ".brigade" / "memory-care" / "runbooks"
+
+
+def _load_memory_care_runbooks(target):
+    runbook_dir = _memory_care_runbook_dir(target)
+    return {name: json.loads((runbook_dir / name).read_text()) for name in MEMORY_CARE_RUNBOOK_NAMES}
+
+
+def _assert_mechanical_brigade_only_runbook(payload):
+    forbidden = _MODEL_DISPATCH_KEYS | _SCHEDULER_KEYS
+    for key in forbidden:
+        assert key not in payload
+    for step in payload["steps"]:
+        for key in forbidden:
+            assert key not in step
+        tokens = shlex.split(step["run"])
+        assert tokens and Path(tokens[0]).name == "brigade"
+    assert payload.get("allowed_commands") == ["brigade"]
+    pins = payload.get("pins")
+    assert isinstance(pins, list) and pins
+    brigade_pins = [pin for pin in pins if pin.get("command") == "brigade"]
+    assert brigade_pins
+    for pin in brigade_pins:
+        assert isinstance(pin.get("sha256"), str) and pin["sha256"].strip()
 
 
 def _write_card(path, frontmatter, body="Body.\n"):
@@ -438,14 +504,28 @@ def test_memory_care_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_cmd, "status", fake_status)
     monkeypatch.setattr(memory_cmd, "doctor", fake_doctor)
     monkeypatch.setattr(memory_cmd, "import_issues", fake_import)
-    assert cli.main(["memory", "care", "init", "--target", str(tmp_path), "--force", "--no-gitignore"]) == 0
+    assert (
+        cli.main(
+            [
+                "memory",
+                "care",
+                "init",
+                "--target",
+                str(tmp_path),
+                "--force",
+                "--no-gitignore",
+                "--with-runbooks",
+            ]
+        )
+        == 0
+    )
     assert cli.main(["memory", "care", "scan", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["memory", "care", "plan-fixes", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["memory", "care", "status", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["memory", "care", "doctor", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["memory", "care", "import-issues", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
     assert seen == [
-        ("init", {"target": tmp_path, "force": True, "update_gitignore": False}),
+        ("init", {"target": tmp_path, "force": True, "update_gitignore": False, "with_runbooks": True}),
         ("scan", {"target": tmp_path, "json_output": True}),
         ("plan-fixes", {"target": tmp_path, "json_output": True}),
         ("status", {"target": tmp_path, "json_output": True}),
@@ -610,3 +690,59 @@ def test_memory_care_producer_artifacts_honor_custom_output_path(tmp_path):
         (tmp_path / ".brigade" / "memory-care" / "custom-decay" / "scan-latest.json", "brigade memory-care"),
         (tmp_path / ".brigade" / "memory-care" / "custom-decay" / "refresh-queue.json", "brigade memory-care"),
     ]
+
+
+def test_memory_care_init_without_runbooks_writes_no_templates(tmp_path):
+    assert memory_cmd.init(target=tmp_path, force=True) == 0
+    runbook_dir = _memory_care_runbook_dir(tmp_path)
+    assert not runbook_dir.exists() or list(runbook_dir.glob("*.json")) == []
+
+
+def test_memory_care_init_with_runbooks_writes_three_pinned_templates(tmp_path, capsys):
+    assert memory_cmd.init(target=tmp_path, force=True, with_runbooks=True) == 0
+    capsys.readouterr()
+
+    runbook_dir = _memory_care_runbook_dir(tmp_path)
+    assert sorted(path.name for path in runbook_dir.glob("*.json")) == sorted(MEMORY_CARE_RUNBOOK_NAMES)
+
+    runbooks = _load_memory_care_runbooks(tmp_path)
+    for payload in runbooks.values():
+        _assert_mechanical_brigade_only_runbook(payload)
+
+    daily_runs = [step["run"] for step in runbooks["daily-care-pass.json"]["steps"]]
+    assert any("memory care scan" in run for run in daily_runs)
+    assert any("memory care import-issues" in run for run in daily_runs)
+
+    ingest_runs = [step["run"] for step in runbooks["ingest-sweep.json"]["steps"]]
+    assert any("handoff lint" in run for run in ingest_runs)
+    assert any("ingest" in run for run in ingest_runs)
+
+    ratchet_runs = [step["run"] for step in runbooks["weekly-outcome-ratchet.json"]["steps"]]
+    assert any("outcome rank" in run for run in ratchet_runs)
+    assert any("outcome reconcile" in run for run in ratchet_runs)
+
+    for name in MEMORY_CARE_RUNBOOK_NAMES:
+        assert runbook_cmd.plan(target=tmp_path, runbook=runbook_dir / name, json_output=True) == 0
+        plan = json.loads(capsys.readouterr().out)
+        assert plan["policy_valid"] is True
+
+
+def test_memory_care_init_with_runbooks_is_idempotent(tmp_path):
+    assert memory_cmd.init(target=tmp_path, force=True, with_runbooks=True) == 0
+    first = {name: (_memory_care_runbook_dir(tmp_path) / name).read_bytes() for name in MEMORY_CARE_RUNBOOK_NAMES}
+
+    assert memory_cmd.init(target=tmp_path, force=True, with_runbooks=True) == 0
+    second = {name: (_memory_care_runbook_dir(tmp_path) / name).read_bytes() for name in MEMORY_CARE_RUNBOOK_NAMES}
+
+    assert first == second
+
+
+def test_memory_care_init_parser_exposes_with_runbooks_flag(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["memory", "care", "init", "--help"])
+    assert exc.value.code == 0
+    assert "--with-runbooks" in capsys.readouterr().out
+
+    parser = cli._build_parser()
+    ns = parser.parse_args(["memory", "care", "init", "--with-runbooks"])
+    assert ns.with_runbooks is True
