@@ -7,7 +7,13 @@ import pytest
 from brigade import skills_cmd
 from brigade.templates import template_root
 
-BUNDLED_TEMPLATES = ("brigade-work", "note", "ultra-work-scout")
+BUNDLED_TEMPLATES = (
+    "brigade-work",
+    "note",
+    "ultra-work-scout",
+    "handoff-inbox-drain",
+    "card-refresh",
+)
 
 
 def _doctor_issue_names(skill_id, target, capsys):
