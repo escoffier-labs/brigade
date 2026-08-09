@@ -577,8 +577,87 @@ must not recompute it from post-run state.
 
 ---
 
+## `brigade.work-run`: `schema_version: 1`
+
+Portable multi-file archive for one Brigade run directory. The archive root is a
+directory containing `work-run.json` (this envelope) and a `payload/` tree with
+the exported run files. Published JSON Schema artifact:
+[`schemas/work-run.v1.schema.json`](../schemas/work-run.v1.schema.json).
+
+Following the Agent Client Protocol pattern, the schema **artifact** version
+(the `work-run.v1` filename / `$id`) is separate from archive **wire**
+compatibility (`schema` + `schema_version` on `work-run.json`). Consumers must
+not infer import acceptance from the artifact filename alone.
+
+**Commands:** `brigade runs export`, `brigade runs import`,
+`brigade runs validate-archive`.
+
+### Layout
+
+```text
+<archive>/
+  work-run.json
+  payload/
+    run.json
+    roster.json
+    ...
+    events/lifecycle.jsonl
+    events/recovery-checkpoints/<sha256>.json   # artifact references only
+```
+
+### Manifest fields
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema` | string | yes | Always `brigade.work-run` |
+| `schema_version` | integer | yes | `1` |
+| `run_id` | string | yes | `YYYYMMDD-HHMMSS-<8 hex>` |
+| `exported_at` | string | yes | ISO-8601 UTC (`Z`) |
+| `exporter_brigade_version` | string | yes | Brigade version that wrote the archive |
+| `format` | string | yes | Always `directory` |
+| `payload_dir` | string | yes | Always `payload` |
+| `compatibility` | object | yes | Closed import/export rules (below) |
+| `files` | array | yes | Declared payload entries with digests |
+| `run` | object | no | Compact summary projected from `run.json` |
+| `source_run_dir` | string | no | Absolute source path at export time |
+| `schema_artifact` | string | no | Repo-relative published schema path |
+
+**`files[]` entry**
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `path` | string | yes | Relative path under `payload/` |
+| `sha256` | string | yes | Lowercase hex digest of file bytes |
+| `byte_size` | integer | yes | Byte length |
+| `role` | string | yes | `receipt`, `journal`, `checkpoint-reference`, `artifact`, `support`, or `other` |
+| `media_type` | string | no | Best-effort media type |
+| `nested_schema` | string | no | Nested document `schema` when known |
+| `nested_schema_version` | integer | no | Nested document `schema_version` when known |
+| `privacy_class` | string | no | `public`, `private`, or `redacted` |
+
+### Compatibility rules (import / export)
+
+| Rule | v1 behavior |
+| --- | --- |
+| Unsupported `schema` / `schema_version` | **Refuse** hard |
+| Unknown manifest keys | **Refuse** (closed envelope) |
+| Nested receipt unknown keys | **Ignore** (receipt-family additive evolution) |
+| Symlinks / special files | **Refuse** |
+| Recovery-checkpoint bodies | **Strip** to closed artifact references on export (#636); validate refuses bodies |
+| Resume after import | **Not supported** in v1 (`resume_supported: false`); import is inspection/audit oriented |
+| Digest mismatch | **Refuse** |
+
+`compatibility` object fields are closed for v1: reader window pinned to
+`schema_version` 1, `private_checkpoint_bodies` =
+`strip_to_artifact_reference`, `unsupported_archive_version` = `refuse`,
+`nested_receipt_unknown_keys` = `ignore`, `symlinks_and_special_files` =
+`refuse`, and `journal_authority` one of `none` / `present` / `authoritative`.
+
+---
+
 ## Related commands
 
 - `brigade receipts verify`: digest chain checks for verify receipts and outcome rows
 - `brigade receipts export miseledger`: adapter export (separate `miseledger.adapter.v1` envelope)
+- `brigade runs export` / `import` / `validate-archive`: portable `brigade.work-run` archives
 - `brigade outcome rebuild-status`: prove `status.json` matches decision receipts

@@ -221,6 +221,69 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
     )
     p_runs_audit.add_argument("--json", action="store_true", help="Emit the audit receipt as JSON.")
+    p_runs_export = runs_sub.add_parser(
+        "export",
+        help="Export a run directory as a versioned brigade.work-run archive.",
+    )
+    p_runs_export.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_runs_export.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_runs_export.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_runs_export.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        required=True,
+        help="Destination archive directory (created; must not exist unless --force).",
+    )
+    p_runs_export.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing destination archive directory.",
+    )
+    p_runs_export.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p_runs_import = runs_sub.add_parser(
+        "import",
+        help="Validate a brigade.work-run archive and copy its payload into the runs directory.",
+    )
+    p_runs_import.add_argument("archive", type=Path, help="Path to a brigade.work-run archive directory.")
+    p_runs_import.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory receives the import.",
+    )
+    p_runs_import.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory. Defaults to .brigade/runs under --cwd.",
+    )
+    p_runs_import.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace an existing destination run directory with the same run id.",
+    )
+    p_runs_import.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p_runs_validate_archive = runs_sub.add_parser(
+        "validate-archive",
+        help="Validate a brigade.work-run archive manifest, digests, and export privacy rules.",
+    )
+    p_runs_validate_archive.add_argument(
+        "archive",
+        type=Path,
+        help="Path to a brigade.work-run archive directory.",
+    )
+    p_runs_validate_archive.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     p_runs.set_defaults(func=dispatch)
 
 
@@ -291,6 +354,31 @@ def dispatch(args) -> int:
             runs_dir=args.runs_dir,
             json_output=args.json,
         )
+    if args.runs_command == "export":
+        from .. import work_run_archive
+
+        return work_run_archive.export_cli(
+            args.run,
+            cwd=args.cwd,
+            runs_dir=args.runs_dir,
+            output=args.output,
+            force=args.force,
+            json_output=args.json,
+        )
+    if args.runs_command == "import":
+        from .. import work_run_archive
+
+        return work_run_archive.import_cli(
+            args.archive,
+            cwd=args.cwd,
+            runs_dir=args.runs_dir,
+            force=args.force,
+            json_output=args.json,
+        )
+    if args.runs_command == "validate-archive":
+        from .. import work_run_archive
+
+        return work_run_archive.validate_cli(args.archive, json_output=args.json)
     args._brigade_parser.error(f"unknown runs command: {args.runs_command}")
     return 2
 
