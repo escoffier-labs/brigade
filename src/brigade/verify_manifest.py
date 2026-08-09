@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import localio, outcome_cmd, runguard
+from . import localio, outcome_cmd, runguard, verification_contract
 from .router import PATHS
 
 VERIFY_MANIFEST_SCHEMA = "brigade.verify_manifest.v1"
@@ -50,10 +50,45 @@ class VerifyManifest:
     fixture_check_id: str | None = None
     patch_source: str = "worktree"
     path: Path | None = None
+    consequential: bool = False
+    verification_contract: dict[str, Any] | None = None
 
     @property
     def planned_commands(self) -> list[str | list[str]]:
         return [check.command for check in self.checks]
+
+    def contract_plan_view(self) -> dict[str, Any]:
+        """Plan-time VerificationContract completeness for this work template."""
+        payload = self.verification_contract
+        if payload is None and self.consequential:
+            # Consequential manifests may omit nested verifier and inherit checks.
+            return verification_contract.contract_plan_view(
+                None,
+                consequential=True,
+                allow_manifest_checks=True,
+            )
+        if payload is None:
+            return verification_contract.contract_plan_view(
+                None,
+                consequential=False,
+                allow_manifest_checks=True,
+            )
+        # Allow omitting verifier on manifests: fill manifest_checks for validation.
+        enriched = dict(payload)
+        verifier = enriched.get("verifier")
+        if verifier is None:
+            enriched["verifier"] = {"source": "manifest_checks"}
+        elif (
+            isinstance(verifier, dict)
+            and verifier.get("source") is None
+            and not any(key in verifier for key in ("command", "argv", "manifest_id"))
+        ):
+            enriched["verifier"] = {**verifier, "source": "manifest_checks"}
+        return verification_contract.contract_plan_view(
+            enriched,
+            consequential=self.consequential,
+            allow_manifest_checks=True,
+        )
 
 
 def validate_route_paths(route_paths: tuple[str, ...] | list[str]) -> str | None:
@@ -254,6 +289,34 @@ def validate_manifest_payload(payload: dict[str, Any]) -> list[str]:
                 value = fixture.get(key)
                 if not isinstance(value, str) or not value.strip():
                     errors.append(f"fixture.{key} is required for fixture_eval manifests")
+    consequential = payload.get("consequential", False)
+    if consequential is not False and consequential is not True:
+        errors.append("consequential must be a boolean when set")
+    contract_raw = payload.get("verification_contract")
+    if contract_raw is not None:
+        if not isinstance(contract_raw, dict):
+            errors.append("verification_contract must be an object when set")
+        else:
+            enriched = dict(contract_raw)
+            verifier = enriched.get("verifier")
+            if verifier is None:
+                enriched["verifier"] = {"source": "manifest_checks"}
+            elif (
+                isinstance(verifier, dict)
+                and verifier.get("source") is None
+                and not any(key in verifier for key in ("command", "argv", "manifest_id"))
+            ):
+                enriched["verifier"] = {**verifier, "source": "manifest_checks"}
+            for error in verification_contract.validate_contract_payload(
+                enriched,
+                allow_manifest_checks=True,
+            ):
+                errors.append(f"verification_contract: {error}")
+    elif consequential is True:
+        errors.append(
+            "consequential manifests require verification_contract "
+            "(rollback and budget; verifier defaults to manifest checks)"
+        )
     return errors
 
 
@@ -279,6 +342,18 @@ def manifest_from_payload(payload: dict[str, Any], *, path: Path | None = None) 
     route_paths = tuple(str(item) for item in route_paths_raw) if isinstance(route_paths_raw, list) else ()
     route_classes_raw = payload.get("route_classes", [])
     route_classes = tuple(str(item) for item in route_classes_raw) if isinstance(route_classes_raw, list) else ()
+    contract_raw = payload.get("verification_contract")
+    contract_payload = dict(contract_raw) if isinstance(contract_raw, dict) else None
+    if contract_payload is not None:
+        verifier = contract_payload.get("verifier")
+        if verifier is None:
+            contract_payload["verifier"] = {"source": "manifest_checks"}
+        elif (
+            isinstance(verifier, dict)
+            and verifier.get("source") is None
+            and not any(key in verifier for key in ("command", "argv", "manifest_id"))
+        ):
+            contract_payload["verifier"] = {**verifier, "source": "manifest_checks"}
     return VerifyManifest(
         manifest_id=str(payload["manifest_id"]),
         binding_mode=str(payload["binding_mode"]),
@@ -297,8 +372,10 @@ def manifest_from_payload(payload: dict[str, Any], *, path: Path | None = None) 
         fixture_manifest_id=fixture.get("manifest_id") if isinstance(fixture, dict) else None,
         fixture_case_id=fixture.get("case_id") if isinstance(fixture, dict) else None,
         fixture_check_id=fixture.get("check_id") if isinstance(fixture, dict) else None,
-        patch_source=str(payload.get("patch_source") or "worktree"),
+        patch_source=str(payload.get("patch_source", "worktree")),
         path=path,
+        consequential=bool(payload.get("consequential", False)),
+        verification_contract=contract_payload,
     )
 
 

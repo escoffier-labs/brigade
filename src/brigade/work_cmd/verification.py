@@ -25,7 +25,7 @@ from .. import (
     receipt_signing,
     runguard,
 )
-from .. import verify_manifest, verify_trial
+from .. import verification_contract, verify_manifest, verify_trial
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -490,6 +490,53 @@ def _build_subject_binding(
     return binding
 
 
+def _stamp_verification_contract_declaration(
+    receipt: dict[str, Any],
+    manifest: verify_manifest.VerifyManifest,
+) -> None:
+    """Stamp the declared VerificationContract (before finalize)."""
+    if not manifest.verification_contract:
+        return
+    try:
+        contract = verification_contract.contract_from_payload(
+            manifest.verification_contract,
+            allow_manifest_checks=True,
+        )
+    except ValueError:
+        return
+    receipt["verification_contract"] = contract.to_payload()
+
+
+def _stamp_verification_contract_outcomes(receipt: dict[str, Any]) -> None:
+    """Record budget use and verification outcome after status/duration are final."""
+    declared = receipt.get("verification_contract")
+    if not isinstance(declared, dict):
+        return
+    try:
+        contract = verification_contract.contract_from_payload(
+            declared,
+            allow_manifest_checks=True,
+        )
+    except ValueError:
+        return
+    latency_used = receipt.get("duration_seconds")
+    if isinstance(latency_used, bool) or not isinstance(latency_used, (int, float)):
+        latency_used = None
+    receipt["budget_use"] = verification_contract.budget_use_payload(
+        contract,
+        latency_seconds_used=float(latency_used) if latency_used is not None else None,
+        tokens_used=None,
+    )
+    receipt["verification"] = verification_contract.verification_outcome_payload(
+        status=str(receipt.get("status") or "unknown"),
+        independent_of_model_completion=True,
+    )
+    receipt["model_completion"] = verification_contract.model_completion_payload(
+        status="not_applicable",
+        detail="work verify receipts are verifier-owned; model completion is recorded on run/work templates",
+    )
+
+
 def _apply_manifest_scoring_fields(
     target: Path,
     receipt: dict[str, Any],
@@ -503,6 +550,7 @@ def _apply_manifest_scoring_fields(
     subject_binding = _build_subject_binding(target, manifest, receipt, run_dir)
     if subject_binding is not None:
         receipt["subject_binding"] = subject_binding
+    _stamp_verification_contract_declaration(receipt, manifest)
     verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
 
 
@@ -539,6 +587,7 @@ def _finalize_verify_receipt(
             if isinstance(command, dict):
                 verify_trial.stamp_verify_command_failure_taxonomy(command)
     verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
+    _stamp_verification_contract_outcomes(receipt)
     try:
         git = _receipt_git_snapshot(target)
         if git is not None:
@@ -1294,6 +1343,13 @@ def _verify_plan_payload(
         payload["scoreable"] = True
         payload["suggested_command"] = f'brigade work verify run --manifest "{manifest.manifest_id}"'
         payload.pop("suggested_from_graph_impact", None)
+        contract_view = manifest.contract_plan_view()
+        payload["verification_contract"] = contract_view
+        payload["consequential"] = manifest.consequential
+        for blocker in contract_view.get("blockers") or []:
+            if isinstance(blocker, str) and blocker not in blockers:
+                blockers.append(blocker)
+        payload["blockers"] = blockers
     elif commands is not None:
         payload["scoreable"] = False
         payload.pop("suggested_from_graph_impact", None)

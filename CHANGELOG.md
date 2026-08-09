@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `subject_binding.generated_patch_quarantine`. Model confidence, lexical or
   textual similarity, and repeated sampling are explicitly non-promoting
   outcome sources. Design: `docs/design/generated-patch-quarantine.md`.
+- VerificationContract (#500): consequential runbooks and verify manifests declare
+  an independent verifier, failure/rollback path, and token/latency budget before
+  execution (`brigade.verification_contract.v1`). Plan surfaces incompleteness;
+  run refuses incomplete consequential templates. Receipts record `budget_use`
+  and `verification` separately from `model_completion`. Budget enforcement
+  remains #593.
 
 ## [0.26.1] - 2026-08-09
 

@@ -9,10 +9,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
-from . import receipt_signing
+from . import receipt_signing, verification_contract
 from .localio import (
     canonical_json_digest as _canonical_json_digest,
     file_sha256 as _file_sha256,
@@ -312,6 +313,10 @@ def _policy_for_step(payload: dict[str, Any], step: dict[str, Any]) -> dict[str,
     }
 
 
+def _runbook_consequential(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("consequential"))
+
+
 def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, str | None]:
     payload, error = _read_runbook(runbook)
     if payload is None:
@@ -334,6 +339,11 @@ def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, s
     policy_failures = [
         {"step": step["id"], "failures": step["policy"]["failures"]} for step in steps if step["policy"]["failures"]
     ]
+    consequential = _runbook_consequential(payload)
+    contract_view = verification_contract.contract_plan_view(
+        verification_contract.extract_contract_payload(payload),
+        consequential=consequential,
+    )
     plan = {
         "target": str(target),
         "runbook_path": str(runbook),
@@ -342,6 +352,8 @@ def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, s
         # file_approved is informational only. It does NOT authorize execution;
         # the operator must pass --approved. A file-embedded flag is ignored.
         "file_approved": bool(payload.get("approved")),
+        "consequential": consequential,
+        "verification_contract": contract_view,
         "policy_valid": not policy_failures,
         "policy_failures": policy_failures,
         "step_count": len(steps),
@@ -351,12 +363,80 @@ def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, s
             "Executes arbitrary foreground shell commands from the runbook file, which is only as trustworthy as whoever wrote it. Review every step before approving.",
             "The destructive deny-list is advisory, not a security boundary; it is trivially bypassable.",
             "Writes stdout, stderr, and JSON receipts under .brigade/runbooks/runs/.",
+            "Consequential runbooks must declare verification_contract (verifier, rollback, budget) before execution.",
         ],
     }
     pins = _pin_entries(payload)
     if pins:
         plan["pins"] = pins
     return plan, None
+
+
+def _shell_or_argv_command(
+    command: str | list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+) -> tuple[int, bool, str, str]:
+    """Run a contract verifier/rollback command. Returns exit_code, timed_out, stdout, stderr."""
+    try:
+        if isinstance(command, list):
+            completed = subprocess.run(
+                command,
+                cwd=cwd,
+                shell=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                check=False,
+            )
+        else:
+            completed = subprocess.run(
+                command,
+                cwd=cwd,
+                shell=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                check=False,
+            )
+        return completed.returncode, False, completed.stdout, completed.stderr
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        return 124, True, stdout, stderr
+
+
+def _resolve_verifier_command(
+    contract: verification_contract.VerificationContract,
+) -> tuple[str | list[str] | None, str | None]:
+    verifier = contract.verifier
+    if verifier.source == "command" and verifier.command is not None:
+        return verifier.command, None
+    if verifier.source == "argv" and verifier.argv is not None:
+        return list(verifier.argv), None
+    if verifier.source == "manifest_id":
+        return None, "runbook verification_contract verifier.manifest_id requires work verify; use command or argv"
+    if verifier.source == "manifest_checks":
+        return None, "runbook verification_contract cannot use verifier.source manifest_checks"
+    return None, "verification_contract verifier is incomplete"
+
+
+def _resolve_rollback_command(
+    contract: verification_contract.VerificationContract,
+) -> tuple[str | list[str] | None, str | None]:
+    rollback = contract.rollback
+    if rollback.policy in {"none", "manual"}:
+        return None, None
+    if rollback.policy == "git-restore":
+        return ["git", "restore", "--worktree", "--", "."], None
+    if rollback.policy == "command":
+        if rollback.command is None:
+            return None, "rollback.command is required"
+        return rollback.command, None
+    return None, f"unsupported rollback.policy: {rollback.policy}"
 
 
 def plan(*, target: Path, runbook: Path, json_output: bool = False) -> int:
@@ -366,13 +446,28 @@ def plan(*, target: Path, runbook: Path, json_output: bool = False) -> int:
     if payload is None:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    contract_view = payload.get("verification_contract")
+    blockers: list[Any] = []
+    if isinstance(contract_view, dict):
+        raw_blockers = contract_view.get("blockers")
+        if isinstance(raw_blockers, list):
+            blockers = raw_blockers
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
+        return 1 if blockers else 0
     print(f"runbook plan: {payload['runbook_id']}")
     for step in payload["steps"]:
         print(f"- {step['id']}: {step['run']}")
-    return 0
+    if isinstance(contract_view, dict):
+        print(
+            "verification_contract: "
+            f"present={contract_view.get('present')} "
+            f"complete={contract_view.get('complete')} "
+            f"consequential={contract_view.get('consequential')}"
+        )
+        for blocker in blockers:
+            print(f"blocker: {blocker}")
+    return 1 if blockers else 0
 
 
 def pin(*, target: Path, runbook: Path, dry_run: bool = False, json_output: bool = False) -> int:
@@ -429,6 +524,32 @@ def _execute_plan(
             )
         else:
             print("error: runbook policy failed", file=sys.stderr)
+        return 2
+    contract_view = plan_payload.get("verification_contract")
+    contract_blockers = (
+        contract_view.get("blockers")
+        if isinstance(contract_view, dict) and isinstance(contract_view.get("blockers"), list)
+        else []
+    )
+    if contract_blockers:
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "target": str(target),
+                        "status": "verification-contract-incomplete",
+                        "runbook_id": plan_payload["runbook_id"],
+                        "verification_contract": contract_view,
+                        "blockers": contract_blockers,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print("error: consequential runbook is incomplete without verification_contract", file=sys.stderr)
+            for blocker in contract_blockers:
+                print(f"  - {blocker}", file=sys.stderr)
         return 2
     # Approval is a human-in-the-loop gate. It is satisfied ONLY by the operator
     # passing --approved (or the equivalent `approved` argument), never by an
@@ -533,6 +654,110 @@ def _execute_plan(
         if exit_code != 0:
             status = "failed"
             break
+
+    model_completion = verification_contract.model_completion_payload(
+        status="completed" if status == "completed" else "failed",
+        detail=None if status == "completed" else "one or more runbook steps failed",
+    )
+    verification_payload: dict[str, Any] | None = None
+    rollback_payload: dict[str, Any] | None = None
+    budget_use: dict[str, Any] | None = None
+    declared_contract: dict[str, Any] | None = None
+    include_model_completion = False
+
+    contract_blob = (
+        contract_view.get("contract") if isinstance(contract_view, dict) and contract_view.get("complete") else None
+    )
+    if isinstance(contract_blob, dict):
+        include_model_completion = True
+    if isinstance(contract_blob, dict) and status == "completed":
+        contract = verification_contract.contract_from_payload(contract_blob)
+        declared_contract = contract.to_payload()
+        verifier_command, verifier_error = _resolve_verifier_command(contract)
+        verify_timeout = contract.budget.latency_seconds
+        verify_started = time.monotonic()
+        if verifier_error or verifier_command is None:
+            verification_payload = verification_contract.verification_outcome_payload(
+                status="rejected",
+                exit_code=2,
+                detail=verifier_error or "verifier command missing",
+            )
+            status = "failed"
+        else:
+            exit_code, timed_out, stdout, stderr = _shell_or_argv_command(
+                verifier_command,
+                cwd=target,
+                timeout=verify_timeout,
+            )
+            verify_stdout = run_dir / "verification.stdout.log"
+            verify_stderr = run_dir / "verification.stderr.log"
+            verify_stdout.write_text(stdout)
+            verify_stderr.write_text(stderr)
+            verify_status = "passed" if exit_code == 0 and not timed_out else "failed"
+            verification_payload = verification_contract.verification_outcome_payload(
+                status=verify_status,
+                exit_code=exit_code,
+                detail="verifier timed out" if timed_out else None,
+                command=verifier_command,
+            )
+            verification_payload["stdout_log_path"] = str(verify_stdout)
+            verification_payload["stderr_log_path"] = str(verify_stderr)
+            # Wall time of the verifier only (declaration recording; #593 enforces).
+            latency_used = time.monotonic() - verify_started
+            budget_use = verification_contract.budget_use_payload(
+                contract,
+                latency_seconds_used=latency_used,
+                tokens_used=None,
+            )
+            if verify_status != "passed":
+                status = "failed"
+                rollback_command, rollback_error = _resolve_rollback_command(contract)
+                if rollback_error:
+                    rollback_payload = verification_contract.rollback_outcome_payload(
+                        status="rejected",
+                        policy=contract.rollback.policy,
+                        exit_code=2,
+                        detail=rollback_error,
+                    )
+                elif rollback_command is None:
+                    rollback_payload = verification_contract.rollback_outcome_payload(
+                        status="skipped",
+                        policy=contract.rollback.policy,
+                        detail="rollback policy does not execute a command",
+                    )
+                else:
+                    rb_code, rb_timed_out, rb_stdout, rb_stderr = _shell_or_argv_command(
+                        rollback_command,
+                        cwd=target,
+                        timeout=verify_timeout,
+                    )
+                    rb_stdout_path = run_dir / "rollback.stdout.log"
+                    rb_stderr_path = run_dir / "rollback.stderr.log"
+                    rb_stdout_path.write_text(rb_stdout)
+                    rb_stderr_path.write_text(rb_stderr)
+                    rollback_payload = verification_contract.rollback_outcome_payload(
+                        status="completed" if rb_code == 0 and not rb_timed_out else "failed",
+                        policy=contract.rollback.policy,
+                        exit_code=rb_code,
+                        detail="rollback timed out" if rb_timed_out else None,
+                        command=rollback_command,
+                    )
+                    rollback_payload["stdout_log_path"] = str(rb_stdout_path)
+                    rollback_payload["stderr_log_path"] = str(rb_stderr_path)
+    elif isinstance(contract_blob, dict) and status != "completed":
+        # Steps failed: still record the declared contract and that verification did not run.
+        contract = verification_contract.contract_from_payload(contract_blob)
+        declared_contract = contract.to_payload()
+        verification_payload = verification_contract.verification_outcome_payload(
+            status="not_run",
+            detail="model/step completion failed; verifier not executed",
+        )
+        budget_use = verification_contract.budget_use_payload(
+            contract,
+            latency_seconds_used=0.0,
+            tokens_used=None,
+        )
+
     receipt = {
         "run_id": run_id,
         "runbook_id": plan_payload["runbook_id"],
@@ -547,6 +772,16 @@ def _execute_plan(
         "steps": results,
         "receipt_path": str(run_dir / "receipt.json"),
     }
+    if include_model_completion:
+        receipt["model_completion"] = model_completion
+    if declared_contract is not None:
+        receipt["verification_contract"] = declared_contract
+    if verification_payload is not None:
+        receipt["verification"] = verification_payload
+    if rollback_payload is not None:
+        receipt["rollback"] = rollback_payload
+    if budget_use is not None:
+        receipt["budget_use"] = budget_use
     if pin_checks:
         receipt["pin_checks"] = pin_checks
     log_digests: dict[str, str] = {}
@@ -563,6 +798,15 @@ def _execute_plan(
             except ValueError:
                 log_name = path.name
             log_digests[log_name] = _file_sha256(path)
+    for extra_name in (
+        "verification.stdout.log",
+        "verification.stderr.log",
+        "rollback.stdout.log",
+        "rollback.stderr.log",
+    ):
+        extra_path = run_dir / extra_name
+        if extra_path.is_file():
+            log_digests[extra_name] = _file_sha256(extra_path)
     receipt["digests"] = {
         "algorithm": "sha256",
         "logs": dict(sorted(log_digests.items())),
