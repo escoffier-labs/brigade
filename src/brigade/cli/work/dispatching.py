@@ -124,6 +124,7 @@ def dispatch(args) -> int:
                 target=args.target,
                 commands=args.verify_commands,
                 manifest_id=args.verify_manifest_id,
+                files=args.verify_plan_files,
                 json_output=args.json,
             )
         if args.verify_command == "run":

@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Work verify plan ranks candidate verification commands from GraphTrail
+  affected-test impact (#486): `brigade work verify plan` attaches
+  `graph_impact` / `ranked_candidates` with hop-distance confidence and
+  via-symbol evidence, optional `--file` seeds changed paths (otherwise
+  `git diff --name-only HEAD`), and the worker still chooses the command.
+  When GraphTrail is unavailable the ranking degrades cleanly to an empty
+  advisory list.
 - Work task footprint metadata with a three-phase lifecycle (#777): each task
   carries `metadata.footprint` (`files`, `symbol_ids`, `snapshot_hash`) written
   predicted at filing (GraphTrail `impact` when available; empty-predicted

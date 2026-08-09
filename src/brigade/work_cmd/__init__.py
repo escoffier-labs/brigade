@@ -21,6 +21,7 @@ from . import (  # noqa: F401
     services,
     session,
     verification,
+    verify_ranking,
 )
 
 # NOTE: the ``sweeps`` submodule is loaded via ``from .sweeps import ...`` below;

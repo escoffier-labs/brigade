@@ -20,6 +20,7 @@ from .. import verify_manifest, verify_trial
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
+from . import verify_ranking
 
 
 def _verification_is_windows() -> bool:
@@ -1212,8 +1213,15 @@ def _verify_plan_payload(
     commands: list[str] | None = None,
     *,
     manifest_id: str | None = None,
+    files: list[str] | None = None,
+    affected_runner: Any | None = None,
 ) -> dict[str, Any]:
     target = target.expanduser().resolve()
+    ranking = verify_ranking.rank_verification_candidates(
+        target,
+        files=files,
+        affected_runner=affected_runner,
+    )
     manifest: verify_manifest.VerifyManifest | None = None
     if manifest_id:
         manifest, error = verify_manifest.resolve_manifest(target, manifest_id)
@@ -1224,6 +1232,8 @@ def _verify_plan_payload(
                 "commands": [],
                 "blockers": [error or f"verify manifest not found: {manifest_id}"],
                 "evidence": _verification_evidence_payload(target),
+                "graph_impact": ranking,
+                "ranked_candidates": ranking.get("candidates") or [],
                 "suggested_command": f'brigade work verify run --manifest "{manifest_id}"',
             }
         planned_commands = manifest.planned_commands
@@ -1243,16 +1253,32 @@ def _verify_plan_payload(
         "commands": planned_commands,
         "blockers": blockers,
         "evidence": evidence,
+        "graph_impact": ranking,
+        "ranked_candidates": ranking.get("candidates") or [],
         "suggested_command": "brigade work verify run"
         if planned_commands
         else 'brigade work verify run --command "..."',
     }
+    # Advisory only: when GraphTrail ranked affected tests and the caller did not
+    # lock a command/manifest, prefer the combined affected-test command as the
+    # next-step hint. ``commands`` still carries the default/full plan.
+    if (
+        commands is None
+        and manifest is None
+        and isinstance(ranking.get("suggested_command"), str)
+        and ranking["suggested_command"].strip()
+    ):
+        ranked_cmd = ranking["suggested_command"].strip()
+        payload["suggested_command"] = f'brigade work verify run --command "{ranked_cmd}"'
+        payload["suggested_from_graph_impact"] = True
     if manifest is not None:
         payload["manifest_id"] = manifest.manifest_id
         payload["scoreable"] = True
         payload["suggested_command"] = f'brigade work verify run --manifest "{manifest.manifest_id}"'
+        payload.pop("suggested_from_graph_impact", None)
     elif commands is not None:
         payload["scoreable"] = False
+        payload.pop("suggested_from_graph_impact", None)
     return payload
 
 
@@ -1773,13 +1799,21 @@ def verify_plan(
     target: Path,
     commands: list[str] | None = None,
     manifest_id: str | None = None,
+    files: list[str] | None = None,
     json_output: bool = False,
+    affected_runner: Any | None = None,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    payload = _verify_plan_payload(target, commands, manifest_id=manifest_id)
+    payload = _verify_plan_payload(
+        target,
+        commands,
+        manifest_id=manifest_id,
+        files=files,
+        affected_runner=affected_runner,
+    )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if not payload["blockers"] else 1
@@ -1789,6 +1823,7 @@ def verify_plan(
     print(f"commands: {len(commands)}")
     for command in commands:
         print(f"- {command}")
+    _print_graph_impact(payload.get("graph_impact"))
     blockers = payload.get("blockers") if isinstance(payload.get("blockers"), list) else []
     if blockers:
         print("blockers:")
@@ -1796,6 +1831,32 @@ def verify_plan(
             print(f"  - {blocker}")
     print(f"run: {payload['suggested_command']}")
     return 0 if not blockers else 1
+
+
+def _print_graph_impact(ranking: object) -> None:
+    if not isinstance(ranking, dict):
+        return
+    if ranking.get("degraded") is True:
+        reason = ranking.get("degraded_reason") or "graphtrail unavailable"
+        print(f"graph_impact: degraded ({reason})")
+        return
+    candidates = ranking.get("candidates") if isinstance(ranking.get("candidates"), list) else []
+    changed = ranking.get("changed_files") if isinstance(ranking.get("changed_files"), list) else []
+    print(f"graph_impact: {len(candidates)} candidate(s) from {len(changed)} changed file(s)")
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        confidence = item.get("confidence") if isinstance(item.get("confidence"), dict) else {}
+        band = confidence.get("band") or "unknown"
+        score = confidence.get("score")
+        hops = confidence.get("min_hops")
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        via = evidence.get("via") if isinstance(evidence.get("via"), list) else []
+        via_text = ",".join(str(symbol) for symbol in via[:3]) if via else "-"
+        print(f"- [{band} score={score} hops={hops} via={via_text}] {item.get('command')}")
+    note = ranking.get("attribution")
+    if isinstance(note, str) and note.strip() and candidates:
+        print(f"graph_impact_note: {note.strip()}")
 
 
 def _attach_miseledger_indexing(
