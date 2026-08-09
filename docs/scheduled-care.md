@@ -1,6 +1,6 @@
 # Scheduled Memory Care
 
-The schedule belongs to the operator; Brigade only runs when invoked. Brigade does not install cron jobs, systemd timers, GitHub Actions workflows, or any other scheduler. Copy one of the recipes below into your own crontab, user timer, or CI job after `brigade init` wires the target.
+The schedule belongs to the operator. Brigade only runs when invoked. Brigade does not install cron jobs, systemd timers, GitHub Actions workflows, or any other scheduler. Copy one of the recipes below into your own crontab, user timer, or CI job after `brigade init` wires the target.
 
 Prerequisites:
 
@@ -13,7 +13,7 @@ brigade daily init --target .
 brigade extras on   # once per machine; required for center report and runbook commands
 ```
 
-Replace `WORKSPACE` with the absolute path to your Brigade-wired repo or operator workspace. Every `brigade` command below assumes `cd WORKSPACE` first, so `--target .` resolves correctly.
+Replace `WORKSPACE` with the absolute path to your Brigade-wired repo or operator workspace. Every `brigade` command below assumes `cd` into that directory first, so `--target .` resolves correctly. In crontab lines, quote the path (`cd "WORKSPACE"`) so spaces and shell metacharacters do not break the job.
 
 Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry.md), [operator center](operator-center.md), [agents guide](agents-guide.md).
 
@@ -43,6 +43,16 @@ Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 Replace `/home/you` with your account home directory. Cron cannot expand `$HOME`.
 
+### systemd user timers
+
+User timers stop when you log out unless lingering is enabled. Run once per account:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+Then `systemctl --user daemon-reload`, `systemctl --user enable --now <timer>.timer`, and `systemctl --user list-timers` to confirm the next fire time.
+
 ### Tracked runbooks
 
 `brigade init` gitignores `.brigade/` by default. Nightly runbooks referenced from CI must be committed. Inside the managed brigade gitignore block, add:
@@ -50,15 +60,16 @@ Replace `/home/you` with your account home directory. Cron cannot expand `$HOME`
 ```gitignore
 !.brigade/runbooks/
 !.brigade/runbooks/**
+.brigade/runbooks/runs/
 ```
 
-Then commit `.brigade/runbooks/nightly-maintenance.json`. Runtime receipts under `.brigade/runbooks/runs/` stay gitignored.
+The final line re-ignores runtime receipts after the `**` un-ignore. Then commit `.brigade/runbooks/nightly-maintenance.json`. Receipts under `.brigade/runbooks/runs/` stay out of git.
 
 ## GitHub Actions bootstrap
 
 Fresh checkouts have no `.brigade/` runtime state. Scheduled workflows need a bootstrap on every run and a cache when you want scan queues, receipts, or reports to accumulate across runs.
 
-Use this step block before the recipe commands in each workflow below:
+Use this step block before the recipe commands in each workflow below. Restore the `.brigade` cache before bootstrap so scan queues, receipts, and reports survive across runs:
 
 ```yaml
       - uses: actions/checkout@v4
@@ -68,19 +79,21 @@ Use this step block before the recipe commands in each workflow below:
       - run: python -m pip install --upgrade pip pipx
       - run: pipx install brigade-cli
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: .brigade
+          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
           brigade init --depth repo --harnesses codex --target .
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
-      - uses: actions/cache@v4
-        with:
-          path: .brigade
-          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ hashFiles('.gitignore') }}
-          restore-keys: |
-            brigade-${{ github.workflow }}-${{ github.ref_name }}-
 ```
+
+The cache `key` includes `${{ github.run_id }}` so each run writes a fresh entry. `restore-keys` keeps the stable workflow/ref prefix so the latest prior `.brigade` state restores on the next run.
 
 Adjust `--depth` and `--harnesses` to match your repo. `brigade init` is idempotent on an already-wired checkout.
 
@@ -92,6 +105,7 @@ Scan local memory cards for decay, import flagged items into the work inbox, and
 brigade memory care scan --target .
 brigade memory care import-issues --target .
 brigade work brief --target .
+brigade memory care closeout --target .
 ```
 
 Optional follow-ups when the scan surfaces metadata gaps or stale review queues:
@@ -100,7 +114,6 @@ Optional follow-ups when the scan surfaces metadata gaps or stale review queues:
 brigade memory care plan-fixes --target .
 brigade memory care backfill --target .
 brigade memory care backfill --apply --target .
-brigade memory care closeout --target .
 ```
 
 Foreground batch alternative when scanner producers are configured in `.brigade/scanners.toml`:
@@ -117,7 +130,7 @@ On a workspace with several enabled producers, `brigade work scanners run --due 
 
 ```cron
 PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
-15 6 * * * cd WORKSPACE && brigade memory care scan --target . && brigade memory care import-issues --target . && brigade work brief --target .
+15 6 * * * cd "WORKSPACE" && brigade memory care scan --target . && brigade memory care import-issues --target . && brigade work brief --target . && brigade memory care closeout --target .
 ```
 
 ### systemd user timer
@@ -132,7 +145,7 @@ Description=Brigade daily memory care pass
 Type=oneshot
 WorkingDirectory=WORKSPACE
 Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/bin/sh -c 'brigade memory care scan --target . && brigade memory care import-issues --target . && brigade work brief --target .'
+ExecStart=/bin/sh -c 'brigade memory care scan --target . && brigade memory care import-issues --target . && brigade work brief --target . && brigade memory care closeout --target .'
 ```
 
 `~/.config/systemd/user/brigade-daily-care.timer`:
@@ -149,7 +162,7 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-Enable with `systemctl --user daemon-reload`, then `systemctl --user enable --now brigade-daily-care.timer`.
+Enable with `systemctl --user daemon-reload`, then `systemctl --user enable --now brigade-daily-care.timer`. See [systemd user timers](#systemd-user-timers) for `loginctl enable-linger`.
 
 ### GitHub Actions
 
@@ -172,21 +185,22 @@ jobs:
       - run: python -m pip install --upgrade pip pipx
       - run: pipx install brigade-cli
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: .brigade
+          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
           brigade init --depth repo --harnesses codex --target .
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
-      - uses: actions/cache@v4
-        with:
-          path: .brigade
-          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ hashFiles('.gitignore') }}
-          restore-keys: |
-            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - run: brigade memory care scan --target .
       - run: brigade memory care import-issues --target .
       - run: brigade work brief --target .
+      - run: brigade memory care closeout --target .
 ```
 
 ## Ingest sweep
@@ -204,7 +218,7 @@ Run this on a shorter cadence when writer harnesses produce handoffs throughout 
 
 ```cron
 PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
-*/30 * * * * cd WORKSPACE && brigade handoff lint --strict --target . && brigade ingest --promote-cards --route-documents --target .
+*/30 * * * * cd "WORKSPACE" && brigade handoff lint --strict --target . && brigade ingest --promote-cards --route-documents --target .
 ```
 
 ### systemd user timer
@@ -257,25 +271,25 @@ jobs:
       - run: python -m pip install --upgrade pip pipx
       - run: pipx install brigade-cli
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: .brigade
+          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
           brigade init --depth repo --harnesses codex --target .
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
-      - uses: actions/cache@v4
-        with:
-          path: .brigade
-          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ hashFiles('.gitignore') }}
-          restore-keys: |
-            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - run: brigade handoff lint --strict --target .
       - run: brigade ingest --promote-cards --route-documents --target .
 ```
 
 ## Weekly outcome ratchet
 
-Rank verified-learning outcomes, then reconcile skill promotion state. `reconcile` is dry-run by default; pass `--apply` only when you intend to install or roll back registry skills.
+Rank verified-learning outcomes, then reconcile skill promotion state. `reconcile` is dry-run by default. Pass `--apply` only when you intend to install or roll back registry skills.
 
 ```bash
 brigade outcome rank --target .
@@ -294,14 +308,14 @@ Schedule rank first, then reconcile 30 to 60 minutes later so new verify receipt
 
 ```cron
 PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
-0 7 * * 1 cd WORKSPACE && brigade outcome rank --target .
-30 7 * * 1 cd WORKSPACE && brigade outcome reconcile --target .
+0 7 * * 1 cd "WORKSPACE" && brigade outcome rank --target .
+30 7 * * 1 cd "WORKSPACE" && brigade outcome reconcile --target .
 ```
 
 To apply promotions automatically after review:
 
 ```cron
-30 7 * * 1 cd WORKSPACE && brigade outcome reconcile --apply --target .
+30 7 * * 1 cd "WORKSPACE" && brigade outcome reconcile --apply --target .
 ```
 
 ### systemd user timer
@@ -383,18 +397,18 @@ jobs:
       - run: python -m pip install --upgrade pip pipx
       - run: pipx install brigade-cli
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: .brigade
+          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
           brigade init --depth repo --harnesses codex --target .
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
-      - uses: actions/cache@v4
-        with:
-          path: .brigade
-          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ hashFiles('.gitignore') }}
-          restore-keys: |
-            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - run: brigade outcome rank --target .
   outcome-reconcile:
     needs: outcome-rank
@@ -407,24 +421,26 @@ jobs:
       - run: python -m pip install --upgrade pip pipx
       - run: pipx install brigade-cli
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: .brigade
+          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
           brigade init --depth repo --harnesses codex --target .
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
-      - uses: actions/cache@v4
-        with:
-          path: .brigade
-          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ hashFiles('.gitignore') }}
-          restore-keys: |
-            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - run: brigade outcome reconcile --target .
 ```
 
+The GitHub Actions recipe runs reconcile immediately after rank in the same workflow (`needs: outcome-rank`), not 30 to 60 minutes later. That is fine for CI: both jobs share the same restored `.brigade` cache and rank only reads receipts already on disk. On a laptop, keep the cron or timer gap so verify runs between rank and reconcile can finish first.
+
 ## Daily observability
 
-Check handoff pipeline health, read the daily driver snapshot, and build the local operator report bundle. `center report build` is extras-gated; run `brigade extras on` once per machine or prefix with `BRIGADE_EXTRAS=1`.
+Check handoff pipeline health, read the daily driver snapshot, and build the local operator report bundle. `center report build` is extras-gated. Run `brigade extras on` once per machine or prefix with `BRIGADE_EXTRAS=1`.
 
 ```bash
 brigade handoff doctor --target .
@@ -436,7 +452,7 @@ brigade center report build --target .
 
 ```cron
 PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
-0 8 * * * cd WORKSPACE && brigade handoff doctor --target . && brigade daily status --target . && brigade center report build --target .
+0 8 * * * cd "WORKSPACE" && brigade handoff doctor --target . && brigade daily status --target . && brigade center report build --target .
 ```
 
 ### systemd user timer
@@ -489,18 +505,18 @@ jobs:
       - run: python -m pip install --upgrade pip pipx
       - run: pipx install brigade-cli
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: .brigade
+          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
           brigade init --depth repo --harnesses codex --target .
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
-      - uses: actions/cache@v4
-        with:
-          path: .brigade
-          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ hashFiles('.gitignore') }}
-          restore-keys: |
-            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - run: brigade handoff doctor --target .
       - run: brigade daily status --target .
       - run: brigade center report build --target .
@@ -528,7 +544,7 @@ Example runbook at `.brigade/runbooks/nightly-maintenance.json`:
 }
 ```
 
-Run it (`runbook` is extras-gated; run `brigade extras on` once per machine or prefix with `BRIGADE_EXTRAS=1`):
+Run it (`runbook` is extras-gated. Run `brigade extras on` once per machine or prefix with `BRIGADE_EXTRAS=1`):
 
 ```bash
 brigade runbook run --approved --target . .brigade/runbooks/nightly-maintenance.json
@@ -538,7 +554,7 @@ brigade runbook run --approved --target . .brigade/runbooks/nightly-maintenance.
 
 ```cron
 PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
-0 4 * * * cd WORKSPACE && brigade runbook run --approved --target . .brigade/runbooks/nightly-maintenance.json
+0 4 * * * cd "WORKSPACE" && brigade runbook run --approved --target . .brigade/runbooks/nightly-maintenance.json
 ```
 
 ### systemd user timer
@@ -591,18 +607,18 @@ jobs:
       - run: python -m pip install --upgrade pip pipx
       - run: pipx install brigade-cli
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: .brigade
+          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - name: Bootstrap Brigade
         run: |
           brigade init --depth repo --harnesses codex --target .
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
-      - uses: actions/cache@v4
-        with:
-          path: .brigade
-          key: brigade-${{ github.workflow }}-${{ github.ref_name }}-${{ hashFiles('.gitignore') }}
-          restore-keys: |
-            brigade-${{ github.workflow }}-${{ github.ref_name }}-
       - run: brigade runbook run --approved --target . .brigade/runbooks/nightly-maintenance.json
 ```
 
@@ -610,4 +626,4 @@ Commit the runbook JSON when you want CI to execute the same pinned steps as you
 
 ## More recipes
 
-Add new sections here as adapters land. Future candidates include a beads reconcile pass once a `bd` adapter ships; follow the same crontab, systemd, and GitHub Actions shape as the recipes above.
+Add new sections here as adapters land. Future candidates include a beads reconcile pass once a `bd` adapter ships. Follow the same crontab, systemd, and GitHub Actions shape as the recipes above.
