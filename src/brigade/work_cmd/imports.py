@@ -75,7 +75,7 @@ def import_context(
         body_path = Path(from_file).expanduser()
         try:
             raw = body_path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             print(f"error: cannot read --from-file: {exc}", file=sys.stderr)
             return 2
     else:
