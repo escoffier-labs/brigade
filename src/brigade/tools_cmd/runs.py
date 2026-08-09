@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -13,6 +14,27 @@ from typing import Any
 
 from ..render import emit
 from . import calls as calls_mod, checkpoint_store, constants, helpers, mcp, paths, safety
+
+
+_OUTPUT_REDUCER_ID = "brigade.tool-output-summary.v1"
+_OUTPUT_SUMMARY_LIMIT = 500
+_OUTPUT_REDUCER_RULES = {
+    "collapse_whitespace": True,
+    "limit_characters": _OUTPUT_SUMMARY_LIMIT,
+    "redact_secret_patterns": True,
+    "trim_trailing_before_ellipsis": True,
+    "truncation_suffix": "...",
+}
+_OUTPUT_REDUCER_RULE_HASH = hashlib.sha256(
+    json.dumps(_OUTPUT_REDUCER_RULES, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+
+
+def _compact_output_summary(value: str) -> tuple[str, int]:
+    """Return the stored summary and the deterministic number of omitted chars."""
+    redacted = safety._redact_text(value, None)
+    summary = safety._redact_text(redacted, _OUTPUT_SUMMARY_LIMIT)
+    return summary, max(0, len(redacted) - len(summary))
 
 
 def _write_run_receipt(
@@ -57,6 +79,8 @@ def _write_run_receipt(
     receipt_path = run_dir / f"{run_id}.json"
     stdout_path.write_text(stdout_text)
     stderr_path.write_text(stderr_text)
+    stdout_summary, stdout_omitted = _compact_output_summary(stdout_text)
+    stderr_summary, stderr_omitted = _compact_output_summary(stderr_text)
     receipt = {
         "id": run_id,
         "call_id": call.get("id"),
@@ -74,8 +98,8 @@ def _write_run_receipt(
         "cwd": str(cwd),
         "args": call.get("args"),
         "arguments": call.get("arguments"),
-        "stdout_summary": safety._redact_text(stdout_text),
-        "stderr_summary": safety._redact_text(stderr_text),
+        "stdout_summary": stdout_summary,
+        "stderr_summary": stderr_summary,
         "stdout_log_path": str(stdout_path),
         "stderr_log_path": str(stderr_path),
         "receipt_path": str(receipt_path),
@@ -97,6 +121,18 @@ def _write_run_receipt(
         "env_labels_used": policy_decision.get("env_labels_used", []),
         "projection_summary": call.get("projection_summary", {}),
     }
+    omitted_by_stream = {
+        stream: count for stream, count in (("stdout", stdout_omitted), ("stderr", stderr_omitted)) if count
+    }
+    if omitted_by_stream:
+        receipt["output_compaction"] = {
+            "reducer_id": _OUTPUT_REDUCER_ID,
+            "rule_hash": _OUTPUT_REDUCER_RULE_HASH,
+            "omitted_count": sum(omitted_by_stream.values()),
+            "omitted_by_stream": omitted_by_stream,
+            "unit": "characters",
+            "raw_retrievable": stdout_path.is_file() and stderr_path.is_file(),
+        }
     if extra:
         receipt.update(extra)
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
@@ -150,6 +186,7 @@ def _run_public_summary(receipt: dict[str, Any]) -> dict[str, Any]:
         "stderr_summary": receipt.get("stderr_summary"),
         "stdout_log_path": receipt.get("stdout_log_path"),
         "stderr_log_path": receipt.get("stderr_log_path"),
+        "output_compaction": receipt.get("output_compaction"),
         "receipt_path": receipt.get("receipt_path"),
     }
 
