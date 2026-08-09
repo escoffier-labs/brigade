@@ -1,0 +1,17 @@
+{
+  "id": "forward-plan",
+  "title": "forward-plan",
+  "version": "0.1.0",
+  "description": "Allowlist-bound forward planner: ready set + outcome rank + ROADMAP.md to a dependency-filed plan under .brigade/work/plans/, with GraphTrail-derived edges marked derived and confirmation-gated.",
+  "required_tools": [
+    "Read",
+    "Grep",
+    "Write",
+    "Bash(brigade work ready:*)",
+    "Bash(brigade outcome rank:*)",
+    "Bash(brigade work task:*)",
+    "Bash(brigade work plans:*)",
+    "Bash(brigade code:*)"
+  ],
+  "tests": ["brigade skills lint forward-plan"]
+}
