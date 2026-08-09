@@ -47,16 +47,78 @@ def _task_ledger_lock(target: Path) -> Iterator[None]:
         runguard._release_lock(path, ownership)
 
 
+REASON_CORRUPT_LEDGER = "corrupt_ledger"
+REASON_UNSUPPORTED_LEDGER_VERSION = "unsupported_ledger_version"
+
+
+class TaskLedgerError(ValueError):
+    """Fail-closed read/parse failure for ``.brigade/work/tasks.json``."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        details: dict[str, Any] | None = None,
+        exit_code: int = 2,
+    ):
+        super().__init__(message)
+        self.reason = reason
+        self.details = details or {}
+        self.exit_code = exit_code
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = {"error": str(self), "reason": self.reason, "exit_code": self.exit_code}
+        payload.update(self.details)
+        return payload
+
+
 def _read_task_ledger(target: Path) -> dict[str, Any]:
     path = helpers._tasks_path(target)
     if not path.exists():
         return {"version": edges_mod.TASK_LEDGER_VERSION, "tasks": [], "edges": []}
     try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {"version": edges_mod.TASK_LEDGER_VERSION, "tasks": [], "edges": []}
+        raw = path.read_text()
+    except OSError as exc:
+        raise TaskLedgerError(
+            f"task ledger is unreadable: {path}",
+            reason=REASON_CORRUPT_LEDGER,
+            details={"path": str(path), "error": str(exc)},
+        ) from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise TaskLedgerError(
+            f"task ledger is corrupt (invalid JSON): {path}",
+            reason=REASON_CORRUPT_LEDGER,
+            details={"path": str(path), "error": str(exc)},
+        ) from exc
     if not isinstance(payload, dict):
-        return {"version": edges_mod.TASK_LEDGER_VERSION, "tasks": [], "edges": []}
+        raise TaskLedgerError(
+            f"task ledger is corrupt (root must be an object): {path}",
+            reason=REASON_CORRUPT_LEDGER,
+            details={"path": str(path)},
+        )
+    version = payload.get("version", 1)
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise TaskLedgerError(
+            f"task ledger has invalid version {version!r}: {path}",
+            reason=REASON_UNSUPPORTED_LEDGER_VERSION,
+            details={"path": str(path), "version": version, "supported": edges_mod.TASK_LEDGER_VERSION},
+        )
+    if version > edges_mod.TASK_LEDGER_VERSION:
+        raise TaskLedgerError(
+            f"task ledger version {version} is newer than supported "
+            f"{edges_mod.TASK_LEDGER_VERSION}: {path}",
+            reason=REASON_UNSUPPORTED_LEDGER_VERSION,
+            details={"path": str(path), "version": version, "supported": edges_mod.TASK_LEDGER_VERSION},
+        )
+    if version < 1:
+        raise TaskLedgerError(
+            f"task ledger has invalid version {version}: {path}",
+            reason=REASON_UNSUPPORTED_LEDGER_VERSION,
+            details={"path": str(path), "version": version, "supported": edges_mod.TASK_LEDGER_VERSION},
+        )
     tasks = payload.get("tasks")
     if not isinstance(tasks, list):
         payload["tasks"] = []
