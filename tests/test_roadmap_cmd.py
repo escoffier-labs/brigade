@@ -41,6 +41,11 @@ def test_read_text_returns_empty_on_undecodable_utf8(tmp_path):
     assert roadmap_cmd._read_text(path) == ""
 
 
+def test_target_owns_brigade_cli_ignores_malformed_pyproject(tmp_path):
+    tmp_path.joinpath("pyproject.toml").write_bytes(b'name = "brigade-cli"\xff')
+    assert roadmap_cmd._target_owns_brigade_cli(tmp_path) is False
+
+
 def test_roadmap_audit_classifies_stale_sections_and_command_mismatch(tmp_path):
     (tmp_path / "ROADMAP.md").write_text(
         "# Roadmap\n\n"

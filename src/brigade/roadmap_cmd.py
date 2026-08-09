@@ -538,9 +538,8 @@ def _target_owns_brigade_cli(target: Path) -> bool:
     audited against brigade's own command surface, which otherwise reports
     hundreds of "undocumented" commands it never owned.
     """
-    try:
-        text = (target / "pyproject.toml").read_text(encoding="utf-8")
-    except OSError:
+    text = _read_text(target / "pyproject.toml")
+    if not text:
         return False
     return re.search(r'(?m)^\s*name\s*=\s*"brigade-cli"\s*$', text) is not None
 

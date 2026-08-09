@@ -317,7 +317,7 @@ def _execute(
         summary = f"promote → {dest.relative_to(target)}  ({name})"
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content)
+            dest.write_text(content, encoding="utf-8")
             _archive(handoff_path, processed_dir)
         return Action("promoted", summary)
 
@@ -346,7 +346,7 @@ def _execute(
             header = (
                 f"<!-- routed from {handoff_path.name}\n     reason: {outcome.reason}\n     routed-at: {slug} -->\n\n"
             )
-            dest.write_text(header + original)
+            dest.write_text(header + original, encoding="utf-8")
             _archive(handoff_path, processed_dir)
         # Both inboxed and skipped are now archived; classify them uniformly.
         return Action("inboxed", summary)

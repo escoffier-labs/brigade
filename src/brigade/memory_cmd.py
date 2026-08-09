@@ -230,7 +230,7 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True) ->
         print(f"error: memory-care config already exists: {path}", file=sys.stderr)
         return 1
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_format_config())
+    path.write_text(_format_config(), encoding="utf-8")
     if update_gitignore:
         apply_gitignore(target, Selection(depth="repo", harnesses=[], owner="this-repo", includes=[]))
     print(f"memory_care_config: {path}")
@@ -320,7 +320,7 @@ def _index_links(target: Path, config: MemoryCareConfig) -> set[str]:
             continue
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         links.update(match.group("path") for match in pattern.finditer(text))
     return links
@@ -744,8 +744,8 @@ def _write_scan_outputs(target: Path, config: MemoryCareConfig, payload: dict[st
     output.mkdir(parents=True, exist_ok=True)
     scan_path = output / "scan-latest.json"
     queue_path = output / "refresh-queue.json"
-    scan_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    queue_path.write_text(json.dumps(_queue_payload(payload), indent=2, sort_keys=True) + "\n")
+    scan_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    queue_path.write_text(json.dumps(_queue_payload(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return scan_path, queue_path
 
 

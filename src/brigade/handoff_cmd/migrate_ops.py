@@ -84,11 +84,11 @@ def migrate(*, target: Path, inbox: str | None = None, apply: bool = False, json
             if apply:
                 originals = inbox_path / "migrated-originals"
                 originals.mkdir(parents=True, exist_ok=True)
-                (originals / path.name).write_text(text)
-                path.write_text(rendered)
+                (originals / path.name).write_text(text, encoding="utf-8")
+                path.write_text(rendered, encoding="utf-8")
                 converted = lint_file(path)
                 if not converted.valid:
-                    path.write_text(text)
+                    path.write_text(text, encoding="utf-8")
                     (originals / path.name).unlink()
                     item["status"] = "unmigratable"
                     item["missing"] = list(converted.errors)

@@ -262,7 +262,7 @@ def _copy_skill_for_harness(
         rendered = _render_skill_text_for_harness(
             source_skill.read_text(encoding="utf-8", errors="replace"), metadata, skill_id, harness
         )
-        _skill_md_path(dest).write_text(rendered)
+        _skill_md_path(dest).write_text(rendered, encoding="utf-8")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -1710,7 +1710,8 @@ def pack_build(*, target: Path, json_output: bool = False) -> int:
         f"# Skill Pack {pack_id}\n\n"
         f"- skills: {payload['skill_count']}\n"
         f"- fingerprint: {payload['evidence_fingerprint']}\n"
-        f"- import: brigade skills pack import {pack_dir}\n"
+        f"- import: brigade skills pack import {pack_dir}\n",
+        encoding="utf-8",
     )
     payload["path"] = str(pack_dir)
     if json_output:

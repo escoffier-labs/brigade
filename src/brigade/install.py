@@ -153,7 +153,7 @@ def _git_info_dir(target: Path) -> Path | None:
         return git_path / "info"
     if git_path.is_file():
         try:
-            content = git_path.read_text().strip()
+            content = git_path.read_text(encoding="utf-8").strip()
         except OSError:
             return None
         if content.startswith("gitdir:"):
@@ -183,7 +183,7 @@ def apply_gitignore(target: Path, selection: Selection, *, use_git_exclude: bool
         gi = target / ".gitignore"
         location = ".gitignore"
     if not gi.exists():
-        gi.write_text(block)
+        gi.write_text(block, encoding="utf-8")
         return f"created ({location})"
     existing = gi.read_text(encoding="utf-8")
     markers = (
@@ -192,10 +192,10 @@ def apply_gitignore(target: Path, selection: Selection, *, use_git_exclude: bool
     )
     new_text, replaced = _replace_managed_gitignore_blocks(existing, block, markers)
     if replaced:
-        gi.write_text(new_text)
+        gi.write_text(new_text, encoding="utf-8")
         return f"updated ({location})"
     sep = "" if existing.endswith("\n") else "\n"
-    gi.write_text(existing + sep + "\n" + block)
+    gi.write_text(existing + sep + "\n" + block, encoding="utf-8")
     return f"updated ({location})"
 
 
@@ -304,7 +304,7 @@ def _write_surface_evidence(target: Path, selection: Selection, *, projection_on
             for surface in selection.surfaces
         },
     }
-    path.write_text(json.dumps(payload, indent=2) + "\n")
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def install_selection(

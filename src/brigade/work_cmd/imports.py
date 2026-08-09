@@ -123,7 +123,7 @@ def _append_active_context_note(target: Path, rendered: str) -> Path | None:
         return None
     session_json = session_dir / "session.json"
     try:
-        payload = json.loads(session_json.read_text())
+        payload = json.loads(session_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):

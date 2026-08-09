@@ -180,9 +180,9 @@ def run(
     ho = handoffmod.render_handoff(
         question=question, markdown_report=result.report, findings=result.findings, stats=result.stats
     )
-    (d / "report.md").write_text(md)
-    (d / "report.html").write_text(html)
-    (d / "handoff.md").write_text(ho)
+    (d / "report.md").write_text(md, encoding="utf-8")
+    (d / "report.html").write_text(html, encoding="utf-8")
+    (d / "handoff.md").write_text(ho, encoding="utf-8")
     registry.finish_run(
         target,
         run_id,
@@ -372,7 +372,7 @@ def export_handoff(
             "inbox": inbox_label,
             "blockers": ["export path already exists with different content; pass --force to replace"],
         }
-    out_path.write_text(export_text)
+    out_path.write_text(export_text, encoding="utf-8")
 
     from . import handoff_cmd
 
