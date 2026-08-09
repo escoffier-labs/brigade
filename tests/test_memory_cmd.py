@@ -31,6 +31,12 @@ def test_memory_care_init_status_and_doctor(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["config_path"].endswith(".brigade/memory-care.toml")
     assert any(check["name"] == "memory_care_scan" for check in payload["checks"])
+    archive = payload["archive_candidates"]
+    assert archive["read_only"] is True
+    assert archive["would_archive"] is False
+    assert archive["approval_required"] is True
+    assert archive["candidate_count"] == 0
+    assert archive["candidates"] == []
 
     assert memory_cmd.doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -903,3 +909,164 @@ def test_memory_care_status_archive_candidates_are_read_only(tmp_path, monkeypat
     assert not any(path.name.endswith(".archived") or path.name.endswith(".bak") for path in tmp_path.rglob("*"))
     assert not (tmp_path / "memory" / "cards" / "archive").exists()
     assert list((tmp_path / ".brigade" / "memory-care").rglob("closeout.json")) == []
+
+
+def test_memory_care_status_archive_candidate_threshold_uses_two_times_ttl_not_plus_thirty(
+    tmp_path, monkeypatch, capsys
+):
+    """ttl*2 and ttl+30 collide when ttl=30; use ttl=45 so the formulas diverge."""
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
+    _write_archive_candidate_care_config(tmp_path, stale_after_days=45)
+    cards = tmp_path / "memory" / "cards"
+    # age 80: between (45+30=75) and (45*2=90) — candidate only under the wrong formula
+    _write_card(
+        cards / "between-formulas.md",
+        {
+            "topic": "between-formulas",
+            "last_reviewed": "2026-03-09",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+    )
+    # age 90: exactly 2x TTL — not a candidate (strict >)
+    _write_card(
+        cards / "exactly-two-ttl.md",
+        {
+            "topic": "exactly-two-ttl",
+            "last_reviewed": "2026-02-27",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+    )
+    # age 91: past 2x TTL — candidate
+    _write_card(
+        cards / "past-two-ttl.md",
+        {
+            "topic": "past-two-ttl",
+            "last_reviewed": "2026-02-26",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+    )
+    (tmp_path / "MEMORY.md").write_text(
+        "\n".join(
+            [
+                "- [between-formulas](memory/cards/between-formulas.md)",
+                "- [exactly-two-ttl](memory/cards/exactly-two-ttl.md)",
+                "- [past-two-ttl](memory/cards/past-two-ttl.md)",
+            ]
+        )
+        + "\n"
+    )
+
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert memory_cmd.status(target=tmp_path, json_output=True) == 0
+    archive = json.loads(capsys.readouterr().out)["archive_candidates"]
+    assert archive["threshold"]["ttl_days"] == 45
+    assert archive["threshold"]["candidate_after_days"] == 90
+    assert archive["threshold"]["candidate_after_days"] != 45 + 30
+    by_id = {item["card_id"]: item for item in archive["candidates"]}
+    assert set(by_id) == {"past-two-ttl"}
+    assert by_id["past-two-ttl"]["age_days"] == 91
+    assert "between-formulas" not in by_id
+    assert "exactly-two-ttl" not in by_id
+
+
+def test_memory_care_status_archive_candidates_age_from_saved_scan_date_not_today(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
+    _write_archive_candidate_care_config(tmp_path, stale_after_days=30)
+    cards = tmp_path / "memory" / "cards"
+    # At scan_date 2026-05-28, age=57 (<=60) so not a candidate.
+    # If status wrongly used a later "today", age would cross the threshold.
+    _write_card(
+        cards / "scan-anchored.md",
+        {
+            "topic": "scan-anchored",
+            "last_reviewed": "2026-04-01",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+    )
+    (tmp_path / "MEMORY.md").write_text("- [scan-anchored](memory/cards/scan-anchored.md)\n")
+
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    scan_payload = json.loads(capsys.readouterr().out)
+    assert scan_payload["scan_date"] == "2026-05-28"
+
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 7, 1))
+    assert memory_cmd.status(target=tmp_path, json_output=True) == 0
+    archive = json.loads(capsys.readouterr().out)["archive_candidates"]
+    assert archive["scan_date"] == "2026-05-28"
+    assert archive["candidate_count"] == 0
+    assert archive["candidates"] == []
+
+
+def test_memory_care_status_prints_archive_candidates_in_human_output(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
+    _write_archive_candidate_care_config(tmp_path, stale_after_days=30)
+    cards = tmp_path / "memory" / "cards"
+    _write_card(
+        cards / "human-old.md",
+        {
+            "topic": "human-old",
+            "last_reviewed": "2026-03-28",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md", "TOOLS.md"],
+        },
+    )
+    (tmp_path / "MEMORY.md").write_text("- [human-old](memory/cards/human-old.md)\n")
+
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+
+    assert memory_cmd.status(target=tmp_path, json_output=False) == 0
+    out = capsys.readouterr().out
+    assert "memory care status:" in out
+    assert (
+        "archive_candidates: count=1 unassessable=0 threshold=age_days>60 approval_required=True would_archive=False"
+    ) in out
+    assert (
+        "  archive_candidate: memory/cards/human-old.md "
+        "age_days=61 last_reviewed=2026-03-28 evidence=README.md,TOOLS.md"
+    ) in out
+
+
+def test_memory_care_archive_candidates_from_legacy_scan_without_evidence_pointers(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 8, 1))
+    _write_archive_candidate_care_config(tmp_path, stale_after_days=30)
+    config = memory_cmd.load_config(tmp_path)
+    assert config is not None
+    scan_dir = tmp_path / ".brigade" / "memory-care" / "decay"
+    scan_dir.mkdir(parents=True)
+    (scan_dir / "scan-latest.json").write_text(
+        json.dumps(
+            {
+                "scan_date": "2026-05-28",
+                "cards": [
+                    {
+                        "card_id": "legacy",
+                        "file": "memory/cards/legacy.md",
+                        "last_reviewed": "2026-03-28",
+                        "fresh_until": "2026-12-01",
+                    }
+                ],
+            }
+        )
+    )
+    archive = memory_cmd._archive_candidates_from_scan(
+        memory_cmd._load_scan_payload(tmp_path, config),
+        config,
+    )
+    assert archive["scan_date"] == "2026-05-28"
+    assert archive["candidate_count"] == 1
+    candidate = archive["candidates"][0]
+    assert candidate["card_id"] == "legacy"
+    assert candidate["age_days"] == 61
+    assert candidate["evidence_pointers"] == []
+    assert candidate["approval_required"] is True
