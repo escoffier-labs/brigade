@@ -23,6 +23,30 @@ from . import footprint as footprint_mod
 
 MODE_FILE_OVERLAP = "file_overlap"
 MODE_FILE_OVERLAP_SYMBOL_IMPACT = "file_overlap+symbol_impact"
+MODE_CAMPAIGN_DEFERRED = "campaign_deferred"
+
+
+def partition_campaign_ready(
+    ready: Sequence[dict[str, Any]],
+    *,
+    members: Sequence[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Seam for future cross-repo wave aggregation over a campaign ready set.
+
+    Per-repo footprint waves (#778) do not yet compose across campaign members
+    (#814). Callers that pass ``--parallel-safe`` with ``--campaign`` get a
+    stable deferred marker instead of inventing waves. ``ready`` and
+    ``members`` are accepted so a later implementation can reuse the same
+    signature without a CLI break.
+    """
+    del ready, members  # reserved for a future aggregator
+    return {
+        "waves": [],
+        "wave_count": 0,
+        "partition_mode": MODE_CAMPAIGN_DEFERRED,
+        "partition_degraded": True,
+        "partition_degraded_reason": "cross-repo wave aggregation not implemented",
+    }
 
 
 def partition_ready(

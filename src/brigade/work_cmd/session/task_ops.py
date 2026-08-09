@@ -659,6 +659,7 @@ def _format_ready_annotations(item: dict[str, Any]) -> str:
 def ready(
     *,
     target: Path,
+    campaign: str | None = None,
     explain: bool = False,
     parallel_safe: bool = False,
     json_output: bool = False,
@@ -667,11 +668,38 @@ def ready(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    payload = ledger_mod._readiness_payload(target, explain=explain, parallel_safe=parallel_safe)
+    if campaign:
+        from .. import campaign as campaign_mod
+
+        try:
+            payload = campaign_mod.campaign_readiness_payload(
+                target,
+                campaign,
+                explain=explain,
+                parallel_safe=parallel_safe,
+            )
+        except campaign_mod.CampaignError as exc:
+            if json_output:
+                print(json.dumps(exc.as_dict(), indent=2, sort_keys=True))
+            else:
+                print(f"error: {exc}", file=sys.stderr)
+                member_errors = exc.details.get("member_errors") or exc.details.get("errors") or []
+                if member_errors:
+                    print(f"member_errors: {len(member_errors)}", file=sys.stderr)
+                dangling = exc.details.get("dangling_endpoints") or []
+                if dangling:
+                    print(f"dangling_endpoints: {len(dangling)}", file=sys.stderr)
+            return int(exc.exit_code)
+    else:
+        payload = ledger_mod._readiness_payload(target, explain=explain, parallel_safe=parallel_safe)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
-    print(f"work ready: {target}")
+    if campaign:
+        print(f"work ready campaign: {payload.get('campaign')} ({target})")
+        print(f"members: {payload.get('member_count', 0)}")
+    else:
+        print(f"work ready: {target}")
     print(f"ready: {payload['ready_count']}")
     print(f"blocked: {payload['blocked_count']}")
     print(f"cycles: {payload['cycle_count']}")

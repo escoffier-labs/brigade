@@ -437,6 +437,15 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_ready = work_sub.add_parser("ready", help="Show the ready set of work tasks (no open blockers).")
     p_work_ready.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_ready.add_argument(
+        "--campaign",
+        default=None,
+        help=(
+            "Aggregate ready work across a named campaign lens under "
+            ".brigade/campaigns/<name>.json (or a campaign JSON path). "
+            "Per-repo ledgers stay authoritative; task ids are repo-qualified."
+        ),
+    )
+    p_work_ready.add_argument(
         "--explain", action="store_true", help="Include blocked tasks, blocker paths, and cycles."
     )
     p_work_ready.add_argument(

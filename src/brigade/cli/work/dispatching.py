@@ -591,6 +591,7 @@ def dispatch(args) -> int:
     if args.work_command == "ready":
         return work_cmd.ready(
             target=args.target,
+            campaign=args.campaign,
             explain=args.explain,
             parallel_safe=args.parallel_safe,
             json_output=args.json,
