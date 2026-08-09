@@ -1637,6 +1637,7 @@ Each subsystem has a companion doc under [`docs/`]() with the full local contrac
 - [`docs/backup-health.md`](backup-health.md) - read-only backup health summaries and issue routing
 - [`docs/memory-care.md`](memory-care.md) - memory card decay scanning and refresh imports
 - [`docs/execution-model.md`](execution-model.md) - explicit-invocation boundary and external-scheduler ownership
+- [`docs/scheduled-care.md`](scheduled-care.md) - operator-owned cron, systemd, and CI recipes for the memory-care loop
 - [`docs/security.md`](security.md) - the agent workspace security scanner and evidence bundles
 - [`docs/inspiration-patterns.md`](inspiration-patterns.md) - neutral pattern families and source-pattern decisions
 - [`docs/roadmap-completion-plan.md`](roadmap-completion-plan.md) - the large-roadmap completion plan and phase boundaries
