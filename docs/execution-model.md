@@ -20,13 +20,20 @@ A scheduled invocation is still an explicit invocation: the same command runs wh
 
 `brigade tools runtime start` can launch a local MCP runtime process that you started and that you stop. That process is not a Brigade scheduler and does not run memory care, ingest, or outcome reconcile on its own.
 
-## Future work (not shipped)
+## Opt-in care scaffold
 
-Issue [#759](https://github.com/escoffier-labs/brigade/issues/759) tracks an opt-in care scaffold that would write managed entries into the operator's own scheduler (install / status / uninstall), still without Brigade owning a daemon. Until that lands, schedule Brigade yourself with crontab, systemd timers, CI, or your existing agent cron. That scaffold is not shipped in the current release.
+`brigade care install --target .` writes managed entries into the operator's
+own scheduler (crontab by default; `--backend systemd` writes user units).
+`brigade care status` audits those entries and shows the latest runbook
+receipt for each recipe. `brigade care uninstall` removes only the
+hash-stamped Brigade block. The schedule still belongs to the operator:
+Brigade does not run a daemon, and Windows prints Task Scheduler
+equivalents instead of writing them. See [scheduled care](scheduled-care.md).
 
 ## Related
 
 - [Memory care](memory-care.md): card scan, refresh queue, and import boundaries
+- [Scheduled care](scheduled-care.md): crontab, systemd, CI recipes and `brigade care`
 - [Scanner registry](scanner-registry.md): explicit foreground sweeps, not a scheduler
 - [Technical guide](technical-guide.md): full command surface and deliberate-friction rules
 - [Roadmap](../ROADMAP.md): direction, with this page as the execution-model source of truth

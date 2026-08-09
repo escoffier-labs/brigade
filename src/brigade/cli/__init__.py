@@ -31,6 +31,7 @@ from . import (
     profiles as _profiles_group,
     receipts as _receipts_group,
     daily as _daily_group,
+    care as _care_group,
     add as _add_group,
     setup as _setup_group,
     update as _update_group,
@@ -145,6 +146,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _profiles_group.register(sub)
     _receipts_group.register(sub)
     _daily_group.register(sub)
+    _care_group.register(sub)
     _add_group.register(sub)
     _setup_group.register(sub)
     _update_group.register(sub)

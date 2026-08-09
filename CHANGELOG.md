@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are recorded in `candidate-set.json` and stamped onto the plan; an empty
   required set fails closed with typed `no-admissible-tool` and one bounded
   replan instead of letting the model improvise tools.
+- `brigade care install|status|uninstall` (#759): opt-in scaffold that writes
+  hash-stamped managed entries into the operator's crontab (or systemd user
+  units), matching `docs/scheduled-care.md`. Memory-care recipes invoke the
+  shipped runbooks so scheduled fires write normal receipts; Windows prints
+  Task Scheduler equivalents instead of silently no-oping; tampered blocks are
+  reported and not clobbered without `--adopt`.
 - Work verify plan ranks candidate verification commands from GraphTrail
   affected-test impact (#486): `brigade work verify plan` attaches
   `graph_impact` / `ranked_candidates` with hop-distance confidence and
