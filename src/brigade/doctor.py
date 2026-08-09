@@ -815,7 +815,11 @@ def run(
 
         if json_output:
             return doctor_agent.report_agent_json(ctx, checks, operator=operator)
-        return doctor_agent.report_agent_text(checks, target=ctx.target)
+        return doctor_agent.report_agent_text(
+            checks,
+            target=ctx.target,
+            selection=ctx.selection,
+        )
     if json_output:
         return _report_json(ctx, checks, operator=operator)
 

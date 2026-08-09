@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -222,6 +223,42 @@ def _split_observed_expected(detail: str) -> tuple[str, str]:
     return text, "check status OK"
 
 
+def init_command_for_target(
+    target: Path,
+    *,
+    selection: object | None = None,
+) -> str:
+    """Shell-safe, non-interactive ``brigade init`` for bootstrap remediation."""
+    depth = "repo"
+    harnesses: list[str] = ["claude"]
+    owner = "claude"
+    if selection is not None:
+        depth = getattr(selection, "depth", None) or depth
+        raw_harnesses = getattr(selection, "harnesses", None)
+        if raw_harnesses is not None:
+            harnesses = list(raw_harnesses)
+        owner = getattr(selection, "owner", None) or owner
+    harnesses_arg = ",".join(harnesses) if harnesses else "none"
+    return (
+        f"brigade init --target {shlex.quote(str(target))} --depth {shlex.quote(depth)} "
+        f"--harnesses {shlex.quote(harnesses_arg)} --owner {shlex.quote(owner)}"
+    )
+
+
+def _resolve_selection(target: Path, selection: object | None) -> object | None:
+    if selection is not None:
+        return selection
+    try:
+        from .config import load_config
+
+        cfg = load_config(target)
+        if cfg is None:
+            return None
+        return cfg.selection
+    except (ValueError, json.JSONDecodeError, OSError):
+        return None
+
+
 def is_actionable_agent_check(
     check: CheckResult | ScopedCheckResult,
     *,
@@ -240,6 +277,7 @@ def finding_from_check(
     check: CheckResult | ScopedCheckResult,
     *,
     target: Path,
+    selection: object | None = None,
 ) -> dict[str, Any] | None:
     status, name, detail, scope = _normalize_scoped_check(check)
     if not is_actionable_agent_check(check, target=target):
@@ -260,6 +298,8 @@ def finding_from_check(
         and not any("hooks install" in command for command in commands)
     ):
         commands.append(f"brigade work hooks install --target {target}")
+    if name.startswith("bootstrap:") and status == FAIL and "missing" in clean_detail.lower() and not commands:
+        commands.append(init_command_for_target(target, selection=selection))
     return {
         "severity": _SEVERITY_LABEL.get(status, status.lower()),
         "name": name,
@@ -277,10 +317,12 @@ def build_findings(
     checks: Sequence[CheckResult | ScopedCheckResult],
     *,
     target: Path,
+    selection: object | None = None,
 ) -> list[dict[str, Any]]:
+    resolved_selection = _resolve_selection(target, selection)
     findings: list[dict[str, Any]] = []
     for check in checks:
-        finding = finding_from_check(check, target=target)
+        finding = finding_from_check(check, target=target, selection=resolved_selection)
         if finding is not None:
             findings.append(finding)
     return findings
@@ -298,6 +340,30 @@ def _passed_count(checks: Sequence[CheckResult | ScopedCheckResult], findings: S
     actionable = sum(1 for check in checks if _normalize_scoped_check(check)[0] in ACTIONABLE_STATUSES)
     suppressed = actionable - len(findings)
     return counts[OK] + counts[INFO] + max(0, suppressed)
+
+
+def _failed_count_from_findings(findings: Sequence[Mapping[str, Any]]) -> int:
+    return sum(1 for finding in findings if finding.get("status") == FAIL or finding.get("severity") == "error")
+
+
+def _warn_count_from_findings(findings: Sequence[Mapping[str, Any]]) -> int:
+    return sum(1 for finding in findings if finding.get("status") == WARN or finding.get("severity") == "warn")
+
+
+def _manual_count_from_findings(findings: Sequence[Mapping[str, Any]]) -> int:
+    return sum(1 for finding in findings if finding.get("status") == MANUAL or finding.get("severity") == "manual")
+
+
+def _suppressed_actionable_count(
+    checks: Sequence[CheckResult | ScopedCheckResult],
+    findings: Sequence[Mapping[str, Any]],
+) -> int:
+    actionable = sum(1 for check in checks if _normalize_scoped_check(check)[0] in ACTIONABLE_STATUSES)
+    return max(0, actionable - len(findings))
+
+
+def _agent_exit_from_findings(findings: Sequence[Mapping[str, Any]]) -> int:
+    return 1 if _failed_count_from_findings(findings) else 0
 
 
 def format_finding_text(finding: Mapping[str, Any]) -> str:
@@ -321,8 +387,9 @@ def report_agent_text(
     checks: Sequence[CheckResult | ScopedCheckResult],
     *,
     target: Path,
+    selection: object | None = None,
 ) -> int:
-    findings = build_findings(checks, target=target)
+    findings = build_findings(checks, target=target, selection=selection)
     passed = _passed_count(checks, findings)
     print(summary_line(passed, len(findings)))
     if findings:
@@ -331,8 +398,7 @@ def report_agent_text(
             if index:
                 print()
             print(format_finding_text(finding))
-    failed = any(finding.get("status") == FAIL or finding.get("severity") == "error" for finding in findings)
-    return 1 if failed else 0
+    return _agent_exit_from_findings(findings)
 
 
 def report_agent_json(
@@ -341,9 +407,13 @@ def report_agent_json(
     *,
     operator: bool = False,
 ) -> int:
-    findings = build_findings(checks, target=ctx.target)
+    findings = build_findings(checks, target=ctx.target, selection=ctx.selection)
     passed = _passed_count(checks, findings)
     counts = _status_counts(list(checks))
+    surfaced_failed = _failed_count_from_findings(findings)
+    surfaced_warn = _warn_count_from_findings(findings)
+    surfaced_manual = _manual_count_from_findings(findings)
+    suppressed = _suppressed_actionable_count(checks, findings)
     sel = ctx.selection
     payload = {
         "mode": "agent",
@@ -357,9 +427,10 @@ def report_agent_json(
             "passed": passed,
             "findings": len(findings),
             "ok": counts[OK],
-            "warn": counts[WARN],
-            "manual": counts[MANUAL],
-            "failed": counts[FAIL],
+            "warn": surfaced_warn,
+            "manual": surfaced_manual,
+            "failed": surfaced_failed,
+            "suppressed": suppressed,
             "info": counts[INFO],
             "line": summary_line(passed, len(findings)),
         },
@@ -375,7 +446,7 @@ def report_agent_json(
             }
             for finding in findings
         ],
-        "ready": counts[FAIL] == 0 and not any(f.get("severity") == "error" for f in findings),
+        "ready": surfaced_failed == 0,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
-    return 1 if not payload["ready"] else 0
+    return _agent_exit_from_findings(findings)
