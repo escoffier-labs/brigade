@@ -161,6 +161,67 @@ def test_blocks_cycle_rejected_at_add_time(tmp_path, monkeypatch, capsys):
     assert "cycles" in payload
 
 
+def test_three_node_transitive_blocks_cycle_rejected_at_add_time(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 8, 9, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    a = _add(tmp_path, "A")
+    b = _add(tmp_path, "B")
+    c = _add(tmp_path, "C")
+    assert work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"]) == 0
+    assert work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=b["id"], target_id=c["id"]) == 0
+    capsys.readouterr()
+    assert (
+        work_cmd.task_edge_add(
+            target=tmp_path, edge_type="blocks", source=c["id"], target_id=a["id"], json_output=True
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == edges_mod.REASON_DEPENDENCY_CYCLE
+    cycle_nodes = set(payload["cycles"][0]["nodes"])
+    assert cycle_nodes == {a["id"], b["id"], c["id"]}
+
+
+def test_mixed_blocks_parent_child_transitive_cycle_rejected_at_add_time(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 8, 9, 12, 30, 0, tzinfo=timezone.utc),
+    )
+    parent = _add(tmp_path, "Epic parent")
+    child = _add(tmp_path, "Epic child")
+    blocker = _add(tmp_path, "Upstream blocker")
+    assert (
+        work_cmd.task_edge_add(
+            target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"]
+        )
+        == 0
+    )
+    assert (
+        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=child["id"], target_id=blocker["id"]) == 0
+    )
+    capsys.readouterr()
+    assert (
+        work_cmd.task_edge_add(
+            target=tmp_path,
+            edge_type="blocks",
+            source=blocker["id"],
+            target_id=parent["id"],
+            json_output=True,
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == edges_mod.REASON_DEPENDENCY_CYCLE
+    cycle_nodes = set(payload["cycles"][0]["nodes"])
+    assert cycle_nodes == {parent["id"], child["id"], blocker["id"]}
+
+
 def test_discovered_from_ignored_by_cycle_detection(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(

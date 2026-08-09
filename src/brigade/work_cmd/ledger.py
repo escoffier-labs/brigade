@@ -30,7 +30,8 @@ def _acquire_task_ledger_lock(path: Path) -> runguard._LockOwnership:
         except runguard.RunLockError as exc:
             if time.monotonic() >= deadline:
                 raise runguard.RunLockError(
-                    f"task ledger lock busy after waiting: {path}. {exc}"
+                    f"task ledger lock still held after waiting 5s: {path}. "
+                    "Another process may be updating .brigade/work/tasks.json; retry shortly."
                 ) from exc
             time.sleep(0.01)
 
