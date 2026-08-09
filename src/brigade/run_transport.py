@@ -707,7 +707,7 @@ def dispatch(
         placement_error = _dag_placement_error(assignments, route_dependencies)
         if placement_error is None:
             if on_scheduler_resolved is not None:
-                on_scheduler_resolved("dag", None)
+                on_scheduler_resolved("single-node" if len(assignments) == 1 else "dag", None)
             return _dag_dispatch(
                 assignments,
                 roster,
@@ -804,6 +804,65 @@ def _dag_placement_error(
         if assignment.covers and not set(assignment.covers) <= known:
             return "plan not fully covered"
     return None
+
+
+def dag_cycle_members(
+    assignments: list[Assignment],
+    route_dependencies: dict[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    """Return workers in mutual-wait components of an assignment plan.
+
+    This uses the same covers-set semantics as the ready queue: a dependency
+    covered by the assignment itself is satisfied locally, while a stage with
+    multiple coverers needs any one of them to finish.  Nodes that can become
+    ready are peeled first so an optional cyclic coverer does not make an
+    otherwise runnable plan look cyclic.
+    """
+    coverers: dict[str, tuple[int, ...]] = {}
+    for stage_name in route_dependencies:
+        coverers[stage_name] = tuple(i for i, assignment in enumerate(assignments) if stage_name in assignment.covers)
+
+    groups: list[tuple[tuple[int, ...], ...]] = []
+    for i, assignment in enumerate(assignments):
+        dependencies: dict[str, tuple[int, ...]] = {}
+        for stage_name in assignment.covers:
+            for dependency in route_dependencies.get(stage_name, ()):
+                stage_coverers = coverers.get(dependency, ())
+                if i in stage_coverers:
+                    continue
+                others = tuple(index for index in stage_coverers if index != i)
+                if others:
+                    dependencies[dependency] = others
+        groups.append(tuple(dependencies.values()))
+
+    runnable: set[int] = set()
+    changed = True
+    while changed:
+        changed = False
+        for i, prerequisites in enumerate(groups):
+            if i not in runnable and all(set(group) & runnable for group in prerequisites):
+                runnable.add(i)
+                changed = True
+
+    blocked = set(range(len(assignments))) - runnable
+    edges = {i: {member for group in groups[i] for member in group if member in blocked} for i in blocked}
+    cycle_nodes: set[int] = set()
+
+    # Small plans make a direct reachability test clearer than a full SCC
+    # implementation: an edge is cyclic exactly when its target reaches back.
+    def reaches(start: int, target: int, seen: set[int]) -> bool:
+        if start == target:
+            return True
+        if start in seen:
+            return False
+        seen.add(start)
+        return any(reaches(next_node, target, seen) for next_node in edges.get(start, ()))
+
+    for source, targets in edges.items():
+        for target in targets:
+            if reaches(target, source, set()):
+                cycle_nodes.update((source, target))
+    return tuple(assignments[i].worker for i in sorted(cycle_nodes))
 
 
 def _dag_dispatch(

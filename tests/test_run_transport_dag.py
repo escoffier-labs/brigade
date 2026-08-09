@@ -197,6 +197,17 @@ def test_scheduler_resolution_reported_when_dag_engages(dag_harness):
     assert resolved == [("dag", None)]
 
 
+def test_scheduler_resolution_distinguishes_single_node_plan(dag_harness):
+    resolved = []
+    results = dag_harness(
+        assignments=[_a("p", 1, ["plan"])],
+        dependencies=DEPS,
+        on_scheduler_resolved=lambda used, reason: resolved.append((used, reason)),
+    )
+    assert resolved == [("single-node", None)]
+    assert results[0].ok is True
+
+
 def test_scheduler_resolution_reports_wave_fallback(dag_harness):
     resolved = []
     dag_harness(
