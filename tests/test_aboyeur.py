@@ -4529,6 +4529,32 @@ def test_plan_covered_first_try_makes_one_call(monkeypatch):
     assert assignments[0].covers == ("implement", "correctness-review", "verify")
 
 
+def test_plan_rejects_mutual_wait_cycle_with_named_members(monkeypatch):
+    from brigade.route_catalog import RouteBrief
+
+    route = RouteBrief(
+        attached=True,
+        route=("first", "second", "third"),
+        dependencies={"first": (), "second": ("first",), "third": ("second",)},
+    )
+    plan_json = json.dumps(
+        {
+            "assignments": [
+                {"worker": "coder", "task": "first and third", "covers": ["first", "third"]},
+                {"worker": "reviewer", "task": "second", "covers": ["second"]},
+            ]
+        }
+    )
+
+    monkeypatch.setattr(
+        aboyeur.agents,
+        "run_agent",
+        lambda *args, **kwargs: agents.AgentResult(text=plan_json, ok=True),
+    )
+    with pytest.raises(RuntimeError, match=r"dependency cycle involving: coder, reviewer"):
+        aboyeur.plan("build it", _roster(), route=route)
+
+
 def test_plan_coverage_retry_falls_back_to_first_plan_on_bad_revision(monkeypatch):
     from brigade.route_catalog import route_brief
 

@@ -44,7 +44,7 @@ from .run_receipts import (
     write_agent_logs as _write_agent_logs,
     write_worker_logs as _write_worker_logs,
 )
-from .run_transport import Assignment, WorkerResult
+from .run_transport import Assignment, WorkerResult, dag_cycle_members
 from .roster import Agent, Roster, is_cli_allowed, read_only_capability_error, timeout_for, workers
 from .route_catalog import RouteBrief, route_brief, uncovered_stages, unknown_covers
 from .route_policy import (
@@ -1329,6 +1329,14 @@ def _unknown_covers(route: RouteBrief | None, assignments: list[Assignment]) -> 
     return unknown_covers(route, assignments)
 
 
+def _validate_plan_dependencies(route: RouteBrief | None, assignments: list[Assignment]) -> None:
+    if route is None or not route.attached:
+        return
+    members = dag_cycle_members(assignments, route.dependencies)
+    if members:
+        raise ValueError(f"plan has a dependency cycle involving: {', '.join(members)}")
+
+
 def _orchestrator_hides_write_tools(
     roster: Roster,
     *,
@@ -1394,6 +1402,7 @@ def plan(
         raise RuntimeError(f"orchestrator failed during plan: {first.detail}")
     try:
         assignments = parse_plan(first.text, roster, read_only=read_only, skill_policy=skill_policy)
+        _validate_plan_dependencies(route, assignments)
         _record_plan_attempt(
             attempts,
             stage="initial",
@@ -1433,6 +1442,7 @@ def plan(
             raise RuntimeError(f"orchestrator failed during plan correction: {second.detail}") from exc
         try:
             assignments = parse_plan(second.text, roster, read_only=read_only, skill_policy=skill_policy)
+            _validate_plan_dependencies(route, assignments)
             _record_plan_attempt(
                 attempts,
                 stage="correction",
@@ -1487,6 +1497,7 @@ def plan(
         return assignments
     try:
         revised = parse_plan(revised_result.text, roster, read_only=read_only, skill_policy=skill_policy)
+        _validate_plan_dependencies(route, revised)
     except ValueError as exc:
         _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result, parse_error=str(exc))
         return assignments
