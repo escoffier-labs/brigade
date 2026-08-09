@@ -326,8 +326,8 @@ def _command_inventory_path(target: Path) -> Path:
 
 def _read_text(path: Path) -> str:
     try:
-        return path.read_text()
-    except OSError:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return ""
 
 
@@ -538,9 +538,8 @@ def _target_owns_brigade_cli(target: Path) -> bool:
     audited against brigade's own command surface, which otherwise reports
     hundreds of "undocumented" commands it never owned.
     """
-    try:
-        text = (target / "pyproject.toml").read_text()
-    except OSError:
+    text = _read_text(target / "pyproject.toml")
+    if not text:
         return False
     return re.search(r'(?m)^\s*name\s*=\s*"brigade-cli"\s*$', text) is not None
 

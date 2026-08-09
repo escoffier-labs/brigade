@@ -5,6 +5,47 @@ from brigade import cli
 from brigade import roadmap_cmd
 
 
+def test_read_text_reads_utf8_docs_when_locale_codec_is_cp1252(tmp_path, monkeypatch):
+    """Regression for #752: Windows locale default (cp1252) must not decode repo docs.
+
+    Forces the Path.read_text default codec to cp1252 (as on Windows) so this
+    fails on Linux CI too if encoding=\"utf-8\" is dropped from _read_text.
+    """
+    path = tmp_path / "README.md"
+    # U+2510 BOX DRAWINGS LIGHT DOWN AND LEFT — UTF-8 e2 94 90; byte 0x90 is
+    # undefined in cp1252 and raises UnicodeDecodeError under that codec.
+    box = "\u2510"
+    path.write_bytes(f"Run `brigade work brief` near {box}\n".encode("utf-8"))
+
+    real_read_text = Path.read_text
+
+    def read_text_locale_default(self, *args, encoding=None, errors=None, **kwargs):
+        if encoding is None:
+            encoding = "cp1252"
+        return real_read_text(self, *args, encoding=encoding, errors=errors, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text_locale_default)
+
+    text = roadmap_cmd._read_text(path)
+    assert box in text
+    assert "brigade work brief" in text
+
+    (tmp_path / "ROADMAP.md").write_bytes(b"# Roadmap\n")
+    documented = roadmap_cmd._documented_brigade_commands(tmp_path)
+    assert "brigade work brief" in documented
+
+
+def test_read_text_returns_empty_on_undecodable_utf8(tmp_path):
+    path = tmp_path / "broken.md"
+    path.write_bytes(b"ok\xff\xfe not utf-8")
+    assert roadmap_cmd._read_text(path) == ""
+
+
+def test_target_owns_brigade_cli_ignores_malformed_pyproject(tmp_path):
+    tmp_path.joinpath("pyproject.toml").write_bytes(b'name = "brigade-cli"\xff')
+    assert roadmap_cmd._target_owns_brigade_cli(tmp_path) is False
+
+
 def test_roadmap_audit_classifies_stale_sections_and_command_mismatch(tmp_path):
     (tmp_path / "ROADMAP.md").write_text(
         "# Roadmap\n\n"

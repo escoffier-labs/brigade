@@ -74,8 +74,8 @@ def import_context(
     if from_file is not None:
         body_path = Path(from_file).expanduser()
         try:
-            raw = body_path.read_text()
-        except OSError as exc:
+            raw = body_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
             print(f"error: cannot read --from-file: {exc}", file=sys.stderr)
             return 2
     else:
@@ -123,7 +123,7 @@ def _append_active_context_note(target: Path, rendered: str) -> Path | None:
         return None
     session_json = session_dir / "session.json"
     try:
-        payload = json.loads(session_json.read_text())
+        payload = json.loads(session_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(payload, dict):
@@ -139,8 +139,8 @@ def _append_active_context_note(target: Path, rendered: str) -> Path | None:
     helpers._write_json(session_json, payload)
 
     notes_path = session_dir / "notes.md"
-    prefix = "" if notes_path.exists() and notes_path.read_text().endswith("\n") else "\n"
-    with notes_path.open("a") as handle:
+    prefix = "" if notes_path.exists() and notes_path.read_text(encoding="utf-8").endswith("\n") else "\n"
+    with notes_path.open("a", encoding="utf-8") as handle:
         if notes_path.stat().st_size == 0:
             handle.write("# Brigade Work Session Notes\n")
         else:

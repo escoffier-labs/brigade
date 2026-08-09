@@ -342,7 +342,7 @@ def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]
             issues.append("missing Brigade ownership state")
 
     try:
-        guidance_text = (target / "AGENTS.md").read_text().casefold()
+        guidance_text = (target / "AGENTS.md").read_text(encoding="utf-8").casefold()
         guidance_current = "brigade-wired" in guidance_text and "brigade-work" in guidance_text
     except OSError:
         guidance_current = False

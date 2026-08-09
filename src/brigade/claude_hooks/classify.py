@@ -27,7 +27,7 @@ def _is_wired_for_claude(target: Path) -> bool:
 def _instruction_import_current(target: Path) -> bool:
     path = target / "CLAUDE.md"
     try:
-        return any(line.strip() == "@AGENTS.md" for line in path.read_text().splitlines())
+        return any(line.strip() == "@AGENTS.md" for line in path.read_text(encoding="utf-8").splitlines())
     except OSError:
         return False
 

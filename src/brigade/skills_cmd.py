@@ -259,8 +259,10 @@ def _copy_skill_for_harness(
     shutil.copytree(source_dir, dest)
     source_skill = _skill_md_path(source_dir)
     if source_skill.is_file():
-        rendered = _render_skill_text_for_harness(source_skill.read_text(errors="replace"), metadata, skill_id, harness)
-        _skill_md_path(dest).write_text(rendered)
+        rendered = _render_skill_text_for_harness(
+            source_skill.read_text(encoding="utf-8", errors="replace"), metadata, skill_id, harness
+        )
+        _skill_md_path(dest).write_text(rendered, encoding="utf-8")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -298,7 +300,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return rows
     try:
-        lines = path.read_text(errors="replace").splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return rows
     for line in lines:
@@ -330,7 +332,7 @@ def _changelog_payload(skill_dir: Path, metadata: dict[str, Any]) -> dict[str, A
     headings: list[str] = []
     fingerprint: str | None = None
     if path is not None:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
         fingerprint = _text_fingerprint(text)
         headings = [line.strip("# ").strip() for line in text.splitlines() if line.startswith("#")][:8]
     return {
@@ -567,7 +569,7 @@ def _lint_payload(
         errors.append(f"SKILL.md not found: {skill_md}")
         text = ""
     else:
-        text = skill_md.read_text(errors="replace")
+        text = skill_md.read_text(encoding="utf-8", errors="replace")
         if not text.strip():
             errors.append("SKILL.md is empty")
         if len(text) > 40_000:
@@ -884,7 +886,7 @@ def _drift_payload(
     receipt = _latest_install_receipt(target, skill_id, harness)
     installed_skill = _skill_md_path(installed_dir)
     installed_present = installed_skill.is_file()
-    installed_text = installed_skill.read_text(errors="replace") if installed_present else ""
+    installed_text = installed_skill.read_text(encoding="utf-8", errors="replace") if installed_present else ""
     current_source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
     current_render = _renderer_contract(target, harness)
     current_render_fingerprint = _text_fingerprint(rendered)
@@ -983,7 +985,7 @@ def install(
             skipped.append({"target": "hermes", "reason": "Hermes home not found (is Hermes installed?)"})
             continue
         dest = _install_dir(workspace, install_target, skill_id)
-        source_text = _skill_md_path(source_dir).read_text(errors="replace")
+        source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
         rendered_text = _render_skill_text_for_harness(source_text, metadata, skill_id, install_target)
         render_fingerprint = _text_fingerprint(rendered_text)
         render_contract = _renderer_contract(workspace, install_target)
@@ -1023,7 +1025,9 @@ def install(
         dest.parent.mkdir(parents=True, exist_ok=True)
         _copy_skill_for_harness(source_dir, dest, metadata, skill_id, install_target)
         installed_fingerprint = _fingerprint(dest)
-        installed_skill_fingerprint = _text_fingerprint(_skill_md_path(dest).read_text(errors="replace"))
+        installed_skill_fingerprint = _text_fingerprint(
+            _skill_md_path(dest).read_text(encoding="utf-8", errors="replace")
+        )
         installed_metadata_fingerprint = _file_fingerprint(_metadata_path(dest))
         installed_at = _now()
         receipt = {
@@ -1155,7 +1159,7 @@ def _sync_plan(*, workspace: Path, harness: str, trust: str) -> tuple[list[dict[
                 items.append(item)
                 continue
             source_dir = Path(str(lint_payload["skill_dir"]))
-            source_text = _skill_md_path(source_dir).read_text(errors="replace")
+            source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
             rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, install_target)
             render_errors = _rendered_skill_validation(rendered, install_target)
             if render_errors:
@@ -1295,7 +1299,7 @@ def _user_profile_package(
         return None
     skill_md_path = _skill_md_path(skill_dir)
     if "SKILL.md" in files and skill_md_path.is_file():
-        source_text = skill_md_path.read_text(errors="replace")
+        source_text = skill_md_path.read_text(encoding="utf-8", errors="replace")
         rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, harness)
         if _rendered_skill_validation(rendered, harness):
             return None
@@ -1593,11 +1597,11 @@ def diff(*, target: Path, skill: str, harness: str, against: str = "bundled", js
         return 2
     source_dir = Path(str(lint_payload["skill_dir"]))
     metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
-    source_text = _skill_md_path(source_dir).read_text(errors="replace")
+    source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
     rendered = _render_skill_text_for_harness(source_text, metadata, skill_id, harness)
     installed_dir = _install_dir(target, harness, skill_id)
     installed_skill = _skill_md_path(installed_dir)
-    installed_text = installed_skill.read_text(errors="replace") if installed_skill.is_file() else ""
+    installed_text = installed_skill.read_text(encoding="utf-8", errors="replace") if installed_skill.is_file() else ""
     source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
     diff_lines = list(
         difflib.unified_diff(
@@ -1706,7 +1710,8 @@ def pack_build(*, target: Path, json_output: bool = False) -> int:
         f"# Skill Pack {pack_id}\n\n"
         f"- skills: {payload['skill_count']}\n"
         f"- fingerprint: {payload['evidence_fingerprint']}\n"
-        f"- import: brigade skills pack import {pack_dir}\n"
+        f"- import: brigade skills pack import {pack_dir}\n",
+        encoding="utf-8",
     )
     payload["path"] = str(pack_dir)
     if json_output:
@@ -1955,13 +1960,13 @@ def _mcp_read_resource(target: Path, uri: str) -> tuple[str, str] | tuple[None, 
     metadata = _read_json(_metadata_path(skill_dir))
     if name == "SKILL.md":
         path = _skill_md_path(skill_dir)
-        return (path.read_text(errors="replace"), "text/markdown") if path.is_file() else (None, None)
+        return (path.read_text(encoding="utf-8", errors="replace"), "text/markdown") if path.is_file() else (None, None)
     if name == "skill.json":
         return json.dumps(metadata, indent=2, sort_keys=True) + "\n", "application/json"
     if name == "CHANGELOG.md":
         changelog = _changelog_payload(skill_dir, metadata)
         path = Path(str(changelog.get("path") or ""))
-        return (path.read_text(errors="replace"), "text/markdown") if path.is_file() else (None, None)
+        return (path.read_text(encoding="utf-8", errors="replace"), "text/markdown") if path.is_file() else (None, None)
     if name == "compatibility.json":
         return (
             json.dumps(_compatibility_payload(target, f"registry:{skill_id}"), indent=2, sort_keys=True) + "\n",
@@ -2164,7 +2169,7 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
     skill_dir = Path(str(lint_payload.get("skill_dir") or ""))
     skill_md = _skill_md_path(skill_dir)
     if skill_md.is_file():
-        source_text = skill_md.read_text(errors="replace")
+        source_text = skill_md.read_text(encoding="utf-8", errors="replace")
     adapters = []
     for adapter_id, adapter in _adapter_map(target).items():
         install_path = adapter.get("install_path")
@@ -2425,7 +2430,7 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
             continue
         source_dir = Path(str(lint_payload["skill_dir"]))
         metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
-        source_text = _skill_md_path(source_dir).read_text(errors="replace")
+        source_text = _skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
         supported = metadata.get("supported_harnesses") if isinstance(metadata.get("supported_harnesses"), list) else []
         source = lint_payload.get("source") if isinstance(lint_payload.get("source"), dict) else {}
         supported_state = harness in supported or not supported
@@ -2854,8 +2859,8 @@ def inbox_diff(*, target: Path, proposal_id: str, json_output: bool = False) -> 
         return 2
     proposed = _proposal_skill_path(path) / "SKILL.md"
     existing = _skill_path(target, str(proposal.get("skill_id") or path.name)) / "SKILL.md"
-    before = existing.read_text(errors="replace").splitlines() if existing.is_file() else []
-    after = proposed.read_text(errors="replace").splitlines() if proposed.is_file() else []
+    before = existing.read_text(encoding="utf-8", errors="replace").splitlines() if existing.is_file() else []
+    after = proposed.read_text(encoding="utf-8", errors="replace").splitlines() if proposed.is_file() else []
     diff = list(difflib.unified_diff(before, after, fromfile=str(existing), tofile=str(proposed), lineterm=""))
     payload = {
         "target": str(target),

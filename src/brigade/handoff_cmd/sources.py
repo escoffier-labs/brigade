@@ -35,7 +35,7 @@ def _source_config_for_checks(target: Path, sources_path: Path | None) -> Source
 
 def _parse_ingestor_log_issues(log_path: Path) -> list[HandoffIssue]:
     try:
-        lines = log_path.read_text(errors="replace").splitlines()
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
         return [
             _make_issue(
@@ -403,7 +403,7 @@ def _inspect_ingestor(config: IngestorConfig | None) -> IngestorHealth:
             warnings=(f"handoff ingestor log is configured but missing at {config.log_path}",),
         )
     try:
-        text = config.log_path.read_text(errors="replace")
+        text = config.log_path.read_text(encoding="utf-8", errors="replace")
         mtime = config.log_path.stat().st_mtime
     except OSError as exc:
         return IngestorHealth(

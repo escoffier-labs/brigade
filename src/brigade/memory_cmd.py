@@ -230,7 +230,7 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True) ->
         print(f"error: memory-care config already exists: {path}", file=sys.stderr)
         return 1
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_format_config())
+    path.write_text(_format_config(), encoding="utf-8")
     if update_gitignore:
         apply_gitignore(target, Selection(depth="repo", harnesses=[], owner="this-repo", includes=[]))
     print(f"memory_care_config: {path}")
@@ -319,8 +319,8 @@ def _index_links(target: Path, config: MemoryCareConfig) -> set[str]:
         if not path.is_file():
             continue
         try:
-            text = path.read_text()
-        except OSError:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
         links.update(match.group("path") for match in pattern.finditer(text))
     return links
@@ -508,7 +508,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
 
     for path in cards:
         rel = str(path.relative_to(target))
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
         meta, has_frontmatter = _parse_frontmatter(text)
         card_id = str(_frontmatter_value(meta, "id", "card_id", "topic") or Path(rel).stem)
         by_id.setdefault(card_id, []).append(rel)
@@ -744,8 +744,8 @@ def _write_scan_outputs(target: Path, config: MemoryCareConfig, payload: dict[st
     output.mkdir(parents=True, exist_ok=True)
     scan_path = output / "scan-latest.json"
     queue_path = output / "refresh-queue.json"
-    scan_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    queue_path.write_text(json.dumps(_queue_payload(payload), indent=2, sort_keys=True) + "\n")
+    scan_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    queue_path.write_text(json.dumps(_queue_payload(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return scan_path, queue_path
 
 
@@ -775,7 +775,7 @@ def _autofix_plan_item(issue: dict[str, Any], *, target: Path, scan_date: str) -
         blockers.append("card-file-missing")
     else:
         try:
-            text = path.read_text(errors="replace")
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             blockers.append("card-file-unreadable")
         else:
@@ -1133,7 +1133,7 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
     skipped_no_frontmatter = 0
     for path in _iter_cards(target, config):
         rel = str(path.relative_to(target))
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
         meta, has_frontmatter = _parse_frontmatter(text)
         if not has_frontmatter:
             skipped_no_frontmatter += 1
@@ -1169,13 +1169,13 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
 
 def _backfill_write(target: Path, candidate: dict[str, Any]) -> None:
     path = target / candidate["file"]
-    text = path.read_text(errors="replace")
+    text = path.read_text(encoding="utf-8", errors="replace")
     lines = text.split("\n")
     # _parse_frontmatter guarantees a leading `---` block; insert the new keys
     # just before its closing fence, leaving every other byte untouched.
     closing = next(i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---")
     additions = [f"{field}: {candidate[field]}" for field in candidate["fields"]]
-    path.write_text("\n".join(lines[:closing] + additions + lines[closing:]))
+    path.write_text("\n".join(lines[:closing] + additions + lines[closing:]), encoding="utf-8")
 
 
 def backfill(*, target: Path, apply: bool = False, json_output: bool = False) -> int:
@@ -1324,7 +1324,7 @@ def closeout(*, target: Path, reason: str | None = None, defer: bool = False, js
 
 def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}
     frontmatter, _ = _parse_frontmatter(text)
@@ -1430,7 +1430,7 @@ def _mcp_read_card(target: Path, config: MemoryCareConfig, uri: str) -> tuple[st
             continue
         if path.resolve() == candidate:
             try:
-                return path.read_text(errors="replace"), "text/markdown"
+                return path.read_text(encoding="utf-8", errors="replace"), "text/markdown"
             except OSError:
                 return None, None
     return None, None

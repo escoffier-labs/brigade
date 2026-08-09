@@ -39,7 +39,7 @@ def _json_text(payload: object) -> str:
 
 def _extension_source() -> str:
     template = Path(__file__).parent / "templates" / "pi" / "extensions" / "brigade-mcp-bridge.js"
-    return template.read_text()
+    return template.read_text(encoding="utf-8")
 
 
 def _catalog_projection(target: Path) -> dict[str, Any]:

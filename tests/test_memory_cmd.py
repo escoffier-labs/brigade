@@ -454,6 +454,19 @@ def test_memory_care_cli(tmp_path, monkeypatch):
     ]
 
 
+def test_memory_care_scan_tolerates_malformed_utf8_index(tmp_path, capsys):
+    cards = tmp_path / "memory" / "cards"
+    _write_card(
+        cards / "ok.md",
+        {"topic": "ok", "last_reviewed": "2026-05-20", "confidence": "high", "evidence": ["README.md"]},
+    )
+    (tmp_path / "MEMORY.md").write_bytes(b"# index\n\xff not utf-8\n")
+
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["issue_count"] >= 0
+
+
 def test_memory_care_scan_default_output_lives_under_brigade_state(tmp_path, capsys):
     cards = tmp_path / "memory" / "cards"
     cards.mkdir(parents=True)

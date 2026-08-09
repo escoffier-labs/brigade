@@ -62,7 +62,7 @@ def scan_dead_links(memory_dir: Path) -> list[DeadLink]:
     pool = sorted(slugs)
     out: list[DeadLink] = []
     for p in _card_paths(memory_dir):
-        text = p.read_text(errors="replace")
+        text = p.read_text(encoding="utf-8", errors="replace")
         for raw_link in extract_wiki_links(text):
             slug = raw_link.lower().removesuffix(".md")
             # Accept wiki links that include a cards/ prefix.

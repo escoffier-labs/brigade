@@ -182,7 +182,7 @@ def ingest_into(
 
 def parse(path: Path) -> Dict[str, str]:
     """Split a handoff into sections keyed by lowercased ## heading."""
-    body = path.read_text()
+    body = path.read_text(encoding="utf-8")
     sections: Dict[str, str] = {}
     last_name = None
     last_pos = 0
@@ -270,7 +270,7 @@ def decide(
         dest = target / document
         # Dedupe: never re-append content that is already present in the target.
         # Without this, a re-routed handoff duplicates its content on every run.
-        existing = dest.read_text() if dest.is_file() else ""
+        existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
         normalized_existing = _normalize_for_dedupe(existing)
         normalized_suggested = _normalize_for_dedupe(content)
         if normalized_suggested and normalized_suggested in normalized_existing:
@@ -328,7 +328,7 @@ def _execute(
         summary = f"promote → {dest.relative_to(target)}  ({name})"
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(content)
+            dest.write_text(content, encoding="utf-8")
             _archive(handoff_path, processed_dir)
         return Action("promoted", summary)
 
@@ -339,7 +339,7 @@ def _execute(
         summary = f"append → {dest.relative_to(target)}  ({name})"
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            with dest.open("a") as f:
+            with dest.open("a", encoding="utf-8") as f:
                 f.write("\n\n" + content + "\n")
             _archive(handoff_path, processed_dir)
         return Action("routed", summary)
@@ -353,11 +353,11 @@ def _execute(
             inbox_dir.mkdir(parents=True, exist_ok=True)
             # Copy the original file verbatim so reviewers see what the
             # harness actually wrote, not a reconstruction.
-            original = handoff_path.read_text()
+            original = handoff_path.read_text(encoding="utf-8")
             header = (
                 f"<!-- routed from {handoff_path.name}\n     reason: {outcome.reason}\n     routed-at: {slug} -->\n\n"
             )
-            dest.write_text(header + original)
+            dest.write_text(header + original, encoding="utf-8")
             _archive(handoff_path, processed_dir)
         # Both inboxed and skipped are now archived; classify them uniformly.
         return Action("inboxed", summary)

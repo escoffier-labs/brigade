@@ -81,7 +81,7 @@ def validate(skill_dir: Path, *, mode: str) -> Validation:
     path = skill_dir / "SKILL.md"
     if not path.is_file():
         return Validation({}, (f"SKILL.md not found: {path}",), ())
-    lines, framing_error = _frontmatter(path.read_text(errors="replace"))
+    lines, framing_error = _frontmatter(path.read_text(encoding="utf-8", errors="replace"))
     if lines is None:
         if mode == "lenient":
             return Validation({}, (), (framing_error or "invalid frontmatter",))

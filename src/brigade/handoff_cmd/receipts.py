@@ -348,7 +348,7 @@ def reconcile(*, target: Path, sources: Path | None = None, json_output: bool = 
         print(f"error: ingestor last_run_log not found: {log_path}", file=sys.stderr)
         return 1
     try:
-        text = log_path.read_text(errors="replace")
+        text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         print(f"error: cannot read ingestor log: {exc}", file=sys.stderr)
         return 1

@@ -14,11 +14,11 @@ def run(target: Path | None = None) -> int:
     if target is not None:
         local = target.expanduser().resolve() / ".claude" / "memory-handoffs" / "TEMPLATE.md"
         if local.is_file():
-            sys.stdout.write(local.read_text())
+            sys.stdout.write(local.read_text(encoding="utf-8"))
             return 0
     packaged = template_root() / "claude" / "memory-handoffs" / "TEMPLATE.md"
     if not packaged.is_file():
         print("error: packaged TEMPLATE.md missing", file=sys.stderr)
         return 1
-    sys.stdout.write(packaged.read_text())
+    sys.stdout.write(packaged.read_text(encoding="utf-8"))
     return 0

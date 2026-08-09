@@ -3106,6 +3106,25 @@ def test_import_context_missing_from_file_errors(tmp_path, capsys):
     assert work_cmd._read_imports(tmp_path) == []
 
 
+def test_import_context_invalid_utf8_from_file_errors(tmp_path, capsys):
+    tmp_path.mkdir(exist_ok=True)
+    body_file = tmp_path / "invalid-utf8.txt"
+    body_file.write_bytes(b"\xff\xfe not valid utf-8")
+
+    assert (
+        work_cmd.import_context(
+            target=tmp_path,
+            text="",
+            context_kind="note",
+            from_file=body_file,
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "error: cannot read --from-file:" in captured.err
+    assert work_cmd._read_imports(tmp_path) == []
+
+
 def test_import_context_rejects_non_directory_target(tmp_path, capsys):
     missing = tmp_path / "nope"
     assert work_cmd.import_context(target=missing, text="ctx", context_kind="note") == 2
