@@ -258,7 +258,7 @@ def _write_session_markdown(path: Path, *, title: str, payload: dict[str, Any], 
         lines.append(f"- Latest run: {latest.get('started_at')} [{latest.get('status')}] {latest.get('path')}")
     if dogfood.get("next"):
         lines.append(f"- Next: {dogfood['next']}")
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _write_work_handoff(target: Path, session_dir: Path, payload: dict[str, Any], inbox: Path) -> Path:
@@ -336,7 +336,7 @@ no-card
 {document_content.strip()}
 """
     inbox.mkdir(parents=True, exist_ok=True)
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
     return path
 
 

@@ -1175,7 +1175,7 @@ def _backfill_write(target: Path, candidate: dict[str, Any]) -> None:
     # just before its closing fence, leaving every other byte untouched.
     closing = next(i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---")
     additions = [f"{field}: {candidate[field]}" for field in candidate["fields"]]
-    path.write_text("\n".join(lines[:closing] + additions + lines[closing:]))
+    path.write_text("\n".join(lines[:closing] + additions + lines[closing:]), encoding="utf-8")
 
 
 def backfill(*, target: Path, apply: bool = False, json_output: bool = False) -> int:

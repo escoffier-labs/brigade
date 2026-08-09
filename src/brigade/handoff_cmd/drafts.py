@@ -810,7 +810,7 @@ def draft(
         suggested_content=suggested_content,
     )
     inbox_path.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
     lint_result = lint_file(path)
     guard_result = _guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
     payload = {
