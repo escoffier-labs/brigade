@@ -22,6 +22,11 @@ from . import reviews as reviews_mod
 from . import scanners as scanners_mod
 
 
+def _verification_is_windows() -> bool:
+    """True on Windows; patchable in tests without mutating the shared os module."""
+    return os.name == "nt"
+
+
 def _default_verify_commands(target: Path) -> list[str]:
     if (target / "pyproject.toml").is_file() and (target / "tests").is_dir():
         if (target / "src").is_dir():
@@ -57,7 +62,7 @@ def _high_risk_command_message(executable: str) -> str:
     honors shebang +x scripts; Windows needs an explicit host (.ps1/.cmd) or a
     shebang'd script path that verify rewrites to the interpreter.
     """
-    if os.name == "nt":
+    if _verification_is_windows():
         remedy = (
             "python script.py, a .ps1/.cmd run by its path like .\\scripts\\check.ps1, "
             "or a shebang'd script path like ./scripts/check.sh"
@@ -80,7 +85,9 @@ def _unresolvable_command_message(executable: str) -> str:
 
 def _verify_token_is_path(token: str) -> bool:
     """True when *token* should be resolved relative to --target, not via PATH."""
-    if "/" in token or (os.name == "nt" and ("\\" in token or (len(token) >= 2 and token[1] == ":"))):
+    if "/" in token or (
+        _verification_is_windows() and ("\\" in token or (len(token) >= 2 and token[1] == ":"))
+    ):
         return True
     return False
 
@@ -277,7 +284,7 @@ def _verify_execution_argv(argv: list[str], target: Path) -> list[str]:
     if not executable_path.is_absolute():
         executable_path = target / executable_path
     execution_argv[0] = str(executable_path)
-    if os.name == "nt":
+    if _verification_is_windows():
         hosted = _windows_script_execution_argv(executable_path, execution_argv[1:])
         if hosted is not None:
             return hosted

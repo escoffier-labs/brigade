@@ -1234,7 +1234,6 @@ def test_shebang_interpreter_token_parses_env_and_absolute_forms():
 def test_windows_script_execution_argv_hosts_shebang_and_native_suffixes(tmp_path, monkeypatch):
     from brigade.work_cmd import verification
 
-    monkeypatch.setattr(verification.os, "name", "nt")
     script = tmp_path / "check.sh"
     script.write_bytes(b"#!/usr/bin/env bash\necho hi\n")
     fake_bash = tmp_path / "bash.exe"
@@ -1293,10 +1292,10 @@ def test_verify_execution_argv_expands_shebang_only_on_windows(tmp_path, monkeyp
         lambda token: str(fake_bash) if token == "bash" else None,
     )
 
-    monkeypatch.setattr(verification.os, "name", "posix")
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: False)
     assert verification._verify_execution_argv(["./scripts/check.sh"], target) == [str(script)]
 
-    monkeypatch.setattr(verification.os, "name", "nt")
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
     assert verification._verify_execution_argv(["./scripts/check.sh", "x"], target) == [
         str(fake_bash),
         str(script),
@@ -1307,12 +1306,12 @@ def test_verify_execution_argv_expands_shebang_only_on_windows(tmp_path, monkeyp
 def test_high_risk_command_message_is_platform_aware(monkeypatch):
     from brigade.work_cmd import verification
 
-    monkeypatch.setattr(verification.os, "name", "posix")
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: False)
     posix_msg = verification._high_risk_command_message("bash")
     assert "chmod +x" in posix_msg
     assert "./scripts/check.sh" in posix_msg
 
-    monkeypatch.setattr(verification.os, "name", "nt")
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
     win_msg = verification._high_risk_command_message("bash")
     assert "python script.py" in win_msg
     assert ".ps1" in win_msg
