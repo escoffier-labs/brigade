@@ -242,3 +242,53 @@ def test_auto_declined_method_shape_still_scrubs_after_public_string_validation(
     scrubbed = worker_events.scrub_event(case["raw"])
     assert scrubbed["method"].endswith("#auto-declined")
     assert not worker_events.validate_scrubbed_event(scrubbed)
+
+
+def test_single_scrubbed_event_document_is_supported(tmp_path: Path):
+    scrubbed = _case("turn_started_public")["scrubbed"]
+    path = tmp_path / "turn.scrubbed.json"
+    path.write_text(json.dumps(scrubbed), encoding="utf-8")
+
+    info = worker_events.inspect_stream_file(path)
+    assert info.status == worker_events.STATUS_SCRUBBED
+    assert info.artifact_class == worker_events.SCRUBBED_ARTIFACT_CLASS
+    assert info.media_type == worker_events.SCRUBBED_MEDIA_TYPE
+    assert info.event_count == 1
+    assert info.diagnostic is None
+
+    loaded = worker_events.load_stream_for_consumer(path, consumer="run_audit")
+    assert loaded == scrubbed
+    assert loaded["schema"] == worker_events.SCHEMA
+    assert not worker_events.validate_scrubbed_event(loaded)
+
+
+def test_arbitrary_auto_declined_method_prefix_fails_closed():
+    case = _case("auto_declined_with_secrets")
+    raw = json.loads(json.dumps(case["raw"]))
+    raw["method"] = "unknown/request#auto-declined"
+    with pytest.raises(worker_events.WorkerEventError) as excinfo:
+        worker_events.scrub_event(raw)
+    assert excinfo.value.category == "unknown-method"
+    assert len(str(excinfo.value)) <= worker_events.MAX_DIAGNOSTIC_LEN
+
+    valid = worker_events.scrub_event(case["raw"])
+    assert valid["method"] == "item/commandExecution/requestApproval#auto-declined"
+    assert not worker_events.validate_scrubbed_event(valid)
+
+
+def test_forged_scrubbed_event_unknown_params_field_is_rejected(tmp_path: Path):
+    scrubbed = json.loads(json.dumps(_case("turn_started_public")["scrubbed"]))
+    scrubbed["params"]["harmlessExtra"] = "looks-fine"
+
+    errors = worker_events.validate_scrubbed_event(scrubbed)
+    assert errors
+    assert len(errors[0]) <= worker_events.MAX_DIAGNOSTIC_LEN
+
+    path = tmp_path / "forged.scrubbed.json"
+    path.write_text(json.dumps(scrubbed), encoding="utf-8")
+    info = worker_events.inspect_stream_file(path)
+    assert info.status == worker_events.STATUS_UNCLASSIFIED
+    assert info.diagnostic is not None
+
+    with pytest.raises(worker_events.WorkerEventError):
+        worker_events.load_stream_for_consumer(path, consumer="run_audit")

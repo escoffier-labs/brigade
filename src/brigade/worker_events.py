@@ -61,6 +61,34 @@ _SECRET_LIKE_PUBLIC_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)authorization\s*[:=]"), "authorization material"),
 )
 _AUTO_DECLINED_SUFFIX = "#auto-declined"
+_AUTO_DECLINED_METHOD_BASES = frozenset({"item/commandExecution/requestApproval"})
+
+_SCRUBBED_EVENT_TOP_LEVEL_KEYS = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "transport",
+        "classification_status",
+        "method",
+        "source_digest",
+        "params",
+        "jsonrpc",
+    }
+)
+_SCRUBBED_STREAM_TOP_LEVEL_KEYS = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "transport",
+        "classification_status",
+        "media_type",
+        "artifact_class",
+        "classification_matrix_version",
+        "source_digest",
+        "event_count",
+        "events",
+    }
+)
 
 # Top-level JSON-RPC notification envelope keys only.
 _ENVELOPE_FIELDS: dict[str, str] = {
@@ -332,7 +360,7 @@ def _validate_public_string(value: str, *, field: str, kind: str = "identifier")
             raise WorkerEventError(_bound(f"{field} retains {label}"), category="secret")
 
 
-def _validate_scrubbed_public_strings(value: Any, *, path: str) -> list[str]:
+def _validate_scrubbed_scalar_public(path: str, value: Any) -> list[str]:
     errors: list[str] = []
     if isinstance(value, str):
         try:
@@ -340,22 +368,101 @@ def _validate_scrubbed_public_strings(value: Any, *, path: str) -> list[str]:
             _validate_public_string(value, field=path, kind=kind)
         except WorkerEventError as exc:
             errors.append(exc.diagnostic)
+    elif value is None or isinstance(value, int) and not isinstance(value, bool):
         return errors
-    if isinstance(value, Mapping):
-        for key, nested in value.items():
-            if not isinstance(key, str):
-                errors.append(_bound(f"{path} has non-string key"))
-                continue
-            errors.extend(_validate_scrubbed_public_strings(nested, path=f"{path}.{key}"))
+    elif isinstance(value, bool):
         return errors
-    if isinstance(value, list):
+    elif isinstance(value, list):
         for index, nested in enumerate(value):
-            errors.extend(_validate_scrubbed_public_strings(nested, path=f"{path}[{index}]"))
+            errors.extend(_validate_scrubbed_scalar_public(f"{path}[{index}]", nested))
+    else:
+        errors.append(_bound(f"{path} has unsupported type {type(value).__name__}"))
     return errors
 
 
-def _scrubbed_document_validation_errors(payload: Mapping[str, Any]) -> list[str]:
+def _validate_scrubbed_object(obj: Mapping[str, Any], matrix: Mapping[str, str], *, path: str) -> list[str]:
     errors: list[str] = []
+    for key, value in obj.items():
+        if not isinstance(key, str):
+            errors.append(_bound(f"{path} has non-string key"))
+            continue
+        global_class = _GLOBAL_SECRET_KEYS.get(key)
+        classification = global_class or matrix.get(key)
+        if classification is None:
+            errors.append(_bound(f"unknown field {path}.{key}"))
+            continue
+        if classification != FIELD_PUBLIC:
+            errors.append(_bound(f"scrubbed projection retains private field {path}.{key}"))
+            continue
+        if key == "item":
+            errors.extend(_validate_scrubbed_item(value, path=f"{path}.{key}"))
+        elif key == "turn":
+            errors.extend(_validate_scrubbed_turn(value, path=f"{path}.{key}"))
+        else:
+            errors.extend(_validate_scrubbed_scalar_public(f"{path}.{key}", value))
+    return errors
+
+
+def _validate_scrubbed_item(item: Any, *, path: str) -> list[str]:
+    if not isinstance(item, Mapping):
+        return [_bound(f"{path} must be an object")]
+    item_type = item.get("type")
+    if not isinstance(item_type, str) or not item_type:
+        return [_bound(f"{path}.type must be a non-empty string")]
+    matrix = _ITEM_TYPE_FIELDS.get(item_type)
+    if matrix is None:
+        return [_bound(f"unknown item type {item_type!r}")]
+    return _validate_scrubbed_object(item, matrix, path=path)
+
+
+def _validate_scrubbed_turn(turn: Any, *, path: str) -> list[str]:
+    if not isinstance(turn, Mapping):
+        return [_bound(f"{path} must be an object")]
+    errors: list[str] = []
+    for key, value in turn.items():
+        if not isinstance(key, str):
+            errors.append(_bound(f"{path} has non-string key"))
+            continue
+        classification = _TURN_FIELDS.get(key)
+        if classification is None:
+            errors.append(_bound(f"unknown field {path}.{key}"))
+            continue
+        if classification != FIELD_PUBLIC:
+            errors.append(_bound(f"scrubbed projection retains private field {path}.{key}"))
+            continue
+        if key == "items":
+            if not isinstance(value, list):
+                errors.append(_bound(f"{path}.items must be an array"))
+                continue
+            for index, entry in enumerate(value):
+                errors.extend(_validate_scrubbed_item(entry, path=f"{path}.items[{index}]"))
+            continue
+        errors.extend(_validate_scrubbed_scalar_public(f"{path}.{key}", value))
+    return errors
+
+
+def _validate_scrubbed_params_structure(method: str, params: Mapping[str, Any], *, path: str) -> list[str]:
+    try:
+        matrix = _param_matrix_for_method(method)
+    except WorkerEventError as exc:
+        return [exc.diagnostic]
+    return _validate_scrubbed_object(params, matrix, path=path)
+
+
+def _scrubbed_single_event_document_validation_errors(payload: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    unknown_keys = sorted(set(payload.keys()) - _SCRUBBED_EVENT_TOP_LEVEL_KEYS)
+    if unknown_keys:
+        errors.append(_bound(f"unknown scrubbed event keys: {', '.join(unknown_keys[:8])}"))
+    errors.extend(validate_scrubbed_event(payload))
+    return errors
+
+
+def _scrubbed_stream_document_validation_errors(payload: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    unknown_keys = sorted(set(payload.keys()) - _SCRUBBED_STREAM_TOP_LEVEL_KEYS)
+    if unknown_keys:
+        errors.append(_bound(f"unknown scrubbed stream keys: {', '.join(unknown_keys[:8])}"))
     if payload.get("schema") != STREAM_SCHEMA:
         errors.append(_bound(f"schema must be {STREAM_SCHEMA!r}"))
     if payload.get("schema_version") != STREAM_SCHEMA_VERSION:
@@ -389,6 +496,15 @@ def _scrubbed_document_validation_errors(payload: Mapping[str, Any]) -> list[str
     return errors
 
 
+def _scrubbed_document_validation_errors(payload: Mapping[str, Any]) -> list[str]:
+    schema = payload.get("schema")
+    if schema == SCHEMA:
+        return _scrubbed_single_event_document_validation_errors(payload)
+    if schema == STREAM_SCHEMA:
+        return _scrubbed_stream_document_validation_errors(payload)
+    return [_bound(f"schema must be {SCHEMA!r} or {STREAM_SCHEMA!r}")]
+
+
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -415,7 +531,10 @@ def classification_matrix() -> dict[str, Any]:
 
 
 def _is_auto_declined(method: str) -> bool:
-    return method.endswith(_AUTO_DECLINED_SUFFIX) and len(method) > len(_AUTO_DECLINED_SUFFIX)
+    if not method.endswith(_AUTO_DECLINED_SUFFIX):
+        return False
+    base = method[: -len(_AUTO_DECLINED_SUFFIX)]
+    return base in _AUTO_DECLINED_METHOD_BASES
 
 
 def _param_matrix_for_method(method: str) -> dict[str, str]:
@@ -691,6 +810,16 @@ def inspect_stream_file(path: Path) -> StreamArtifactInfo:
                     source_digest=digest,
                     diagnostic=validation_errors[0],
                 )
+            if payload.get("schema") == SCHEMA:
+                return StreamArtifactInfo(
+                    path=path,
+                    status=STATUS_SCRUBBED,
+                    media_type=SCRUBBED_MEDIA_TYPE,
+                    artifact_class=SCRUBBED_ARTIFACT_CLASS,
+                    transport=str(payload.get("transport") or TRANSPORT),
+                    event_count=1,
+                    source_digest=str(payload.get("source_digest") or digest),
+                )
             event_count = payload.get("event_count")
             if not isinstance(event_count, int):
                 events = payload.get("events")
@@ -887,6 +1016,9 @@ def validate_scrubbed_event(event: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
     if not isinstance(event, Mapping):
         return ["scrubbed event must be a JSON object"]
+    unknown_keys = sorted(set(event.keys()) - _SCRUBBED_EVENT_TOP_LEVEL_KEYS)
+    if unknown_keys:
+        errors.append(_bound(f"unknown scrubbed event keys: {', '.join(unknown_keys[:8])}"))
     if event.get("schema") != SCHEMA:
         errors.append(_bound(f"schema must be {SCHEMA!r}"))
     if event.get("schema_version") != SCHEMA_VERSION:
@@ -909,8 +1041,8 @@ def validate_scrubbed_event(event: Mapping[str, Any]) -> list[str]:
     params = event.get("params")
     if not isinstance(params, Mapping):
         errors.append("params must be an object")
-    else:
-        errors.extend(_validate_scrubbed_public_strings(params, path="params"))
+    elif isinstance(method, str) and method:
+        errors.extend(_validate_scrubbed_params_structure(method, params, path="params"))
     errors.extend(scrubbed_projection_omits_sensitive_material(event))
     return errors
 
