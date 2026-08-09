@@ -90,6 +90,63 @@ def test_roadmap_audit_normalizes_parameterized_and_parent_commands(tmp_path):
     assert "brigade chat surfaces show surface-one" not in payload["missing_cli_commands"]
 
 
+def test_roadmap_audit_ignores_rejected_brigade_components_alternative(tmp_path):
+    (tmp_path / "ROADMAP.md").write_text("# Roadmap\n")
+    (tmp_path / "README.md").write_text(
+        "## Command Alternatives (Scouting)\n\n"
+        "### Alternative A — Top-level `brigade setup` (recommended)\n\n"
+        "Add `brigade setup` as a first-class top-level command.\n\n"
+        "### Alternative C — `brigade components` command group\n\n"
+        "Expose `brigade components install`, `status`, and `rollback` backed by the same engine.\n\n"
+        "Tradeoffs: adds CLI surface area before the current phase needs it.\n\n"
+        "**Recommendation:** Alternative A.\n"
+    )
+
+    payload = roadmap_cmd.audit_payload(tmp_path)
+
+    assert "brigade setup" in payload["documented_commands"]
+    assert not any(command.startswith("brigade components") for command in payload["documented_commands"])
+    assert not any(command.startswith("brigade components") for command in payload["missing_cli_commands"])
+
+
+def test_roadmap_audit_rejected_section_does_not_poison_later_sibling_headings(tmp_path):
+    (tmp_path / "ROADMAP.md").write_text("# Roadmap\n")
+    (tmp_path / "README.md").write_text(
+        "## Rejected design ideas\n\n"
+        "### Alternative B — discarded `brigade junk` path\n\n"
+        "This section names a rejected command.\n\n"
+        "## Documented commands\n\n"
+        "Run `brigade doctor` for health checks.\n"
+    )
+
+    payload = roadmap_cmd.audit_payload(tmp_path)
+
+    assert "brigade doctor" in payload["documented_commands"]
+    assert "brigade junk" not in payload["documented_commands"]
+
+
+def test_roadmap_audit_accepts_alternative_configuration_heading(tmp_path):
+    (tmp_path / "ROADMAP.md").write_text("# Roadmap\n")
+    (tmp_path / "README.md").write_text(
+        "## Alternative configuration\n\nUse `brigade doctor` when wiring optional settings.\n"
+    )
+
+    payload = roadmap_cmd.audit_payload(tmp_path)
+
+    assert "brigade doctor" in payload["documented_commands"]
+    assert "brigade doctor" not in payload["missing_cli_commands"]
+
+
+def test_roadmap_audit_extracts_inline_backtick_commands_inside_fenced_blocks(tmp_path):
+    (tmp_path / "ROADMAP.md").write_text("# Roadmap\n")
+    (tmp_path / "README.md").write_text("```bash\nprefix `brigade doctor` suffix\n```\n")
+
+    payload = roadmap_cmd.audit_payload(tmp_path)
+
+    assert "brigade doctor" in payload["documented_commands"]
+    assert "brigade doctor" not in payload["missing_cli_commands"]
+
+
 def test_roadmap_audit_json_and_imports(tmp_path, capsys):
     (tmp_path / "ROADMAP.md").write_text("# Roadmap\n")
     (tmp_path / "README.md").write_text("Run `brigade missing localcommand`.\n")
