@@ -43,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and confirmation-gated; degrades to zero proposed edges when GraphTrail is
   unavailable. Ships `plan.template.json` as the artifact contract. Skill only,
   with no new CLI subcommand.
+- Hash-stamped managed instruction blocks (#732): Brigade frames harness
+  instruction spans with `BEGIN/END BRIGADE INTEGRATION` markers that carry
+  marker-format version, profile, and a full SHA-256 of the body. Install is a
+  true no-op when recorded, actual, and desired digests match; check
+  (`brigade harness sync --check` / `harness doctor`) classifies
+  missing/stale/locally_modified/malformed/current and prints the fix command;
+  removal is surgical. Locally modified or malformed spans fail closed unless
+  `--force`. Symlinked targets are skipped (including a post-`lstat` symlink
+  swap). Legacy `brigade:user-profile` markers are recognized and upgraded in
+  place.
 
 ### Fixed
 - DAG runs no longer deadlock on shared cover sets, accept mutual-wait cycles, misreport one-node execution, route to unhealthy seats, or miss shared-checkout isolation breaches. (#742, #788, #791, #794)

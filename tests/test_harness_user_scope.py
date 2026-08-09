@@ -149,7 +149,7 @@ def test_hand_authored_agents_section_survives_sync(tmp_path, monkeypatch, capsy
     text = agents.read_text()
     assert "# My notes" in text
     assert "Keep this paragraph." in text
-    assert harness_profiles.INSTRUCTION_START in text
+    assert "BEGIN BRIGADE INTEGRATION" in text
     assert harness_profiles.managed_instruction_text().strip() in text
 
 
@@ -166,7 +166,7 @@ def test_claude_hand_authored_section_survives_sync(tmp_path, monkeypatch, capsy
     capsys.readouterr()
     text = claude_md.read_text()
     assert "Personal routing" in text
-    assert harness_profiles.INSTRUCTION_START in text
+    assert "BEGIN BRIGADE INTEGRATION" in text
 
 
 def test_foreign_managed_block_reports_conflict(tmp_path, monkeypatch, capsys):
@@ -413,6 +413,62 @@ def test_skill_root_symlink_is_conflict_and_does_not_escape_home(tmp_path, monke
     payload = json.loads(capsys.readouterr().out)["results"][0]
     assert payload["status"] == "conflict"
     assert not any(outside.rglob("*"))
+
+
+def test_doctor_and_check_report_stale_block_with_fix_command(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    assert cli.main(_sync_base(workspace) + ["--write", "--json"]) == 0
+    capsys.readouterr()
+
+    agents = home / ".codex" / "AGENTS.md"
+    old_body = "old managed body\n"
+    agents.write_text(harness_profile_cmd._block(old_body))
+    state_path = home / ".codex" / "brigade" / "install-state.json"
+    state = json.loads(state_path.read_text())
+    state["instructions"]["digest"] = harness_profile_cmd.digest_text(old_body)
+    state_path.write_text(json.dumps(state))
+
+    assert (
+        cli.main(["harness", "doctor", "--target", "codex", "--scope", "user", "--workspace", str(workspace), "--json"])
+        == 1
+    )
+    doctor = json.loads(capsys.readouterr().out)["results"][0]
+    instruction = next(item for item in doctor["items"] if item["surface"] == "instruction")
+    assert instruction["status"] == "stale"
+    assert "brigade harness sync --target codex --scope user --write" in instruction["detail"]
+
+    assert cli.main(_sync_base(workspace) + ["--check", "--json"]) == 1
+    checked = json.loads(capsys.readouterr().out)["results"][0]
+    assert checked["ready"] is False
+    check_instruction = next(item for item in checked["items"] if item["surface"] == "instruction")
+    assert check_instruction["status"] == "stale"
+
+
+def test_force_overwrites_locally_modified_instruction_block(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    assert cli.main(_sync_base(workspace) + ["--write", "--json"]) == 0
+    capsys.readouterr()
+    agents = home / ".codex" / "AGENTS.md"
+    text = agents.read_text()
+    agents.write_text(text.replace("brigade run", "brigade dispatch", 1))
+
+    assert cli.main(_sync_base(workspace) + ["--write", "--json"]) == 1
+    assert "brigade dispatch" in agents.read_text()
+    capsys.readouterr()
+
+    assert cli.main(_sync_base(workspace) + ["--force", "--write", "--json"]) == 0
+    capsys.readouterr()
+    restored = agents.read_text()
+    assert "brigade run" in restored
+    assert "brigade dispatch" not in restored
+    assert "BEGIN BRIGADE INTEGRATION" in restored
+    assert "hash:" in restored
 
 
 def test_doctor_reports_drift_without_mutating(tmp_path, monkeypatch, capsys):

@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__ as BRIGADE_VERSION
-from . import harness_profiles, localio, mcp_adapters, mcp_cmd, skills_cmd
+from . import harness_profiles, localio, managed_block, mcp_adapters, mcp_cmd, skills_cmd
 from .toml_compat import TOMLDecodeError as _TOMLDecodeError
 from .toml_compat import loads as _toml_loads
 
-_RECOVERY_COMMAND = "brigade harness sync --target <harness> --scope user --adopt --write"
+_RECOVERY_COMMAND = "brigade harness sync --target <harness> --scope user --help"
 _SECTIONS = ("instructions", "skills", "generated", "mcp")
 _HOOK_STATE_KEY = "hooks.json#sessionStart"
 _LEGACY_MIGRATED = "legacy_migrated"
@@ -166,109 +166,197 @@ def load_profile_state(*, state_path: Path, workspace: Path, harness: str) -> Lo
     return LoadedProfileState(state, None)
 
 
-def _block(body: str) -> str:
-    return f"{harness_profiles.INSTRUCTION_START}\n{body}\n{harness_profiles.INSTRUCTION_END}\n"
-
-
-def _split_components(text: str) -> tuple[str, str, str] | None:
-    start, end = harness_profiles.INSTRUCTION_START, harness_profiles.INSTRUCTION_END
-    if text.count(start) != 1 or text.count(end) != 1:
-        return None
-    start_pos, end_pos = text.find(start), text.find(end)
-    after_start = start_pos + len(start)
-    if end_pos <= start_pos or after_start >= len(text) or text[after_start] != "\n" or text[end_pos - 1] != "\n":
-        return None
-    before = text[:start_pos]
-    body = text[after_start + 1 : end_pos - 1]
-    after = text[end_pos + len(end) :]
-    if after.startswith("\n"):
-        after = after[1:]
-    return before, body, after
-
-
-def plan_instruction(*, path: Path, desired: str, state: dict[str, Any], adopt: bool = False) -> SurfacePlan:
-    instruction_state = state.get("instructions", {}) if isinstance(state.get("instructions"), dict) else {}
-    owned = instruction_state.get("digest")
-    if not path.exists():
-        return SurfacePlan("instruction", path, "missing", "create", digest_text(desired), _block(desired))
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        return SurfacePlan("instruction", path, "conflict", "preserve", detail=str(exc))
-    parts = _split_components(text)
-    if parts is None:
-        if harness_profiles.INSTRUCTION_START not in text and harness_profiles.INSTRUCTION_END not in text:
-            return SurfacePlan(
-                "instruction",
-                path,
-                "missing",
-                "create",
-                digest_text(desired),
-                text + ("\n" if text else "") + _block(desired),
-            )
-        return SurfacePlan(
-            "instruction", path, "conflict", "preserve", detail="managed instruction markers are malformed"
-        )
-    before, live, after = parts
-    live_digest, desired_digest = digest_text(live), digest_text(desired)
-    if live_digest == desired_digest:
-        if owned == live_digest:
-            return SurfacePlan("instruction", path, "current", "none", desired_digest)
-        if adopt:
-            return SurfacePlan("instruction", path, "adopted", "none", desired_digest)
-        return SurfacePlan(
-            "instruction",
-            path,
-            "conflict",
-            "preserve",
-            desired_digest,
-            detail=f"matching managed instruction block is unowned; recover with: {_RECOVERY_COMMAND}",
-        )
-    if owned == live_digest or adopt:
-        return SurfacePlan("instruction", path, "stale", "update", desired_digest, before + _block(desired) + after)
-    return SurfacePlan(
-        "instruction",
-        path,
-        "conflict",
-        "preserve",
-        detail=f"foreign managed instruction block; recover with: {_RECOVERY_COMMAND}",
+def _block(body: str, *, profile: str = managed_block.DEFAULT_PROFILE) -> str:
+    return managed_block.render_block(
+        body,
+        kind=managed_block.DEFAULT_KIND,
+        profile=profile,
     )
 
 
-def plan_instruction_removal(*, path: Path, state: dict[str, Any]) -> SurfacePlan:
+def _split_components(text: str) -> tuple[str, str, str] | None:
+    parsed = managed_block.parse_blocks(text, kind=managed_block.DEFAULT_KIND)
+    if parsed.status != "ok":
+        return None
+    return parsed.before, parsed.body, parsed.after
+
+
+def _instruction_help_command(harness: str | None = None) -> str:
+    target = harness or "<harness>"
+    return _RECOVERY_COMMAND.replace("<harness>", target)
+
+
+def _instruction_write_fix_command(harness: str | None = None) -> str:
+    target = harness or "<harness>"
+    return managed_block.default_fix_command(harness=target)
+
+
+def _plan_from_block_plan(path: Path, plan: managed_block.BlockPlan, *, harness: str | None = None) -> SurfacePlan:
+    """Map managed-block plans onto the harness SurfacePlan vocabulary."""
+    status = plan.status
+    action = plan.action
+    detail = plan.detail
+    if status in {
+        managed_block.STATUS_MISSING,
+        managed_block.STATUS_STALE,
+        managed_block.STATUS_LOCALLY_MODIFIED,
+        managed_block.STATUS_MALFORMED,
+    }:
+        if status in {managed_block.STATUS_LOCALLY_MODIFIED, managed_block.STATUS_MALFORMED}:
+            help_cmd = _instruction_help_command(harness)
+            detail = f"{detail}; see: {help_cmd}" if detail else f"see: {help_cmd}"
+        else:
+            write_cmd = _instruction_write_fix_command(harness)
+            detail = f"{detail}; fix with: {write_cmd}" if detail else f"fix with: {write_cmd}"
+    # Preserve legacy conflict wording for fail-closed local edits so existing
+    # recovery messaging and tests keep a stable surface.
+    if status == managed_block.STATUS_LOCALLY_MODIFIED and action == managed_block.ACTION_PRESERVE:
+        status = "conflict"
+        if not detail or "see:" not in (detail or ""):
+            detail = detail or f"foreign managed instruction block; see: {_instruction_help_command(harness)}"
+    elif status == managed_block.STATUS_MALFORMED and action == managed_block.ACTION_PRESERVE:
+        status = "conflict"
+        detail = detail or "managed instruction markers are malformed"
+    elif status == "symlink":
+        status = "conflict"
+        action = "preserve"
+    return SurfacePlan(
+        "instruction",
+        path,
+        status,
+        action if action != managed_block.ACTION_PRESERVE else "preserve",
+        plan.desired_hash,
+        plan.rendered,
+        detail,
+    )
+
+
+def plan_instruction(
+    *,
+    path: Path,
+    desired: str,
+    state: dict[str, Any],
+    adopt: bool = False,
+    force: bool = False,
+    profile: str = managed_block.DEFAULT_PROFILE,
+    harness: str | None = None,
+) -> SurfacePlan:
+    instruction_state = state.get("instructions", {}) if isinstance(state.get("instructions"), dict) else {}
+    owned = instruction_state.get("digest")
+    owned_digest = owned if isinstance(owned, str) else None
+    fix = _instruction_write_fix_command(harness)
+    desired_digest = managed_block.body_hash(desired)
+    if not path.exists():
+        block_plan = managed_block.plan_install(
+            None,
+            desired=desired,
+            owned_digest=owned_digest,
+            force=force,
+            adopt=adopt,
+            profile=profile,
+            fix_command=fix,
+        )
+        return _plan_from_block_plan(path, block_plan, harness=harness)
+    try:
+        text = managed_block.read_text_nofollow(path)
+    except (OSError, UnicodeDecodeError) as exc:
+        return SurfacePlan("instruction", path, "conflict", "preserve", detail=str(exc))
+
+    assessment = managed_block.assess_block(
+        text,
+        desired=desired,
+        owned_digest=owned_digest,
+        profile=profile,
+        fix_command=fix,
+    )
+
+    # Ownership ledger gate: identical content with no Brigade ownership still
+    # requires --adopt before sync will claim it (stamped or legacy).
+    if assessment.status in {managed_block.STATUS_CURRENT, managed_block.STATUS_STALE}:
+        if assessment.actual_hash == desired_digest and owned_digest is None and not adopt and not force:
+            return SurfacePlan(
+                "instruction",
+                path,
+                "conflict",
+                "preserve",
+                desired_digest,
+                detail=f"matching managed instruction block is unowned; see: {_instruction_help_command(harness)}",
+            )
+        if (
+            assessment.actual_hash == desired_digest
+            and owned_digest is None
+            and adopt
+            and assessment.status == managed_block.STATUS_CURRENT
+        ):
+            return SurfacePlan("instruction", path, "adopted", "none", desired_digest)
+        if assessment.actual_hash == desired_digest and owned_digest is None and adopt and assessment.legacy:
+            # Adopt + upgrade legacy markers to hash-stamped form.
+            block_plan = managed_block.plan_install(
+                text,
+                desired=desired,
+                owned_digest=owned_digest,
+                force=True,
+                adopt=True,
+                profile=profile,
+                fix_command=fix,
+            )
+            surface = _plan_from_block_plan(path, block_plan, harness=harness)
+            return SurfacePlan(
+                "instruction",
+                path,
+                "adopted",
+                surface.action,
+                desired_digest,
+                surface.rendered,
+                surface.detail,
+            )
+
+    block_plan = managed_block.plan_install(
+        text,
+        desired=desired,
+        owned_digest=owned_digest,
+        force=force,
+        adopt=adopt,
+        profile=profile,
+        fix_command=fix,
+    )
+    return _plan_from_block_plan(path, block_plan, harness=harness)
+
+
+def plan_instruction_removal(
+    *, path: Path, state: dict[str, Any], force: bool = False, harness: str | None = None
+) -> SurfacePlan:
     if not path.exists():
         return SurfacePlan("instruction", path, "absent", "none")
     try:
-        text = path.read_text(encoding="utf-8")
+        text = managed_block.read_text_nofollow(path)
     except (OSError, UnicodeDecodeError) as exc:
         return SurfacePlan("instruction", path, "conflict", "preserve", detail=str(exc))
-    parts = _split_components(text)
-    if parts is None:
-        return SurfacePlan(
-            "instruction",
-            path,
-            "absent"
-            if harness_profiles.INSTRUCTION_START not in text and harness_profiles.INSTRUCTION_END not in text
-            else "conflict",
-            "none"
-            if harness_profiles.INSTRUCTION_START not in text and harness_profiles.INSTRUCTION_END not in text
-            else "preserve",
-            detail="managed instruction markers are malformed",
-        )
-    before, body, after = parts
     instruction_state = state.get("instructions", {}) if isinstance(state.get("instructions"), dict) else {}
     owned = instruction_state.get("digest")
-    if owned == digest_text(body):
-        if instruction_state.get("created_file") and not before and not after:
-            return SurfacePlan("instruction", path, "managed", "remove")
-        return SurfacePlan(
-            "instruction",
-            path,
-            "managed",
-            "remove",
-            rendered=(before[:-1] if before.endswith("\n") else before) + after,
-        )
-    return SurfacePlan("instruction", path, "conflict", "preserve", detail="owned instruction block was edited")
+    owned_digest = owned if isinstance(owned, str) else None
+    block_plan = managed_block.plan_remove(
+        text,
+        owned_digest=owned_digest,
+        force=force,
+        fix_command=_instruction_write_fix_command(harness),
+    )
+    if block_plan.action == managed_block.ACTION_NONE and block_plan.status == managed_block.STATUS_MISSING:
+        return SurfacePlan("instruction", path, "absent", "none")
+    if block_plan.action == managed_block.ACTION_PRESERVE:
+        detail = block_plan.detail or "owned instruction block was edited"
+        if block_plan.status == managed_block.STATUS_MALFORMED:
+            detail = block_plan.detail or "managed instruction markers are malformed"
+        return SurfacePlan("instruction", path, "conflict", "preserve", detail=detail)
+    if instruction_state.get("created_file") and block_plan.rendered == "":
+        return SurfacePlan("instruction", path, "managed", "remove")
+    return SurfacePlan(
+        "instruction",
+        path,
+        "managed",
+        "remove",
+        rendered=block_plan.rendered if block_plan.rendered is not None else "",
+    )
 
 
 def plan_managed_instruction(*, path: Path, desired: str, state: dict[str, Any], adopt: bool = False) -> SurfacePlan:
@@ -294,7 +382,7 @@ def plan_managed_instruction(*, path: Path, desired: str, state: dict[str, Any],
             "conflict",
             "preserve",
             desired_digest,
-            detail=f"matching managed instruction file is unowned; recover with: {_RECOVERY_COMMAND}",
+            detail=f"matching managed instruction file is unowned; see: {_instruction_help_command()}",
         )
     if owned == live_digest or adopt:
         return SurfacePlan("instruction", path, "stale", "update", desired_digest, desired)
@@ -303,7 +391,7 @@ def plan_managed_instruction(*, path: Path, desired: str, state: dict[str, Any],
         path,
         "conflict",
         "preserve",
-        detail=f"foreign managed instruction file; recover with: {_RECOVERY_COMMAND}",
+        detail=f"foreign managed instruction file; see: {_instruction_help_command()}",
     )
 
 
@@ -320,17 +408,24 @@ def plan_managed_instruction_removal(*, path: Path, state: dict[str, Any]) -> Su
     return SurfacePlan("instruction", path, "conflict", "preserve", detail="owned instruction file was edited")
 
 
-def _instruction_plan(profile, state: dict[str, Any], *, adopt: bool) -> SurfacePlan:
+def _instruction_plan(profile, state: dict[str, Any], *, adopt: bool, force: bool = False) -> SurfacePlan:
     desired = profile.instruction_text or harness_profiles.managed_instruction_text()
     if profile.instruction_mode == "managed-file":
         return plan_managed_instruction(path=profile.instruction_path, desired=desired, state=state, adopt=adopt)
-    return plan_instruction(path=profile.instruction_path, desired=desired, state=state, adopt=adopt)
+    return plan_instruction(
+        path=profile.instruction_path,
+        desired=desired,
+        state=state,
+        adopt=adopt,
+        force=force,
+        harness=profile.harness,
+    )
 
 
-def _instruction_removal_plan(profile, state: dict[str, Any]) -> SurfacePlan:
+def _instruction_removal_plan(profile, state: dict[str, Any], *, force: bool = False) -> SurfacePlan:
     if profile.instruction_mode == "managed-file":
         return plan_managed_instruction_removal(path=profile.instruction_path, state=state)
-    return plan_instruction_removal(path=profile.instruction_path, state=state)
+    return plan_instruction_removal(path=profile.instruction_path, state=state, force=force, harness=profile.harness)
 
 
 def _lstat_conflict(path: Path, *, directory: bool) -> str | None:
@@ -1254,7 +1349,7 @@ def _prune_created_directories(paths: list[Path], root: Path) -> list[str]:
 
 
 def _sync_profile(
-    profile, workspace: Path, *, write: bool, allow_global_stdio: bool, adopt: bool
+    profile, workspace: Path, *, write: bool, allow_global_stdio: bool, adopt: bool, force: bool = False
 ) -> tuple[dict[str, Any], bool]:
     surface_conflicts = _native_surface_conflicts(profile, workspace)
     if surface_conflicts:
@@ -1283,15 +1378,16 @@ def _sync_profile(
         ), False
     state = json.loads(json.dumps(loaded.state))
     instruction_existed = profile.instruction_path.exists()
-    instruction = _instruction_plan(profile, state, adopt=adopt)
-    items = [
-        {
-            "surface": "instruction",
-            "path": str(instruction.path),
-            "status": instruction.status,
-            "action": instruction.action,
-        }
-    ]
+    instruction = _instruction_plan(profile, state, adopt=adopt, force=force)
+    item = {
+        "surface": "instruction",
+        "path": str(instruction.path),
+        "status": instruction.status,
+        "action": instruction.action,
+    }
+    if instruction.detail:
+        item["detail"] = instruction.detail
+    items = [item]
     conflicts = (
         []
         if instruction.status != "conflict"
@@ -1350,7 +1446,50 @@ def _sync_profile(
                 if profile.instruction_mode == "managed-file"
                 else []
             )
-            localio.write_text_atomic(instruction.path, instruction.rendered or "")
+            if profile.instruction_mode == "managed-file":
+                localio.write_text_atomic(instruction.path, instruction.rendered or "")
+            else:
+                outcome = managed_block.write_text_nofollow_atomic(instruction.path, instruction.rendered or "")
+                if outcome.status == managed_block.WRITE_SKIPPED_SYMLINK:
+                    conflict = {
+                        "surface": "instruction",
+                        "path": str(instruction.path),
+                        "status": "conflict",
+                        "action": "preserve",
+                        "detail": outcome.detail or "symlinked instruction path",
+                    }
+                    return _result(
+                        profile,
+                        status="conflict",
+                        ready=False,
+                        items=items,
+                        conflicts=[conflict],
+                        files_written=[],
+                        files_removed=[],
+                        mcp={"status": "pending", "items": []},
+                        receipt_path=profile.receipt_path,
+                        receipt_state="missing",
+                    ), False
+                if outcome.status not in {managed_block.WRITE_WRITTEN, managed_block.WRITE_NOOP}:
+                    conflict = {
+                        "surface": "instruction",
+                        "path": str(instruction.path),
+                        "status": "conflict",
+                        "action": "preserve",
+                        "detail": outcome.detail or "instruction write refused",
+                    }
+                    return _result(
+                        profile,
+                        status="conflict",
+                        ready=False,
+                        items=items,
+                        conflicts=[conflict],
+                        files_written=[],
+                        files_removed=[],
+                        mcp={"status": "pending", "items": []},
+                        receipt_path=profile.receipt_path,
+                        receipt_state="missing",
+                    ), False
             files_written.append(str(instruction.path))
             changed = True
             if profile.instruction_mode == "managed-file":
@@ -1443,7 +1582,7 @@ def _sync_profile(
     ), False
 
 
-def _uninstall_profile(profile, workspace: Path, *, write: bool) -> tuple[dict[str, Any], bool]:
+def _uninstall_profile(profile, workspace: Path, *, write: bool, force: bool = False) -> tuple[dict[str, Any], bool]:
     surface_conflicts = _native_surface_conflicts(profile, workspace)
     if surface_conflicts:
         return _surface_conflict_result(profile, surface_conflicts)
@@ -1483,8 +1622,10 @@ def _uninstall_profile(profile, workspace: Path, *, write: bool) -> tuple[dict[s
             receipt_path=profile.receipt_path,
             receipt_state="present" if profile.receipt_path.exists() else "missing",
         ), False
-    plan = _instruction_removal_plan(profile, state)
+    plan = _instruction_removal_plan(profile, state, force=force)
     items = [{"surface": "instruction", "path": str(plan.path), "status": plan.status, "action": plan.action}]
+    if plan.detail:
+        items[0]["detail"] = plan.detail
     conflicts = [] if plan.status != "conflict" else [items[0] | {"detail": plan.detail or "instruction conflict"}]
     skill_plan = _skill_uninstall_plan(profile, state)
     items.extend(skill_plan["items"])
@@ -1514,7 +1655,51 @@ def _uninstall_profile(profile, workspace: Path, *, write: bool) -> tuple[dict[s
             if plan.rendered is None:
                 plan.path.unlink(missing_ok=True)
             else:
-                localio.write_text_atomic(plan.path, plan.rendered)
+                outcome = managed_block.write_text_nofollow_atomic(plan.path, plan.rendered)
+                if outcome.status == managed_block.WRITE_SKIPPED_SYMLINK:
+                    conflicts.append(
+                        {
+                            "surface": "instruction",
+                            "path": str(plan.path),
+                            "status": "conflict",
+                            "action": "preserve",
+                            "detail": outcome.detail or "symlinked instruction path",
+                        }
+                    )
+                    return _result(
+                        profile,
+                        status="conflict",
+                        ready=False,
+                        items=items,
+                        conflicts=conflicts,
+                        files_written=[],
+                        files_removed=[],
+                        mcp={"status": "pending", "items": []},
+                        receipt_path=profile.receipt_path,
+                        receipt_state="present" if profile.receipt_path.exists() else "missing",
+                    ), False
+                if outcome.status not in {managed_block.WRITE_WRITTEN, managed_block.WRITE_NOOP}:
+                    conflicts.append(
+                        {
+                            "surface": "instruction",
+                            "path": str(plan.path),
+                            "status": "conflict",
+                            "action": "preserve",
+                            "detail": outcome.detail or "instruction write refused",
+                        }
+                    )
+                    return _result(
+                        profile,
+                        status="conflict",
+                        ready=False,
+                        items=items,
+                        conflicts=conflicts,
+                        files_written=[],
+                        files_removed=[],
+                        mcp={"status": "pending", "items": []},
+                        receipt_path=profile.receipt_path,
+                        receipt_state="present" if profile.receipt_path.exists() else "missing",
+                    ), False
             files_removed.append(str(plan.path))
         instruction_dirs = state.get("instructions", {})
         instruction_dirs = (
@@ -1599,6 +1784,14 @@ def _doctor_profile(profile, workspace: Path, *, verify_mcp: bool) -> tuple[dict
         "status": instruction.status,
         "action": instruction.action,
     }
+    if instruction.detail:
+        item["detail"] = instruction.detail
+    elif instruction.status == managed_block.STATUS_STALE:
+        item["detail"] = f"fix with: {_instruction_write_fix_command(profile.harness)}"
+    elif instruction.status == managed_block.STATUS_MISSING:
+        item["detail"] = f"fix with: {_instruction_write_fix_command(profile.harness)}"
+    # Doctor --check semantics: anything not current is actionable. Preserve
+    # distinct stale / missing / conflict statuses on the item itself.
     conflicts = [item] if instruction.status != "current" else []
     skill_plan = _skill_plans(profile, state, workspace)
     skill_issues = [entry for entry in skill_plan["items"] if entry["status"] != "current"]
@@ -1635,6 +1828,8 @@ def _run(
     write: bool = False,
     allow_global_stdio: bool = False,
     adopt: bool = False,
+    force: bool = False,
+    check: bool = False,
     verify_mcp: bool = False,
     json_output: bool = False,
     home: Path | None = None,
@@ -1643,11 +1838,19 @@ def _run(
 
     def run_profile(profile, *, profile_write: bool) -> tuple[dict[str, Any], bool]:
         if operation == "sync":
+            if check:
+                # --check is doctor-style classification for instruction freshness.
+                return _doctor_profile(profile, workspace, verify_mcp=False)
             return _sync_profile(
-                profile, workspace, write=profile_write, allow_global_stdio=allow_global_stdio, adopt=adopt
+                profile,
+                workspace,
+                write=profile_write,
+                allow_global_stdio=allow_global_stdio,
+                adopt=adopt,
+                force=force,
             )
         elif operation == "uninstall":
-            return _uninstall_profile(profile, workspace, write=profile_write)
+            return _uninstall_profile(profile, workspace, write=profile_write, force=force)
         return _doctor_profile(profile, workspace, verify_mcp=verify_mcp)
 
     if write and len(profiles) > 1 and operation in {"sync", "uninstall"}:
@@ -1676,6 +1879,18 @@ def _run(
             print(
                 f"{result['harness']}: {result['status']} receipt={result['receipt_path']} ({result['receipt_state']})"
             )
+            for item in result.get("items", []):
+                if item.get("surface") != "instruction":
+                    continue
+                if item.get("status") in {
+                    managed_block.STATUS_STALE,
+                    managed_block.STATUS_MISSING,
+                    managed_block.STATUS_LOCALLY_MODIFIED,
+                    managed_block.STATUS_MALFORMED,
+                    "conflict",
+                }:
+                    detail = item.get("detail") or item.get("status")
+                    print(f"  instruction {item.get('status')}: {detail}")
     return 0 if payload["ready"] else 1
 
 
@@ -1686,6 +1901,8 @@ def sync(
     write: bool = False,
     allow_global_stdio: bool = False,
     adopt: bool = False,
+    force: bool = False,
+    check: bool = False,
     json_output: bool = False,
     home: Path | None = None,
 ) -> int:
@@ -1696,15 +1913,31 @@ def sync(
         write=write,
         allow_global_stdio=allow_global_stdio,
         adopt=adopt,
+        force=force,
+        check=check,
         json_output=json_output,
         home=home,
     )
 
 
 def uninstall(
-    *, harness: str, workspace: Path, write: bool = False, json_output: bool = False, home: Path | None = None
+    *,
+    harness: str,
+    workspace: Path,
+    write: bool = False,
+    force: bool = False,
+    json_output: bool = False,
+    home: Path | None = None,
 ) -> int:
-    return _run("uninstall", harness=harness, workspace=workspace, write=write, json_output=json_output, home=home)
+    return _run(
+        "uninstall",
+        harness=harness,
+        workspace=workspace,
+        write=write,
+        force=force,
+        json_output=json_output,
+        home=home,
+    )
 
 
 def doctor(

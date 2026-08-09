@@ -13,8 +13,11 @@ USER_SCOPE_HARNESS_IDS = (*SLICE1_HARNESS_IDS, *SLICE2_HARNESS_IDS)
 USER_SCOPE_SLICE1_TARGETS = (*SLICE1_HARNESS_IDS, "all")
 USER_SCOPE_TARGETS = (*USER_SCOPE_HARNESS_IDS, "all")
 PROFILE_STATE_VERSION = 2
+# Legacy user-profile markers (pre hash-stamp). Recognized and upgraded in place.
 INSTRUCTION_START = "<!-- brigade:user-profile:start -->"
 INSTRUCTION_END = "<!-- brigade:user-profile:end -->"
+INSTRUCTION_KIND = "INTEGRATION"
+INSTRUCTION_PROFILE = "full"
 
 
 @dataclass(frozen=True)
