@@ -414,6 +414,20 @@ checkpoint before replacing `run.json`. If rollback leaves an older Brigade
 unable to interpret a journal event or projector version, stop that writer and
 roll forward. The append-only journal format is a one-way storage boundary.
 
+`brigade runs resume <run>` also handles an app-server run whose owner exited
+after dispatch began but before `worker-results.json` was aggregated. After it
+acquires the normal run lock, Brigade reconstructs only the active-stage worker
+thread coordinates from the already-flushed app-server event streams, records
+the missing terminal failure through the lifecycle journal, and resumes those
+threads. If no durable thread coordinates exist, resume fails cleanly without
+calling the provider. It never guesses a thread or treats a live run as
+interrupted. Multi-stage app-server runs interrupted while `active_stage` is
+greater than 1 cannot be salvaged this way when earlier-stage worker results
+were never persisted. Resume fails closed before provider construction instead
+of synthesizing from partial stage output. A successful resume refreshes
+`finished_at` and `duration_seconds` to the post-resume completion time rather
+than retaining the pre-resume owner-exit timestamp.
+
 If the approved action completed but the process exited before recording
 `approval.consumed` and `run.resumed`, run `brigade runs resume <run>` again.
 Brigade verifies that the redeemed claim belongs to the same run and still
