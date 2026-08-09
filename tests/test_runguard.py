@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import threading
@@ -326,6 +327,68 @@ def test_run_lock_timeout_clock_is_isolated_from_process_clock(tmp_path, monkeyp
 
     assert sleeps == [0.05]
     assert lock_path.is_dir()
+
+
+def test_run_lock_fair_queue_long_holder_multiple_waiters_proceed_in_order(tmp_path):
+    repo = _repo(tmp_path)
+    order: list[str] = []
+    holder_done = threading.Event()
+
+    def holder() -> None:
+        with runguard.run_lock(repo):
+            order.append("holder-start")
+            assert holder_done.wait(timeout=5)
+            order.append("holder-end")
+
+    def waiter(name: str) -> None:
+        with runguard.run_lock(repo, wait_seconds=math.inf, poll_interval=0.02):
+            order.append(name)
+
+    holder_thread = threading.Thread(target=holder)
+    holder_thread.start()
+    stdlib_time.sleep(0.1)
+
+    waiter_threads = []
+    for index in range(3):
+        thread = threading.Thread(target=waiter, args=(f"waiter-{index}",))
+        thread.start()
+        waiter_threads.append(thread)
+        stdlib_time.sleep(0.05)
+
+    stdlib_time.sleep(0.2)
+    holder_done.set()
+
+    for thread in waiter_threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+    holder_thread.join(timeout=10)
+    assert not holder_thread.is_alive()
+
+    assert order == ["holder-start", "holder-end", "waiter-0", "waiter-1", "waiter-2"]
+
+
+def test_run_lock_wait_reclaims_stale_holder(tmp_path):
+    repo = _repo(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text("99999999\n")
+
+    with runguard.run_lock(repo, wait_seconds=1.0, poll_interval=0.05):
+        assert (lock_path / "pid").read_text().strip() == str(os.getpid())
+
+    assert not lock_path.exists()
+
+
+def test_run_lock_prunes_stale_wait_tickets_before_queue_head(tmp_path):
+    repo = _repo(tmp_path)
+    queue_dir = runguard._wait_queue_dir(runguard.lock_path(repo))
+    queue_dir.mkdir(parents=True)
+    dead_ticket = queue_dir / "00000000000000000001-00000001-dead.wait"
+    dead_ticket.write_text(json.dumps({"pid": 99999999}))
+    live_ticket = runguard._enroll_wait_ticket(queue_dir)
+
+    assert runguard._is_wait_queue_head(live_ticket, queue_dir)
+    assert not dead_ticket.exists()
 
 
 def test_run_lock_replaces_lock_with_dead_pid(tmp_path):

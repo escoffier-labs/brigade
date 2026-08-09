@@ -296,3 +296,30 @@ def test_resolve_verify_archive_honors_absolute_dir(tmp_path):
     enabled, root = resolve_verify_archive(tmp_path)
     assert enabled is True
     assert root == destination
+
+
+def test_load_config_defaults_run_lock_wait_seconds(tmp_path):
+    _write_config_json(tmp_path)
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.run_lock_wait_seconds == 0.0
+
+
+def test_load_config_reads_run_lock_wait_seconds(tmp_path):
+    _write_config_json(tmp_path, run_lock_wait_seconds=120)
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.run_lock_wait_seconds == 120.0
+
+
+@pytest.mark.parametrize("value", [-1, "slow", True])
+def test_load_config_rejects_invalid_run_lock_wait_seconds(tmp_path, value):
+    _write_config_json(tmp_path, run_lock_wait_seconds=value)
+    with pytest.raises(ValueError, match="run_lock_wait_seconds must be a non-negative number"):
+        load_config(tmp_path)
+
+
+def test_resolve_run_lock_wait_seconds_defaults_without_config(tmp_path):
+    from brigade.config import resolve_run_lock_wait_seconds
+
+    assert resolve_run_lock_wait_seconds(tmp_path) == 0.0

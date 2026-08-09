@@ -21,6 +21,7 @@ DEFAULT_CAPTURE_BEFORE_RETRY = "warn"
 DEFAULT_VERIFY_RUNS_KEEP = 50
 DEFAULT_VERIFY_ARCHIVE_ENABLED = True
 DEFAULT_VERIFY_ARCHIVE_DIR = ".brigade/work/verify-archive"
+DEFAULT_RUN_LOCK_WAIT_SECONDS = 0.0
 
 
 @dataclass
@@ -32,6 +33,7 @@ class Config:
     verify_runs_keep: int = DEFAULT_VERIFY_RUNS_KEEP
     verify_archive_enabled: bool = DEFAULT_VERIFY_ARCHIVE_ENABLED
     verify_archive_dir: str = DEFAULT_VERIFY_ARCHIVE_DIR
+    run_lock_wait_seconds: float = DEFAULT_RUN_LOCK_WAIT_SECONDS
 
 
 def validate_graphtrail_delta_timeout(value: Any) -> float:
@@ -89,6 +91,22 @@ def validate_verify_archive_dir(value: Any) -> str:
     return value.strip()
 
 
+def validate_run_lock_wait_seconds(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("run_lock_wait_seconds must be a non-negative number")
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("run_lock_wait_seconds must be a non-negative number")
+    return timeout
+
+
+def resolve_run_lock_wait_seconds(target: Path) -> float:
+    cfg = load_config(target)
+    if cfg is not None:
+        return cfg.run_lock_wait_seconds
+    return DEFAULT_RUN_LOCK_WAIT_SECONDS
+
+
 def resolve_verify_runs_keep(target: Path) -> int:
     cfg = load_config(target)
     if cfg is not None:
@@ -137,6 +155,9 @@ def write_config(target: Path, cfg: Config) -> None:
     verify_archive_dir = validate_verify_archive_dir(cfg.verify_archive_dir)
     if verify_archive_dir != DEFAULT_VERIFY_ARCHIVE_DIR:
         payload["verify_archive_dir"] = verify_archive_dir
+    run_lock_wait_seconds = validate_run_lock_wait_seconds(cfg.run_lock_wait_seconds)
+    if run_lock_wait_seconds != DEFAULT_RUN_LOCK_WAIT_SECONDS:
+        payload["run_lock_wait_seconds"] = run_lock_wait_seconds
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
@@ -169,6 +190,9 @@ def load_config(target: Path) -> Optional[Config]:
         data.get("verify_archive_enabled", DEFAULT_VERIFY_ARCHIVE_ENABLED)
     )
     verify_archive_dir = validate_verify_archive_dir(data.get("verify_archive_dir", DEFAULT_VERIFY_ARCHIVE_DIR))
+    run_lock_wait_seconds = validate_run_lock_wait_seconds(
+        data.get("run_lock_wait_seconds", DEFAULT_RUN_LOCK_WAIT_SECONDS)
+    )
     return Config(
         version=version,
         selection=sel,
@@ -177,4 +201,5 @@ def load_config(target: Path) -> Optional[Config]:
         verify_runs_keep=verify_runs_keep,
         verify_archive_enabled=verify_archive_enabled,
         verify_archive_dir=verify_archive_dir,
+        run_lock_wait_seconds=run_lock_wait_seconds,
     )

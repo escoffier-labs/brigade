@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import signal
 import subprocess
@@ -1213,8 +1214,11 @@ def test_run_cli_lock_conflict_errors(tmp_path, monkeypatch, capsys):
     assert "another brigade run appears active" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(("wait_arg", "expected"), [("--wait=0.25", 0.25), ("--wait", 600.0)])
-def test_run_cli_passes_bounded_wait_to_run_lock(tmp_path, monkeypatch, wait_arg, expected):
+@pytest.mark.parametrize(
+    ("wait_arg", "expected"),
+    [("--wait=0.25", 0.25), ("--wait", math.inf), ("--wait=0", 0.0)],
+)
+def test_run_cli_passes_wait_seconds_to_run_lock(tmp_path, monkeypatch, wait_arg, expected):
     repo = _git_repo_with_roster(tmp_path)
     seen = {}
 
@@ -1253,6 +1257,68 @@ def test_run_cli_records_output_dir_in_run_lock(tmp_path, monkeypatch):
 
     assert rc == 0
     assert seen == {"cwd": repo, "run_dir": output_dir, "wait_seconds": 0.0}
+
+
+def test_run_cli_uses_config_run_lock_wait_seconds_default(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    (repo / ".brigade" / "config.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "depth": "repo",
+                "harnesses": ["claude"],
+                "owner": "claude",
+                "includes": [],
+                "run_lock_wait_seconds": 45,
+            }
+        )
+        + "\n"
+    )
+    seen = {}
+
+    @contextmanager
+    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0):
+        seen["wait_seconds"] = wait_seconds
+        yield
+
+    monkeypatch.setattr(runguard, "run_lock", fake_lock)
+    monkeypatch.setattr(aboyeur, "run", lambda *args, **kwargs: 0)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--no-artifacts"])
+
+    assert rc == 0
+    assert seen == {"wait_seconds": 45.0}
+
+
+def test_run_cli_wait_zero_overrides_config_default_wait(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    (repo / ".brigade" / "config.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "depth": "repo",
+                "harnesses": ["claude"],
+                "owner": "claude",
+                "includes": [],
+                "run_lock_wait_seconds": 45,
+            }
+        )
+        + "\n"
+    )
+    seen = {}
+
+    @contextmanager
+    def fake_lock(cwd, *, run_dir=None, wait_seconds=0.0):
+        seen["wait_seconds"] = wait_seconds
+        yield
+
+    monkeypatch.setattr(runguard, "run_lock", fake_lock)
+    monkeypatch.setattr(aboyeur, "run", lambda *args, **kwargs: 0)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--wait=0", "--no-artifacts"])
+
+    assert rc == 0
+    assert seen == {"wait_seconds": 0.0}
 
 
 def test_run_cli_terminalizes_roster_snapshot_write_failure(tmp_path, monkeypatch):

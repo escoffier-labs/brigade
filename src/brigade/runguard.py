@@ -6,6 +6,7 @@ import contextlib
 import errno
 import hashlib
 import json
+import math
 import os
 import shutil
 import stat
@@ -14,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic as _monotonic
+from time import monotonic_ns as _monotonic_ns
 from time import sleep as _sleep
 from uuid import uuid4
 
@@ -35,6 +37,7 @@ _NONTERMINAL_RUN_STATUSES = frozenset(
 
 class _RunLockClock:
     monotonic = staticmethod(_monotonic)
+    monotonic_ns = staticmethod(_monotonic_ns)
     sleep = staticmethod(_sleep)
 
 
@@ -752,6 +755,113 @@ def _lock_path_is_directory(path: Path) -> bool | None:
     return True
 
 
+def _wait_queue_dir(lock_path: Path) -> Path:
+    return lock_path.parent / f"{lock_path.name}.wait-queue"
+
+
+def _list_wait_tickets(queue_dir: Path) -> list[Path]:
+    if not queue_dir.is_dir():
+        return []
+    return sorted(queue_dir.glob("*.wait"))
+
+
+def _wait_ticket_is_live(ticket: Path) -> bool:
+    try:
+        payload = json.loads(ticket.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        return False
+    pid = payload.get("pid") if isinstance(payload, dict) else None
+    return isinstance(pid, int) and _pid_is_active(pid)
+
+
+def _prune_stale_wait_tickets(queue_dir: Path) -> None:
+    for ticket in _list_wait_tickets(queue_dir):
+        if _wait_ticket_is_live(ticket):
+            continue
+        try:
+            ticket.unlink()
+        except OSError:
+            pass
+
+
+def _enroll_wait_ticket(queue_dir: Path) -> Path:
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    token = uuid4().hex
+    ticket = queue_dir / f"{time.monotonic_ns():020d}-{os.getpid():08d}-{token}.wait"
+    payload = {
+        "schema": "brigade.run_lock_wait.v1",
+        "pid": os.getpid(),
+        "enrolled_at": datetime.now(timezone.utc).isoformat(),
+    }
+    fd = os.open(ticket, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, json.dumps(payload).encode())
+    finally:
+        os.close(fd)
+    return ticket
+
+
+def _leave_wait_ticket(ticket: Path) -> None:
+    try:
+        ticket.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def _is_wait_queue_head(ticket: Path, queue_dir: Path) -> bool:
+    _prune_stale_wait_tickets(queue_dir)
+    tickets = _list_wait_tickets(queue_dir)
+    return bool(tickets) and tickets[0] == ticket
+
+
+def _lock_held_by_live_process(path: Path) -> bool:
+    try:
+        if _lock_path_is_directory(path) is None:
+            return False
+    except RunLockError:
+        return False
+    return not _lock_is_stale(path)
+
+
+def _wait_to_acquire_lock(
+    path: Path,
+    *,
+    run_dir: Path | None = None,
+    wait_seconds: float,
+    poll_interval: float,
+) -> _LockOwnership:
+    if wait_seconds == 0:
+        return _acquire_lock(path, run_dir=run_dir)
+
+    queue_dir = _wait_queue_dir(path)
+    ticket = _enroll_wait_ticket(queue_dir)
+    unbounded = math.isinf(wait_seconds)
+    deadline = time.monotonic() + wait_seconds if not unbounded else 0.0
+    try:
+        while True:
+            if _is_wait_queue_head(ticket, queue_dir):
+                try:
+                    return _acquire_lock(path, run_dir=run_dir)
+                except RunLockError as exc:
+                    if not _lock_held_by_live_process(path):
+                        raise
+                    if not unbounded:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise RunLockError(
+                                f"timed out after {wait_seconds:g}s waiting for run lock: {path}"
+                            ) from exc
+            elif not unbounded:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RunLockError(f"timed out after {wait_seconds:g}s waiting for run lock: {path}")
+            time.sleep(poll_interval)
+    finally:
+        _leave_wait_ticket(ticket)
+
+
 def _acquire_lock(path: Path, *, run_dir: Path | None = None) -> _LockOwnership:
     for _ in range(8):
         try:
@@ -808,25 +918,18 @@ def run_lock(
     wait_seconds: float = 0.0,
     poll_interval: float = 0.1,
 ):
-    if wait_seconds < 0:
-        raise ValueError("run lock wait_seconds must be non-negative")
+    if wait_seconds < 0 or (not math.isinf(wait_seconds) and not math.isfinite(wait_seconds)):
+        raise ValueError("run lock wait_seconds must be zero, positive, or unbounded")
     if poll_interval <= 0:
         raise ValueError("run lock poll_interval must be positive")
     path = lock_path(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.monotonic() + wait_seconds
-    ownership: _LockOwnership | None = None
-    while True:
-        try:
-            ownership = _acquire_lock(path, run_dir=run_dir)
-            break
-        except RunLockError as exc:
-            if wait_seconds == 0:
-                raise
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise RunLockError(f"timed out after {wait_seconds:g}s waiting for run lock: {path}") from exc
-            time.sleep(min(poll_interval, remaining))
+    ownership = _wait_to_acquire_lock(
+        path,
+        run_dir=run_dir,
+        wait_seconds=wait_seconds,
+        poll_interval=poll_interval,
+    )
     retain_lock = False
     try:
         yield path
