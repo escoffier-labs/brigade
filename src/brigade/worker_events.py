@@ -50,7 +50,16 @@ CONSUMER_POLICIES = frozenset({POLICY_SCRUBBED_ONLY, POLICY_LOCAL_ONLY})
 
 MAX_DIAGNOSTIC_LEN = 240
 MAX_LINE_BYTES = 1_048_576
+MAX_PUBLIC_STRING_LEN = 256
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_PUBLIC_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_PUBLIC_METHOD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:#-]*$")
+_SECRET_LIKE_PUBLIC_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?i)sk-[a-z0-9][a-z0-9._-]{7,}"), "provider API key"),
+    (re.compile(r"(?i)bearer\s+[a-z0-9._\-]+"), "bearer token"),
+    (re.compile(r"(?i)(api[_-]?key|password|secret)\s*[:=]"), "credential material"),
+    (re.compile(r"(?i)authorization\s*[:=]"), "authorization material"),
+)
 _AUTO_DECLINED_SUFFIX = "#auto-declined"
 
 # Top-level JSON-RPC notification envelope keys only.
@@ -308,6 +317,78 @@ def _bound(msg: str) -> str:
     return msg[: MAX_DIAGNOSTIC_LEN - 1] + "\u2026"
 
 
+def _validate_public_string(value: str, *, field: str, kind: str = "identifier") -> None:
+    if not isinstance(value, str) or not value:
+        raise WorkerEventError(_bound(f"{field} must be a non-empty string"), category="type")
+    if len(value) > MAX_PUBLIC_STRING_LEN:
+        raise WorkerEventError(_bound(f"{field} exceeds {MAX_PUBLIC_STRING_LEN} characters"), category="bound")
+    if any(ch in value for ch in ("\n", "\r", "\0")):
+        raise WorkerEventError(_bound(f"{field} contains invalid control characters"), category="type")
+    pattern = _PUBLIC_METHOD_RE if kind == "method" else _PUBLIC_IDENTIFIER_RE
+    if not pattern.fullmatch(value):
+        raise WorkerEventError(_bound(f"{field} has invalid public format"), category="type")
+    for secret_pattern, label in _SECRET_LIKE_PUBLIC_PATTERNS:
+        if secret_pattern.search(value):
+            raise WorkerEventError(_bound(f"{field} retains {label}"), category="secret")
+
+
+def _validate_scrubbed_public_strings(value: Any, *, path: str) -> list[str]:
+    errors: list[str] = []
+    if isinstance(value, str):
+        try:
+            kind = "method" if path.endswith(".method") or path == "method" else "identifier"
+            _validate_public_string(value, field=path, kind=kind)
+        except WorkerEventError as exc:
+            errors.append(exc.diagnostic)
+        return errors
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                errors.append(_bound(f"{path} has non-string key"))
+                continue
+            errors.extend(_validate_scrubbed_public_strings(nested, path=f"{path}.{key}"))
+        return errors
+    if isinstance(value, list):
+        for index, nested in enumerate(value):
+            errors.extend(_validate_scrubbed_public_strings(nested, path=f"{path}[{index}]"))
+    return errors
+
+
+def _scrubbed_document_validation_errors(payload: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if payload.get("schema") != STREAM_SCHEMA:
+        errors.append(_bound(f"schema must be {STREAM_SCHEMA!r}"))
+    if payload.get("schema_version") != STREAM_SCHEMA_VERSION:
+        errors.append(_bound(f"schema_version must be {STREAM_SCHEMA_VERSION}"))
+    if payload.get("transport") != TRANSPORT:
+        errors.append(_bound(f"transport must be {TRANSPORT!r}"))
+    if payload.get("classification_status") != STATUS_SCRUBBED:
+        errors.append("classification_status must be scrubbed")
+    if payload.get("media_type") != SCRUBBED_MEDIA_TYPE:
+        errors.append(_bound(f"media_type must be {SCRUBBED_MEDIA_TYPE!r}"))
+    if payload.get("artifact_class") != SCRUBBED_ARTIFACT_CLASS:
+        errors.append(_bound(f"artifact_class must be {SCRUBBED_ARTIFACT_CLASS!r}"))
+    digest = payload.get("source_digest")
+    if not (isinstance(digest, str) and _HEX64.fullmatch(digest)):
+        errors.append("source_digest must be a 64-char lowercase hex string")
+    events = payload.get("events")
+    if not isinstance(events, list):
+        errors.append("events must be an array")
+        return errors
+    event_count = payload.get("event_count")
+    if not isinstance(event_count, int):
+        errors.append("event_count must be an integer")
+    elif event_count != len(events):
+        errors.append("event_count must match events length")
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping):
+            errors.append(_bound(f"events[{index}] must be an object"))
+            continue
+        for diagnostic in validate_scrubbed_event(event):
+            errors.append(_bound(f"events[{index}]: {diagnostic}"))
+    return errors
+
+
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -346,7 +427,10 @@ def _param_matrix_for_method(method: str) -> dict[str, str]:
 
 
 def _scrub_scalar_public(key: str, value: Any) -> Any:
-    if value is None or isinstance(value, (str, int)) and not isinstance(value, bool):
+    if isinstance(value, str):
+        _validate_public_string(value, field=key)
+        return value
+    if value is None or isinstance(value, int) and not isinstance(value, bool):
         return value
     if isinstance(value, float):
         # Duration-like numbers occasionally appear as floats; refuse rather than coerce.
@@ -433,6 +517,7 @@ def scrub_event(raw: Mapping[str, Any]) -> dict[str, Any]:
     method = raw.get("method")
     if not isinstance(method, str) or not method:
         raise WorkerEventError("method must be a non-empty string", category="type")
+    _validate_public_string(method, field="method", kind="method")
 
     params = raw.get("params")
     if params is None:
@@ -458,6 +543,9 @@ def scrub_event(raw: Mapping[str, Any]) -> dict[str, Any]:
         if jsonrpc != "2.0":
             raise WorkerEventError(_bound(f"unsupported jsonrpc {jsonrpc!r}"), category="type")
         projection["jsonrpc"] = jsonrpc
+    validation_errors = validate_scrubbed_event(projection)
+    if validation_errors:
+        raise WorkerEventError(validation_errors[0], category="schema")
     return projection
 
 
@@ -591,6 +679,18 @@ def inspect_stream_file(path: Path) -> StreamArtifactInfo:
             payload = None
         if _looks_like_scrubbed_document(payload):
             assert isinstance(payload, Mapping)
+            validation_errors = _scrubbed_document_validation_errors(payload)
+            if validation_errors:
+                return StreamArtifactInfo(
+                    path=path,
+                    status=STATUS_UNCLASSIFIED,
+                    media_type=RAW_MEDIA_TYPE,
+                    artifact_class=UNCLASSIFIED_ARTIFACT_CLASS,
+                    transport=TRANSPORT,
+                    event_count=0,
+                    source_digest=digest,
+                    diagnostic=validation_errors[0],
+                )
             event_count = payload.get("event_count")
             if not isinstance(event_count, int):
                 events = payload.get("events")
@@ -696,7 +796,13 @@ def load_stream_for_consumer(
 
     if policy == POLICY_LOCAL_ONLY:
         if info.status == STATUS_SCRUBBED and _file_is_scrubbed_document(path):
-            return dict(json.loads(path.read_text(encoding="utf-8")))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, Mapping):
+                raise WorkerEventError("scrubbed document must be a JSON object", category="schema")
+            validation_errors = _scrubbed_document_validation_errors(payload)
+            if validation_errors:
+                raise WorkerEventError(validation_errors[0], category="schema")
+            return dict(payload)
         try:
             raw_text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
@@ -715,8 +821,11 @@ def load_stream_for_consumer(
     # scrubbed-only: portable consumers must not receive raw notifications.
     if info.status == STATUS_SCRUBBED and _file_is_scrubbed_document(path):
         payload = json.loads(path.read_text(encoding="utf-8"))
-        if not _looks_like_scrubbed_document(payload):
-            raise WorkerEventError("scrubbed document failed validation", category="schema")
+        if not isinstance(payload, Mapping):
+            raise WorkerEventError("scrubbed document must be a JSON object", category="schema")
+        validation_errors = _scrubbed_document_validation_errors(payload)
+        if validation_errors:
+            raise WorkerEventError(validation_errors[0], category="schema")
         return dict(payload)
 
     # Raw NDJSON is not admissible as audit/replay evidence. Scrub into a
@@ -789,12 +898,19 @@ def validate_scrubbed_event(event: Mapping[str, Any]) -> list[str]:
     method = event.get("method")
     if not isinstance(method, str) or not method:
         errors.append("method must be a non-empty string")
+    else:
+        try:
+            _validate_public_string(method, field="method", kind="method")
+        except WorkerEventError as exc:
+            errors.append(exc.diagnostic)
     digest = event.get("source_digest")
     if not (isinstance(digest, str) and _HEX64.fullmatch(digest)):
         errors.append("source_digest must be a 64-char lowercase hex string")
     params = event.get("params")
     if not isinstance(params, Mapping):
         errors.append("params must be an object")
+    else:
+        errors.extend(_validate_scrubbed_public_strings(params, path="params"))
     errors.extend(scrubbed_projection_omits_sensitive_material(event))
     return errors
 
@@ -812,7 +928,7 @@ def scrubbed_projection_omits_sensitive_material(event: Mapping[str, Any]) -> li
         (re.compile(r"(?i)cookie\s*[:=]\s*\S+"), "cookie material"),
         (re.compile(r"/home/[^\s\"']+"), "absolute home path"),
         (re.compile(r"/Users/[^\s\"']+"), "absolute home path"),
-        (re.compile(r"(?i)sk-[a-z0-9]{8,}"), "provider API key"),
+        (re.compile(r"(?i)sk-[a-z0-9][a-z0-9._-]{7,}"), "provider API key"),
         (re.compile(r"(?i)\"text\"\s*:\s*\"[^\"]+\""), "private text content"),
         (re.compile(r"(?i)\"command\"\s*:\s*\"[^\"]+\""), "private command content"),
         (re.compile(r"(?i)\"prompt\"\s*:\s*\"[^\"]+\""), "raw prompt"),

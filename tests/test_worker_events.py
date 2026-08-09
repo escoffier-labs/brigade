@@ -188,3 +188,57 @@ def test_scrubbed_document_is_admissible_for_audit_consumer(tmp_path: Path):
 def test_reject_raw_worker_stream_evidence_unknown_policy(tmp_path: Path):
     with pytest.raises(run_audit.AuditError):
         run_audit.reject_raw_worker_stream_evidence(tmp_path, policy="export-everything")
+
+
+def _write_fake_scrubbed_document(tmp_path: Path, *, mutate) -> Path:
+    raw_path = tmp_path / "coder.jsonl"
+    raw_path.write_text(json.dumps(_case("turn_started_public")["raw"]) + "\n", encoding="utf-8")
+    doc = worker_events.scrub_stream_file(raw_path)
+    mutate(doc)
+    scrubbed_path = tmp_path / "coder.scrubbed.json"
+    scrubbed_path.write_text(json.dumps(doc), encoding="utf-8")
+    return scrubbed_path
+
+
+def test_self_declared_scrubbed_document_with_embedded_secrets_is_not_admissible(tmp_path: Path):
+    def inject_private_prompt(document: dict) -> None:
+        event = document["events"][0]
+        event["params"]["prompt"] = "leaked private prompt with sk-live-EXAMPLESECRETVALUE99"
+
+    path = _write_fake_scrubbed_document(tmp_path, mutate=inject_private_prompt)
+
+    info = worker_events.inspect_stream_file(path)
+    assert info.status == worker_events.STATUS_UNCLASSIFIED
+    assert info.artifact_class == worker_events.UNCLASSIFIED_ARTIFACT_CLASS
+    assert info.diagnostic is not None
+
+    with pytest.raises(worker_events.WorkerEventError):
+        worker_events.load_stream_for_consumer(path, consumer="run_audit")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("threadId", "sk-live-EXAMPLESECRETVALUE99"),
+        ("threadId", "thread\ninject"),
+        ("threadId", "t" * 300),
+        ("method", "turn/started\n"),
+        ("method", "Bearer sk-live-EXAMPLESECRETVALUE99"),
+    ],
+)
+def test_public_identifier_and_method_strings_fail_closed_during_projection(field: str, value: str):
+    raw = json.loads(json.dumps(_case("turn_started_public")["raw"]))
+    if field == "method":
+        raw["method"] = value
+    else:
+        raw["params"][field] = value
+    with pytest.raises(worker_events.WorkerEventError) as excinfo:
+        worker_events.scrub_event(raw)
+    assert len(str(excinfo.value)) <= worker_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_auto_declined_method_shape_still_scrubs_after_public_string_validation():
+    case = _case("auto_declined_with_secrets")
+    scrubbed = worker_events.scrub_event(case["raw"])
+    assert scrubbed["method"].endswith("#auto-declined")
+    assert not worker_events.validate_scrubbed_event(scrubbed)
