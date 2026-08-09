@@ -12,7 +12,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import aboyeur, agents, codex_appserver, receipt_schema, run_lifecycle, runguard
+from . import aboyeur, agents, codex_appserver, receipt_schema, run_lifecycle, runguard, worker_events
 from .roster import Agent, Roster, _as_bool, _as_env
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
@@ -75,15 +75,24 @@ def _interrupted_appserver_results(run_dir: Path) -> dict | None:
         event_path = run_dir / "events" / f"{aboyeur._slug(worker)}.jsonl"
         thread_id: str | None = None
         try:
-            lines = event_path.read_text().splitlines()
-        except OSError:
+            # Resume is a local salvage path: raw worker streams are admissible
+            # only under the explicit local-only consumer policy (#592).
+            loaded = worker_events.load_stream_for_consumer(
+                event_path,
+                consumer="run_resume",
+                policy=worker_events.POLICY_LOCAL_ONLY,
+            )
+        except (worker_events.WorkerEventError, worker_events.WorkerEventPolicyError, OSError):
             continue
-        for line in lines:
-            try:
-                event = json.loads(line)
-            except (json.JSONDecodeError, RecursionError):
+        if isinstance(loaded, dict):
+            maybe_events = loaded.get("events")
+            events: list[object] = maybe_events if isinstance(maybe_events, list) else []
+        else:
+            events = list(loaded)
+        for event in events:
+            if not isinstance(event, dict):
                 continue
-            params = event.get("params") if isinstance(event, dict) else None
+            params = event.get("params")
             candidate = params.get("threadId") if isinstance(params, dict) else None
             if isinstance(candidate, str) and candidate:
                 thread_id = candidate

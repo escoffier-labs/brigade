@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from brigade import __version__ as BRIGADE_VERSION
-from brigade import run_events, run_journal, run_projector
+from brigade import run_events, run_journal, run_projector, worker_events
 from brigade.run_events import CanonicalizationError, canonical_bytes
 
 AUDIT_SCHEMA = "brigade.run_audit.v1"
@@ -88,9 +88,11 @@ NORMALIZATION_EXCLUSIONS: frozenset[str] = frozenset(
     }
 )
 
-# First-slice audit coverage by transport. Structured app-server response
-# fixture comparison is a follow-up (#592); unsupported transports must state
-# coverage instead of claiming full replay.
+# First-slice audit coverage by transport. Structured app-server worker-stream
+# fixture comparison requires scrubbed projections from #592; raw
+# events/<worker>.jsonl is rejected unless an explicit local-only policy allows
+# local salvage. Unsupported transports must state coverage instead of claiming
+# full replay.
 TRANSPORT_COVERAGE: dict[str, dict[str, Any]] = {
     "app-server": {
         "coordinator_decisions": True,
@@ -98,7 +100,10 @@ TRANSPORT_COVERAGE: dict[str, dict[str, Any]] = {
         "composed_prompt_fingerprints": True,
         "provider_response_fixtures": False,
         "worker_event_streams": False,
-        "note": "coordinator-only slice; provider response fixtures deferred",
+        "note": (
+            "coordinator-only slice; raw worker streams rejected without local-only "
+            "policy; scrubbed projections required for portable stream evidence (#592)"
+        ),
     },
     "exec": {
         "coordinator_decisions": True,
@@ -754,6 +759,11 @@ def audit_run(
     enables golden / regression comparison; when omitted, the audit checks
     internal consistency (projection, approval, routing) against archived
     artifacts and returns the normalized event sequence for byte-stable replay.
+
+    Raw ``events/<worker>.jsonl`` streams are never treated as portable audit
+    evidence. Call ``reject_raw_worker_stream_evidence`` (default scrubbed-only
+    policy) before loading stream fixtures; pass ``policy=local-only`` only for
+    explicit local salvage that must not export stream bytes (#592).
     """
     run_dir = Path(run_dir)
     revision = code_revision if code_revision is not None else BRIGADE_VERSION
@@ -779,6 +789,10 @@ def audit_run(
                 detail=_bound(f"run directory not found: {run_dir.name}"),
             ),
         )
+
+    # Worker event streams (#592): coordinator-only audits never load raw
+    # events/<worker>.jsonl as portable evidence. Use
+    # reject_raw_worker_stream_evidence() when a caller needs the explicit gate.
 
     source_run_id = run_dir.name
     journal_path = run_dir / JOURNAL_REL
@@ -1106,6 +1120,27 @@ def _error_report(
         not_auditable_reason=_bound(detail)
         if divergence_class in {CLASS_MISSING_OR_CORRUPT_FIXTURE, CLASS_UNSUPPORTED_SCHEMA}
         else None,
+    )
+
+
+def reject_raw_worker_stream_evidence(
+    run_dir: Path,
+    *,
+    policy: str = worker_events.POLICY_SCRUBBED_ONLY,
+) -> list[worker_events.StreamArtifactInfo]:
+    """Reject raw worker streams as audit/replay evidence unless local-only.
+
+    Coordinator-only ``audit_run`` does not load worker streams as fixtures.
+    Callers that compare or export stream evidence must go through this gate
+    (or ``worker_events.load_stream_for_consumer``) so raw NDJSON cannot become
+    portable evidence under the default scrubbed-only policy (#592).
+    """
+    if policy not in worker_events.CONSUMER_POLICIES:
+        raise AuditError(_bound(f"unknown worker_stream_policy {policy!r}"))
+    return worker_events.assert_audit_rejects_raw_streams(
+        Path(run_dir) / "events",
+        policy=policy,
+        consumer="run_audit",
     )
 
 
