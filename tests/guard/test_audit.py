@@ -43,6 +43,22 @@ class AuditCliTests(unittest.TestCase):
         offenders = {entry["path"] for entry in payload["top_offenders"]}
         self.assertEqual(offenders, {"tracked.md"})
 
+    def test_audit_tracked_scope_preserves_directory_exclusions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            excluded = repo / ".claude" / "notes.md"
+            excluded.parent.mkdir()
+            excluded.write_text("Service runs on 192.168.99.10.\n")
+            subprocess.run(["git", "add", "-f", ".claude/notes.md"], cwd=repo, check=True)
+
+            proc = self._audit(repo, str(repo), "--scope", "tracked", "--json")
+
+        self.assertEqual(proc.returncode, 0, msg=proc.stdout + proc.stderr)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["summary"]["files_scanned"], 1)
+        self.assertEqual(payload["summary"]["files_with_findings"], 0)
+
     def test_audit_tree_scope_counts_all_files(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = Path(tmp)

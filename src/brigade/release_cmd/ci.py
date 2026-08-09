@@ -30,6 +30,8 @@ from .. import (
     work_cmd,
 )
 from ..selection import KNOWN_HARNESSES
+from ..guard.audit import run_audit
+from ..guard.policy import load_policy
 from ..localio import (
     read_json_dict as _read_json,
     read_jsonl_dicts as _read_jsonl,
@@ -307,6 +309,23 @@ def _content_guard_command(
             env,
             None,
         )
+    if module == "brigade.guard":
+        return (
+            [
+                sys.executable,
+                "-m",
+                module,
+                "audit",
+                str(target),
+                "--scope",
+                "tracked",
+                "--strict",
+                "--policy",
+                str(policy_path),
+            ],
+            env,
+            None,
+        )
     return [sys.executable, "-m", module, "scan", str(target), "--policy", str(policy_path)], env, None
 
 
@@ -321,17 +340,49 @@ def _run_content_guard_check(
     argv, env_updates, error = _content_guard_command(target, policy=policy, introduced=introduced, base_ref=base_ref)
     if error or argv is None:
         return {"name": f"content_guard_{name}", "status": WARN, "detail": error or "not available", "available": False}
+    if not introduced and scrub.scanner_module() == "brigade.guard":
+        policy_path = Path(argv[argv.index("--policy") + 1])
+        try:
+            report = run_audit(target, policy=load_policy(policy_path), scope="tracked")
+        except (OSError, SystemExit, ValueError) as exc:
+            return {
+                "name": f"content_guard_{name}",
+                "status": WARN,
+                "detail": f"content guard unavailable: {exc}",
+                "available": False,
+                "argv": argv,
+            }
+        status = FAIL if report.blocked else OK
+        return {
+            "name": f"content_guard_{name}",
+            "status": status,
+            "available": True,
+            "exit_code": 1 if report.blocked else 0,
+            "argv": argv,
+            "stdout_summary": f"{report.files_scanned} tracked file(s) checked",
+            "stderr_summary": "",
+            "detail": "content-guard reported findings" if report.blocked else "clean",
+        }
     env = os.environ.copy()
     env.update(env_updates)
-    result = subprocess.run(
-        argv,
-        cwd=target,
-        env=env,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=target,
+            env=env,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        return {
+            "name": f"content_guard_{name}",
+            "status": WARN,
+            "detail": f"content guard unavailable: {exc}",
+            "available": False,
+            "argv": argv,
+        }
     status = OK if result.returncode == 0 else FAIL
     return {
         "name": f"content_guard_{name}",

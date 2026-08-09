@@ -6,8 +6,9 @@ The `audit` command is reporting-oriented. It runs the same engine as
 
 Two enumeration modes:
 - `tracked` (default): use git's `ls-files` from inside the target directory.
-  Only files Git already knows about. This matches what the pre-push hook
-  scans and is the right default for "what could leak out of this repo".
+  Only files Git already knows about, filtered by audit directory exclusions
+  (for example `.claude`, `node_modules`, `.venv`). This is the right default
+  for "what could leak out of this repo".
 - `tree`: walk the filesystem with `Path.rglob("*")`, skipping the standard
   excluded dirs (node_modules, .git, dist, etc.) and binary files. This is
   the "what's lurking on disk" mode useful for local lint reviews.
@@ -130,7 +131,7 @@ def run_audit(
 def _enumerate(target: Path, *, scope: str, exclude_dirs: frozenset[str]) -> list[Path]:
     if scope == "tracked":
         rel_paths = _tracked_paths(all_tracked=True, cwd=target)
-        return [target / rel for rel in rel_paths]
+        return [target / rel for rel in rel_paths if not exclude_dirs.intersection(rel.parts)]
 
     # scope == "tree"
     paths: list[Path] = []

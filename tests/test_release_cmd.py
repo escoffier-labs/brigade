@@ -144,9 +144,56 @@ def test_release_guard_defaults_to_embedded_brigade_modules(tmp_path, monkeypatc
     )
     assert tip_error is None
     assert tip[:3] == [release_cmd.sys.executable, "-m", "brigade.guard"]
+    assert tip[3:7] == ["audit", str(tmp_path), "--scope", "tracked"]
+    assert "--strict" in tip
     assert history[:3] == [release_cmd.sys.executable, "-m", "brigade.guard.git_scan"]
     assert tip_env == history_env == {}
     assert "CONTENT_GUARD_DIR" not in " ".join(tip + history)
+
+
+def test_release_guard_tip_ignores_gitignored_scratch(tmp_path, monkeypatch):
+    monkeypatch.delenv("CONTENT_GUARD_DIR", raising=False)
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("scratch.md\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "ignore scratch"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "scratch.md").write_text("Service runs on 192.168.99.10.\n")
+
+    check = release_cmd._run_content_guard_check(tmp_path, name="tip", policy="public-repo")
+
+    assert check["status"] == "ok"
+    assert check["available"] is True
+
+
+def test_release_guard_broken_external_scanner_is_unavailable_warning(tmp_path, monkeypatch):
+    checkout = tmp_path / "content-guard"
+    (checkout / "src").mkdir(parents=True)
+    (checkout / "policies").mkdir()
+    (checkout / "policies" / "public-repo.json").write_text("{}")
+    monkeypatch.setenv("CONTENT_GUARD_DIR", str(checkout))
+
+    def unavailable(*args, **kwargs):
+        raise OSError("scanner executable is broken")
+
+    monkeypatch.setattr(release_cmd.subprocess, "run", unavailable)
+
+    check = release_cmd._run_content_guard_check(tmp_path, name="tip", policy="public-repo")
+
+    assert check["status"] == "warn"
+    assert check["available"] is False
+    assert "unavailable" in check["detail"]
+
+
+def test_release_guard_malformed_embedded_policy_is_unavailable_warning(tmp_path, monkeypatch):
+    monkeypatch.delenv("CONTENT_GUARD_DIR", raising=False)
+    policy_path = tmp_path / "broken-policy.json"
+    policy_path.write_text("{ not valid json\n")
+
+    check = release_cmd._run_content_guard_check(tmp_path, name="tip", policy=str(policy_path))
+
+    assert check["status"] == "warn"
+    assert check["available"] is False
+    assert "unavailable" in check["detail"]
 
 
 def test_release_guard_external_checkout_requires_explicit_override(tmp_path, monkeypatch):
