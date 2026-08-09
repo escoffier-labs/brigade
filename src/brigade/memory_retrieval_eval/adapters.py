@@ -96,8 +96,10 @@ def semantic_adapter(cards: Sequence[CardDoc]) -> tuple[AdapterFn | None, str | 
     """
     try:
         from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
-    except ImportError:
-        return None, "sentence_transformers not installed"
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        return None, f"sentence_transformers unavailable ({type(exc).__name__}: {exc})"
 
     model_name = os.environ.get("BRIGADE_MEMORY_EVAL_EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     try:
@@ -126,24 +128,31 @@ def semantic_adapter(cards: Sequence[CardDoc]) -> tuple[AdapterFn | None, str | 
     return search, None
 
 
-def build_adapters(target: Path, cards: Sequence[CardDoc]) -> dict[str, dict[str, Any]]:
+def build_adapters(
+    target: Path,
+    cards: Sequence[CardDoc],
+    *,
+    wanted: Sequence[str],
+) -> dict[str, dict[str, Any]]:
     """Return adapter metadata and callables keyed by adapter name."""
-    adapters: dict[str, dict[str, Any]] = {
-        "current": {
+    adapters: dict[str, dict[str, Any]] = {}
+    if "current" in wanted:
+        adapters["current"] = {
             "available": True,
             "reason": None,
             "search": current_adapter(target),
-        },
-        "grep": {
+        }
+    if "grep" in wanted:
+        adapters["grep"] = {
             "available": True,
             "reason": None,
             "search": grep_adapter(cards),
-        },
-    }
-    semantic_fn, reason = semantic_adapter(cards)
-    adapters["semantic"] = {
-        "available": semantic_fn is not None,
-        "reason": reason,
-        "search": semantic_fn,
-    }
+        }
+    if "semantic" in wanted:
+        semantic_fn, reason = semantic_adapter(cards)
+        adapters["semantic"] = {
+            "available": semantic_fn is not None,
+            "reason": reason,
+            "search": semantic_fn,
+        }
     return adapters

@@ -9,6 +9,7 @@ from .adapters import build_adapters
 from .corpus import (
     corpus_stats,
     default_fixture_root,
+    fixture_root_label,
     load_cards,
     load_queries,
     validate_gold,
@@ -17,6 +18,7 @@ from .metrics import aggregate_scores, ceiling_for_queries, score_query
 
 DEFAULT_FIXTURE_ROOT = default_fixture_root()
 DEFAULT_K = 5
+KNOWN_ADAPTERS = frozenset({"current", "grep", "semantic"})
 
 
 def run_eval(
@@ -45,11 +47,12 @@ def run_eval(
     if problems:
         raise ValueError("fixture gold validation failed:\n- " + "\n- ".join(problems))
 
-    built = build_adapters(root, cards)
     wanted = adapters or ["current", "grep", "semantic"]
-    unknown = [name for name in wanted if name not in built]
+    unknown = [name for name in wanted if name not in KNOWN_ADAPTERS]
     if unknown:
         raise ValueError(f"unknown adapters: {', '.join(unknown)}")
+
+    built = build_adapters(root, cards, wanted=wanted)
 
     per_adapter: dict[str, Any] = {}
     for name in wanted:
@@ -95,7 +98,7 @@ def run_eval(
     return {
         "kind": "memory-retrieval-eval",
         "issue": 722,
-        "fixture_root": str(root),
+        "fixture_root": fixture_root_label(fixture_root, root),
         "k": k_eff,
         "corpus": corpus_stats(cards, queries),
         "ceiling": ceiling_for_queries(queries, k_eff),

@@ -122,3 +122,121 @@ def test_ceiling_helpers_match_oracle():
 def test_missing_fixture_root_errors(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         run_eval(fixture_root=tmp_path)
+
+
+def test_run_eval_current_and_grep_never_touch_semantic_adapter(monkeypatch):
+    import brigade.memory_retrieval_eval.adapters as adapters_mod
+
+    def _forbidden_semantic(_cards):
+        raise AssertionError("semantic_adapter must not run for current/grep-only eval")
+
+    monkeypatch.setattr(adapters_mod, "semantic_adapter", _forbidden_semantic)
+    report = run_eval(adapters=["current", "grep"])
+    assert "semantic" not in report["adapters"]
+
+
+def test_semantic_adapter_handles_broken_sentence_transformers_import(monkeypatch):
+    import builtins
+
+    import brigade.memory_retrieval_eval.adapters as adapters_mod
+
+    real_import = builtins.__import__
+
+    def _broken_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "sentence_transformers":
+            raise OSError("simulated broken native extension")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _broken_import)
+    cards = load_cards(DEFAULT_FIXTURE_ROOT)
+    search_fn, reason = adapters_mod.semantic_adapter(cards)
+    assert search_fn is None
+    assert reason is not None
+    assert "OSError" in reason
+
+    report = run_eval(adapters=["semantic"])
+    assert report["adapters"]["semantic"]["skipped"] is True
+    assert report["adapters"]["semantic"]["reason"]
+
+
+def test_malformed_query_missing_id_raises_value_error(tmp_path: Path):
+    fixture = tmp_path / "fixture"
+    _copy_minimal_fixture(fixture)
+    queries_path = fixture / "queries.json"
+    queries_path.write_text(
+        json.dumps({"k": 5, "queries": [{"query": "restic", "gold": ["restic-backup-schedule"]}]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="id"):
+        load_queries(queries_path)
+
+
+def test_malformed_query_missing_query_raises_value_error(tmp_path: Path):
+    fixture = tmp_path / "fixture"
+    _copy_minimal_fixture(fixture)
+    queries_path = fixture / "queries.json"
+    queries_path.write_text(
+        json.dumps({"k": 5, "queries": [{"id": "q1", "gold": ["restic-backup-schedule"]}]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="query"):
+        load_queries(queries_path)
+
+
+def test_cli_malformed_query_exits_2(tmp_path: Path, capsys):
+    fixture = tmp_path / "fixture"
+    _copy_minimal_fixture(fixture)
+    queries_path = fixture / "queries.json"
+    queries_path.write_text(
+        json.dumps({"k": 5, "queries": [{"id": "q1", "gold": ["restic-backup-schedule"]}]}),
+        encoding="utf-8",
+    )
+    rc = eval_main.main(["--fixture-root", str(fixture), "--adapters", "grep", "--json"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "query" in err.lower()
+
+
+def test_default_report_fixture_root_is_stable_and_not_absolute():
+    report = run_eval(adapters=["current", "grep"])
+    fixture_root = report["fixture_root"]
+    assert not Path(fixture_root).is_absolute()
+    assert fixture_root == "evals/memory-retrieval"
+
+
+def test_custom_fixture_root_label_is_deterministic(tmp_path: Path):
+    fixture = tmp_path / "custom-eval"
+    _copy_minimal_fixture(fixture)
+    first = run_eval(fixture_root=fixture, adapters=["grep"])
+    second = run_eval(fixture_root=fixture, adapters=["grep"])
+    label = first["fixture_root"]
+    assert label == second["fixture_root"]
+    assert not Path(label).is_absolute()
+    assert label != "evals/memory-retrieval"
+
+
+def _copy_minimal_fixture(fixture: Path) -> None:
+    """Copy one card and a valid query from the default fixture for isolated tests."""
+    import shutil
+
+    src_cards = DEFAULT_FIXTURE_ROOT / "memory" / "cards"
+    dst_cards = fixture / "memory" / "cards"
+    dst_cards.mkdir(parents=True)
+    shutil.copy2(src_cards / "restic-backup-schedule.md", dst_cards / "restic-backup-schedule.md")
+    (fixture / "queries.json").write_text(
+        json.dumps(
+            {
+                "k": 5,
+                "queries": [
+                    {
+                        "id": "q1",
+                        "query": "restic backup schedule",
+                        "gold": ["restic-backup-schedule"],
+                        "category": "exact",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )

@@ -34,10 +34,28 @@ class QuerySpec:
     category: str
 
 
+def repo_root() -> Path:
+    """Repository root (``evals/`` and ``src/`` live here)."""
+    return Path(__file__).resolve().parents[3]
+
+
 def default_fixture_root() -> Path:
     """Repo-relative fixture root: ``evals/memory-retrieval``."""
-    # src/brigade/memory_retrieval_eval/corpus.py -> parents[3] == repo root
-    return Path(__file__).resolve().parents[3] / "evals" / "memory-retrieval"
+    return repo_root() / "evals" / "memory-retrieval"
+
+
+def fixture_root_label(original: Path | None, resolved: Path) -> str:
+    """Stable, non-absolute fixture identifier for eval reports."""
+    default_resolved = default_fixture_root().resolve()
+    if resolved == default_resolved:
+        return "evals/memory-retrieval"
+    try:
+        return resolved.relative_to(repo_root()).as_posix()
+    except ValueError:
+        pass
+    if original is not None and not original.expanduser().is_absolute():
+        return original.expanduser().as_posix()
+    return f"external/{resolved.name}"
 
 
 def load_cards(target: Path) -> list[CardDoc]:
@@ -77,6 +95,10 @@ def load_queries(queries_path: Path) -> tuple[int, list[QuerySpec]]:
     for item in raw_queries:
         if not isinstance(item, dict):
             raise ValueError("each query must be an object")
+        if "id" not in item:
+            raise ValueError("each query must include an id")
+        if "query" not in item:
+            raise ValueError("each query must include a query string")
         query_id = str(item["id"])
         query = str(item["query"]).strip()
         gold_raw = item.get("gold")
