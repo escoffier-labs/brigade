@@ -124,6 +124,42 @@ def test_missing_fixture_root_errors(tmp_path: Path):
         run_eval(fixture_root=tmp_path)
 
 
+def test_run_eval_first_gold_rank_below_k(monkeypatch, tmp_path: Path):
+    """Gold below K must still appear in first_gold_rank while top-K metrics stay capped."""
+    import brigade.memory_retrieval_eval.harness as harness_mod
+
+    fixture = tmp_path / "fixture"
+    _copy_minimal_fixture(fixture)
+
+    gold_id = "restic-backup-schedule"
+    decoys = [f"decoy-{i}" for i in range(5)]
+    dst_cards = fixture / "memory" / "cards"
+    for decoy_id in decoys:
+        (dst_cards / f"{decoy_id}.md").write_text("decoy", encoding="utf-8")
+    full_ranking = decoys + [gold_id]
+
+    real_build = harness_mod.build_adapters
+
+    def _patched_build(target, cards, *, wanted):
+        meta = real_build(target, cards, wanted=wanted)
+
+        def search(_query: str, limit: int) -> list[tuple[str, float]]:
+            pairs = [(card_id, float(100 - i)) for i, card_id in enumerate(full_ranking)]
+            return pairs[:limit]
+
+        if "current" in meta:
+            meta["current"]["search"] = search
+        return meta
+
+    monkeypatch.setattr(harness_mod, "build_adapters", _patched_build)
+
+    report = run_eval(fixture_root=fixture, adapters=["current"], k=5)
+    row = report["adapters"]["current"]["queries"][0]
+    assert row["hit_at_k"] == 0.0
+    assert row["first_gold_rank"] == 6
+    assert row["ranked"] == decoys
+
+
 def test_run_eval_current_and_grep_never_touch_semantic_adapter(monkeypatch):
     import brigade.memory_retrieval_eval.adapters as adapters_mod
 

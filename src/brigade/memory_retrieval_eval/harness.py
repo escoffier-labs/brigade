@@ -66,9 +66,10 @@ def run_eval(
             continue
 
         search = meta["search"]
+        corpus_limit = len(cards)
         per_query: list[dict[str, Any]] = []
         for query in queries:
-            ranked_pairs = search(query.query, k_eff)
+            ranked_pairs = search(query.query, corpus_limit)
             ranked_ids = [card_id for card_id, _score in ranked_pairs]
             metrics = score_query(ranked_ids, query.gold, k_eff)
             per_query.append(
