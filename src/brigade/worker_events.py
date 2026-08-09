@@ -1051,7 +1051,7 @@ def validate_scrubbed_event(event: Mapping[str, Any]) -> list[str]:
         errors.append("source_digest must be a 64-char lowercase hex string")
     jsonrpc = event.get("jsonrpc")
     if jsonrpc is not None and jsonrpc != "2.0":
-        errors.append(_bound(f"jsonrpc must be '2.0'"))
+        errors.append(_bound("jsonrpc must be '2.0'"))
     params = event.get("params")
     if not isinstance(params, Mapping):
         errors.append("params must be an object")
