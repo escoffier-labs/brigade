@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `docs/scheduled-care.md`: copy-paste cron, systemd timer, and GitHub Actions recipes for the memory-care loop (daily care, ingest sweep, weekly outcome ratchet, daily observability, nightly ops). (#764)
+- `brigade memory care status` reports a read-only `archive_candidates` view
+  from the saved scan: cards with `age_days > 2 * stale_after_days`, including
+  age, last-reviewed, and evidence pointers. Approval-gated and never archives;
+  available in human output and `--json`. (#765)
 
 ## [0.26.0] - 2026-08-05
 
