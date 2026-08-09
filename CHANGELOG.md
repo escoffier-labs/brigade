@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-08-09
+
 ### Changed
 - `brigade work` task ledgers now track dependency edges, a computed ready set, atomic compare-and-set claims with fail-closed filters, and three-phase file and symbol footprints from task creation through verified completion. (#783, #796, #797)
 - Memory care now ships two review skills and three pinned runbook templates, reports read-only archive candidates, and documents cron, systemd, and GitHub Actions scheduling. (#771, #785, #786, #789)
