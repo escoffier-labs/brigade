@@ -1,0 +1,70 @@
+{
+  "kind": "forward-plan",
+  "plan_id": "forward-plan-YYYYMMDDTHHMMSSZ",
+  "title": "Forward plan",
+  "status": "draft",
+  "created_at": "YYYY-MM-DDTHH:MM:SS+00:00",
+  "updated_at": "YYYY-MM-DDTHH:MM:SS+00:00",
+  "inputs": {
+    "ready": {
+      "command": "brigade work ready --json",
+      "ready_count": 0,
+      "source": ".brigade/work/tasks.json"
+    },
+    "outcome_rank": {
+      "command": "brigade outcome rank --json",
+      "ranking_count": 0
+    },
+    "roadmap": {
+      "path": "ROADMAP.md",
+      "sections_read": ["Now", "Next", "Later"],
+      "sections_ignored": ["Vocabulary", "Where things stand", "How items move"]
+    }
+  },
+  "nodes": [
+    {
+      "key": "example-ready-task",
+      "text": "Example node text",
+      "origin": "ready|roadmap-now|roadmap-next|roadmap-later|proposed",
+      "task_id": null,
+      "priority_hint": "ready-first then outcome-rank then roadmap Now/Next/Later"
+    }
+  ],
+  "proposed_edges": [
+    {
+      "source": "example-a",
+      "target": "example-b",
+      "type": "blocks",
+      "derived": true,
+      "confirmed": false,
+      "rule": "def-use",
+      "snapshot_hash": null,
+      "notes": "Derived from GraphTrail impact intersection; requires confirmation before ledger filing."
+    },
+    {
+      "source": "example-a",
+      "target": "example-c",
+      "type": "conflicts-with",
+      "derived": true,
+      "confirmed": false,
+      "rule": "write-overlap",
+      "snapshot_hash": null,
+      "notes": "Proposal-only parallel-safety advisory until a native conflicts-with edge exists."
+    }
+  ],
+  "graphtrail": {
+    "available": false,
+    "snapshot_hash": null,
+    "degradation": "GraphTrail unavailable; no derived dependency edges proposed."
+  },
+  "confirmation": {
+    "required_for_derived_edges": true,
+    "auto_apply_forbidden": true,
+    "only_derived_may_be_auto_retracted": true
+  },
+  "next_command": "brigade work plans",
+  "receipt_paths": [
+    ".brigade/work/plans/forward-plan-YYYYMMDDTHHMMSSZ.json",
+    ".brigade/work/plans/forward-plan-YYYYMMDDTHHMMSSZ.plan.md"
+  ]
+}

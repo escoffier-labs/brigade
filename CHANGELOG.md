@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (open blockers, wrong status) fail closed. `work release` / `work reassign`
   compare claim identity; empty filter values match nothing. `work status`
   lists stale claims (default 24h).
+- `forward-plan` bundled registry skill (#779): turns the native ready set,
+  `brigade outcome rank`, and repo `ROADMAP.md` into a dependency-filed plan
+  artifact under `.brigade/work/plans/`. Proposes GraphTrail-derived edges
+  (`blocks` from def/use, `conflicts-with` from write overlap) marked derived
+  and confirmation-gated; degrades to zero proposed edges when GraphTrail is
+   unavailable. Ships `plan.template.json` as the artifact contract. Skill only,
+   with no new CLI subcommand.
 - Work task ledger dependency edges and a computed ready set (#737): typed
   edges (`blocks`, `parent-child`, `discovered-from`) live as a normalized
   top-level `edges` array in `.brigade/work/tasks.json` (schema version 2).
