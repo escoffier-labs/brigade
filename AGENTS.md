@@ -83,3 +83,47 @@ Format: trigger, then the rule, then what to do instead.
 At the end of any substantial task that produced durable knowledge (root
 causes, decisions, gotchas), write a handoff to `.claude/memory-handoffs/`
 using the format in `.claude/memory-handoffs/TEMPLATE.md`.
+
+## Cursor Cloud specific instructions
+
+Brigade is a zero-runtime-dependency Python CLI — there is no long-running
+server or web UI to start. "Run the application" means exercising the CLI
+against a temp directory (never the operator home or this checkout).
+
+### Services / surfaces
+
+| Surface | Required? | Notes |
+|---|---|---|
+| Python CLI (`brigade` via `.venv`) | Required | `source .venv/bin/activate` then use `brigade` / `python -m brigade` |
+| Native engines (`brigade setup`) | Optional | Code graph / evidence binaries; not needed for unit tests or init+doctor |
+| Model seats / `brigade run` | Out of scope here | No seat credentials in this VM — do not run `brigade run` |
+| Rust/Go engines under `engines/` | Optional | Built in CI only when those paths change |
+
+### Standard commands
+
+See AGENTS.md Definition of Done and CONTRIBUTING.md. Day-to-day:
+
+- Lint/type/sync gate pieces: `ruff check .`, `ruff format --check .`, `mypy`,
+  `python scripts/version_sync.py --check`, `python scripts/managed_snapshot.py --check`
+  (or the combined `./scripts/verify`, which also runs coverage pytest)
+- Tests: `pytest -q` (full suite; expect a long run, ~30+ minutes)
+- End-to-end smoke (same shape as CI `install-from-source`):
+
+```bash
+target="$(mktemp -d)"
+git init -q -b main "$target"
+python -m brigade init --target "$target" --depth workspace --harnesses claude,codex
+python -m brigade doctor --target "$target"
+```
+
+Doctor may report `WARN`s on a fresh temp target (memory-care / security not
+initialized yet); `0 failed` is the success signal.
+
+### Beads (`bd`)
+
+`bd` is installed at `/usr/local/bin/bd` from the linux-amd64 release tarball.
+Pinned during environment setup to **bd 1.1.2**
+(`bd version 1.1.2 (20e493e56: HEAD@20e493e569c9)`), fetched from the
+`steveyegge/beads` → `gastownhall/beads` release assets. Beads is young and
+schema-mobile — if `bd` commands fail after an upstream release, re-check the
+installed pin before assuming a Brigade bug.
