@@ -495,6 +495,82 @@ def test_wait_ticket_transient_read_error_is_not_pruned(tmp_path, monkeypatch):
     assert runguard._wait_ticket_is_live(ticket)
 
 
+def test_wait_ticket_enroll_survives_concurrent_prune_before_publish(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    queue_dir = runguard._wait_queue_dir(runguard.lock_path(repo))
+    publish_ready = threading.Event()
+    publish_gate = threading.Event()
+    enrolling_files: list[Path] = []
+    real_replace = os.replace
+
+    def gated_replace(src, dst):
+        if str(dst).endswith(".wait"):
+            enrolling_files.append(Path(src))
+            publish_ready.set()
+            assert publish_gate.wait(timeout=5)
+            listed = runguard._list_wait_tickets(queue_dir)
+            assert listed == []
+            runguard._prune_stale_wait_tickets(queue_dir)
+            assert Path(src).exists()
+            assert not Path(dst).exists()
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", gated_replace)
+
+    enrolled: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def enroll() -> None:
+        try:
+            ticket = runguard._enroll_wait_ticket(queue_dir)
+        except BaseException as exc:
+            errors.append(exc)
+            return
+        enrolled["ticket"] = ticket
+
+    enroll_thread = threading.Thread(target=enroll)
+    enroll_thread.start()
+    assert publish_ready.wait(timeout=5)
+    publish_gate.set()
+    enroll_thread.join(timeout=5)
+    assert not enroll_thread.is_alive()
+    assert errors == []
+
+    ticket = enrolled["ticket"]
+    assert isinstance(ticket, Path)
+    assert ticket.exists()
+    assert runguard._wait_ticket_is_live(ticket)
+    assert runguard._is_wait_queue_head(ticket, queue_dir)
+    assert not any(queue_dir.glob("*.enrolling"))
+    assert not enrolling_files or not enrolling_files[0].exists()
+
+    runguard._leave_wait_ticket(ticket, queue_dir)
+
+
+def test_wait_to_acquire_lock_timeout_before_immediate_retry_churn(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text(f"{os.getpid()}\n")
+    monotonic = iter((0.0, 0.0, 0.21))
+    sleeps: list[float] = []
+    monkeypatch.setattr(runguard.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(runguard.time, "sleep", sleeps.append)
+    monkeypatch.setattr(runguard, "_is_wait_queue_head", lambda *_args, **_kwargs: True)
+
+    def always_retry_acquire(*_args, **_kwargs):
+        raise runguard.RunLockError("another brigade run appears active")
+
+    monkeypatch.setattr(runguard, "_acquire_lock", always_retry_acquire)
+    monkeypatch.setattr(runguard, "_wait_retry_after_acquire_error", lambda *_args, **_kwargs: True)
+
+    with pytest.raises(runguard.RunLockError, match=r"timed out after 0.2s waiting for run lock"):
+        with runguard.run_lock(repo, wait_seconds=0.2, poll_interval=0.05):
+            pass
+
+    assert sleeps == []
+
+
 def test_wait_to_acquire_lock_retries_immediately_without_poll_sleep(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     lock_path = runguard.lock_path(repo)

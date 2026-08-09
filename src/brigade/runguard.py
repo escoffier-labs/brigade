@@ -10,6 +10,7 @@ import math
 import os
 import shutil
 import stat
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -799,6 +800,31 @@ def _prune_stale_wait_tickets(queue_dir: Path) -> None:
     _remove_empty_wait_queue_dir(queue_dir)
 
 
+def _publish_wait_ticket_exclusive(ticket: Path, encoded: bytes) -> None:
+    """Publish a complete wait ticket without exposing partial *.wait files."""
+    queue_dir = ticket.parent
+    fd, tmp_name = tempfile.mkstemp(
+        dir=queue_dir,
+        prefix=f".{ticket.name}.",
+        suffix=".enrolling",
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        try:
+            os.write(fd, encoded)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if ticket.exists():
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(ticket))
+        os.replace(tmp_path, ticket)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    else:
+        tmp_path.unlink(missing_ok=True)
+
+
 def _enroll_wait_ticket(queue_dir: Path) -> Path:
     # Cross-process FIFO ordering sorts ticket filenames by the monotonic_ns prefix.
     # This assumes a system-wide monotonic clock (e.g. Linux CLOCK_MONOTONIC), not
@@ -814,14 +840,14 @@ def _enroll_wait_ticket(queue_dir: Path) -> Path:
         queue_dir.mkdir(parents=True, exist_ok=True)
         ticket = queue_dir / f"{time.monotonic_ns():020d}-{os.getpid():08d}-{token}.wait"
         try:
-            fd = os.open(ticket, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileNotFoundError:
-            # Another waiter removed the empty queue dir between mkdir and create.
+            _publish_wait_ticket_exclusive(ticket, encoded)
+        except FileExistsError:
             continue
-        try:
-            os.write(fd, encoded)
-        finally:
-            os.close(fd)
+        except FileNotFoundError:
+            # Another waiter removed the empty queue dir between mkdir and publish.
+            continue
+        except OSError:
+            continue
         return ticket
     raise RunLockError(f"could not enroll for run lock wait queue: {queue_dir}")
 
@@ -884,6 +910,10 @@ def _wait_to_acquire_lock(
                     else:
                         timed_out_acquire_exc = exc
             if immediately_retryable:
+                if not unbounded:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RunLockError(f"timed out after {wait_seconds:g}s waiting for run lock: {path}")
                 continue
             if not unbounded:
                 remaining = deadline - time.monotonic()
