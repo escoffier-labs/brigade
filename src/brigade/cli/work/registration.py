@@ -462,6 +462,20 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Dependency as type:id (blocks, discovered-from, parent-child). Repeatable.",
     )
     p_work_task_add.add_argument(
+        "--symbol",
+        dest="symbols",
+        action="append",
+        default=None,
+        help="Named symbol for predicted footprint impact at filing (repeatable).",
+    )
+    p_work_task_add.add_argument(
+        "--file",
+        dest="files",
+        action="append",
+        default=None,
+        help="Named file seed for predicted footprint at filing (repeatable).",
+    )
+    p_work_task_add.add_argument(
         "--graph",
         type=Path,
         default=None,
@@ -511,6 +525,27 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Attach a completed research run report as quarantined (untrusted-web) plan evidence.",
     )
+    p_work_task_claim = task_sub.add_parser(
+        "claim",
+        help="Claim a task and refine its footprint from plan-named files.",
+    )
+    p_work_task_claim.add_argument("task_id", help="Task id or unique prefix.")
+    p_work_task_claim.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_task_claim.add_argument("--actor", default=None, help="Assignee / claiming actor name.")
+    p_work_task_claim.add_argument(
+        "--file",
+        dest="files",
+        action="append",
+        default=None,
+        help="Concrete file path to refine the footprint with (repeatable).",
+    )
+    p_work_task_claim.add_argument(
+        "--from-plan",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Extract plan-named files when --file is omitted (default: true).",
+    )
+    p_work_task_claim.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_task_done = task_sub.add_parser("done", help="Mark one work task done.")
     p_work_task_done.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_done.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")

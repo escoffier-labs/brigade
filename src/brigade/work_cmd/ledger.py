@@ -1460,6 +1460,9 @@ def _add_task(
             acceptance=acceptance,
             template=template,
         )
+        from . import footprint as footprint_mod
+
+        footprint_mod.attach_predicted(target, task)
         ledger["tasks"].append(task)
         created_edges: list[dict[str, Any]] = []
         for proposal in proposed_edges or []:
@@ -1513,6 +1516,9 @@ def _apply_graph_plan(
                 acceptance=node.get("acceptance") if isinstance(node.get("acceptance"), list) else None,
                 template=node.get("template") if isinstance(node.get("template"), str) else None,
             )
+            from . import footprint as footprint_mod
+
+            footprint_mod.attach_predicted(target, task)
             ledger["tasks"].append(task)
             key_map[node["key"]] = str(task["id"])
             created_tasks.append(task)

@@ -235,6 +235,15 @@ def run(
                 if completed_run_path is not None:
                     task["completed_run_path"] = completed_run_path
                 task["completed_acceptance"] = ledger_mod._task_acceptance(task)
+                from .. import footprint as footprint_mod
+                from .. import verification as verification_mod
+
+                receipt = verification_mod._latest_verify_receipt(target)
+                delta = footprint_mod.receipt_graph_delta(receipt)
+                footprint_mod.set_task_footprint(
+                    task,
+                    footprint_mod.reconcile_footprint(delta, prior=footprint_mod.task_footprint(task)),
+                )
                 ledger_mod._write_task_ledger(target, ledger)
     if dogfood_rc == 0 and queue_next:
         queued_task, created, reason = _queue_latest_next(

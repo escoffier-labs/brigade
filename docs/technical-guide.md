@@ -746,6 +746,7 @@ Task ledger commands:
 - `brigade work task add --from-issue 42` imports a GitHub issue with `gh issue view` when `gh` is available, including acceptance criteria parsed from issue-body checkboxes or acceptance/test sections.
 - `brigade work task add --from-next` promotes the latest extracted dogfood next step.
 - `brigade work task add "..." --deps blocks:<task-id>` attaches repeatable dependency edges when the task is created. Each `--deps` value is `type:id` where `type` is `blocks`, `parent-child`, or `discovered-from` (`blocks:<id>` means the referenced task blocks the new task).
+- `brigade work task add "..." --symbol <id> --file <path>` seeds the predicted footprint written at filing. When GraphTrail is installed and `.graphtrail/graphtrail.db` exists, filing calls `impact` for named symbols; otherwise the footprint degrades to an empty predicted object (`files`/`symbol_ids` empty, `phase=predicted`).
 - `brigade work task add --graph plan.json` atomically materializes tasks and edges from a JSON plan (`nodes` plus `edges`). Use `--dry-run` to validate without writing.
 - `brigade work ready [--explain] [--json]` lists pending tasks with no open readiness blockers. `blocks` edges gate readiness. Open blockers on a parent propagate to children through `parent-child` edges. `discovered-from` is provenance-only and never gates readiness.
 - `brigade work task edge add <type> <source> <target>` adds one typed edge (`blocks`, `parent-child`, or `discovered-from`). Repeatable `add` dedupes identical endpoints.
@@ -753,10 +754,11 @@ Task ledger commands:
 - `brigade work task edge remove --id <edge-id>` removes one edge by id, or pass `--type`, `--source`, and `--target` to match endpoints.
 - Direct and transitive cycles on readiness-affecting edges (`blocks` and `parent-child`) are rejected at edge-add and graph-apply time with machine-readable `dependency_cycle` reason and cycle node lists. Mixed edge-type cycles (for example `parent-child` plus `blocks`) use the same detection. `discovered-from` never participates in cycle detection.
 - `brigade work task plan <task-id>` shows the task metadata, acceptance checklist, template guidance, and suggested run command. Add `--write` to persist a plan artifact (plan.md plus a JSON receipt under `.brigade/work/plans/`) capturing assumptions, acceptance, risks, steps, and the next safe command; `--meta` writes a plan-for-the-plan that stops before the deliverable; `--step` captures steps; and `--from-research <run-id>` attaches a research run report as quarantined untrusted-web evidence.
+- `brigade work task claim <task-id> [--actor <name>] [--file <path>]` claims a task (`status=in_progress`) and refines `metadata.footprint` from plan-named files (or explicit `--file` paths). Compare-and-set claim guards are a separate slice; this command is the footprint refine seam.
 - `brigade work plans` lists persisted plan artifacts.
 - `brigade work plan-promote <task-id> --as template|rule|skill` writes a local DRAFT proposal under `.brigade/work/plan-proposals/` from an accepted plan, and never installs templates, rules, or skills; `brigade work plan-proposals` lists them.
 - `brigade learn skill-candidates --source security-scan` detects repeated local learning evidence that may deserve a reusable skill, and `brigade learn propose-skill <candidate-id> --dry-run` previews the generated source before writing. Without `--dry-run`, `propose-skill` writes an unreviewed generated skill source plus a normal `.brigade/skills/inbox/` proposal. It does not import, accept, install, or publish the skill.
-- `brigade work task done <task-id>` closes queued work.
+- `brigade work task done <task-id>` closes queued work and reconciles the task footprint by joining the latest verify receipt's `code_graph_delta` / `graphtrail_delta`.
 
 Available task templates are `vertical-slice`, `bugfix`, `red-green-refactor`, `docs`, and `security-follow-up`.
 Issue-backed tasks keep issue URL, number, title, labels, state, and source metadata in the local gitignored ledger.

@@ -93,6 +93,8 @@ def task_add(
     acceptance: list[str] | None = None,
     template: str | None = None,
     deps: list[str] | None = None,
+    symbols: list[str] | None = None,
+    files: list[str] | None = None,
     graph: Path | None = None,
     dry_run: bool = False,
     json_output: bool = False,
@@ -178,6 +180,12 @@ def task_add(
         dedupe = False
     else:
         metadata = None
+    if symbols or files:
+        metadata = dict(metadata or {})
+        if symbols:
+            metadata["symbol_ids"] = list(symbols)
+        if files:
+            metadata["files"] = list(files)
     if not task_text:
         print("error: task text is required", file=sys.stderr)
         return 2
@@ -229,6 +237,11 @@ def task_add(
         print(f"edges: {len(task_edges)}")
         for edge in task_edges:
             print(f"  - {edge['type']}: {edge['source']} -> {edge['target']}")
+    footprint = task.get("metadata", {}).get("footprint") if isinstance(task.get("metadata"), dict) else None
+    if isinstance(footprint, dict):
+        print(f"footprint.phase: {footprint.get('phase')}")
+        print(f"footprint.files: {len(footprint.get('files') or [])}")
+        print(f"footprint.symbol_ids: {len(footprint.get('symbol_ids') or [])}")
     print(f"text: {task['text']}")
     return 0
 
@@ -397,6 +410,75 @@ def task_plan(
     return 0
 
 
+def task_claim(
+    *,
+    target: Path,
+    task_id: str,
+    actor: str | None = None,
+    files: list[str] | None = None,
+    from_plan: bool = True,
+    json_output: bool = False,
+) -> int:
+    """Claim a task and refine its footprint from plan-named files.
+
+    This is the footprint refine seam (#777). Atomic compare-and-set claim
+    guards land in #738; this command is the additive lifecycle write that
+    claim will call.
+    """
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    from .. import footprint as footprint_mod
+
+    with ledger_mod._task_ledger_lock(target):
+        task, ledger = ledger_mod._find_task(target, task_id)
+        if task is None:
+            print(f"error: task not found: {task_id}", file=sys.stderr)
+            return 1
+        status = str(task.get("status") or "pending")
+        if status in edges_mod.TERMINAL_TASK_STATUSES:
+            print(f"error: task is already {status}: {task.get('id')}", file=sys.stderr)
+            return 2
+        plan_files: list[str] = []
+        if files:
+            plan_files = list(files)
+        elif from_plan:
+            plan = ledger_mod._read_plan_receipt(target, str(task.get("id")), kind="plan")
+            plan_files = footprint_mod.extract_plan_files(plan)
+        footprint = footprint_mod.refine_footprint(
+            files=plan_files,
+            prior=footprint_mod.task_footprint(task),
+        )
+        footprint_mod.set_task_footprint(task, footprint)
+        now = helpers._now().isoformat()
+        task["status"] = "in_progress"
+        task["updated_at"] = now
+        task["claimed_at"] = now
+        if actor and actor.strip():
+            task["assignee"] = actor.strip()
+        ledger_mod._write_task_ledger(target, ledger)
+    payload = {
+        "task": task.get("id"),
+        "status": task.get("status"),
+        "assignee": task.get("assignee"),
+        "claimed_at": task.get("claimed_at"),
+        "footprint": footprint,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"task: {task.get('id')}")
+    print("status: in_progress")
+    if task.get("assignee"):
+        print(f"assignee: {task['assignee']}")
+    print(f"footprint.phase: {footprint.get('phase')}")
+    print(f"footprint.files: {len(footprint.get('files') or [])}")
+    for path in footprint.get("files") or []:
+        print(f"  - {path}")
+    return 0
+
+
 def task_done(*, target: Path, task_id: str, force: bool = False, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -427,14 +509,25 @@ def task_done(*, target: Path, task_id: str, force: bool = False, json_output: b
         task["status"] = "done"
         task["updated_at"] = now
         task["completed_at"] = now
+        from .. import footprint as footprint_mod
+        from .. import verification as verification_mod
+
+        receipt = verification_mod._latest_verify_receipt(target)
+        delta = footprint_mod.receipt_graph_delta(receipt)
+        footprint_mod.set_task_footprint(
+            task,
+            footprint_mod.reconcile_footprint(delta, prior=footprint_mod.task_footprint(task)),
+        )
         side_effects = edges_mod.close_side_effects(ledger, resolved_id)
         ledger_mod._write_task_ledger(target, ledger)
+    footprint = task.get("metadata", {}).get("footprint") if isinstance(task.get("metadata"), dict) else None
     payload = {
         "task": task.get("id"),
         "status": "done",
         "newly_unblocked": side_effects["newly_unblocked"],
         "completable_parents": side_effects["completable_parents"],
         "forced": bool(open_children and force),
+        "footprint": footprint,
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -449,6 +542,9 @@ def task_done(*, target: Path, task_id: str, force: bool = False, json_output: b
     print(f"completable_parents: {len(payload['completable_parents'])}")
     for item in payload["completable_parents"]:
         print(f"  - {item['id']} {helpers._short(str(item.get('title') or ''))}")
+    if isinstance(footprint, dict):
+        print(f"footprint.phase: {footprint.get('phase')}")
+        print(f"footprint.files: {len(footprint.get('files') or [])}")
     return 0
 
 
