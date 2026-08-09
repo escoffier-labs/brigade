@@ -19,6 +19,7 @@ from .budgets import MEMORY_CARD_BUDGET_BYTES
 from .install import apply_gitignore
 from .selection import Selection
 from .localio import write_json as _write_json, utc_now_iso_z as _utc_iso
+from .memory_doctor.safety import atomic_write_text
 from .templates import template_root
 
 CONFIG_REL_PATH = ".brigade/memory-care.toml"
@@ -276,6 +277,8 @@ def _write_memory_care_runbooks(target: Path) -> int:
                 return 2
             validated["pins"] = pins
             _write_json(dest, validated)
+        # Narrow crash window: after rmtree the old tree is gone; if replace fails
+        # before publishing temp_dir, neither directory remains at dest_dir.
         if dest_dir.exists():
             shutil.rmtree(dest_dir)
         temp_dir.replace(dest_dir)
@@ -305,7 +308,7 @@ def init(
         if rc != 0:
             return rc
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_format_config(), encoding="utf-8")
+    atomic_write_text(path, _format_config())
     if update_gitignore:
         apply_gitignore(target, Selection(depth="repo", harnesses=[], owner="this-repo", includes=[]))
     print(f"memory_care_config: {path}")

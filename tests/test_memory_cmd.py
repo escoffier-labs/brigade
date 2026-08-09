@@ -1247,6 +1247,32 @@ def test_memory_care_init_with_runbooks_pin_failure_leaves_no_config_or_partial_
     assert not runbook_dir.exists() or list(runbook_dir.glob("*.json")) == []
 
 
+def test_memory_care_force_reinit_pin_failure_preserves_existing_runbooks_and_config(
+    tmp_path, monkeypatch, capsys
+):
+    assert memory_cmd.init(target=tmp_path, force=True, with_runbooks=True) == 0
+    capsys.readouterr()
+
+    config_path = tmp_path / ".brigade" / "memory-care.toml"
+    config_path.write_text(config_path.read_text(encoding="utf-8") + "# user marker\n", encoding="utf-8")
+    saved_config = config_path.read_bytes()
+    saved_runbooks = {
+        name: (_memory_care_runbook_dir(tmp_path) / name).read_bytes() for name in MEMORY_CARE_RUNBOOK_NAMES
+    }
+
+    def _fail_pin(_target, _payload):
+        return None, "runbook step 1 argv[0] could not be resolved: brigade"
+
+    monkeypatch.setattr(runbook_cmd, "_pin_payload_from_runbook", _fail_pin)
+
+    assert memory_cmd.init(target=tmp_path, force=True, with_runbooks=True) == 2
+    assert "could not be resolved" in capsys.readouterr().err
+
+    assert config_path.read_bytes() == saved_config
+    for name, payload in saved_runbooks.items():
+        assert (_memory_care_runbook_dir(tmp_path) / name).read_bytes() == payload
+
+
 def test_memory_care_init_with_runbooks_writes_three_pinned_templates(tmp_path, capsys):
     assert memory_cmd.init(target=tmp_path, force=True, with_runbooks=True) == 0
     captured = capsys.readouterr()
