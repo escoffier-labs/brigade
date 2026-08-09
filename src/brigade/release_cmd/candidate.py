@@ -120,7 +120,19 @@ def _release_receipt_matches_head(receipt: dict[str, Any], target: Path, *, base
     # Require an explicit top-level base_ref; legacy receipts omit it and must refresh.
     if "base_ref" not in receipt or receipt["base_ref"] != base_ref:
         return False
-    return bool(receipt_head and current_head and receipt_head == current_head)
+    receipt_tracked_dirty = git.get("tracked_dirty_files")
+    if not isinstance(receipt_tracked_dirty, list):
+        return False
+    status = _git(target, "status", "--porcelain=v1", "--untracked-files=no")
+    if status.returncode != 0:
+        return False
+    current_tracked_dirty = [line for line in status.stdout.splitlines() if line]
+    return bool(
+        receipt_head
+        and current_head
+        and receipt_head == current_head
+        and receipt_tracked_dirty == current_tracked_dirty
+    )
 
 
 def _latest_release_or_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
