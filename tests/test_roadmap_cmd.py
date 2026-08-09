@@ -87,8 +87,7 @@ def test_roadmap_audit_rejected_section_does_not_poison_later_sibling_headings(t
 def test_roadmap_audit_accepts_alternative_configuration_heading(tmp_path):
     (tmp_path / "ROADMAP.md").write_text("# Roadmap\n")
     (tmp_path / "README.md").write_text(
-        "## Alternative configuration\n\n"
-        "Use `brigade doctor` when wiring optional settings.\n"
+        "## Alternative configuration\n\nUse `brigade doctor` when wiring optional settings.\n"
     )
 
     payload = roadmap_cmd.audit_payload(tmp_path)
@@ -99,11 +98,7 @@ def test_roadmap_audit_accepts_alternative_configuration_heading(tmp_path):
 
 def test_roadmap_audit_extracts_inline_backtick_commands_inside_fenced_blocks(tmp_path):
     (tmp_path / "ROADMAP.md").write_text("# Roadmap\n")
-    (tmp_path / "README.md").write_text(
-        "```bash\n"
-        "prefix `brigade doctor` suffix\n"
-        "```\n"
-    )
+    (tmp_path / "README.md").write_text("```bash\nprefix `brigade doctor` suffix\n```\n")
 
     payload = roadmap_cmd.audit_payload(tmp_path)
 
