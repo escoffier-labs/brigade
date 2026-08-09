@@ -589,6 +589,39 @@ def dispatch(args) -> int:
         return work_cmd.next(target=args.target, json_output=args.json)
     if args.work_command == "ready":
         return work_cmd.ready(target=args.target, explain=args.explain, json_output=args.json)
+    if args.work_command == "claim":
+        return work_cmd.claim(
+            target=args.target,
+            task_id=args.task_id,
+            actor=args.actor,
+            claim_id=args.claim_id,
+            claim_next=args.claim_next,
+            if_actor=args.if_actor,
+            if_status=args.if_status,
+            json_output=args.json,
+        )
+    if args.work_command == "release":
+        return work_cmd.release(
+            target=args.target,
+            task=args.task,
+            actor=args.actor,
+            claim_id=args.claim_id,
+            stale_after_hours=args.stale_after_hours,
+            if_actor=args.if_actor,
+            if_status=args.if_status,
+            json_output=args.json,
+        )
+    if args.work_command == "reassign":
+        return work_cmd.reassign(
+            target=args.target,
+            task_id=args.task_id,
+            to_actor=args.to_actor,
+            claim_id=args.claim_id,
+            new_claim_id=args.new_claim_id,
+            if_actor=args.if_actor,
+            if_status=args.if_status,
+            json_output=args.json,
+        )
     if args.work_command == "tasks":
         return work_cmd.tasks(target=args.target, all_tasks=args.all, json_output=args.json)
     if args.work_command == "task":

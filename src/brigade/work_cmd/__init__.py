@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from . import (  # noqa: F401
     backup,
+    claiming,
     config,
     constants,
     helpers,
@@ -153,6 +154,10 @@ from .ledger import (  # noqa: F401
     _add_task,
     _apply_graph_plan,
     _task_ledger_lock,
+    _claim_task,
+    _release_tasks,
+    _reassign_task,
+    _stale_claim_payload,
     _plan_rel_path,
     _append_dedupe,
     _read_plan_receipt,
@@ -422,6 +427,9 @@ from .session import (  # noqa: F401
     task_edge_remove,
     task_edge_list,
     ready,
+    claim,
+    release,
+    reassign,
     next,
     bootstrap,
     run,

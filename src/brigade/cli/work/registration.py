@@ -429,6 +429,72 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--explain", action="store_true", help="Include blocked tasks, blocker paths, and cycles."
     )
     p_work_ready.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_claim = work_sub.add_parser(
+        "claim",
+        help="Atomically claim a ready work task (pending → in_progress with assignee).",
+    )
+    p_work_claim.add_argument("task_id", nargs="?", default=None, help="Task id or unique prefix.")
+    p_work_claim.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_claim.add_argument("--actor", required=True, help="Human-readable actor / seat label.")
+    p_work_claim.add_argument(
+        "--claim-id",
+        default=None,
+        help="Opaque claim request id. Same id retries as an idempotent success; a new id loses the race.",
+    )
+    p_work_claim.add_argument(
+        "--next",
+        dest="claim_next",
+        action="store_true",
+        help="Claim the highest-priority ready task under one store lock.",
+    )
+    p_work_claim.add_argument("--if-actor", default=None, help="CAS guard: require current assignee.")
+    p_work_claim.add_argument("--if-status", default=None, help="CAS guard: require current status.")
+    p_work_claim.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_release = work_sub.add_parser(
+        "release",
+        help="Release claimed work tasks. Empty filter values match nothing (fail closed).",
+    )
+    p_work_release.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_release.add_argument(
+        "--task",
+        action="append",
+        default=None,
+        help="Task id filter. May be repeated. Empty values match nothing.",
+    )
+    p_work_release.add_argument(
+        "--actor",
+        action="append",
+        default=None,
+        help="Actor filter. May be repeated. Empty values match nothing.",
+    )
+    p_work_release.add_argument(
+        "--claim-id",
+        action="append",
+        default=None,
+        help="Claim id filter. May be repeated. Empty values match nothing.",
+    )
+    p_work_release.add_argument(
+        "--stale-after",
+        dest="stale_after_hours",
+        type=float,
+        default=None,
+        help="Only release claims at least this many hours old.",
+    )
+    p_work_release.add_argument("--if-actor", default=None, help="CAS guard: require current assignee.")
+    p_work_release.add_argument("--if-status", default=None, help="CAS guard: require current status.")
+    p_work_release.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_reassign = work_sub.add_parser(
+        "reassign",
+        help="Reassign a live claim to a new actor (compares claim id when provided).",
+    )
+    p_work_reassign.add_argument("task_id", help="Task id or unique prefix.")
+    p_work_reassign.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_reassign.add_argument("--to", dest="to_actor", required=True, help="New actor / seat label.")
+    p_work_reassign.add_argument("--claim-id", default=None, help="Require this claim id before reassigning.")
+    p_work_reassign.add_argument("--new-claim-id", default=None, help="Opaque claim id for the new assignment.")
+    p_work_reassign.add_argument("--if-actor", default=None, help="CAS guard: require current assignee.")
+    p_work_reassign.add_argument("--if-status", default=None, help="CAS guard: require current status.")
+    p_work_reassign.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_tasks = work_sub.add_parser("tasks", help="List pending work tasks.")
     p_work_tasks.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_tasks.add_argument("--all", action="store_true", help="Include completed tasks.")

@@ -283,6 +283,14 @@ def status(*, target: Path, limit: int = 12) -> int:
         status_out = helpers._git_value(target, "status", "--short") or ""
         _print_dirty(status_out.splitlines(), limit=limit)
 
+    stale_payload = ledger_mod._stale_claim_payload(target)
+    print(f"stale_claims: {stale_payload['stale_count']} (after {stale_payload['stale_after_hours']}h)")
+    for item in stale_payload["stale"][:limit]:
+        print(
+            f"- claim {item.get('task_id')} holder={item.get('assignee')} "
+            f"age_hours={item.get('age_hours')} {helpers._short(str(item.get('text') or ''))}"
+        )
+
     try:
         effective_target, artifacts_dir, cfg = dogfood_cmd._load_effective_paths(target)
     except (FileNotFoundError, ValueError) as exc:
