@@ -23,6 +23,7 @@ from . import managed_block, memory_cmd, runbook_cmd
 
 CARE_KIND = "CARE"
 CARE_MARKER_VERSION = 1
+CARE_MARKER_STYLE = managed_block.MARKER_STYLE_HASH
 DEFAULT_BACKEND: Literal["crontab", "systemd"] = "crontab"
 SUPPORTED_BACKENDS = ("crontab", "systemd")
 
@@ -30,8 +31,24 @@ MEMORY_CARE_RUNBOOK_REL = {
     "daily-care": ".brigade/memory-care/runbooks/daily-care-pass.json",
     "ingest-sweep": ".brigade/memory-care/runbooks/ingest-sweep.json",
     "weekly-outcome-ratchet": ".brigade/memory-care/runbooks/weekly-outcome-ratchet.json",
+    "daily-observability": ".brigade/memory-care/runbooks/daily-observability.json",
 }
 NIGHTLY_RUNBOOK_REL = ".brigade/runbooks/nightly-maintenance.json"
+DAILY_OBSERVABILITY_RUNBOOK_NAME = "daily-observability.json"
+DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD: dict[str, Any] = {
+    "id": "daily-observability",
+    "description": (
+        "Daily handoff health, daily driver snapshot, and operator report bundle. "
+        "Run from the repo or workspace root: "
+        "brigade runbook run --approved .brigade/memory-care/runbooks/daily-observability.json"
+    ),
+    "allowed_commands": ["brigade"],
+    "steps": [
+        {"id": "handoff-doctor", "run": "brigade handoff doctor --target ."},
+        {"id": "daily-status", "run": "brigade daily status --target ."},
+        {"id": "center-report", "run": "brigade center report build --target ."},
+    ],
+}
 
 
 @dataclass(frozen=True)
@@ -83,12 +100,9 @@ CARE_ENTRIES: tuple[CareEntry, ...] = (
         schedule="0 8 * * *",
         on_calendar="*-*-* 08:00:00",
         description="Brigade daily observability pass",
-        kind="shell",
-        shell=(
-            "brigade handoff doctor --target . && "
-            "brigade daily status --target . && "
-            "brigade center report build --target ."
-        ),
+        kind="runbook",
+        runbook_rel=MEMORY_CARE_RUNBOOK_REL["daily-observability"],
+        runbook_id="daily-observability",
     ),
     CareEntry(
         entry_id="nightly-ops",
@@ -112,15 +126,60 @@ def _path_prefix(home: Path | None = None) -> str:
     return f"{local_bin}:/usr/local/bin:/usr/bin:/bin"
 
 
+def _public_block_status(status: str) -> str:
+    if status == managed_block.STATUS_LOCALLY_MODIFIED:
+        return "tampered"
+    return status
+
+
+def _block_body_from_rendered(text: str) -> str:
+    parsed = managed_block.parse_blocks(text, kind=CARE_KIND, style=CARE_MARKER_STYLE)
+    return parsed.body if parsed.status == "ok" else ""
+
+
+def _owned_digest_from_text(text: str) -> str | None:
+    parsed = managed_block.parse_blocks(text, kind=CARE_KIND, style=CARE_MARKER_STYLE)
+    return parsed.actual_hash if parsed.status == "ok" else None
+
+
+def _systemd_quote_value(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if value and all(ch not in ' \t\n\r"\\%' for ch in value):
+        return value
+    return f'"{escaped}"'
+
+
+def _systemd_environment_path(path_value: str) -> str:
+    inner = path_value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if any(ch in ' \t\n\r"\\%' for ch in path_value):
+        return f'Environment="PATH={inner}"'
+    return f"Environment=PATH={path_value}"
+
+
+def _systemd_exec_start_runbook(runbook_rel: str) -> str:
+    argv = ["/usr/bin/env", "brigade", "runbook", "run", "--approved", runbook_rel, "--target", "."]
+    return "ExecStart=" + " ".join(_systemd_quote_value(arg) for arg in argv)
+
+
+def _systemd_working_directory(workspace: Path) -> str:
+    return f"WorkingDirectory={_systemd_quote_value(str(workspace))}"
+
+
+def _cron_escape_path(value: str) -> str:
+    """Escape cron metacharacters in a path embedded in a double-quoted shell fragment."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`").replace("%", "\\%")
+
+
 def _cron_command(entry: CareEntry, *, workspace: Path) -> str:
-    quoted = str(workspace).replace('"', '\\"')
+    quoted_workspace = _cron_escape_path(str(workspace))
     if entry.kind == "runbook":
         assert entry.runbook_rel is not None
-        body = f"brigade runbook run --approved {entry.runbook_rel} --target ."
+        quoted_rel = _cron_escape_path(entry.runbook_rel)
+        body = f'brigade runbook run --approved "{quoted_rel}" --target .'
     else:
         assert entry.shell is not None
         body = entry.shell
-    return f'cd "{quoted}" && {body}'
+    return f'cd "{quoted_workspace}" && {body}'
 
 
 def _crontab_body(*, workspace: Path, home: Path | None = None) -> str:
@@ -132,11 +191,11 @@ def _crontab_body(*, workspace: Path, home: Path | None = None) -> str:
 
 def render_crontab_block(*, workspace: Path, home: Path | None = None) -> str:
     """Render the managed crontab block including markers."""
-    return managed_block.wrap_block(
+    return managed_block.render_block(
+        _crontab_body(workspace=workspace, home=home),
         kind=CARE_KIND,
         profile="crontab",
-        body=_crontab_body(workspace=workspace, home=home),
-        style="hash",
+        style=CARE_MARKER_STYLE,
     )
 
 
@@ -196,6 +255,40 @@ def _ensure_memory_care_runbooks(target: Path) -> int:
     return memory_cmd._write_memory_care_runbooks(target)
 
 
+def _write_daily_observability_runbook(target: Path) -> int:
+    """Materialize the daily-observability runbook with binary pins when missing."""
+    dest = memory_cmd._memory_care_runbooks_dir(target) / DAILY_OBSERVABILITY_RUNBOOK_NAME
+    if dest.is_file():
+        return 0
+    temp = dest.parent / f".{DAILY_OBSERVABILITY_RUNBOOK_NAME}.init-tmp"
+    try:
+        from .localio import write_json as _write_json
+
+        temp.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(temp, dict(DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD))
+        validated, error = runbook_cmd._read_runbook(temp, require_pin_hashes=False)
+        if validated is None:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        pins, pin_error = runbook_cmd._pin_payload_from_runbook(target, validated)
+        if pins is None:
+            print(f"error: {pin_error}", file=sys.stderr)
+            return 2
+        validated["pins"] = pins
+        _write_json(dest, validated)
+        return 0
+    finally:
+        if temp.is_file():
+            temp.unlink()
+
+
+def _ensure_care_runbooks(target: Path) -> int:
+    rc = _ensure_memory_care_runbooks(target)
+    if rc != 0:
+        return rc
+    return _write_daily_observability_runbook(target)
+
+
 def _latest_runbook_receipt(target: Path, runbook_id: str) -> dict[str, Any] | None:
     for receipt in runbook_cmd._run_receipts(target):
         if str(receipt.get("runbook_id") or "") == runbook_id:
@@ -211,29 +304,23 @@ def _entry_status(target: Path, entry: CareEntry) -> dict[str, Any]:
         "kind": entry.kind,
         "description": entry.description,
     }
-    if entry.kind == "runbook":
-        assert entry.runbook_rel is not None
-        path = target / entry.runbook_rel
-        payload["runbook"] = entry.runbook_rel
-        payload["runbook_id"] = entry.runbook_id
-        payload["runbook_present"] = path.is_file()
-        receipt = _latest_runbook_receipt(target, entry.runbook_id or "")
-        if receipt is None:
-            payload["last_receipt"] = None
-        else:
-            payload["last_receipt"] = {
-                "run_id": receipt.get("run_id"),
-                "status": receipt.get("status"),
-                "started_at": receipt.get("started_at"),
-                "completed_at": receipt.get("completed_at"),
-                "receipt_path": receipt.get("receipt_path"),
-            }
-    else:
-        payload["shell"] = entry.shell
+    assert entry.kind == "runbook"
+    assert entry.runbook_rel is not None
+    path = target / entry.runbook_rel
+    payload["runbook"] = entry.runbook_rel
+    payload["runbook_id"] = entry.runbook_id
+    payload["runbook_present"] = path.is_file()
+    receipt = _latest_runbook_receipt(target, entry.runbook_id or "")
+    if receipt is None:
         payload["last_receipt"] = None
-        payload["receipt_note"] = (
-            "shell recipes do not write a runbook receipt; inspect local artifacts under .brigade/"
-        )
+    else:
+        payload["last_receipt"] = {
+            "run_id": receipt.get("run_id"),
+            "status": receipt.get("status"),
+            "started_at": receipt.get("started_at"),
+            "completed_at": receipt.get("completed_at"),
+            "receipt_path": receipt.get("receipt_path"),
+        }
     return payload
 
 
@@ -311,7 +398,7 @@ def install(
     if _is_windows():
         return _windows_print(workspace=target)
 
-    rc = _ensure_memory_care_runbooks(target)
+    rc = _ensure_care_runbooks(target)
     if rc != 0:
         return rc
 
@@ -333,59 +420,95 @@ def _install_crontab(
         print(f"error: failed to read crontab: {error}", file=sys.stderr)
         return 2
     desired_body = _crontab_body(workspace=target, home=home)
-    plan = managed_block.classify_block(current, kind=CARE_KIND, desired_body=desired_body)
-    if plan.status == "current":
+    assessment = managed_block.assess_block(
+        current,
+        desired=desired_body,
+        kind=CARE_KIND,
+        profile="crontab",
+        style=CARE_MARKER_STYLE,
+    )
+    if assessment.status == managed_block.STATUS_CURRENT:
         payload = {
             "target": str(target),
             "backend": "crontab",
             "status": "current",
-            "action": "none",
-            "hash": plan.desired_hash,
+            "action": managed_block.ACTION_NONE,
+            "hash": assessment.desired_hash,
             "dry_run": dry_run,
             "entries": [_entry_status(target, entry) for entry in CARE_ENTRIES],
         }
         _print_payload(payload, json_output=json_output)
         return 0
-    if plan.status == "tampered" and not adopt:
+    if assessment.status == managed_block.STATUS_LOCALLY_MODIFIED and not adopt:
         payload = {
             "target": str(target),
             "backend": "crontab",
             "status": "tampered",
-            "action": "preserve",
-            "recorded_hash": plan.recorded_hash,
-            "live_hash": plan.live_hash,
-            "desired_hash": plan.desired_hash,
-            "detail": plan.detail,
+            "action": managed_block.ACTION_PRESERVE,
+            "recorded_hash": assessment.recorded_hash,
+            "live_hash": assessment.actual_hash,
+            "desired_hash": assessment.desired_hash,
+            "detail": assessment.detail,
             "fix_command": "brigade care install --target . --adopt",
             "entries": [_entry_status(target, entry) for entry in CARE_ENTRIES],
         }
         _print_payload(payload, json_output=json_output)
         print("error: care crontab block was hand-edited; refusing to clobber without --adopt", file=sys.stderr)
         return 1
+    if assessment.status == managed_block.STATUS_MALFORMED:
+        payload = {
+            "target": str(target),
+            "backend": "crontab",
+            "status": managed_block.STATUS_MALFORMED,
+            "action": managed_block.ACTION_PRESERVE,
+            "desired_hash": assessment.desired_hash,
+            "detail": assessment.detail,
+            "entries": [_entry_status(target, entry) for entry in CARE_ENTRIES],
+        }
+        _print_payload(payload, json_output=json_output)
+        print("error: care crontab block has malformed markers; refusing to install", file=sys.stderr)
+        return 1
 
-    rendered, apply_plan = managed_block.apply_block(
+    plan = managed_block.plan_install(
         current,
+        desired=desired_body,
         kind=CARE_KIND,
         profile="crontab",
-        desired_body=desired_body,
-        style="hash",
         adopt=adopt,
+        style=CARE_MARKER_STYLE,
     )
+    rendered = plan.rendered if plan.rendered is not None else current
     payload = {
         "target": str(target),
         "backend": "crontab",
-        "status": apply_plan.status,
-        "action": apply_plan.action,
-        "hash": apply_plan.desired_hash,
+        "status": _public_block_status(plan.status),
+        "action": plan.action,
+        "hash": plan.desired_hash,
         "dry_run": dry_run,
         "entries": [_entry_status(target, entry) for entry in CARE_ENTRIES],
     }
     if dry_run:
-        payload["rendered_block"] = managed_block.wrap_block(
-            kind=CARE_KIND, profile="crontab", body=desired_body, style="hash"
+        payload["rendered_block"] = managed_block.render_block(
+            desired_body,
+            kind=CARE_KIND,
+            profile="crontab",
+            style=CARE_MARKER_STYLE,
         )
         _print_payload(payload, json_output=json_output)
         return 0
+    if plan.action == managed_block.ACTION_NONE:
+        _print_payload(payload, json_output=json_output)
+        if not json_output:
+            print("next_command: brigade care status --target .")
+        return 0
+    if plan.action == managed_block.ACTION_PRESERVE:
+        payload["detail"] = plan.detail
+        _print_payload(payload, json_output=json_output)
+        if plan.status == managed_block.STATUS_MALFORMED:
+            print("error: care crontab block has malformed markers; refusing to install", file=sys.stderr)
+        else:
+            print("error: care crontab block was hand-edited; refusing to clobber without --adopt", file=sys.stderr)
+        return 1
     write_error = _write_crontab(rendered)
     if write_error:
         print(f"error: failed to write crontab: {write_error}", file=sys.stderr)
@@ -412,12 +535,8 @@ def _systemd_unit_bodies(*, workspace: Path, home: Path | None = None) -> dict[s
     for entry in CARE_ENTRIES:
         service_name = f"brigade-{entry.entry_id}.service"
         timer_name = f"brigade-{entry.entry_id}.timer"
-        if entry.kind == "runbook":
-            assert entry.runbook_rel is not None
-            exec_start = f"ExecStart=brigade runbook run --approved {entry.runbook_rel} --target ."
-        else:
-            assert entry.shell is not None
-            exec_start = f"ExecStart=/bin/sh -c '{entry.shell}'"
+        assert entry.kind == "runbook" and entry.runbook_rel is not None
+        exec_start = _systemd_exec_start_runbook(entry.runbook_rel)
         service_body = "\n".join(
             [
                 "[Unit]",
@@ -425,8 +544,8 @@ def _systemd_unit_bodies(*, workspace: Path, home: Path | None = None) -> dict[s
                 "",
                 "[Service]",
                 "Type=oneshot",
-                f"WorkingDirectory={workspace}",
-                f"Environment=PATH={path_value}",
+                _systemd_working_directory(workspace),
+                _systemd_environment_path(path_value),
                 exec_start,
             ]
         )
@@ -443,10 +562,12 @@ def _systemd_unit_bodies(*, workspace: Path, home: Path | None = None) -> dict[s
                 "WantedBy=timers.target",
             ]
         )
-        units[service_name] = managed_block.wrap_block(
-            kind=CARE_KIND, profile="systemd", body=service_body, style="hash"
+        units[service_name] = managed_block.render_block(
+            service_body, kind=CARE_KIND, profile="systemd", style=CARE_MARKER_STYLE
         )
-        units[timer_name] = managed_block.wrap_block(kind=CARE_KIND, profile="systemd", body=timer_body, style="hash")
+        units[timer_name] = managed_block.render_block(
+            timer_body, kind=CARE_KIND, profile="systemd", style=CARE_MARKER_STYLE
+        )
     return units
 
 
@@ -464,44 +585,78 @@ def _install_systemd(
     blocked = False
     for name, desired_text in units.items():
         path = unit_dir / name
-        existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-        desired_match = managed_block.find_block(desired_text, kind=CARE_KIND)
-        assert desired_match is not None
-        plan = managed_block.classify_block(existing, kind=CARE_KIND, desired_body=desired_match.body)
-        if plan.status == "tampered" and not adopt:
+        desired_body = _block_body_from_rendered(desired_text)
+        existing_text: str | None
+        if path.is_file():
+            if path.is_symlink():
+                print(f"error: refusing to follow symlink unit: {path}", file=sys.stderr)
+                return 2
+            try:
+                existing_text = managed_block.read_text_nofollow(path)
+            except (OSError, UnicodeDecodeError) as exc:
+                print(f"error: failed to read unit {path}: {exc}", file=sys.stderr)
+                return 2
+        else:
+            existing_text = None
+        plan = managed_block.plan_install(
+            existing_text,
+            desired=desired_body,
+            kind=CARE_KIND,
+            profile="systemd",
+            adopt=adopt,
+            style=CARE_MARKER_STYLE,
+        )
+        public_status = _public_block_status(plan.status)
+        if plan.action == managed_block.ACTION_PRESERVE:
             blocked = True
             results.append(
                 {
                     "name": name,
                     "path": str(path),
-                    "status": "tampered",
-                    "action": "preserve",
+                    "status": public_status,
+                    "action": managed_block.ACTION_PRESERVE,
                     "detail": plan.detail,
                 }
             )
             continue
-        if plan.status == "current":
-            results.append({"name": name, "path": str(path), "status": "current", "action": "none"})
+        if plan.status == managed_block.STATUS_CURRENT and plan.action == managed_block.ACTION_NONE:
+            results.append({"name": name, "path": str(path), "status": "current", "action": managed_block.ACTION_NONE})
             continue
         results.append(
             {
                 "name": name,
                 "path": str(path),
-                "status": plan.status,
-                "action": "create" if plan.status == "missing" else "update",
+                "status": public_status,
+                "action": plan.action,
             }
         )
         if dry_run:
             continue
         unit_dir.mkdir(parents=True, exist_ok=True)
-        if path.exists() or path.is_symlink():
-            try:
-                if path.is_symlink():
-                    print(f"error: refusing to follow symlink unit: {path}", file=sys.stderr)
-                    return 2
-            except OSError:
-                pass
-        path.write_text(desired_text, encoding="utf-8")
+        _, outcome = managed_block.install_block(
+            path,
+            desired_body,
+            kind=CARE_KIND,
+            profile="systemd",
+            adopt=adopt,
+            style=CARE_MARKER_STYLE,
+        )
+        if outcome.status == managed_block.WRITE_ERROR:
+            print(f"error: failed to write unit {path}: {outcome.detail}", file=sys.stderr)
+            return 2
+        if outcome.status == managed_block.WRITE_SKIPPED_SYMLINK:
+            print(f"error: refusing to follow symlink unit: {path}", file=sys.stderr)
+            return 2
+        if outcome.status == managed_block.WRITE_REFUSED:
+            blocked = True
+            results[-1] = {
+                "name": name,
+                "path": str(path),
+                "status": public_status,
+                "action": managed_block.ACTION_PRESERVE,
+                "detail": outcome.detail or plan.detail,
+            }
+            continue
     payload = {
         "target": str(target),
         "backend": "systemd",
@@ -518,7 +673,10 @@ def _install_systemd(
     }
     _print_payload(payload, json_output=json_output)
     if blocked:
-        print("error: one or more systemd units were hand-edited; refusing without --adopt", file=sys.stderr)
+        if any(unit.get("status") == managed_block.STATUS_MALFORMED for unit in results):
+            print("error: one or more systemd units have malformed markers; refusing to install", file=sys.stderr)
+        else:
+            print("error: one or more systemd units were hand-edited; refusing without --adopt", file=sys.stderr)
         return 1
     if not json_output and not dry_run:
         print("note: Brigade wrote unit files only; enable timers with systemctl --user.")
@@ -557,28 +715,42 @@ def status(
             print(f"error: failed to read crontab: {error}", file=sys.stderr)
             return 2
         desired_body = _crontab_body(workspace=target, home=home)
-        plan = managed_block.classify_block(current, kind=CARE_KIND, desired_body=desired_body)
-        match = managed_block.find_block(current, kind=CARE_KIND)
+        assessment = managed_block.assess_block(
+            current,
+            desired=desired_body,
+            kind=CARE_KIND,
+            profile="crontab",
+            style=CARE_MARKER_STYLE,
+        )
+        plan = managed_block.plan_install(
+            current,
+            desired=desired_body,
+            kind=CARE_KIND,
+            profile="crontab",
+            style=CARE_MARKER_STYLE,
+        )
+        parsed = managed_block.parse_blocks(current, kind=CARE_KIND, style=CARE_MARKER_STYLE)
+        public_status = _public_block_status(assessment.status)
         crontab_payload: dict[str, Any] = {
             "target": str(target),
             "backend": "crontab",
-            "status": plan.status,
+            "status": public_status,
             "action": plan.action,
-            "recorded_hash": plan.recorded_hash,
-            "live_hash": plan.live_hash,
-            "desired_hash": plan.desired_hash,
-            "detail": plan.detail,
-            "profile": match.profile if match else None,
+            "recorded_hash": assessment.recorded_hash,
+            "live_hash": assessment.actual_hash,
+            "desired_hash": assessment.desired_hash,
+            "detail": assessment.detail,
+            "profile": parsed.meta.profile if parsed.meta else None,
             "entries": [_entry_status(target, entry) for entry in CARE_ENTRIES],
         }
-        if plan.status == "tampered":
+        if public_status == "tampered":
             crontab_payload["fix_command"] = "brigade care install --target . --adopt"
-        elif plan.status == "stale":
+        elif public_status == "stale":
             crontab_payload["fix_command"] = "brigade care install --target ."
-        elif plan.status == "missing":
+        elif public_status == managed_block.STATUS_MISSING:
             crontab_payload["fix_command"] = "brigade care install --target ."
         _print_payload(crontab_payload, json_output=json_output)
-        return 0 if plan.status in {"current", "missing"} else 1
+        return 0 if public_status in {"current", managed_block.STATUS_MISSING} else 1
 
     unit_dir = _systemd_user_dir(home)
     units = _systemd_unit_bodies(workspace=target, home=home)
@@ -586,26 +758,53 @@ def status(
     worst = "current"
     for name, desired_text in units.items():
         path = unit_dir / name
-        existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-        desired_match = managed_block.find_block(desired_text, kind=CARE_KIND)
-        assert desired_match is not None
-        plan = managed_block.classify_block(existing, kind=CARE_KIND, desired_body=desired_match.body)
+        if path.is_symlink():
+            existing_text = ""
+            public_status = managed_block.STATUS_MALFORMED
+            results.append(
+                {
+                    "name": name,
+                    "path": str(path),
+                    "status": public_status,
+                    "recorded_hash": None,
+                    "live_hash": None,
+                    "desired_hash": None,
+                }
+            )
+            worst = public_status if worst == "current" else worst
+            continue
+        if not path.is_file():
+            existing_text = ""
+        else:
+            try:
+                existing_text = managed_block.read_text_nofollow(path)
+            except OSError:
+                existing_text = ""
+        desired_body = _block_body_from_rendered(desired_text)
+        assessment = managed_block.assess_block(
+            existing_text,
+            desired=desired_body,
+            kind=CARE_KIND,
+            profile="systemd",
+            style=CARE_MARKER_STYLE,
+        )
+        public_status = _public_block_status(assessment.status)
         results.append(
             {
                 "name": name,
                 "path": str(path),
-                "status": plan.status,
-                "recorded_hash": plan.recorded_hash,
-                "live_hash": plan.live_hash,
-                "desired_hash": plan.desired_hash,
+                "status": public_status,
+                "recorded_hash": assessment.recorded_hash,
+                "live_hash": assessment.actual_hash,
+                "desired_hash": assessment.desired_hash,
             }
         )
-        if plan.status == "tampered":
+        if public_status == "tampered":
             worst = "tampered"
-        elif plan.status == "stale" and worst != "tampered":
+        elif public_status == managed_block.STATUS_STALE and worst != "tampered":
             worst = "stale"
-        elif plan.status == "missing" and worst == "current":
-            worst = "missing"
+        elif public_status == managed_block.STATUS_MISSING and worst == "current":
+            worst = managed_block.STATUS_MISSING
     payload = {
         "target": str(target),
         "backend": "systemd",
@@ -615,7 +814,7 @@ def status(
         "entries": [_entry_status(target, entry) for entry in CARE_ENTRIES],
     }
     _print_payload(payload, json_output=json_output)
-    return 0 if worst in {"current", "missing"} else 1
+    return 0 if worst in {"current", managed_block.STATUS_MISSING} else 1
 
 
 def uninstall(
@@ -646,17 +845,28 @@ def uninstall(
         if error:
             print(f"error: failed to read crontab: {error}", file=sys.stderr)
             return 2
-        rendered, plan = managed_block.remove_block(current, kind=CARE_KIND)
+        owned_digest = _owned_digest_from_text(current)
+        plan = managed_block.plan_remove(current, kind=CARE_KIND, owned_digest=owned_digest, style=CARE_MARKER_STYLE)
+        public_status = _public_block_status(plan.status)
         payload = {
             "target": str(target),
             "backend": "crontab",
-            "status": plan.status,
+            "status": public_status,
             "action": plan.action,
             "dry_run": dry_run,
+            "detail": plan.detail,
         }
-        if plan.action == "none":
+        if plan.action == managed_block.ACTION_PRESERVE:
+            _print_payload(payload, json_output=json_output)
+            print(
+                "error: care crontab block was hand-edited; refusing to remove without repair",
+                file=sys.stderr,
+            )
+            return 1
+        if plan.action == managed_block.ACTION_NONE:
             _print_payload(payload, json_output=json_output)
             return 0
+        rendered = plan.rendered if plan.rendered is not None else ""
         if dry_run:
             payload["would_write"] = True
             _print_payload(payload, json_output=json_output)
@@ -671,6 +881,8 @@ def uninstall(
     unit_dir = _systemd_user_dir(home)
     removed: list[str] = []
     skipped: list[str] = []
+    refused: list[str] = []
+    blocked = False
     for entry in CARE_ENTRIES:
         for suffix in (".service", ".timer"):
             name = f"brigade-{entry.entry_id}{suffix}"
@@ -681,15 +893,41 @@ def uninstall(
             if path.is_symlink():
                 print(f"error: refusing to remove symlink unit: {path}", file=sys.stderr)
                 return 2
-            text = path.read_text(encoding="utf-8")
-            match = managed_block.find_block(text, kind=CARE_KIND)
-            if match is None:
+            try:
+                text = managed_block.read_text_nofollow(path)
+            except OSError as exc:
+                print(f"error: failed to read unit {path}: {exc}", file=sys.stderr)
+                return 2
+            owned_digest = _owned_digest_from_text(text)
+            plan = managed_block.plan_remove(text, kind=CARE_KIND, owned_digest=owned_digest, style=CARE_MARKER_STYLE)
+            if plan.action == managed_block.ACTION_PRESERVE:
+                blocked = True
+                refused.append(name)
+                continue
+            if plan.action == managed_block.ACTION_NONE:
                 skipped.append(name)
                 continue
             if dry_run:
                 removed.append(name)
                 continue
-            path.unlink()
+            remove_plan, outcome = managed_block.remove_block(
+                path,
+                kind=CARE_KIND,
+                owned_digest=owned_digest,
+                style=CARE_MARKER_STYLE,
+            )
+            if remove_plan.action == managed_block.ACTION_PRESERVE:
+                blocked = True
+                refused.append(name)
+                continue
+            if outcome.status == managed_block.WRITE_ERROR:
+                print(f"error: failed to update unit {path}: {outcome.detail}", file=sys.stderr)
+                return 2
+            if outcome.status == managed_block.WRITE_SKIPPED_SYMLINK:
+                print(f"error: refusing to remove symlink unit: {path}", file=sys.stderr)
+                return 2
+            if path.exists() and not managed_block.read_text_nofollow(path).strip():
+                path.unlink()
             removed.append(name)
     payload = {
         "target": str(target),
@@ -697,7 +935,14 @@ def uninstall(
         "dry_run": dry_run,
         "removed": removed,
         "skipped": skipped,
+        "refused": refused,
         "next_commands": ["systemctl --user daemon-reload"],
     }
     _print_payload(payload, json_output=json_output)
+    if blocked:
+        print(
+            "error: one or more systemd units were hand-edited; refusing to remove without repair",
+            file=sys.stderr,
+        )
+        return 1
     return 0

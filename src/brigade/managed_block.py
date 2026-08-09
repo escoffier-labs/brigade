@@ -37,7 +37,11 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
+
+MarkerStyle = Literal["html", "hash"]
+MARKER_STYLE_HTML: MarkerStyle = "html"
+MARKER_STYLE_HASH: MarkerStyle = "hash"
 
 MARKER_FORMAT_VERSION = 1
 DEFAULT_KIND = "INTEGRATION"
@@ -55,6 +59,14 @@ _BEGIN_RE = re.compile(
 _END_RE = re.compile(r"<!--\s*END BRIGADE\s+([A-Za-z][A-Za-z0-9_-]*)\s*-->")
 _BEGIN_LOOSE_RE = re.compile(r"<!--\s*BEGIN BRIGADE\b")
 _END_LOOSE_RE = re.compile(r"<!--\s*END BRIGADE\b")
+_HASH_BEGIN_RE = re.compile(
+    r"^#\s*BEGIN BRIGADE\s+([A-Za-z][A-Za-z0-9_-]*)\s+"
+    r"v:(\d+)\s+profile:([^\s]+)\s+hash:([0-9a-fA-F]+)\s*$",
+    re.MULTILINE,
+)
+_HASH_END_RE = re.compile(r"^#\s*END BRIGADE\s+([A-Za-z][A-Za-z0-9_-]*)\s*$", re.MULTILINE)
+_HASH_BEGIN_LOOSE_RE = re.compile(r"^#\s*BEGIN BRIGADE\b", re.MULTILINE)
+_HASH_END_LOOSE_RE = re.compile(r"^#\s*END BRIGADE\b", re.MULTILINE)
 
 STATUS_MISSING = "missing"
 STATUS_CURRENT = "current"
@@ -82,6 +94,7 @@ class BlockMeta:
     profile: str | None
     recorded_hash: str | None
     legacy: bool
+    style: MarkerStyle = MARKER_STYLE_HTML
 
 
 @dataclass(frozen=True)
@@ -182,28 +195,53 @@ def _with_file_newlines(block: str, newline: str) -> str:
     return block.replace("\n", "\r\n")
 
 
-def begin_marker(*, kind: str, profile: str, digest: str, version: int = MARKER_FORMAT_VERSION) -> str:
+def begin_marker(
+    *,
+    kind: str,
+    profile: str,
+    digest: str,
+    version: int = MARKER_FORMAT_VERSION,
+    style: MarkerStyle = MARKER_STYLE_HTML,
+) -> str:
     if version != MARKER_FORMAT_VERSION:
         raise ValueError(f"unsupported managed-block marker version: {version}")
+    if style not in {MARKER_STYLE_HTML, MARKER_STYLE_HASH}:
+        raise ValueError(f"unsupported managed-block marker style: {style}")
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", kind):
         raise ValueError(f"invalid managed-block kind: {kind!r}")
     if any(ch.isspace() for ch in profile) or not profile:
         raise ValueError(f"invalid managed-block profile: {profile!r}")
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError("managed-block hash must be a full lowercase sha256 hex digest")
+    if style == MARKER_STYLE_HASH:
+        return f"# BEGIN BRIGADE {kind} v:{version} profile:{profile} hash:{digest}"
     return f"<!-- BEGIN BRIGADE {kind} v:{version} profile:{profile} hash:{digest} -->"
 
 
-def end_marker(*, kind: str) -> str:
+def end_marker(*, kind: str, style: MarkerStyle = MARKER_STYLE_HTML) -> str:
+    if style not in {MARKER_STYLE_HTML, MARKER_STYLE_HASH}:
+        raise ValueError(f"unsupported managed-block marker style: {style}")
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", kind):
         raise ValueError(f"invalid managed-block kind: {kind!r}")
+    if style == MARKER_STYLE_HASH:
+        return f"# END BRIGADE {kind}"
     return f"<!-- END BRIGADE {kind} -->"
 
 
-def render_block(body: str, *, kind: str = DEFAULT_KIND, profile: str = DEFAULT_PROFILE) -> str:
+def render_block(
+    body: str,
+    *,
+    kind: str = DEFAULT_KIND,
+    profile: str = DEFAULT_PROFILE,
+    style: MarkerStyle = MARKER_STYLE_HTML,
+) -> str:
     """Render a stamped block including the trailing newline after the end marker."""
     digest = body_hash(body)
-    return f"{begin_marker(kind=kind, profile=profile, digest=digest)}\n{body}\n{end_marker(kind=kind)}\n"
+    return (
+        f"{begin_marker(kind=kind, profile=profile, digest=digest, style=style)}\n"
+        f"{body}\n"
+        f"{end_marker(kind=kind, style=style)}\n"
+    )
 
 
 def default_fix_command(*, harness: str = "<harness>") -> str:
@@ -216,29 +254,96 @@ def _legacy_pair_for_kind(kind: str) -> tuple[str, str] | None:
     return None
 
 
-def _marker_hits(text: str, *, kind: str) -> tuple[list[re.Match[str]], list[re.Match[str]], list[str]]:
+def _marker_hits(
+    text: str,
+    *,
+    kind: str,
+    style: MarkerStyle,
+) -> tuple[list[re.Match[str]], list[re.Match[str]], list[str]]:
     """Return begin matches, end matches, and malformed loose-marker details for kind."""
-    begins = [m for m in _BEGIN_RE.finditer(text) if m.group(1) == kind]
-    ends = [m for m in _END_RE.finditer(text) if m.group(1) == kind]
+    if style == MARKER_STYLE_HASH:
+        begin_re, end_re, begin_loose_re, end_loose_re = (
+            _HASH_BEGIN_RE,
+            _HASH_END_RE,
+            _HASH_BEGIN_LOOSE_RE,
+            _HASH_END_LOOSE_RE,
+        )
+    else:
+        begin_re, end_re, begin_loose_re, end_loose_re = (
+            _BEGIN_RE,
+            _END_RE,
+            _BEGIN_LOOSE_RE,
+            _END_LOOSE_RE,
+        )
+    begins = [m for m in begin_re.finditer(text) if m.group(1) == kind]
+    ends = [m for m in end_re.finditer(text) if m.group(1) == kind]
     details: list[str] = []
-    for match in _BEGIN_LOOSE_RE.finditer(text):
+    if style == MARKER_STYLE_HASH:
+        for match in begin_loose_re.finditer(text):
+            line_end = text.find("\n", match.start())
+            window = text[match.start() : line_end if line_end != -1 else len(text)]
+            if begin_re.fullmatch(window):
+                continue
+            kind_token = re.match(r"^#\s*BEGIN BRIGADE\s+(\S+)", window)
+            token = kind_token.group(1) if kind_token else ""
+            if not token or token == kind or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", token):
+                details.append("begin marker metadata cannot be parsed")
+        for match in end_loose_re.finditer(text):
+            line_end = text.find("\n", match.start())
+            window = text[match.start() : line_end if line_end != -1 else len(text)]
+            if end_re.fullmatch(window):
+                continue
+            kind_token = re.match(r"^#\s*END BRIGADE\s+([A-Za-z][A-Za-z0-9_-]*)\s*$", window)
+            if kind_token is None or kind_token.group(1) == kind:
+                details.append("end marker cannot be parsed")
+        return begins, ends, details
+
+    for match in begin_loose_re.finditer(text):
         close = text.find("-->", match.start())
         window = text[match.start() : close + 3] if close != -1 else text[match.start() : match.start() + 120]
-        if _BEGIN_RE.fullmatch(window):
+        if begin_re.fullmatch(window):
             continue
         kind_token = re.match(r"<!--\s*BEGIN BRIGADE\s+(\S+)", window)
         token = kind_token.group(1) if kind_token else ""
         if not token or token == kind or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", token):
             details.append("begin marker metadata cannot be parsed")
-    for match in _END_LOOSE_RE.finditer(text):
+    for match in end_loose_re.finditer(text):
         close = text.find("-->", match.start())
         window = text[match.start() : close + 3] if close != -1 else text[match.start() : match.start() + 80]
-        if _END_RE.fullmatch(window):
+        if end_re.fullmatch(window):
             continue
         kind_token = re.match(r"<!--\s*END BRIGADE\s+([A-Za-z][A-Za-z0-9_-]*)\s*-->", window)
         if kind_token is None or kind_token.group(1) == kind:
             details.append("end marker cannot be parsed")
     return begins, ends, details
+
+
+def _stamped_marker_styles(text: str, *, kind: str) -> set[MarkerStyle]:
+    styles: set[MarkerStyle] = set()
+    if any(m.group(1) == kind for m in _BEGIN_RE.finditer(text)) or any(
+        m.group(1) == kind for m in _END_RE.finditer(text)
+    ):
+        styles.add(MARKER_STYLE_HTML)
+    if any(m.group(1) == kind for m in _HASH_BEGIN_RE.finditer(text)) or any(
+        m.group(1) == kind for m in _HASH_END_RE.finditer(text)
+    ):
+        styles.add(MARKER_STYLE_HASH)
+    return styles
+
+
+def _resolve_marker_style(text: str, *, kind: str, style: MarkerStyle | None) -> MarkerStyle | None:
+    stamped = _stamped_marker_styles(text, kind=kind)
+    if style is not None:
+        if len(stamped) > 1:
+            return None
+        if stamped and next(iter(stamped)) != style:
+            return None
+        return style
+    if len(stamped) > 1:
+        return None
+    if stamped:
+        return next(iter(stamped))
+    return MARKER_STYLE_HTML
 
 
 def _extract_framed_body(text: str, start_pos: int, start_len: int, end_pos: int) -> tuple[str, str, str] | None:
@@ -252,11 +357,19 @@ def _extract_framed_body(text: str, start_pos: int, start_len: int, end_pos: int
     return before, body, text[end_pos:]
 
 
-def parse_blocks(text: str, *, kind: str = DEFAULT_KIND) -> ParsedBlock:
+def parse_blocks(text: str, *, kind: str = DEFAULT_KIND, style: MarkerStyle | None = None) -> ParsedBlock:
     """Parse the managed span for ``kind`` into a structured block state."""
     offsets = _normalized_offset_starts(text)
     normalized = normalize_newlines(text)
-    begins, ends, loose_details = _marker_hits(normalized, kind=kind)
+    resolved_style = _resolve_marker_style(normalized, kind=kind, style=style)
+    if resolved_style is None:
+        stamped = _stamped_marker_styles(normalized, kind=kind)
+        if style is not None and stamped and len(stamped) == 1 and next(iter(stamped)) != style:
+            detail = "stamped managed markers do not match requested marker style"
+        else:
+            detail = "stamped html and hash-comment managed markers both present"
+        return ParsedBlock(STATUS_MALFORMED, kind, detail=detail)
+    begins, ends, loose_details = _marker_hits(normalized, kind=kind, style=resolved_style)
     legacy = _legacy_pair_for_kind(kind)
     legacy_starts = normalized.count(legacy[0]) if legacy else 0
     legacy_ends = normalized.count(legacy[1]) if legacy else 0
@@ -291,7 +404,9 @@ def parse_blocks(text: str, *, kind: str = DEFAULT_KIND) -> ParsedBlock:
             return ParsedBlock(STATUS_MALFORMED, kind, detail="orphan managed marker")
         # Nested / overlapping: another begin or end inside the span.
         inner = normalized[begin.end() : end.start()]
-        if _BEGIN_LOOSE_RE.search(inner) or _END_LOOSE_RE.search(inner):
+        inner_loose_begin = _HASH_BEGIN_LOOSE_RE if resolved_style == MARKER_STYLE_HASH else _BEGIN_LOOSE_RE
+        inner_loose_end = _HASH_END_LOOSE_RE if resolved_style == MARKER_STYLE_HASH else _END_LOOSE_RE
+        if inner_loose_begin.search(inner) or inner_loose_end.search(inner):
             return ParsedBlock(STATUS_MALFORMED, kind, detail="nested managed markers")
         if legacy and (legacy[0] in inner or legacy[1] in inner):
             return ParsedBlock(STATUS_MALFORMED, kind, detail="nested managed markers")
@@ -317,7 +432,14 @@ def parse_blocks(text: str, *, kind: str = DEFAULT_KIND) -> ParsedBlock:
         if after_start < len(normalized) and normalized[after_start] == "\n":
             after_start += 1
         after = _slice_by_normalized_range(text, offsets, after_start, len(normalized))
-        meta = BlockMeta(kind=kind, version=version, profile=profile, recorded_hash=recorded, legacy=False)
+        meta = BlockMeta(
+            kind=kind,
+            version=version,
+            profile=profile,
+            recorded_hash=recorded,
+            legacy=False,
+            style=resolved_style,
+        )
         return ParsedBlock(
             "ok",
             kind,
@@ -375,9 +497,10 @@ def assess_block(
     profile: str = DEFAULT_PROFILE,
     owned_digest: str | None = None,
     fix_command: str | None = None,
+    style: MarkerStyle | None = None,
 ) -> BlockAssessment:
     """Classify a file's managed span against an optional desired body."""
-    parsed = parse_blocks(text, kind=kind)
+    parsed = parse_blocks(text, kind=kind, style=style)
     fix = fix_command or default_fix_command()
     if parsed.status == STATUS_MISSING:
         return BlockAssessment(
@@ -524,10 +647,12 @@ def plan_install(
     force: bool = False,
     adopt: bool = False,
     fix_command: str | None = None,
+    style: MarkerStyle | None = None,
 ) -> BlockPlan:
     """Plan create/update/no-op/preserve for a managed block inside ``text``."""
+    resolved_style = style or MARKER_STYLE_HTML
     desired_digest = body_hash(desired)
-    block = render_block(desired, kind=kind, profile=profile)
+    block = render_block(desired, kind=kind, profile=profile, style=resolved_style)
     fix = fix_command or default_fix_command()
     if text is None:
         return BlockPlan(
@@ -541,6 +666,7 @@ def plan_install(
         profile=profile,
         owned_digest=owned_digest,
         fix_command=fix,
+        style=resolved_style,
     )
     parsed = assessment.parsed
 
@@ -623,13 +749,14 @@ def plan_remove(
     owned_digest: str | None = None,
     force: bool = False,
     fix_command: str | None = None,
+    style: MarkerStyle | None = None,
 ) -> BlockPlan:
     """Plan surgical removal of the managed span (plus one trailing newline)."""
     fix = fix_command or default_fix_command()
     if text is None:
         return BlockPlan(STATUS_MISSING, ACTION_NONE, kind, fix_command=fix, detail="managed block is absent")
 
-    assessment = assess_block(text, desired=None, kind=kind, owned_digest=owned_digest, fix_command=fix)
+    assessment = assess_block(text, desired=None, kind=kind, owned_digest=owned_digest, fix_command=fix, style=style)
     parsed = assessment.parsed
 
     if assessment.status == STATUS_MISSING:
@@ -786,6 +913,7 @@ def install_block(
     adopt: bool = False,
     fix_command: str | None = None,
     lstat_probe: Callable[[Path], int | None] | None = None,
+    style: MarkerStyle | None = None,
 ) -> tuple[BlockPlan, WriteOutcome]:
     """Install or update a managed block with symlink-safe atomic publish."""
     probe = lstat_probe or _lstat_mode
@@ -830,6 +958,7 @@ def install_block(
         force=force,
         adopt=adopt,
         fix_command=fix_command,
+        style=style,
     )
     if plan.action == ACTION_NONE:
         return plan, WriteOutcome(WRITE_NOOP)
@@ -858,6 +987,7 @@ def remove_block(
     force: bool = False,
     fix_command: str | None = None,
     lstat_probe: Callable[[Path], int | None] | None = None,
+    style: MarkerStyle | None = None,
 ) -> tuple[BlockPlan, WriteOutcome]:
     """Remove a managed block surgically with symlink-safe atomic publish."""
     probe = lstat_probe or _lstat_mode
@@ -875,7 +1005,9 @@ def remove_block(
         )
         return plan, WriteOutcome(WRITE_SKIPPED_SYMLINK, detail=warning, warning=warning)
     if mode is None:
-        plan = plan_remove(None, kind=kind, owned_digest=owned_digest, force=force, fix_command=fix_command)
+        plan = plan_remove(
+            None, kind=kind, owned_digest=owned_digest, force=force, fix_command=fix_command, style=style
+        )
         return plan, WriteOutcome(WRITE_NOOP)
 
     try:
@@ -884,7 +1016,7 @@ def remove_block(
         plan = BlockPlan(STATUS_MALFORMED, ACTION_PRESERVE, kind, detail=str(exc), fix_command=fix_command)
         return plan, WriteOutcome(WRITE_ERROR, detail=str(exc))
 
-    plan = plan_remove(text, kind=kind, owned_digest=owned_digest, force=force, fix_command=fix_command)
+    plan = plan_remove(text, kind=kind, owned_digest=owned_digest, force=force, fix_command=fix_command, style=style)
     if plan.action == ACTION_NONE:
         return plan, WriteOutcome(WRITE_NOOP)
     if plan.action == ACTION_PRESERVE or plan.rendered is None:
@@ -903,6 +1035,7 @@ def check_block(
     profile: str = DEFAULT_PROFILE,
     owned_digest: str | None = None,
     fix_command: str | None = None,
+    style: MarkerStyle | None = None,
 ) -> BlockAssessment:
     """Classify a path's managed block; missing file is ``missing``."""
     if path_is_symlink(path):
@@ -941,4 +1074,5 @@ def check_block(
         profile=profile,
         owned_digest=owned_digest,
         fix_command=fix_command,
+        style=style,
     )
