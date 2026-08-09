@@ -1,0 +1,33 @@
+name: publish-dev
+
+on:
+  schedule:
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish-dev-wheel:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Derive and stamp the development wheel version
+        run: python scripts/prepare_dev_wheel.py --date-suffix "$(date -u +%Y%m%d)"
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build
+      - name: Build wheel only
+        run: python -m build --wheel
+      - name: Publish development wheel to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
+        with:
+          skip-existing: true
