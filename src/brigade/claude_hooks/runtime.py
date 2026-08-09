@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import os
 import re
 import shlex
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
+import time
 from datetime import datetime
+from queue import Empty
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -22,6 +23,12 @@ from .package import PACKAGE_REF
 BRIEF_TIMEOUT_SECONDS = 10
 MAX_RECENT_SESSION_STATES = 512
 CLAUDE_SESSION_ENV = "BRIGADE_CLAUDE_SESSION"
+_HOOK_WORKER_EVENT_ENV = "BRIGADE_HOOK_WORKER_EVENT"
+_HOOK_TEST_HANG_ENV = "BRIGADE_HOOK_TEST_HANG_SECONDS"
+_HOOK_TIMEOUT_ENV = "BRIGADE_HOOK_TIMEOUT_SECONDS"
+_HOOK_WORKER_COMMAND = (
+    "import json, os, sys, time; from brigade.claude_hooks.runtime import _hook_worker_main; _hook_worker_main()"
+)
 
 
 class HookDegraded(Exception):
@@ -2093,6 +2100,139 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     return None
 
 
+def _hook_timeout_seconds() -> float:
+    raw = os.environ.get(_HOOK_TIMEOUT_ENV)
+    if raw is not None and raw.strip():
+        try:
+            value = float(raw)
+        except ValueError:
+            value = 0.0
+        if value > 0:
+            return value
+    return float(envelope.HOOK_TIMEOUT_SECONDS)
+
+
+def _maybe_test_hang() -> None:
+    raw = os.environ.get(_HOOK_TEST_HANG_ENV)
+    if raw is None or not raw.strip():
+        return
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return
+    if seconds > 0:
+        time.sleep(seconds)
+
+
+def _isolated_handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    _maybe_test_hang()
+    return handle_payload(event, payload)
+
+
+def _hook_worker_main() -> None:
+    """Run ``handle_payload`` in an isolated child process (issue #735)."""
+    event = os.environ.get(_HOOK_WORKER_EVENT_ENV, "")
+    raw = sys.stdin.read()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise TypeError("hook stdin must be a JSON object")
+    result = _isolated_handle_payload(event, payload)
+    sys.stdout.write(json.dumps(result))
+
+
+def _terminate_process(proc: mp.Process | mp.context.ForkProcess) -> None:
+    if not proc.is_alive():
+        return
+    proc.terminate()
+    proc.join(timeout=1)
+    if proc.is_alive():
+        proc.kill()
+        proc.join()
+
+
+def _recv_timed_handle_payload_result(
+    queue: mp.Queue,
+    proc: mp.Process | mp.context.ForkProcess,
+    *,
+    timeout: float,
+) -> dict[str, Any] | None:
+    try:
+        status, value = queue.get(timeout=timeout)
+    except Empty as exc:
+        _terminate_process(proc)
+        raise HookDegraded("hook operation timed out") from exc
+    proc.join(timeout=1)
+    if proc.is_alive():
+        _terminate_process(proc)
+    if status == "ok":
+        return value if isinstance(value, dict) else None
+    if isinstance(value, BaseException):
+        raise value
+    raise RuntimeError(str(value))
+
+
+def _fork_timed_handle_payload_target(event: str, payload: dict[str, Any], queue: mp.Queue) -> None:
+    try:
+        result = _isolated_handle_payload(event, payload)
+        queue.put(("ok", result))
+    except Exception as exc:  # noqa: BLE001 - marshal failure back to parent
+        queue.put(("err", exc))
+
+
+def _fork_timed_handle_payload_worker(event: str, raw: str, *, timeout: float) -> dict[str, Any] | None:
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise HookDegraded("hook stdin must be a JSON object")
+
+    ctx = mp.get_context("fork")
+    queue: mp.Queue = ctx.Queue()
+    proc = ctx.Process(
+        target=_fork_timed_handle_payload_target,
+        args=(event, payload, queue),
+        daemon=True,
+    )
+    try:
+        proc.start()
+        return _recv_timed_handle_payload_result(queue, proc, timeout=timeout)
+    finally:
+        if proc.is_alive():
+            _terminate_process(proc)
+        queue.close()
+        queue.join_thread()
+
+
+def _subprocess_timed_handle_payload(event: str, raw: str, *, timeout: float) -> dict[str, Any] | None:
+    env = os.environ.copy()
+    env[_HOOK_WORKER_EVENT_ENV] = event
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", _HOOK_WORKER_COMMAND],
+            input=raw,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HookDegraded("hook operation timed out") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit {completed.returncode}"
+        raise RuntimeError(detail)
+    stdout = completed.stdout.strip()
+    if not stdout or stdout == "null":
+        return None
+    parsed = json.loads(stdout)
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _run_timed_handle_payload(event: str, raw: str) -> dict[str, Any] | None:
+    timeout = _hook_timeout_seconds()
+    if sys.platform == "win32":
+        return _subprocess_timed_handle_payload(event, raw, timeout=timeout)
+    return _fork_timed_handle_payload_worker(event, raw, timeout=timeout)
+
+
 def _emit_result(event: str, result: dict[str, Any] | None, *, target: Path | None) -> None:
     payload = result if result is not None else envelope.empty_envelope(event)
     envelope.emit_stdout(payload)
@@ -2137,20 +2277,7 @@ def hook_run(*, event: str, package: str, stdin_text: str | None = None) -> int:
             raise HookDegraded("hook stdin must be a JSON object")
         payload = parsed
         log_target = _resolve_log_target(payload)
-
-        def _invoke() -> dict[str, Any] | None:
-            return handle_payload(event, payload)
-
-        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="claude-hook")
-        try:
-            future = pool.submit(_invoke)
-            try:
-                result = future.result(timeout=envelope.HOOK_TIMEOUT_SECONDS)
-            except FuturesTimeoutError as exc:
-                future.cancel()
-                raise HookDegraded("hook operation timed out") from exc
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+        result = _run_timed_handle_payload(event, raw)
     except HookDegraded as exc:
         if log_target is not None:
             envelope.append_log(log_target, f"{event}: degraded: {exc}")

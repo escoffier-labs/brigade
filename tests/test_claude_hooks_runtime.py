@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
+import time
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from brigade import cli, localio
+from brigade.claude_hooks import envelope
+from brigade.claude_hooks.package import PACKAGE_REF
 from brigade.claude_hooks import runtime
 from brigade.install import install_selection
 from brigade.selection import Selection
@@ -1405,6 +1409,49 @@ def test_hook_run_rejects_stale_package_without_output(capsys):
         == 0
     )
     assert capsys.readouterr().out == ""
+
+
+def test_hook_run_process_exits_within_timeout_when_operation_hangs(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    payload = _payload(
+        target,
+        "PreToolUse",
+        tool_name="Bash",
+        tool_input={"command": "pytest -q"},
+    )
+    env = os.environ.copy()
+    repo_root = Path(__file__).resolve().parents[1]
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(repo_root / "src"), env.get("PYTHONPATH"))))
+    env[runtime._HOOK_TEST_HANG_ENV] = "30"
+    env[runtime._HOOK_TIMEOUT_ENV] = "0.25"
+    started = time.monotonic()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "brigade",
+            "work",
+            "hook-run",
+            "--event",
+            "PreToolUse",
+            "--package",
+            PACKAGE_REF,
+        ],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        cwd=target,
+        env=env,
+        timeout=5,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+
+    assert completed.returncode == 0
+    assert elapsed < 2.0
+    assert json.loads(completed.stdout) == envelope.degraded_envelope("PreToolUse")
+    assert "timed out" in envelope.log_path(target).read_text(encoding="utf-8")
+    assert "resource_tracker" not in completed.stderr
 
 
 def test_posttool_failure_keeps_routed_failure_in_the_loop(tmp_path: Path):
