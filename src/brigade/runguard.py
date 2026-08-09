@@ -816,13 +816,18 @@ def _is_wait_queue_head(ticket: Path, queue_dir: Path) -> bool:
     return bool(tickets) and tickets[0] == ticket
 
 
-def _lock_held_by_live_process(path: Path) -> bool:
+def _wait_retry_after_acquire_error(path: Path) -> bool:
+    """Return True when a failed acquire should retry instead of aborting.
+
+    A structurally malformed non-directory lock still raises ``RunLockError``.
+    """
     try:
-        if _lock_path_is_directory(path) is None:
-            return False
+        lock_is_directory = _lock_path_is_directory(path)
     except RunLockError:
-        return False
-    return not _lock_is_stale(path)
+        raise
+    if lock_is_directory is None:
+        return True
+    return _lock_is_stale(path)
 
 
 def _wait_to_acquire_lock(
@@ -841,23 +846,26 @@ def _wait_to_acquire_lock(
     deadline = time.monotonic() + wait_seconds if not unbounded else 0.0
     try:
         while True:
+            timed_out_acquire_exc: RunLockError | None = None
             if _is_wait_queue_head(ticket, queue_dir):
                 try:
                     return _acquire_lock(path, run_dir=run_dir)
                 except RunLockError as exc:
-                    if not _lock_held_by_live_process(path):
-                        raise
-                    if not unbounded:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            raise RunLockError(
-                                f"timed out after {wait_seconds:g}s waiting for run lock: {path}"
-                            ) from exc
-            elif not unbounded:
+                    if _wait_retry_after_acquire_error(path):
+                        pass
+                    else:
+                        timed_out_acquire_exc = exc
+            if not unbounded:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    if timed_out_acquire_exc is not None:
+                        raise RunLockError(
+                            f"timed out after {wait_seconds:g}s waiting for run lock: {path}"
+                        ) from timed_out_acquire_exc
                     raise RunLockError(f"timed out after {wait_seconds:g}s waiting for run lock: {path}")
-            time.sleep(poll_interval)
+                time.sleep(min(poll_interval, remaining))
+            else:
+                time.sleep(poll_interval)
     finally:
         _leave_wait_ticket(ticket)
 

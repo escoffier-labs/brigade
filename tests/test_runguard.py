@@ -329,15 +329,31 @@ def test_run_lock_timeout_clock_is_isolated_from_process_clock(tmp_path, monkeyp
     assert lock_path.is_dir()
 
 
-def test_run_lock_fair_queue_long_holder_multiple_waiters_proceed_in_order(tmp_path):
+def test_run_lock_fair_queue_long_holder_multiple_waiters_proceed_in_order(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     order: list[str] = []
-    holder_done = threading.Event()
+    holder_release = threading.Event()
+    holder_acquired = threading.Event()
+    enrollment_signals = [threading.Event() for _ in range(3)]
+    enroll_index = 0
+    enroll_lock = threading.Lock()
+    original_enroll = runguard._enroll_wait_ticket
+
+    def counting_enroll(queue_dir):
+        nonlocal enroll_index
+        ticket = original_enroll(queue_dir)
+        with enroll_lock:
+            enrollment_signals[enroll_index].set()
+            enroll_index += 1
+        return ticket
+
+    monkeypatch.setattr(runguard, "_enroll_wait_ticket", counting_enroll)
 
     def holder() -> None:
         with runguard.run_lock(repo):
             order.append("holder-start")
-            assert holder_done.wait(timeout=5)
+            holder_acquired.set()
+            assert holder_release.wait(timeout=5)
             order.append("holder-end")
 
     def waiter(name: str) -> None:
@@ -346,17 +362,16 @@ def test_run_lock_fair_queue_long_holder_multiple_waiters_proceed_in_order(tmp_p
 
     holder_thread = threading.Thread(target=holder)
     holder_thread.start()
-    stdlib_time.sleep(0.1)
+    assert holder_acquired.wait(timeout=5)
 
-    waiter_threads = []
+    waiter_threads: list[threading.Thread] = []
     for index in range(3):
         thread = threading.Thread(target=waiter, args=(f"waiter-{index}",))
         thread.start()
+        assert enrollment_signals[index].wait(timeout=5)
         waiter_threads.append(thread)
-        stdlib_time.sleep(0.05)
 
-    stdlib_time.sleep(0.2)
-    holder_done.set()
+    holder_release.set()
 
     for thread in waiter_threads:
         thread.join(timeout=10)
@@ -365,6 +380,50 @@ def test_run_lock_fair_queue_long_holder_multiple_waiters_proceed_in_order(tmp_p
     assert not holder_thread.is_alive()
 
     assert order == ["holder-start", "holder-end", "waiter-0", "waiter-1", "waiter-2"]
+
+
+def test_wait_to_acquire_lock_retries_when_lock_clears_after_failed_acquire(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text(f"{os.getpid()}\n")
+    original_acquire = runguard._acquire_lock
+    acquire_calls = 0
+
+    def acquire_then_clear(path, *, run_dir=None):
+        nonlocal acquire_calls
+        acquire_calls += 1
+        if acquire_calls == 1:
+            shutil.rmtree(lock_path)
+            raise runguard.RunLockError("another brigade run appears active")
+        return original_acquire(path, run_dir=run_dir)
+
+    monkeypatch.setattr(runguard, "_acquire_lock", acquire_then_clear)
+
+    with runguard.run_lock(repo, wait_seconds=1.0, poll_interval=0.05):
+        assert acquire_calls == 2
+        assert (lock_path / "pid").read_text().strip() == str(os.getpid())
+
+    assert not lock_path.exists()
+
+
+def test_wait_to_acquire_lock_still_surfaces_malformed_lock_after_failed_acquire(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("malformed lock\n")
+
+    def fail_acquire(path, *, run_dir=None):
+        raise runguard.RunLockError("could not acquire run lock")
+
+    monkeypatch.setattr(runguard, "_acquire_lock", fail_acquire)
+
+    with pytest.raises(runguard.RunLockError, match="malformed run lock"):
+        with runguard.run_lock(repo, wait_seconds=1.0, poll_interval=0.05):
+            pass
+
+    assert lock_path.is_file()
+    assert lock_path.read_text() == "malformed lock\n"
 
 
 def test_run_lock_wait_reclaims_stale_holder(tmp_path):
