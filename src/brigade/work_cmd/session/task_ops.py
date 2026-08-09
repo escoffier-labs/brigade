@@ -527,7 +527,7 @@ def task_done(*, target: Path, task_id: str, force: bool = False, json_output: b
         delta = footprint_mod.receipt_graph_delta(receipt)
         footprint_mod.set_task_footprint(
             task,
-            footprint_mod.reconcile_footprint(delta, prior=footprint_mod.task_footprint(task)),
+            footprint_mod.reconcile_footprint(delta, prior=footprint_mod.task_footprint(task), target=target),
         )
         side_effects = edges_mod.close_side_effects(ledger, resolved_id)
         ledger_mod._write_task_ledger(target, ledger)

@@ -28,14 +28,40 @@ PHASE_PREDICTED = "predicted"
 PHASE_REFINED = "refined"
 PHASE_RECONCILED = "reconciled"
 FOOTPRINT_PHASES = (PHASE_PREDICTED, PHASE_REFINED, PHASE_RECONCILED)
+# Bound hostile / hand-edited footprint lists so a single task cannot balloon
+# the ledger. Spike-validated workloads stay well under this.
+MAX_FOOTPRINT_ENTRIES = 512
 
 _PATH_TOKEN = re.compile(r"(?P<path>(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)")
+
+
+def is_safe_footprint_path(value: str) -> bool:
+    """Return True when ``value`` is a repo-relative path without traversal."""
+    text = value.strip()
+    if not text:
+        return False
+    if text.startswith("/") or text.startswith("\\"):
+        return False
+    # Windows drive / UNC
+    if len(text) >= 2 and text[1] == ":":
+        return False
+    if text.startswith("\\\\") or text.startswith("//"):
+        return False
+    normalized = text.replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    parts = [part for part in normalized.split("/") if part not in ("", ".")]
+    if not parts:
+        return False
+    if any(part == ".." for part in parts):
+        return False
+    return True
 
 
 def normalize_footprint(raw: object, *, phase: str | None = None) -> dict[str, Any]:
     """Return a footprint object with the spike-validated core fields."""
     data = raw if isinstance(raw, dict) else {}
-    files = _unique_strings(data.get("files"))
+    files = [path for path in _unique_strings(data.get("files")) if is_safe_footprint_path(path)]
     symbol_ids = _unique_strings(data.get("symbol_ids") if "symbol_ids" in data else data.get("symbols"))
     snapshot_hash = data.get("snapshot_hash")
     if snapshot_hash is None:
@@ -100,7 +126,7 @@ def symbols_from_metadata(metadata: dict[str, Any] | None) -> list[str]:
 def files_from_metadata(metadata: dict[str, Any] | None) -> list[str]:
     if not isinstance(metadata, dict):
         return []
-    return _unique_strings(metadata.get("files"))
+    return [path for path in _unique_strings(metadata.get("files")) if is_safe_footprint_path(path)]
 
 
 def predict_footprint(
@@ -186,10 +212,11 @@ def reconcile_footprint(
     delta: dict[str, Any] | None,
     *,
     prior: dict[str, Any] | None = None,
+    target: Path | None = None,
 ) -> dict[str, Any]:
     """Reconciled footprint at completion by joining a verify graph delta."""
     prior_norm = normalize_footprint(prior) if prior is not None else None
-    payload = _delta_payload(delta)
+    payload = _delta_payload(delta, target=target)
     files = _files_from_delta(payload)
     symbols = _symbols_from_delta(payload)
     snapshot_hash = _snapshot_hash_from_delta(payload)
@@ -303,11 +330,13 @@ def _unique_strings(value: object) -> list[str]:
             continue
         seen.add(text)
         result.append(text)
+        if len(result) >= MAX_FOOTPRINT_ENTRIES:
+            break
     return result
 
 
 def _path_tokens(text: str) -> list[str]:
-    return [match.group("path") for match in _PATH_TOKEN.finditer(text)]
+    return [match.group("path") for match in _PATH_TOKEN.finditer(text) if is_safe_footprint_path(match.group("path"))]
 
 
 def _files_from_impact_payload(payload: dict[str, Any]) -> list[str]:
@@ -325,7 +354,7 @@ def _files_from_impact_payload(payload: dict[str, Any]) -> list[str]:
                 file_value = item.get(file_key)
                 if isinstance(file_value, str) and file_value.strip():
                     files.append(file_value.strip())
-    return _unique_strings(files)
+    return [path for path in _unique_strings(files) if is_safe_footprint_path(path)]
 
 
 def _symbols_from_impact_payload(payload: dict[str, Any]) -> list[str]:
@@ -347,13 +376,25 @@ def _symbols_from_impact_payload(payload: dict[str, Any]) -> list[str]:
     return _unique_strings(symbols)
 
 
-def _delta_payload(delta: dict[str, Any] | None) -> dict[str, Any]:
+def _delta_payload(delta: dict[str, Any] | None, *, target: Path | None = None) -> dict[str, Any]:
     if not isinstance(delta, dict):
         return {}
     # Prefer an on-disk sidecar when present so join sees the full payload.
+    # Sidecar reads are confined to ``target`` when provided so a hostile
+    # receipt cannot exfiltrate arbitrary host files into the footprint.
     sidecar = delta.get("sidecar_path")
     if isinstance(sidecar, str) and sidecar.strip():
-        path = Path(sidecar)
+        path = Path(sidecar.strip())
+        if target is not None:
+            try:
+                resolved = path.expanduser().resolve(strict=False)
+                root = target.expanduser().resolve(strict=False)
+            except OSError:
+                return delta
+            try:
+                resolved.relative_to(root)
+            except ValueError:
+                return delta
         if path.is_file():
             try:
                 loaded = json.loads(path.read_text())
@@ -388,7 +429,7 @@ def _files_from_delta(payload: dict[str, Any]) -> list[str]:
             path = node.get("file_path") or node.get("path")
             if isinstance(path, str) and path.strip():
                 files.append(path.strip())
-    return _unique_strings(files)
+    return [path for path in _unique_strings(files) if is_safe_footprint_path(path)]
 
 
 def _symbols_from_delta(payload: dict[str, Any]) -> list[str]:
