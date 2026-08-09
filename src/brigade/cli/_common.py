@@ -29,7 +29,18 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
     ),
     (
         "Daily operator loop",
-        ["operator", "daily", "work", "friction", "workflow", "center", "runbook", "budgets", "notifications"],
+        [
+            "operator",
+            "daily",
+            "care",
+            "work",
+            "friction",
+            "workflow",
+            "center",
+            "runbook",
+            "budgets",
+            "notifications",
+        ],
     ),
     (
         "Stations and tools",

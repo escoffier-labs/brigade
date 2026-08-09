@@ -280,3 +280,112 @@ def test_other_kind_block_is_left_alone():
     )
     assert "BEGIN BRIGADE SECURITY" in (removed.rendered or "")
     assert "BEGIN BRIGADE INTEGRATION" not in (removed.rendered or "")
+
+
+def test_hash_comment_markers_round_trip_with_full_sha256():
+    body = "PATH=/bin\n0 1 * * * true\n"
+    block = managed_block.render_block(body, kind="CARE", profile="crontab", style=managed_block.MARKER_STYLE_HASH)
+    digest = managed_block.body_hash(body)
+    assert block.startswith(f"# BEGIN BRIGADE CARE v:1 profile:crontab hash:{digest}\n")
+    assert "# END BRIGADE CARE\n" in block
+    assert "<!--" not in block
+    assessment = managed_block.assess_block(
+        block, desired=body, kind="CARE", profile="crontab", style=managed_block.MARKER_STYLE_HASH
+    )
+    assert assessment.status == managed_block.STATUS_CURRENT
+    assert assessment.recorded_hash == digest
+
+
+def test_html_default_style_unchanged_for_integration_blocks():
+    body = _desired()
+    block = managed_block.render_block(body)
+    assert block.startswith("<!-- BEGIN BRIGADE INTEGRATION")
+    assessment = managed_block.assess_block(block, desired=body)
+    assert assessment.status == managed_block.STATUS_CURRENT
+
+
+def test_remove_block_skips_symlink_swap(tmp_path):
+    body = _desired()
+    path = tmp_path / "AGENTS.md"
+    path.write_text(f"# keep\n{managed_block.render_block(body)}", encoding="utf-8")
+    target = tmp_path / "elsewhere.md"
+    target.write_text("secret\n", encoding="utf-8")
+    calls = {"n": 0}
+
+    def probe(candidate: Path) -> int | None:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return os.lstat(candidate).st_mode
+        if candidate == path and path.exists() and not path.is_symlink():
+            path.unlink()
+            path.symlink_to(target)
+        return os.lstat(candidate).st_mode
+
+    with pytest.warns(UserWarning, match="symlink"):
+        plan, outcome = managed_block.remove_block(path, owned_digest=managed_block.body_hash(body), lstat_probe=probe)
+    assert outcome.status == managed_block.WRITE_SKIPPED_SYMLINK
+    assert target.read_text(encoding="utf-8") == "secret\n"
+
+
+def test_mixed_html_and_hash_markers_are_malformed():
+    body = _desired()
+    html = managed_block.render_block(body, kind="CARE", profile="full", style=managed_block.MARKER_STYLE_HTML)
+    hybrid = html + managed_block.render_block(
+        "other\n", kind="CARE", profile="crontab", style=managed_block.MARKER_STYLE_HASH
+    )
+    assessment = managed_block.assess_block(hybrid, desired=body, kind="CARE", profile="full")
+    assert assessment.status == managed_block.STATUS_MALFORMED
+
+
+def test_explicit_hash_style_rejects_html_stamped_markers():
+    body = _desired()
+    html = managed_block.render_block(body, kind="CARE", profile="full", style=managed_block.MARKER_STYLE_HTML)
+    parsed = managed_block.parse_blocks(html, kind="CARE", style=managed_block.MARKER_STYLE_HASH)
+    assert parsed.status == managed_block.STATUS_MALFORMED
+    assert parsed.detail == "stamped managed markers do not match requested marker style"
+    assessment = managed_block.assess_block(
+        html, desired=body, kind="CARE", profile="full", style=managed_block.MARKER_STYLE_HASH
+    )
+    assert assessment.status == managed_block.STATUS_MALFORMED
+    plan = managed_block.plan_install(
+        html, desired=body, kind="CARE", profile="full", style=managed_block.MARKER_STYLE_HASH
+    )
+    assert plan.status == managed_block.STATUS_MALFORMED
+    assert plan.action == managed_block.ACTION_PRESERVE
+
+
+def test_explicit_html_style_rejects_hash_stamped_markers():
+    body = _desired()
+    hashed = managed_block.render_block(body, kind="CARE", profile="crontab", style=managed_block.MARKER_STYLE_HASH)
+    parsed = managed_block.parse_blocks(hashed, kind="CARE", style=managed_block.MARKER_STYLE_HTML)
+    assert parsed.status == managed_block.STATUS_MALFORMED
+    assert parsed.detail == "stamped managed markers do not match requested marker style"
+    assessment = managed_block.assess_block(
+        hashed, desired=body, kind="CARE", profile="crontab", style=managed_block.MARKER_STYLE_HTML
+    )
+    assert assessment.status == managed_block.STATUS_MALFORMED
+    plan = managed_block.plan_install(
+        hashed, desired=body, kind="CARE", profile="crontab", style=managed_block.MARKER_STYLE_HTML
+    )
+    assert plan.status == managed_block.STATUS_MALFORMED
+    assert plan.action == managed_block.ACTION_PRESERVE
+
+
+def test_explicit_style_rejects_mixed_stamped_markers():
+    body = _desired()
+    html = managed_block.render_block(body, kind="CARE", profile="full", style=managed_block.MARKER_STYLE_HTML)
+    hybrid = html + managed_block.render_block(
+        "other\n", kind="CARE", profile="crontab", style=managed_block.MARKER_STYLE_HASH
+    )
+    parsed = managed_block.parse_blocks(hybrid, kind="CARE", style=managed_block.MARKER_STYLE_HASH)
+    assert parsed.status == managed_block.STATUS_MALFORMED
+    assert parsed.detail == "stamped html and hash-comment managed markers both present"
+    assessment = managed_block.assess_block(
+        hybrid, desired=body, kind="CARE", profile="full", style=managed_block.MARKER_STYLE_HASH
+    )
+    assert assessment.status == managed_block.STATUS_MALFORMED
+    plan = managed_block.plan_install(
+        hybrid, desired=body, kind="CARE", profile="full", style=managed_block.MARKER_STYLE_HASH
+    )
+    assert plan.status == managed_block.STATUS_MALFORMED
+    assert plan.action == managed_block.ACTION_PRESERVE

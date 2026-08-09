@@ -1,6 +1,13 @@
 # Scheduled Memory Care
 
-The schedule belongs to the operator. Brigade only runs when invoked. Brigade does not install cron jobs, systemd timers, GitHub Actions workflows, or any other scheduler. Copy one of the recipes below into your own crontab, user timer, or CI job after `brigade init` wires the target.
+The schedule belongs to the operator. Brigade only runs when invoked. Copy one
+of the recipes below into your own crontab, user timer, or CI job after
+`brigade init` wires the target, or let `brigade care install --target .`
+scaffold the same recipes as a hash-stamped managed block in your crontab
+(systemd user units with `--backend systemd`). `care status` audits the block
+and latest runbook receipts; `care uninstall` removes only that block. On
+Windows, `care install` prints Task Scheduler equivalents and does not write
+tasks. Brigade still does not own a daemon or background supervisor.
 
 Prerequisites:
 
@@ -15,7 +22,29 @@ brigade extras on   # once per machine; required for center report and runbook c
 
 Replace `WORKSPACE` with the absolute path to your Brigade-wired repo or operator workspace. Every `brigade` command below assumes `cd` into that directory first, so `--target .` resolves correctly. In crontab lines, quote the path (`cd "WORKSPACE"`) so spaces and shell metacharacters do not break the job.
 
-Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry.md), [operator center](operator-center.md), [agents guide](agents-guide.md).
+### brigade care (opt-in scaffold)
+
+```bash
+brigade memory care init --with-runbooks --target .
+brigade extras on   # runbook + center report are extras-gated
+brigade care install --target .
+brigade care status --target .
+# brigade care uninstall --target .
+```
+
+`care install` scaffolds the recipes on this page. Daily care, ingest sweep, and
+weekly outcome ratchet invoke the shipped memory-care runbooks under
+`.brigade/memory-care/runbooks/` so each fire writes a runbook receipt. Weekly
+outcome uses the combined runbook at Monday 07:00 (rank then reconcile in one
+approved run) instead of the 30-minute gap in the hand-written crontab below.
+Daily observability uses the shipped runbook at
+`.brigade/memory-care/runbooks/daily-observability.json` so each fire writes a
+receipt; nightly ops calls
+`.brigade/runbooks/nightly-maintenance.json` (operator-authored). Entries live
+inside a `# BEGIN BRIGADE CARE ... hash:...` managed block so status can detect
+drift and uninstall can remove only Brigade's span.
+
+Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry.md), [operator center](operator-center.md), [agents guide](agents-guide.md), [execution model](execution-model.md).
 
 ## Scheduler wiring
 
@@ -442,6 +471,14 @@ The GitHub Actions recipe runs reconcile immediately after rank in the same work
 
 Check handoff pipeline health, read the daily driver snapshot, and build the local operator report bundle. `center report build` is extras-gated. Run `brigade extras on` once per machine or prefix with `BRIGADE_EXTRAS=1`.
 
+`brigade care install` materializes `.brigade/memory-care/runbooks/daily-observability.json` and schedules it as a runbook so each fire writes a normal runbook receipt.
+
+```bash
+brigade runbook run --approved .brigade/memory-care/runbooks/daily-observability.json --target .
+```
+
+The runbook steps are:
+
 ```bash
 brigade handoff doctor --target .
 brigade daily status --target .
@@ -452,7 +489,7 @@ brigade center report build --target .
 
 ```cron
 PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
-0 8 * * * cd "WORKSPACE" && brigade handoff doctor --target . && brigade daily status --target . && brigade center report build --target .
+0 8 * * * cd "WORKSPACE" && brigade runbook run --approved ".brigade/memory-care/runbooks/daily-observability.json" --target .
 ```
 
 ### systemd user timer
@@ -467,7 +504,7 @@ Description=Brigade daily observability pass
 Type=oneshot
 WorkingDirectory=WORKSPACE
 Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/bin/sh -c 'brigade handoff doctor --target . && brigade daily status --target . && brigade center report build --target .'
+ExecStart=brigade runbook run --approved .brigade/memory-care/runbooks/daily-observability.json --target .
 ```
 
 `~/.config/systemd/user/brigade-daily-observability.timer`:
