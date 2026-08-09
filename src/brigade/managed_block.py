@@ -151,6 +151,37 @@ def normalize_newlines(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _normalized_offset_starts(text: str) -> list[int]:
+    """Map each normalized-text index to its start offset in ``text``."""
+    starts: list[int] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        starts.append(index)
+        if text.startswith("\r\n", index):
+            index += 2
+        elif text[index] == "\r":
+            index += 1
+        else:
+            index += 1
+    starts.append(length)
+    return starts
+
+
+def _slice_by_normalized_range(text: str, offsets: list[int], start: int, end: int) -> str:
+    return text[offsets[start] : offsets[end]]
+
+
+def _file_newline(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _with_file_newlines(block: str, newline: str) -> str:
+    if newline == "\n":
+        return block
+    return block.replace("\n", "\r\n")
+
+
 def begin_marker(*, kind: str, profile: str, digest: str, version: int = MARKER_FORMAT_VERSION) -> str:
     if version != MARKER_FORMAT_VERSION:
         raise ValueError(f"unsupported managed-block marker version: {version}")
@@ -223,11 +254,12 @@ def _extract_framed_body(text: str, start_pos: int, start_len: int, end_pos: int
 
 def parse_blocks(text: str, *, kind: str = DEFAULT_KIND) -> ParsedBlock:
     """Parse the managed span for ``kind`` into a structured block state."""
-    text = normalize_newlines(text)
-    begins, ends, loose_details = _marker_hits(text, kind=kind)
+    offsets = _normalized_offset_starts(text)
+    normalized = normalize_newlines(text)
+    begins, ends, loose_details = _marker_hits(normalized, kind=kind)
     legacy = _legacy_pair_for_kind(kind)
-    legacy_starts = text.count(legacy[0]) if legacy else 0
-    legacy_ends = text.count(legacy[1]) if legacy else 0
+    legacy_starts = normalized.count(legacy[0]) if legacy else 0
+    legacy_ends = normalized.count(legacy[1]) if legacy else 0
 
     if loose_details and not begins and not ends and legacy_starts == 0 and legacy_ends == 0:
         return ParsedBlock(STATUS_MALFORMED, kind, detail=loose_details[0])
@@ -258,7 +290,7 @@ def parse_blocks(text: str, *, kind: str = DEFAULT_KIND) -> ParsedBlock:
         if end.start() <= begin.start():
             return ParsedBlock(STATUS_MALFORMED, kind, detail="orphan managed marker")
         # Nested / overlapping: another begin or end inside the span.
-        inner = text[begin.end() : end.start()]
+        inner = normalized[begin.end() : end.start()]
         if _BEGIN_LOOSE_RE.search(inner) or _END_LOOSE_RE.search(inner):
             return ParsedBlock(STATUS_MALFORMED, kind, detail="nested managed markers")
         if legacy and (legacy[0] in inner or legacy[1] in inner):
@@ -270,13 +302,21 @@ def parse_blocks(text: str, *, kind: str = DEFAULT_KIND) -> ParsedBlock:
             return ParsedBlock(STATUS_MALFORMED, kind, detail=f"unsupported marker version: {version}")
         if not re.fullmatch(r"[0-9a-f]{64}", recorded):
             return ParsedBlock(STATUS_MALFORMED, kind, detail="begin marker hash must be a full sha256 digest")
-        framed = _extract_framed_body(text, begin.start(), len(begin.group(0)), end.start())
+        framed = _extract_framed_body(normalized, begin.start(), len(begin.group(0)), end.start())
         if framed is None:
             return ParsedBlock(STATUS_MALFORMED, kind, detail="managed instruction markers are malformed")
         before, body, after_with_end = framed
         after = after_with_end[len(end.group(0)) :]
         if after.startswith("\n"):
             after = after[1:]
+        before = _slice_by_normalized_range(text, offsets, 0, begin.start())
+        body_start = begin.start() + len(begin.group(0)) + 1
+        body_end = end.start() - 1
+        body = normalize_newlines(_slice_by_normalized_range(text, offsets, body_start, body_end))
+        after_start = end.start() + len(end.group(0))
+        if after_start < len(normalized) and normalized[after_start] == "\n":
+            after_start += 1
+        after = _slice_by_normalized_range(text, offsets, after_start, len(normalized))
         meta = BlockMeta(kind=kind, version=version, profile=profile, recorded_hash=recorded, legacy=False)
         return ParsedBlock(
             "ok",
@@ -294,19 +334,27 @@ def parse_blocks(text: str, *, kind: str = DEFAULT_KIND) -> ParsedBlock:
     if legacy_starts != 1 or legacy_ends != 1:
         detail = "duplicate managed blocks" if legacy_starts > 1 or legacy_ends > 1 else "orphan managed marker"
         return ParsedBlock(STATUS_MALFORMED, kind, detail=detail)
-    start_pos, end_pos = text.find(legacy_start), text.find(legacy_end)
+    start_pos, end_pos = normalized.find(legacy_start), normalized.find(legacy_end)
     if end_pos <= start_pos:
         return ParsedBlock(STATUS_MALFORMED, kind, detail="orphan managed marker")
-    inner = text[start_pos + len(legacy_start) : end_pos]
+    inner = normalized[start_pos + len(legacy_start) : end_pos]
     if legacy_start in inner or legacy_end in inner or _BEGIN_LOOSE_RE.search(inner) or _END_LOOSE_RE.search(inner):
         return ParsedBlock(STATUS_MALFORMED, kind, detail="nested managed markers")
-    framed = _extract_framed_body(text, start_pos, len(legacy_start), end_pos)
+    framed = _extract_framed_body(normalized, start_pos, len(legacy_start), end_pos)
     if framed is None:
         return ParsedBlock(STATUS_MALFORMED, kind, detail="managed instruction markers are malformed")
     before, body, after_with_end = framed
     after = after_with_end[len(legacy_end) :]
     if after.startswith("\n"):
         after = after[1:]
+    before = _slice_by_normalized_range(text, offsets, 0, start_pos)
+    body_start = start_pos + len(legacy_start) + 1
+    body_end = end_pos - 1
+    body = normalize_newlines(_slice_by_normalized_range(text, offsets, body_start, body_end))
+    after_start = end_pos + len(legacy_end)
+    if after_start < len(normalized) and normalized[after_start] == "\n":
+        after_start += 1
+    after = _slice_by_normalized_range(text, offsets, after_start, len(normalized))
     meta = BlockMeta(kind=kind, version=None, profile=None, recorded_hash=None, legacy=True)
     return ParsedBlock(
         "ok",
@@ -497,12 +545,13 @@ def plan_install(
     parsed = assessment.parsed
 
     if assessment.status == STATUS_MISSING:
-        prefix = text if (not text or text.endswith("\n")) else text + "\n"
+        newline = _file_newline(text)
+        prefix = text if (not text or text.endswith(newline)) else text + newline
         return BlockPlan(
             STATUS_MISSING,
             ACTION_CREATE,
             kind,
-            rendered=prefix + block,
+            rendered=prefix + _with_file_newlines(block, newline),
             desired_hash=desired_digest,
             fix_command=fix,
             detail=assessment.detail,
@@ -520,7 +569,8 @@ def plan_install(
 
     if assessment.status == STATUS_STALE:
         assert parsed.status == "ok"
-        rendered = parsed.before + block + parsed.after
+        newline = _file_newline(text)
+        rendered = parsed.before + _with_file_newlines(block, newline) + parsed.after
         return BlockPlan(
             STATUS_STALE,
             ACTION_UPDATE,
@@ -534,11 +584,12 @@ def plan_install(
     if assessment.status in {STATUS_LOCALLY_MODIFIED, STATUS_MALFORMED}:
         can_force = force or (adopt and assessment.status == STATUS_LOCALLY_MODIFIED and parsed.status == "ok")
         if can_force and parsed.status == "ok":
+            newline = _file_newline(text)
             return BlockPlan(
                 assessment.status,
                 ACTION_UPDATE,
                 kind,
-                rendered=parsed.before + block + parsed.after,
+                rendered=parsed.before + _with_file_newlines(block, newline) + parsed.after,
                 desired_hash=desired_digest,
                 fix_command=fix,
                 detail=assessment.detail,
@@ -758,7 +809,7 @@ def install_block(
         text = None
     else:
         try:
-            text = normalize_newlines(read_text_nofollow(path))
+            text = read_text_nofollow(path)
         except (OSError, UnicodeDecodeError) as exc:
             plan = BlockPlan(
                 STATUS_MALFORMED,
@@ -828,7 +879,7 @@ def remove_block(
         return plan, WriteOutcome(WRITE_NOOP)
 
     try:
-        text = normalize_newlines(read_text_nofollow(path))
+        text = read_text_nofollow(path)
     except (OSError, UnicodeDecodeError) as exc:
         plan = BlockPlan(STATUS_MALFORMED, ACTION_PRESERVE, kind, detail=str(exc), fix_command=fix_command)
         return plan, WriteOutcome(WRITE_ERROR, detail=str(exc))

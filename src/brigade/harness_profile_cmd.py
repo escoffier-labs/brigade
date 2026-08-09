@@ -15,7 +15,7 @@ from . import harness_profiles, localio, managed_block, mcp_adapters, mcp_cmd, s
 from .toml_compat import TOMLDecodeError as _TOMLDecodeError
 from .toml_compat import loads as _toml_loads
 
-_RECOVERY_COMMAND = "brigade harness sync --target <harness> --scope user --adopt --write"
+_RECOVERY_COMMAND = "brigade harness sync --target <harness> --scope user --help"
 _SECTIONS = ("instructions", "skills", "generated", "mcp")
 _HOOK_STATE_KEY = "hooks.json#sessionStart"
 _LEGACY_MIGRATED = "legacy_migrated"
@@ -181,7 +181,12 @@ def _split_components(text: str) -> tuple[str, str, str] | None:
     return parsed.before, parsed.body, parsed.after
 
 
-def _instruction_fix_command(harness: str | None = None) -> str:
+def _instruction_help_command(harness: str | None = None) -> str:
+    target = harness or "<harness>"
+    return _RECOVERY_COMMAND.replace("<harness>", target)
+
+
+def _instruction_write_fix_command(harness: str | None = None) -> str:
     target = harness or "<harness>"
     return managed_block.default_fix_command(harness=target)
 
@@ -191,22 +196,24 @@ def _plan_from_block_plan(path: Path, plan: managed_block.BlockPlan, *, harness:
     status = plan.status
     action = plan.action
     detail = plan.detail
-    if plan.fix_command and status in {
+    if status in {
         managed_block.STATUS_MISSING,
         managed_block.STATUS_STALE,
         managed_block.STATUS_LOCALLY_MODIFIED,
         managed_block.STATUS_MALFORMED,
     }:
-        fix = plan.fix_command
-        if harness and "<harness>" in fix:
-            fix = _instruction_fix_command(harness)
-        detail = f"{detail}; fix with: {fix}" if detail else f"fix with: {fix}"
+        if status in {managed_block.STATUS_LOCALLY_MODIFIED, managed_block.STATUS_MALFORMED}:
+            help_cmd = _instruction_help_command(harness)
+            detail = f"{detail}; see: {help_cmd}" if detail else f"see: {help_cmd}"
+        else:
+            write_cmd = _instruction_write_fix_command(harness)
+            detail = f"{detail}; fix with: {write_cmd}" if detail else f"fix with: {write_cmd}"
     # Preserve legacy conflict wording for fail-closed local edits so existing
     # recovery messaging and tests keep a stable surface.
     if status == managed_block.STATUS_LOCALLY_MODIFIED and action == managed_block.ACTION_PRESERVE:
         status = "conflict"
-        if not detail or "fix with:" not in (detail or ""):
-            detail = detail or f"foreign managed instruction block; recover with: {_RECOVERY_COMMAND}"
+        if not detail or "see:" not in (detail or ""):
+            detail = detail or f"foreign managed instruction block; see: {_instruction_help_command(harness)}"
     elif status == managed_block.STATUS_MALFORMED and action == managed_block.ACTION_PRESERVE:
         status = "conflict"
         detail = detail or "managed instruction markers are malformed"
@@ -237,7 +244,7 @@ def plan_instruction(
     instruction_state = state.get("instructions", {}) if isinstance(state.get("instructions"), dict) else {}
     owned = instruction_state.get("digest")
     owned_digest = owned if isinstance(owned, str) else None
-    fix = _instruction_fix_command(harness)
+    fix = _instruction_write_fix_command(harness)
     desired_digest = managed_block.body_hash(desired)
     if not path.exists():
         block_plan = managed_block.plan_install(
@@ -251,7 +258,7 @@ def plan_instruction(
         )
         return _plan_from_block_plan(path, block_plan, harness=harness)
     try:
-        text = managed_block.normalize_newlines(path.read_text(encoding="utf-8"))
+        text = managed_block.read_text_nofollow(path)
     except (OSError, UnicodeDecodeError) as exc:
         return SurfacePlan("instruction", path, "conflict", "preserve", detail=str(exc))
 
@@ -273,7 +280,7 @@ def plan_instruction(
                 "conflict",
                 "preserve",
                 desired_digest,
-                detail=f"matching managed instruction block is unowned; recover with: {_RECOVERY_COMMAND}",
+                detail=f"matching managed instruction block is unowned; see: {_instruction_help_command(harness)}",
             )
         if (
             assessment.actual_hash == desired_digest
@@ -322,7 +329,7 @@ def plan_instruction_removal(
     if not path.exists():
         return SurfacePlan("instruction", path, "absent", "none")
     try:
-        text = managed_block.normalize_newlines(path.read_text(encoding="utf-8"))
+        text = managed_block.read_text_nofollow(path)
     except (OSError, UnicodeDecodeError) as exc:
         return SurfacePlan("instruction", path, "conflict", "preserve", detail=str(exc))
     instruction_state = state.get("instructions", {}) if isinstance(state.get("instructions"), dict) else {}
@@ -332,7 +339,7 @@ def plan_instruction_removal(
         text,
         owned_digest=owned_digest,
         force=force,
-        fix_command=_instruction_fix_command(harness),
+        fix_command=_instruction_write_fix_command(harness),
     )
     if block_plan.action == managed_block.ACTION_NONE and block_plan.status == managed_block.STATUS_MISSING:
         return SurfacePlan("instruction", path, "absent", "none")
@@ -375,7 +382,7 @@ def plan_managed_instruction(*, path: Path, desired: str, state: dict[str, Any],
             "conflict",
             "preserve",
             desired_digest,
-            detail=f"matching managed instruction file is unowned; recover with: {_RECOVERY_COMMAND}",
+            detail=f"matching managed instruction file is unowned; see: {_instruction_help_command()}",
         )
     if owned == live_digest or adopt:
         return SurfacePlan("instruction", path, "stale", "update", desired_digest, desired)
@@ -384,7 +391,7 @@ def plan_managed_instruction(*, path: Path, desired: str, state: dict[str, Any],
         path,
         "conflict",
         "preserve",
-        detail=f"foreign managed instruction file; recover with: {_RECOVERY_COMMAND}",
+        detail=f"foreign managed instruction file; see: {_instruction_help_command()}",
     )
 
 
@@ -1780,9 +1787,9 @@ def _doctor_profile(profile, workspace: Path, *, verify_mcp: bool) -> tuple[dict
     if instruction.detail:
         item["detail"] = instruction.detail
     elif instruction.status == managed_block.STATUS_STALE:
-        item["detail"] = f"fix with: {_instruction_fix_command(profile.harness)}"
+        item["detail"] = f"fix with: {_instruction_write_fix_command(profile.harness)}"
     elif instruction.status == managed_block.STATUS_MISSING:
-        item["detail"] = f"fix with: {_instruction_fix_command(profile.harness)}"
+        item["detail"] = f"fix with: {_instruction_write_fix_command(profile.harness)}"
     # Doctor --check semantics: anything not current is actionable. Preserve
     # distinct stale / missing / conflict statuses on the item itself.
     conflicts = [item] if instruction.status != "current" else []

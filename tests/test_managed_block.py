@@ -166,6 +166,52 @@ def test_crlf_input_normalizes_for_hash_and_parse():
     assert assessment.status == managed_block.STATUS_CURRENT
 
 
+def test_crlf_neighbors_preserved_on_stale_update():
+    body = _desired()
+    old = "old body\n"
+    crlf_prefix = "# above\r\nkeep\r\n"
+    crlf_suffix = "# below\r\nalso keep\r\n"
+    crlf_block = managed_block.render_block(old).replace("\n", "\r\n")
+    text = crlf_prefix + crlf_block + crlf_suffix
+
+    plan = managed_block.plan_install(text, desired=body, owned_digest=managed_block.body_hash(old))
+    assert plan.status == managed_block.STATUS_STALE
+    assert plan.action == managed_block.ACTION_UPDATE
+    assert plan.rendered is not None
+    assert plan.rendered.startswith(crlf_prefix)
+    assert plan.rendered.endswith(crlf_suffix)
+    assert "\r\n" in plan.rendered
+    assert "\n" not in plan.rendered.replace("\r\n", "")
+
+
+def test_crlf_neighbors_preserved_on_managed_span_removal():
+    body = _desired()
+    crlf_prefix = "# above\r\nkeep\r\n"
+    crlf_suffix = "# below\r\nalso keep\r\n"
+    crlf_block = managed_block.render_block(body).replace("\n", "\r\n")
+    text = crlf_prefix + crlf_block + crlf_suffix
+
+    plan = managed_block.plan_remove(text, owned_digest=managed_block.body_hash(body))
+    assert plan.action == managed_block.ACTION_REMOVE
+    assert plan.rendered == crlf_prefix + crlf_suffix
+
+
+def test_remove_block_preserves_crlf_neighbors_on_disk(tmp_path):
+    body = _desired()
+    crlf_prefix = "# above\r\nkeep\r\n"
+    crlf_suffix = "# below\r\nalso keep\r\n"
+    crlf_block = managed_block.render_block(body).replace("\n", "\r\n")
+    expected_neighbors = (crlf_prefix + crlf_suffix).encode("utf-8")
+    path = tmp_path / "AGENTS.md"
+    path.write_bytes((crlf_prefix + crlf_block + crlf_suffix).encode("utf-8"))
+
+    plan, outcome = managed_block.remove_block(path, owned_digest=managed_block.body_hash(body))
+    assert plan.action == managed_block.ACTION_REMOVE
+    assert outcome.status == managed_block.WRITE_WRITTEN
+    assert path.read_bytes() == expected_neighbors
+    assert b"\r\n" in path.read_bytes()
+
+
 def test_legacy_markers_upgrade_in_place():
     body = _desired()
     legacy = (
