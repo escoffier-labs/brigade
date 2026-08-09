@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
@@ -448,6 +449,76 @@ def test_run_lock_prunes_stale_wait_tickets_before_queue_head(tmp_path):
 
     assert runguard._is_wait_queue_head(live_ticket, queue_dir)
     assert not dead_ticket.exists()
+    assert queue_dir.is_dir()
+
+
+def test_run_lock_removes_empty_wait_queue_dir_when_last_ticket_leaves(tmp_path):
+    repo = _repo(tmp_path)
+    queue_dir = runguard._wait_queue_dir(runguard.lock_path(repo))
+    ticket = runguard._enroll_wait_ticket(queue_dir)
+    assert queue_dir.is_dir()
+
+    runguard._leave_wait_ticket(ticket, queue_dir)
+    assert not queue_dir.exists()
+
+
+def test_run_lock_prune_removes_empty_wait_queue_dir(tmp_path):
+    repo = _repo(tmp_path)
+    queue_dir = runguard._wait_queue_dir(runguard.lock_path(repo))
+    queue_dir.mkdir(parents=True)
+    dead_ticket = queue_dir / "00000000000000000001-00000001-dead.wait"
+    dead_ticket.write_text(json.dumps({"pid": 99999999}))
+
+    runguard._prune_stale_wait_tickets(queue_dir)
+    assert not dead_ticket.exists()
+    assert not queue_dir.exists()
+
+
+def test_wait_ticket_transient_read_error_is_not_pruned(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    queue_dir = runguard._wait_queue_dir(runguard.lock_path(repo))
+    ticket = runguard._enroll_wait_ticket(queue_dir)
+    original_read_text = Path.read_text
+    calls = 0
+
+    def flaky_read_text(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if self == ticket and calls == 1:
+            raise OSError(errno.EIO, "simulated transient read")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    runguard._prune_stale_wait_tickets(queue_dir)
+    assert ticket.exists()
+    assert runguard._wait_ticket_is_live(ticket)
+
+
+def test_wait_to_acquire_lock_retries_immediately_without_poll_sleep(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text(f"{os.getpid()}\n")
+    original_acquire = runguard._acquire_lock
+    acquire_calls = 0
+    sleeps = []
+    monkeypatch.setattr(runguard.time, "sleep", sleeps.append)
+
+    def acquire_then_clear(path, *, run_dir=None):
+        nonlocal acquire_calls
+        acquire_calls += 1
+        if acquire_calls == 1:
+            shutil.rmtree(lock_path)
+            raise runguard.RunLockError("another brigade run appears active")
+        return original_acquire(path, run_dir=run_dir)
+
+    monkeypatch.setattr(runguard, "_acquire_lock", acquire_then_clear)
+
+    with runguard.run_lock(repo, wait_seconds=1.0, poll_interval=0.05):
+        assert acquire_calls == 2
+
+    assert sleeps == []
 
 
 def test_run_lock_replaces_lock_with_dead_pid(tmp_path):

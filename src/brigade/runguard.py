@@ -768,10 +768,24 @@ def _list_wait_tickets(queue_dir: Path) -> list[Path]:
 def _wait_ticket_is_live(ticket: Path) -> bool:
     try:
         payload = json.loads(ticket.read_text())
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+    except OSError:
+        # A transient unreadable ticket is not proof the waiter died; skip pruning.
+        return True
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return False
     pid = payload.get("pid") if isinstance(payload, dict) else None
     return isinstance(pid, int) and _pid_is_active(pid)
+
+
+def _remove_empty_wait_queue_dir(queue_dir: Path) -> None:
+    try:
+        if not queue_dir.is_dir():
+            return
+        if any(queue_dir.glob("*.wait")):
+            return
+        queue_dir.rmdir()
+    except OSError:
+        pass
 
 
 def _prune_stale_wait_tickets(queue_dir: Path) -> None:
@@ -782,32 +796,45 @@ def _prune_stale_wait_tickets(queue_dir: Path) -> None:
             ticket.unlink()
         except OSError:
             pass
+    _remove_empty_wait_queue_dir(queue_dir)
 
 
 def _enroll_wait_ticket(queue_dir: Path) -> Path:
-    queue_dir.mkdir(parents=True, exist_ok=True)
+    # Cross-process FIFO ordering sorts ticket filenames by the monotonic_ns prefix.
+    # This assumes a system-wide monotonic clock (e.g. Linux CLOCK_MONOTONIC), not
+    # per-process views that can diverge across hosts or after suspend.
     token = uuid4().hex
-    ticket = queue_dir / f"{time.monotonic_ns():020d}-{os.getpid():08d}-{token}.wait"
     payload = {
         "schema": "brigade.run_lock_wait.v1",
         "pid": os.getpid(),
         "enrolled_at": datetime.now(timezone.utc).isoformat(),
     }
-    fd = os.open(ticket, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        os.write(fd, json.dumps(payload).encode())
-    finally:
-        os.close(fd)
-    return ticket
+    encoded = json.dumps(payload).encode()
+    for _ in range(4):
+        queue_dir.mkdir(parents=True, exist_ok=True)
+        ticket = queue_dir / f"{time.monotonic_ns():020d}-{os.getpid():08d}-{token}.wait"
+        try:
+            fd = os.open(ticket, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileNotFoundError:
+            # Another waiter removed the empty queue dir between mkdir and create.
+            continue
+        try:
+            os.write(fd, encoded)
+        finally:
+            os.close(fd)
+        return ticket
+    raise RunLockError(f"could not enroll for run lock wait queue: {queue_dir}")
 
 
-def _leave_wait_ticket(ticket: Path) -> None:
+def _leave_wait_ticket(ticket: Path, queue_dir: Path | None = None) -> None:
     try:
         ticket.unlink()
     except FileNotFoundError:
         return
     except OSError:
         return
+    if queue_dir is not None:
+        _remove_empty_wait_queue_dir(queue_dir)
 
 
 def _is_wait_queue_head(ticket: Path, queue_dir: Path) -> bool:
@@ -847,14 +874,17 @@ def _wait_to_acquire_lock(
     try:
         while True:
             timed_out_acquire_exc: RunLockError | None = None
+            immediately_retryable = False
             if _is_wait_queue_head(ticket, queue_dir):
                 try:
                     return _acquire_lock(path, run_dir=run_dir)
                 except RunLockError as exc:
                     if _wait_retry_after_acquire_error(path):
-                        pass
+                        immediately_retryable = True
                     else:
                         timed_out_acquire_exc = exc
+            if immediately_retryable:
+                continue
             if not unbounded:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -867,7 +897,7 @@ def _wait_to_acquire_lock(
             else:
                 time.sleep(poll_interval)
     finally:
-        _leave_wait_ticket(ticket)
+        _leave_wait_ticket(ticket, queue_dir)
 
 
 def _acquire_lock(path: Path, *, run_dir: Path | None = None) -> _LockOwnership:
