@@ -198,6 +198,117 @@ def test_collect_changed_files_from_git(tmp_path):
     assert verify_ranking.collect_changed_files(tmp_path, files=["src/a.py", "src/a.py"]) == ["src/a.py"]
 
 
+def test_rank_verification_candidates_deduplicates_duplicate_paths(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src").mkdir()
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"fake-graphtrail-index")
+
+    monkeypatch.setattr(verify_ranking.component_bins, "resolve", lambda _name: "/fake/graphtrail")
+
+    def fake_affected(target, binary, db_path, files, depth):
+        return {
+            "changed_files": ["src/pkg/mod.py"],
+            "missing_files": [],
+            "affected_tests": [
+                {
+                    "file_path": "tests/test_mod.py",
+                    "min_hops": 3,
+                    "via": ["far_helper"],
+                },
+                {
+                    "file_path": "tests/test_mod.py",
+                    "min_hops": 1,
+                    "via": ["near_helper"],
+                },
+                {
+                    "path": "tests/test_mod.py",
+                    "min_hops": 2,
+                    "via": ["mid_helper"],
+                },
+                {
+                    "file_path": "tests/test_other.py",
+                    "min_hops": 1,
+                    "via": ["other"],
+                },
+            ],
+        }
+
+    monkeypatch.setattr(verify_ranking, "_run_graphtrail_affected", fake_affected)
+
+    ranking = verify_ranking.rank_verification_candidates(tmp_path, files=["src/pkg/mod.py"])
+    candidates = ranking["candidates"]
+    assert [item["test_path"] for item in candidates] == [
+        "tests/test_mod.py",
+        "tests/test_other.py",
+    ]
+    assert candidates[0]["confidence"]["min_hops"] == 1
+    assert candidates[0]["evidence"]["via"] == ["near_helper"]
+    assert ranking["suggested_command"] == ("PYTHONPATH=src python3 -m pytest -q tests/test_mod.py tests/test_other.py")
+
+
+def test_rank_verification_candidates_npm_default_keeps_advisory_paths_only(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    (tmp_path / "package.json").write_text('{"name":"demo","scripts":{"test":"node --test"}}')
+    (tmp_path / "src").mkdir()
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"fake-graphtrail-index")
+
+    monkeypatch.setattr(verify_ranking.component_bins, "resolve", lambda _name: "/fake/graphtrail")
+
+    def fake_affected(target, binary, db_path, files, depth):
+        return {
+            "changed_files": ["src/mod.js"],
+            "missing_files": [],
+            "affected_tests": [
+                {"file_path": "src/mod.test.js", "min_hops": 1, "via": ["test_mod"]},
+            ],
+        }
+
+    monkeypatch.setattr(verify_ranking, "_run_graphtrail_affected", fake_affected)
+
+    ranking = verify_ranking.rank_verification_candidates(tmp_path, files=["src/mod.js"])
+    assert ranking["candidates"][0]["test_path"] == "src/mod.test.js"
+    assert ranking["candidates"][0]["command"] == "npm test -- src/mod.test.js"
+    assert "pytest" not in ranking["candidates"][0]["command"]
+    assert ranking["suggested_command"] is None
+
+
+def test_verify_plan_npm_default_does_not_promote_pytest_graph_impact(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    (tmp_path / "package.json").write_text('{"name":"demo","scripts":{"test":"node --test"}}')
+    (tmp_path / "src").mkdir()
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"fake-graphtrail-index")
+
+    monkeypatch.setattr(verify_ranking.component_bins, "resolve", lambda _name: "/fake/graphtrail")
+
+    def fake_affected(target, binary, db_path, files, depth):
+        return {
+            "changed_files": ["src/mod.js"],
+            "missing_files": [],
+            "affected_tests": [
+                {"file_path": "src/mod.test.js", "min_hops": 1, "via": ["test_mod"]},
+            ],
+        }
+
+    monkeypatch.setattr(verify_ranking, "_run_graphtrail_affected", fake_affected)
+
+    assert work_cmd.verify_plan(target=tmp_path, files=["src/mod.js"], json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["commands"] == ["npm test"]
+    assert payload["suggested_command"] == "brigade work verify run"
+    assert "suggested_from_graph_impact" not in payload
+    assert payload["ranked_candidates"][0]["test_path"] == "src/mod.test.js"
+    assert payload["ranked_candidates"][0]["command"] == "npm test -- src/mod.test.js"
+    assert "pytest" not in payload["ranked_candidates"][0]["command"]
+
+
 def test_cli_verify_plan_passes_files(tmp_path, monkeypatch, capsys):
     from brigade import cli
 

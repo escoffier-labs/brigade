@@ -125,8 +125,9 @@ def _ranking_from_affected_report(target: Path, report: dict[str, Any], *, depth
     if not isinstance(affected_tests, list):
         affected_tests = []
 
-    base_prefix = _pytest_command_prefix(target)
-    candidates: list[dict[str, Any]] = []
+    candidate_prefix = _candidate_command_prefix(target)
+    combined_prefix = _verification_command_prefix(target)
+    by_path: dict[str, dict[str, Any]] = {}
     for row in affected_tests:
         if not isinstance(row, dict):
             continue
@@ -141,37 +142,32 @@ def _ranking_from_affected_report(target: Path, report: dict[str, Any], *, depth
             min_hops = 0
         via = _unique_strings(row.get("via"))
         confidence = confidence_for_hops(min_hops)
-        command = f"{base_prefix} {path}".strip() if base_prefix else path
-        candidates.append(
-            {
-                "command": command,
-                "test_path": path,
-                "confidence": confidence,
-                "evidence": {
-                    "file_path": path,
-                    "min_hops": min_hops,
-                    "via": via,
-                    "source": "graphtrail.affected",
-                },
-            }
-        )
+        command = f"{candidate_prefix} {path}".strip() if candidate_prefix else path
+        candidate = {
+            "command": command,
+            "test_path": path,
+            "confidence": confidence,
+            "evidence": {
+                "file_path": path,
+                "min_hops": min_hops,
+                "via": via,
+                "source": "graphtrail.affected",
+            },
+        }
+        existing = by_path.get(path)
+        if existing is None or _candidate_rank_key(candidate) < _candidate_rank_key(existing):
+            by_path[path] = candidate
 
-    candidates.sort(
-        key=lambda item: (
-            -float(item["confidence"]["score"]),
-            int(item["confidence"]["min_hops"]),
-            str(item["test_path"]),
-        )
-    )
+    candidates = sorted(by_path.values(), key=_candidate_rank_key)
     if len(candidates) > CANDIDATE_FILE_CAP:
         candidates = candidates[:CANDIDATE_FILE_CAP]
 
     suggested_command = None
-    if candidates:
+    if candidates and combined_prefix:
         # Prefer a single combined command covering the highest-confidence tests.
         limited = [str(item["test_path"]) for item in candidates]
         joined = " ".join(limited)
-        suggested_command = f"{base_prefix} {joined}".strip() if base_prefix else joined
+        suggested_command = f"{combined_prefix} {joined}".strip()
 
     return {
         "degraded": False,
@@ -185,8 +181,22 @@ def _ranking_from_affected_report(target: Path, report: dict[str, Any], *, depth
     }
 
 
-def _pytest_command_prefix(target: Path) -> str:
-    """Match ``_default_verify_commands`` so ranked candidates share the same runner."""
+def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, int, str]:
+    confidence = item.get("confidence") or {}
+    return (
+        -float(confidence.get("score", 0.0)),
+        int(confidence.get("min_hops", 0)),
+        str(item.get("test_path") or ""),
+    )
+
+
+def _verification_command_prefix(target: Path) -> str | None:
+    """Return a combined-command prefix when it matches ``_default_verify_commands``.
+
+    When the plan default is ``npm test`` (package.json without a Python test
+    layout), return ``None`` so graph impact does not promote a combined command
+    over the plan-level default.
+    """
     if (target / "pyproject.toml").is_file() and (target / "tests").is_dir():
         if (target / "src").is_dir():
             return "PYTHONPATH=src python3 -m pytest -q"
@@ -194,10 +204,18 @@ def _pytest_command_prefix(target: Path) -> str:
     if (target / "pytest.ini").is_file() or (target / "tests").is_dir():
         return "python3 -m pytest -q"
     if (target / "package.json").is_file():
-        # GraphTrail attributes source/test files; npm projects still get path hints
-        # but the default runner stays ``npm test`` at the plan level.
-        return "python3 -m pytest -q"
+        return None
     return "python3 -m pytest -q"
+
+
+def _candidate_command_prefix(target: Path) -> str | None:
+    """Return an executable prefix for each ranked candidate command."""
+    combined = _verification_command_prefix(target)
+    if combined is not None:
+        return combined
+    if (target / "package.json").is_file():
+        return "npm test --"
+    return None
 
 
 def _run_graphtrail_affected(
