@@ -270,6 +270,7 @@ def lint_file(path: Path) -> HandoffLintResult:
     warnings: list[str] = []
     hints: list[str] = []
     action: str | None = None
+    salvageable = False
     try:
         text = path.read_text(errors="replace")
     except OSError as exc:
@@ -282,6 +283,11 @@ def lint_file(path: Path) -> HandoffLintResult:
         )
 
     raw_sections = _parse_markdown_sections(text)
+    # Use the same structural boundary as ingest: a note with several populated
+    # Markdown sections can be preserved for review, unlike unstructured text.
+    from ..ingest import has_salvageable_structure
+
+    salvageable = has_salvageable_structure(raw_sections)
     sections, collision_errors, noncanonical_headings = _canonicalize_sections(raw_sections)
     errors.extend(collision_errors)
     heading_warnings, heading_hints = _lint_noncanonical_heading_messages(noncanonical_headings)
@@ -301,6 +307,12 @@ def lint_file(path: Path) -> HandoffLintResult:
 
             if not scan_untrusted(text).flagged:
                 hints.append("this looks like a freeform note; try `brigade handoff migrate --target .`")
+        elif salvageable:
+            from ..untrusted import scan_untrusted
+
+            if not scan_untrusted(text).flagged:
+                expected = ", ".join(f"## {name}" for name in CANONICAL_HANDOFF_SECTION_HEADINGS)
+                hints.append(f"structured note detected; use Brigade handoff sections: {expected}")
 
     action_value = _section_value(sections, "Recommended memory action")
     if action_value:
@@ -324,6 +336,7 @@ def lint_file(path: Path) -> HandoffLintResult:
         warnings=tuple(warnings),
         hints=tuple(hints),
         readability=readability,
+        salvageable=salvageable,
     )
 
 
