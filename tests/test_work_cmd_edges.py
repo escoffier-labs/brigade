@@ -175,9 +175,7 @@ def test_three_node_transitive_blocks_cycle_rejected_at_add_time(tmp_path, monke
     assert work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=b["id"], target_id=c["id"]) == 0
     capsys.readouterr()
     assert (
-        work_cmd.task_edge_add(
-            target=tmp_path, edge_type="blocks", source=c["id"], target_id=a["id"], json_output=True
-        )
+        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=c["id"], target_id=a["id"], json_output=True)
         == 2
     )
     payload = json.loads(capsys.readouterr().out)
@@ -197,14 +195,10 @@ def test_mixed_blocks_parent_child_transitive_cycle_rejected_at_add_time(tmp_pat
     child = _add(tmp_path, "Epic child")
     blocker = _add(tmp_path, "Upstream blocker")
     assert (
-        work_cmd.task_edge_add(
-            target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"]
-        )
+        work_cmd.task_edge_add(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"])
         == 0
     )
-    assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=child["id"], target_id=blocker["id"]) == 0
-    )
+    assert work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=child["id"], target_id=blocker["id"]) == 0
     capsys.readouterr()
     assert (
         work_cmd.task_edge_add(
@@ -570,9 +564,7 @@ def test_concurrent_edge_writes_do_not_lose_dependency_edges(tmp_path, monkeypat
     assert errors == []
     ledger = work_cmd._read_task_ledger(tmp_path)
     edge_pairs = {
-        (edge["source"], edge["target"], edge["type"])
-        for edge in ledger.get("edges", [])
-        if isinstance(edge, dict)
+        (edge["source"], edge["target"], edge["type"]) for edge in ledger.get("edges", []) if isinstance(edge, dict)
     }
     expected = {(hub["id"], target["id"], "blocks") for target in targets}
     assert expected <= edge_pairs

@@ -812,7 +812,9 @@ def _review_stamp_task_closeouts(target: Path, closeout: dict[str, Any]) -> list
             if not isinstance(closeouts, list):
                 closeouts = []
                 metadata["review_closeouts"] = closeouts
-            if any(isinstance(item, dict) and item.get("review_run_id") == closeout.get("run_id") for item in closeouts):
+            if any(
+                isinstance(item, dict) and item.get("review_run_id") == closeout.get("run_id") for item in closeouts
+            ):
                 continue
             closeouts.append(
                 {
