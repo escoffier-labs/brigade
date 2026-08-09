@@ -1,0 +1,15 @@
+{
+  "id": "ingest-sweep",
+  "description": "Handoff lint and ingest sweep for writer inboxes. Run from the repo or workspace root: brigade runbook run --approved .brigade/memory-care/runbooks/ingest-sweep.json",
+  "allowed_commands": ["brigade"],
+  "steps": [
+    {
+      "id": "lint",
+      "run": "brigade handoff lint --strict --target ."
+    },
+    {
+      "id": "ingest",
+      "run": "brigade ingest --promote-cards --route-documents --target ."
+    }
+  ]
+}

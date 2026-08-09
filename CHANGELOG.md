@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   readiness-affecting edges (`blocks` and `parent-child`) are rejected at
   edge-add and graph-apply time with a machine-readable `dependency_cycle`
   reason; `discovered-from` never participates in cycle detection.
+- `brigade memory care init --with-runbooks` writes three mechanical,
+  model-free memory-care runbook templates (`daily-care-pass`, `ingest-sweep`,
+  `weekly-outcome-ratchet`) under `.brigade/memory-care/runbooks/`. Each
+  template restricts execution to `brigade` via `allowed_commands` and gets
+  binary pins materialized at write time from the resolved `brigade` path.
+  (#760)
 
 ### Fixed
 - `brigade run --wait` now joins a fair per-worktree wait queue instead of
