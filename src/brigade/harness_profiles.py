@@ -17,7 +17,12 @@ PROFILE_STATE_VERSION = 2
 INSTRUCTION_START = "<!-- brigade:user-profile:start -->"
 INSTRUCTION_END = "<!-- brigade:user-profile:end -->"
 INSTRUCTION_KIND = "INTEGRATION"
-INSTRUCTION_PROFILE = "full"
+INSTRUCTION_PROFILE_MINIMAL = "minimal"
+INSTRUCTION_PROFILE_FULL = "full"
+INSTRUCTION_PROFILE = INSTRUCTION_PROFILE_FULL
+# Harnesses whose SessionStart (or equivalent) injects the live work brief.
+# Their static block defaults to the minimal pointer when hooks are active.
+HOOK_BRIEF_HARNESSES = frozenset({"claude"})
 
 
 @dataclass(frozen=True)
@@ -172,13 +177,13 @@ def resolve_profiles(
     return resolve_slice1_profiles(harness=harness, home=home, workspace=workspace)
 
 
-def managed_instruction_text() -> str:
-    """Return the common managed user-profile instruction body."""
-    return (
-        "## Brigade work loop\n\n"
-        "Invoke the `using-skillet` skill and use each applicable reviewed skill before substantive work in a Brigade-wired repository.\n\n"
-        "Run `brigade work brief --target .` when a `.brigade/` directory exists or `brigade status --target .` succeeds, and follow the brief before editing.\n\n"
-        "Route worker-sized or parallelizable implementation through `brigade run` and keep the frontier session on planning, dispatch, review, and synthesis.\n\n"
-        'Run counting checks through `brigade work verify run --target . --command "<command>" --capture brigade-work`, capturing failures as evidence so the outcome ledger stays honest.\n\n'
-        "After substantial work, create a Memory Handoff through the standard Rocinante flow and never edit canonical memory directly.\n"
-    )
+def managed_instruction_text(*, profile: str = INSTRUCTION_PROFILE_FULL) -> str:
+    """Return the managed user-profile instruction body for a depth profile.
+
+    Bodies are rendered from the same ordered brief sections used by
+    ``brigade work brief`` (see ``brief_sections``). ``minimal`` is a short
+    pointer; ``full`` adds session-close and work-loop protocol.
+    """
+    from . import brief_sections
+
+    return brief_sections.render_static_instruction(profile)

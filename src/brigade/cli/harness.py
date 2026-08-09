@@ -73,6 +73,15 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Overwrite a locally modified or recoverable managed instruction block.",
     )
+    sync.add_argument(
+        "--profile",
+        choices=["minimal", "full"],
+        help=(
+            "Override instruction depth for this sync. Default selects minimal when "
+            "brief-injecting hooks are installed for the harness, otherwise full. "
+            "Shared-file installs still keep the richest active requirement."
+        ),
+    )
 
     uninstall = commands.add_parser("uninstall", help="Remove only Brigade-owned harness configuration.")
     uninstall_target = uninstall.add_mutually_exclusive_group(required=True)
@@ -161,6 +170,7 @@ def dispatch(args) -> int:
             force=bool(getattr(args, "force", False)),
             check=bool(getattr(args, "check", False)),
             json_output=args.json,
+            profile=getattr(args, "profile", None),
         )
 
     if args.harness_command == "uninstall":

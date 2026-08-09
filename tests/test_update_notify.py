@@ -335,7 +335,8 @@ def test_work_brief_prints_update_line_when_newer(tmp_path, tmp_path_factory, mo
     _write_state(cache_home, checked_at=100.0, latest="99.0.0")
     lines = _run_brief(tmp_path, cache_home, monkeypatch, capsys).splitlines()
     assert lines[0].startswith("work brief: ")
-    assert lines[1] == f'update_available: 99.0.0 (installed {__version__}); run "brigade update"'
+    assert lines[1] == "session_close:"
+    assert f'update_available: 99.0.0 (installed {__version__}); run "brigade update"' in lines
 
 
 def test_main_invokes_notify_after_command(monkeypatch):

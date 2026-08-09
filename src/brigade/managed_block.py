@@ -563,6 +563,19 @@ def assess_block(
 
     assert desired_digest is not None
     if not legacy and recorded == actual == desired_digest:
+        stamped_profile = parsed.meta.profile
+        if stamped_profile is not None and stamped_profile != profile:
+            return BlockAssessment(
+                STATUS_STALE,
+                kind,
+                parsed,
+                desired_hash=desired_digest,
+                recorded_hash=recorded,
+                actual_hash=actual,
+                profile=stamped_profile,
+                fix_command=fix,
+                detail=f"managed block profile is stale ({stamped_profile} != {profile})",
+            )
         return BlockAssessment(
             STATUS_CURRENT,
             kind,
@@ -570,7 +583,7 @@ def assess_block(
             desired_hash=desired_digest,
             recorded_hash=recorded,
             actual_hash=actual,
-            profile=parsed.meta.profile or profile,
+            profile=stamped_profile or profile,
             fix_command=fix,
         )
 

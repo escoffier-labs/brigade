@@ -635,6 +635,10 @@ def test_work_brief_reports_morning_entrypoint(tmp_path, monkeypatch, capsys):
     assert work_cmd.brief(target=tmp_path, limit=2) == 0
     out = capsys.readouterr().out
     assert "work brief:" in out
+    assert out.index("session_close:") < out.index("active_session:")
+    assert "Verify captured through Brigade?" in out
+    assert "Outcome recorded?" in out
+    assert "Memory Handoff written" in out
     assert "active_session: none" in out
     assert "latest_session:" in out
     assert "latest_session_title: Ended Work" in out
@@ -664,6 +668,8 @@ def test_work_brief_json_reports_recent_sessions(tmp_path, monkeypatch, capsys):
 
     assert work_cmd.brief(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
+    assert payload["session_close"]["items"]
+    assert any("Verify captured" in item for item in payload["session_close"]["items"])
     assert payload["active_session"]["title"] == "Active Work"
     assert payload["latest_session"]["title"] == "Active Work"
     assert payload["recent_sessions"][0]["status"] == "active"
