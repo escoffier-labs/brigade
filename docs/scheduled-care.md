@@ -55,7 +55,7 @@ Then `systemctl --user daemon-reload`, `systemctl --user enable --now <timer>.ti
 
 ### Tracked runbooks
 
-`brigade init` gitignores `.brigade/` by default. Nightly runbooks referenced from CI must be committed. Inside the managed brigade gitignore block, add:
+`brigade init` adds a managed gitignore block that keeps `.brigade/*` out of git by default. Nightly runbooks referenced from CI must be committed. Inside that block, add:
 
 ```gitignore
 !.brigade/runbooks/
@@ -547,14 +547,14 @@ Example runbook at `.brigade/runbooks/nightly-maintenance.json`:
 Run it (`runbook` is extras-gated. Run `brigade extras on` once per machine or prefix with `BRIGADE_EXTRAS=1`):
 
 ```bash
-brigade runbook run --approved --target . .brigade/runbooks/nightly-maintenance.json
+brigade runbook run .brigade/runbooks/nightly-maintenance.json --target . --approved
 ```
 
 ### Crontab
 
 ```cron
 PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
-0 4 * * * cd "WORKSPACE" && brigade runbook run --approved --target . .brigade/runbooks/nightly-maintenance.json
+0 4 * * * cd "WORKSPACE" && brigade runbook run .brigade/runbooks/nightly-maintenance.json --target . --approved
 ```
 
 ### systemd user timer
@@ -569,7 +569,7 @@ Description=Brigade nightly maintenance runbook
 Type=oneshot
 WorkingDirectory=WORKSPACE
 Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=brigade runbook run --approved --target . .brigade/runbooks/nightly-maintenance.json
+ExecStart=brigade runbook run .brigade/runbooks/nightly-maintenance.json --target . --approved
 ```
 
 `~/.config/systemd/user/brigade-nightly-ops.timer`:
@@ -619,7 +619,7 @@ jobs:
           brigade memory care init --target .
           brigade daily init --target .
           brigade extras on
-      - run: brigade runbook run --approved --target . .brigade/runbooks/nightly-maintenance.json
+      - run: brigade runbook run .brigade/runbooks/nightly-maintenance.json --target . --approved
 ```
 
 Commit the runbook JSON when you want CI to execute the same pinned steps as your laptop.
