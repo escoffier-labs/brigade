@@ -69,6 +69,211 @@ def _write_task_ledger(target: Path, payload: dict[str, Any]) -> None:
     helpers._write_json(helpers._tasks_path(target), payload)
 
 
+def _claim_task(
+    target: Path,
+    task_id: str | None,
+    *,
+    actor: str,
+    claim_id: str | None = None,
+    claim_next: bool = False,
+    if_actor: str | None = None,
+    if_status: str | None = None,
+) -> dict[str, Any]:
+    """CAS claim under the task-ledger lock. Raises ``claim.ClaimError``."""
+    from .claiming import ClaimError, apply_claim_next, apply_claim_to_task, generate_claim_id
+
+    resolved_claim_id = claim_id or generate_claim_id()
+    with _task_ledger_lock(target):
+        ledger = _read_task_ledger(target)
+        if claim_next:
+            result = apply_claim_next(
+                ledger,
+                actor=actor,
+                claim_id=resolved_claim_id,
+                if_actor=if_actor,
+                if_status=if_status,
+            )
+            _write_task_ledger(target, ledger)
+            return result
+        if not task_id:
+            raise ClaimError(
+                "task id is required unless --next is set",
+                reason="unknown_task",
+                details={},
+                exit_code=2,
+            )
+        task = None
+        matches: list[dict[str, Any]] = []
+        for item in ledger["tasks"]:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id")
+            if item_id == task_id:
+                task = item
+                break
+            if isinstance(item_id, str) and item_id.startswith(task_id):
+                matches.append(item)
+        if task is None and len(matches) == 1:
+            task = matches[0]
+        if task is None:
+            raise ClaimError(
+                f"task not found: {task_id}",
+                reason="unknown_task",
+                details={"task_id": task_id},
+                exit_code=1,
+            )
+        result = apply_claim_to_task(
+            ledger,
+            task,
+            actor=actor,
+            claim_id=resolved_claim_id,
+            if_actor=if_actor,
+            if_status=if_status,
+            require_ready=True,
+        )
+        _write_task_ledger(target, ledger)
+        return result
+
+
+def _release_tasks(
+    target: Path,
+    *,
+    task_ids: list[str] | None = None,
+    actors: list[str] | None = None,
+    claim_ids: list[str] | None = None,
+    stale_after_hours: float | None = None,
+    if_actor: str | None = None,
+    if_status: str | None = None,
+) -> dict[str, Any]:
+    """Release matching claims under the task-ledger lock (fail-closed filters)."""
+    from .claiming import (
+        ClaimError,
+        REASON_MISSING_FILTER,
+        apply_release_to_task,
+        claim_record,
+        normalize_filter_list,
+        task_matches_release_filters,
+    )
+
+    # Normalize filters before taking the lock so empty values never match-all.
+    normalized_task_ids = normalize_filter_list(task_ids, field="task") if task_ids is not None else None
+    normalized_actors = normalize_filter_list(actors, field="actor") if actors is not None else None
+    normalized_claim_ids = normalize_filter_list(claim_ids, field="claim_id") if claim_ids is not None else None
+    if normalized_task_ids is None and normalized_actors is None and normalized_claim_ids is None:
+        if stale_after_hours is None:
+            raise ClaimError(
+                "release requires a filter (--task, --actor, and/or --claim-id)",
+                reason=REASON_MISSING_FILTER,
+                details={},
+                exit_code=2,
+            )
+
+    with _task_ledger_lock(target):
+        ledger = _read_task_ledger(target)
+        released: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for task in list(ledger.get("tasks", [])):
+            if not isinstance(task, dict):
+                continue
+            if not task_matches_release_filters(
+                task,
+                actors=normalized_actors,
+                claim_ids=normalized_claim_ids,
+                task_ids=normalized_task_ids,
+                stale_after_hours=stale_after_hours,
+            ):
+                continue
+            existing = claim_record(task)
+            try:
+                result = apply_release_to_task(
+                    ledger,
+                    task,
+                    # Compare the claim identity observed under this lock so a
+                    # concurrent reassignment cannot be cleared by a stale match.
+                    claim_id=existing["claim_id"] if existing is not None else None,
+                    if_actor=if_actor,
+                    if_status=if_status,
+                )
+                released.append(result)
+            except ClaimError as exc:
+                skipped.append(exc.as_dict())
+        if released:
+            _write_task_ledger(target, ledger)
+        result = {"released": released, "released_count": len(released), "skipped": skipped}
+        if not released and skipped:
+            # Propagate precondition failures (guard mismatch / claim-id) when
+            # every matched item was rejected and nothing was written.
+            exit_codes = [int(item.get("exit_code") or 13) for item in skipped if isinstance(item, dict)]
+            if exit_codes and all(code == 13 for code in exit_codes):
+                raise ClaimError(
+                    str(skipped[0].get("error") or "release guard mismatch"),
+                    reason=str(skipped[0].get("reason") or "guard_mismatch"),
+                    details={"skipped": skipped, **{k: v for k, v in skipped[0].items() if k != "skipped"}},
+                    exit_code=13,
+                )
+        return result
+
+
+def _reassign_task(
+    target: Path,
+    task_id: str,
+    *,
+    to_actor: str,
+    claim_id: str | None = None,
+    new_claim_id: str | None = None,
+    if_actor: str | None = None,
+    if_status: str | None = None,
+) -> dict[str, Any]:
+    from .claiming import ClaimError, apply_reassign_to_task
+
+    with _task_ledger_lock(target):
+        ledger = _read_task_ledger(target)
+        task = None
+        matches: list[dict[str, Any]] = []
+        for item in ledger["tasks"]:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id")
+            if item_id == task_id:
+                task = item
+                break
+            if isinstance(item_id, str) and item_id.startswith(task_id):
+                matches.append(item)
+        if task is None and len(matches) == 1:
+            task = matches[0]
+        if task is None:
+            raise ClaimError(
+                f"task not found: {task_id}",
+                reason="unknown_task",
+                details={"task_id": task_id},
+                exit_code=1,
+            )
+        result = apply_reassign_to_task(
+            ledger,
+            task,
+            to_actor=to_actor,
+            claim_id=claim_id,
+            new_claim_id=new_claim_id,
+            if_actor=if_actor,
+            if_status=if_status,
+        )
+        _write_task_ledger(target, ledger)
+        return result
+
+
+def _stale_claim_payload(target: Path, *, stale_after_hours: float | None = None) -> dict[str, Any]:
+    from .claiming import list_stale_claims
+
+    hours = constants.CLAIM_STALE_HOURS if stale_after_hours is None else stale_after_hours
+    ledger = _read_task_ledger(target)
+    stale = list_stale_claims(ledger, stale_after_hours=hours)
+    return {
+        "stale_after_hours": hours,
+        "stale_count": len(stale),
+        "stale": stale,
+    }
+
+
 def _read_imports(target: Path) -> list[dict[str, Any]]:
     path = helpers._imports_path(target)
     if not path.exists():
@@ -183,6 +388,14 @@ def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
     }
     if isinstance(task.get("template"), str):
         summary["template"] = task["template"]
+    assignee = _string_field(task.get("assignee"))
+    if assignee:
+        summary["assignee"] = assignee
+    claim = task.get("claim") if isinstance(task.get("claim"), dict) else None
+    if isinstance(claim, dict) and _string_field(claim.get("claim_id")):
+        summary["claim_id"] = claim.get("claim_id")
+        if isinstance(claim.get("claimed_at"), str):
+            summary["claimed_at"] = claim["claimed_at"]
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     closeouts = metadata.get("review_closeouts")
     if isinstance(closeouts, list):

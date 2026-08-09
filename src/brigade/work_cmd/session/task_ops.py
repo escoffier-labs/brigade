@@ -270,6 +270,13 @@ def task_show(*, target: Path, task_id: str, json_output: bool = False) -> int:
     print(f"source: {task.get('source', '')}")
     print(f"type: {ledger_mod._normalize_task_type(task.get('type'))}")
     print(f"priority: {ledger_mod._normalize_task_priority(task.get('priority'))}")
+    if task.get("assignee"):
+        print(f"assignee: {task['assignee']}")
+    claim = task.get("claim") if isinstance(task.get("claim"), dict) else None
+    if claim:
+        print(f"claim_id: {claim.get('claim_id', '')}")
+        print(f"claimed_at: {claim.get('claimed_at', '')}")
+        print(f"item_revision: {claim.get('item_revision', '')}")
     if task.get("template"):
         print(f"template: {task['template']}")
     print(f"created_at: {task.get('created_at', '')}")
@@ -706,6 +713,167 @@ def task_edge_list(*, target: Path, task_id: str | None = None, json_output: boo
     print(f"edges: {len(edge_items)}")
     for edge in edge_items:
         print(f"- {edge.get('id')} {edge['type']}: {edge['source']} -> {edge['target']}")
+    return 0
+
+
+def _emit_claim_error(exc: Exception, *, json_output: bool) -> int:
+    from ..claiming import ClaimError
+
+    if isinstance(exc, ClaimError):
+        if json_output:
+            print(json.dumps(exc.as_dict(), indent=2, sort_keys=True))
+        else:
+            print(f"error: {exc}", file=sys.stderr)
+            holder = exc.details.get("holder")
+            claim_id = exc.details.get("claim_id")
+            if holder:
+                print(f"holder: {holder}", file=sys.stderr)
+            if claim_id:
+                print(f"claim_id: {claim_id}", file=sys.stderr)
+        return int(exc.exit_code)
+    raise exc
+
+
+def claim(
+    *,
+    target: Path,
+    task_id: str | None = None,
+    actor: str | None = None,
+    claim_id: str | None = None,
+    claim_next: bool = False,
+    if_actor: str | None = None,
+    if_status: str | None = None,
+    json_output: bool = False,
+) -> int:
+    from ..claiming import ClaimError
+
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if claim_next and task_id:
+        print("error: pass a task id or --next, not both", file=sys.stderr)
+        return 2
+    if not claim_next and not task_id:
+        print("error: claim requires a task id or --next", file=sys.stderr)
+        return 2
+    if actor is None or not str(actor).strip():
+        print("error: --actor is required", file=sys.stderr)
+        return 2
+    try:
+        result = ledger_mod._claim_task(
+            target,
+            task_id,
+            actor=actor,
+            claim_id=claim_id,
+            claim_next=claim_next,
+            if_actor=if_actor,
+            if_status=if_status,
+        )
+    except ClaimError as exc:
+        return _emit_claim_error(exc, json_output=json_output)
+    if json_output:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"task: {result.get('task_id')}")
+    print(f"status: {result.get('status')}")
+    print(f"assignee: {result.get('assignee')}")
+    claim_info = result.get("claim") if isinstance(result.get("claim"), dict) else {}
+    print(f"claim_id: {claim_info.get('claim_id')}")
+    print(f"claimed_at: {claim_info.get('claimed_at')}")
+    print(f"created: {result.get('created')}")
+    if result.get("idempotent"):
+        print("idempotent: true")
+    return 0
+
+
+def release(
+    *,
+    target: Path,
+    task: list[str] | None = None,
+    actor: list[str] | None = None,
+    claim_id: list[str] | None = None,
+    stale_after_hours: float | None = None,
+    if_actor: str | None = None,
+    if_status: str | None = None,
+    json_output: bool = False,
+) -> int:
+    from ..claiming import ClaimError
+
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    try:
+        result = ledger_mod._release_tasks(
+            target,
+            task_ids=task,
+            actors=actor,
+            claim_ids=claim_id,
+            stale_after_hours=stale_after_hours,
+            if_actor=if_actor,
+            if_status=if_status,
+        )
+    except ClaimError as exc:
+        return _emit_claim_error(exc, json_output=json_output)
+    if json_output:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"released: {result['released_count']}")
+    for item in result["released"]:
+        released = item.get("released") if isinstance(item.get("released"), dict) else {}
+        print(f"- {item.get('task_id')} was {released.get('actor')} ({released.get('claim_id')})")
+    if result["skipped"]:
+        print(f"skipped: {len(result['skipped'])}")
+        for item in result["skipped"]:
+            print(f"- {item.get('reason')}: {item.get('error')}")
+    return 0
+
+
+def reassign(
+    *,
+    target: Path,
+    task_id: str,
+    to_actor: str,
+    claim_id: str | None = None,
+    new_claim_id: str | None = None,
+    if_actor: str | None = None,
+    if_status: str | None = None,
+    json_output: bool = False,
+) -> int:
+    from ..claiming import ClaimError
+
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if not str(to_actor or "").strip():
+        print("error: --to is required", file=sys.stderr)
+        return 2
+    try:
+        result = ledger_mod._reassign_task(
+            target,
+            task_id,
+            to_actor=to_actor,
+            claim_id=claim_id,
+            new_claim_id=new_claim_id,
+            if_actor=if_actor,
+            if_status=if_status,
+        )
+    except ClaimError as exc:
+        return _emit_claim_error(exc, json_output=json_output)
+    if json_output:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    print(f"task: {result.get('task_id')}")
+    print(f"status: {result.get('status')}")
+    print(f"assignee: {result.get('assignee')}")
+    claim_info = result.get("claim") if isinstance(result.get("claim"), dict) else {}
+    print(f"claim_id: {claim_info.get('claim_id')}")
+    previous = result.get("previous") if isinstance(result.get("previous"), dict) else {}
+    if previous:
+        print(f"previous_actor: {previous.get('actor')}")
+        print(f"previous_claim_id: {previous.get('claim_id')}")
     return 0
 
 

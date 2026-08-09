@@ -69,7 +69,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade untrusted` (extras): 2 command path(s)
 - `brigade update`: 1 command path(s)
 - `brigade version`: 1 command path(s)
-- `brigade work`: 150 command path(s)
+- `brigade work`: 153 command path(s)
 - `brigade workflow` (extras): 3 command path(s)
 
 ## Commands
@@ -572,6 +572,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work backup status`
 - `brigade work bootstrap`
 - `brigade work brief`
+- `brigade work claim`
 - `brigade work closeout`
 - `brigade work doctor`
 - `brigade work end`
@@ -672,7 +673,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work plan-proposals`
 - `brigade work plans`
 - `brigade work ready`
+- `brigade work reassign`
 - `brigade work recap`
+- `brigade work release`
 - `brigade work resolve-target`
 - `brigade work resume`
 - `brigade work review closeout`

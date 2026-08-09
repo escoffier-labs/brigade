@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `work task done` by joining the latest verify receipt's `code_graph_delta`
   / `graphtrail_delta`. Additive `task add --symbol` / `--file` seed the
   predicted write.
+- Work inbox atomic claim with compare-and-set guards (#738):
+  `brigade work claim <id>|--next --actor <name> [--claim-id]` performs a
+  pending→`in_progress` transition with assignee under the tasks.json ledger
+  lock. Idempotency is keyed by opaque `--claim-id` (same id retries; a new id
+  loses). Lost races and `--if-actor`/`--if-status` mismatches exit 13 with the
+  holder named and no release/steal suggestion. Claims against non-ready tasks
+  (open blockers, wrong status) fail closed. `work release` / `work reassign`
+  compare claim identity; empty filter values match nothing. `work status`
+  lists stale claims (default 24h).
 - Work task ledger dependency edges and a computed ready set (#737): typed
   edges (`blocks`, `parent-child`, `discovered-from`) live as a normalized
   top-level `edges` array in `.brigade/work/tasks.json` (schema version 2).
