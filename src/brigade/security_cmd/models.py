@@ -250,6 +250,45 @@ def _secrets_title_rank(title: str) -> int:
     return SECRETS_TITLE_RANK.get(title, 0)
 
 
+_INTERNAL_FINDING_KEYS = frozenset({"_coalesce_group", "_fingerprint_content"})
+
+
+def _strip_internal_finding_keys(finding: dict[str, Any]) -> dict[str, Any]:
+    for key in _INTERNAL_FINDING_KEYS:
+        finding.pop(key, None)
+    return finding
+
+
+def _finding_coalesce_rank(finding: dict[str, Any]) -> tuple[int, int]:
+    """Rank coalesce-group members: severity first, then secrets title tie-break.
+
+    Scanner-defined coalesce groups currently emit uniform severity; title rank
+    breaks ties within the same severity so the most specific secret label wins.
+    """
+    severity = SEVERITY_ORDER.get(str(finding.get("severity") or ""), 0)
+    return severity, _secrets_title_rank(str(finding.get("title") or ""))
+
+
+def _coalesce_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Select the strongest remaining member of each scanner-defined group."""
+    selected: list[tuple[int, dict[str, Any]]] = []
+    grouped: dict[tuple[str, str, int], tuple[int, dict[str, Any]]] = {}
+    for index, finding in enumerate(findings):
+        group = finding.pop("_coalesce_group", None)
+        if not group:
+            selected.append((index, finding))
+            continue
+        key = (str(group), str(finding.get("path") or ""), int(finding.get("line") or 0))
+        current = grouped.get(key)
+        if current is None or _finding_coalesce_rank(finding) > _finding_coalesce_rank(current[1]):
+            grouped[key] = (index, finding)
+    selected.extend(grouped.values())
+    coalesced = [finding for _, finding in sorted(selected, key=lambda item: item[0])]
+    for finding in coalesced:
+        _strip_internal_finding_keys(finding)
+    return coalesced
+
+
 def _is_security_scanner_literal(path: Path, line: str, target: Path) -> bool:
     try:
         rel = path.relative_to(target).as_posix()
