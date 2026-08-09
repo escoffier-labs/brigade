@@ -8,18 +8,26 @@ import re
 import shlex
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
 from .. import localio
 from ..wiring import resolve_wired_target
+from . import envelope
 from .package import PACKAGE_REF
 
 BRIEF_TIMEOUT_SECONDS = 10
-BRIEF_MAX_CHARS = 8_000
 MAX_RECENT_SESSION_STATES = 512
 CLAUDE_SESSION_ENV = "BRIGADE_CLAUDE_SESSION"
+
+
+class HookDegraded(Exception):
+    """Internal hook failure that must fail open with a doctor pointer."""
+
+
 _SHELL_SEPARATORS = {"&&", "||", ";", "|", "|&", "&", "\n"}
 _PIPELINE_SEPARATORS = {"|", "|&"}
 _SHELL_WRAPPERS = {"bash", "dash", "ksh", "sh", "zsh"}
@@ -581,20 +589,20 @@ def _run_brief(target: Path) -> str:
             text=True,
             timeout=BRIEF_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return (
-            "Brigade is wired for this repo. Run `brigade work brief --target "
-            f"{shlex.quote(str(target))}` before real work."
-        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HookDegraded(f"brief unavailable: {exc}") from exc
     text = result.stdout.strip()
     if result.returncode != 0 or not text:
-        return (
-            "Brigade is wired for this repo. Run `brigade work brief --target "
-            f"{shlex.quote(str(target))}` before real work."
-        )
-    if len(text) > BRIEF_MAX_CHARS:
-        text = text[:BRIEF_MAX_CHARS] + "\n[Brigade brief truncated]"
+        detail = (result.stderr or "").strip() or f"exit {result.returncode}"
+        raise HookDegraded(f"brief failed: {detail}")
     return text
+
+
+def _brief_records(text: str) -> list[str]:
+    """Split a work brief into whole-record units for capped injection."""
+    lines = [line.rstrip() for line in text.splitlines()]
+    records = [line for line in lines if line.strip()]
+    return records if records else [text]
 
 
 def _is_env_assignment(token: str) -> bool:
@@ -1824,8 +1832,24 @@ def _handoff_since(target: Path, started_at: object) -> bool:
     return False
 
 
-def _additional_context(event: str, text: str) -> dict[str, Any]:
-    return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
+def _additional_context(
+    event: str,
+    text: str,
+    *,
+    target: Path,
+    session_id: str,
+    records: list[str] | None = None,
+) -> dict[str, Any]:
+    max_chars, max_items = envelope.resolve_caps()
+    payload_records = records if records is not None else [text]
+    return envelope.additional_context_envelope(
+        event,
+        payload_records,
+        target=target,
+        session_id=session_id,
+        max_chars=max_chars,
+        max_items=max_items,
+    )
 
 
 def _unwired_init_hint(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -1848,11 +1872,19 @@ def _unwired_init_hint(payload: dict[str, Any]) -> dict[str, Any] | None:
     command = (
         f"brigade init --target {shlex.quote(str(cwd))} --depth repo --harnesses claude --owner claude --git-exclude"
     )
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        session_id = "unwired"
     return _additional_context(
         "SessionStart",
-        "This git repository is not Brigade-wired. Configure it before real work so "
-        f"verification and memory are captured: {command}\n"
-        "Then start with: brigade work brief --target .",
+        "",
+        target=cwd,
+        session_id=session_id,
+        records=[
+            "This git repository is not Brigade-wired. Configure it before real work so "
+            f"verification and memory are captured: {command}",
+            "Then start with: brigade work brief --target .",
+        ],
     )
 
 
@@ -1875,9 +1907,16 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     if event == "SessionStart":
         if state.get("briefed"):
             return None
+        brief_text = _run_brief(target)
         state["briefed"] = True
         write_session_state(target, session_id, state)
-        return _additional_context("SessionStart", _run_brief(target))
+        return _additional_context(
+            "SessionStart",
+            brief_text,
+            target=target,
+            session_id=session_id,
+            records=_brief_records(brief_text),
+        )
 
     if event == "PreToolUse":
         tool_name = payload.get("tool_name")
@@ -1990,8 +2029,14 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             )
             return _additional_context(
                 "PostToolUseFailure",
-                "The failed or rejected verification must remain recorded in Brigade before retrying. Inspect the receipt, fix the cause, then rerun through "
-                f"`brigade work verify run --capture {capture_id}`.",
+                "",
+                target=target,
+                session_id=session_id,
+                records=[
+                    "The failed or rejected verification must remain recorded in Brigade before retrying. "
+                    "Inspect the receipt, fix the cause, then rerun through "
+                    f"`brigade work verify run --capture {capture_id}`.",
+                ],
             )
         return None
 
@@ -2037,22 +2082,99 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         if handoff_target is not None:
             return _additional_context(
                 "Stop",
-                "Verification is recorded. If this work produced durable knowledge, write a Memory Handoff in `.claude/memory-handoffs/` before finishing.",
+                "",
+                target=handoff_target,
+                session_id=session_id,
+                records=[
+                    "Verification is recorded. If this work produced durable knowledge, write a Memory Handoff in "
+                    "`.claude/memory-handoffs/` before finishing.",
+                ],
             )
     return None
 
 
+def _emit_result(event: str, result: dict[str, Any] | None, *, target: Path | None) -> None:
+    payload = result if result is not None else envelope.empty_envelope(event)
+    envelope.emit_stdout(payload)
+    if target is not None and result is None:
+        envelope.append_log(target, f"{event}: empty envelope")
+
+
+def _resolve_log_target(payload: dict[str, Any] | None) -> Path | None:
+    if not isinstance(payload, dict):
+        return None
+    wired = resolve_wired_target(payload.get("cwd"))
+    if wired is not None:
+        return wired
+    raw = payload.get("cwd")
+    if isinstance(raw, str) and raw:
+        try:
+            return Path(raw).expanduser().resolve(strict=False)
+        except OSError:
+            return None
+    return None
+
+
 def hook_run(*, event: str, package: str, stdin_text: str | None = None) -> int:
+    """Run one managed Claude hook under the #735 output contract.
+
+    Always exits 0. Stdout is exactly one schema-valid JSON object (empty
+    envelope, degraded doctor pointer, or a rendered decision/injection).
+    Diagnostics go to the local hook log, never to the session stream.
+    """
     if package != PACKAGE_REF:
         return 0
+
+    log_target: Path | None = None
+    raw = ""
     try:
         raw = sys.stdin.read() if stdin_text is None else stdin_text
-        payload = json.loads(raw)
-        if not isinstance(payload, dict):
-            return 0
-        result = handle_payload(event, payload)
-    except Exception:  # noqa: BLE001 - hooks must fail open instead of breaking the harness
+        try:
+            parsed = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError as exc:
+            raise HookDegraded(f"malformed hook stdin: {exc}") from None
+        if not isinstance(parsed, dict):
+            raise HookDegraded("hook stdin must be a JSON object")
+        payload = parsed
+        log_target = _resolve_log_target(payload)
+
+        def _invoke() -> dict[str, Any] | None:
+            return handle_payload(event, payload)
+
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="claude-hook")
+        try:
+            future = pool.submit(_invoke)
+            try:
+                result = future.result(timeout=envelope.HOOK_TIMEOUT_SECONDS)
+            except FuturesTimeoutError as exc:
+                future.cancel()
+                raise HookDegraded("hook operation timed out") from exc
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+    except HookDegraded as exc:
+        if log_target is not None:
+            envelope.append_log(log_target, f"{event}: degraded: {exc}")
+        else:
+            # Best-effort log under cwd when the repo is not yet wired.
+            try:
+                envelope.append_log(Path.cwd(), f"{event}: degraded: {exc}")
+            except OSError:
+                pass
+        envelope.emit_stdout(envelope.degraded_envelope(event))
         return 0
-    if result is not None:
-        print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+    except Exception as exc:  # noqa: BLE001 - hooks must fail open instead of breaking the harness
+        if log_target is not None:
+            envelope.append_log(log_target, f"{event}: error: {type(exc).__name__}: {exc}")
+        envelope.emit_stdout(envelope.degraded_envelope(event))
+        return 0
+
+    try:
+        _emit_result(event, result, target=log_target)
+    except Exception as exc:  # noqa: BLE001 - stdout failure still fails open
+        if log_target is not None:
+            envelope.append_log(log_target, f"{event}: emit failed: {exc}")
+        try:
+            envelope.emit_stdout(envelope.degraded_envelope(event))
+        except Exception:  # noqa: BLE001
+            pass
     return 0

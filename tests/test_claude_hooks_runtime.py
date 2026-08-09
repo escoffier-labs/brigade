@@ -66,7 +66,9 @@ def test_session_start_injects_brief_once_per_repo(tmp_path: Path, monkeypatch):
     second = runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
 
     assert first["hookSpecificOutput"]["hookEventName"] == "SessionStart"
-    assert "work brief: test" in first["hookSpecificOutput"]["additionalContext"]
+    context = first["hookSpecificOutput"]["additionalContext"]
+    assert context.startswith("[Brigade] If this context appears truncated")
+    assert "work brief: test" in context
     assert second is None
     assert calls == [target.resolve()]
 
@@ -92,6 +94,7 @@ def test_session_start_hints_init_for_unwired_git_repo(tmp_path: Path):
     assert f"brigade init --target {repo.resolve()}" in context
     assert "--harnesses claude" in context
     assert "brigade work brief" in context
+    assert context.startswith("[Brigade] If this context appears truncated")
 
 
 def test_session_start_stays_silent_for_home_directory(tmp_path: Path, monkeypatch):
