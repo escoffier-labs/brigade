@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import textwrap
 from pathlib import Path
+
+import pytest
 
 
 from brigade import handoff_cmd, ingest as ingest_mod
@@ -835,3 +838,273 @@ def test_promote_replaces_existing_card_wholesale(tmp_target: Path):
     text = card.read_text()
     assert "new body" in text
     assert "old body" not in text
+
+
+def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, capsys):
+    """Exact content match reinforces the existing card instead of filing a duplicate."""
+    from datetime import date
+
+    from brigade.card_fingerprint import content_fingerprint
+
+    inbox = _seed(tmp_target)
+    body = (
+        "Always flush the shared widget cache after a schema migration completes "
+        "otherwise application reads return stale rows for several minutes"
+    )
+    card_body = (
+        "---\n"
+        "topic: widget-cache\n"
+        "category: test\n"
+        "tags: [test]\n"
+        "last_reviewed: 2026-01-01\n"
+        'evidence: ["README.md"]\n'
+        "---\n\n"
+        f"# widget-cache\n\n{body}\n"
+    )
+    existing = tmp_target / "memory" / "cards" / "widget-cache.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(card_body)
+    fp = content_fingerprint(card_body)
+
+    # Same normalized content under a different target filename.
+    _write_handoff(
+        inbox,
+        "2026-05-13-1100-dup.md",
+        f"""
+        ## Type
+        workflow
+
+        ## Title
+        Dup fact
+
+        ## Summary
+        Rediscovered the same durable fact.
+
+        ## Durable facts
+        - {body}
+
+        ## Evidence
+        - files changed: `src/example.py`
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        widget-cache-again.md
+
+        ## Suggested card content
+        ---
+        topic: widget-cache
+        category: test
+        tags: [test]
+        ---
+
+        # widget-cache
+
+        {body}
+        """,
+    )
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    out = capsys.readouterr().out
+    assert "reinforce → memory/cards/widget-cache.md" in out
+    assert "Reinforced 1" in out
+    assert not (tmp_target / "memory" / "cards" / "widget-cache-again.md").exists()
+
+    text = existing.read_text()
+    assert f"last_reviewed: {date.today().isoformat()}" in text
+    assert "reinforcements: 1" in text
+    assert f"fingerprint: {fp}" in text
+    assert "2026-05-13-1100-dup.md" in text
+    assert body in text
+
+
+def test_create_card_near_match_proposes_reinforce_without_writing(tmp_target: Path, capsys):
+    """Reworded near-duplicates are proposed for review, never auto-merged."""
+    inbox = _seed(tmp_target)
+    existing = tmp_target / "memory" / "cards" / "schema-flush.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(
+        "---\n"
+        "topic: schema-flush\n"
+        "category: test\n"
+        "tags: [test]\n"
+        "---\n\n"
+        "# schema-flush\n\n"
+        "Always flush the shared widget cache after a schema migration completes "
+        "otherwise application reads return stale rows for several minutes\n"
+    )
+    before = existing.read_text()
+
+    reworded = (
+        "Always please flush the shared widget cache after a schema migration completes "
+        "otherwise application reads return stale rows for several minutes"
+    )
+    _write_handoff(
+        inbox,
+        "2026-05-13-1101-near.md",
+        _card_handoff_body("schema-flush-v2.md", "schema-flush-v2", reworded),
+    )
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    out = capsys.readouterr().out
+    assert "near-match reinforce proposal: memory/cards/schema-flush.md" in out
+    assert "similarity=" in out
+    assert existing.read_text() == before
+    assert not (tmp_target / "memory" / "cards" / "schema-flush-v2.md").exists()
+    inbox_files = list((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
+    assert len(inbox_files) == 1
+
+
+def test_create_card_below_threshold_still_promotes(tmp_target: Path):
+    """Unrelated card content below the near-match threshold files normally."""
+    inbox = _seed(tmp_target)
+    existing = tmp_target / "memory" / "cards" / "alpha.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(
+        "---\n"
+        "topic: alpha\n"
+        "---\n\n"
+        "# alpha\n\n"
+        "Alpha service binds only to the loopback interface during local smoke tests.\n"
+    )
+
+    _write_handoff(
+        inbox,
+        "2026-05-13-1102-other.md",
+        _card_handoff_body(
+            "beta.md",
+            "beta",
+            "Beta workers require the shared object store credentials before startup.",
+        ),
+    )
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    new_card = tmp_target / "memory" / "cards" / "beta.md"
+    assert new_card.is_file()
+    assert "fingerprint:" in new_card.read_text()
+    assert "Beta workers" in new_card.read_text()
+
+
+def test_create_card_opposite_polarity_near_match_flags_contradiction(tmp_target: Path, capsys):
+    """Opposite-polarity near-matches route to contradiction review, not reinforce."""
+    inbox = _seed(tmp_target)
+    body_works = (
+        "The foo compatibility flag works when bar is set during service startup "
+        "and the worker pool is warm enough for incoming traffic from remote clients "
+        "during the morning health check window"
+    )
+    existing = tmp_target / "memory" / "cards" / "foo-flag.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text(f"---\ntopic: foo-flag\ncategory: test\ntags: [test]\n---\n\n# foo-flag\n\n{body_works}\n")
+    before = existing.read_text()
+    body_fails = body_works.replace("works", "fails")
+
+    _write_handoff(
+        inbox,
+        "2026-05-13-1103-polarity.md",
+        f"""
+        ## Type
+        workflow
+
+        ## Title
+        Polarity conflict
+
+        ## Summary
+        Rediscovered the flag behavior with opposite outcome.
+
+        ## Durable facts
+        - {body_fails}
+
+        ## Evidence
+        - files changed: `src/example.py`
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        foo-flag-v2.md
+
+        ## Suggested card content
+        ---
+        topic: foo-flag
+        category: test
+        tags: [test]
+        ---
+
+        # foo-flag
+
+        {body_fails}
+        """,
+    )
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    out = capsys.readouterr().out
+    assert "contradiction candidate vs memory/cards/foo-flag.md" in out
+    assert "opposite polarity" in out
+    assert "reinforce →" not in out
+    assert existing.read_text() == before
+    assert not (tmp_target / "memory" / "cards" / "foo-flag-v2.md").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_create_card_reinforce_skips_symlinked_cards_and_preserves_outside_file(tmp_target: Path, capsys):
+    """Symlinked card files are not reinforcement targets; outside files stay untouched."""
+    inbox = _seed(tmp_target)
+    body = (
+        "Always flush the shared widget cache after a schema migration completes "
+        "otherwise application reads return stale rows for several minutes"
+    )
+    victim_card_body = f"---\ntopic: widget-cache\ncategory: test\ntags: [test]\n---\n\n# widget-cache\n\n{body}\n"
+    victim = tmp_target / "outside" / "victim.md"
+    victim.parent.mkdir(parents=True)
+    victim_bytes = victim_card_body.encode("utf-8")
+    victim.write_bytes(victim_bytes)
+
+    cards = tmp_target / "memory" / "cards"
+    cards.mkdir(parents=True, exist_ok=True)
+    (cards / "widget-cache.md").symlink_to(victim)
+
+    _write_handoff(
+        inbox,
+        "2026-05-13-1101-symlink.md",
+        f"""
+        ## Type
+        workflow
+
+        ## Title
+        Dup fact via symlink
+
+        ## Summary
+        Rediscovered the same durable fact.
+
+        ## Durable facts
+        - {body}
+
+        ## Evidence
+        - files changed: `src/example.py`
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        widget-cache-again.md
+
+        ## Suggested card content
+        ---
+        topic: widget-cache
+        category: test
+        tags: [test]
+        ---
+
+        # widget-cache
+
+        {body}
+        """,
+    )
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    out = capsys.readouterr().out
+    assert "reinforce → memory/cards/widget-cache.md" not in out
+    assert "Reinforced 0" in out
+    assert victim.read_bytes() == victim_bytes
+
+    new_card = tmp_target / "memory" / "cards" / "widget-cache-again.md"
+    assert new_card.is_file()
+    assert "promote → memory/cards/widget-cache-again.md" in out
+    assert body in new_card.read_text()

@@ -1,4 +1,5 @@
 import json
+import os
 import shlex
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -627,6 +628,7 @@ def test_memory_care_backfill_dry_run_derives_dates_and_writes_nothing(tmp_path,
             "topic": "complete",
             "last_reviewed": "2026-05-01",
             "fresh_until": "2026-12-01",
+            "fingerprint": "already-set",
             "confidence": "high",
             "evidence": ["README.md"],
         },
@@ -644,6 +646,8 @@ def test_memory_care_backfill_dry_run_derives_dates_and_writes_nothing(tmp_path,
     assert item["source"] == "git-history"
     assert item["last_reviewed"] == "2026-03-15"
     assert item["fresh_until"] == "2026-06-13"
+    assert "fingerprint" in item["fields"]
+    assert len(item["fingerprint"]) == 64
     assert (cards / "bare.md").read_text() == before
     assert not (tmp_path / ".brigade" / "memory-care" / "backfills").exists()
 
@@ -660,6 +664,7 @@ def test_memory_care_backfill_apply_writes_metadata_receipt_and_is_idempotent(tm
             "topic": "complete",
             "last_reviewed": "2026-05-01",
             "fresh_until": "2026-12-01",
+            "fingerprint": "already-set",
             "confidence": "high",
             "evidence": ["README.md"],
         },
@@ -675,6 +680,7 @@ def test_memory_care_backfill_apply_writes_metadata_receipt_and_is_idempotent(tm
     text = (cards / "bare.md").read_text()
     assert "last_reviewed: 2026-03-15" in text
     assert "fresh_until: 2026-06-13" in text
+    assert "fingerprint:" in text
     assert text.endswith("Body.\n")
     assert (cards / "complete.md").read_text() == complete_before
     receipts = list((tmp_path / ".brigade" / "memory-care" / "backfills").glob("*.json"))
@@ -702,6 +708,74 @@ def test_memory_care_backfill_falls_back_to_mtime_outside_git(tmp_path, capsys):
     item = payload["candidates"][0]
     assert item["source"] == "file-mtime"
     assert item["last_reviewed"] == "2026-04-02"
+
+
+def test_memory_care_backfill_fingerprint_only_for_dated_cards(tmp_path, capsys):
+    """Cards that already have dates still get a content fingerprint backfill."""
+    cards = tmp_path / "memory" / "cards"
+    _write_card(
+        cards / "dated.md",
+        {
+            "topic": "dated",
+            "last_reviewed": "2026-05-01",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+        body="Durable fact about the widget cache.\n",
+    )
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    item = payload["candidates"][0]
+    assert item["fields"] == ["fingerprint"]
+    assert item["source"] == "content-hash"
+    assert len(item["fingerprint"]) == 64
+
+    assert memory_cmd.backfill(target=tmp_path, apply=True, json_output=True) == 0
+    text = (cards / "dated.md").read_text()
+    assert f"fingerprint: {item['fingerprint']}" in text
+    assert "last_reviewed: 2026-05-01" in text
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_memory_care_backfill_skips_symlinked_cards(tmp_path, capsys):
+    victim = tmp_path / "outside" / "victim.md"
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(b"VICTIM_SECRET_BYTES\n")
+    cards = tmp_path / "memory" / "cards"
+    _write_card(cards / "real.md", {"topic": "real", "confidence": "high", "evidence": ["README.md"]})
+    (cards / "link.md").symlink_to(victim)
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    files = {item["file"] for item in payload["candidates"]}
+    assert any(path.endswith("real.md") for path in files)
+    assert not any(path.endswith("link.md") for path in files)
+    assert victim.read_bytes() == b"VICTIM_SECRET_BYTES\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_memory_care_backfill_apply_preserves_outside_file(tmp_path, capsys):
+    victim = tmp_path / "outside" / "victim.md"
+    victim.parent.mkdir(parents=True)
+    victim_bytes = ('---\ntopic: victim\nconfidence: high\nevidence: ["README.md"]\n---\n\nVictim body.\n').encode(
+        "utf-8"
+    )
+    victim.write_bytes(victim_bytes)
+    cards = tmp_path / "memory" / "cards"
+    cards.mkdir(parents=True, exist_ok=True)
+    (cards / "link.md").symlink_to(victim)
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    assert victim.read_bytes() == victim_bytes
+    capsys.readouterr()
+
+    assert memory_cmd.backfill(target=tmp_path, apply=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["written_count"] == 0
+    assert victim.read_bytes() == victim_bytes
 
 
 def test_memory_care_producer_artifacts_use_write_dir_not_read_fallback(tmp_path):

@@ -168,10 +168,11 @@ def test_memory_care_skill_never_deletes(skill_id):
 
 
 @pytest.mark.parametrize("skill_id", MEMORY_CARE_SKILLS)
-def test_memory_care_skill_carries_manual_dedup_pending_724(skill_id):
+def test_memory_care_skill_carries_reinforce_over_duplicate_724(skill_id):
     text = _skill_text(skill_id)
-    assert re.search(r"(?i)manual\s+dedup", text), f"{skill_id} must carry manual dedup instructions"
-    assert re.search(r"#\s*724\b", text), f"{skill_id} must note manual dedup is pending #724"
+    assert re.search(r"(?i)reinforce", text), f"{skill_id} must carry reinforce-in-place instructions"
+    assert re.search(r"#\s*724\b", text), f"{skill_id} must reference fingerprint reinforcement (#724)"
+    assert not re.search(r"(?i)pending\s+#\s*724", text), f"{skill_id} must not still mark #724 as pending"
 
 
 def test_session_sweep_is_not_built_or_registered(tmp_path, capsys):

@@ -1,6 +1,6 @@
 ---
 name: card-refresh
-description: Use when refreshing stale Brigade memory cards from the care refresh queue - category allowlist, grounded edits that cite on-disk sources of truth, archive-only retention, and manual dedup until #724. Never delete, remove, or prune.
+description: Use when refreshing stale Brigade memory cards from the care refresh queue - category allowlist, grounded edits that cite on-disk sources of truth, archive-only retention, and reinforce-in-place instead of near-duplicate siblings (#724). Never delete, remove, or prune.
 allowed-tools: Read, Grep, Bash(brigade memory care status:*), Bash(brigade memory care plan-fixes:*), Bash(brigade memory care closeout:*)
 compatibility: Brigade-wired workspaces with memory care scan output; operator-scheduled headless harnesses.
 ---
@@ -39,13 +39,13 @@ Refreshes must be grounded. Edit or refresh a card only when you can cite existi
 - Never prune the refresh queue or card trees by hand.
 - Archive only when an operator-approved archive path already exists; otherwise leave stale-but-unverified cards for human review and use `care closeout` for items you actually refreshed.
 
-## Manual dedup (pending #724)
+## Reinforce over duplicate (#724)
 
-Until #724 lands fingerprint-based reinforcement, perform manual dedup before writing a refreshed or sibling card:
+Ingest already reinforces exact fingerprint matches and proposes near-match / opposite-polarity review. When refreshing:
 
 1. Search for near-duplicate cards covering the same fact.
 2. Reinforce the strongest existing card (cite the on-disk sources) instead of splitting.
-3. If duplicates are ambiguous, stop and mark needs-human rather than merging blindly.
+3. If duplicates are ambiguous or look like opposite-polarity contradictions, stop and mark needs-human rather than merging blindly.
 
 ## Process
 

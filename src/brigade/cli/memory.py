@@ -36,13 +36,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_memory_care_plan_fixes.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_care_backfill = memory_care_sub.add_parser(
-        "backfill", help="Backfill missing reviewed/freshness card metadata from git history (dry-run by default)."
+        "backfill",
+        help=("Backfill missing reviewed/freshness/fingerprint card metadata (dry-run by default)."),
     )
     p_memory_care_backfill.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
     )
     p_memory_care_backfill.add_argument(
-        "--apply", action="store_true", help="Write the derived metadata into card frontmatter and record a receipt."
+        "--apply",
+        action="store_true",
+        help="Write the derived metadata into card frontmatter and record a receipt.",
     )
     p_memory_care_backfill.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_care_status = memory_care_sub.add_parser("status", help="Show local memory-care status.")

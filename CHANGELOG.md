@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/test_error_refusal_copy.py`.
 
 ### Added
+- Ingest reinforces an existing memory card when a `create-card` handoff
+  repeats a known fact (#724): content fingerprints (plus ~0.9 token Jaccard
+  near-match) avoid near-duplicate files. Exact matches bump `last_reviewed`,
+  increment `reinforcements`, and append an evidence pointer; near-matches are
+  proposed to the review inbox (never auto-merged); opposite-polarity
+  near-matches route as contradiction candidates. `memory care backfill`
+  also stamps missing `fingerprint` values (dry-run by default).
 - Parallel-safe ready partition (#778): `brigade work ready --parallel-safe`
   wraps the native ready set with a query-time greedy partition into dispatch
   waves by footprint intersection (exact file overlap first; one-hop

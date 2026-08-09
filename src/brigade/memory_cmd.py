@@ -380,6 +380,8 @@ def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
         if not root.is_dir():
             continue
         for path in root.rglob("*.md"):
+            if path.is_symlink():
+                continue
             if not path.is_file():
                 continue
             rel = str(path.relative_to(target))
@@ -1295,25 +1297,34 @@ def _git_last_commit_date(target: Path, rel: str) -> date | None:
 
 
 def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[dict[str, Any]], int]:
-    """Cards with frontmatter but missing review/freshness metadata, with derived values.
+    """Cards with frontmatter but missing review/freshness/fingerprint metadata.
 
     The derived `last_reviewed` is the card file's last git commit date (the
     last time anyone touched the fact), falling back to file mtime outside git.
     `fresh_until` is the derived or existing reviewed date plus the configured
-    stale window. Existing values are never proposed for change.
+    stale window. `fingerprint` is a stable hash of normalized card content.
+    Existing values are never proposed for change.
     """
+    from .card_fingerprint import content_fingerprint
+
     candidates: list[dict[str, Any]] = []
     skipped_no_frontmatter = 0
+    from .card_fingerprint import read_text_nofollow
+
     for path in _iter_cards(target, config):
         rel = str(path.relative_to(target))
-        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = read_text_nofollow(path)
+        except OSError:
+            continue
         meta, has_frontmatter = _parse_frontmatter(text)
         if not has_frontmatter:
             skipped_no_frontmatter += 1
             continue
         reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
         expiry = _parse_date(_frontmatter_value(meta, "fresh_until", "expires_at", "expires"))
-        if reviewed is not None and expiry is not None:
+        has_fingerprint = bool(str(meta.get("fingerprint") or "").strip())
+        if reviewed is not None and expiry is not None and has_fingerprint:
             continue
         derived = _git_last_commit_date(target, rel)
         source = "git-history"
@@ -1336,23 +1347,33 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
         if expiry is None:
             candidate["fresh_until"] = (base_reviewed + _td(days=config.stale_after_days)).isoformat()
             candidate["fields"].append("fresh_until")
+        if not has_fingerprint:
+            candidate["fingerprint"] = content_fingerprint(text)
+            candidate["fields"].append("fingerprint")
+            if reviewed is not None and expiry is not None:
+                candidate["source"] = "content-hash"
         candidates.append(candidate)
     return candidates, skipped_no_frontmatter
 
 
 def _backfill_write(target: Path, candidate: dict[str, Any]) -> None:
+    from .card_fingerprint import read_text_nofollow, write_text_nofollow_atomic
+
     path = target / candidate["file"]
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text = read_text_nofollow(path)
     lines = text.split("\n")
     # _parse_frontmatter guarantees a leading `---` block; insert the new keys
     # just before its closing fence, leaving every other byte untouched.
     closing = next(i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---")
     additions = [f"{field}: {candidate[field]}" for field in candidate["fields"]]
-    path.write_text("\n".join(lines[:closing] + additions + lines[closing:]), encoding="utf-8")
+    write_text_nofollow_atomic(
+        path,
+        "\n".join(lines[:closing] + additions + lines[closing:]),
+    )
 
 
 def backfill(*, target: Path, apply: bool = False, json_output: bool = False) -> int:
-    """Plan or apply safe metadata backfill for cards missing review/freshness dates."""
+    """Plan or apply safe metadata backfill for cards missing review/freshness/fingerprint."""
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
