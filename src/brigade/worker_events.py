@@ -51,6 +51,7 @@ CONSUMER_POLICIES = frozenset({POLICY_SCRUBBED_ONLY, POLICY_LOCAL_ONLY})
 MAX_DIAGNOSTIC_LEN = 240
 MAX_LINE_BYTES = 1_048_576
 MAX_PUBLIC_STRING_LEN = 256
+MAX_PUBLIC_LIST_DEPTH = 64
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _PUBLIC_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _PUBLIC_METHOD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:#-]*$")
@@ -363,8 +364,10 @@ def _validate_public_string(value: str, *, field: str, kind: str = "identifier")
             raise WorkerEventError(_bound(f"{field} retains {label}"), category="secret")
 
 
-def _validate_scrubbed_scalar_public(path: str, value: Any) -> list[str]:
+def _validate_scrubbed_scalar_public(path: str, value: Any, *, depth: int = 0) -> list[str]:
     errors: list[str] = []
+    if depth > MAX_PUBLIC_LIST_DEPTH:
+        return [_bound(f"{path} public list nesting exceeds {MAX_PUBLIC_LIST_DEPTH}")]
     if isinstance(value, str):
         try:
             kind = "method" if path.endswith(".method") or path == "method" else "identifier"
@@ -377,7 +380,7 @@ def _validate_scrubbed_scalar_public(path: str, value: Any) -> list[str]:
         return errors
     elif isinstance(value, list):
         for index, nested in enumerate(value):
-            errors.extend(_validate_scrubbed_scalar_public(f"{path}[{index}]", nested))
+            errors.extend(_validate_scrubbed_scalar_public(f"{path}[{index}]", nested, depth=depth + 1))
     else:
         errors.append(_bound(f"{path} has unsupported type {type(value).__name__}"))
     return errors
@@ -548,7 +551,12 @@ def _param_matrix_for_method(method: str) -> dict[str, str]:
     raise WorkerEventError(_bound(f"unknown event method {method!r}"), category="unknown-method")
 
 
-def _scrub_scalar_public(key: str, value: Any) -> Any:
+def _scrub_scalar_public(key: str, value: Any, *, depth: int = 0) -> Any:
+    if depth > MAX_PUBLIC_LIST_DEPTH:
+        raise WorkerEventError(
+            _bound(f"public field {key!r} list nesting exceeds {MAX_PUBLIC_LIST_DEPTH}"),
+            category="bound",
+        )
     if isinstance(value, str):
         _validate_public_string(value, field=key)
         return value
@@ -561,7 +569,7 @@ def _scrub_scalar_public(key: str, value: Any) -> Any:
         # JSON-RPC sometimes carries booleans (e.g. success). Allow only for known public bools.
         return value
     if isinstance(value, list):
-        return [_scrub_scalar_public(f"{key}[]", item) for item in value]
+        return [_scrub_scalar_public(f"{key}[]", item, depth=depth + 1) for item in value]
     raise WorkerEventError(
         _bound(f"public field {key!r} has unsupported type {type(value).__name__}"),
         category="type",
@@ -1041,6 +1049,9 @@ def validate_scrubbed_event(event: Mapping[str, Any]) -> list[str]:
     digest = event.get("source_digest")
     if not (isinstance(digest, str) and _HEX64.fullmatch(digest)):
         errors.append("source_digest must be a 64-char lowercase hex string")
+    jsonrpc = event.get("jsonrpc")
+    if jsonrpc is not None and jsonrpc != "2.0":
+        errors.append(_bound(f"jsonrpc must be '2.0'"))
     params = event.get("params")
     if not isinstance(params, Mapping):
         errors.append("params must be an object")

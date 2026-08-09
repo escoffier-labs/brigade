@@ -191,6 +191,13 @@ def test_reject_raw_worker_stream_evidence_unknown_policy(tmp_path: Path):
         run_audit.reject_raw_worker_stream_evidence(tmp_path, policy="export-everything")
 
 
+def _nested_public_list(depth: int) -> object:
+    value: object = "accept"
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
 def _write_fake_scrubbed_document(tmp_path: Path, *, mutate) -> Path:
     raw_path = tmp_path / "coder.jsonl"
     raw_path.write_text(json.dumps(_case("turn_started_public")["raw"]) + "\n", encoding="utf-8")
@@ -275,6 +282,44 @@ def test_arbitrary_auto_declined_method_prefix_fails_closed():
     valid = worker_events.scrub_event(case["raw"])
     assert valid["method"] == "item/commandExecution/requestApproval#auto-declined"
     assert not worker_events.validate_scrubbed_event(valid)
+
+
+def test_deeply_nested_public_list_in_scrubbed_stream_is_bounded(tmp_path: Path):
+    raw_path = tmp_path / "coder.jsonl"
+    raw_path.write_text(json.dumps(_case("auto_declined_with_secrets")["raw"]) + "\n", encoding="utf-8")
+    doc = worker_events.scrub_stream_file(raw_path)
+    doc["events"][0]["params"]["availableDecisions"] = _nested_public_list(5000)
+    path = tmp_path / "coder.scrubbed.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+
+    info = worker_events.inspect_stream_file(path)
+    assert info.status == worker_events.STATUS_UNCLASSIFIED
+    assert info.artifact_class == worker_events.UNCLASSIFIED_ARTIFACT_CLASS
+    assert info.diagnostic is not None
+    assert len(info.diagnostic) <= worker_events.MAX_DIAGNOSTIC_LEN
+
+    with pytest.raises(worker_events.WorkerEventError) as excinfo:
+        worker_events.load_stream_for_consumer(path, consumer="run_audit")
+    assert len(str(excinfo.value)) <= worker_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_scrubbed_event_with_invalid_jsonrpc_is_not_admissible(tmp_path: Path):
+    scrubbed = json.loads(json.dumps(_case("turn_started_public")["scrubbed"]))
+    scrubbed["jsonrpc"] = "1.0"
+
+    errors = worker_events.validate_scrubbed_event(scrubbed)
+    assert errors
+    assert "jsonrpc" in errors[0].lower()
+    assert len(errors[0]) <= worker_events.MAX_DIAGNOSTIC_LEN
+
+    path = tmp_path / "bad-jsonrpc.scrubbed.json"
+    path.write_text(json.dumps(scrubbed), encoding="utf-8")
+    info = worker_events.inspect_stream_file(path)
+    assert info.status == worker_events.STATUS_UNCLASSIFIED
+    assert info.diagnostic is not None
+
+    with pytest.raises(worker_events.WorkerEventError):
+        worker_events.load_stream_for_consumer(path, consumer="run_audit")
 
 
 def test_forged_scrubbed_event_unknown_params_field_is_rejected(tmp_path: Path):
