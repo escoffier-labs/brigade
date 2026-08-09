@@ -232,6 +232,7 @@ _RUN_OWNED_FAILURE_KINDS = frozenset(
         "interrupted",
         "invalid-patch",
         "invalid-plan",
+        "isolation-breach",
         "keyboard-interrupt",
         "orchestrator-error",
         "planner-failure",
