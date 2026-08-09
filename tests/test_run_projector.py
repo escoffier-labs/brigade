@@ -116,6 +116,7 @@ def _full_base_snapshot() -> dict:
         "brief_budget": 100,
         "route": "route-id",
         "skill_route_policy": "auto",
+        "seat_routing": [{"requested_seat": "coder", "outcome": "skip"}],
         "pre_run_snapshot": {"files": []},
         "git": {"branch": "main"},
         "code_graph_delta": {"changed": []},
@@ -523,7 +524,7 @@ def test_dataclasses_replace_mutation_of_typed_run_event_raises_event_chain_erro
 
 def test_full_field_fixture_preserves_deep_equality_and_copies_nested_values():
     base = _full_base_snapshot()
-    assert len(PRESERVED_FIELDS) == 46
+    assert len(PRESERVED_FIELDS) == 47
     assert DERIVED_FIELDS == {
         "status",
         "projector_version",

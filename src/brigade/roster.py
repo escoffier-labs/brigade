@@ -60,6 +60,9 @@ class Roster:
     scheduler: str | None = None
     codex_transport: str = "exec"
     resolution: RosterResolution | None = None
+    # Run-local admission evidence, carried on the effective roster so that
+    # subsequent run.json rewrites cannot discard a routing decision.
+    seat_routing: tuple[dict[str, object], ...] = ()
 
     def find_role(self, role: str) -> Agent | None:
         return next((a for a in self.agents.values() if a.role == role), None)
