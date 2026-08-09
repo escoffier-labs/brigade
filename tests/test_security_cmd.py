@@ -216,6 +216,62 @@ def test_security_scan_secrets_false_positive_suppressions(tmp_path):
     assert not any("security_cmd" in f["path"] for f in secrets)
 
 
+def test_security_scan_secret_title_rank_order_is_pinned(tmp_path):
+    """Overlapping secret detectors on one line pick the highest-ranked title."""
+    titles_low_to_high = [
+        "Possible sensitive secret material",
+        "Possible hardcoded credential",
+        "Plaintext password",
+        "Session chat contains exposed credential",
+    ]
+
+    assert [security_cmd._secrets_title_rank(title) for title in titles_low_to_high] == [10, 20, 30, 40]
+    assert security_cmd._secrets_title_rank("Unknown secret finding") == 0
+
+    (tmp_path / "co_firing.txt").write_text(
+        'password = "-----BEGIN RSA PRIVATE KEY-----MIIabcdefgh1234"\n'
+    )
+    co_firing = [
+        finding
+        for finding in security_cmd.scan_target(tmp_path)["findings"]
+        if finding["category"] == "secrets" and finding["path"] == "co_firing.txt"
+    ]
+    assert len(co_firing) == 1
+    assert co_firing[0]["title"] == "Plaintext password"
+    assert co_firing[0]["line"] == 1
+
+
+def test_security_scan_secret_fingerprints_are_pinned(tmp_path):
+    """Fingerprints pin suppression to matched content, not incidental scan output like line numbers."""
+    (tmp_path / "credentials.txt").write_text(
+        "\n".join(
+            [
+                'api_key = "sk-live-abcd1234efgh5678"',
+                "db_password = CorrectHorseBattery",
+                "AUTH_TOKEN=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+                "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c",
+                "",
+            ]
+        )
+    )
+    session_dir = tmp_path / ".codex" / "sessions"
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.jsonl").write_text("service_api_key=abcd1234abcd1234abcd1234\n")
+
+    findings = {
+        (finding["path"], finding["title"]): finding["fingerprint"]
+        for finding in security_cmd.scan_target(tmp_path)["findings"]
+        if finding["category"] == "secrets"
+    }
+
+    assert findings == {
+        ("credentials.txt", "Possible hardcoded credential"): "983b44f70e2be9c2",
+        ("credentials.txt", "Plaintext password"): "afeee40a319e68a3",
+        ("credentials.txt", "Possible sensitive secret material"): "27c0481c02000a1c",
+        (".codex/sessions/session.jsonl", "Session chat contains exposed credential"): "56a7fa4efb614bf7",
+    }
+
+
 def test_security_policy_presets_and_template_inclusion(tmp_path, capsys):
     template_dir = tmp_path / "src" / "brigade" / "templates" / "workspace"
     template_dir.mkdir(parents=True)
