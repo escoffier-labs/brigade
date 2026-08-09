@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `brigade center serve` gains work-graph views over existing `--json` contracts:
+  an SVG ready/blocked dependency graph, parallel-safe dispatch-wave swim-lanes
+  (seam-ready for `work ready --parallel-safe` when #803 lands), and per-task
+  claim state with three-phase footprint stale indicators. Read-only; no new
+  write surfaces.
+
 ## [0.26.1] - 2026-08-09
 
 ### Changed

@@ -82,6 +82,15 @@ def test_get_view_status_returns_200(dashboard_server):
     assert _status_code(response) == "200"
 
 
+@pytest.mark.parametrize("view_name", [module.NAME for module in all_views()])
+def test_get_each_registered_view_returns_200(dashboard_server, view_name):
+    host, port = dashboard_server.server_address
+    response = _raw_request(dashboard_server, f"{host}:{port}", path=f"/view/{view_name}")
+    assert _status_code(response) == "200"
+    _, body = _headers_and_body(response)
+    assert "failed to render" not in body
+
+
 def test_get_unknown_view_returns_404(dashboard_server):
     host, port = dashboard_server.server_address
     response = _raw_request(dashboard_server, f"{host}:{port}", path="/view/nope")
