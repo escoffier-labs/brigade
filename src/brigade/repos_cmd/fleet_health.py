@@ -354,7 +354,7 @@ def actions_build(
     review_status = _report_review_status(report)
     if review_status not in {"reviewed", "deferred"} and not allow_unreviewed:
         print(
-            "error: source fleet report must be closed out as reviewed or deferred, or pass --allow-unreviewed",
+            "error: source fleet report must be closed out as reviewed or deferred before building actions",
             file=sys.stderr,
         )
         return 2

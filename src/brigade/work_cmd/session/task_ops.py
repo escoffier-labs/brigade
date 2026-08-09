@@ -411,7 +411,7 @@ def task_done(*, target: Path, task_id: str, force: bool = False, json_output: b
         open_children = edges_mod.open_children_for_parent(ledger, resolved_id)
         if open_children and not force:
             payload = {
-                "error": "parent has open children; pass --force to close anyway",
+                "error": "parent has open children",
                 "reason": edges_mod.REASON_OPEN_CHILDREN,
                 "task_id": resolved_id,
                 "open_children": open_children,

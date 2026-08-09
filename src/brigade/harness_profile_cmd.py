@@ -921,7 +921,7 @@ def _mcp_plan(
             "path": str(path),
             "status": "conflict",
             "action": "preserve",
-            "detail": "stdio MCP servers require --allow-global-stdio",
+            "detail": "stdio MCP servers in user-wide config need explicit operator acknowledgement",
         }
         return {
             "items": [item],

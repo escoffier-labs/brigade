@@ -344,7 +344,7 @@ def install_selection(
         for entry in files:
             dst = target / entry["dst"]
             if dst.exists():
-                print(f"  file  {dst} (exists; kept unless --force)")
+                print(f"  file  {dst} (exists; kept)")
             else:
                 print(f"  file  {dst}")
         return 0
@@ -447,7 +447,8 @@ def install_selection(
     print(f"brigade: memory owner -> {owner_label}")
     if kept_files:
         print(
-            f"brigade: kept {len(kept_files)} existing file(s); run with --force to overwrite "
+            f"brigade: kept {len(kept_files)} existing file(s); re-run init only if you intend "
+            "to replace them with current templates "
             "(e.g. to refresh AGENTS.md / CLAUDE.md with the latest directives)."
         )
     if wired_skills:

@@ -490,7 +490,8 @@ def test_user_scope_stdio_sync_blocks_non_interactively(tmp_path, monkeypatch, c
 
     assert rc == 2
     assert not (home / ".cursor" / "mcp.json").exists()
-    assert any("--allow-global-stdio" in e for e in payload["errors"])
+    assert any("user-scoped sync would write stdio MCP servers" in e for e in payload["errors"])
+    assert all("--allow-global-stdio" not in e for e in payload["errors"])
     assert payload["stdio_exposures"][0]["stdio_writes"] == 1
     assert payload["stdio_exposures"][0]["harness"] == "cursor-user"
 
@@ -620,7 +621,8 @@ def test_operator_sync_mcp_non_tty_requires_allow_flag(tmp_path, monkeypatch, ca
     payload = json.loads(capsys.readouterr().out)
 
     assert rc == 1
-    assert any("--allow-global-stdio" in e for e in payload["sync"]["errors"])
+    assert any("user-scoped sync would write stdio MCP servers" in e for e in payload["sync"]["errors"])
+    assert all("--allow-global-stdio" not in e for e in payload["sync"]["errors"])
     assert not (home / ".gemini/config/mcp_config.json").exists()
 
 

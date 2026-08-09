@@ -60,7 +60,8 @@ def test_require_clean_worktree_blocks_dirty_repo(tmp_path):
         runguard.require_clean_worktree(repo)
 
     assert exc.value.paths == ["tracked.txt"]
-    assert "--allow-dirty" in str(exc.value)
+    assert "Commit, stash, or clean the tree" in str(exc.value)
+    assert "--allow-dirty" not in str(exc.value)
 
 
 def test_run_lock_rejects_lock_held_by_live_process(tmp_path):

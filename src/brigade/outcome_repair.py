@@ -414,7 +414,7 @@ def repair_ledger(
 ) -> int:
     """Quarantine a broken completed ledger, keep the valid prefix, append a repair record."""
     if operator_confirmed is not True:
-        print("error: operator confirmation is required (--operator-confirm)", file=sys.stderr)
+        print("error: operator confirmation is required; see `brigade outcome repair --help`", file=sys.stderr)
         return 2
     target = target.expanduser().resolve()
     path = outcome_cmd._records_path(target)

@@ -277,7 +277,7 @@ def _plan_for_harness(
                         "conflict",
                         canon_fp,
                         desired_fp,
-                        detail="server was edited outside Brigade; --force to overwrite",
+                        detail="server was edited outside Brigade; leaving the live config unchanged",
                     )
                 )
         elif live_fp != desired_fp or record.get("canonical_fingerprint") != canon_fp:
@@ -409,7 +409,7 @@ def _stdio_exposure_lines(exposures: list[dict[str, Any]]) -> list[str]:
         )
     lines.append(
         "  prefer project-scoped config or a shared HTTP/SSE transport where the client supports it; "
-        "pass --allow-global-stdio to acknowledge"
+        "user-wide stdio writes need explicit operator acknowledgement after review"
     )
     return lines
 
@@ -481,9 +481,14 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True, js
     created = not path.exists()
     if path.exists() and not force:
         return _emit(
-            {"canonical_path": str(path), "created": False, "error": "already exists (use --force)"},
+            {
+                "canonical_path": str(path),
+                "created": False,
+                "error": "already exists; leaving it unchanged",
+                "reason": "already_exists",
+            },
             json_output,
-            [f"error: {path} already exists (use --force)"],
+            [f"error: {path} already exists; leaving it unchanged"],
             3,
         )
     localio.write_json(path, {"version": 1, "servers": {}})
@@ -778,8 +783,8 @@ def sync(
                 gated = {e["harness"] for e in exposures}
                 gate_error = (
                     "user-scoped sync would write stdio MCP servers into a user-wide client config; "
-                    "re-run with --allow-global-stdio to acknowledge, or use project scope / an "
-                    "HTTP-SSE transport"
+                    "use project scope or an HTTP/SSE transport, or acknowledge the user-scope "
+                    "stdio risk only after operator review"
                 )
             else:
                 for line in warning_lines:
