@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configurable via `run_lock_wait_seconds` in `.brigade/config.json`; use
   `--wait=0` to fail fast when that default is set.
 
+### Added
+- `docs/scheduled-care.md`: copy-paste cron, systemd timer, and GitHub Actions recipes for the memory-care loop (daily care, ingest sweep, weekly outcome ratchet, daily observability, nightly ops). (#764)
+
 ## [0.26.0] - 2026-08-05
 
 ### Added
