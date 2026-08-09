@@ -18,7 +18,12 @@ from . import mcp_server, runbook_cmd, toml_compat as tomllib, work_cmd
 from .budgets import MEMORY_CARD_BUDGET_BYTES
 from .install import apply_gitignore
 from .selection import Selection
-from .localio import write_json as _write_json, utc_now_iso_z as _utc_iso
+from .localio import (
+    read_jsonl_dicts as _read_jsonl_dicts,
+    write_json as _write_json,
+    write_text_atomic as _write_text_atomic,
+    utc_now_iso_z as _utc_iso,
+)
 from .memory_doctor.safety import atomic_write_text
 from .templates import template_root
 
@@ -1183,6 +1188,7 @@ def health(target: Path) -> dict[str, Any]:
         },
         "archive_candidates": archive_candidates,
         "latest_closeout": closeout,
+        "search_recall": search_recall_status(target),
     }
 
 
@@ -1264,6 +1270,14 @@ def status(*, target: Path, json_output: bool = False) -> int:
             f"last_reviewed={candidate.get('last_reviewed')} "
             f"evidence={','.join(str(item) for item in pointers) if pointers else '-'}"
         )
+    recall_value = payload.get("search_recall")
+    recall = recall_value if isinstance(recall_value, dict) else {}
+    print(
+        "search_recall: "
+        f"searches={recall.get('searches', 0)} "
+        f"followup_rate={recall.get('followup_rate', 0.0)} "
+        f"(second-class; informs, never gates)"
+    )
     return 0 if payload["valid"] else 1
 
 
@@ -1515,6 +1529,164 @@ def closeout(*, target: Path, reason: str | None = None, defer: bool = False, js
 
 # --- memory search (deterministic keyword search over cards) ---
 
+# Label-free recall signal (#723): local search log + follow-up rate.
+# Path is host-local under .brigade/; queries and top-K card ids only (no body).
+SEARCH_LOG_REL = ".brigade/memory/search-log.jsonl"
+# Follow-up window. Too short and legitimate rephrases are missed; too long and
+# unrelated successive searches inflate the miss rate. 45s sits in the 30–60s
+# band from the issue.
+SEARCH_FOLLOWUP_WINDOW_S = 45
+# Top-K card ids logged and compared for disjointness. Aligned with the
+# retrieval eval harness DEFAULT_K=5 so failed queries in this log are directly
+# usable as fixture material for evals/memory-retrieval/.
+SEARCH_LOG_TOP_K = 5
+# Cap the rolling log; drop oldest beyond N. Personal corpora stay small.
+SEARCH_LOG_MAX_ENTRIES = 500
+# Dashboard list-all hack uses query ":" (YAML key separators hit everything).
+# Logging that would drown the recall signal.
+_SEARCH_LOG_SKIP_QUERIES = frozenset({":"})
+
+
+def _normalize_search_query(query: str) -> str:
+    return " ".join(str(query or "").lower().split())
+
+
+def _card_id_from_match_path(rel_path: str) -> str:
+    """Stem of the card path; same mapping the retrieval eval harness uses."""
+    return Path(str(rel_path)).stem
+
+
+def _search_log_path(target: Path) -> Path:
+    return target.expanduser().resolve() / SEARCH_LOG_REL
+
+
+def _parse_search_log_ts(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _search_log_card_ids(matches: list[dict[str, Any]], *, top_k: int = SEARCH_LOG_TOP_K) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for match in matches[:top_k]:
+        if not isinstance(match, dict):
+            continue
+        card_id = _card_id_from_match_path(str(match.get("path") or ""))
+        if not card_id or card_id in seen:
+            continue
+        seen.add(card_id)
+        ids.append(card_id)
+    return ids
+
+
+def _should_log_search(query: str) -> bool:
+    normalized = _normalize_search_query(query)
+    return bool(normalized) and normalized not in _SEARCH_LOG_SKIP_QUERIES
+
+
+def followup_rate_from_entries(
+    entries: list[dict[str, Any]],
+    *,
+    window_s: int = SEARCH_FOLLOWUP_WINDOW_S,
+) -> dict[str, Any]:
+    """Compute the rolling follow-up (miss) rate from search-log entries.
+
+    A follow-up within ``window_s`` whose top-K card ids share nothing with the
+    prior search counts as a miss. Overlap, or no follow-up within the window,
+    counts the prior search as satisfied. Outside-window successors start a
+    fresh event. Second-class evidence: informs retrieval investment, never
+    gates doctor/valid.
+    """
+    searches = 0
+    misses = 0
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        ts = _parse_search_log_ts(entry.get("ts"))
+        if ts is None:
+            continue
+        card_ids_value = entry.get("card_ids")
+        if not isinstance(card_ids_value, list):
+            continue
+        searches += 1
+        followup: dict[str, Any] | None = None
+        if index + 1 < len(entries):
+            nxt = entries[index + 1]
+            if isinstance(nxt, dict):
+                next_ts = _parse_search_log_ts(nxt.get("ts"))
+                if next_ts is not None and (next_ts - ts).total_seconds() <= window_s:
+                    followup = nxt
+        if followup is None:
+            continue
+        next_ids_value = followup.get("card_ids")
+        if not isinstance(next_ids_value, list):
+            continue
+        prior_ids = {str(item) for item in card_ids_value if item}
+        next_ids = {str(item) for item in next_ids_value if item}
+        if prior_ids.isdisjoint(next_ids):
+            misses += 1
+    rate = round(misses / searches, 4) if searches else 0.0
+    return {
+        "searches": searches,
+        "followups": misses,
+        "followup_rate": rate,
+        "window_s": window_s,
+        "top_k": SEARCH_LOG_TOP_K,
+    }
+
+
+def search_recall_status(target: Path) -> dict[str, Any]:
+    """Read the local search log and return the rolling follow-up rate payload."""
+    path = _search_log_path(target)
+    try:
+        entries = _read_jsonl_dicts(path)
+    except OSError:
+        entries = []
+    stats = followup_rate_from_entries(entries)
+    # Do not emit log_path here: center report build harvests path-like strings
+    # from health payloads as receipt references, and a missing (or non-receipt)
+    # search log would false-alarm as operator_report_missing_receipt.
+    stats["evidence_class"] = "second_class"
+    return stats
+
+
+def _record_search_log(
+    target: Path,
+    *,
+    query: str,
+    matches: list[dict[str, Any]],
+    ts: str | None = None,
+) -> None:
+    """Append one search event; fail-open so logging never breaks search."""
+    if not _should_log_search(query):
+        return
+    path = _search_log_path(target)
+    entry = {
+        "ts": ts or _utc_iso(),
+        "query": _normalize_search_query(query),
+        "card_ids": _search_log_card_ids(matches if isinstance(matches, list) else []),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = _read_jsonl_dicts(path)
+        existing.append(entry)
+        if len(existing) > SEARCH_LOG_MAX_ENTRIES:
+            existing = existing[-SEARCH_LOG_MAX_ENTRIES:]
+        rendered = "".join(json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n" for item in existing)
+        _write_text_atomic(path, rendered)
+    except OSError:
+        return
+
 
 def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     try:
@@ -1576,6 +1748,9 @@ def search(*, target: Path, query: str, limit: int = 20, json_output: bool = Fal
     except ValueError as exc:
         print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
         return 2
+    # Side-effect only on the CLI path so search_cards_payload (and the
+    # retrieval eval harness that calls it) stay pure.
+    _record_search_log(target, query=query, matches=payload.get("matches") or [])
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0

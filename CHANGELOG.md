@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (seam-ready for `work ready --parallel-safe` when #803 lands), and per-task
   claim state with three-phase footprint stale indicators. Read-only; no new
   write surfaces.
+- Label-free memory search recall signal (#723): `brigade memory search`
+  appends a size-capped local log at `.brigade/memory/search-log.jsonl`
+  (timestamp, normalized query, top-K card ids only). A follow-up within the
+  disjointness window whose top-K shares nothing with the prior search counts
+  as a miss; `memory care status` reports the rolling `search_recall`
+  (`searches`, `followup_rate`) as second-class evidence that never gates
+  doctor/`valid`. Failed queries become fixture material for the #722
+  retrieval eval harness.
 
 ## [0.26.1] - 2026-08-09
 
