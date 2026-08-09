@@ -442,6 +442,144 @@ def test_posttooluse_ignores_concurrent_session_write_during_read_only_bash(tmp_
     )
 
 
+def test_posttooluse_ignores_interleaved_concurrent_write_with_stale_fingerprint(tmp_path: Path):
+    """Issue #704: foreign writes must not re-arm closeout when the writer's
+    recorded repo_fingerprint lags the live tree (second write on disk before
+    that writer's next PostToolUse). Exact fingerprint equality is the escape
+    the #395/#380 fix missed.
+    """
+    target = _wired_claude(tmp_path)
+    reader_session = "reader-stale-fp"
+    writer_session = "writer-stale-fp"
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=reader_session,
+        tool_name="Bash",
+        tool_input={"command": f"{sys.executable} -c \"print('noop')\""},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+
+    first = target / "first.py"
+    first.write_text("first\n")
+    assert (
+        runtime.handle_payload(
+            "PostToolUse",
+            _payload(
+                target,
+                "PostToolUse",
+                session_id=writer_session,
+                tool_name="Write",
+                tool_input={"file_path": str(first)},
+            ),
+        )
+        is None
+    )
+    writer_state = runtime.read_session_state(target, writer_session)
+    assert writer_state["write_observed"] is True
+    recorded_fp = writer_state["repo_fingerprint"]
+
+    # Second concurrent write lands before the writer records the new fingerprint.
+    second = target / "second.py"
+    second.write_text("second\n")
+    live_fp = runtime.repo_worktree_fingerprint(target)
+    assert live_fp is not None
+    assert recorded_fp != live_fp
+
+    assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
+    reader_state = runtime.read_session_state(target, reader_session)
+    assert reader_state["write_observed"] is False
+    assert "last_write_at" not in reader_state
+    assert "pending_bash_fingerprint" not in reader_state
+    assert (
+        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader_session, stop_hook_active=False))
+        is None
+    )
+
+
+def test_stop_keeps_prior_receipt_when_interleaved_foreign_write_lags_fingerprint(tmp_path: Path, monkeypatch):
+    """Issue #704 receipt treadmill: a session that already verified must not
+    have last_write_at raised by a concurrent session whose recorded fingerprint
+    is no longer current.
+    """
+    target = _wired_claude(tmp_path)
+    reader_session = "verified-reader"
+    writer_session = "active-writer"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=reader_session))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader_session,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "own.py")},
+        ),
+    )
+    state = runtime.read_session_state(target, reader_session)
+    write_at = state["last_verification_write_at"]
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": write_at,
+                "harness_session": {
+                    "harness": "claude",
+                    "fingerprint": state["session_fingerprint"],
+                },
+            }
+        )
+        + "\n"
+    )
+
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=reader_session,
+        tool_name="Bash",
+        tool_input={"command": f"{sys.executable} -c \"print('noop')\""},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+
+    first = target / "foreign-a.py"
+    first.write_text("foreign-a\n")
+    assert (
+        runtime.handle_payload(
+            "PostToolUse",
+            _payload(
+                target,
+                "PostToolUse",
+                session_id=writer_session,
+                tool_name="Write",
+                tool_input={"file_path": str(first)},
+            ),
+        )
+        is None
+    )
+    (target / "foreign-b.py").write_text("foreign-b\n")
+    assert (
+        runtime.repo_worktree_fingerprint(target)
+        != runtime.read_session_state(target, writer_session)["repo_fingerprint"]
+    )
+
+    assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
+    updated = runtime.read_session_state(target, reader_session)
+    assert updated["last_verification_write_at"] == write_at
+    assert updated["last_write_at"] == write_at
+
+    handoff = target / ".claude" / "memory-handoffs" / "handoff.md"
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text("durable finding\n")
+    assert (
+        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader_session, stop_hook_active=False))
+        is None
+    )
+
+
 def test_posttooluse_snapshot_fails_closed_when_state_cannot_be_inspected(tmp_path: Path, monkeypatch):
     target = _wired_claude(tmp_path)
     session_id = "snapshot-unavailable"
