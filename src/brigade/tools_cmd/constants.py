@@ -52,6 +52,8 @@ PARITY_ISSUE_TYPES = {
     "unmanaged_projection",
 }
 APPROVAL_MODES = ("never", "on-request", "always")
+# Ordered least → most privileged for CandidateSetGate (#504).
+RISK_CLASSES = ("read", "local-write", "network", "privileged")
 SCHEMA_TYPES = ("object", "array", "string", "number", "integer", "boolean", "null")
 UNSAFE_FIELD_PATTERN = re.compile(r"(password|secret|token|credential|api[_-]?key)", re.IGNORECASE)
 HIGH_RISK_COMMAND_PATTERNS = (

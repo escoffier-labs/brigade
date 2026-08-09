@@ -438,7 +438,9 @@ def build_plan_prompt(
         "You are the Brigade aboyeur. Split the user's task across the available workers.\n"
         "Return exactly one JSON object, with no prose outside JSON:\n"
         '{"assignments":[{"stage":1,"worker":"<worker-name>","task":"<specific sub-task>",'
-        '"covers":["<route-stage>"],"selected_skill_ids":["<artifact-id>"]}]}\n'
+        '"covers":["<route-stage>"],"selected_skill_ids":["<artifact-id>"],'
+        '"domain":"<tool-domain>","capabilities":["<capability>"],'
+        '"max_risk_class":"read|local-write|network|privileged"}]}\n'
         f"{note}\n"
         f"User task:\n{task}\n\n"
         f"Available workers, excluding you:\n{worker_lines}\n"
@@ -452,6 +454,9 @@ def build_plan_prompt(
         f"{capability_rule}"
         "- Use zero assignments only if no worker is useful."
         f"{route_rule}"
+        "\n- Optional tool gates: set domain, capabilities, and/or max_risk_class so "
+        "CandidateSetGate can narrow .brigade/tools.toml before the worker runs; "
+        "an empty admissible set fails the step for replanning."
         f"{no_write_rule}"
         f"{policy}"
     )
@@ -1130,29 +1135,62 @@ def parse_plan(
         ):
             raise ValueError("assignment.selected_skill_ids must be a list of non-empty strings when set")
         selected_skill_ids = tuple(dict.fromkeys(skill_id.strip() for skill_id in raw_selected))
+        raw_domain = item.get("domain")
+        domain: str | None = None
+        if raw_domain is not None:
+            if not isinstance(raw_domain, str) or not raw_domain.strip():
+                raise ValueError("assignment.domain must be a non-empty string when set")
+            domain = raw_domain.strip()
+        raw_capabilities = item.get("capabilities", [])
+        if raw_capabilities is None:
+            raw_capabilities = []
+        if not isinstance(raw_capabilities, list) or any(
+            not isinstance(capability, str) or not capability.strip() for capability in raw_capabilities
+        ):
+            raise ValueError("assignment.capabilities must be a list of non-empty strings when set")
+        capabilities = tuple(dict.fromkeys(capability.strip() for capability in raw_capabilities))
+        raw_max_risk = item.get("max_risk_class")
+        max_risk_class: str | None = None
+        if raw_max_risk is not None:
+            if not isinstance(raw_max_risk, str) or not raw_max_risk.strip():
+                raise ValueError("assignment.max_risk_class must be a non-empty string when set")
+            max_risk_class = raw_max_risk.strip()
+            from .tools_cmd.constants import RISK_CLASSES
+
+            if max_risk_class not in RISK_CLASSES:
+                raise ValueError("assignment.max_risk_class must be one of: " + ", ".join(RISK_CLASSES))
         assignment = Assignment(
             worker=worker,
             task=subtask.strip(),
             stage=stage,
             covers=covers,
             selected_skill_ids=selected_skill_ids,
+            domain=domain,
+            capabilities=capabilities,
+            max_risk_class=max_risk_class,
         )
         key = (assignment.stage, assignment.worker, assignment.task)
         if key not in seen:
             assignments.append(assignment)
             seen.add(key)
             stage_counts[assignment.stage] = stage_counts.get(assignment.stage, 0) + 1
-        elif covers:
+        elif covers or selected_skill_ids or domain or capabilities or max_risk_class:
             # Duplicates merge their covers instead of dropping them, so a plan
             # that tags the same assignment twice still counts as covering both.
             for index, existing in enumerate(assignments):
                 if (existing.stage, existing.worker, existing.task) == key:
                     merged = tuple(dict.fromkeys(existing.covers + covers))
                     merged_skills = tuple(dict.fromkeys(existing.selected_skill_ids + selected_skill_ids))
+                    merged_caps = tuple(dict.fromkeys(existing.capabilities + capabilities))
+                    merged_domain = domain or existing.domain
+                    merged_risk = max_risk_class or existing.max_risk_class
                     assignments[index] = replace(
                         existing,
                         covers=merged,
                         selected_skill_ids=merged_skills,
+                        domain=merged_domain,
+                        capabilities=merged_caps,
+                        max_risk_class=merged_risk,
                     )
                     break
 
@@ -1550,6 +1588,19 @@ def _worker_prompt(
         prior_context = f"\n\nEarlier-stage context:\n{_render_prior_results(prior_results)}"
     policy = f"\n\n{_read_only_rules()}" if read_only else ""
     scope_policy = worker_skill_policy_constraint(skill_policy, assignment)
+    tool_gate = ""
+    if assignment.admissible_tool_ids:
+        tool_ids = ", ".join(assignment.admissible_tool_ids)
+        tool_gate = (
+            "\n\nAdmissible portable tools for this step (CandidateSetGate): "
+            f"{tool_ids}. Use only these catalog tool ids; do not improvise tools "
+            "outside the admissible set."
+        )
+    elif assignment.domain or assignment.capabilities or assignment.max_risk_class:
+        tool_gate = (
+            "\n\nCandidateSetGate found no admissible portable tools for this step's "
+            "declared domain/capability/risk requirements. Do not invent tools."
+        )
     return_instruction = (
         "Return a concise, complete final user-visible result."
         if direct
@@ -1562,6 +1613,7 @@ def _worker_prompt(
         f"{return_instruction}"
         f"{prior_context}"
         f"{scope_policy}"
+        f"{tool_gate}"
         f"{policy}"
     )
     return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
@@ -1731,6 +1783,150 @@ def _run_codex_appserver_worker(
         requested_model=agent.model,
         reasoning=agent.reasoning,
     )
+
+
+def _candidate_set_replan_note(decision: Any) -> str:
+    from . import candidate_set as candidate_set_mod
+
+    detail = candidate_set_mod.empty_required_failure_detail(decision)
+    return (
+        f"{detail}. Revise assignment domain, capabilities, and/or max_risk_class "
+        "so at least one .brigade/tools.toml entry is admissible, or drop tool "
+        "requirements when no portable tool is needed."
+    )
+
+
+def _apply_candidate_set_gate(
+    *,
+    cwd: Path,
+    output_dir: Path,
+    assignments: list[Assignment],
+    roster: Roster,
+    task: str,
+    read_only: bool,
+    sandbox_read_only: bool | None,
+    sandbox: str | None,
+    code_graph: Any,
+    drift_impact: Any,
+    evidence: Any,
+    route: RouteBrief | None,
+    skill_policy: Any,
+    transport_for_payload: str | None,
+    process_registry: Any,
+    plan_attempts: list[dict[str, object]] | None,
+    allow_replan: bool,
+) -> tuple[list[Assignment], Any, str | None]:
+    """Filter tools per assignment, write receipt, optionally replan once on empty sets.
+
+    Returns ``(assignments, decision, failure_detail)``. ``failure_detail`` is set when
+    a required step still has no admissible tool after the bounded replan.
+    """
+    from . import candidate_set as candidate_set_mod
+
+    decision = candidate_set_mod.evaluate_assignments(
+        cwd,
+        assignments,
+        run_id=output_dir.name,
+    )
+    candidate_set_mod.write_candidate_set_receipt(output_dir, decision)
+    if not decision.has_empty_required_steps:
+        return candidate_set_mod.apply_admissible_tools(assignments, decision), decision, None
+
+    if allow_replan:
+        note = _candidate_set_replan_note(decision)
+        if plan_attempts is not None:
+            plan_attempts.append(
+                {
+                    "stage": "candidate-set-gate",
+                    "ok": False,
+                    "parsed": True,
+                    "detail": note,
+                    "failure_phase": candidate_set_mod.FAILURE_PHASE,
+                    "failure_kind": candidate_set_mod.FAILURE_KIND,
+                    "empty_required_steps": [
+                        {
+                            "stage": step.stage,
+                            "worker": step.worker,
+                            "task": step.task,
+                            "requirements": step.requirements.payload(),
+                        }
+                        for step in decision.empty_required_steps
+                    ],
+                }
+            )
+        no_file_writes = _orchestrator_hides_write_tools(
+            roster,
+            read_only=read_only,
+            sandbox_read_only=sandbox_read_only,
+            sandbox=sandbox,
+        )
+        revised_result = _call_with_process_registry(
+            _run_orchestrator,
+            roster,
+            build_plan_prompt(
+                task,
+                roster,
+                corrective_note=note,
+                read_only=read_only,
+                code_graph=code_graph,
+                drift_impact=drift_impact,
+                evidence=evidence,
+                route=route,
+                no_file_writes=no_file_writes,
+                skill_policy=skill_policy,
+            ),
+            cwd=cwd,
+            read_only=read_only,
+            sandbox_read_only=sandbox_read_only,
+            sandbox=sandbox,
+            codex_transport=transport_for_payload,
+            process_registry=process_registry,
+        )
+        if revised_result.ok:
+            try:
+                revised = parse_plan(
+                    revised_result.text,
+                    roster,
+                    read_only=read_only,
+                    skill_policy=skill_policy,
+                )
+                _validate_plan_dependencies(route, revised)
+                _record_plan_attempt(
+                    plan_attempts,
+                    stage="candidate-set-correction",
+                    result=revised_result,
+                    parsed=True,
+                    coverage_missing=_coverage_missing(route, revised),
+                    unknown_covers=_unknown_covers(route, revised),
+                )
+                assignments = revised
+                decision = candidate_set_mod.evaluate_assignments(
+                    cwd,
+                    assignments,
+                    run_id=output_dir.name,
+                )
+                candidate_set_mod.write_candidate_set_receipt(output_dir, decision)
+                _write_json(
+                    output_dir / "plan.json",
+                    receipt_schema.run_plan_document(_assignment_payload(assignments)),
+                )
+            except ValueError as exc:
+                _record_plan_attempt(
+                    plan_attempts,
+                    stage="candidate-set-correction",
+                    result=revised_result,
+                    parse_error=str(exc),
+                )
+        else:
+            _record_plan_attempt(plan_attempts, stage="candidate-set-correction", result=revised_result)
+
+    if decision.has_empty_required_steps:
+        return (
+            candidate_set_mod.apply_admissible_tools(assignments, decision),
+            decision,
+            candidate_set_mod.empty_required_failure_detail(decision),
+        )
+    return candidate_set_mod.apply_admissible_tools(assignments, decision), decision, None
 
 
 def dispatch(
@@ -3672,6 +3868,49 @@ def run(
             output_dir / "plan.json",
             receipt_schema.run_plan_document(_assignment_payload(assignments)),
         )
+
+    if cwd is not None and output_dir is not None:
+        from . import candidate_set as candidate_set_mod
+
+        assignments, _candidate_decision, candidate_failure = _apply_candidate_set_gate(
+            cwd=cwd,
+            output_dir=output_dir,
+            assignments=assignments,
+            roster=roster,
+            task=task,
+            read_only=read_only,
+            sandbox_read_only=sandbox_read_only,
+            sandbox=sandbox,
+            code_graph=code_graph,
+            drift_impact=drift_impact,
+            evidence=evidence,
+            route=route,
+            skill_policy=skill_policy,
+            transport_for_payload=transport_for_payload,
+            process_registry=process_registry,
+            plan_attempts=plan_attempts,
+            allow_replan=not dry_run and not direct_worker,
+        )
+        _write_json(
+            output_dir / "plan.json",
+            receipt_schema.run_plan_document(_assignment_payload(assignments)),
+        )
+        if plan_attempts is not None:
+            attempts_payload = {"attempts": plan_attempts or []}
+            if direct_worker:
+                attempts_payload["mode"] = "direct-worker"
+            _write_json(output_dir / "plan-attempts.json", attempts_payload)
+        if candidate_failure is not None and not dry_run:
+            record_run_termination(
+                output_dir,
+                status="failed",
+                failure_phase=candidate_set_mod.FAILURE_PHASE,
+                failure_kind=candidate_set_mod.FAILURE_KIND,
+                detail=candidate_failure,
+                seat=roster.orchestrator,
+            )
+            print(f"error: {candidate_failure}", file=sys.stderr)
+            return 2
 
     if dry_run:
         payload = {"assignments": _assignment_payload(assignments)}

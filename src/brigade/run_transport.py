@@ -30,6 +30,10 @@ class Assignment:
     stage: int = 1
     covers: tuple[str, ...] = ()
     selected_skill_ids: tuple[str, ...] = ()
+    domain: str | None = None
+    capabilities: tuple[str, ...] = ()
+    max_risk_class: str | None = None
+    admissible_tool_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

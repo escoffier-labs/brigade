@@ -420,6 +420,56 @@ must not recompute it from post-run state.
 | `task` | string | Task text for the worker |
 | `covers` | array of string | Optional covered artifact ids |
 | `selected_skill_ids` | array of string | Optional pre-plan exploratory skill binding |
+| `domain` | string | Optional CandidateSetGate domain requirement |
+| `capabilities` | array of string | Optional required tool capability labels |
+| `max_risk_class` | string | Optional risk ceiling (`read`, `local-write`, `network`, `privileged`) |
+| `admissible_tool_ids` | array of string | Gate output: tool ids admitted for this step |
+
+---
+
+## `brigade.candidate-set.v1`
+
+**Path:** `.brigade/runs/<run-id>/candidate-set.json`
+
+Written after planning and before dispatch. Filters `.brigade/tools.toml` by each
+assignment's declared `domain`, `capabilities`, and `max_risk_class`. When an
+assignment declares any of those requirements and no tool is admissible, the run
+records a typed `no-admissible-tool` planning failure (with one bounded replan)
+instead of letting the worker improvise tools.
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema` | string | yes | `brigade.candidate-set.v1` |
+| `schema_version` | integer | yes | `1` |
+| `gate_version` | string | yes | `candidate-set-gate.v1` |
+| `run_id` | string | yes | Same id as the run directory |
+| `decided_at` | string | yes | ISO-8601 UTC |
+| `tool_count` | integer | yes | Catalog entries considered |
+| `catalog_errors` | array of string | no | Loader errors when present |
+| `steps` | array of object | yes | Per-assignment gate results |
+| `empty_required_steps` | array of object | no | Present only when enforcement found an empty set |
+
+**Step object**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `stage`, `worker`, `task` | — | Assignment identity |
+| `requirements` | object | Declared `domain` / `capabilities` / `max_risk_class` (omit empty) |
+| `enforcement` | boolean | True when any requirement was declared |
+| `admissible` | array of scored tool | Sorted by score desc, then tool id |
+| `rejected` | array of scored tool | Rejected catalog entries with reasons |
+| `empty` | boolean | True when `admissible` is empty |
+
+**Scored tool object**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `tool_id` | string | Catalog id |
+| `score` | number | Deterministic match score |
+| `domain` | string \| null | Tool domain label |
+| `capability` | array of string | Tool capability labels |
+| `risk_class` | string \| null | Tool risk class |
+| `reasons` | array of string | Match / reject reasons |
 
 ---
 
