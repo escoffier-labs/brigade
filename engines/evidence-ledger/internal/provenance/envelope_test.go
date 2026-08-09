@@ -3,6 +3,7 @@ package provenance_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -328,5 +329,53 @@ func TestValidateAcceptsEnvelopeUnder4096CompactBytes(t *testing.T) {
 	env := validEnvelope(t)
 	if err := provenance.Validate(env, provenance.ValidationContext{}); err != nil {
 		t.Fatalf("compact envelope rejected: %v", err)
+	}
+}
+
+func TestBoundEnvelopeIdentityPreservesShortValues(t *testing.T) {
+	const short = "reader:item:1"
+	if got := provenance.BoundEnvelopeIdentity(short); got != short {
+		t.Fatalf("BoundEnvelopeIdentity(%q) = %q, want unchanged", short, got)
+	}
+}
+
+func TestBoundEnvelopeIdentityHashSubstitutesLongValues(t *testing.T) {
+	long := strings.Repeat("x", provenance.MaxEnvelopeIdentityBytes+1)
+	got := provenance.BoundEnvelopeIdentity(long)
+	want := "sha256:" + provenance.SHA256Bytes([]byte(long))
+	if got != want {
+		t.Fatalf("BoundEnvelopeIdentity long value = %q, want %q", got, want)
+	}
+	if got == long {
+		t.Fatal("expected hash substitution for oversized identity")
+	}
+}
+
+func TestNewEvidenceEnvelopeBoundsLongExternalIDs(t *testing.T) {
+	longCollection := strings.Repeat("c", 4000)
+	longItem := strings.Repeat("i", 4000)
+	longLocator := fmt.Sprintf("miseledger://adapter/%s/%s", longCollection, longItem)
+	ingestedAt := "2026-06-03T00:00:00Z"
+	env, err := provenance.NewEvidenceEnvelope(provenance.EvidenceInput{
+		SourceSystem: "miseledger", SourceKind: "adapter", SourceProducer: "ingest.upsertRecord",
+		Origin: "external-service", RepositoryID: "unknown",
+		CollectionID: longCollection, ItemID: longItem,
+		LocatorKind: "uri", LocatorValue: longLocator,
+		Attribution: "observed", Modality: "tool-output",
+		TrustLabel: "quarantined", TrustAssignedBy: "ingest:ingest.upsertRecord", TrustAssignedAt: &ingestedAt,
+		InjectionStatus: "pending", InjectionRules: []string{},
+		Text: "bounded ids still validate", IngestedAt: &ingestedAt,
+	})
+	if err != nil {
+		t.Fatalf("NewEvidenceEnvelope with long external ids: %v", err)
+	}
+	if len(*env.CollectionID) > provenance.MaxEnvelopeIdentityBytes {
+		t.Fatalf("collection_id length = %d, want <= %d", len(*env.CollectionID), provenance.MaxEnvelopeIdentityBytes)
+	}
+	if len(*env.ItemID) > provenance.MaxEnvelopeIdentityBytes {
+		t.Fatalf("item_id length = %d, want <= %d", len(*env.ItemID), provenance.MaxEnvelopeIdentityBytes)
+	}
+	if len(env.Locator.Value) > provenance.MaxEnvelopeIdentityBytes {
+		t.Fatalf("locator.value length = %d, want <= %d", len(env.Locator.Value), provenance.MaxEnvelopeIdentityBytes)
 	}
 }

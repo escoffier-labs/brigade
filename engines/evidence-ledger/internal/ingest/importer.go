@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/escoffier-labs/miseledger/internal/adapter"
+	"github.com/escoffier-labs/miseledger/internal/provenance"
 	"github.com/escoffier-labs/miseledger/internal/sources"
 	"github.com/escoffier-labs/miseledger/internal/textnorm"
 )
@@ -460,7 +461,13 @@ on conflict(source_id, external_id) do update set type=excluded.type, name=exclu
 			return false, err
 		}
 	}
-	itemMeta := itemMetadataJSON(rec)
+	capturedAt := optionalString(rec.Item.CreatedAt)
+	itemLocator := fmt.Sprintf("miseledger://%s/%s/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID)
+	envelope, err := buildIngestEnvelope(rec, now, capturedAt, rec.Item.Text, raw, rec.Collection.ExternalID, rec.Item.ExternalID, "uri", itemLocator)
+	if err != nil {
+		return false, fmt.Errorf("build provenance envelope: %w", err)
+	}
+	itemMeta := itemMetadataJSON(rec, envelope)
 	res, err := tx.Exec(`insert or ignore into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
 values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIfEmpty(actorID), rec.Item.ExternalID, rec.Item.Kind, rec.Item.CreatedAt, rec.Item.UpdatedAt, rec.Item.Text, summary, contentHash, string(raw), rawHash, rawPath, rawOrdinal, string(itemMeta))
 	if err != nil {
@@ -481,7 +488,13 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIf
 		if artifactHash == "" && art.Text != "" {
 			artifactHash = "sha256:" + hashString(textnorm.Normalize(art.Text))
 		}
-		if _, err := tx.Exec(`insert or ignore into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json) values(?,?,?,?,?,?,?,?,?,?,?)`, artifactID, sourceID, itemID, art.ExternalID, art.Kind, art.Path, art.URL, art.MimeType, art.Text, artifactHash, rawOrEmptyObject(art.Metadata)); err != nil {
+		artLocatorKind, artLocatorValue := artifactLocator(rec, art)
+		artEnvelope, err := buildIngestEnvelope(rec, now, capturedAt, art.Text, nil, rec.Collection.ExternalID, art.ExternalID, artLocatorKind, artLocatorValue)
+		if err != nil {
+			return false, fmt.Errorf("build artifact provenance envelope: %w", err)
+		}
+		artMeta := mergeMetadataJSON(art.Metadata, artEnvelope, nil)
+		if _, err := tx.Exec(`insert or ignore into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json) values(?,?,?,?,?,?,?,?,?,?,?)`, artifactID, sourceID, itemID, art.ExternalID, art.Kind, art.Path, art.URL, art.MimeType, art.Text, artifactHash, string(artMeta)); err != nil {
 			return false, err
 		}
 		if art.Text != "" {
@@ -493,8 +506,13 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIf
 			continue
 		}
 		artifactID := stableID("artifact", itemID, "link", link.URL)
-		meta, _ := json.Marshal(map[string]any{"link_text": link.Text})
-		if _, err := tx.Exec(`insert or ignore into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json) values(?,?,?,?,?,?,?,?,?,?,?)`, artifactID, sourceID, itemID, link.URL, "url", "", link.URL, "text/uri-list", link.Text, "sha256:"+hashString(link.URL), string(meta)); err != nil {
+		linkLocator := linkProvenanceLocator(rec, link.URL)
+		linkEnvelope, err := buildIngestEnvelope(rec, now, capturedAt, link.Text, nil, rec.Collection.ExternalID, link.URL, "uri", linkLocator)
+		if err != nil {
+			return false, fmt.Errorf("build link provenance envelope: %w", err)
+		}
+		linkMeta := mergeMetadataJSON(nil, linkEnvelope, map[string]any{"link_text": link.Text})
+		if _, err := tx.Exec(`insert or ignore into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json) values(?,?,?,?,?,?,?,?,?,?,?)`, artifactID, sourceID, itemID, link.URL, "url", "", link.URL, "text/uri-list", link.Text, "sha256:"+hashString(link.URL), string(linkMeta)); err != nil {
 			return false, err
 		}
 		body += "\n" + textnorm.Normalize(link.URL+" "+link.Text)
@@ -519,20 +537,65 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIf
 	return true, nil
 }
 
-func itemMetadataJSON(rec adapter.Record) []byte {
-	meta := map[string]any{"tags": rec.Item.Tags}
-	if len(rec.Item.Metadata) > 0 {
+func buildIngestEnvelope(rec adapter.Record, ingestedAt string, capturedAt *string, text string, raw []byte, collectionID, itemID, locatorKind, locatorValue string) (provenance.Envelope, error) {
+	at := ingestedAt
+	return provenance.NewEvidenceEnvelope(provenance.EvidenceInput{
+		SourceSystem: "miseledger", SourceKind: rec.Source.Kind, SourceProducer: "ingest.upsertRecord",
+		Origin: "external-service", RepositoryID: "unknown",
+		CollectionID: collectionID, ItemID: itemID,
+		LocatorKind: locatorKind, LocatorValue: locatorValue,
+		Attribution: "observed",
+		// Modality tool-output classifies the ingest channel, not human authorship.
+		Modality: "tool-output",
+		TrustLabel: "quarantined", TrustAssignedBy: "ingest:ingest.upsertRecord", TrustAssignedAt: &at,
+		InjectionStatus: "pending", InjectionRules: []string{},
+		Text: text, RawBytes: raw, CapturedAt: capturedAt, IngestedAt: &at,
+	})
+}
+
+func artifactLocator(rec adapter.Record, art adapter.Artifact) (string, string) {
+	return "uri", artifactProvenanceLocator(rec, art)
+}
+
+func artifactProvenanceLocator(rec adapter.Record, art adapter.Artifact) string {
+	return fmt.Sprintf("miseledger://%s/%s/%s/artifact/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID, art.ExternalID)
+}
+
+func linkProvenanceLocator(rec adapter.Record, linkURL string) string {
+	return fmt.Sprintf("miseledger://%s/%s/%s/link/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID, stableID("link", linkURL))
+}
+
+func itemMetadataJSON(rec adapter.Record, envelope provenance.Envelope) []byte {
+	return mergeMetadataJSON(rec.Item.Metadata, envelope, map[string]any{"tags": rec.Item.Tags})
+}
+
+func mergeMetadataJSON(inbound json.RawMessage, envelope provenance.Envelope, seed map[string]any) []byte {
+	meta := map[string]any{}
+	for k, v := range seed {
+		meta[k] = v
+	}
+	if len(inbound) > 0 {
 		var parsed map[string]any
-		if json.Unmarshal(rec.Item.Metadata, &parsed) == nil {
+		if json.Unmarshal(inbound, &parsed) == nil {
 			for k, v := range parsed {
 				meta[k] = v
 			}
 		} else {
-			meta["adapter_metadata_raw"] = string(rec.Item.Metadata)
+			meta["adapter_metadata_raw"] = string(inbound)
 		}
 	}
+	// Inbound metadata is evidence, not authority. Always stamp the locally
+	// assigned envelope after merging it so an adapter cannot replace trust.
+	meta["provenance"] = envelope
 	b, _ := json.Marshal(meta)
 	return b
+}
+
+func optionalString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func indexItemMetadata(tx *sql.Tx, itemID string, tags []string, metaJSON []byte) error {
