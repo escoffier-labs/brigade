@@ -597,6 +597,33 @@ def test_wait_to_acquire_lock_retries_immediately_without_poll_sleep(tmp_path, m
     assert sleeps == []
 
 
+def test_wait_to_acquire_lock_unbounded_immediate_retry_sleeps_between_retries(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text(f"{os.getpid()}\n")
+    original_acquire = runguard._acquire_lock
+    acquire_calls = 0
+    sleeps: list[float] = []
+    monkeypatch.setattr(runguard.time, "sleep", sleeps.append)
+
+    def fail_twice_then_succeed(path, *, run_dir=None):
+        nonlocal acquire_calls
+        acquire_calls += 1
+        if acquire_calls <= 2:
+            if lock_path.exists():
+                shutil.rmtree(lock_path)
+            raise runguard.RunLockError("another brigade run appears active")
+        return original_acquire(path, run_dir=run_dir)
+
+    monkeypatch.setattr(runguard, "_acquire_lock", fail_twice_then_succeed)
+
+    with runguard.run_lock(repo, wait_seconds=math.inf, poll_interval=0.05):
+        assert acquire_calls == 3
+
+    assert sleeps == [0.05, 0.05]
+
+
 def test_run_lock_replaces_lock_with_dead_pid(tmp_path):
     repo = _repo(tmp_path)
     lock_path = runguard.lock_path(repo)

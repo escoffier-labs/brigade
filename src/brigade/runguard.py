@@ -914,6 +914,8 @@ def _wait_to_acquire_lock(
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise RunLockError(f"timed out after {wait_seconds:g}s waiting for run lock: {path}")
+                else:
+                    time.sleep(poll_interval)
                 continue
             if not unbounded:
                 remaining = deadline - time.monotonic()
