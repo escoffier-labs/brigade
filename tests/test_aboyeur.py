@@ -5161,6 +5161,189 @@ def _canonical_and_assigned_worktree(tmp_path):
     return canonical, worktree
 
 
+def test_run_stops_worker_that_writes_outside_assigned_worktree(monkeypatch, tmp_path, capsys):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if cli_ref == "codex":
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            (lock_workspace / "escaped.txt").write_text("outside the assigned tree\n")
+            return agents.AgentResult(text="worker claimed success", ok=True)
+        pytest.fail("synthesis must not run after an isolation breach")
+
+    lock_workspace, worktree = _canonical_and_assigned_worktree(tmp_path)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            cwd=worktree,
+            lock_workspace=lock_workspace,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+        )
+        == 2
+    )
+
+    assert "modified files outside assigned worktree: escaped.txt" in capsys.readouterr().err
+    receipt = json.loads((output_dir / "worker-results.json").read_text())
+    worker = receipt["results"][0]
+    assert worker["ok"] is True
+    assert "failure_kind" not in worker
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure"]["kind"] == "isolation-breach"
+    assert run_meta["failure"]["phase"] == "run-isolation"
+    assert run_meta["failure"]["seat"] == "chef"
+    assert not (output_dir / "final.txt").exists()
+    assert [cli_ref for cli_ref, _prompt in calls].count("ollama:llama3.3") == 1
+
+
+def test_run_isolation_check_fails_closed_on_runguard_error(monkeypatch, tmp_path, capsys):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if cli_ref == "codex":
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker success", ok=True)
+        pytest.fail("synthesis must not run after an isolation breach")
+
+    lock_workspace, worktree = _canonical_and_assigned_worktree(tmp_path)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    def boom(_cwd, _snapshot):
+        raise runguard.RunGuardError("could not read worktree")
+
+    monkeypatch.setattr(aboyeur.runguard, "changes_relative_to_snapshot", boom)
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            cwd=worktree,
+            lock_workspace=lock_workspace,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+        )
+        == 2
+    )
+
+    err = capsys.readouterr().err
+    assert "could not verify canonical checkout" in err
+    assert "could not read worktree" in err
+    receipt = json.loads((output_dir / "worker-results.json").read_text())
+    assert receipt["results"][0]["ok"] is True
+    assert "failure_kind" not in receipt["results"][0]
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["failure"]["kind"] == "isolation-breach"
+    assert run_meta["failure"]["seat"] == "chef"
+
+
+def test_concurrent_workers_do_not_false_flag_clean_seat_for_canonical_escape(monkeypatch, tmp_path, capsys):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if cli_ref == "codex" and len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps(
+                    {
+                        "assignments": [
+                            {"worker": "coder", "task": "escape canonical checkout"},
+                            {"worker": "reviewer", "task": "stay clean"},
+                        ]
+                    }
+                ),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            (lock_workspace / "escaped.txt").write_text("outside the assigned tree\n")
+            return agents.AgentResult(text="worker claimed success", ok=True)
+        if cli_ref == "codex":
+            return agents.AgentResult(text="clean reviewer output", ok=True)
+        pytest.fail("synthesis must not run after an isolation breach")
+
+    lock_workspace, worktree = _canonical_and_assigned_worktree(tmp_path)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            cwd=worktree,
+            lock_workspace=lock_workspace,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+        )
+        == 2
+    )
+
+    assert "modified files outside assigned worktree: escaped.txt" in capsys.readouterr().err
+    receipt = json.loads((output_dir / "worker-results.json").read_text())
+    results_by_worker = {entry["worker"]: entry for entry in receipt["results"]}
+    assert results_by_worker["coder"]["ok"] is True
+    assert results_by_worker["reviewer"]["ok"] is True
+    assert "failure_kind" not in results_by_worker["coder"]
+    assert "failure_kind" not in results_by_worker["reviewer"]
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure"]["kind"] == "isolation-breach"
+    assert run_meta["failure"]["phase"] == "run-isolation"
+    assert run_meta["failure"]["seat"] == "chef"
+    assert not (output_dir / "final.txt").exists()
+
+
+def test_run_allows_worker_changes_inside_assigned_worktree(monkeypatch, tmp_path, capsys):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if cli_ref == "codex" and not any(call[0] == "ollama:llama3.3" for call in calls[:-1]):
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            (cwd / "inside.txt").write_text("inside the assigned tree\n")
+            return agents.AgentResult(text="worker success", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    lock_workspace, worktree = _canonical_and_assigned_worktree(tmp_path)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            cwd=worktree,
+            lock_workspace=lock_workspace,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+        )
+        == 0
+    ), capsys.readouterr().err
+
+    receipt = json.loads((output_dir / "worker-results.json").read_text())
+    assert receipt["results"][0]["ok"] is True
+    assert "failure_kind" not in receipt["results"][0]
+    assert json.loads((output_dir / "run.json").read_text())["status"] == "ok"
+
+
 def test_run_allows_authorized_worktree_head_move_with_separate_lock_workspace(monkeypatch, tmp_path, capsys):
     # Contract (issue #597): when Brigade assigns a detached worktree to a
     # worker, the worker is authorized to create branches, move HEAD, and

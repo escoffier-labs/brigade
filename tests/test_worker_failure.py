@@ -217,6 +217,7 @@ def test_unknown_legacy_failure_is_unclassified_with_actual_normalized_phase():
         ("canceled", "interrupted"),
         ("failed", "keyboard-interrupt"),
         ("failed", "branch-head-drift"),
+        ("failed", "isolation-breach"),
     ],
 )
 def test_run_and_operator_failures_stay_outside_worker_taxonomy(status, failure_kind):

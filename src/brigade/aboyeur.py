@@ -3286,6 +3286,29 @@ def run(
         print(f"error: {detail}", file=sys.stderr)
         return 2
 
+    def _run_isolation_check() -> str | None:
+        """Detect canonical-checkout escapes after dispatch without per-worker attribution."""
+
+        if lock_workspace == cwd or drift_snapshot is None:
+            return None
+        # Preserve the existing branch/HEAD drift classification. Working-tree
+        # mutations are what this post-dispatch check adds; committed or
+        # branch-moving interference remains caught by the run-level drift
+        # checkpoints.
+        if runguard.detect_branch_head_drift(lock_workspace, drift_snapshot) is not None:
+            return None
+        try:
+            changed, untracked = runguard.changes_relative_to_snapshot(lock_workspace, drift_snapshot)
+        except runguard.RunGuardError as exc:
+            return f"isolation breach: could not verify canonical checkout: {exc}"
+        escaped = sorted(set(changed + untracked))
+        if not escaped:
+            return None
+        shown = ", ".join(escaped[:10])
+        if len(escaped) > 10:
+            shown += f", and {len(escaped) - 10} more"
+        return f"isolation breach: modified files outside assigned worktree: {shown}"
+
     if worker is not None:
         worker_error = _direct_worker_error(worker, roster, read_only=read_only)
         if worker_error is not None:
@@ -3891,6 +3914,19 @@ def run(
                 ground_truth=ground_truth,
             ),
         )
+    isolation_detail = _run_isolation_check()
+    if isolation_detail is not None:
+        if output_dir is not None:
+            record_run_termination(
+                output_dir,
+                status="failed",
+                failure_phase="run-isolation",
+                failure_kind="isolation-breach",
+                detail=isolation_detail,
+                seat=roster.orchestrator,
+            )
+        print(f"error: {isolation_detail}", file=sys.stderr)
+        return 2
     if verbose:
         _print_worker_status(worker_results)
         if not direct_worker:
