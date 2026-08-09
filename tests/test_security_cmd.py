@@ -285,6 +285,66 @@ def test_security_scan_secret_fingerprints_are_pinned(tmp_path):
     }
 
 
+def _coalesced_secret_candidates(tmp_path):
+    path = tmp_path / "secrets.env"
+    line = "TOKEN=abc123abc123abc123abc123abc123"
+    path.write_text(line + "\n")
+    candidates = []
+    security_cmd._scan_line(candidates, target=tmp_path, path=path, line_number=1, line=line)
+    security_cmd._assign_fingerprints(candidates)
+    return candidates
+
+
+def test_security_scan_partly_suppressed_group_reports_only_unsuppressed_member(tmp_path):
+    candidates = _coalesced_secret_candidates(tmp_path)
+    assert [item["title"] for item in candidates] == [
+        "Possible hardcoded credential",
+        "Possible sensitive secret material",
+    ]
+
+    report = security_cmd.scan_target(tmp_path, suppressions=(candidates[0]["fingerprint"],))
+
+    assert report["finding_count"] == 1
+    assert report["suppressed_count"] == 1
+    assert report["findings"][0]["title"] == "Possible sensitive secret material"
+    assert report["suppressed_findings"][0]["title"] == "Possible hardcoded credential"
+
+
+def test_security_scan_fully_suppressed_group_disappears(tmp_path):
+    candidates = _coalesced_secret_candidates(tmp_path)
+
+    report = security_cmd.scan_target(
+        tmp_path,
+        suppressions=tuple(item["fingerprint"] for item in candidates),
+    )
+
+    assert report["finding_count"] == 0
+    assert report["suppressed_count"] == 2
+    assert report["findings"] == []
+
+
+def test_security_scan_coalesces_single_secret_without_marker_leak(tmp_path, capsys):
+    path = tmp_path / "secrets.env"
+    line = "TOKEN=abc123abc123abc123abc123abc123"
+    path.write_text(line + "\n")
+
+    report = security_cmd.scan_target(tmp_path)
+
+    assert report["finding_count"] == 1
+    assert report["suppressed_count"] == 0
+    assert report["findings"][0]["title"] == "Possible hardcoded credential"
+    for bucket in ("findings", "suppressed_findings"):
+        for finding in report.get(bucket) or []:
+            assert "_coalesce_group" not in finding
+            assert "_fingerprint_content" not in finding
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    serialized = json.dumps(payload)
+    assert "_coalesce_group" not in serialized
+    assert payload["finding_count"] == 1
+
+
 def test_security_policy_presets_and_template_inclusion(tmp_path, capsys):
     template_dir = tmp_path / "src" / "brigade" / "templates" / "workspace"
     template_dir.mkdir(parents=True)

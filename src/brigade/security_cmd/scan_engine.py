@@ -655,12 +655,10 @@ def _scan_line(
     file_classification = classification or _classification_for(path, target)
     if _is_security_scanner_literal(path, line, target):
         return
-    best_secret: tuple[str, str] | None = None
+    secret_candidates: dict[str, str] = {}
 
     def consider_secret(title: str, suggestion: str) -> None:
-        nonlocal best_secret
-        if best_secret is None or _secrets_title_rank(title) > _secrets_title_rank(best_secret[0]):
-            best_secret = (title, suggestion)
+        secret_candidates.setdefault(title, suggestion)
 
     try:
         rel_path = path.relative_to(target).as_posix()
@@ -697,8 +695,7 @@ def _scan_line(
                 if session_chat
                 else "Remove secret material from the repo and rotate the credential if it was real.",
             )
-    if best_secret is not None:
-        title, suggestion = best_secret
+    for title, suggestion in secret_candidates.items():
         _finding(
             findings,
             target=target,
@@ -712,6 +709,7 @@ def _scan_line(
             classification=file_classification,
             response_options=_secret_response_options(path, target),
         )
+        findings[-1]["_coalesce_group"] = "secrets-line"
     if "danger-full-access" in line or "sandbox_permissions" in line and "require_escalated" in line:
         _finding(
             findings,
@@ -981,10 +979,13 @@ def scan_target(
     open_findings = []
     for finding in findings:
         if _finding_matches_fingerprints(finding, suppression_set, migration_map=migration_map):
+            finding.pop("_coalesce_group", None)
             suppressed.append(finding)
         else:
             open_findings.append(finding)
-    findings = open_findings
+    findings = _coalesce_findings(open_findings)
+    for finding in suppressed:
+        _strip_internal_finding_keys(finding)
     counts: dict[str, int] = {}
     for finding in findings:
         severity = str(finding["severity"])
@@ -1277,6 +1278,10 @@ def write_evidence_bundle(report: dict[str, Any], output_dir: Path) -> Path:
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     report = dict(report)
+    for bucket in ("findings", "suppressed_findings"):
+        for finding in report.get(bucket) or []:
+            if isinstance(finding, dict):
+                _strip_internal_finding_keys(finding)
     report["artifacts"] = str(output_dir)
     (output_dir / "security-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     (output_dir / "security-report.md").write_text(_render_markdown_report(report))
