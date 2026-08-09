@@ -760,13 +760,13 @@ def _archive_candidates_from_scan(scan_payload: dict[str, Any] | None, config: M
     Never walks the card tree. Cards are candidates only when last_reviewed is
     parseable and age_days > 2 * stale_after_days (strict). Missing, invalid, or
     future reviewed dates are unassessable and never inferred from mtime/git.
+    A saved scan without a parseable scan_date is fully unassessable; today is
+    never substituted for the saved-scan anchor.
     """
     ttl_days = int(config.stale_after_days)
     candidate_after_days = ttl_days * 2
     scan_date_raw = scan_payload.get("scan_date") if isinstance(scan_payload, dict) else None
     scan_date = _parse_date(scan_date_raw) if scan_date_raw else None
-    if scan_date is None:
-        scan_date = _today()
     cards_value = scan_payload.get("cards") if isinstance(scan_payload, dict) else None
     cards = cards_value if isinstance(cards_value, list) else []
     candidates: list[dict[str, Any]] = []
@@ -775,7 +775,7 @@ def _archive_candidates_from_scan(scan_payload: dict[str, Any] | None, config: M
         if not isinstance(card, dict):
             continue
         reviewed = _parse_date(card.get("last_reviewed"))
-        if reviewed is None:
+        if scan_date is None or reviewed is None:
             unassessable_count += 1
             continue
         age_days = (scan_date - reviewed).days
@@ -807,7 +807,7 @@ def _archive_candidates_from_scan(scan_payload: dict[str, Any] | None, config: M
         "read_only": True,
         "approval_required": True,
         "would_archive": False,
-        "scan_date": scan_date.isoformat(),
+        "scan_date": scan_date.isoformat() if scan_date is not None else None,
         "threshold": {
             "ttl_days": ttl_days,
             "candidate_after_days": candidate_after_days,

@@ -1037,6 +1037,42 @@ def test_memory_care_status_prints_archive_candidates_in_human_output(tmp_path, 
     ) in out
 
 
+def test_memory_care_archive_candidates_unassessable_when_saved_scan_date_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 8, 1))
+    _write_archive_candidate_care_config(tmp_path, stale_after_days=30)
+    config = memory_cmd.load_config(tmp_path)
+    assert config is not None
+    scan_dir = tmp_path / ".brigade" / "memory-care" / "decay"
+    scan_dir.mkdir(parents=True)
+    (scan_dir / "scan-latest.json").write_text(
+        json.dumps(
+            {
+                "cards": [
+                    {
+                        "card_id": "would-be-candidate",
+                        "file": "memory/cards/would-be-candidate.md",
+                        "last_reviewed": "2026-03-28",
+                        "fresh_until": "2026-12-01",
+                    },
+                    {
+                        "card_id": "missing-reviewed",
+                        "file": "memory/cards/missing-reviewed.md",
+                        "fresh_until": "2026-12-01",
+                    },
+                ],
+            }
+        )
+    )
+    archive = memory_cmd._archive_candidates_from_scan(
+        memory_cmd._load_scan_payload(tmp_path, config),
+        config,
+    )
+    assert archive["scan_date"] is None
+    assert archive["candidate_count"] == 0
+    assert archive["candidates"] == []
+    assert archive["unassessable_count"] == 2
+
+
 def test_memory_care_archive_candidates_from_legacy_scan_without_evidence_pointers(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 8, 1))
     _write_archive_candidate_care_config(tmp_path, stale_after_days=30)
