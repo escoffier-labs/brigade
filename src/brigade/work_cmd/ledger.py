@@ -108,8 +108,7 @@ def _read_task_ledger(target: Path) -> dict[str, Any]:
         )
     if version > edges_mod.TASK_LEDGER_VERSION:
         raise TaskLedgerError(
-            f"task ledger version {version} is newer than supported "
-            f"{edges_mod.TASK_LEDGER_VERSION}: {path}",
+            f"task ledger version {version} is newer than supported {edges_mod.TASK_LEDGER_VERSION}: {path}",
             reason=REASON_UNSUPPORTED_LEDGER_VERSION,
             details={"path": str(path), "version": version, "supported": edges_mod.TASK_LEDGER_VERSION},
         )
