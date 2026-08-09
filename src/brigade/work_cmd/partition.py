@@ -45,6 +45,7 @@ def partition_ready(
     mode = MODE_FILE_OVERLAP_SYMBOL_IMPACT if use_symbol_impact else MODE_FILE_OVERLAP
 
     runner = impact_runner or footprint_mod._run_graphtrail_impact
+    impact_cache: dict[str, dict[str, Any] | None] = {}
     effective: dict[str, frozenset[str]] = {}
     exclusive: dict[str, bool] = {}
     for item in ready:
@@ -58,12 +59,13 @@ def partition_ready(
             db_path=db_path,
             use_symbol_impact=use_symbol_impact,
             impact_runner=runner,
+            impact_cache=impact_cache,
         )
         effective[task_id] = files
         exclusive[task_id] = len(files) == 0
 
     waves: list[list[dict[str, Any]]] = []
-    wave_file_sets: list[set[str]] = []
+    wave_task_ids: list[list[str]] = []
     wave_has_exclusive: list[bool] = []
 
     for item in ready:
@@ -76,15 +78,25 @@ def partition_ready(
                 continue
             if is_exclusive:
                 continue
-            if files & wave_file_sets[index]:
+            overlaps = False
+            for existing_id in wave_task_ids[index]:
+                if footprints_overlap(
+                    None,
+                    None,
+                    left_files=files,
+                    right_files=effective.get(existing_id, frozenset()),
+                ):
+                    overlaps = True
+                    break
+            if overlaps:
                 continue
             wave.append(item)
-            wave_file_sets[index].update(files)
+            wave_task_ids[index].append(task_id)
             placed = True
             break
         if not placed:
             waves.append([item])
-            wave_file_sets.append(set(files))
+            wave_task_ids.append([task_id])
             wave_has_exclusive.append(is_exclusive)
 
     wave_payloads = [
@@ -150,6 +162,7 @@ def _effective_files(
     db_path: Path | None,
     use_symbol_impact: bool,
     impact_runner: Any,
+    impact_cache: dict[str, dict[str, Any] | None] | None = None,
 ) -> frozenset[str]:
     if not isinstance(footprint, dict):
         return frozenset()
@@ -157,8 +170,13 @@ def _effective_files(
     files = set(normalized["files"])
     if not use_symbol_impact or binary is None or db_path is None:
         return frozenset(files)
+    cache = impact_cache if impact_cache is not None else {}
     for symbol in normalized["symbol_ids"]:
-        payload = impact_runner(target, binary, db_path, symbol)
+        if symbol in cache:
+            payload = cache[symbol]
+        else:
+            payload = impact_runner(target, binary, db_path, symbol)
+            cache[symbol] = payload
         if not isinstance(payload, dict):
             continue
         files.update(footprint_mod._files_from_impact_payload(payload))

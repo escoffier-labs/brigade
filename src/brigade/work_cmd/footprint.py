@@ -249,18 +249,17 @@ def attach_predicted(target: Path, task: dict[str, Any], *, impact_runner: Any |
 
 
 def _run_graphtrail_impact(target: Path, binary: str, db_path: Path, query: str) -> dict[str, Any] | None:
-    result = proc.run(
-        [binary, "--db", str(db_path), "impact", query, "--json"],
-        timeout=10.0,
-        cwd=target,
-    )
+    db = str(db_path)
+    if query.startswith("-"):
+        json_argv = [binary, "--db", db, "impact", "--json", "--", query]
+        text_argv = [binary, "--db", db, "impact", "--", query]
+    else:
+        json_argv = [binary, "--db", db, "impact", query, "--json"]
+        text_argv = [binary, "--db", db, "impact", query]
+    result = proc.run(json_argv, timeout=10.0, cwd=target)
     if result.code != 0:
         # Text-mode fallback: some GraphTrail builds omit --json for impact.
-        text_result = proc.run(
-            [binary, "--db", str(db_path), "impact", query],
-            timeout=10.0,
-            cwd=target,
-        )
+        text_result = proc.run(text_argv, timeout=10.0, cwd=target)
         if text_result.code != 0:
             return None
         return {"related_files": _path_tokens(text_result.stdout), "symbol_ids": [query]}

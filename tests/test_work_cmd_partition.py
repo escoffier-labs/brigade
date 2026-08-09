@@ -173,6 +173,51 @@ def test_symbol_impact_refinement_detects_indirect_overlap(tmp_path, monkeypatch
     assert payload["waves"][1]["task_ids"] == [b["id"]]
 
 
+def test_symbol_impact_memoized_within_partition_call(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"fake-graphtrail-index")
+    monkeypatch.setattr(partition_mod.component_bins, "resolve", lambda _name: "/fake/graphtrail")
+
+    call_counts: dict[str, int] = {}
+
+    def fake_impact(target, binary, db_path, query):
+        call_counts[query] = call_counts.get(query, 0) + 1
+        return {"related_files": ["src/shared_core.py"]}
+
+    a = _add(tmp_path, "Symbol alpha dup A")
+    b = _add(tmp_path, "Symbol alpha dup B")
+    _set_pending_footprint(tmp_path, a["id"], files=["src/a.py"], symbol_ids=["pkg.shared"])
+    _set_pending_footprint(tmp_path, b["id"], files=["src/b.py"], symbol_ids=["pkg.shared"])
+
+    payload = work_cmd._readiness_payload(tmp_path, parallel_safe=True, impact_runner=fake_impact)
+    assert call_counts == {"pkg.shared": 1}
+    assert payload["wave_count"] == 2
+
+
+def test_malformed_impact_payload_falls_back_to_file_overlap(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"fake-graphtrail-index")
+    monkeypatch.setattr(partition_mod.component_bins, "resolve", lambda _name: "/fake/graphtrail")
+
+    def fake_impact(target, binary, db_path, query):
+        # Non-dict payloads are ignored; partition stays on declared file overlap.
+        return ["not-a-dict"]
+
+    a = _add(tmp_path, "Declared disjoint A")
+    b = _add(tmp_path, "Declared disjoint B")
+    _set_pending_footprint(tmp_path, a["id"], files=["src/a.py"], symbol_ids=["pkg.alpha"])
+    _set_pending_footprint(tmp_path, b["id"], files=["src/b.py"], symbol_ids=["pkg.beta"])
+
+    payload = work_cmd._readiness_payload(tmp_path, parallel_safe=True, impact_runner=fake_impact)
+    assert payload["partition_mode"] == partition_mod.MODE_FILE_OVERLAP_SYMBOL_IMPACT
+    assert payload["wave_count"] == 1
+    assert payload["waves"][0]["task_ids"] == [a["id"], b["id"]]
+
+
 def test_footprints_overlap_helper_empty_is_exclusive():
     assert partition_mod.footprints_overlap(
         {"files": [], "symbol_ids": []},
