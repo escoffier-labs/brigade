@@ -130,7 +130,7 @@ def run_audit(
 def _enumerate(target: Path, *, scope: str, exclude_dirs: frozenset[str]) -> list[Path]:
     if scope == "tracked":
         rel_paths = _tracked_paths(all_tracked=True, cwd=target)
-        return [target / rel for rel in rel_paths]
+        return [target / rel for rel in rel_paths if not exclude_dirs.intersection(rel.parts)]
 
     # scope == "tree"
     paths: list[Path] = []
