@@ -604,6 +604,8 @@ def dispatch(args) -> int:
                 acceptance=args.acceptance,
                 template=args.template,
                 deps=args.deps,
+                symbols=args.symbols,
+                files=args.files,
                 graph=args.graph,
                 dry_run=args.dry_run,
                 json_output=args.json,
@@ -625,6 +627,15 @@ def dispatch(args) -> int:
                 kind="meta" if args.meta else "plan",
                 steps=args.step,
                 from_research=args.from_research,
+            )
+        if args.task_command == "claim":
+            return work_cmd.task_claim(
+                target=args.target,
+                task_id=args.task_id,
+                actor=args.actor,
+                files=args.files,
+                from_plan=args.from_plan,
+                json_output=args.json,
             )
         if args.task_command == "done":
             return work_cmd.task_done(target=args.target, task_id=args.task_id, force=args.force, json_output=args.json)

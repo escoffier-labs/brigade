@@ -416,6 +416,7 @@ from .session import (  # noqa: F401
     task_add,
     task_show,
     task_plan,
+    task_claim,
     task_done,
     task_edge_add,
     task_edge_remove,

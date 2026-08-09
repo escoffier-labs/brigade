@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Work task footprint metadata with a three-phase lifecycle (#777): each task
+  carries `metadata.footprint` (`files`, `symbol_ids`, `snapshot_hash`) written
+  predicted at filing (GraphTrail `impact` when available; empty-predicted
+  degrade when the binary or index is absent), refined at
+  `brigade work task claim` from plan-named files, and reconciled at
+  `work task done` by joining the latest verify receipt's `code_graph_delta`
+  / `graphtrail_delta`. Additive `task add --symbol` / `--file` seed the
+  predicted write.
 - Work task ledger dependency edges and a computed ready set (#737): typed
   edges (`blocks`, `parent-child`, `discovered-from`) live as a normalized
   top-level `edges` array in `.brigade/work/tasks.json` (schema version 2).
