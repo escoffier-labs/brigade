@@ -27,6 +27,35 @@ def _verification_is_windows() -> bool:
     return os.name == "nt"
 
 
+_VERIFICATION_WINDOWS_SHELL_META_RE = constants.SCANNER_SHELL_META_RE
+_VERIFICATION_POSIX_SHELL_META_RE = re.compile(r"[;&|`<>\\]|\$\(")
+
+
+def _verification_shell_meta_re() -> re.Pattern[str]:
+    """Shell-metacharacter guard for raw ``--command`` parsing.
+
+    On POSIX, backslash is treated as an escape/separator and rejected. On Windows,
+    backslash is an ordinary path separator and only true shell metacharacters match.
+    """
+    if _verification_is_windows():
+        return _VERIFICATION_WINDOWS_SHELL_META_RE
+    return _VERIFICATION_POSIX_SHELL_META_RE
+
+
+def _verification_strip_outer_quotes(token: str) -> str:
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
+        return token[1:-1]
+    return token
+
+
+def _verification_split_command(command: str) -> list[str]:
+    """Split a raw ``--command`` string with platform-aware shlex rules."""
+    parts = shlex.split(command, posix=not _verification_is_windows())
+    if _verification_is_windows():
+        parts = [_verification_strip_outer_quotes(token) for token in parts]
+    return parts
+
+
 def _default_verify_commands(target: Path) -> list[str]:
     if (target / "pyproject.toml").is_file() and (target / "tests").is_dir():
         if (target / "src").is_dir():
@@ -212,7 +241,7 @@ def _windows_script_execution_argv(script: Path, script_args: list[str]) -> list
 
 def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None, dict[str, str], str | None]:
     try:
-        parts = shlex.split(command)
+        parts = _verification_split_command(command)
     except ValueError as exc:
         return None, {}, f"invalid command: {exc}"
     if not parts:
@@ -227,7 +256,7 @@ def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None,
     executable = Path(argv[0]).name
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
         return None, env, _high_risk_command_message(executable)
-    if any(constants.SCANNER_SHELL_META_RE.search(part) for part in argv):
+    if any(_verification_shell_meta_re().search(part) for part in argv):
         return (
             None,
             env,

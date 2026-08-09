@@ -1318,6 +1318,61 @@ def test_high_risk_command_message_is_platform_aware(monkeypatch):
     assert "chmod +x" not in win_msg
 
 
+def test_verification_split_command_preserves_windows_backslash_paths(monkeypatch):
+    from brigade.work_cmd import verification
+
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
+    assert verification._verification_split_command(r".\scripts\check.ps1") == [r".\scripts\check.ps1"]
+    assert verification._verification_split_command(r"C:\repo\scripts\check.ps1") == [r"C:\repo\scripts\check.ps1"]
+    assert verification._verification_split_command(r'".\scripts\with spaces\check.ps1"') == [
+        r".\scripts\with spaces\check.ps1"
+    ]
+
+
+def test_verification_split_command_keeps_posix_shlex_behavior(monkeypatch):
+    from brigade.work_cmd import verification
+
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: False)
+    assert verification._verification_split_command("./scripts/check.sh") == ["./scripts/check.sh"]
+    assert verification._verification_split_command('python3 -c "print(1)"') == ["python3", "-c", "print(1)"]
+
+
+def test_verification_shell_meta_allows_backslash_only_on_windows(monkeypatch):
+    from brigade.work_cmd import verification
+
+    path_token = r".\scripts\check.ps1"
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
+    assert verification._verification_shell_meta_re().search(path_token) is None
+
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: False)
+    assert verification._verification_shell_meta_re().search(path_token) is not None
+
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
+    assert verification._verification_shell_meta_re().search("foo;bar") is not None
+
+
+def test_verify_parse_command_treats_windows_backslash_tokens_as_paths(tmp_path, monkeypatch):
+    """Parsing and path-token classification; pathlib resolution is covered on Windows CI."""
+    from brigade.work_cmd import verification
+
+    target = tmp_path / "repo"
+    target.mkdir()
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
+
+    for command in (
+        r".\scripts\check.ps1",
+        r'".\scripts\check.ps1"',
+        r"C:\repo\scripts\check.ps1",
+    ):
+        token = verification._verification_split_command(command)[0]
+        assert verification._verify_token_is_path(token)
+        argv, env, error = verification._verify_parse_command(command, target)
+        assert argv is None
+        assert env == {}
+        assert "shell metacharacters" not in (error or "")
+        assert error == verification._unresolvable_command_message(token)
+
+
 def test_work_verify_run_records_target_relative_process_start_failure(tmp_path, monkeypatch, capsys):
     target = tmp_path / "repo"
     caller = tmp_path / "caller"
