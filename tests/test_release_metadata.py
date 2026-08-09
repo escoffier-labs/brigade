@@ -13,8 +13,8 @@ def _release_changelog(version: str) -> str:
     return text[start:end]
 
 
-def test_current_release_has_expected_v0260_release_notes():
-    assert __version__ == "0.26.0"
+def test_current_release_has_expected_v0261_release_notes():
+    assert __version__ == "0.26.1"
     assert "no release has shipped from this entry" not in (ROOT / "CHANGELOG.md").read_text()
 
     text = _release_changelog(__version__)
@@ -22,22 +22,24 @@ def test_current_release_has_expected_v0260_release_notes():
     assert text.count("### Added") == 1
     assert text.count("### Changed") == 1
     assert text.count("### Fixed") == 1
-    assert text.count("### Removed") == 1
+    assert text.count("### Removed") == 0
     assert text.count("### Deprecated") == 0
     for expected in (
-        "user-scope",
-        "available_update",
-        "linked git worktree",
-        "MODEL_OUTPUT",
-        "check.brigade.tools",
-        "#740, #743",
-        "(#741)",
-        "(#718)",
-        "(#701)",
-        "(#716)",
-        "(#717)",
-        "(#719)",
-        "(#720)",
+        "task ledgers",
+        "Memory care now ships two review skills",
+        "brigade center serve",
+        "brigade handoff lint",
+        "Stable publishing accepts only exact release tags",
+        "agent-facing API",
+        "(#739)",
+        "hop-distance confidence",
+        "(#486)",
+        "(#487)",
+        "forward-plan",
+        "(#779)",
+        "DAG runs no longer deadlock",
+        "fair FIFO queue",
+        "(#755, #787)",
     ):
         assert expected in text
 
