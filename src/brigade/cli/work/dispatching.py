@@ -589,7 +589,12 @@ def dispatch(args) -> int:
     if args.work_command == "next":
         return work_cmd.next(target=args.target, json_output=args.json)
     if args.work_command == "ready":
-        return work_cmd.ready(target=args.target, explain=args.explain, json_output=args.json)
+        return work_cmd.ready(
+            target=args.target,
+            explain=args.explain,
+            parallel_safe=args.parallel_safe,
+            json_output=args.json,
+        )
     if args.work_command == "claim":
         return work_cmd.claim(
             target=args.target,

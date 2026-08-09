@@ -67,6 +67,52 @@ def test_filing_predicted_enrichment_via_mocked_impact(tmp_path, monkeypatch):
     assert "degraded" not in footprint
 
 
+def test_run_graphtrail_impact_argv_for_dash_query(tmp_path, monkeypatch):
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"fake-graphtrail-index")
+    captured: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        captured.append(list(argv))
+        from brigade import proc
+
+        if "--json" in argv:
+            return proc.Result(code=0, stdout='{"related_files": ["src/x.py"]}', stderr="")
+        return proc.Result(code=1, stdout="", stderr="")
+
+    monkeypatch.setattr(footprint_mod.proc, "run", fake_run)
+
+    result = footprint_mod._run_graphtrail_impact(tmp_path, "/bin/graphtrail", db, "-flag-like")
+    assert result == {"related_files": ["src/x.py"]}
+    assert captured == [
+        ["/bin/graphtrail", "--db", str(db), "impact", "--json", "--", "-flag-like"],
+    ]
+
+
+def test_run_graphtrail_impact_argv_preserves_non_dash_query(tmp_path, monkeypatch):
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"fake-graphtrail-index")
+    captured: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        captured.append(list(argv))
+        from brigade import proc
+
+        if "--json" in argv:
+            return proc.Result(code=0, stdout='{"related_files": ["src/y.py"]}', stderr="")
+        return proc.Result(code=1, stdout="", stderr="")
+
+    monkeypatch.setattr(footprint_mod.proc, "run", fake_run)
+
+    result = footprint_mod._run_graphtrail_impact(tmp_path, "/bin/graphtrail", db, "pkg.mod.fn")
+    assert result == {"related_files": ["src/y.py"]}
+    assert captured == [
+        ["/bin/graphtrail", "--db", str(db), "impact", "pkg.mod.fn", "--json"],
+    ]
+
+
 def test_three_phase_writes_predict_refine_reconcile(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(

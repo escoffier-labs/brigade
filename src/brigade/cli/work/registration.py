@@ -439,6 +439,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_ready.add_argument(
         "--explain", action="store_true", help="Include blocked tasks, blocker paths, and cycles."
     )
+    p_work_ready.add_argument(
+        "--parallel-safe",
+        action="store_true",
+        help="Partition the ready set into dispatch waves by footprint intersection.",
+    )
     p_work_ready.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_claim = work_sub.add_parser(
         "claim",
