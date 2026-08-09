@@ -347,6 +347,109 @@ def _normalize_task_priority(value: object) -> str:
     return "normal"
 
 
+def _normalize_seat_class(value: object) -> str | None:
+    """Return a valid seat-class hint, or None when absent.
+
+    Raises ValueError when a value is present but not in TASK_SEAT_CLASSES.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"seat_class must be one of: {', '.join(constants.TASK_SEAT_CLASSES)}")
+    text = value.strip()
+    if not text:
+        return None
+    if text not in constants.TASK_SEAT_CLASSES:
+        raise ValueError(f"seat_class must be one of: {', '.join(constants.TASK_SEAT_CLASSES)}")
+    return text
+
+
+def _normalize_spend_by(value: object) -> str | None:
+    """Return a validated ISO-8601 spend-by deadline, or None when absent.
+
+    Accepts date or datetime strings (Z suffix allowed). Raises ValueError when
+    a value is present but not parseable as ISO-8601.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("spend_by must be an ISO-8601 date or datetime")
+    text = value.strip()
+    if not text:
+        return None
+    if helpers._parse_iso_datetime(text) is None:
+        raise ValueError("spend_by must be an ISO-8601 date or datetime")
+    return text
+
+
+def _dispatch_annotations(task: dict[str, Any]) -> dict[str, str]:
+    """Project present, valid seat_class / spend_by hints for ready output.
+
+    Invalid or missing annotations are omitted so absent annotations change
+    nothing for dispatchers.
+    """
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    annotations: dict[str, str] = {}
+    raw_seat = metadata.get("seat_class")
+    if isinstance(raw_seat, str) and raw_seat.strip() in constants.TASK_SEAT_CLASSES:
+        annotations["seat_class"] = raw_seat.strip()
+    raw_spend = metadata.get("spend_by")
+    if isinstance(raw_spend, str) and helpers._parse_iso_datetime(raw_spend.strip()) is not None:
+        annotations["spend_by"] = raw_spend.strip()
+    return annotations
+
+
+def _sanitize_dispatch_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Normalize seat_class / spend_by keys in a metadata bag; raise on invalid."""
+    cleaned = dict(metadata)
+    if "seat_class" in cleaned:
+        seat = _normalize_seat_class(cleaned.get("seat_class"))
+        if seat is None:
+            cleaned.pop("seat_class", None)
+        else:
+            cleaned["seat_class"] = seat
+    if "spend_by" in cleaned:
+        spend = _normalize_spend_by(cleaned.get("spend_by"))
+        if spend is None:
+            cleaned.pop("spend_by", None)
+        else:
+            cleaned["spend_by"] = spend
+    return cleaned
+
+
+def _merge_dispatch_annotations(
+    metadata: dict[str, Any] | None,
+    *,
+    seat_class: object = None,
+    spend_by: object = None,
+    clear_seat_class: bool = False,
+    clear_spend_by: bool = False,
+) -> dict[str, Any] | None:
+    """Merge or clear dispatch annotations into a metadata bag.
+
+    Returns None when the resulting metadata would be empty. Raises ValueError
+    on invalid seat_class / spend_by values.
+    """
+    merged: dict[str, Any] = dict(metadata) if isinstance(metadata, dict) else {}
+    if clear_seat_class:
+        merged.pop("seat_class", None)
+    elif seat_class is not None:
+        normalized = _normalize_seat_class(seat_class)
+        if normalized is None:
+            merged.pop("seat_class", None)
+        else:
+            merged["seat_class"] = normalized
+    if clear_spend_by:
+        merged.pop("spend_by", None)
+    elif spend_by is not None:
+        normalized_spend = _normalize_spend_by(spend_by)
+        if normalized_spend is None:
+            merged.pop("spend_by", None)
+        else:
+            merged["spend_by"] = normalized_spend
+    return merged or None
+
+
 def _normalize_acceptance(values: object) -> list[str]:
     if values is None:
         return []
@@ -1609,7 +1712,7 @@ def _make_task(
     if template:
         task["template"] = template
     if metadata:
-        task["metadata"] = metadata
+        task["metadata"] = _sanitize_dispatch_metadata(dict(metadata))
     return task
 
 
@@ -1718,6 +1821,39 @@ def _add_task(
             task["edges"] = created_edges
         _write_task_ledger(target, ledger)
         return task, True
+
+
+def _annotate_task(
+    target: Path,
+    task_id: str,
+    *,
+    seat_class: object = None,
+    spend_by: object = None,
+    clear_seat_class: bool = False,
+    clear_spend_by: bool = False,
+) -> dict[str, Any]:
+    """Update dispatch annotations on an existing task. Raises ValueError/KeyError."""
+    if seat_class is None and spend_by is None and not clear_seat_class and not clear_spend_by:
+        raise ValueError("pass --seat-class, --spend-by, and/or a --clear-* flag")
+    with _task_ledger_lock(target):
+        task, ledger = _find_task(target, task_id)
+        if task is None:
+            raise KeyError(f"task not found: {task_id}")
+        existing = task.get("metadata") if isinstance(task.get("metadata"), dict) else None
+        merged = _merge_dispatch_annotations(
+            existing,
+            seat_class=seat_class,
+            spend_by=spend_by,
+            clear_seat_class=clear_seat_class,
+            clear_spend_by=clear_spend_by,
+        )
+        if merged is None:
+            task.pop("metadata", None)
+        else:
+            task["metadata"] = merged
+        task["updated_at"] = helpers._now().isoformat()
+        _write_task_ledger(target, ledger)
+        return task
 
 
 def _apply_graph_plan(

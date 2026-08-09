@@ -27,7 +27,9 @@
       "text": "Example node text",
       "origin": "ready|roadmap-now|roadmap-next|roadmap-later|proposed",
       "task_id": null,
-      "priority_hint": "ready-first then outcome-rank then roadmap Now/Next/Later"
+      "priority_hint": "ready-first then outcome-rank then roadmap Now/Next/Later",
+      "seat_class": null,
+      "spend_by": null
     }
   ],
   "proposed_edges": [

@@ -1,7 +1,7 @@
 {
   "id": "forward-plan",
   "title": "forward-plan",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Allowlist-bound forward planner: ready set + outcome rank + ROADMAP.md to a dependency-filed plan under .brigade/work/plans/, with GraphTrail-derived edges marked derived and confirmation-gated.",
   "required_tools": [
     "Read",

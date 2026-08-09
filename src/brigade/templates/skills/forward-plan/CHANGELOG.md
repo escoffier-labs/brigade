@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+- Document optional `seat_class` / `spend_by` dispatch annotations on ready
+  items and when emitting tasks (`work task add` / `annotate` / graph metadata)
+  for quota-driven routing (#815).
+
 ## 0.1.0
 
 - Initial bundled forward-plan skill: ready set + outcome rank + ROADMAP.md to a

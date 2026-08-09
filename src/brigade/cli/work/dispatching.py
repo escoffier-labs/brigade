@@ -645,8 +645,20 @@ def dispatch(args) -> int:
                 deps=args.deps,
                 symbols=args.symbols,
                 files=args.files,
+                seat_class=args.seat_class,
+                spend_by=args.spend_by,
                 graph=args.graph,
                 dry_run=args.dry_run,
+                json_output=args.json,
+            )
+        if args.task_command == "annotate":
+            return work_cmd.task_annotate(
+                target=args.target,
+                task_id=args.task_id,
+                seat_class=args.seat_class,
+                spend_by=args.spend_by,
+                clear_seat_class=args.clear_seat_class,
+                clear_spend_by=args.clear_spend_by,
                 json_output=args.json,
             )
         if args.task_command == "show":
