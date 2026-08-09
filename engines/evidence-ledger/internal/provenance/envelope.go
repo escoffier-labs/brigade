@@ -25,7 +25,9 @@ const (
 	LegacyDisplay      = "UNKNOWN PROVENANCE - legacy item"
 	HashAlgorithm      = "sha256"
 	RawScope           = "exact_bytes"
-	MaxCompactBytes    = 4096
+	MaxCompactBytes           = 4096
+	MaxEnvelopeIdentityBytes  = 512
+	envelopeIdentityDigestPre = "sha256:"
 )
 
 var (
@@ -125,6 +127,85 @@ type AuthorityProof struct {
 type ValidationContext struct {
 	InboundAdapter bool
 	AuthorityProof *AuthorityProof
+}
+
+// EvidenceInput contains the fields known at an evidence creation boundary.
+// NewEvidenceEnvelope owns the schema constants so callers cannot emit an
+// unversioned or partially versioned envelope.
+type EvidenceInput struct {
+	SourceSystem       string
+	SourceKind         string
+	SourceProducer     string
+	Origin             string
+	RepositoryID       string
+	RepositoryRevision *string
+	SessionID          *string
+	SessionHarness     *string
+	CollectionID       string
+	ItemID             string
+	LocatorKind        string
+	LocatorValue       string
+	Attribution        string
+	Modality           string
+	TrustLabel         string
+	TrustAssignedBy    string
+	TrustAssignedAt    *string
+	InjectionStatus    string
+	InjectionRules     []string
+	Text               string
+	RawBytes           []byte
+	CapturedAt         *string
+	IngestedAt         *string
+}
+
+// BoundEnvelopeIdentity returns s when it fits the provenance identity budget,
+// otherwise a deterministic sha256: digest of the exact UTF-8 bytes.
+func BoundEnvelopeIdentity(s string) string {
+	if len(s) <= MaxEnvelopeIdentityBytes {
+		return s
+	}
+	return envelopeIdentityDigestPre + SHA256Bytes([]byte(s))
+}
+
+// NewEvidenceEnvelope builds and validates a v1 envelope for persisted item
+// text. Content covers exact UTF-8 bytes; RawBytes is hashed independently.
+func NewEvidenceEnvelope(in EvidenceInput) (Envelope, error) {
+	content := ContentSHA256(in.Text)
+	var rawAlgorithm, rawScope, rawDigest *string
+	if in.RawBytes != nil {
+		algorithm, scope, digest := HashAlgorithm, RawScope, SHA256Bytes(in.RawBytes)
+		rawAlgorithm, rawScope, rawDigest = &algorithm, &scope, &digest
+	}
+	collectionID := BoundEnvelopeIdentity(in.CollectionID)
+	itemID := BoundEnvelopeIdentity(in.ItemID)
+	locatorValue := BoundEnvelopeIdentity(in.LocatorValue)
+	repositoryID := BoundEnvelopeIdentity(in.RepositoryID)
+	var sessionID *string
+	if in.SessionID != nil {
+		bounded := BoundEnvelopeIdentity(*in.SessionID)
+		sessionID = &bounded
+	}
+	env := Envelope{
+		Schema: Schema, SchemaVersion: SchemaVersion,
+		Source:       Source{System: in.SourceSystem, Kind: in.SourceKind, Producer: in.SourceProducer},
+		Origin:       in.Origin,
+		Repository:   &Repository{ID: repositoryID, Revision: in.RepositoryRevision},
+		Session:      &Session{ID: sessionID, Harness: in.SessionHarness},
+		CollectionID: &collectionID, ItemID: &itemID,
+		Locator:     &Locator{Kind: in.LocatorKind, Value: locatorValue},
+		Attribution: in.Attribution, Modality: in.Modality,
+		Trust: Trust{
+			Label: in.TrustLabel, AssignedBy: in.TrustAssignedBy, AssignedAt: in.TrustAssignedAt,
+			TrustPolicy: TrustPolicy{Schema: TrustPolicySchema, SchemaVersion: TrustPolicyVersion},
+			Injection:   Injection{Status: in.InjectionStatus, Count: len(in.InjectionRules), Rules: append([]string{}, in.InjectionRules...)},
+		},
+		Hashes:     Hashes{ContentAlgorithm: HashAlgorithm, ContentScope: "item.text.utf8.v1", Content: &content, RawAlgorithm: rawAlgorithm, RawScope: rawScope, Raw: rawDigest},
+		CapturedAt: in.CapturedAt, IngestedAt: in.IngestedAt,
+	}
+	if err := Validate(env, ValidationContext{}); err != nil {
+		return Envelope{}, err
+	}
+	return env, nil
 }
 
 // SHA256Bytes returns the bare lowercase 64-char hex SHA-256 digest of data.

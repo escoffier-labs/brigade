@@ -13,6 +13,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade center serve` adds an explicit loopback-bound read-only dashboard transport with host, CSP, and token safeguards, and the docs define Brigade's external-scheduler boundary. (#729, #784)
 - `brigade handoff lint` warns about context-dependent durable facts, supports `--strict`, and distinguishes salvageable non-template notes from invalid input. (#730, #773)
 - Stable publishing accepts only exact release tags, while a separate daily main-branch workflow publishes development wheels without version commits or GitHub Releases. (#782)
+- Error and refusal copy is treated as an agent-facing API (#739): destructive
+  and gate-bypassing flags (`--force`, `--allow-*`, `--operator-confirm`,
+  `--allow-dirty`) are no longer named as remediations; wrong or platform-only
+  advice (init `--force` for missing templates, redundant sweep `--force`,
+  `chmod +x` hook guidance) is corrected. Convention lives in CONTRIBUTING;
+  audit table in `docs/audit/2026-08-09-error-refusal-copy.md`; contracts in
+  `tests/test_error_refusal_copy.py`.
+
+### Added
+- Work verify plan ranks candidate verification commands from GraphTrail
+  affected-test impact (#486): `brigade work verify plan` attaches
+  `graph_impact` / `ranked_candidates` with hop-distance confidence and
+  via-symbol evidence, optional `--file` seeds changed paths (otherwise
+  `git diff --name-only HEAD`), and the worker still chooses the command.
+  When GraphTrail is unavailable the ranking degrades cleanly to an empty
+  advisory list.
+- Versioned `brigade.work-run` archive schema for portable run import/export
+  (#487): `work-run.json` + `payload/` directory layout, published JSON Schema
+  at `schemas/work-run.v1.schema.json`, stdlib validator, and explicit
+  compatibility rules (refuse unsupported archive versions, strip private
+  recovery-checkpoint bodies on export, ignore unknown nested receipt keys).
+  Additive CLI: `brigade runs export`, `brigade runs import`, and
+  `brigade runs validate-archive`.
+- `forward-plan` bundled registry skill (#779): turns the native ready set,
+  `brigade outcome rank`, and repo `ROADMAP.md` into a dependency-filed plan
+  artifact under `.brigade/work/plans/`. Proposes GraphTrail-derived edges
+  (`blocks` from def/use, `conflicts-with` from write overlap) marked derived
+  and confirmation-gated; degrades to zero proposed edges when GraphTrail is
+  unavailable. Ships `plan.template.json` as the artifact contract. Skill only,
+  with no new CLI subcommand.
 
 ### Fixed
 - DAG runs no longer deadlock on shared cover sets, accept mutual-wait cycles, misreport one-node execution, route to unhealthy seats, or miss shared-checkout isolation breaches. (#742, #788, #791, #794)

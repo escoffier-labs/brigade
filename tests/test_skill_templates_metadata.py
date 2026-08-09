@@ -13,6 +13,7 @@ BUNDLED_TEMPLATES = (
     "ultra-work-scout",
     "handoff-inbox-drain",
     "card-refresh",
+    "forward-plan",
 )
 
 

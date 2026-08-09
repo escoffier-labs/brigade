@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brigade.tools/schemas/work-run.v1.schema.json",
+  "title": "Brigade work-run archive manifest v1",
+  "description": "Versioned brigade.work-run archive envelope for portable run import/export. Artifact version (this file) is separate from archive wire schema_version.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "run_id",
+    "exported_at",
+    "exporter_brigade_version",
+    "format",
+    "payload_dir",
+    "compatibility",
+    "files"
+  ],
+  "properties": {
+    "schema": {"const": "brigade.work-run"},
+    "schema_version": {"const": 1},
+    "run_id": {
+      "type": "string",
+      "pattern": "^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$"
+    },
+    "exported_at": {"type": "string", "minLength": 1},
+    "exporter_brigade_version": {"type": "string", "minLength": 1},
+    "format": {"const": "directory"},
+    "payload_dir": {"const": "payload"},
+    "source_run_dir": {"type": "string", "minLength": 1},
+    "schema_artifact": {"type": "string", "minLength": 1},
+    "run": {"$ref": "#/$defs/run_summary"},
+    "compatibility": {"$ref": "#/$defs/compatibility"},
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/file_entry"}
+    }
+  },
+  "$defs": {
+    "run_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "minLength": 1},
+        "schema_version": {"type": "integer", "minimum": 1},
+        "status": {"type": "string", "minLength": 1},
+        "started_at": {"type": "string", "minLength": 1},
+        "finished_at": {"type": "string", "minLength": 1},
+        "task": {"type": "string", "minLength": 1}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_reader_schema_version",
+        "max_reader_schema_version",
+        "journal_authority",
+        "resume_supported",
+        "private_checkpoint_bodies",
+        "unsupported_archive_version",
+        "nested_receipt_unknown_keys",
+        "symlinks_and_special_files"
+      ],
+      "properties": {
+        "min_reader_schema_version": {"const": 1},
+        "max_reader_schema_version": {"const": 1},
+        "journal_authority": {"enum": ["none", "present", "authoritative"]},
+        "resume_supported": {"const": false},
+        "private_checkpoint_bodies": {"const": "strip_to_artifact_reference"},
+        "unsupported_archive_version": {"const": "refuse"},
+        "nested_receipt_unknown_keys": {"const": "ignore"},
+        "symlinks_and_special_files": {"const": "refuse"},
+        "schema_artifact_note": {"type": "string", "minLength": 1}
+      }
+    },
+    "file_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "byte_size", "role"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+        },
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "byte_size": {"type": "integer", "minimum": 0},
+        "role": {
+          "enum": [
+            "receipt",
+            "journal",
+            "checkpoint-reference",
+            "artifact",
+            "support",
+            "other"
+          ]
+        },
+        "media_type": {"type": "string", "minLength": 1},
+        "nested_schema": {"type": "string", "minLength": 1},
+        "nested_schema_version": {"type": "integer", "minimum": 1},
+        "privacy_class": {"enum": ["public", "private", "redacted"]}
+      }
+    }
+  }
+}

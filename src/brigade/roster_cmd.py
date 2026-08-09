@@ -304,7 +304,7 @@ def init(
     target = target.expanduser()
     path = target / DEFAULT_ROSTER_REL
     if path.exists() and not force:
-        print(f"error: roster already exists at {path}; pass --force to overwrite", file=sys.stderr)
+        print(f"error: roster already exists at {path}; leaving it unchanged", file=sys.stderr)
         return 2
     if not path.exists() and not force:
         try:
@@ -315,7 +315,7 @@ def init(
             print(
                 f"error: {fallback.source} roster {fallback.path} already applies here via fallback; "
                 f"a starter at {path} would shadow it with codex+ollama-only seats. "
-                "Pass --force to scaffold a workspace roster anyway.",
+                "Refusing to scaffold a workspace roster that would hide the active fallback.",
                 file=sys.stderr,
             )
             return 2

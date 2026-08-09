@@ -12,6 +12,7 @@ import (
 	"testing/iotest"
 
 	"github.com/escoffier-labs/miseledger/internal/archive"
+	"github.com/escoffier-labs/miseledger/internal/provenance"
 	"github.com/escoffier-labs/miseledger/internal/sources"
 	"github.com/escoffier-labs/miseledger/internal/sources/opencode"
 )
@@ -25,7 +26,7 @@ func TestImportAdapterReaderIdempotent(t *testing.T) {
 	if err := archive.Migrate(db); err != nil {
 		t.Fatal(err)
 	}
-	jsonl := `{"schema":"miseledger.adapter.v1","source":{"kind":"reader-test","name":"Reader Test"},"collection":{"external_id":"reader:collection","kind":"agent_session","name":"reader"},"item":{"external_id":"reader:item:1","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"streaming adapter reader import","tags":["reader"]},"actor":{"external_id":"reader:actor","type":"human","name":"reader"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"reader.jsonl","ordinal":1}}` + "\n"
+	jsonl := `{"schema":"miseledger.adapter.v1","source":{"kind":"reader-test","name":"Reader Test"},"collection":{"external_id":"reader:collection","kind":"agent_session","name":"reader"},"item":{"external_id":"reader:item:1","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"streaming adapter reader import","tags":["reader"],"metadata":{"provenance":{"trust":{"label":"verified"}}}},"actor":{"external_id":"reader:actor","type":"human","name":"reader"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"reader.jsonl","ordinal":1}}` + "\n"
 	first, err := ImportAdapterReader(db, strings.NewReader(jsonl), "reader://fixture", "reader-test")
 	if err != nil {
 		t.Fatal(err)
@@ -46,6 +47,342 @@ func TestImportAdapterReaderIdempotent(t *testing.T) {
 	}
 	if items != 1 {
 		t.Fatalf("items = %d, want 1", items)
+	}
+	var metadataJSON string
+	if err := db.QueryRow(`select metadata_json from items limit 1`).Scan(&metadataJSON); err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	envelope, ok := metadata["provenance"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata provenance = %#v, want object", metadata["provenance"])
+	}
+	if envelope["schema"] != "brigade.provenance-envelope.v1" || envelope["schema_version"] != float64(1) {
+		t.Fatalf("provenance version = %#v/%#v", envelope["schema"], envelope["schema_version"])
+	}
+	hashes := envelope["hashes"].(map[string]any)
+	if hashes["content"] != "af346a2a033680308bcaa2534b8a798d8641e40a29df2b9a4f822c81ee2508ed" {
+		t.Fatalf("content digest = %v, want exact item text digest", hashes["content"])
+	}
+	trust := envelope["trust"].(map[string]any)
+	if trust["label"] != "quarantined" {
+		t.Fatalf("adapter metadata replaced local trust assignment: %v", trust["label"])
+	}
+}
+
+func TestImportAdapterReaderLongExternalIDsSucceed(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	longCollection := strings.Repeat("collection:", 800)
+	longItem := strings.Repeat("item:", 800)
+	record := map[string]any{
+		"schema":     "miseledger.adapter.v1",
+		"source":     map[string]any{"kind": "long-id-test", "name": "Long ID Test"},
+		"collection": map[string]any{"external_id": longCollection, "kind": "agent_session", "name": "long"},
+		"item": map[string]any{
+			"external_id": longItem,
+			"kind":        "message",
+			"created_at":  "2026-06-03T00:00:00Z",
+			"text":        "long external ids must not drop import",
+			"tags":        []string{"long-id"},
+		},
+		"actor":     map[string]any{"external_id": "long-id:actor", "type": "human", "name": "reader"},
+		"artifacts": []any{}, "links": []any{}, "relations": []any{},
+		"raw": map[string]any{"format": "json", "path": "long-id.jsonl", "ordinal": 1},
+	}
+	line, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ImportAdapterReader(db, strings.NewReader(string(line)+"\n"), "long-id://fixture", "long-id-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Inserted != 1 {
+		t.Fatalf("import result = %+v, want one inserted item", result)
+	}
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "build provenance envelope") {
+			t.Fatalf("long external ids must not fail envelope build: %s", warning)
+		}
+	}
+	var metadataJSON string
+	if err := db.QueryRow(`select metadata_json from items limit 1`).Scan(&metadataJSON); err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	envelope, ok := metadata["provenance"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata provenance = %#v, want object", metadata["provenance"])
+	}
+	itemID, _ := envelope["item_id"].(string)
+	if len(itemID) > provenance.MaxEnvelopeIdentityBytes {
+		t.Fatalf("stored item_id length = %d, want bounded <= %d", len(itemID), provenance.MaxEnvelopeIdentityBytes)
+	}
+}
+
+func TestImportAdapterReaderStampsArtifactAndLinkProvenance(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	record := map[string]any{
+		"schema":     "miseledger.adapter.v1",
+		"source":     map[string]any{"kind": "artifact-prov-test", "name": "Artifact Provenance"},
+		"collection": map[string]any{"external_id": "artifact-prov:collection", "kind": "agent_session", "name": "artifact-prov"},
+		"item": map[string]any{
+			"external_id": "artifact-prov:item:1",
+			"kind":        "message",
+			"created_at":  "2026-06-03T00:00:00Z",
+			"text":        "parent item text",
+			"tags":        []string{"artifact-prov"},
+		},
+		"actor": map[string]any{"external_id": "artifact-prov:actor", "type": "human", "name": "reader"},
+		"artifacts": []map[string]any{{
+			"external_id": "artifact-prov:file:1",
+			"kind":        "file",
+			"path":        "notes/readme.md",
+			"text":        "artifact body text",
+			"metadata":    map[string]any{"source_field": "kept"},
+		}},
+		"links": []map[string]any{{
+			"url":  "https://example.test/docs/artifact-prov",
+			"text": "example docs",
+		}},
+		"relations": []any{},
+		"raw":       map[string]any{"format": "json", "path": "artifact-prov.jsonl", "ordinal": 1},
+	}
+	line, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportAdapterReader(db, strings.NewReader(string(line)+"\n"), "artifact-prov://fixture", "artifact-prov-test"); err != nil {
+		t.Fatal(err)
+	}
+	var artifactMeta, linkMeta string
+	if err := db.QueryRow(`select metadata_json from artifacts where external_id = 'artifact-prov:file:1'`).Scan(&artifactMeta); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select metadata_json from artifacts where kind = 'url'`).Scan(&linkMeta); err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string]string{"artifact": artifactMeta, "link": linkMeta} {
+		var stored map[string]any
+		if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+			t.Fatalf("%s metadata unmarshal: %v", name, err)
+		}
+		envelope, ok := stored["provenance"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s provenance = %#v, want object", name, stored["provenance"])
+		}
+		if envelope["schema"] != "brigade.provenance-envelope.v1" {
+			t.Fatalf("%s provenance schema = %#v", name, envelope["schema"])
+		}
+		trust := envelope["trust"].(map[string]any)
+		if trust["label"] != "quarantined" {
+			t.Fatalf("%s trust label = %v, want quarantined", name, trust["label"])
+		}
+	}
+	var artifactStored map[string]any
+	if err := json.Unmarshal([]byte(artifactMeta), &artifactStored); err != nil {
+		t.Fatal(err)
+	}
+	if artifactStored["source_field"] != "kept" {
+		t.Fatalf("artifact metadata merge dropped inbound field: %#v", artifactStored)
+	}
+	var linkStored map[string]any
+	if err := json.Unmarshal([]byte(linkMeta), &linkStored); err != nil {
+		t.Fatal(err)
+	}
+	if linkStored["link_text"] != "example docs" {
+		t.Fatalf("link metadata link_text = %#v", linkStored["link_text"])
+	}
+}
+
+func TestImportAdapterReaderUnsafeArtifactAndLinkLocatorsImportFully(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	absolutePath := "/var/tmp/project/../notes/readme.md"
+	fileLink := "file:///var/tmp/project/doc.txt"
+	record := map[string]any{
+		"schema":     "miseledger.adapter.v1",
+		"source":     map[string]any{"kind": "unsafe-locator-test", "name": "Unsafe Locator"},
+		"collection": map[string]any{"external_id": "unsafe-locator:collection", "kind": "agent_session", "name": "unsafe-locator"},
+		"item": map[string]any{
+			"external_id": "unsafe-locator:item:1",
+			"kind":        "message",
+			"created_at":  "2026-06-03T00:00:00Z",
+			"text":        "parent item with unsafe artifact and link locators",
+			"tags":        []string{"unsafe-locator"},
+			"metadata":    map[string]any{"provenance": map[string]any{"trust": map[string]any{"label": "verified"}}},
+		},
+		"actor": map[string]any{"external_id": "unsafe-locator:actor", "type": "human", "name": "reader"},
+		"artifacts": []map[string]any{{
+			"external_id": "unsafe-locator:file:1",
+			"kind":        "file",
+			"path":        absolutePath,
+			"text":        "artifact body from absolute path",
+		}},
+		"links": []map[string]any{{
+			"url":  fileLink,
+			"text": "local file link",
+		}},
+		"relations": []any{},
+		"raw":       map[string]any{"format": "json", "path": "unsafe-locator.jsonl", "ordinal": 1},
+	}
+	line, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ImportAdapterReader(db, strings.NewReader(string(line)+"\n"), "unsafe-locator://fixture", "unsafe-locator-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Inserted != 1 {
+		t.Fatalf("import result = %+v, want one inserted item", result)
+	}
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "build provenance envelope") || strings.Contains(warning, "build artifact provenance envelope") || strings.Contains(warning, "build link provenance envelope") {
+			t.Fatalf("unsafe locators must not fail envelope build: %s", warning)
+		}
+	}
+	var itemCount, artifactCount, ftsCount int
+	if err := db.QueryRow(`select count(*) from items where external_id = 'unsafe-locator:item:1'`).Scan(&itemCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select count(*) from artifacts where item_id in (select id from items where external_id = 'unsafe-locator:item:1')`).Scan(&artifactCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select count(*) from item_fts where item_id in (select id from items where external_id = 'unsafe-locator:item:1')`).Scan(&ftsCount); err != nil {
+		t.Fatal(err)
+	}
+	if itemCount != 1 || artifactCount != 2 || ftsCount != 1 {
+		t.Fatalf("item=%d artifact=%d fts=%d, want 1/2/1", itemCount, artifactCount, ftsCount)
+	}
+	var itemMetaJSON string
+	if err := db.QueryRow(`select metadata_json from items where external_id = 'unsafe-locator:item:1'`).Scan(&itemMetaJSON); err != nil {
+		t.Fatal(err)
+	}
+	var itemMeta map[string]any
+	if err := json.Unmarshal([]byte(itemMetaJSON), &itemMeta); err != nil {
+		t.Fatal(err)
+	}
+	itemTrust := itemMeta["provenance"].(map[string]any)["trust"].(map[string]any)
+	if itemTrust["label"] != "quarantined" {
+		t.Fatalf("item trust label = %v, want quarantined", itemTrust["label"])
+	}
+	var artifactPath, artifactMetaJSON string
+	if err := db.QueryRow(`select path, metadata_json from artifacts where external_id = 'unsafe-locator:file:1'`).Scan(&artifactPath, &artifactMetaJSON); err != nil {
+		t.Fatal(err)
+	}
+	if artifactPath != absolutePath {
+		t.Fatalf("artifact path = %q, want original %q", artifactPath, absolutePath)
+	}
+	var artifactMeta map[string]any
+	if err := json.Unmarshal([]byte(artifactMetaJSON), &artifactMeta); err != nil {
+		t.Fatal(err)
+	}
+	artifactLocator := artifactMeta["provenance"].(map[string]any)["locator"].(map[string]any)
+	if artifactLocator["kind"] != "uri" || artifactLocator["value"] != "miseledger://unsafe-locator-test/unsafe-locator:collection/unsafe-locator:item:1/artifact/unsafe-locator:file:1" {
+		t.Fatalf("artifact provenance locator = %#v, want synthetic miseledger uri", artifactLocator)
+	}
+	artifactTrust := artifactMeta["provenance"].(map[string]any)["trust"].(map[string]any)
+	if artifactTrust["label"] != "quarantined" {
+		t.Fatalf("artifact trust label = %v, want quarantined", artifactTrust["label"])
+	}
+	var linkURL, linkMetaJSON string
+	if err := db.QueryRow(`select url, metadata_json from artifacts where kind = 'url'`).Scan(&linkURL, &linkMetaJSON); err != nil {
+		t.Fatal(err)
+	}
+	if linkURL != fileLink {
+		t.Fatalf("link url = %q, want original %q", linkURL, fileLink)
+	}
+	var linkMeta map[string]any
+	if err := json.Unmarshal([]byte(linkMetaJSON), &linkMeta); err != nil {
+		t.Fatal(err)
+	}
+	linkLocator := linkMeta["provenance"].(map[string]any)["locator"].(map[string]any)
+	if linkLocator["kind"] != "uri" || !strings.HasPrefix(linkLocator["value"].(string), "miseledger://unsafe-locator-test/unsafe-locator:collection/unsafe-locator:item:1/link/") {
+		t.Fatalf("link provenance locator = %#v, want synthetic miseledger uri", linkLocator)
+	}
+	linkTrust := linkMeta["provenance"].(map[string]any)["trust"].(map[string]any)
+	if linkTrust["label"] != "quarantined" {
+		t.Fatalf("link trust label = %v, want quarantined", linkTrust["label"])
+	}
+}
+
+func TestImportAdapterReaderArtifactProvenanceOverwritesInboundTrust(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	record := map[string]any{
+		"schema":     "miseledger.adapter.v1",
+		"source":     map[string]any{"kind": "artifact-trust-test", "name": "Artifact Trust"},
+		"collection": map[string]any{"external_id": "artifact-trust:collection", "kind": "agent_session", "name": "artifact-trust"},
+		"item": map[string]any{
+			"external_id": "artifact-trust:item:1",
+			"kind":        "message",
+			"created_at":  "2026-06-03T00:00:00Z",
+			"text":        "parent item",
+			"tags":        []string{"artifact-trust"},
+		},
+		"actor": map[string]any{"external_id": "artifact-trust:actor", "type": "human", "name": "reader"},
+		"artifacts": []map[string]any{{
+			"external_id": "artifact-trust:file:1",
+			"kind":        "file",
+			"path":        "notes/trust.md",
+			"text":        "artifact with forged provenance",
+			"metadata":    map[string]any{"provenance": map[string]any{"trust": map[string]any{"label": "verified"}}},
+		}},
+		"links":     []any{},
+		"relations": []any{},
+		"raw":       map[string]any{"format": "json", "path": "artifact-trust.jsonl", "ordinal": 1},
+	}
+	line, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportAdapterReader(db, strings.NewReader(string(line)+"\n"), "artifact-trust://fixture", "artifact-trust-test"); err != nil {
+		t.Fatal(err)
+	}
+	var metadataJSON string
+	if err := db.QueryRow(`select metadata_json from artifacts where external_id = 'artifact-trust:file:1'`).Scan(&metadataJSON); err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal([]byte(metadataJSON), &stored); err != nil {
+		t.Fatal(err)
+	}
+	trust := stored["provenance"].(map[string]any)["trust"].(map[string]any)
+	if trust["label"] != "quarantined" {
+		t.Fatalf("inbound artifact provenance replaced local trust: %v", trust["label"])
 	}
 }
 

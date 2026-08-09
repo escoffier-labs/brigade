@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
+import time
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from brigade import cli, localio
+from brigade.claude_hooks import envelope
+from brigade.claude_hooks.package import PACKAGE_REF
 from brigade.claude_hooks import runtime
 from brigade.install import install_selection
 from brigade.selection import Selection
@@ -66,7 +70,9 @@ def test_session_start_injects_brief_once_per_repo(tmp_path: Path, monkeypatch):
     second = runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
 
     assert first["hookSpecificOutput"]["hookEventName"] == "SessionStart"
-    assert "work brief: test" in first["hookSpecificOutput"]["additionalContext"]
+    context = first["hookSpecificOutput"]["additionalContext"]
+    assert context.startswith("[Brigade] If this context appears truncated")
+    assert "work brief: test" in context
     assert second is None
     assert calls == [target.resolve()]
 
@@ -92,6 +98,7 @@ def test_session_start_hints_init_for_unwired_git_repo(tmp_path: Path):
     assert f"brigade init --target {repo.resolve()}" in context
     assert "--harnesses claude" in context
     assert "brigade work brief" in context
+    assert context.startswith("[Brigade] If this context appears truncated")
 
 
 def test_session_start_stays_silent_for_home_directory(tmp_path: Path, monkeypatch):
@@ -436,6 +443,144 @@ def test_posttooluse_ignores_concurrent_session_write_during_read_only_bash(tmp_
     assert reader_state["write_observed"] is False
     assert "pending_bash_fingerprint" not in reader_state
     assert "pending_bash_started_at" not in reader_state
+    assert (
+        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader_session, stop_hook_active=False))
+        is None
+    )
+
+
+def test_posttooluse_ignores_interleaved_concurrent_write_with_stale_fingerprint(tmp_path: Path):
+    """Issue #704: foreign writes must not re-arm closeout when the writer's
+    recorded repo_fingerprint lags the live tree (second write on disk before
+    that writer's next PostToolUse). Exact fingerprint equality is the escape
+    the #395/#380 fix missed.
+    """
+    target = _wired_claude(tmp_path)
+    reader_session = "reader-stale-fp"
+    writer_session = "writer-stale-fp"
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=reader_session,
+        tool_name="Bash",
+        tool_input={"command": f"{sys.executable} -c \"print('noop')\""},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+
+    first = target / "first.py"
+    first.write_text("first\n")
+    assert (
+        runtime.handle_payload(
+            "PostToolUse",
+            _payload(
+                target,
+                "PostToolUse",
+                session_id=writer_session,
+                tool_name="Write",
+                tool_input={"file_path": str(first)},
+            ),
+        )
+        is None
+    )
+    writer_state = runtime.read_session_state(target, writer_session)
+    assert writer_state["write_observed"] is True
+    recorded_fp = writer_state["repo_fingerprint"]
+
+    # Second concurrent write lands before the writer records the new fingerprint.
+    second = target / "second.py"
+    second.write_text("second\n")
+    live_fp = runtime.repo_worktree_fingerprint(target)
+    assert live_fp is not None
+    assert recorded_fp != live_fp
+
+    assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
+    reader_state = runtime.read_session_state(target, reader_session)
+    assert reader_state["write_observed"] is False
+    assert "last_write_at" not in reader_state
+    assert "pending_bash_fingerprint" not in reader_state
+    assert (
+        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader_session, stop_hook_active=False))
+        is None
+    )
+
+
+def test_stop_keeps_prior_receipt_when_interleaved_foreign_write_lags_fingerprint(tmp_path: Path, monkeypatch):
+    """Issue #704 receipt treadmill: a session that already verified must not
+    have last_write_at raised by a concurrent session whose recorded fingerprint
+    is no longer current.
+    """
+    target = _wired_claude(tmp_path)
+    reader_session = "verified-reader"
+    writer_session = "active-writer"
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=reader_session))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target,
+            "PostToolUse",
+            session_id=reader_session,
+            tool_name="Write",
+            tool_input={"file_path": str(target / "own.py")},
+        ),
+    )
+    state = runtime.read_session_state(target, reader_session)
+    write_at = state["last_verification_write_at"]
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": write_at,
+                "harness_session": {
+                    "harness": "claude",
+                    "fingerprint": state["session_fingerprint"],
+                },
+            }
+        )
+        + "\n"
+    )
+
+    pretool = _payload(
+        target,
+        "PreToolUse",
+        session_id=reader_session,
+        tool_name="Bash",
+        tool_input={"command": f"{sys.executable} -c \"print('noop')\""},
+    )
+    assert runtime.handle_payload("PreToolUse", pretool) is None
+
+    first = target / "foreign-a.py"
+    first.write_text("foreign-a\n")
+    assert (
+        runtime.handle_payload(
+            "PostToolUse",
+            _payload(
+                target,
+                "PostToolUse",
+                session_id=writer_session,
+                tool_name="Write",
+                tool_input={"file_path": str(first)},
+            ),
+        )
+        is None
+    )
+    (target / "foreign-b.py").write_text("foreign-b\n")
+    assert (
+        runtime.repo_worktree_fingerprint(target)
+        != runtime.read_session_state(target, writer_session)["repo_fingerprint"]
+    )
+
+    assert runtime.handle_payload("PostToolUse", {**pretool, "hook_event_name": "PostToolUse"}) is None
+    updated = runtime.read_session_state(target, reader_session)
+    assert updated["last_verification_write_at"] == write_at
+    assert updated["last_write_at"] == write_at
+
+    handoff = target / ".claude" / "memory-handoffs" / "handoff.md"
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text("durable finding\n")
     assert (
         runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader_session, stop_hook_active=False))
         is None
@@ -1402,6 +1547,49 @@ def test_hook_run_rejects_stale_package_without_output(capsys):
         == 0
     )
     assert capsys.readouterr().out == ""
+
+
+def test_hook_run_process_exits_within_timeout_when_operation_hangs(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    payload = _payload(
+        target,
+        "PreToolUse",
+        tool_name="Bash",
+        tool_input={"command": "pytest -q"},
+    )
+    env = os.environ.copy()
+    repo_root = Path(__file__).resolve().parents[1]
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(repo_root / "src"), env.get("PYTHONPATH"))))
+    env[runtime._HOOK_TEST_HANG_ENV] = "30"
+    env[runtime._HOOK_TIMEOUT_ENV] = "0.25"
+    started = time.monotonic()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "brigade",
+            "work",
+            "hook-run",
+            "--event",
+            "PreToolUse",
+            "--package",
+            PACKAGE_REF,
+        ],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        cwd=target,
+        env=env,
+        timeout=5,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+
+    assert completed.returncode == 0
+    assert elapsed < 2.0
+    assert json.loads(completed.stdout) == envelope.degraded_envelope("PreToolUse")
+    assert "timed out" in envelope.log_path(target).read_text(encoding="utf-8")
+    assert "resource_tracker" not in completed.stderr
 
 
 def test_posttool_failure_keeps_routed_failure_in_the_loop(tmp_path: Path):

@@ -1,0 +1,295 @@
+"""Agent-facing doctor output mode (issue #734)."""
+
+from __future__ import annotations
+
+import json
+import shlex
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from brigade import doctor as doctor_mod
+from brigade import doctor_agent
+from brigade import outcome_cmd
+from brigade.install import install_selection
+from brigade.selection import Selection
+
+
+def _expected_init_command(target: Path, *, selection: Selection | None = None) -> str:
+    return doctor_agent.init_command_for_target(target, selection=selection)
+
+
+def _wire(tmp_path: Path, *, harnesses: list[str] | None = None) -> Path:
+    target = tmp_path / "ws"
+    assert (
+        install_selection(
+            target,
+            Selection(
+                depth="workspace",
+                harnesses=harnesses or ["claude"],
+                owner=(harnesses or ["claude"])[0],
+                includes=[],
+            ),
+        )
+        == 0
+    )
+    return target
+
+
+def test_doctor_agent_healthy_target_prints_summary_only(tmp_path: Path, capsys, monkeypatch):
+    target = tmp_path / "healthy"
+    target.mkdir()
+    checks = [(doctor_mod.OK, f"check-{index}", "ready") for index in range(14)]
+    monkeypatch.setattr(doctor_mod, "_gather_checks", lambda _ctx: checks)
+
+    assert doctor_mod.run(target=target, agent=True) == 0
+    out = capsys.readouterr().out.strip()
+    assert out == "14 checks passed, 0 findings"
+    assert "severity:" not in out
+    assert "brigade doctor:" not in out
+
+
+def test_doctor_agent_findings_carry_structured_fields_text_and_json(tmp_path: Path, capsys, monkeypatch):
+    target = tmp_path / "findings"
+    target.mkdir()
+    checks = [
+        (doctor_mod.OK, "bootstrap: AGENTS.md", str(target / "AGENTS.md")),
+        (
+            doctor_mod.WARN,
+            "security: config",
+            f"missing at {target / '.brigade' / 'security.toml'}; run `brigade security init --target .`",
+        ),
+        (
+            doctor_mod.FAIL,
+            "bootstrap: AGENTS.md",
+            f"missing at {target / 'AGENTS.md'}",
+        ),
+    ]
+    monkeypatch.setattr(doctor_mod, "_gather_checks", lambda _ctx: checks)
+
+    assert doctor_mod.run(target=target, agent=True) == 1
+    text = capsys.readouterr().out
+    assert "1 check passed, 2 findings" in text
+    assert "severity: warn" in text
+    assert "severity: error" in text
+    assert "explanation:" in text
+    assert "observed:" in text
+    assert "expected:" in text
+    assert "commands:" in text
+    assert "brigade security init --target ." in text
+    assert "check-0" not in text
+    assert "name: bootstrap: AGENTS.md" in text
+    fallback_init = _expected_init_command(target)
+    assert fallback_init in text
+    assert "--depth repo" in fallback_init
+    assert "--harnesses claude" in fallback_init
+    assert "--owner claude" in fallback_init
+
+    assert doctor_mod.run(target=target, agent=True, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "agent"
+    assert payload["summary"]["passed"] == 1
+    assert payload["summary"]["findings"] == 2
+    assert "checks" not in payload
+    finding = next(item for item in payload["findings"] if item["name"] == "security: config")
+    assert finding["severity"] == "warn"
+    assert finding["explanation"]
+    assert "missing" in finding["observed"]
+    assert "present" in finding["expected"]
+    assert finding["commands"] == ["brigade security init --target ."]
+    bootstrap = next(item for item in payload["findings"] if item["name"] == "bootstrap: AGENTS.md")
+    assert bootstrap["commands"] == [fallback_init]
+
+
+def test_doctor_agent_dormant_loop_clears_after_verify(tmp_path: Path, capsys):
+    target = _wire(tmp_path)
+    capsys.readouterr()
+
+    assert doctor_mod.run(target=target, agent=True, json_output=True) == 0
+    before = json.loads(capsys.readouterr().out)
+    dormant = [item for item in before["findings"] if item["name"] == "outcome loop: dormant"]
+    assert dormant
+    assert any("work verify run" in command for command in dormant[0]["commands"])
+
+    # A verify run feeds the loop and clears the dormant finding.
+    from brigade.work_cmd import verification as verify_mod
+
+    assert verify_mod.verify_run(target=target, commands=["python3 -c \"print('ok')\""]) == 0
+    capsys.readouterr()
+
+    assert doctor_mod.run(target=target, agent=True, json_output=True) == 0
+    after = json.loads(capsys.readouterr().out)
+    assert not any(item["name"] == "outcome loop: dormant" for item in after["findings"])
+
+
+def test_doctor_agent_silences_absent_harness_checks(tmp_path: Path, capsys, monkeypatch):
+    target = _wire(tmp_path, harnesses=["claude", "openclaw"])
+    # Ensure OpenClaw host artifacts are absent inside the temp HOME.
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    (tmp_path / "empty-home").mkdir()
+    capsys.readouterr()
+
+    assert doctor_mod.run(target=target, agent=True, json_output=True, operator=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert not any(str(item["name"]).startswith("openclaw:") for item in payload["findings"])
+
+
+def test_doctor_agent_suppressed_harness_fail_text_json_parity(tmp_path: Path, capsys, monkeypatch):
+    target = _wire(tmp_path, harnesses=["claude"])
+    checks = [
+        (doctor_mod.OK, "bootstrap: AGENTS.md", str(target / "AGENTS.md")),
+        (
+            doctor_mod.FAIL,
+            "hermes: workspace handoff inbox",
+            f"missing at {target / '.hermes' / 'memory-handoffs'}",
+        ),
+    ]
+    monkeypatch.setattr(doctor_mod, "_gather_checks", lambda _ctx: checks)
+    capsys.readouterr()
+
+    text_rc = doctor_mod.run(target=target, agent=True)
+    text_out = capsys.readouterr().out
+    assert text_rc == 0
+    assert "hermes:" not in text_out
+    assert "0 findings" in text_out
+
+    json_rc = doctor_mod.run(target=target, agent=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert json_rc == 0
+    assert payload["ready"] is True
+    assert payload["summary"]["failed"] == 0
+    assert payload["summary"]["warn"] == 0
+    assert payload["summary"]["findings"] == 0
+    assert payload["summary"]["suppressed"] == 1
+    assert not any(str(item["name"]).startswith("hermes:") for item in payload["findings"])
+
+
+def test_doctor_agent_suppressed_harness_warn_json_summary(tmp_path: Path, capsys, monkeypatch):
+    target = _wire(tmp_path, harnesses=["claude"])
+    checks = [
+        (doctor_mod.OK, "bootstrap: AGENTS.md", str(target / "AGENTS.md")),
+        (
+            doctor_mod.WARN,
+            "openclaw: host config",
+            "missing at ~/.openclaw/openclaw.json",
+        ),
+    ]
+    monkeypatch.setattr(doctor_mod, "_gather_checks", lambda _ctx: checks)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    (tmp_path / "empty-home").mkdir()
+    capsys.readouterr()
+
+    assert doctor_mod.run(target=target, agent=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"]["warn"] == 0
+    assert payload["summary"]["findings"] == 0
+    assert payload["summary"]["suppressed"] == 1
+
+
+def test_doctor_agent_bootstrap_missing_init_command_uses_selection(tmp_path: Path, capsys, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    (tmp_path / "empty-home").mkdir()
+    target = _wire(tmp_path, harnesses=["claude"])
+    selection = Selection(
+        depth="workspace",
+        harnesses=["claude"],
+        owner="claude",
+        includes=[],
+    )
+    expected = _expected_init_command(target, selection=selection)
+    agents_md = target / "AGENTS.md"
+    agents_md.unlink()
+    assert not agents_md.is_file()
+    checks = [
+        (
+            doctor_mod.FAIL,
+            "bootstrap: AGENTS.md",
+            f"missing at {agents_md}",
+        ),
+    ]
+    monkeypatch.setattr(doctor_mod, "_gather_checks", lambda _ctx: checks)
+    capsys.readouterr()
+
+    assert doctor_mod.run(target=target, agent=True) == 1
+    text = capsys.readouterr().out
+    assert expected in text
+    assert "--depth workspace" in expected
+    assert shlex.quote(str(target)) in expected
+
+    assert doctor_mod.run(target=target, agent=True, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    bootstrap = payload["findings"][0]
+    assert bootstrap["commands"] == [expected]
+
+    from brigade import cli
+
+    init_argv = shlex.split(expected)
+    assert init_argv[0] == "brigade"
+    assert cli.main(init_argv[1:]) == 0
+    assert agents_md.is_file()
+
+
+def test_doctor_agent_bootstrap_missing_init_command_direct_fallback(tmp_path: Path):
+    target = tmp_path / "unwired"
+    target.mkdir()
+    check = (
+        doctor_mod.FAIL,
+        "bootstrap: AGENTS.md",
+        f"missing at {target / 'AGENTS.md'}",
+    )
+    expected = _expected_init_command(target)
+    finding = doctor_agent.finding_from_check(check, target=target)
+    assert finding is not None
+    assert finding["commands"] == [expected]
+    assert "--depth repo" in expected
+    assert "--harnesses claude" in expected
+    assert "--owner claude" in expected
+
+
+def test_doctor_agent_corrupt_hooks_is_error_severity(tmp_path: Path, capsys):
+    target = _wire(tmp_path)
+    (target / ".claude" / "settings.json").write_text("{not-json\n")
+    capsys.readouterr()
+
+    assert doctor_mod.run(target=target, agent=True, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    finding = next(item for item in payload["findings"] if item["name"] == "claude work loop")
+    assert finding["severity"] == "error"
+    assert "JSONDecodeError" in finding["observed"]
+    assert "parse failure" in finding["observed"]
+
+
+def test_doctor_agent_ledger_stale_finding(tmp_path: Path, monkeypatch):
+    target = _wire(tmp_path)
+    stale_ts = (datetime.now(timezone.utc) - timedelta(days=doctor_mod.OUTCOME_LEDGER_STALE_DAYS + 2)).isoformat()
+
+    class _Record:
+        ts = stale_ts
+
+    monkeypatch.setattr(
+        outcome_cmd,
+        "health",
+        lambda _target: {
+            "verify_run_count": 1,
+            "record_count": 1,
+            "issues": [],
+        },
+    )
+    monkeypatch.setattr(outcome_cmd, "load_records", lambda _target: [_Record()])
+
+    checks = doctor_mod._check_outcome_loop(doctor_mod.build_context(target))
+    names = [name for _status, name, _detail in checks]
+    assert "outcome loop: ledger stale" in names
+
+
+def test_doctor_agent_extract_commands_and_harness_detection(tmp_path: Path, monkeypatch):
+    target = tmp_path / "detect"
+    target.mkdir()
+    (target / ".claude").mkdir()
+    assert doctor_agent.harness_artifacts_present(target, "claude")
+    # OpenClaw detection reads host config under HOME, not the target tree.
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    (tmp_path / "empty-home").mkdir()
+    assert not doctor_agent.harness_artifacts_present(target, "openclaw")
+    assert doctor_agent.extract_commands("run `brigade security init --target .` now") == [
+        "brigade security init --target ."
+    ]

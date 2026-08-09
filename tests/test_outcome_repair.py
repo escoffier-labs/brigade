@@ -81,11 +81,14 @@ def test_doctor_reports_completed_ledger_chain_break(tmp_path, capsys):
     assert payload["completed_ledger"]["line_no"] == 3
     assert payload["completed_ledger"]["kind"] == "digest_chain_break"
     assert "outcome repair" in payload["completed_ledger"]["repair_command"]
+    assert "--operator-confirm" not in payload["completed_ledger"]["repair_command"]
+    assert payload["completed_ledger"]["repair_requires_operator_confirm"] is True
 
     assert cli.main(["outcome", "doctor", "--target", str(tmp_path)]) == 0
     text = capsys.readouterr().out
     assert "completed_ledger: CORRUPT line=3" in text
-    assert "repair: brigade outcome repair --operator-confirm" in text
+    assert "repair: brigade outcome repair (requires explicit operator confirmation)" in text
+    assert "--operator-confirm" not in text
 
 
 def test_repair_requires_operator_confirmation(tmp_path, capsys):
@@ -310,7 +313,8 @@ def test_capture_degrades_with_bounded_error_and_writes_nothing(tmp_path, capsys
     captured = capsys.readouterr()
     assert rc == 1
     assert "ledger corrupt at line 3" in captured.err
-    assert "brigade outcome repair --operator-confirm" in captured.err
+    assert "brigade outcome doctor" in captured.err
+    assert "--operator-confirm" not in captured.err
     assert path.read_bytes() == before
 
 

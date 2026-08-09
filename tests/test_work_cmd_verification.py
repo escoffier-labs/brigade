@@ -2641,7 +2641,13 @@ def test_work_verify_and_closeout_cli(tmp_path, monkeypatch):
     assert seen == [
         (
             "verify-plan",
-            {"target": tmp_path, "commands": ["python3 -m pytest -q"], "manifest_id": None, "json_output": True},
+            {
+                "target": tmp_path,
+                "commands": ["python3 -m pytest -q"],
+                "manifest_id": None,
+                "files": None,
+                "json_output": True,
+            },
         ),
         (
             "verify-run",

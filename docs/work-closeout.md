@@ -14,7 +14,7 @@ brigade work closeout latest
 brigade work closeout <session-id>
 ```
 
-`verify plan` inspects the repo and proposes local verification commands. It recognizes Python test layouts and package.json projects, and it reports blockers without running anything.
+`verify plan` inspects the repo and proposes local verification commands. It recognizes Python test layouts and package.json projects, and it reports blockers without running anything. When GraphTrail is installed and indexed, it also ranks affected-test candidates from changed files (`--file`, or `git diff --name-only HEAD`) with graph evidence and confidence; the ranking is advisory and the worker still chooses the command. Without GraphTrail the plan degrades cleanly and keeps the default command list.
 
 `verify run` executes only explicit local commands, directly with `shell=False`. It supports simple leading environment assignments such as `PYTHONPATH=src`, rejects high-risk shell-like commands, captures stdout and stderr logs locally, and writes a receipt under:
 

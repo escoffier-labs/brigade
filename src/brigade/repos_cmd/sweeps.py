@@ -311,7 +311,7 @@ def _health_command_registry_payload(
                             "repo_id": entry.repo_id,
                             "command_label": command.label,
                             "age_hours": age_hours,
-                            "suggested_next_command": f"brigade repos sweep run --repo {entry.repo_id} --force",
+                            "suggested_next_command": f"brigade repos sweep run --repo {entry.repo_id}",
                         }
                     )
                 if receipt.get("status") != "completed":
@@ -373,7 +373,7 @@ def _health_command_registry_payload(
         "issues": issues,
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
-        "suggested_next_commands": ["brigade repos sweep run --all --force"] if issues else [],
+        "suggested_next_commands": ["brigade repos sweep run --all"] if issues else [],
         "privacy": {
             "argv_redacted": True,
             "safe_labels_only": True,

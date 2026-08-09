@@ -27,9 +27,9 @@ def _wired(tmp_path: Path) -> Path:
     return target
 
 
-def _loop_check(target: Path, capsys):
+def _loop_check(target: Path, capsys, *, expect_rc: int = 0):
     capsys.readouterr()
-    assert doctor_mod.run(target, json_output=True) == 0
+    assert doctor_mod.run(target, json_output=True) == expect_rc
     payload = json.loads(capsys.readouterr().out)
     return next(item for item in payload["checks"] if item["name"] == "claude work loop")
 
@@ -48,15 +48,15 @@ def test_doctor_reports_advisory_only_without_hooks(tmp_path: Path, capsys):
     assert "advisory-only" in check["detail"]
 
 
-def test_doctor_reports_partial_for_unreadable_hook_settings(tmp_path: Path, capsys):
+def test_doctor_reports_error_for_unreadable_hook_settings(tmp_path: Path, capsys):
     target = _wired(tmp_path)
     (target / ".claude" / "settings.json").write_text("{not-json\n")
 
-    check = _loop_check(target, capsys)
+    check = _loop_check(target, capsys, expect_rc=1)
 
-    assert check["status"] == "WARN"
-    assert "partial" in check["detail"]
-    assert "settings" in check["detail"]
+    assert check["status"] == "FAIL"
+    assert "hook settings error" in check["detail"]
+    assert "JSONDecodeError" in check["detail"]
 
 
 def test_doctor_reports_missing_hook_sidecar(tmp_path: Path, capsys):

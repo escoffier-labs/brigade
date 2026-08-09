@@ -109,7 +109,8 @@ def test_roster_init_refuses_to_shadow_user_roster(_hermetic_home, tmp_target, c
     assert not (tmp_target / ".brigade" / "roster.toml").exists()
     assert str(user) in err
     assert "shadow" in err
-    assert "--force" in err
+    assert "Refusing to scaffold" in err
+    assert "--force" not in err
 
 
 def test_roster_init_refuses_to_shadow_worktree_parent_roster(_hermetic_home, tmp_path, capsys):
@@ -131,7 +132,8 @@ def test_roster_init_refuses_to_shadow_worktree_parent_roster(_hermetic_home, tm
     assert not (worktree / ".brigade" / "roster.toml").exists()
     assert str(parent_roster.resolve()) in err
     assert "worktree-parent" in err
-    assert "--force" in err
+    assert "Refusing to scaffold" in err
+    assert "--force" not in err
 
 
 def test_roster_init_force_scaffolds_despite_user_roster(_hermetic_home, tmp_target):

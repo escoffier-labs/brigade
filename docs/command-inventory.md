@@ -56,7 +56,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade route`: 1 command path(s)
 - `brigade run`: 1 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
-- `brigade runs`: 11 command path(s)
+- `brigade runs`: 14 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 6 command path(s)
 - `brigade security`: 15 command path(s)
@@ -443,6 +443,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runbook run` (extras)
 - `brigade runs audit`
 - `brigade runs events`
+- `brigade runs export`
+- `brigade runs import`
 - `brigade runs interrupt`
 - `brigade runs latest`
 - `brigade runs list`
@@ -451,6 +453,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs resume`
 - `brigade runs show`
 - `brigade runs steer`
+- `brigade runs validate-archive`
 - `brigade runs watch`
 - `brigade scrub`
 - `brigade search context`

@@ -445,7 +445,7 @@ def quickstart(
             "steps": steps,
             "status": "blocked",
             "next_commands": [
-                f"brigade init --target {target} --depth {depth} --harnesses {','.join(selected_harnesses) or 'none'} --force"
+                f"brigade doctor --target {target}",
             ],
             "local_only_notes": _quickstart_local_notes(),
         }

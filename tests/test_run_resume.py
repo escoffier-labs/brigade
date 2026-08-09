@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -184,6 +185,8 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
                 "kind": "owner-process-exited",
                 "owner_pid": 99999999,
             },
+            "finished_at": "2026-07-03T00:05:00+00:00",
+            "duration_seconds": 300.0,
         }
     )
     (run_dir / "run.json").write_text(json.dumps(recovered))
@@ -205,6 +208,8 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
     assert run_json["recovery_history"] == [recovered["failure"]]
     assert "failure_phase" not in run_json
     assert "failure" not in run_json
+    assert run_json["finished_at"] != recovered["finished_at"]
+    assert run_json["duration_seconds"] != recovered["duration_seconds"]
     worker_revisions = sorted((run_dir / "revisions" / "worker-results").glob("*.json"))
     synthesis_revisions = sorted((run_dir / "revisions" / "synthesis").glob("*.json"))
     assert [path.name for path in worker_revisions] == ["000001.json", "000002.json"]
@@ -225,6 +230,183 @@ def test_resume_with_nothing_resumable_reports_and_exits_2(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "no resumable workers" in err
     assert "cook" in err  # names the non-resumable failure
+
+
+def test_resume_recovers_appserver_thread_from_interrupted_dispatch_events(tmp_path, monkeypatch):
+    run_dir = _write_run_dir(tmp_path, results=[])
+    (run_dir / "worker-results.json").unlink()
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta.update({"status": "dispatching", "codex_transport": "app-server"})
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    events = run_dir / "events"
+    events.mkdir()
+    (events / "cook.jsonl").write_text(
+        json.dumps({"method": "turn/started", "params": {"threadId": "t-recovered", "turnId": "turn-1"}}) + "\n"
+    )
+
+    def recover_stale(workspace, candidate, *, required):
+        assert candidate == run_dir
+        assert required is False
+        return False
+
+    monkeypatch.setattr(run_resume.runguard, "recover_stale_run", recover_stale)
+    monkeypatch.setattr(run_resume.runguard, "run_lock", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *args, **kwargs: agents.AgentResult(text="recovered synthesis", ok=True),
+    )
+
+    assert run_resume.resume(run_dir) == 0
+    results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    assert results[0]["thread_id"] == "t-recovered"
+    assert results[0]["ok"] is True
+    final_meta = json.loads((run_dir / "run.json").read_text())
+    assert final_meta["recovery_history"][0]["kind"] == "owner-process-exited"
+
+
+def test_resume_refuses_interrupted_multistage_appserver_salvage(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(tmp_path, results=[])
+    (run_dir / "worker-results.json").unlink()
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta.update({"status": "dispatching", "codex_transport": "app-server", "active_stage": 2})
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    (run_dir / "plan.json").write_text(
+        json.dumps(
+            {
+                "assignments": [
+                    {"stage": 1, "worker": "cook", "task": "stage one"},
+                    {"stage": 2, "worker": "cook", "task": "stage two"},
+                ]
+            }
+        )
+    )
+    events = run_dir / "events"
+    events.mkdir()
+    (events / "cook.jsonl").write_text(
+        json.dumps({"method": "turn/started", "params": {"threadId": "t-stage-two", "turnId": "turn-2"}}) + "\n"
+    )
+    provider_calls: list[str] = []
+
+    class GuardServer:
+        def __init__(self, *args, **kwargs):
+            provider_calls.append("constructed")
+
+        def start(self):
+            provider_calls.append("started")
+
+    monkeypatch.setattr(run_resume.runguard, "recover_stale_run", lambda *args, **kwargs: False)
+    monkeypatch.setattr(run_resume.runguard, "run_lock", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", GuardServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("synthesis must not run")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert provider_calls == []
+    err = capsys.readouterr().err
+    assert "stage 2" in err
+    assert "earlier-stage worker results were not persisted" in err
+
+
+@pytest.mark.parametrize("malformed_results", [None, {"worker": "cook"}])
+def test_resume_refuses_multistage_salvage_with_malformed_worker_results(
+    tmp_path, monkeypatch, capsys, malformed_results
+):
+    run_dir = _write_run_dir(tmp_path, results=[])
+    (run_dir / "worker-results.json").write_text(json.dumps({"results": malformed_results, "ground_truth": {}}))
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta.update({"status": "dispatching", "codex_transport": "app-server", "active_stage": 2})
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    (run_dir / "plan.json").write_text(
+        json.dumps(
+            {
+                "assignments": [
+                    {"stage": 1, "worker": "cook", "task": "stage one"},
+                    {"stage": 2, "worker": "cook", "task": "stage two"},
+                ]
+            }
+        )
+    )
+    events = run_dir / "events"
+    events.mkdir()
+    (events / "cook.jsonl").write_text(
+        json.dumps({"method": "turn/started", "params": {"threadId": "t-stage-two", "turnId": "turn-2"}}) + "\n"
+    )
+    provider_calls: list[str] = []
+
+    class GuardServer:
+        def __init__(self, *args, **kwargs):
+            provider_calls.append("constructed")
+
+        def start(self):
+            provider_calls.append("started")
+
+    monkeypatch.setattr(run_resume.runguard, "recover_stale_run", lambda *args, **kwargs: False)
+    monkeypatch.setattr(run_resume.runguard, "run_lock", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", GuardServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("synthesis must not run")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert provider_calls == []
+    err = capsys.readouterr().err
+    assert "stage 2" in err
+    assert "earlier-stage worker results were not persisted" in err
+
+
+def test_resume_synthesis_failure_replaces_owner_exit_attribution(tmp_path, monkeypatch):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "timeout",
+                "text": "part",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            },
+        ],
+    )
+    recovered = json.loads((run_dir / "run.json").read_text())
+    recovered.update(
+        {
+            "status": "failed",
+            "error": "run owner exited before recording a terminal state",
+            "failure_phase": "dispatching",
+            "failure": {
+                "phase": "dispatching",
+                "kind": "owner-process-exited",
+                "detail": "run owner exited before recording a terminal state",
+            },
+            "finished_at": "2026-07-03T00:05:00+00:00",
+            "duration_seconds": 300.0,
+        }
+    )
+    (run_dir / "run.json").write_text(json.dumps(recovered))
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="synthesis failed", ok=False, detail="orchestrator timeout"),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    run_json = json.loads((run_dir / "run.json").read_text())
+    assert run_json["status"] == "failed"
+    assert run_json["failure"]["kind"] == "agent-error"
+    assert run_json["failure"]["phase"] == "synthesis"
+    assert run_json["failure"]["seat"] == "chef"
+    assert run_json["recovery_history"] == [recovered["failure"]]
+    assert run_json["finished_at"] != recovered["finished_at"]
 
 
 def test_approval_resume_requires_reserved_snapshot_before_provider_start(tmp_path, monkeypatch):

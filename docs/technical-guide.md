@@ -408,11 +408,33 @@ Upgrade the writer before using `runs recover` or `runs resume` on one of those
 runs.
 
 Use `brigade runs show <run>` or `brigade runs watch <run>` for inspection. Use
+`brigade runs export <run> --output <archive-dir>` to pack a portable
+`brigade.work-run` archive (`work-run.json` + `payload/`),
+`brigade runs validate-archive <archive-dir>` to check the envelope and digests,
+and `brigade runs import <archive-dir>` to copy a validated payload into
+`.brigade/runs/`. Export strips private recovery-checkpoint bodies; v1 import is
+inspection-oriented and does not claim resume support. See
+`docs/receipt-schemas.md` (`brigade.work-run`) and
+`schemas/work-run.v1.schema.json`. Use
 `brigade runs recover <run>` when the snapshot is missing, corrupt, or behind a
 verified journal checkpoint. Recovery validates the bounded event chain and
 checkpoint before replacing `run.json`. If rollback leaves an older Brigade
 unable to interpret a journal event or projector version, stop that writer and
 roll forward. The append-only journal format is a one-way storage boundary.
+
+`brigade runs resume <run>` also handles an app-server run whose owner exited
+after dispatch began but before `worker-results.json` was aggregated. After it
+acquires the normal run lock, Brigade reconstructs only the active-stage worker
+thread coordinates from the already-flushed app-server event streams, records
+the missing terminal failure through the lifecycle journal, and resumes those
+threads. If no durable thread coordinates exist, resume fails cleanly without
+calling the provider. It never guesses a thread or treats a live run as
+interrupted. Multi-stage app-server runs interrupted while `active_stage` is
+greater than 1 cannot be salvaged this way when earlier-stage worker results
+were never persisted. Resume fails closed before provider construction instead
+of synthesizing from partial stage output. A successful resume refreshes
+`finished_at` and `duration_seconds` to the post-resume completion time rather
+than retaining the pre-resume owner-exit timestamp.
 
 If the approved action completed but the process exited before recording
 `approval.consumed` and `run.resumed`, run `brigade runs resume <run>` again.
@@ -1075,7 +1097,7 @@ Manual session commands:
 
 Work verification and closeout commands:
 
-- `brigade work verify plan` previews the local verification commands and current evidence snapshot without running anything.
+- `brigade work verify plan` previews the local verification commands and current evidence snapshot without running anything. When GraphTrail is available it also ranks affected-test candidates (`graph_impact` / `ranked_candidates`) from changed files (`--file` or `git diff --name-only HEAD`) with hop-distance confidence and via-symbol evidence; the worker still chooses the command. Missing GraphTrail degrades to an empty advisory ranking.
 - `brigade work verify run` executes explicit local verification commands without a shell and writes receipts under `.brigade/work/verify-runs/`.
 - `brigade work verify runs` and `brigade work verify show <run-id>` inspect local verification receipts, command exit codes, summaries, and log paths.
 - `brigade receipts keygen` creates the optional local HMAC key used to sign new receipt digests. Pass `--force` to rotate the key.

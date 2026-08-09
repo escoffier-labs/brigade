@@ -437,7 +437,7 @@ def init(
 
     path = config_path(target)
     if path.exists() and not force:
-        print(f"error: dogfood config already exists at {path}; pass --force to overwrite", file=sys.stderr)
+        print(f"error: dogfood config already exists at {path}; leaving it unchanged", file=sys.stderr)
         return 2
 
     chosen_artifacts_dir = artifacts_dir.expanduser() if artifacts_dir is not None else target / ".brigade" / "runs"

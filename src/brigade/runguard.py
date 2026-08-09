@@ -60,9 +60,7 @@ class DirtyWorktreeError(RunGuardError):
         shown = ", ".join(paths[:8])
         if len(paths) > 8:
             shown += f", ... ({len(paths)} total)"
-        super().__init__(
-            f"dirty worktree: {shown}. Commit, stash, clean the tree, or pass --allow-dirty to run anyway."
-        )
+        super().__init__(f"dirty worktree: {shown}. Commit, stash, or clean the tree before running.")
 
 
 class RunLockError(RunGuardError):

@@ -29,6 +29,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Show every check instead of condensing long reports.",
     )
     p_doctor.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
+    p_doctor.add_argument(
+        "--agent",
+        action="store_true",
+        help="Agent-facing output: omit passes and emit only actionable findings (composes with --json).",
+    )
     p_doctor.set_defaults(func=dispatch)
 
 
@@ -41,4 +46,5 @@ def dispatch(args) -> int:
         json_output=args.json,
         full=args.full,
         operator=args.operator,
+        agent=args.agent,
     )

@@ -641,7 +641,9 @@ def _last_record_digest(path: Path) -> str | None:
 def _ledger_corrupt_message(line_no: int, kind: str, path: Path, *, detail: str = "") -> str:
     """Bounded capture/append error that points operators at ``outcome repair``."""
     suffix = f" ({detail})" if detail else ""
-    return f"ledger corrupt at line {line_no}: {kind}{suffix}; run `brigade outcome repair --operator-confirm`: {path}"
+    return (
+        f"ledger corrupt at line {line_no}: {kind}{suffix}; inspect with `brigade outcome doctor` before repair: {path}"
+    )
 
 
 def _validate_completed_ledger_bytes(raw: bytes, path: Path) -> str | None:
@@ -2329,7 +2331,8 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
             "suspected_cause": break_info.suspected_cause,
             "invalid_segment_start": break_info.invalid_segment_start,
             "invalid_segment_end": break_info.invalid_segment_end,
-            "repair_command": "brigade outcome repair --operator-confirm",
+            "repair_command": "brigade outcome repair",
+            "repair_requires_operator_confirm": True,
         }
     payload["completed_ledger"] = completed_ledger
     if json_output:
@@ -2345,7 +2348,7 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
             f"expected_prev={break_info.expected_prev!r} actual_prev={break_info.actual_prev!r}"
         )
         print(f"suspected_cause: {break_info.suspected_cause}")
-        print("repair: brigade outcome repair --operator-confirm")
+        print("repair: brigade outcome repair (requires explicit operator confirmation)")
     return 0
 
 

@@ -1099,7 +1099,8 @@ def test_run_cli_dirty_guard_blocks_by_default(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "dirty worktree" in err
     assert "tracked.txt" in err
-    assert "--allow-dirty" in err
+    assert "Commit, stash, or clean the tree" in err
+    assert "--allow-dirty" not in err
 
 
 def test_run_cli_dirty_guard_does_not_allocate_artifact_directory(tmp_path, monkeypatch):

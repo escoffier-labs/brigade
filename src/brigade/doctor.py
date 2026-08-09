@@ -33,6 +33,8 @@ SCOPE_TARGET = "target"
 SCOPE_OPERATOR = "operator"
 ACTIONABLE_STATUSES = frozenset({FAIL, WARN, MANUAL})
 ADAPTER_CHECK_PREFIX = "adapter: "
+# Wired workspaces with no ledger append for this many days are dormant (#734).
+OUTCOME_LEDGER_STALE_DAYS = 7
 
 
 def _adapter_check_name(name: str) -> str:
@@ -97,7 +99,93 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks.extend(_check_orphan_inboxes(ctx.target, ctx.harnesses))
     checks.append(_check_recovery_checkpoints(ctx.target))
     checks.extend(_check_journal_event_headroom(ctx.target))
+    checks.extend(_check_outcome_loop(ctx))
     return checks
+
+
+_OUTCOME_LOOP_DORMANT_NAME = "outcome loop: dormant"
+_OUTCOME_LOOP_STALE_NAME = "outcome loop: ledger stale"
+_OUTCOME_LOOP_HALF_FED_NAME = "outcome loop: half-fed"
+
+
+def _check_outcome_loop(ctx: DoctorContext) -> List[CheckResult]:
+    """First-class dormancy findings for the verify/outcome work loop (#734)."""
+    if ctx.selection is None:
+        return []
+    from . import outcome_cmd
+
+    target = ctx.target
+    health = outcome_cmd.health(target)
+    results: List[CheckResult] = []
+    for issue in health.get("issues") or []:
+        if not isinstance(issue, dict):
+            continue
+        name = str(issue.get("name") or "")
+        detail = str(issue.get("detail") or "")
+        if name == "outcome_loop_dormant":
+            results.append(
+                (
+                    WARN,
+                    _OUTCOME_LOOP_DORMANT_NAME,
+                    "wired but no verify run ever captured; "
+                    'run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>`',
+                )
+            )
+        elif name == "outcome_loop_half_fed":
+            results.append(
+                (
+                    WARN,
+                    _OUTCOME_LOOP_HALF_FED_NAME,
+                    f'{detail}; run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>` '
+                    "through a registered verifier manifest",
+                )
+            )
+
+    stale = _outcome_ledger_stale_finding(target, health, stale_days=OUTCOME_LEDGER_STALE_DAYS)
+    if stale is not None:
+        results.append(stale)
+    return results
+
+
+def _outcome_ledger_stale_finding(
+    target: Path,
+    health: dict,
+    *,
+    stale_days: int,
+) -> CheckResult | None:
+    """Warn when a wired workspace has had no ledger append for ``stale_days``."""
+    from . import outcome_cmd
+
+    if int(health.get("record_count") or 0) == 0:
+        # Empty ledger is owned by dormant (no verify) or half-fed (verify without capture).
+        return None
+    records = outcome_cmd.load_records(target)
+    if not records:
+        return None
+    latest = records[-1]
+    ts_raw = getattr(latest, "ts", None)
+    if not isinstance(ts_raw, str) or not ts_raw:
+        return None
+    try:
+        latest_dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return (
+            WARN,
+            _OUTCOME_LOOP_STALE_NAME,
+            f"unparseable latest outcome ledger timestamp {ts_raw!r}; "
+            'run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>`',
+        )
+    if latest_dt.tzinfo is None:
+        latest_dt = latest_dt.replace(tzinfo=timezone.utc)
+    age_days = (datetime.now(timezone.utc) - latest_dt.astimezone(timezone.utc)).days
+    if age_days < stale_days:
+        return None
+    return (
+        WARN,
+        _OUTCOME_LOOP_STALE_NAME,
+        f"outcome ledger empty for {age_days} days (threshold {stale_days}); "
+        'run `brigade work verify run --target . --command "<test>" --capture <skill-or-card-id>`',
+    )
 
 
 _RECOVERY_CHECKPOINTS_NAME = "runs: recovery checkpoints"
@@ -553,8 +641,14 @@ def _check_claude_work_loop(target: Path) -> CheckResult | None:
     status = OK if payload["state"] == "enforced" else WARN
     detail = str(payload["detail"])
     hooks = payload.get("hooks") or {}
+    hook_error = hooks.get("error")
+    # A settings/hooks file that exists but fails to parse silently disables the
+    # whole work-loop package; treat that as FAIL so agents stop guessing.
+    if hook_error:
+        status = FAIL
+        detail = f"state=error; hook settings error: {hook_error}"
     legacy_count = hooks.get("legacy_handler_count", 0)
-    if legacy_count:
+    if legacy_count and status != FAIL:
         status = WARN
         detail = (
             f"{detail}; {legacy_count} legacy hook handler(s) in .claude/settings.json - "
@@ -708,6 +802,7 @@ def run(
     json_output: bool = False,
     full: bool = False,
     operator: bool = False,
+    agent: bool = False,
 ) -> int:
     ctx = build_context(target, harness)
     checks = _gather_checks(ctx)
@@ -715,6 +810,16 @@ def run(
         checks = _replace_recovery_check_with_full(checks, ctx.target)
     if not operator:
         checks = _filter_target_scoped_checks(checks)
+    if agent:
+        from . import doctor_agent
+
+        if json_output:
+            return doctor_agent.report_agent_json(ctx, checks, operator=operator)
+        return doctor_agent.report_agent_text(
+            checks,
+            target=ctx.target,
+            selection=ctx.selection,
+        )
     if json_output:
         return _report_json(ctx, checks, operator=operator)
 
@@ -1306,7 +1411,11 @@ def _check_publish_gate(target: Path) -> List[CheckResult]:
         results.append((OK, "publish: hooks/pre-push", str(hook)))
         if not os.access(hook, os.X_OK):
             results.append(
-                (WARN, "publish: hooks/pre-push", "exists but not executable; run `chmod +x hooks/pre-push`")
+                (
+                    WARN,
+                    "publish: hooks/pre-push",
+                    "exists but is not executable for this process; mark hooks/pre-push executable for your Git hook host",
+                )
             )
     else:
         results.append((WARN, "publish: hooks/pre-push", f"missing at {hook}"))
@@ -1376,7 +1485,7 @@ def _check_openclaw_cron_jobs() -> List[CheckResult]:
     try:
         data = json.loads(jobs_path.read_text())
     except json.JSONDecodeError as exc:
-        return [(WARN, "openclaw: cron jobs", f"invalid JSON: {exc}")]
+        return [(FAIL, "openclaw: cron jobs", f"invalid JSON: {exc}")]
 
     jobs = data.get("jobs", [])
     if not isinstance(jobs, list):
