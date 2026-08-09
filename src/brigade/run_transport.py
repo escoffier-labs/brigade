@@ -836,7 +836,14 @@ def _dag_dispatch(
         groups: dict[str, tuple[int, ...]] = {}
         for stage_name in a.covers:
             for dep_stage in route_dependencies.get(stage_name, ()):
-                others = tuple(idx for idx in coverers.get(dep_stage, ()) if idx != i)
+                dep_coverers = coverers.get(dep_stage, ())
+                if i in dep_coverers:
+                    # This assignment covers the dependency stage itself, so the edge
+                    # is satisfied within its own execution. Without this, every
+                    # parallel assignment sharing a composite covers set waits on its
+                    # peers and the whole plan deadlocks on the first sweep.
+                    continue
+                others = tuple(idx for idx in dep_coverers if idx != i)
                 if not others:
                     # Nobody else covers it (or only this assignment does):
                     # vacuously satisfied, same leniency as wave mode.
