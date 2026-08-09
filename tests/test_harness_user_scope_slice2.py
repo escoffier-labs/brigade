@@ -214,7 +214,7 @@ def test_hand_authored_instruction_section_survives_sync(tmp_path, monkeypatch, 
     text = instruction.read_text()
     assert "# My notes" in text
     assert "Keep this paragraph." in text
-    assert harness_profiles.INSTRUCTION_START in text
+    assert "BEGIN BRIGADE INTEGRATION" in text
     assert harness_profiles.managed_instruction_text().strip() in text
 
 

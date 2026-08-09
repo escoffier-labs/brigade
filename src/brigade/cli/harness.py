@@ -11,11 +11,17 @@ from .. import harness_profiles
 USER_SCOPE_TARGETS = harness_profiles.USER_SCOPE_TARGETS
 
 
-def _write_mode(parser: argparse.ArgumentParser, *, default_dry: bool = True) -> None:
+def _write_mode(parser: argparse.ArgumentParser, *, default_dry: bool = True, allow_check: bool = False) -> None:
     mode = parser.add_mutually_exclusive_group()
     if default_dry:
         mode.add_argument("--dry-run", action="store_true", help="Preview changes without writing (default).")
         mode.add_argument("--write", action="store_true", help="Apply the planned changes.")
+        if allow_check:
+            mode.add_argument(
+                "--check",
+                action="store_true",
+                help="Classify managed instruction blocks as missing/stale/current and exit nonzero unless current.",
+            )
     else:
         mode.add_argument("--write", action="store_true", help="Apply the planned changes.")
         mode.add_argument("--dry-run", action="store_true", help="Preview changes without writing (default).")
@@ -51,7 +57,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     sync = commands.add_parser("sync", help="Plan or apply user-scope harness onboarding (dry-run default).")
     _common_slice1(sync)
-    _write_mode(sync)
+    _write_mode(sync, allow_check=True)
     sync.add_argument(
         "--allow-global-stdio",
         action="store_true",
@@ -61,6 +67,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--adopt",
         action="store_true",
         help="Adopt a foreign managed block or generated file instead of reporting a conflict.",
+    )
+    sync.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite a locally modified or recoverable managed instruction block.",
     )
 
     uninstall = commands.add_parser("uninstall", help="Remove only Brigade-owned harness configuration.")
@@ -84,6 +95,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Workspace the profile is bound to (default: current directory).",
     )
     uninstall.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    uninstall.add_argument(
+        "--force",
+        action="store_true",
+        help="Remove a locally modified managed instruction block.",
+    )
     _write_mode(uninstall)
 
     doctor = commands.add_parser("doctor", help="Check a harness onboarding profile.")
@@ -142,6 +158,8 @@ def dispatch(args) -> int:
             write=bool(args.write),
             allow_global_stdio=bool(getattr(args, "allow_global_stdio", False)),
             adopt=bool(getattr(args, "adopt", False)),
+            force=bool(getattr(args, "force", False)),
+            check=bool(getattr(args, "check", False)),
             json_output=args.json,
         )
 
@@ -151,6 +169,7 @@ def dispatch(args) -> int:
                 harness=args.target,
                 workspace=args.workspace,
                 write=bool(args.write),
+                force=bool(getattr(args, "force", False)),
                 json_output=args.json,
             )
         return cursor_user_cmd.uninstall(write=args.write, json_output=args.json)
