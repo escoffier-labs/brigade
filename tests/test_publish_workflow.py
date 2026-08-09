@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from scripts.prepare_dev_wheel import derive_dev_version, next_minor_version, prepare_dev_wheel
+from scripts.prepare_dev_wheel import derive_dev_version, next_minor_version, prepare_dev_wheel, read_stable_version
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -330,6 +330,28 @@ def test_update_channels_documents_exact_dev_wheel_install():
     assert "pipx install 'brigade-cli==0.27.0.dev20260808'" in text
     assert "pip install 'brigade-cli==0.27.0.dev20260808'" in text
     assert "default resolver does not select them" in text
+
+
+def test_read_stable_version_accepts_exactly_one_numeric_project_version(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.26.1"\n')
+
+    assert read_stable_version(tmp_path) == "0.26.1"
+
+
+@pytest.mark.parametrize(
+    "pyproject_text",
+    [
+        '[project]\nname = "pkg"\n',
+        '[project]\nversion = "0.26.1.dev1"\n',
+        '[project]\nversion = "v0.26.1"\n',
+        '[project]\nversion = "0.26.1"\nversion = "0.26.2"\n',
+    ],
+)
+def test_read_stable_version_rejects_malformed_or_ambiguous_pyproject(tmp_path, pyproject_text):
+    (tmp_path / "pyproject.toml").write_text(pyproject_text)
+
+    with pytest.raises(ValueError, match="exactly one strict numeric X.Y.Z"):
+        read_stable_version(tmp_path)
 
 
 def test_prepare_dev_wheel_stamps_python_versions_and_preserves_template_pins(tmp_path):

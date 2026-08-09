@@ -5,17 +5,20 @@ from __future__ import annotations
 
 import argparse
 import re
-import tomllib
 from pathlib import Path
 
 
 DEV_VERSION = re.compile(r"^\d+\.\d+\.\d+\.dev\d+$")
 DATE_SUFFIX = re.compile(r"^\d{8}$")
 STABLE_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+PYPROJECT_VERSION = re.compile(r'(?m)^version = "(\d+\.\d+\.\d+)"$')
 
 
 def read_stable_version(root: Path) -> str:
-    return tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    versions = PYPROJECT_VERSION.findall((root / "pyproject.toml").read_text())
+    if len(versions) != 1:
+        raise ValueError("could not find exactly one strict numeric X.Y.Z version declaration in pyproject.toml")
+    return versions[0]
 
 
 def next_minor_version(stable_version: str) -> str:
