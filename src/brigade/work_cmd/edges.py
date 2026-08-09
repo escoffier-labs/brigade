@@ -105,7 +105,10 @@ def _normalize_edge_record(raw: object, *, require_id: bool = False) -> dict[str
         return None
     if not isinstance(target, str) or not target.strip():
         return None
-    if not isinstance(edge_type, str) or edge_type.strip() not in EDGE_TYPES:
+    # Preserve hand-edited unknown types across rewrite; mutation APIs still
+    # validate via ``_normalize_edge_type``. Unknown types never participate in
+    # readiness or cycle detection (see ``READINESS_EDGE_TYPES``).
+    if not isinstance(edge_type, str) or not edge_type.strip():
         return None
     edge: dict[str, Any] = {
         "source": source.strip(),
