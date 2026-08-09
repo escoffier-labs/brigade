@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import textwrap
 from pathlib import Path
+
+import pytest
 
 
 from brigade import handoff_cmd, ingest as ingest_mod
@@ -1038,3 +1041,70 @@ def test_create_card_opposite_polarity_near_match_flags_contradiction(tmp_target
     assert "reinforce →" not in out
     assert existing.read_text() == before
     assert not (tmp_target / "memory" / "cards" / "foo-flag-v2.md").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_create_card_reinforce_skips_symlinked_cards_and_preserves_outside_file(tmp_target: Path, capsys):
+    """Symlinked card files are not reinforcement targets; outside files stay untouched."""
+    inbox = _seed(tmp_target)
+    body = (
+        "Always flush the shared widget cache after a schema migration completes "
+        "otherwise application reads return stale rows for several minutes"
+    )
+    victim_card_body = f"---\ntopic: widget-cache\ncategory: test\ntags: [test]\n---\n\n# widget-cache\n\n{body}\n"
+    victim = tmp_target / "outside" / "victim.md"
+    victim.parent.mkdir(parents=True)
+    victim_bytes = victim_card_body.encode("utf-8")
+    victim.write_bytes(victim_bytes)
+
+    cards = tmp_target / "memory" / "cards"
+    cards.mkdir(parents=True, exist_ok=True)
+    (cards / "widget-cache.md").symlink_to(victim)
+
+    _write_handoff(
+        inbox,
+        "2026-05-13-1101-symlink.md",
+        f"""
+        ## Type
+        workflow
+
+        ## Title
+        Dup fact via symlink
+
+        ## Summary
+        Rediscovered the same durable fact.
+
+        ## Durable facts
+        - {body}
+
+        ## Evidence
+        - files changed: `src/example.py`
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        widget-cache-again.md
+
+        ## Suggested card content
+        ---
+        topic: widget-cache
+        category: test
+        tags: [test]
+        ---
+
+        # widget-cache
+
+        {body}
+        """,
+    )
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    out = capsys.readouterr().out
+    assert "reinforce → memory/cards/widget-cache.md" not in out
+    assert "Reinforced 0" in out
+    assert victim.read_bytes() == victim_bytes
+
+    new_card = tmp_target / "memory" / "cards" / "widget-cache-again.md"
+    assert new_card.is_file()
+    assert "promote → memory/cards/widget-cache-again.md" in out
+    assert body in new_card.read_text()

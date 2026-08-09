@@ -7,15 +7,21 @@ still share a high Jaccard score while exact restatements share a hash.
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
 import re
+import stat
+import tempfile
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # Near-match threshold from issue #724 (~0.9 token Jaccard).
 NEAR_MATCH_THRESHOLD = 0.9
+
+_HAS_FCHMOD = hasattr(os, "fchmod")
 
 _PUNCT_RE = re.compile(r"[^\w\s]+", re.UNICODE)
 _WS_RE = re.compile(r"\s+")
@@ -62,6 +68,132 @@ _NEGATION_TOKENS = frozenset(
         "barely",
     }
 )
+
+
+def _lstat_mode(path: Path) -> int | None:
+    try:
+        return os.lstat(path).st_mode
+    except FileNotFoundError:
+        return None
+
+
+def path_is_symlink(path: Path) -> bool:
+    mode = _lstat_mode(path)
+    return mode is not None and stat.S_ISLNK(mode)
+
+
+def _reject_symlink_or_non_regular(path: Path, *, st_mode: int) -> None:
+    if stat.S_ISLNK(st_mode):
+        raise OSError(f"refusing symlinked path: {path}")
+    if not stat.S_ISREG(st_mode):
+        raise OSError(f"card path is not a regular file: {path}")
+
+
+def _verify_fd_identity(path: Path, fd: int) -> None:
+    """Verify an opened descriptor still refers to the same inode as lstat(path)."""
+    try:
+        st_path = os.lstat(path)
+        st_fd = os.fstat(fd)
+    except OSError as exc:
+        raise OSError(f"cannot verify opened path: {path}") from exc
+    _reject_symlink_or_non_regular(path, st_mode=st_path.st_mode)
+    if st_path.st_ino != st_fd.st_ino or st_path.st_dev != st_fd.st_dev:
+        raise OSError(f"refusing swapped path: {path}")
+
+
+def _read_fd_to_bytes(
+    fd: int,
+    *,
+    read_fn: Callable[[int, int], bytes] | None = None,
+    chunk_size: int = 65536,
+) -> bytes:
+    """Read a regular-file descriptor until EOF."""
+    reader = read_fn or os.read
+    chunks: list[bytes] = []
+    while True:
+        chunk = reader(fd, chunk_size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def read_text_nofollow(
+    path: Path,
+    *,
+    read_fn: Callable[[int, int], bytes] | None = None,
+) -> str:
+    """Read UTF-8 text without following a symlinked final path component."""
+    has_nofollow = hasattr(os, "O_NOFOLLOW")
+    if has_nofollow:
+        flags = os.O_RDONLY | os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            if getattr(exc, "errno", None) in {errno.ELOOP, errno.EMLINK}:
+                raise OSError(f"refusing symlinked path: {path}") from exc
+            raise
+    else:
+        try:
+            preflight = os.lstat(path)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise OSError(f"cannot stat path: {path}") from exc
+        _reject_symlink_or_non_regular(path, st_mode=preflight.st_mode)
+        fd = os.open(path, os.O_RDONLY)
+
+    try:
+        if not has_nofollow:
+            _verify_fd_identity(path, fd)
+        st = os.fstat(fd)
+        if stat.S_ISLNK(st.st_mode):
+            raise OSError(f"refusing symlinked path: {path}")
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"card path is not a regular file: {path}")
+        data = _read_fd_to_bytes(fd, read_fn=read_fn)
+    finally:
+        os.close(fd)
+    return data.decode("utf-8", errors="replace")
+
+
+def write_text_nofollow_atomic(
+    path: Path,
+    data: str,
+    *,
+    lstat_probe: Callable[[Path], int | None] | None = None,
+) -> None:
+    """Atomically replace ``path`` without following a symlinked final component.
+
+    Raises ``OSError`` when the destination is or becomes a symlink before publish.
+    """
+    probe = lstat_probe or _lstat_mode
+    mode = probe(path)
+    if mode is not None and stat.S_ISLNK(mode):
+        raise OSError(f"refusing symlinked path: {path}")
+    if mode is not None and not stat.S_ISREG(mode):
+        raise OSError(f"card path is not a regular file: {path}")
+    preserve_mode = stat.S_IMODE(mode) if mode is not None and stat.S_ISREG(mode) else None
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            if preserve_mode is not None and _HAS_FCHMOD:
+                os.fchmod(handle.fileno(), preserve_mode)
+        mode_after = probe(path)
+        if mode_after is not None and stat.S_ISLNK(mode_after):
+            raise OSError(f"refusing symlinked path after swap: {path}")
+        if mode_after is not None and not stat.S_ISREG(mode_after):
+            raise OSError(f"card path is not a regular file: {path}")
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def strip_frontmatter(text: str) -> str:
@@ -191,9 +323,11 @@ def index_cards(cards_root: Path) -> list[IndexedCard]:
         # Decay outputs are not canonical cards.
         if "decay" in path.relative_to(cards_root).parts:
             continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        stored = _stored_fingerprint(text)
-        fingerprint = stored or content_fingerprint(text)
+        try:
+            text = read_text_nofollow(path)
+        except OSError:
+            continue
+        fingerprint = content_fingerprint(text)
         indexed.append(
             IndexedCard(
                 path=path,
@@ -254,13 +388,14 @@ def reinforce_existing_card(
     today: date,
     evidence_pointer: str,
     fingerprint: str | None = None,
+    lstat_probe: Callable[[Path], int | None] | None = None,
 ) -> dict[str, Any]:
     """Reinforce an existing card in place and return the applied patch.
 
     Bumps ``last_reviewed``, increments ``reinforcements``, ensures
     ``fingerprint``, and appends ``evidence_pointer`` to evidence metadata.
     """
-    text = card_path.read_text(encoding="utf-8", errors="replace")
+    text = read_text_nofollow(card_path)
     meta, has_frontmatter = _parse_frontmatter_lines(text)
     if not has_frontmatter:
         raise ValueError(f"card missing frontmatter: {card_path}")
@@ -284,16 +419,8 @@ def reinforce_existing_card(
         "evidence": evidence,
     }
     patched = _upsert_frontmatter_fields(text, updates)
-    card_path.write_text(patched, encoding="utf-8")
+    write_text_nofollow_atomic(card_path, patched, lstat_probe=lstat_probe)
     return updates
-
-
-def _stored_fingerprint(text: str) -> str | None:
-    meta, has_frontmatter = _parse_frontmatter_lines(text)
-    if not has_frontmatter:
-        return None
-    value = str(meta.get("fingerprint") or "").strip()
-    return value or None
 
 
 def _parse_frontmatter_lines(text: str) -> tuple[dict[str, Any], bool]:

@@ -380,6 +380,8 @@ def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
         if not root.is_dir():
             continue
         for path in root.rglob("*.md"):
+            if path.is_symlink():
+                continue
             if not path.is_file():
                 continue
             rel = str(path.relative_to(target))
@@ -1307,9 +1309,14 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
 
     candidates: list[dict[str, Any]] = []
     skipped_no_frontmatter = 0
+    from .card_fingerprint import read_text_nofollow
+
     for path in _iter_cards(target, config):
         rel = str(path.relative_to(target))
-        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = read_text_nofollow(path)
+        except OSError:
+            continue
         meta, has_frontmatter = _parse_frontmatter(text)
         if not has_frontmatter:
             skipped_no_frontmatter += 1
@@ -1350,14 +1357,19 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
 
 
 def _backfill_write(target: Path, candidate: dict[str, Any]) -> None:
+    from .card_fingerprint import read_text_nofollow, write_text_nofollow_atomic
+
     path = target / candidate["file"]
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text = read_text_nofollow(path)
     lines = text.split("\n")
     # _parse_frontmatter guarantees a leading `---` block; insert the new keys
     # just before its closing fence, leaving every other byte untouched.
     closing = next(i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---")
     additions = [f"{field}: {candidate[field]}" for field in candidate["fields"]]
-    path.write_text("\n".join(lines[:closing] + additions + lines[closing:]), encoding="utf-8")
+    write_text_nofollow_atomic(
+        path,
+        "\n".join(lines[:closing] + additions + lines[closing:]),
+    )
 
 
 def backfill(*, target: Path, apply: bool = False, json_output: bool = False) -> int:

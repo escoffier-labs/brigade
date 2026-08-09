@@ -1,4 +1,5 @@
 import json
+import os
 import shlex
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -736,6 +737,45 @@ def test_memory_care_backfill_fingerprint_only_for_dated_cards(tmp_path, capsys)
     text = (cards / "dated.md").read_text()
     assert f"fingerprint: {item['fingerprint']}" in text
     assert "last_reviewed: 2026-05-01" in text
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_memory_care_backfill_skips_symlinked_cards(tmp_path, capsys):
+    victim = tmp_path / "outside" / "victim.md"
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(b"VICTIM_SECRET_BYTES\n")
+    cards = tmp_path / "memory" / "cards"
+    _write_card(cards / "real.md", {"topic": "real", "confidence": "high", "evidence": ["README.md"]})
+    (cards / "link.md").symlink_to(victim)
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    files = {item["file"] for item in payload["candidates"]}
+    assert any(path.endswith("real.md") for path in files)
+    assert not any(path.endswith("link.md") for path in files)
+    assert victim.read_bytes() == b"VICTIM_SECRET_BYTES\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
+def test_memory_care_backfill_apply_preserves_outside_file(tmp_path, capsys):
+    victim = tmp_path / "outside" / "victim.md"
+    victim.parent.mkdir(parents=True)
+    victim_bytes = ('---\ntopic: victim\nconfidence: high\nevidence: ["README.md"]\n---\n\nVictim body.\n').encode(
+        "utf-8"
+    )
+    victim.write_bytes(victim_bytes)
+    cards = tmp_path / "memory" / "cards"
+    cards.mkdir(parents=True, exist_ok=True)
+    (cards / "link.md").symlink_to(victim)
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    assert victim.read_bytes() == victim_bytes
+    capsys.readouterr()
+
+    assert memory_cmd.backfill(target=tmp_path, apply=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["written_count"] == 0
+    assert victim.read_bytes() == victim_bytes
 
 
 def test_memory_care_producer_artifacts_use_write_dir_not_read_fallback(tmp_path):
