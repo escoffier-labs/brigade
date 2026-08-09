@@ -98,6 +98,9 @@ output_schema_path = "tools/simplify.output.schema.json"
 examples_path = "tools/simplify.examples.json"
 permissions = ["read-files"]
 effects = ["local-read"]
+domain = "code"
+capability = ["read-files"]
+risk_class = "read"
 approval_mode = "on-request"
 cwd = "."
 env_labels = ["SAFE_ENV"]
@@ -129,6 +132,9 @@ Fields:
 - `examples_path`: optional local examples file.
 - `permissions`: safe labels for needed capabilities.
 - `effects`: safe labels for expected effects such as `local-read`.
+- `domain`: optional CandidateSetGate domain label (for example `code` or `ops`).
+- `capability`: optional list of capability labels the tool provides. Plan steps may require a subset via assignment `capabilities`.
+- `risk_class`: optional risk class, one of `read`, `local-write`, `network`, or `privileged`. Plan steps may set `max_risk_class` as a ceiling.
 - `approval_mode`: `never`, `on-request`, or `always`.
 - `cwd`: optional local working directory label or relative path.
 - `env_labels`: safe environment labels only, never values.
@@ -142,6 +148,20 @@ Fields:
 - `fingerprint`: optional source fingerprint when the source file is generated elsewhere.
 
 Supported harness labels are local conventions. Brigade recognizes Claude Code, Codex, OpenCode, Antigravity, Pi, Cursor, Hermes, OpenClaw, MCP, and scripts through the labels `claude`, `codex`, `opencode`, `antigravity`, `pi`, `cursor`, `hermes`, `openclaw`, `mcp`, and `scripts`.
+
+## CandidateSetGate
+
+Before `brigade run` dispatches a worker, CandidateSetGate filters `.brigade/tools.toml`
+by each plan assignment's optional `domain`, `capabilities`, and `max_risk_class`. The
+admissible set and scores are written to `.brigade/runs/<run-id>/candidate-set.json`
+and stamped onto the plan as `admissible_tool_ids`. Worker prompts list only those tool
+ids.
+
+Enforcement is opt-in per assignment: when no tool requirements are declared, every
+enabled catalog entry remains admissible. When requirements are declared and no tool
+matches, the run records a typed `no-admissible-tool` planning failure, attempts one
+bounded replan, and refuses to dispatch so the model cannot improvise outside the
+catalog.
 
 ## Built-In Defaults
 

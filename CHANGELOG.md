@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file-overlap-only degrade otherwise). Same wave = parallel-safe; cross-wave
   = serialize. Empty effective footprints get an exclusive wave. Waves are
   never stored.
+- CandidateSetGate for the portable tool catalog (#504): optional tool
+  `domain` / `capability` / `risk_class` labels and plan-step
+  `domain` / `capabilities` / `max_risk_class` requirements filter
+  `.brigade/tools.toml` before worker dispatch. Admissible tool ids and scores
+  are recorded in `candidate-set.json` and stamped onto the plan; an empty
+  required set fails closed with typed `no-admissible-tool` and one bounded
+  replan instead of letting the model improvise tools.
 - Work verify plan ranks candidate verification commands from GraphTrail
   affected-test impact (#486): `brigade work verify plan` attaches
   `graph_impact` / `ranked_candidates` with hop-distance confidence and

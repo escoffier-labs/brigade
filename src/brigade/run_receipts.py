@@ -23,6 +23,14 @@ def assignment_payload(assignments: list[Assignment]) -> list[dict[str, object]]
             entry["covers"] = list(assignment.covers)
         if assignment.selected_skill_ids:
             entry["selected_skill_ids"] = list(assignment.selected_skill_ids)
+        if assignment.domain:
+            entry["domain"] = assignment.domain
+        if assignment.capabilities:
+            entry["capabilities"] = list(assignment.capabilities)
+        if assignment.max_risk_class:
+            entry["max_risk_class"] = assignment.max_risk_class
+        if assignment.admissible_tool_ids:
+            entry["admissible_tool_ids"] = list(assignment.admissible_tool_ids)
         payload.append(entry)
     return payload
 

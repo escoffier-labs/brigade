@@ -71,6 +71,8 @@ def _load_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
             "runtime_health_path",
             "mcp_server_id",
             "mcp_tool_name",
+            "domain",
+            "risk_class",
         ):
             value = raw_tool.get(field)
             if value is not None:
@@ -80,13 +82,17 @@ def _load_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
                     tool[field] = value.strip()
         if tool.get("approval_mode") and tool["approval_mode"] not in constants.APPROVAL_MODES:
             errors.append(f"{label}: approval_mode must be one of: {', '.join(constants.APPROVAL_MODES)}")
+        if tool.get("risk_class") and tool["risk_class"] not in constants.RISK_CLASSES:
+            errors.append(f"{label}: risk_class must be one of: {', '.join(constants.RISK_CLASSES)}")
         requires_runtime = raw_tool.get("requires_runtime", False)
         if not isinstance(requires_runtime, bool):
             errors.append(f"{label}: requires_runtime must be true or false")
             requires_runtime = False
         tool["requires_runtime"] = requires_runtime
-        for field in ("permissions", "effects", "env_labels"):
+        for field in ("permissions", "effects", "env_labels", "capability"):
             values = raw_tool.get(field, [])
+            if values is None:
+                values = []
             if not isinstance(values, list) or any(not isinstance(item, str) or not item.strip() for item in values):
                 errors.append(f"{label}: {field} must be a list of strings")
                 values = []
