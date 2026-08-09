@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git diff --name-only HEAD`), and the worker still chooses the command.
   When GraphTrail is unavailable the ranking degrades cleanly to an empty
   advisory list.
+- Versioned `brigade.work-run` archive schema for portable run import/export
+  (#487): `work-run.json` + `payload/` directory layout, published JSON Schema
+  at `schemas/work-run.v1.schema.json`, stdlib validator, and explicit
+  compatibility rules (refuse unsupported archive versions, strip private
+  recovery-checkpoint bodies on export, ignore unknown nested receipt keys).
+  Additive CLI: `brigade runs export`, `brigade runs import`, and
+  `brigade runs validate-archive`.
 - Work task footprint metadata with a three-phase lifecycle (#777): each task
   carries `metadata.footprint` (`files`, `symbol_ids`, `snapshot_hash`) written
   predicted at filing (GraphTrail `impact` when available; empty-predicted

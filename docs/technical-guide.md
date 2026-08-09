@@ -408,6 +408,14 @@ Upgrade the writer before using `runs recover` or `runs resume` on one of those
 runs.
 
 Use `brigade runs show <run>` or `brigade runs watch <run>` for inspection. Use
+`brigade runs export <run> --output <archive-dir>` to pack a portable
+`brigade.work-run` archive (`work-run.json` + `payload/`),
+`brigade runs validate-archive <archive-dir>` to check the envelope and digests,
+and `brigade runs import <archive-dir>` to copy a validated payload into
+`.brigade/runs/`. Export strips private recovery-checkpoint bodies; v1 import is
+inspection-oriented and does not claim resume support. See
+`docs/receipt-schemas.md` (`brigade.work-run`) and
+`schemas/work-run.v1.schema.json`. Use
 `brigade runs recover <run>` when the snapshot is missing, corrupt, or behind a
 verified journal checkpoint. Recovery validates the bounded event chain and
 checkpoint before replacing `run.json`. If rollback leaves an older Brigade
