@@ -1337,18 +1337,25 @@ def test_verification_split_command_keeps_posix_shlex_behavior(monkeypatch):
     assert verification._verification_split_command('python3 -c "print(1)"') == ["python3", "-c", "print(1)"]
 
 
-def test_verification_shell_meta_allows_backslash_only_on_windows(monkeypatch):
+def test_verification_shell_meta_allows_literal_backslashes(monkeypatch):
     from brigade.work_cmd import verification
 
-    path_token = r".\scripts\check.ps1"
-    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
-    assert verification._verification_shell_meta_re().search(path_token) is None
+    for is_windows in (True, False):
+        monkeypatch.setattr(verification, "_verification_is_windows", lambda w=is_windows: w)
+        assert verification._verification_shell_meta_re().search(r".\scripts\check.ps1") is None
+        assert verification._verification_shell_meta_re().search(r"[\d]+") is None
+        assert verification._verification_shell_meta_re().search(r"foo\bar") is None
+        assert verification._verification_shell_meta_re().search("foo;bar") is not None
+        assert verification._verification_shell_meta_re().search("a|b") is not None
+
+
+def test_verify_parse_command_allows_posix_literal_backslash_arguments(monkeypatch):
+    from brigade.work_cmd import verification
 
     monkeypatch.setattr(verification, "_verification_is_windows", lambda: False)
-    assert verification._verification_shell_meta_re().search(path_token) is not None
-
-    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
-    assert verification._verification_shell_meta_re().search("foo;bar") is not None
+    command = r'python3 -c "re.match(r\"\\d+\", \"123\")"'
+    parts = verification._verification_split_command(command)
+    assert not any(verification._verification_shell_meta_re().search(part) for part in parts)
 
 
 def test_verify_parse_command_treats_windows_backslash_tokens_as_paths(tmp_path, monkeypatch):

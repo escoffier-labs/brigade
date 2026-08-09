@@ -27,19 +27,14 @@ def _verification_is_windows() -> bool:
     return os.name == "nt"
 
 
-_VERIFICATION_WINDOWS_SHELL_META_RE = constants.SCANNER_SHELL_META_RE
-_VERIFICATION_POSIX_SHELL_META_RE = re.compile(r"[;&|`<>\\]|\$\(")
-
-
 def _verification_shell_meta_re() -> re.Pattern[str]:
     """Shell-metacharacter guard for raw ``--command`` parsing.
 
-    On POSIX, backslash is treated as an escape/separator and rejected. On Windows,
-    backslash is an ordinary path separator and only true shell metacharacters match.
+    Uses the same pattern as ``constants.SCANNER_SHELL_META_RE`` on every platform.
+    After shlex splitting, literal backslashes in argv tokens (regex escapes, Windows
+    paths, Python ``-c`` strings) are ordinary characters and must not be rejected.
     """
-    if _verification_is_windows():
-        return _VERIFICATION_WINDOWS_SHELL_META_RE
-    return _VERIFICATION_POSIX_SHELL_META_RE
+    return constants.SCANNER_SHELL_META_RE
 
 
 def _verification_strip_outer_quotes(token: str) -> str:
