@@ -63,6 +63,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to minimal). `--profile minimal|full` overrides selection. Doctor warns when
   a minimal profile remains after brief-injecting hooks go inactive. Live
   `brigade work brief` opens with the session-close checklist.
+- Optional evidence-backed decision checkpoints on work plans (#496):
+  `brigade work task plan <id> --write --decision <id> --decision-prompt "..."`
+  with repeatable `--option` declares a checkpoint; `--resolve-decision <id>`
+  requires `--selected`, `--rationale`, and `--evidence-ref` before the plan can
+  be `--accept`ed or before `work task claim` / `work claim` / `work task done`
+  begin dependent work. Receipts gain a `decisions` list; plan.md renders a
+  Decision checkpoints section. Absent `decisions` on legacy receipts stays
+  valid; malformed non-list `decisions` or invalid entries fail closed instead
+  of being dropped. `--evidence-ref` stores an opaque receipt path or external
+  evidence id (no local-file existence check).
 
 ## [0.26.1] - 2026-08-09
 

@@ -204,6 +204,7 @@ def test_task_plan_write_creates_both_artifacts_with_full_schema(tmp_path, capsy
         "acceptance",
         "risks",
         "steps",
+        "decisions",
         "next_command",
         "receipt_paths",
         "research_runs",
@@ -212,6 +213,7 @@ def test_task_plan_write_creates_both_artifacts_with_full_schema(tmp_path, capsy
     assert receipt["task_id"] == task_id
     assert receipt["kind"] == "plan"
     assert receipt["steps"] == []
+    assert receipt["decisions"] == []
     assert receipt["title"] == "Custom plan title"
     assert receipt["status"] == "draft"
     assert receipt["created_at"] == receipt["updated_at"]
@@ -313,13 +315,14 @@ def test_plan_md_has_title_sections_items_and_none_recorded(tmp_path, capsys):
     assert "## Acceptance criteria" in md
     assert "## Risks" in md
     assert "## Steps" in md
+    assert "## Decision checkpoints" in md
     assert "## Next safe command" in md
     assert "## Receipts" in md
     assert "- issue #42" in md
     assert "- API is stable" in md
     assert "- Plan is written" in md
     assert "`brigade work run`" in md
-    # Risks empty -> none recorded marker present
+    # Risks / decisions empty -> none recorded marker present
     assert "_none recorded_" in md
 
 
@@ -761,6 +764,307 @@ def test_meta_plan_via_cli_flags(tmp_path, capsys):
     assert "- First step" in md
 
 
+def test_plan_decision_checkpoint_declare_resolve_and_gate(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            decision="auth-approach",
+            decision_prompt="Which auth approach?",
+            decision_options=["oauth", "api-key"],
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "decision_checkpoints_pending: 1" in out
+    json_path, md_path = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    assert len(receipt["decisions"]) == 1
+    decision = receipt["decisions"][0]
+    assert decision["id"] == "auth-approach"
+    assert decision["prompt"] == "Which auth approach?"
+    assert decision["options"] == ["oauth", "api-key"]
+    assert decision["status"] == "pending"
+    assert decision["selected"] is None
+    assert decision["rationale"] is None
+    assert decision["evidence_ref"] is None
+    md = md_path.read_text()
+    assert "## Decision checkpoints" in md
+    assert "**auth-approach** [pending]" in md
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            accept=True,
+        )
+        == 2
+    )
+    err = capsys.readouterr().err
+    assert "unresolved plan decision checkpoint" in err
+    assert "auth-approach" in err
+
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
+    err = capsys.readouterr().err
+    assert "unresolved plan decision checkpoint" in err
+
+    assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 2
+    err = capsys.readouterr().err
+    assert "unresolved plan decision checkpoint" in err
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            resolve_decision="auth-approach",
+            selected="oauth",
+            rationale="Matches existing SSO providers",
+            evidence_ref=".brigade/work/verify-runs/demo/receipt.json",
+        )
+        == 0
+    )
+    capsys.readouterr()
+    receipt = json.loads(json_path.read_text())
+    decision = receipt["decisions"][0]
+    assert decision["status"] == "resolved"
+    assert decision["selected"] == "oauth"
+    assert decision["rationale"] == "Matches existing SSO providers"
+    assert decision["evidence_ref"] == ".brigade/work/verify-runs/demo/receipt.json"
+    assert decision["resolved_at"]
+    md = md_path.read_text()
+    assert "**auth-approach** [resolved]" in md
+    assert "selected: oauth" in md
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            accept=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    receipt = json.loads(json_path.read_text())
+    assert receipt["status"] == "accepted"
+
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 0
+    out = capsys.readouterr().out
+    assert "status: in_progress" in out
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["unresolved_decision_count"] == 0
+    assert payload["decisions"][0]["status"] == "resolved"
+
+
+def test_plan_decision_resolve_requires_all_fields_and_valid_option(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            decision="route",
+            decision_prompt="Pick a route",
+            decision_options=["direct", "proxy"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            resolve_decision="route",
+            selected="direct",
+            rationale="faster",
+        )
+        == 2
+    )
+    assert "--evidence-ref" in capsys.readouterr().err
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            resolve_decision="route",
+            selected="sidecar",
+            rationale="not listed",
+            evidence_ref="notes/decision.md",
+        )
+        == 2
+    )
+    assert "not in decision options" in capsys.readouterr().err
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            decision="brand-new",
+        )
+        == 2
+    )
+    assert "decision prompt is required" in capsys.readouterr().err
+
+
+def test_work_claim_blocks_on_unresolved_plan_decision(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            decision="store",
+            decision_prompt="Which store?",
+            decision_options=["sqlite", "postgres"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert work_cmd.claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
+    err = capsys.readouterr().err
+    assert "unresolved plan decision checkpoint" in err
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            resolve_decision="store",
+            selected="sqlite",
+            rationale="local-first",
+            evidence_ref=".brigade/work/plans/evidence.md",
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert work_cmd.claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 0
+    out = capsys.readouterr().out
+    assert "claim_id:" in out
+
+
+def test_plan_decision_absent_on_legacy_receipt_remains_valid(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    receipt.pop("decisions", None)
+    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 0
+    capsys.readouterr()
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 0
+    out = capsys.readouterr().out
+    assert "status: in_progress" in out
+
+
+def test_plan_decision_malformed_non_list_fails_closed_on_accept_claim_done(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    receipt["decisions"] = {"id": "auth-approach"}
+    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
+    err = capsys.readouterr().err
+    assert "decisions must be a list" in err
+
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
+    err = capsys.readouterr().err
+    assert "decisions must be a list" in err
+
+    assert work_cmd.claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
+    err = capsys.readouterr().err
+    assert "decisions must be a list" in err
+
+    assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 2
+    err = capsys.readouterr().err
+    assert "decisions must be a list" in err
+
+
+def test_plan_decision_malformed_entry_fails_closed_and_keeps_opaque_evidence_ref(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            decision="store",
+            decision_prompt="Which store?",
+            decision_options=["sqlite", "postgres"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    receipt["decisions"] = [{"prompt": "missing id", "options": ["a"]}]
+    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
+    err = capsys.readouterr().err
+    assert "invalid or missing id" in err
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
+    assert "invalid or missing id" in capsys.readouterr().err
+    assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 2
+    assert "invalid or missing id" in capsys.readouterr().err
+
+    # Restore a valid pending checkpoint, then resolve with an opaque external id.
+    receipt["decisions"] = [
+        {
+            "id": "store",
+            "prompt": "Which store?",
+            "options": ["sqlite", "postgres"],
+            "selected": None,
+            "rationale": None,
+            "evidence_ref": None,
+            "status": "pending",
+            "created_at": "2026-08-10T00:00:00+00:00",
+            "resolved_at": None,
+        }
+    ]
+    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    opaque_ref = "miseledger:bundle/demo-evidence-id"
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            resolve_decision="store",
+            selected="sqlite",
+            rationale="local-first",
+            evidence_ref=opaque_ref,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    saved = json.loads(json_path.read_text())
+    assert saved["decisions"][0]["evidence_ref"] == opaque_ref
+    assert not (tmp_path / opaque_ref).exists()
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 0
+    capsys.readouterr()
+
+
 def test_extract_issue_acceptance_from_sections_and_checkboxes():
     body = """
 ## Context
@@ -1065,6 +1369,13 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
                 "kind": "plan",
                 "steps": [],
                 "from_research": None,
+                "decision": None,
+                "decision_prompt": None,
+                "decision_options": [],
+                "resolve_decision": None,
+                "selected": None,
+                "rationale": None,
+                "evidence_ref": None,
             },
         ),
         ("done", {"target": tmp_path, "task_id": "abc123", "force": False, "json_output": False}),

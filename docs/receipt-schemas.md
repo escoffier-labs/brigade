@@ -245,6 +245,53 @@ directory with the same files and file hashes as the source.
 
 ---
 
+## Work plan receipt (`.brigade/work/plans/<task-id>.json`)
+
+Task plan artifacts written by `brigade work task plan --write`. This family is
+documentation-only (no `schema` / `schema_version` stamp today). Evolution is
+additive: consumers must ignore unknown keys. Readers must accept legacy
+receipts that omit optional fields.
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `task_id` | string | yes | Canonical task id |
+| `kind` | string | yes | `plan` or `meta` |
+| `title` | string | yes | |
+| `status` | string | yes | `draft` or `accepted` |
+| `created_at`, `updated_at` | string | yes | ISO-8601 |
+| `source_context` | array of string | yes | |
+| `assumptions` | array of string | yes | |
+| `acceptance` | array of string | yes | |
+| `risks` | array of string | yes | |
+| `steps` | array of string | yes | |
+| `decisions` | array of object | no | Optional decision checkpoints (#496). **Absent or omitted is valid** (legacy). When present must be a list; non-list values and malformed entries fail closed |
+| `next_command` | string | yes | Suggested next safe command |
+| `receipt_paths` | array of string | yes | Related relative paths |
+| `research_runs` | array of object | yes | Quarantined research attachments |
+
+### `decisions[]` entry
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `id` | string | yes | `[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}` |
+| `prompt` | string | yes | Checkpoint question |
+| `options` | array of string | yes | Allowed selections |
+| `selected` | string \| null | yes | Chosen option when resolved |
+| `rationale` | string \| null | yes | Why that option |
+| `evidence_ref` | string \| null | yes | Opaque receipt path or external evidence id. Stored as written; **not** validated as a local file path (external/opaque ids are allowed) |
+| `status` | string | yes | `pending` or `resolved` |
+| `created_at` | string | yes | ISO-8601 |
+| `resolved_at` | string \| null | yes | ISO-8601 when resolved |
+
+A checkpoint is resolved only when `selected`, `rationale`, and `evidence_ref`
+are all non-empty and `selected` is in `options` when options are non-empty.
+Unresolved checkpoints block plan `--accept`, `work task claim`, `work claim`,
+and `work task done`. Corrupt `decisions` data (non-list, non-object entry,
+invalid/missing id, duplicate id) must fail closed with exit code 2 /
+`malformed_plan_decisions` rather than being silently dropped.
+
+---
+
 ## `brigade.run.v1`: `schema_version: 1`
 
 **Path:** `.brigade/runs/<run-id>/run.json`

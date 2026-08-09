@@ -657,6 +657,54 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Attach a completed research run report as quarantined (untrusted-web) plan evidence.",
     )
+    p_work_task_plan.add_argument(
+        "--decision",
+        dest="decision",
+        metavar="ID",
+        default=None,
+        help="Declare or update an optional decision checkpoint id on the plan.",
+    )
+    p_work_task_plan.add_argument(
+        "--decision-prompt",
+        dest="decision_prompt",
+        default=None,
+        help="Prompt/question for --decision (required when declaring a new checkpoint).",
+    )
+    p_work_task_plan.add_argument(
+        "--option",
+        dest="decision_options",
+        action="append",
+        default=[],
+        help="Allowed option for --decision. May be repeated.",
+    )
+    p_work_task_plan.add_argument(
+        "--resolve-decision",
+        dest="resolve_decision",
+        metavar="ID",
+        default=None,
+        help="Resolve a decision checkpoint with --selected, --rationale, and --evidence-ref.",
+    )
+    p_work_task_plan.add_argument(
+        "--selected",
+        dest="selected",
+        default=None,
+        help="Selected option when resolving a decision checkpoint.",
+    )
+    p_work_task_plan.add_argument(
+        "--rationale",
+        dest="rationale",
+        default=None,
+        help="Rationale when resolving a decision checkpoint.",
+    )
+    p_work_task_plan.add_argument(
+        "--evidence-ref",
+        dest="evidence_ref",
+        default=None,
+        help=(
+            "Opaque receipt path or external evidence id when resolving a decision "
+            "checkpoint (stored as written; not validated as a local file)."
+        ),
+    )
     p_work_task_claim = task_sub.add_parser(
         "claim",
         help="Claim a task and refine its footprint from plan-named files.",

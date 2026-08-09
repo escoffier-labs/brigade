@@ -80,21 +80,63 @@ def _claim_task(
     if_status: str | None = None,
 ) -> dict[str, Any]:
     """CAS claim under the task-ledger lock. Raises ``claim.ClaimError``."""
-    from .claiming import ClaimError, apply_claim_next, apply_claim_to_task, generate_claim_id
+    from .claiming import (
+        ClaimError,
+        REASON_ALREADY_CLAIMED,
+        REASON_GUARD_MISMATCH,
+        REASON_NO_READY,
+        REASON_NOT_READY,
+        apply_claim_to_task,
+        generate_claim_id,
+        ready_sort_key,
+    )
 
     resolved_claim_id = claim_id or generate_claim_id()
     with _task_ledger_lock(target):
         ledger = _read_task_ledger(target)
         if claim_next:
-            result = apply_claim_next(
-                ledger,
-                actor=actor,
-                claim_id=resolved_claim_id,
-                if_actor=if_actor,
-                if_status=if_status,
+            resolution = edges_mod.resolve_readiness(ledger)
+            ordered = sorted(resolution.ready, key=ready_sort_key)
+            task_map = {
+                str(task.get("id")): task
+                for task in ledger.get("tasks", [])
+                if isinstance(task, dict) and task.get("id")
+            }
+            for item in ordered:
+                task = task_map.get(str(item.get("id")))
+                if task is None:
+                    continue
+                try:
+                    unresolved = _unresolved_plan_decisions(target, str(task.get("id")))
+                except PlanDecisionError:
+                    # Corrupt checkpoints are not claimable; keep scanning ready set.
+                    continue
+                if unresolved:
+                    continue
+                try:
+                    result = apply_claim_to_task(
+                        ledger,
+                        task,
+                        actor=actor,
+                        claim_id=resolved_claim_id,
+                        if_actor=if_actor,
+                        if_status=if_status,
+                        require_ready=True,
+                    )
+                except ClaimError as exc:
+                    if exc.reason in {REASON_ALREADY_CLAIMED, REASON_NOT_READY, REASON_GUARD_MISMATCH}:
+                        continue
+                    raise
+                result["selected_from"] = "ready"
+                result["ready_count"] = len(ordered)
+                _write_task_ledger(target, ledger)
+                return result
+            raise ClaimError(
+                "no ready task available to claim",
+                reason=REASON_NO_READY,
+                details={"ready_count": len(ordered)},
+                exit_code=1,
             )
-            _write_task_ledger(target, ledger)
-            return result
         if not task_id:
             raise ClaimError(
                 "task id is required unless --next is set",
@@ -121,6 +163,25 @@ def _claim_task(
                 reason="unknown_task",
                 details={"task_id": task_id},
                 exit_code=1,
+            )
+        try:
+            unresolved = _unresolved_plan_decisions(target, str(task.get("id")))
+        except PlanDecisionError as exc:
+            raise ClaimError(
+                str(exc),
+                reason=exc.reason,
+                details={"task_id": task.get("id"), **exc.details},
+                exit_code=exc.exit_code,
+            ) from exc
+        if unresolved:
+            raise ClaimError(
+                _decision_gate_message(unresolved),
+                reason="unresolved_plan_decisions",
+                details={
+                    "task_id": task.get("id"),
+                    "unresolved_decision_ids": [item.get("id") for item in unresolved],
+                },
+                exit_code=2,
             )
         result = apply_claim_to_task(
             ledger,
@@ -1939,6 +2000,261 @@ def _append_dedupe(existing: list[str], additions: list[str] | None) -> list[str
     return result
 
 
+_DECISION_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
+DECISION_STATUS_PENDING = "pending"
+DECISION_STATUS_RESOLVED = "resolved"
+REASON_MALFORMED_PLAN_DECISIONS = "malformed_plan_decisions"
+DECISION_RECEIPT_KEYS = (
+    "id",
+    "prompt",
+    "options",
+    "selected",
+    "rationale",
+    "evidence_ref",
+    "status",
+    "created_at",
+    "resolved_at",
+)
+
+
+class PlanDecisionError(ValueError):
+    """Fail-closed plan-receipt decision corruption (never silently drop)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str = REASON_MALFORMED_PLAN_DECISIONS,
+        details: dict[str, Any] | None = None,
+        exit_code: int = 2,
+    ):
+        super().__init__(message)
+        self.reason = reason
+        self.details = details or {}
+        self.exit_code = exit_code
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = {"error": str(self), "reason": self.reason, "exit_code": self.exit_code}
+        payload.update(self.details)
+        return payload
+
+
+def _normalize_decision_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or _DECISION_ID_RE.fullmatch(text) is None:
+        return None
+    return text
+
+
+def _decision_is_resolved(decision: dict[str, Any]) -> bool:
+    selected = str(decision.get("selected") or "").strip()
+    rationale = str(decision.get("rationale") or "").strip()
+    evidence_ref = str(decision.get("evidence_ref") or "").strip()
+    if not (selected and rationale and evidence_ref):
+        return False
+    options = decision.get("options")
+    if isinstance(options, list) and options:
+        allowed = {str(item) for item in options}
+        if selected not in allowed:
+            return False
+    return True
+
+
+def _normalize_decision_entry(raw: Any, *, now: str) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    decision_id = _normalize_decision_id(raw.get("id") if isinstance(raw.get("id"), str) else None)
+    if decision_id is None:
+        return None
+    prompt = str(raw.get("prompt") or "").strip()
+    options_raw = raw.get("options")
+    if isinstance(options_raw, str):
+        options_list = [options_raw] if options_raw.strip() else []
+    elif isinstance(options_raw, list):
+        options_list = [str(item).strip() for item in options_raw if str(item).strip()]
+    else:
+        options_list = []
+    options = _append_dedupe([], options_list)
+    selected = str(raw.get("selected") or "").strip() or None
+    rationale = str(raw.get("rationale") or "").strip() or None
+    # Opaque receipt path or external evidence id; no local-file existence check.
+    evidence_ref = str(raw.get("evidence_ref") or "").strip() or None
+    created_at = raw.get("created_at") if isinstance(raw.get("created_at"), str) and raw.get("created_at") else now
+    resolved_at = raw.get("resolved_at") if isinstance(raw.get("resolved_at"), str) and raw.get("resolved_at") else None
+    entry = {
+        "id": decision_id,
+        "prompt": prompt,
+        "options": options,
+        "selected": selected,
+        "rationale": rationale,
+        "evidence_ref": evidence_ref,
+        "created_at": created_at,
+        "resolved_at": resolved_at,
+        "status": DECISION_STATUS_PENDING,
+    }
+    if _decision_is_resolved(entry):
+        entry["status"] = DECISION_STATUS_RESOLVED
+        if not entry["resolved_at"]:
+            entry["resolved_at"] = now
+    else:
+        entry["status"] = DECISION_STATUS_PENDING
+        entry["resolved_at"] = None
+    return entry
+
+
+def _normalize_decisions(raw: Any, *, now: str | None = None) -> list[dict[str, Any]]:
+    """Normalize plan decision checkpoints.
+
+    Absent/``None`` decisions are valid (legacy receipts). A present non-list
+    value, non-object entry, invalid id, or duplicate id fails closed so gates
+    cannot be bypassed by dropping corrupt data.
+    """
+    stamp = now or helpers._now().isoformat()
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise PlanDecisionError(
+            "plan receipt decisions must be a list when present",
+            details={"decisions_type": type(raw).__name__},
+        )
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise PlanDecisionError(
+                f"plan receipt decisions[{index}] must be an object",
+                details={"index": index, "entry_type": type(item).__name__},
+            )
+        entry = _normalize_decision_entry(item, now=stamp)
+        if entry is None:
+            raise PlanDecisionError(
+                f"plan receipt decisions[{index}] has invalid or missing id",
+                details={"index": index},
+            )
+        decision_id = str(entry["id"])
+        if decision_id in seen:
+            raise PlanDecisionError(
+                f"plan receipt decisions has duplicate id: {decision_id}",
+                details={"index": index, "decision_id": decision_id},
+            )
+        seen.add(decision_id)
+        result.append(entry)
+    return result
+
+
+def _unresolved_decisions(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [item for item in decisions if item.get("status") != DECISION_STATUS_RESOLVED]
+
+
+def _plan_decisions(target: Path, task_id: str, *, kind: str = "plan") -> list[dict[str, Any]]:
+    receipt = _read_plan_receipt(target, task_id, kind)
+    if receipt is None:
+        return []
+    if "decisions" not in receipt:
+        return []
+    return _normalize_decisions(receipt.get("decisions"))
+
+
+def _unresolved_plan_decisions(target: Path, task_id: str, *, kind: str = "plan") -> list[dict[str, Any]]:
+    return _unresolved_decisions(_plan_decisions(target, task_id, kind=kind))
+
+
+def _decision_gate_message(unresolved: list[dict[str, Any]]) -> str:
+    ids = ", ".join(str(item.get("id") or "") for item in unresolved)
+    return (
+        "unresolved plan decision checkpoint(s) require selected option, "
+        f"rationale, and evidence_ref before dependent work begins: {ids}"
+    )
+
+
+def _declare_plan_decision(
+    decisions: list[dict[str, Any]],
+    *,
+    decision_id: str,
+    prompt: str | None,
+    options: list[str] | None,
+    now: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    normalized_id = _normalize_decision_id(decision_id)
+    if normalized_id is None:
+        return decisions, f"invalid decision id: {decision_id}"
+    existing = next((item for item in decisions if item.get("id") == normalized_id), None)
+    prompt_text = (prompt or "").strip()
+    option_values = [str(item).strip() for item in (options or []) if str(item).strip()]
+    if existing is None:
+        if not prompt_text:
+            return decisions, f"decision prompt is required for new checkpoint: {normalized_id}"
+        if not option_values:
+            return decisions, f"at least one --option is required for new checkpoint: {normalized_id}"
+        entry = _normalize_decision_entry(
+            {
+                "id": normalized_id,
+                "prompt": prompt_text,
+                "options": option_values,
+                "created_at": now,
+            },
+            now=now,
+        )
+        if entry is None:
+            return decisions, f"invalid decision id: {decision_id}"
+        return [*decisions, entry], None
+    if existing.get("status") == DECISION_STATUS_RESOLVED:
+        return decisions, f"decision checkpoint already resolved: {normalized_id}"
+    if prompt_text:
+        existing["prompt"] = prompt_text
+    if option_values:
+        existing["options"] = _append_dedupe(list(existing.get("options") or []), option_values)
+    refreshed = _normalize_decision_entry(existing, now=now)
+    if refreshed is None:
+        return decisions, f"invalid decision id: {decision_id}"
+    return [refreshed if item.get("id") == normalized_id else item for item in decisions], None
+
+
+def _resolve_plan_decision(
+    decisions: list[dict[str, Any]],
+    *,
+    decision_id: str,
+    selected: str | None,
+    rationale: str | None,
+    evidence_ref: str | None,
+    now: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    normalized_id = _normalize_decision_id(decision_id)
+    if normalized_id is None:
+        return decisions, f"invalid decision id: {decision_id}"
+    existing = next((item for item in decisions if item.get("id") == normalized_id), None)
+    if existing is None:
+        return decisions, f"decision checkpoint not found: {normalized_id}"
+    selected_text = (selected or "").strip()
+    rationale_text = (rationale or "").strip()
+    evidence_text = (evidence_ref or "").strip()
+    missing: list[str] = []
+    if not selected_text:
+        missing.append("--selected")
+    if not rationale_text:
+        missing.append("--rationale")
+    if not evidence_text:
+        missing.append("--evidence-ref")
+    if missing:
+        return decisions, "resolve requires " + ", ".join(missing)
+    options = existing.get("options") if isinstance(existing.get("options"), list) else []
+    if options and selected_text not in {str(item) for item in options}:
+        return (
+            decisions,
+            f"selected option {selected_text!r} is not in decision options: {', '.join(str(item) for item in options)}",
+        )
+    existing["selected"] = selected_text
+    existing["rationale"] = rationale_text
+    existing["evidence_ref"] = evidence_text
+    existing["resolved_at"] = now
+    refreshed = _normalize_decision_entry(existing, now=now)
+    if refreshed is None or refreshed.get("status") != DECISION_STATUS_RESOLVED:
+        return decisions, f"decision checkpoint could not be resolved: {normalized_id}"
+    return [refreshed if item.get("id") == normalized_id else item for item in decisions], None
+
+
 def _read_plan_receipt(target: Path, task_id: str, kind: str = "plan") -> dict[str, Any] | None:
     json_path, _ = helpers._plan_paths(target, task_id, kind)
     if not json_path.is_file():
@@ -1967,6 +2283,7 @@ def _build_plan_receipt(
     kind: str = "plan",
     steps: list[str] | None = None,
     research: dict[str, Any] | None = None,
+    decisions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now = helpers._now().isoformat()
     acceptance = _task_acceptance(task)
@@ -1976,6 +2293,12 @@ def _build_plan_receipt(
         _plan_rel_path(target, json_path),
         _plan_rel_path(target, md_path),
     ]
+    if decisions is not None:
+        normalized_decisions = _normalize_decisions(decisions, now=now)
+    elif existing is not None:
+        normalized_decisions = _normalize_decisions(existing.get("decisions"), now=now)
+    else:
+        normalized_decisions = []
     if existing is None:
         resolved_title = title if title is not None else str(task.get("text") or "")
         return {
@@ -1990,6 +2313,7 @@ def _build_plan_receipt(
             "acceptance": acceptance,
             "risks": _append_dedupe([], risks),
             "steps": _append_dedupe([], steps),
+            "decisions": normalized_decisions,
             "next_command": next_command if next_command is not None else "brigade work run",
             "receipt_paths": receipt_paths,
             "research_runs": [research] if research else [],
@@ -2019,6 +2343,7 @@ def _build_plan_receipt(
         "acceptance": acceptance,
         "risks": _append_dedupe(_as_list(existing.get("risks")), risks),
         "steps": _append_dedupe(_as_list(existing.get("steps")), steps),
+        "decisions": normalized_decisions,
         "next_command": next_command if next_command is not None else prior_next,
         "receipt_paths": receipt_paths,
         "research_runs": research_runs,
@@ -2064,6 +2389,26 @@ def _render_plan_md(receipt: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Steps")
     lines.extend(_bullets(receipt.get("steps")))
+    lines.append("")
+    lines.append("## Decision checkpoints")
+    decisions = _normalize_decisions(receipt.get("decisions"))
+    if not decisions:
+        lines.append("_none recorded_")
+    else:
+        for entry in decisions:
+            status = entry.get("status") or DECISION_STATUS_PENDING
+            options = entry.get("options") if isinstance(entry.get("options"), list) else []
+            option_text = ", ".join(str(item) for item in options) if options else "_none_"
+            lines.append(f"- **{entry.get('id')}** [{status}]: {entry.get('prompt') or ''}")
+            lines.append(f"  - options: {option_text}")
+            if status == DECISION_STATUS_RESOLVED:
+                lines.append(f"  - selected: {entry.get('selected')}")
+                lines.append(f"  - rationale: {entry.get('rationale')}")
+                lines.append(f"  - evidence_ref: {entry.get('evidence_ref')}")
+            else:
+                lines.append("  - selected: _pending_")
+                lines.append("  - rationale: _pending_")
+                lines.append("  - evidence_ref: _pending_")
     lines.append("")
     lines.append("## Next safe command")
     lines.append(f"`{receipt.get('next_command', '')}`")
@@ -2139,6 +2484,13 @@ def _write_plan_artifact(
     kind: str = "plan",
     steps: list[str] | None = None,
     from_research: str | None = None,
+    decision: str | None = None,
+    decision_prompt: str | None = None,
+    decision_options: list[str] | None = None,
+    resolve_decision: str | None = None,
+    selected: str | None = None,
+    rationale: str | None = None,
+    evidence_ref: str | None = None,
 ) -> int:
     from ..research import registry
 
@@ -2168,6 +2520,43 @@ def _write_plan_artifact(
         }
         research_sources.append(f"research:{from_research} (untrusted-web) -> {report_path}")
     existing = _read_plan_receipt(target, resolved_id, kind)
+    now = helpers._now().isoformat()
+    try:
+        if existing is None or "decisions" not in existing:
+            decisions = _normalize_decisions(None, now=now)
+        else:
+            decisions = _normalize_decisions(existing.get("decisions"), now=now)
+    except PlanDecisionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return int(exc.exit_code)
+    if decision is not None:
+        decisions, error = _declare_plan_decision(
+            decisions,
+            decision_id=decision,
+            prompt=decision_prompt,
+            options=decision_options,
+            now=now,
+        )
+        if error is not None:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+    if resolve_decision is not None:
+        decisions, error = _resolve_plan_decision(
+            decisions,
+            decision_id=resolve_decision,
+            selected=selected,
+            rationale=rationale,
+            evidence_ref=evidence_ref,
+            now=now,
+        )
+        if error is not None:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+    if accept:
+        unresolved = _unresolved_decisions(decisions)
+        if unresolved:
+            print(f"error: {_decision_gate_message(unresolved)}", file=sys.stderr)
+            return 2
     receipt = _build_plan_receipt(
         target=target,
         task=task,
@@ -2182,6 +2571,7 @@ def _write_plan_artifact(
         kind=kind,
         steps=steps,
         research=research_entry,
+        decisions=decisions,
     )
     json_path, md_path = helpers._plan_paths(target, resolved_id, kind)
     helpers._plans_dir(target).mkdir(parents=True, exist_ok=True)
@@ -2191,4 +2581,9 @@ def _write_plan_artifact(
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return 0
     print(f"wrote plan: {_plan_rel_path(target, md_path)}  status: {receipt['status']}")
+    unresolved = _unresolved_decisions(decisions)
+    if unresolved:
+        print(f"decision_checkpoints_pending: {len(unresolved)}")
+        for item in unresolved:
+            print(f"  - {item.get('id')}: selected+rationale+evidence_ref required")
     return 0

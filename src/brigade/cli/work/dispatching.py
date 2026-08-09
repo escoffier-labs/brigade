@@ -679,6 +679,13 @@ def dispatch(args) -> int:
                 kind="meta" if args.meta else "plan",
                 steps=args.step,
                 from_research=args.from_research,
+                decision=args.decision,
+                decision_prompt=args.decision_prompt,
+                decision_options=args.decision_options,
+                resolve_decision=args.resolve_decision,
+                selected=args.selected,
+                rationale=args.rationale,
+                evidence_ref=args.evidence_ref,
             )
         if args.task_command == "claim":
             return work_cmd.task_claim(

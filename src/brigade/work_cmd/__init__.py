@@ -175,6 +175,13 @@ from .ledger import (  # noqa: F401
     _significant_pending_without_plan,
     _plan_coverage_payload,
     _write_plan_artifact,
+    PlanDecisionError,
+    REASON_MALFORMED_PLAN_DECISIONS,
+    _normalize_decisions,
+    _unresolved_decisions,
+    _plan_decisions,
+    _unresolved_plan_decisions,
+    _decision_gate_message,
 )
 from .config import (  # noqa: F401
     _format_backup_toml,
