@@ -157,6 +157,27 @@ def test_doctor_cli_forwards_full(tmp_path, monkeypatch):
         "json_output": False,
         "full": True,
         "operator": False,
+        "agent": False,
+    }
+
+
+def test_doctor_cli_forwards_agent(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(doctor_mod, "run", fake_run)
+
+    assert cli.main(["doctor", "--target", str(tmp_path), "--agent", "--json"]) == 0
+    assert seen == {
+        "target": tmp_path,
+        "harness": "generic",
+        "json_output": True,
+        "full": False,
+        "operator": False,
+        "agent": True,
     }
 
 
