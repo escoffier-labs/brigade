@@ -1248,6 +1248,57 @@ def test_release_candidate_build_reuses_fresh_readiness_receipt(tmp_path, monkey
     assert candidate["git"]["head"] == release_receipt["evidence"]["git"]["head"]
 
 
+def test_release_candidate_build_refreshes_legacy_receipt_missing_base_ref(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
+    legacy_run_id = "legacy-readiness-no-base-ref"
+    _write_json(
+        tmp_path / ".brigade" / "release" / "runs" / legacy_run_id / "receipt.json",
+        {
+            "run_id": legacy_run_id,
+            "status": "ready",
+            "ready": True,
+            "started_at": "2026-05-30T00:00:00+00:00",
+            "completed_at": "2026-05-30T00:01:00+00:00",
+            "blockers": [],
+            "warnings": [],
+            "checks": [],
+            "evidence": {"git": {"head": head}},
+        },
+    )
+
+    assert release_cmd.candidate_build(target=tmp_path, base_ref=None, json_output=True) == 0
+    candidate = json.loads(capsys.readouterr().out)
+
+    assert candidate["base_ref"] is None
+    assert candidate["release_readiness_receipt"]["run_id"] == "inline-readiness"
+    assert candidate["release_readiness_receipt"]["run_id"] != legacy_run_id
+
+
+def test_release_candidate_build_does_not_reuse_receipt_for_different_base_ref(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+    subprocess.run(["git", "tag", "base-a"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "tag", "base-b"], cwd=tmp_path, check=True)
+
+    assert release_cmd.run(target=tmp_path, base_ref="base-a", json_output=True) == 0
+    release_receipt = json.loads(capsys.readouterr().out)
+
+    assert release_cmd.candidate_build(target=tmp_path, base_ref="base-b", json_output=True) == 0
+    candidate = json.loads(capsys.readouterr().out)
+
+    assert release_receipt["base_ref"] == "base-a"
+    assert candidate["base_ref"] == "base-b"
+    assert candidate["release_readiness_receipt"]["run_id"] == "inline-readiness"
+    assert candidate["release_readiness_receipt"]["run_id"] != release_receipt["run_id"]
+
+
 @pytest.mark.parametrize(
     ("check_name",),
     [
