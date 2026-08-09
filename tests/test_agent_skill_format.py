@@ -27,6 +27,24 @@ def test_strict_accepts_agent_skills_fields_and_treats_tools_as_requirements(tmp
     assert result.fields["metadata"] == {"owner": "team"}
 
 
+def test_allowed_tools_preserve_parenthesized_command_scopes(tmp_path):
+    directory = _skill(
+        tmp_path,
+        "scoped-bash",
+        "name: scoped-bash\n"
+        "description: Scope bash to named commands.\n"
+        "allowed-tools: Read, Grep, Bash(brigade handoff list:*), Bash(brigade memory care status:*)\n",
+    )
+    result = agent_skill_format.validate(directory, mode="strict")
+    assert result.errors == ()
+    assert result.fields["allowed-tools"] == (
+        "Read",
+        "Grep",
+        "Bash(brigade handoff list:*)",
+        "Bash(brigade memory care status:*)",
+    )
+
+
 def test_strict_rejects_unknown_and_lenient_retains_diagnostic(tmp_path):
     directory = _skill(
         tmp_path,

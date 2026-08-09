@@ -1,0 +1,14 @@
+{
+  "id": "card-refresh",
+  "title": "card-refresh",
+  "version": "0.1.0",
+  "description": "Allowlist-bound care-queue card refresh: grounded edits that cite on-disk sources, archive-only retention, and manual dedup until #724.",
+  "required_tools": [
+    "Read",
+    "Grep",
+    "Bash(brigade memory care status:*)",
+    "Bash(brigade memory care plan-fixes:*)",
+    "Bash(brigade memory care closeout:*)"
+  ],
+  "tests": ["brigade skills lint card-refresh"]
+}

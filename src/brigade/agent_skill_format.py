@@ -31,6 +31,39 @@ def _scalar(value: str) -> str:
     return value
 
 
+def _split_allowed_tools(allowed: str) -> tuple[str, ...]:
+    """Split comma/whitespace tool lists while preserving parenthesized scopes.
+
+    Claude-style entries such as ``Bash(brigade handoff list:*)`` must stay one
+    token. A naive ``re.split(r"[\\s,]+")`` shreds them into nonsense.
+    """
+    items: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in allowed:
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+            continue
+        if ch in ", \t\r\n" and depth == 0:
+            if buf:
+                item = "".join(buf).strip()
+                if item:
+                    items.append(item)
+                buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        item = "".join(buf).strip()
+        if item:
+            items.append(item)
+    return tuple(items)
+
+
 def _frontmatter(text: str) -> tuple[list[str] | None, str | None]:
     lines = text.splitlines()
     if not lines or lines[0] != "---":
@@ -121,7 +154,7 @@ def validate(skill_dir: Path, *, mode: str) -> Validation:
         (errors if mode == "strict" else diagnostics).append(message)
     allowed = fields.get("allowed-tools")
     if isinstance(allowed, str):
-        fields["allowed-tools"] = tuple(item for item in re.split(r"[\s,]+", allowed) if item)
+        fields["allowed-tools"] = _split_allowed_tools(allowed)
     elif allowed is not None:
         errors.append("frontmatter allowed-tools must be a string declaration")
     fields.update(unknown)
