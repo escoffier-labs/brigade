@@ -422,6 +422,192 @@ risk_class = "read"
     assert plan["assignments"][0]["admissible_tool_ids"] == ["reader"]
 
 
+def test_score_tool_rejects_malformed_enabled_in_raw_catalog():
+    tool = {
+        "id": "reader",
+        "raw": {
+            "id": "reader",
+            "name": "Reader",
+            "family": "script",
+            "enabled": "yes",
+            "command": "echo",
+            "domain": "code",
+            "capability": ["read-files"],
+            "risk_class": "read",
+        },
+        "domain": "code",
+        "capability": ["read-files"],
+        "risk_class": "read",
+    }
+    req = candidate_set.ToolRequirements(
+        domain="code",
+        capabilities=("read-files",),
+        max_risk_class="read",
+    )
+    scored = candidate_set.score_tool(tool, req)
+    assert scored.admitted is False
+    assert scored.reasons == ("invalid-enabled",)
+
+
+def test_score_tool_omitted_enabled_remains_admissible():
+    tool = {
+        "id": "reader",
+        "raw": {
+            "id": "reader",
+            "name": "Reader",
+            "family": "script",
+            "command": "echo",
+            "domain": "code",
+            "capability": ["read-files"],
+            "risk_class": "read",
+        },
+        "enabled": True,
+        "domain": "code",
+        "capability": ["read-files"],
+        "risk_class": "read",
+    }
+    req = candidate_set.ToolRequirements(
+        domain="code",
+        capabilities=("read-files",),
+        max_risk_class="read",
+    )
+    scored = candidate_set.score_tool(tool, req)
+    assert scored.admitted is True
+
+
+def test_score_tool_enabled_false_still_rejects():
+    tool = {
+        "id": "reader",
+        "raw": {
+            "id": "reader",
+            "name": "Reader",
+            "family": "script",
+            "enabled": False,
+            "command": "echo",
+            "domain": "code",
+            "capability": ["read-files"],
+            "risk_class": "read",
+        },
+        "enabled": False,
+        "domain": "code",
+        "capability": ["read-files"],
+        "risk_class": "read",
+    }
+    req = candidate_set.ToolRequirements(
+        domain="code",
+        capabilities=("read-files",),
+        max_risk_class="read",
+    )
+    scored = candidate_set.score_tool(tool, req)
+    assert scored.admitted is False
+    assert scored.reasons == ("disabled",)
+
+
+def test_malformed_enabled_cannot_satisfy_active_requirement(tmp_path):
+    _write_tools_toml(
+        tmp_path,
+        """
+[[tool]]
+id = "reader"
+name = "Reader"
+family = "script"
+enabled = "yes"
+command = "echo"
+domain = "code"
+capability = ["read-files"]
+risk_class = "read"
+""",
+    )
+    gated = Assignment(
+        worker="coder",
+        task="read sources",
+        domain="code",
+        capabilities=("read-files",),
+        max_risk_class="read",
+    )
+    decision = candidate_set.evaluate_assignments(
+        tmp_path,
+        [gated],
+        run_id="run-malformed-enabled",
+    )
+    assert decision.catalog_errors
+    assert decision.steps[0].empty_required is True
+    rejected = decision.steps[0].rejected
+    assert any(score.tool_id == "reader" and "invalid-enabled" in score.reasons for score in rejected)
+
+
+def test_candidate_set_corrective_replan_preserves_no_file_write_rule(monkeypatch, tmp_path):
+    gated = Assignment(
+        worker="coder",
+        task="read sources",
+        domain="ops",
+        capabilities=("deploy",),
+        max_risk_class="read",
+    )
+    _stub_run_phases(monkeypatch, assignments=[gated])
+    prompts: list[str] = []
+
+    def fake_run_orchestrator(roster, prompt, **kwargs):
+        prompts.append(prompt)
+        return agents.AgentResult(
+            text=json.dumps(
+                {
+                    "assignments": [
+                        {
+                            "worker": "coder",
+                            "task": "read sources",
+                            "domain": "code",
+                            "capabilities": ["read-files"],
+                            "max_risk_class": "read",
+                        }
+                    ]
+                }
+            ),
+            ok=True,
+        )
+
+    monkeypatch.setattr(aboyeur, "_run_orchestrator", fake_run_orchestrator)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan and synthesize"),
+            "coder": Agent("coder", "codex", "write code"),
+        },
+        max_workers=1,
+    )
+    _write_tools_toml(
+        tmp_path,
+        """
+[[tool]]
+id = "reader"
+name = "Reader"
+family = "script"
+enabled = true
+command = "echo"
+domain = "code"
+capability = ["read-files"]
+risk_class = "read"
+""",
+    )
+    output_dir = tmp_path / "run-replan-readonly"
+    assert (
+        run_aboyeur_guarded(
+            "read sources",
+            roster,
+            cwd=tmp_path,
+            output_dir=output_dir,
+            read_only=True,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+    assert len(prompts) >= 1
+    corrective_prompts = [prompt for prompt in prompts if "Correction needed:" in prompt]
+    assert len(corrective_prompts) == 1
+    assert aboyeur.NO_PLAN_FILE_RULE in corrective_prompts[0]
+
+
 def test_load_config_parses_domain_capability_risk_class(tmp_path):
     from brigade.tools_cmd.config import _load_config
 

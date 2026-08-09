@@ -199,6 +199,15 @@ def risk_rank(value: str | None) -> int | None:
     return _RISK_RANK.get(value)
 
 
+def _invalid_enabled_reason(tool: dict[str, Any]) -> str | None:
+    raw = tool.get("raw")
+    if not isinstance(raw, dict) or "enabled" not in raw:
+        return None
+    if isinstance(raw.get("enabled"), bool):
+        return None
+    return "invalid-enabled"
+
+
 def score_tool(tool: dict[str, Any], requirements: ToolRequirements) -> ToolScore:
     tool_id = str(tool.get("id") or "")
     domain = tool.get("domain") if isinstance(tool.get("domain"), str) else None
@@ -208,6 +217,18 @@ def score_tool(tool: dict[str, Any], requirements: ToolRequirements) -> ToolScor
     reasons: list[str] = []
     score = 0.0
     admitted = True
+
+    invalid_enabled = _invalid_enabled_reason(tool)
+    if invalid_enabled:
+        return ToolScore(
+            tool_id=tool_id,
+            score=0.0,
+            admitted=False,
+            domain=domain,
+            capability=capability,
+            risk_class=risk_class,
+            reasons=(invalid_enabled,),
+        )
 
     if tool.get("enabled") is False:
         return ToolScore(

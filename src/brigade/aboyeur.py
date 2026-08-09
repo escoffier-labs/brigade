@@ -1854,6 +1854,12 @@ def _apply_candidate_set_gate(
                     ],
                 }
             )
+        no_file_writes = _orchestrator_hides_write_tools(
+            roster,
+            read_only=read_only,
+            sandbox_read_only=sandbox_read_only,
+            sandbox=sandbox,
+        )
         revised_result = _call_with_process_registry(
             _run_orchestrator,
             roster,
@@ -1866,6 +1872,7 @@ def _apply_candidate_set_gate(
                 drift_impact=drift_impact,
                 evidence=evidence,
                 route=route,
+                no_file_writes=no_file_writes,
                 skill_policy=skill_policy,
             ),
             cwd=cwd,
