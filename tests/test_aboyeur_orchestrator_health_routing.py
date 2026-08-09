@@ -27,11 +27,12 @@ class RaisingProbe:
         raise RuntimeError("probe failed")
 
 
-def _roster(*, fallback: tuple[str, ...] = ()):
+def _roster(*, fallback: tuple[str, ...] = (), worker_fallback: tuple[str, ...] = ()):
     agents = {
         "chef": Agent("chef", "codex", "plan and synthesize", fallback=fallback),
         "chef-fallback": Agent("chef-fallback", "claude", "plan and synthesize"),
-        "coder": Agent("coder", "codex", "write code"),
+        "coder": Agent("coder", "codex", "write code", fallback=worker_fallback),
+        "coder-fallback": Agent("coder-fallback", "claude", "write code"),
     }
     return Roster(orchestrator="chef", agents=agents, max_workers=1)
 
@@ -119,10 +120,21 @@ def test_unhealthy_orchestrator_without_declared_fallback_aborts(monkeypatch, tm
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["status"] == "failed"
     assert run_meta["failure"]["kind"] == "auth-required"
+    expected = {
+        "requested_seat": "chef",
+        "effective_seat": None,
+        "outcome": "abort",
+        "typed_cause": "auth-required",
+        "rejected_fallbacks": [],
+    }
+    # Chef and coder share a codex seat-health fingerprint, so an unhealthy chef can
+    # cache through to coder and produce a legitimate skip decision alongside abort.
+    assert expected in run_meta["seat_routing"]
 
     routing = json.loads((output_dir / "seat-routing.json").read_text())
     assert routing["outcome"] == "abort"
     assert routing["effective_orchestrator"] is None
+    assert expected in routing["decisions"]
 
 
 def test_unhealthy_orchestrator_with_unhealthy_declared_fallback_aborts(monkeypatch, tmp_path, capsys):
@@ -203,3 +215,108 @@ def test_probe_exception_proceeds_without_abort(monkeypatch, tmp_path, capsys):
 
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["status"] == "ok"
+
+
+def test_unhealthy_worker_routes_to_fallback_and_persists_decision(monkeypatch, tmp_path):
+    seen = {}
+
+    monkeypatch.setattr(
+        aboyeur,
+        "plan",
+        lambda *args, **kwargs: [aboyeur.Assignment(worker="coder", task="implement")],
+    )
+
+    def capture_dispatch(assignments, roster, **kwargs):
+        seen["agent"] = roster.agents["coder"]
+        return [aboyeur.WorkerResult(worker="coder", task="implement", text="done", ok=True)]
+
+    monkeypatch.setattr(aboyeur, "dispatch", capture_dispatch)
+    monkeypatch.setattr(
+        aboyeur,
+        "_run_orchestrator",
+        lambda *args, **kwargs: agents.AgentResult(text="final answer", ok=True),
+    )
+    _install_probe(monkeypatch, PerSeatFakeAdapter(unhealthy=frozenset({"coder"})))
+    output_dir = tmp_path / "run-worker-fallback"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(worker_fallback=("coder-fallback",)),
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    assert seen["agent"].name == "coder"
+    assert seen["agent"].cli == "claude"
+    expected = {
+        "requested_seat": "coder",
+        "effective_seat": "coder-fallback",
+        "outcome": "fallback",
+        "typed_cause": "auth-required",
+        "rejected_fallbacks": [],
+    }
+    routing = json.loads((output_dir / "seat-routing.json").read_text())
+    assert routing["decisions"] == [expected]
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["seat_routing"] == [expected]
+
+
+def test_healthy_worker_path_has_no_routing_decisions(monkeypatch, tmp_path):
+    _stub_run_phases(monkeypatch)
+    _install_probe(monkeypatch, PerSeatFakeAdapter())
+    output_dir = tmp_path / "run-worker-healthy"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(worker_fallback=("coder-fallback",)),
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    assert not (output_dir / "seat-routing.json").exists()
+    assert "seat_routing" not in json.loads((output_dir / "run.json").read_text())
+
+
+def test_unhealthy_direct_worker_without_fallback_aborts(monkeypatch, tmp_path, capsys):
+    _install_probe(monkeypatch, PerSeatFakeAdapter(unhealthy=frozenset({"coder"})))
+    output_dir = tmp_path / "run-direct-unhealthy"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            worker="coder",
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 2
+    )
+
+    stderr = capsys.readouterr().err
+    assert "error: seat coder is unhealthy [auth-required]" in stderr
+    assert "no declared fallbacks" in stderr
+
+    expected = {
+        "requested_seat": "coder",
+        "effective_seat": None,
+        "outcome": "abort",
+        "typed_cause": "auth-required",
+        "rejected_fallbacks": [],
+    }
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["failure"]["kind"] == "auth-required"
+    assert run_meta["failure"]["seat"] == "coder"
+    assert run_meta["seat_routing"] == [expected]
+
+    routing = json.loads((output_dir / "seat-routing.json").read_text())
+    assert routing["decisions"] == [expected]

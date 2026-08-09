@@ -76,6 +76,7 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "brief_budget",
         "route",
         "skill_route_policy",
+        "seat_routing",
         "pre_run_snapshot",
         "git",
         "code_graph_delta",

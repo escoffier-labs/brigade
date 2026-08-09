@@ -2708,6 +2708,8 @@ def _run_payload(
         payload["run_journal_authority_requested"] = True
     if resolution := _roster_resolution_payload(roster):
         payload["roster"] = resolution
+    if roster.seat_routing:
+        payload["seat_routing"] = [dict(decision) for decision in roster.seat_routing]
     if lock_workspace is not None:
         payload["lock_workspace"] = str(lock_workspace)
     if route is not None:
@@ -3006,6 +3008,7 @@ class OrchestratorHealthRoutingDecision:
     abort_detail: str | None = None
     abort_failure_phase: str = "preflight"
     abort_failure_kind: str = "unclassified"
+    abort_seat: str | None = None
     receipt: dict[str, object] | None = None
 
 
@@ -3030,61 +3033,126 @@ def _seat_health_typed_cause(result: seat_health.SeatHealthResult) -> str:
 def resolve_orchestrator_health_routing(
     roster: Roster,
     results: tuple[seat_health.SeatHealthResult, ...] | None,
+    *,
+    pinned_seats: frozenset[str] = frozenset(),
 ) -> OrchestratorHealthRoutingDecision:
-    """Return the effective roster and any orchestrator fallback or abort action."""
-    orchestrator_result = _seat_health_result_for(results, roster.orchestrator)
-    if orchestrator_result is None or orchestrator_result.status != "unhealthy":
+    """Route unhealthy orchestrator and worker seats to declared fallbacks."""
+    if results is None:
         return OrchestratorHealthRoutingDecision(roster=roster)
 
-    requested = roster.orchestrator
-    typed_cause = _seat_health_typed_cause(orchestrator_result)
-    failure = orchestrator_result.failure
-    rejected: list[dict[str, str]] = []
+    referenced = {name for agent in roster.agents.values() for name in agent.fallback}
+    # Roots are the orchestrator plus seats not referenced as fallbacks by any other role.
+    roots = [name for name in roster.agents if name == roster.orchestrator or name not in referenced]
+    effective_agents = dict(roster.agents)
+    effective_orchestrator = roster.orchestrator
+    decisions: list[dict[str, object]] = []
+    warnings: list[str] = []
+    abort: tuple[str, seat_health.SeatHealthResult, list[dict[str, str]]] | None = None
 
-    for fallback_name in roster.agents[requested].fallback:
-        if fallback_name not in roster.agents:
+    for requested in roots:
+        health_result = _seat_health_result_for(results, requested)
+        if health_result is None or health_result.status != "unhealthy":
             continue
-        fallback_result = _seat_health_result_for(results, fallback_name)
-        if fallback_result is not None and fallback_result.status == "healthy":
-            return OrchestratorHealthRoutingDecision(
-                roster=replace(roster, orchestrator=fallback_name),
-                warning=(
-                    f"warning: orchestrator {requested} is unhealthy [{typed_cause}]; "
-                    f"using declared fallback {fallback_name}"
-                ),
-                receipt={
-                    "schema": "brigade.seat_routing.v1",
-                    "requested_orchestrator": requested,
-                    "effective_orchestrator": fallback_name,
-                    "outcome": "fallback",
-                    "typed_cause": typed_cause,
-                    "rejected_fallbacks": rejected,
-                },
-            )
-        status = fallback_result.status if fallback_result is not None else "missing"
-        cause = _seat_health_typed_cause(fallback_result) if fallback_result is not None else "missing"
-        rejected.append({"seat": fallback_name, "status": status, "cause": cause})
+        typed_cause = _seat_health_typed_cause(health_result)
+        rejected: list[dict[str, str]] = []
+        selected: str | None = None
+        for fallback_name in roster.agents[requested].fallback:
+            fallback_result = _seat_health_result_for(results, fallback_name)
+            if fallback_result is not None and fallback_result.status == "healthy":
+                selected = fallback_name
+                break
+            status = fallback_result.status if fallback_result is not None else "missing"
+            cause = _seat_health_typed_cause(fallback_result) if fallback_result is not None else "missing"
+            rejected.append({"seat": fallback_name, "status": status, "cause": cause})
 
+        decision: dict[str, object] = {
+            "requested_seat": requested,
+            "effective_seat": selected,
+            "outcome": "fallback" if selected is not None else "skip",
+            "typed_cause": typed_cause,
+            "rejected_fallbacks": rejected,
+        }
+        decisions.append(decision)
+        if selected is not None:
+            if requested == roster.orchestrator:
+                effective_orchestrator = selected
+                warnings.append(
+                    f"warning: orchestrator {requested} is unhealthy [{typed_cause}]; "
+                    f"using declared fallback {selected}"
+                )
+            else:
+                fallback = roster.agents[selected]
+                requested_agent = roster.agents[requested]
+                effective_agents[requested] = replace(
+                    fallback,
+                    name=requested,
+                    role=requested_agent.role,
+                    purpose=requested_agent.purpose,
+                    fallback=(),
+                )
+                warnings.append(
+                    f"warning: seat {requested} is unhealthy [{typed_cause}]; using declared fallback {selected}"
+                )
+        elif requested == roster.orchestrator or requested in pinned_seats:
+            abort = (requested, health_result, rejected)
+            decision["outcome"] = "abort"
+        else:
+            effective_agents.pop(requested, None)
+            warnings.append(f"warning: skipping unhealthy seat {requested} [{typed_cause}]; no healthy fallback")
+
+    if not decisions:
+        return OrchestratorHealthRoutingDecision(roster=roster)
+
+    effective = replace(
+        roster,
+        agents=effective_agents,
+        orchestrator=effective_orchestrator,
+        seat_routing=tuple(decisions),
+    )
+    receipt: dict[str, object] = {"schema": "brigade.seat_routing.v1", "decisions": decisions}
+    orchestrator_decision = next(
+        (decision for decision in decisions if decision["requested_seat"] == roster.orchestrator), None
+    )
+    if orchestrator_decision is not None:
+        # Preserve the original v1 summary for existing artifact consumers.
+        receipt.update(
+            {
+                "requested_orchestrator": roster.orchestrator,
+                "effective_orchestrator": orchestrator_decision["effective_seat"],
+                "outcome": orchestrator_decision["outcome"],
+                "typed_cause": orchestrator_decision["typed_cause"],
+                "rejected_fallbacks": orchestrator_decision["rejected_fallbacks"],
+            }
+        )
+
+    if abort is None:
+        return OrchestratorHealthRoutingDecision(
+            roster=effective,
+            warning="\n".join(warnings) or None,
+            receipt=receipt,
+        )
+
+    requested, unhealthy_result, rejected = abort
+    typed_cause = _seat_health_typed_cause(unhealthy_result)
     if rejected:
         rejected_detail = "; rejected fallbacks: " + ", ".join(
             f"{entry['seat']} ({entry['status']}[{entry['cause']}])" for entry in rejected
         )
     else:
         rejected_detail = "; no declared fallbacks"
-    detail = f"orchestrator {requested} is unhealthy [{typed_cause}]{rejected_detail}"
+    if requested == roster.orchestrator:
+        detail = f"orchestrator {requested} is unhealthy [{typed_cause}]{rejected_detail}"
+    else:
+        detail = f"seat {requested} is unhealthy [{typed_cause}]{rejected_detail}"
+    failure = unhealthy_result.failure
     return OrchestratorHealthRoutingDecision(
-        roster=roster,
+        roster=effective,
+        warning="\n".join(warnings) or None,
         abort_detail=detail,
         abort_failure_phase=failure.phase.value if failure is not None else "preflight",
         abort_failure_kind=failure.failure_class.value if failure is not None else "unclassified",
-        receipt={
-            "schema": "brigade.seat_routing.v1",
-            "requested_orchestrator": requested,
-            "effective_orchestrator": None,
-            "outcome": "abort",
-            "typed_cause": typed_cause,
-            "rejected_fallbacks": rejected,
-        },
+        abort_seat=requested,
+        receipt=receipt,
     )
 
 
@@ -3391,7 +3459,11 @@ def run(
         )
         # After the initial run receipt, before planning: a probe failure stays receipted.
         health_results = _write_run_seat_health_receipt(output_dir, roster, cwd=cwd)
-        routing = resolve_orchestrator_health_routing(roster, health_results)
+        routing = resolve_orchestrator_health_routing(
+            roster,
+            health_results,
+            pinned_seats=frozenset({worker}) if worker is not None else frozenset(),
+        )
         roster = routing.roster
         if routing.warning is not None:
             print(routing.warning, file=sys.stderr)
@@ -3400,13 +3472,24 @@ def run(
             routing_receipt["run_id"] = output_dir.name
             _write_seat_routing_receipt(output_dir, routing_receipt)
         if routing.abort_detail is not None:
+            if roster.seat_routing:
+                run_path = output_dir / "run.json"
+                try:
+                    run_payload = json.loads(run_path.read_text())
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise runguard.RetainRunLockError(
+                        f"failed to read run receipt before seat-routing abort: {exc}"
+                    ) from exc
+                if isinstance(run_payload, dict):
+                    run_payload["seat_routing"] = [dict(decision) for decision in roster.seat_routing]
+                    _write_json(run_path, receipt_schema.stamp_run_receipt(run_payload))
             record_run_termination(
                 output_dir,
                 status="failed",
                 failure_phase=routing.abort_failure_phase,
                 failure_kind=routing.abort_failure_kind,
                 detail=routing.abort_detail,
-                seat=roster.orchestrator,
+                seat=routing.abort_seat or roster.orchestrator,
             )
             print(f"error: {routing.abort_detail}", file=sys.stderr)
             return 2
