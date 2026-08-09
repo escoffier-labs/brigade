@@ -61,7 +61,7 @@ This README is dense, and a handful of words carry most of the weight. Learn the
 | **AFK** | Away from keyboard, a long unattended run the agent does solo. |
 | **station** | A subsystem of Brigade (memory, security, tokens, pantry) with its own commands. |
 
-The one rule behind all of it: Brigade writes local files and review queues, but it does not publish, edit canonical memory, run background daemons, run arbitrary commands, or touch remote servers on its own. Everything waits for an explicit operator command. That is the "deliberate friction" the rest of this doc keeps repeating.
+Execution model: explicit invocation only. Brigade writes local files and review queues when asked. It does not publish, edit canonical memory, run a scheduler or daemon, run arbitrary commands, or touch remote servers on its own. Full boundary: [`docs/execution-model.md`](execution-model.md). That deliberate friction is what the rest of this doc keeps repeating.
 
 ## The design
 
@@ -106,7 +106,7 @@ Brigade has grown from a bootstrap kit into a local control plane for agent work
 - Operator notifications: optional `agent-notify` status and setup planning for private Discord, Telegram, or Signal notifications. `brigade work brief` and related status surfaces may report readiness or suggest the station; no command sends unless the operator uses an explicit send action.
 - Security and publish guards: content-guard integration, template audit, SARIF output, suppressions, accepted-risk closeouts, policy presets, prompt and instruction checks, MCP checks, supply-chain checks, and redacted reports.
 
-The common rule is deliberate friction: Brigade writes local receipts and review queues, but it does not start daemons, mutate remotes, edit canonical memory, run arbitrary commands, publish releases, or auto-promote findings without an explicit operator command.
+The common rule is deliberate friction: Brigade writes local receipts and review queues, but it does not start daemons, mutate remotes, edit canonical memory, run arbitrary commands, publish releases, or auto-promote findings without an explicit operator command. See [`docs/execution-model.md`](execution-model.md).
 
 Browse the public template index in [`templates/`](../templates/).
 The installable source files live under `src/brigade/templates/`; root workspace files are local dogfood state and stay ignored.
@@ -1636,6 +1636,7 @@ Each subsystem has a companion doc under [`docs/`]() with the full local contrac
 - [`docs/tool-catalog.md`](tool-catalog.md) - the portable tool catalog, call review, runtimes, and policy
 - [`docs/backup-health.md`](backup-health.md) - read-only backup health summaries and issue routing
 - [`docs/memory-care.md`](memory-care.md) - memory card decay scanning and refresh imports
+- [`docs/execution-model.md`](execution-model.md) - explicit-invocation boundary and external-scheduler ownership
 - [`docs/security.md`](security.md) - the agent workspace security scanner and evidence bundles
 - [`docs/inspiration-patterns.md`](inspiration-patterns.md) - neutral pattern families and source-pattern decisions
 - [`docs/roadmap-completion-plan.md`](roadmap-completion-plan.md) - the large-roadmap completion plan and phase boundaries

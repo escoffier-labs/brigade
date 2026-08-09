@@ -1,6 +1,6 @@
 # Brigade Scanner Registry
 
-`brigade work scanners` describes local scanner producers, plans safe run windows, and explicitly runs configured local producers when asked. `brigade work sweep` is the daily review action that runs configured scanner producers and writes one local report. These commands do not install cron jobs, start a daemon, mutate remotes, run scanners from `brief` or `doctor`, or promote imports automatically.
+`brigade work scanners` describes local scanner producers, plans safe run windows, and explicitly runs configured local producers when asked. `brigade work sweep` is the daily review action that runs configured scanner producers and writes one local report. These commands do not install cron jobs, start a daemon, mutate remotes, run scanners from `brief` or `doctor`, or promote imports automatically. An external scheduler may call them later. Boundary: [execution model](execution-model.md).
 
 The local config is gitignored:
 

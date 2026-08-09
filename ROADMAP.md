@@ -17,7 +17,7 @@ This file is direction-only. The full per-feature completion detail through v0.8
 - **station**: an optional sidecar tool Brigade installs and health-checks (pantry, tokens, content guard, …) without folding its runtime into the Python package. The Code and Evidence engines are not stations: they ship inside Brigade under `engines/`.
 - **dogfood**: Brigade being used on itself or the maintainer's real setup.
 
-The one rule behind all of it: Brigade writes local files and queues, but it never publishes, edits canonical memory, runs background daemons, or touches remote servers on its own. Everything waits for an explicit command.
+Execution model: Brigade runs only on explicit invocation. An external scheduler may call its primitives and runbooks. Brigade is not a daemon. Details: [docs/execution-model.md](docs/execution-model.md).
 
 ## Where things stand
 
