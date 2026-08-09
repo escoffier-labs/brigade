@@ -1,6 +1,6 @@
 ---
 name: handoff-inbox-drain
-description: Use when draining a Brigade handoff review inbox - triage drafts with allowlist-bound Brigade handoff commands, grounded edits that cite on-disk content, archive-only retention, and manual dedup until #724. Never delete, remove, or prune.
+description: Use when draining a Brigade handoff review inbox - triage drafts with allowlist-bound Brigade handoff commands, grounded edits that cite on-disk content, archive-only retention, and reinforce-in-place when ingest already matched a known fact (#724). Never delete, remove, or prune.
 allowed-tools: Read, Grep, Bash(brigade handoff list:*), Bash(brigade handoff show:*), Bash(brigade handoff archive:*), Bash(brigade handoff closeout:*), Bash(brigade handoff lint:*), Bash(brigade handoff doctor:*)
 compatibility: Brigade-wired workspaces with handoff inboxes; operator-scheduled headless harnesses.
 ---
@@ -39,13 +39,14 @@ Every edit must be grounded. You must cite existing on-disk content (handoff bod
 - Never prune archives, queues, or card trees.
 - Archive only: uncertain or done items go through archive/closeout paths, or a needs-human file the operator already uses.
 
-## Manual dedup (pending #724)
+## Reinforce over duplicate (#724)
 
-Until #724 lands fingerprint-based reinforcement, perform manual dedup before filing near-duplicates:
+`brigade ingest --promote-cards` reinforces an existing card on exact content fingerprint match and inboxes near-match or opposite-polarity proposals for review. When draining the inbox:
 
 1. Search existing cards and recent handoffs for the same fact or decision.
-2. If a close match exists, reinforce that card (cite the on-disk source) instead of creating a sibling.
-3. If unsure, leave the draft for human review rather than splitting the corpus.
+2. If ingest already proposed a near-match reinforce or contradiction, honor that routing — do not create a sibling card.
+3. If a close match exists without an ingest proposal, reinforce that card (cite the on-disk source) instead of creating a sibling.
+4. If unsure, leave the draft for human review rather than splitting the corpus.
 
 ## Process
 

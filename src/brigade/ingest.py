@@ -13,11 +13,18 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
 from . import budgets
+from .card_fingerprint import (
+    CardMatch,
+    ensure_fingerprint_frontmatter,
+    find_card_match,
+    index_cards,
+    reinforce_existing_card,
+)
 from .handoff_content import normalize_suggested_card_content
 from .selection import WRITER_INBOXES
 from .untrusted import scan_untrusted
@@ -64,6 +71,7 @@ def has_salvageable_structure(sections: Dict[str, str]) -> bool:
 class IngestStats:
     processed: int = 0
     promoted: int = 0
+    reinforced: int = 0
     routed: int = 0
     inboxed: int = 0
     skipped: int = 0
@@ -171,6 +179,8 @@ def ingest_into(
             stats.actions.append(action.summary)
             if action.kind == "promoted":
                 stats.promoted += 1
+            elif action.kind == "reinforced":
+                stats.reinforced += 1
             elif action.kind == "routed":
                 stats.routed += 1
             elif action.kind == "inboxed":
@@ -200,9 +210,10 @@ def parse(path: Path) -> Dict[str, str]:
 
 @dataclass
 class Outcome:
-    kind: str  # promoted | routed | inboxed | skipped
+    kind: str  # promoted | reinforced | routed | inboxed | skipped
     dest: Path | None = None
     reason: str = ""
+    match: CardMatch | None = None
 
 
 def _normalize_for_dedupe(text: str) -> str:
@@ -251,6 +262,12 @@ def decide(
                 "inboxed",
                 reason=f"injection signal in card content ({sig.count} marker(s)): {sig.markers[0]}",
             )
+        # create-card only: reinforce known facts instead of filing near-duplicates.
+        # update-card keeps the wholesale-replace semantic for intentional edits.
+        if action == "create-card":
+            match_outcome = _decide_create_card_match(content, target=target)
+            if match_outcome is not None:
+                return match_outcome
         return Outcome("promoted", dest=target / "memory" / "cards" / card)
 
     if action == "no-card" and route_documents:
@@ -304,6 +321,34 @@ def decide(
     return Outcome("skipped", reason=f"action {action!r} not auto-handled")
 
 
+def _decide_create_card_match(content: str, *, target: Path) -> Outcome | None:
+    """Return reinforce / review Outcome when create-card matches an existing card."""
+    indexed = index_cards(target / "memory" / "cards")
+    match = find_card_match(content, indexed)
+    if match is None:
+        return None
+    rel = match.path.relative_to(target).as_posix()
+    if match.kind == "exact":
+        return Outcome(
+            "reinforced",
+            dest=match.path,
+            reason=f"exact fingerprint match for {rel}",
+            match=match,
+        )
+    similarity = f"{match.similarity:.2f}"
+    if match.opposite_polarity:
+        return Outcome(
+            "inboxed",
+            reason=(f"contradiction candidate vs {rel} (similarity={similarity}, opposite polarity); do not reinforce"),
+            match=match,
+        )
+    return Outcome(
+        "inboxed",
+        reason=(f"near-match reinforce proposal: {rel} (similarity={similarity}); reviewer veto before merging"),
+        match=match,
+    )
+
+
 @dataclass
 class Action:
     kind: str
@@ -325,12 +370,30 @@ def _execute(
         dest = outcome.dest  # type: ignore[assignment]
         assert dest is not None
         content = sections.get("suggested card content", "").strip() + "\n"
+        content = ensure_fingerprint_frontmatter(content)
+        if not content.endswith("\n"):
+            content += "\n"
         summary = f"promote → {dest.relative_to(target)}  ({name})"
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
             _archive(handoff_path, processed_dir)
         return Action("promoted", summary)
+
+    if outcome.kind == "reinforced":
+        dest = outcome.dest
+        assert dest is not None
+        rel = dest.relative_to(target).as_posix()
+        summary = f"reinforce → {rel}  ({name}; matched existing card)"
+        if not dry_run:
+            evidence_pointer = _evidence_pointer(handoff_path, sections=sections, target=target)
+            reinforce_existing_card(
+                dest,
+                today=date.today(),
+                evidence_pointer=evidence_pointer,
+            )
+            _archive(handoff_path, processed_dir)
+        return Action("reinforced", summary)
 
     if outcome.kind == "routed":
         dest = outcome.dest  # type: ignore[assignment]
@@ -365,6 +428,20 @@ def _execute(
     return Action("skipped", f"skip   {name}  ({outcome.reason})")
 
 
+def _evidence_pointer(handoff_path: Path, *, sections: Dict[str, str], target: Path) -> str:
+    """Prefer an on-disk handoff path; fall back to the first evidence bullet."""
+    try:
+        return handoff_path.resolve().relative_to(target.resolve()).as_posix()
+    except ValueError:
+        pass
+    evidence = sections.get("evidence", "")
+    for line in evidence.splitlines():
+        cleaned = line.strip().lstrip("-").strip()
+        if cleaned:
+            return cleaned
+    return handoff_path.name
+
+
 def _list_handoffs(handoffs_dir: Path) -> List[Path]:
     out: List[Path] = []
     for p in sorted(handoffs_dir.iterdir()):
@@ -389,7 +466,8 @@ def _report(stats: IngestStats, dry_run: bool) -> None:
     print()
     print(
         f"{tag}Processed {stats.processed}  Promoted {stats.promoted}  "
-        f"Routed {stats.routed}  Inboxed {stats.inboxed}  Skipped {stats.skipped}"
+        f"Reinforced {stats.reinforced}  Routed {stats.routed}  "
+        f"Inboxed {stats.inboxed}  Skipped {stats.skipped}"
     )
     if stats.processed == 0:
         print(f"{tag}NO_UPDATES")

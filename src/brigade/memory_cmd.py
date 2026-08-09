@@ -1295,13 +1295,16 @@ def _git_last_commit_date(target: Path, rel: str) -> date | None:
 
 
 def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[dict[str, Any]], int]:
-    """Cards with frontmatter but missing review/freshness metadata, with derived values.
+    """Cards with frontmatter but missing review/freshness/fingerprint metadata.
 
     The derived `last_reviewed` is the card file's last git commit date (the
     last time anyone touched the fact), falling back to file mtime outside git.
     `fresh_until` is the derived or existing reviewed date plus the configured
-    stale window. Existing values are never proposed for change.
+    stale window. `fingerprint` is a stable hash of normalized card content.
+    Existing values are never proposed for change.
     """
+    from .card_fingerprint import content_fingerprint
+
     candidates: list[dict[str, Any]] = []
     skipped_no_frontmatter = 0
     for path in _iter_cards(target, config):
@@ -1313,7 +1316,8 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
             continue
         reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
         expiry = _parse_date(_frontmatter_value(meta, "fresh_until", "expires_at", "expires"))
-        if reviewed is not None and expiry is not None:
+        has_fingerprint = bool(str(meta.get("fingerprint") or "").strip())
+        if reviewed is not None and expiry is not None and has_fingerprint:
             continue
         derived = _git_last_commit_date(target, rel)
         source = "git-history"
@@ -1336,6 +1340,11 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
         if expiry is None:
             candidate["fresh_until"] = (base_reviewed + _td(days=config.stale_after_days)).isoformat()
             candidate["fields"].append("fresh_until")
+        if not has_fingerprint:
+            candidate["fingerprint"] = content_fingerprint(text)
+            candidate["fields"].append("fingerprint")
+            if reviewed is not None and expiry is not None:
+                candidate["source"] = "content-hash"
         candidates.append(candidate)
     return candidates, skipped_no_frontmatter
 
@@ -1352,7 +1361,7 @@ def _backfill_write(target: Path, candidate: dict[str, Any]) -> None:
 
 
 def backfill(*, target: Path, apply: bool = False, json_output: bool = False) -> int:
-    """Plan or apply safe metadata backfill for cards missing review/freshness dates."""
+    """Plan or apply safe metadata backfill for cards missing review/freshness/fingerprint."""
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)

@@ -1,8 +1,8 @@
 {
   "id": "card-refresh",
   "title": "card-refresh",
-  "version": "0.1.0",
-  "description": "Allowlist-bound care-queue card refresh: grounded edits that cite on-disk sources, archive-only retention, and manual dedup until #724.",
+  "version": "0.2.0",
+  "description": "Allowlist-bound care-queue card refresh: grounded edits that cite on-disk sources, archive-only retention, and reinforce-in-place instead of near-duplicate siblings (#724).",
   "required_tools": [
     "Read",
     "Grep",

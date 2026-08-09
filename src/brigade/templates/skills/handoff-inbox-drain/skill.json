@@ -1,8 +1,8 @@
 {
   "id": "handoff-inbox-drain",
   "title": "handoff-inbox-drain",
-  "version": "0.1.0",
-  "description": "Allowlist-bound handoff inbox triage: grounded edits that cite on-disk content, archive-only retention, and manual dedup until #724.",
+  "version": "0.2.0",
+  "description": "Allowlist-bound handoff inbox triage: grounded edits that cite on-disk content, archive-only retention, and reinforce-in-place when ingest matched a known fact (#724).",
   "required_tools": [
     "Read",
     "Grep",

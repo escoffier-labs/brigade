@@ -627,6 +627,7 @@ def test_memory_care_backfill_dry_run_derives_dates_and_writes_nothing(tmp_path,
             "topic": "complete",
             "last_reviewed": "2026-05-01",
             "fresh_until": "2026-12-01",
+            "fingerprint": "already-set",
             "confidence": "high",
             "evidence": ["README.md"],
         },
@@ -644,6 +645,8 @@ def test_memory_care_backfill_dry_run_derives_dates_and_writes_nothing(tmp_path,
     assert item["source"] == "git-history"
     assert item["last_reviewed"] == "2026-03-15"
     assert item["fresh_until"] == "2026-06-13"
+    assert "fingerprint" in item["fields"]
+    assert len(item["fingerprint"]) == 64
     assert (cards / "bare.md").read_text() == before
     assert not (tmp_path / ".brigade" / "memory-care" / "backfills").exists()
 
@@ -660,6 +663,7 @@ def test_memory_care_backfill_apply_writes_metadata_receipt_and_is_idempotent(tm
             "topic": "complete",
             "last_reviewed": "2026-05-01",
             "fresh_until": "2026-12-01",
+            "fingerprint": "already-set",
             "confidence": "high",
             "evidence": ["README.md"],
         },
@@ -675,6 +679,7 @@ def test_memory_care_backfill_apply_writes_metadata_receipt_and_is_idempotent(tm
     text = (cards / "bare.md").read_text()
     assert "last_reviewed: 2026-03-15" in text
     assert "fresh_until: 2026-06-13" in text
+    assert "fingerprint:" in text
     assert text.endswith("Body.\n")
     assert (cards / "complete.md").read_text() == complete_before
     receipts = list((tmp_path / ".brigade" / "memory-care" / "backfills").glob("*.json"))
@@ -702,6 +707,35 @@ def test_memory_care_backfill_falls_back_to_mtime_outside_git(tmp_path, capsys):
     item = payload["candidates"][0]
     assert item["source"] == "file-mtime"
     assert item["last_reviewed"] == "2026-04-02"
+
+
+def test_memory_care_backfill_fingerprint_only_for_dated_cards(tmp_path, capsys):
+    """Cards that already have dates still get a content fingerprint backfill."""
+    cards = tmp_path / "memory" / "cards"
+    _write_card(
+        cards / "dated.md",
+        {
+            "topic": "dated",
+            "last_reviewed": "2026-05-01",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+        body="Durable fact about the widget cache.\n",
+    )
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    item = payload["candidates"][0]
+    assert item["fields"] == ["fingerprint"]
+    assert item["source"] == "content-hash"
+    assert len(item["fingerprint"]) == 64
+
+    assert memory_cmd.backfill(target=tmp_path, apply=True, json_output=True) == 0
+    text = (cards / "dated.md").read_text()
+    assert f"fingerprint: {item['fingerprint']}" in text
+    assert "last_reviewed: 2026-05-01" in text
 
 
 def test_memory_care_producer_artifacts_use_write_dir_not_read_fallback(tmp_path):

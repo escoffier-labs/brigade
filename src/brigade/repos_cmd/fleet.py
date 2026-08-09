@@ -921,7 +921,14 @@ def ingest_fleet(
         if not entry.path.is_dir():
             skipped.append({"repo_id": entry.repo_id, "reason": "not reachable"})
             continue
-        before = (stats.processed, stats.promoted, stats.routed, stats.inboxed, stats.skipped)
+        before = (
+            stats.processed,
+            stats.promoted,
+            stats.reinforced,
+            stats.routed,
+            stats.inboxed,
+            stats.skipped,
+        )
         rc = ingest_mod.ingest_into(
             source=entry.path,
             owner=target,
@@ -938,15 +945,17 @@ def ingest_fleet(
                 "repo_id": entry.repo_id,
                 "processed": stats.processed - before[0],
                 "promoted": stats.promoted - before[1],
-                "routed": stats.routed - before[2],
-                "inboxed": stats.inboxed - before[3],
-                "skipped": stats.skipped - before[4],
+                "reinforced": stats.reinforced - before[2],
+                "routed": stats.routed - before[3],
+                "inboxed": stats.inboxed - before[4],
+                "skipped": stats.skipped - before[5],
             }
         )
 
     totals: dict[str, int] = {
         "processed": stats.processed,
         "promoted": stats.promoted,
+        "reinforced": stats.reinforced,
         "routed": stats.routed,
         "inboxed": stats.inboxed,
         "skipped": stats.skipped,
@@ -966,12 +975,13 @@ def ingest_fleet(
         f"repos ingest [{mode}] -> owner {target}",
         *[
             f"- {repo['repo_id']}: processed={repo['processed']} promoted={repo['promoted']} "
-            f"routed={repo['routed']} inboxed={repo['inboxed']}"
+            f"reinforced={repo['reinforced']} routed={repo['routed']} inboxed={repo['inboxed']}"
             for repo in per_repo
         ],
         *[f"- {item['repo_id']}: skipped ({item['reason']})" for item in skipped],
         f"totals: processed={totals['processed']} promoted={totals['promoted']} "
-        f"routed={totals['routed']} inboxed={totals['inboxed']} skipped={totals['skipped']}",
+        f"reinforced={totals['reinforced']} routed={totals['routed']} "
+        f"inboxed={totals['inboxed']} skipped={totals['skipped']}",
     ]
     return emit(payload, json_output, text_lines, 0)
 
