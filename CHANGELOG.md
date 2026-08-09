@@ -7,57 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-- Work task footprint metadata with a three-phase lifecycle (#777): each task
-  carries `metadata.footprint` (`files`, `symbol_ids`, `snapshot_hash`) written
-  predicted at filing (GraphTrail `impact` when available; empty-predicted
-  degrade when the binary or index is absent), refined at
-  `brigade work task claim` from plan-named files, and reconciled at
-  `work task done` by joining the latest verify receipt's `code_graph_delta`
-  / `graphtrail_delta`. Additive `task add --symbol` / `--file` seed the
-  predicted write.
-- Work inbox atomic claim with compare-and-set guards (#738):
-  `brigade work claim <id>|--next --actor <name> [--claim-id]` performs a
-  pending→`in_progress` transition with assignee under the tasks.json ledger
-  lock. Idempotency is keyed by opaque `--claim-id` (same id retries; a new id
-  loses). Lost races and `--if-actor`/`--if-status` mismatches exit 13 with the
-  holder named and no release/steal suggestion. Claims against non-ready tasks
-  (open blockers, wrong status) fail closed. `work release` / `work reassign`
-  compare claim identity; empty filter values match nothing. `work status`
-  lists stale claims (default 24h).
-- Work task ledger dependency edges and a computed ready set (#737): typed
-  edges (`blocks`, `parent-child`, `discovered-from`) live as a normalized
-  top-level `edges` array in `.brigade/work/tasks.json` (schema version 2).
-  `brigade work ready [--explain] [--json]` returns the ready set; `work task
-  edge add|remove|list`, `work task add --deps` / `--graph`, and close-time
-  newly-unblocked / completable-parent reporting cover the mutation surface.
-  Only `blocks` gates readiness (with parent-child blocker propagation);
-  `discovered-from` is provenance-only. Direct and transitive cycles on
-  readiness-affecting edges (`blocks` and `parent-child`) are rejected at
-  edge-add and graph-apply time with a machine-readable `dependency_cycle`
-  reason; `discovered-from` never participates in cycle detection.
-- `brigade memory care init --with-runbooks` writes three mechanical,
-  model-free memory-care runbook templates (`daily-care-pass`, `ingest-sweep`,
-  `weekly-outcome-ratchet`) under `.brigade/memory-care/runbooks/`. Each
-  template restricts execution to `brigade` via `allowed_commands` and gets
-  binary pins materialized at write time from the resolved `brigade` path.
-  (#760)
+### Changed
+- `brigade work` task ledgers now track dependency edges, a computed ready set, atomic compare-and-set claims with fail-closed filters, and three-phase file and symbol footprints from task creation through verified completion. (#783, #796, #797)
+- Memory care now ships two review skills and three pinned runbook templates, reports read-only archive candidates, and documents cron, systemd, and GitHub Actions scheduling. (#771, #785, #786, #789)
+- `brigade center serve` adds an explicit loopback-bound read-only dashboard transport with host, CSP, and token safeguards, and the docs define Brigade's external-scheduler boundary. (#729, #784)
+- `brigade handoff lint` warns about context-dependent durable facts, supports `--strict`, and distinguishes salvageable non-template notes from invalid input. (#730, #773)
+- Stable publishing accepts only exact release tags, while a separate daily main-branch workflow publishes development wheels without version commits or GitHub Releases. (#782)
 
 ### Fixed
-- `brigade run --wait` now joins a fair per-worktree wait queue instead of
-  timing out after 600 seconds while a legitimate run still holds the lock.
-  Waiters proceed in arrival order; stale holders and dead queue tickets are
-  reclaimed during the wait. Bare `--wait` waits without a fixed ceiling;
-  `--wait=SECONDS` keeps an optional bound. Workspace default wait is
-  configurable via `run_lock_wait_seconds` in `.brigade/config.json`; use
-  `--wait=0` to fail fast when that default is set.
-
-### Added
-- `docs/scheduled-care.md`: copy-paste cron, systemd timer, and GitHub Actions recipes for the memory-care loop (daily care, ingest sweep, weekly outcome ratchet, daily observability, nightly ops). (#764)
-- `brigade memory care status` reports a read-only `archive_candidates` view
-  from the saved scan: cards with `age_days > 2 * stale_after_days`, including
-  age, last-reviewed, and evidence pointers. Approval-gated and never archives;
-  available in human output and `--json`. (#765)
+- DAG runs no longer deadlock on shared cover sets, accept mutual-wait cycles, misreport one-node execution, route to unhealthy seats, or miss shared-checkout isolation breaches. (#742, #788, #791, #794)
+- `brigade run --wait` uses a fair FIFO queue, reclaims dead or stale holders, and retries the head waiter after a failed handoff instead of starving or timing out at 600 seconds. (#781, #790)
+- Release and security checks now reject stale readiness receipts across HEAD, base-ref, or tracked-tree changes, limit release content scans to tracked files, tolerate broken external scanners, point failures to `brigade scrub`, and coalesce overlapping open security findings while preserving per-fingerprint suppression and hiding internal metadata. (#753, #756, #774, #775, #776, #793)
+- On Windows, repository text reads use UTF-8 with a safe decode fallback, and `brigade work verify run` hosts shebang, PowerShell, CMD, and batch scripts with native interpreters. (#767, #769)
+- Required notify checks remain reportable on unrelated pull requests, and roadmap command audits ignore rejected design alternatives without suppressing accepted examples. (#755, #787)
 
 ## [0.26.0] - 2026-08-05
 
