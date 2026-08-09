@@ -62,7 +62,10 @@ Source of truth: `worker_events.FIELD_CLASSIFICATION_MATRIX` /
 | `turn/completed` | same as started | provider `turn.error` bodies |
 | `item/started` | `threadId`, `turnId`, `item.id`, `item.type`, safe item public fields | prompts, text, commands, cwd, diffs, tool args/results |
 | `item/completed` | same as started, plus `completedAtMs` | same as started |
-| `*#auto-declined` | `threadId`, `turnId`, `itemId`, `availableDecisions` | `command`, `cwd`, `reason`, headers, cookies, env, credentials, prompts, grant roots |
+| `item/commandExecution/requestApproval#auto-declined` | `threadId`, `turnId`, `itemId`, `availableDecisions` | `command`, `cwd`, `reason`, headers, cookies, env, credentials, prompts, grant roots |
+
+Only the recorded approval auto-decline method above is accepted. Other
+`*#auto-declined` bases fail closed.
 
 Delta methods (`item/*/delta`, …) are never recorded by Brigade and are
 intentionally absent. Unknown methods or fields fail scrubbing with a bounded

@@ -38,6 +38,7 @@ def test_classification_matrix_covers_recorded_app_server_methods():
     methods = set(matrix["methods"])
     assert methods == {"turn/started", "turn/completed", "item/started", "item/completed"}
     assert "auto_declined_params" in matrix
+    assert matrix["auto_declined_methods"] == ["item/commandExecution/requestApproval"]
     for item_type, fields in matrix["item_types"].items():
         assert "id" in fields and fields["id"] == worker_events.FIELD_PUBLIC
         assert "type" in fields and fields["type"] == worker_events.FIELD_PUBLIC

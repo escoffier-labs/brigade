@@ -297,13 +297,16 @@ FIELD_CLASSIFICATION_MATRIX: dict[str, Any] = {
     "field_classes": sorted(FIELD_CLASSES),
     "envelope": dict(_ENVELOPE_FIELDS),
     "methods": {name: {"params": dict(fields)} for name, fields in sorted(_METHOD_PARAM_FIELDS.items())},
+    "auto_declined_methods": sorted(_AUTO_DECLINED_METHOD_BASES),
     "auto_declined_params": dict(_AUTO_DECLINED_PARAM_FIELDS),
     "turn_fields": dict(_TURN_FIELDS),
     "item_types": {name: dict(fields) for name, fields in sorted(_ITEM_TYPE_FIELDS.items())},
     "global_secret_keys": dict(_GLOBAL_SECRET_KEYS),
     "notes": (
         "Delta methods are never recorded by Brigade and are intentionally absent. "
-        "Unknown methods or fields fail closed. Absolute home paths travel in cwd/path/"
+        "Unknown methods or fields fail closed. Only "
+        "item/commandExecution/requestApproval#auto-declined is accepted; other "
+        "*#auto-declined bases fail closed. Absolute home paths travel in cwd/path/"
         "grantRoot and are classified private_content. Provider error bodies are prohibited."
     ),
 }
