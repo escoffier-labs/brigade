@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from brigade import center_cmd, cli, mcp_cmd, outcome_cmd, runguard, scrub, work_cmd
+from brigade import center_cmd, cli, mcp_cmd, outcome_cmd, runbook_cmd, runguard, scrub, work_cmd
+from brigade.operator_cmd import lifecycle as operator_lifecycle
 from brigade.work_cmd import edges as edges_mod
 from brigade.work_cmd.session import briefing as briefing_mod
 
@@ -26,6 +27,7 @@ _BYPASS_TOKENS = (
     "--allow-unreviewed",
     "--allow-global-stdio",
     "--operator-confirm",
+    "--approved",
     "--no-verify",
     "chmod +x",
 )
@@ -183,6 +185,74 @@ def test_publish_hook_doctor_advice_is_platform_portable(tmp_path, monkeypatch):
     joined = "\n".join(details)
     assert any("not executable" in detail for detail in details)
     _assert_no_bypass_tokens(joined)
+
+
+def test_scrub_missing_hook_suggested_commands_omit_force(tmp_path, monkeypatch):
+    target = tmp_path / "repo"
+    target.mkdir()
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] == ["git", "-C", str(target)] and argv[-1] == "core.hooksPath":
+
+            class Result:
+                returncode = 1
+                stdout = ""
+
+            return Result()
+        if argv[:3] == ["git", "-C", str(target)] and argv[-1] == "--git-dir":
+
+            class Result:
+                returncode = 0
+                stdout = ".git"
+
+            return Result()
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(scrub.subprocess, "run", fake_run)
+    status = scrub.hook_status(target, policy="public-repo")
+    assert any(check["name"] == "content_guard_hook_not_enabled" for check in status["checks"])
+    joined = "\n".join(status["suggested_commands"])
+    assert "brigade init --target . --depth repo" in joined
+    _assert_no_bypass_tokens(joined)
+
+
+def test_quickstart_install_failure_next_commands_point_at_doctor(tmp_path, monkeypatch, capsys):
+    def fail_install(**kwargs):
+        return 1, ["error: simulated install failure"]
+
+    monkeypatch.setattr(operator_lifecycle, "install_selection", fail_install)
+    assert operator_lifecycle.quickstart(target=tmp_path, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "blocked"
+    joined = "\n".join(payload["next_commands"])
+    assert f"brigade doctor --target {tmp_path}" in joined
+    _assert_no_bypass_tokens(joined)
+
+
+def test_runbook_approval_refusal_omits_approved_flag(tmp_path, capsys):
+    runbook = tmp_path / "needs-approval.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "id": "needs-approval",
+                "approved": True,
+                "allowed_commands": ["true"],
+                "steps": [{"id": "noop", "run": "true"}],
+            }
+        )
+    )
+
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "approval-required"
+    assert payload["runbook_id"] == "needs-approval"
+    _assert_no_bypass_tokens(json.dumps(payload))
+
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, json_output=False) == 1
+    err = capsys.readouterr().err
+    assert "approved=true inside the runbook file is ignored" in err
+    assert "brigade runbook run --help" in err
+    _assert_no_bypass_tokens(err)
 
 
 def test_cli_open_children_and_mcp_init_contracts_via_main(tmp_path, monkeypatch, capsys):

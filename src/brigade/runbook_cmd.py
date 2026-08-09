@@ -447,8 +447,9 @@ def _execute_plan(
             )
         else:
             print(
-                "error: runbook execution requires the operator to pass --approved; "
-                "approved=true inside the runbook file is ignored",
+                "error: runbook execution requires explicit operator approval on the command line; "
+                "approved=true inside the runbook file is ignored. "
+                "See: brigade runbook run --help",
                 file=sys.stderr,
             )
         return 1

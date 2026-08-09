@@ -114,7 +114,7 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
         if hook.is_file():
             suggestions.append("git config core.hooksPath hooks")
         else:
-            suggestions.append("brigade init --target . --force")
+            suggestions.append("brigade init --target . --depth repo")
     if not checks:
         checks.append(
             {

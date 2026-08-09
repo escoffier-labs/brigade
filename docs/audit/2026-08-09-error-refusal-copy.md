@@ -28,6 +28,9 @@ Sweep date: 2026-08-09. Classification keys:
 | `install.py` kept-files note | `run with --force to overwrite` | judgment-required | Describe intent to replace templates; no force flag. |
 | `runguard.py` DirtyWorktreeError | `pass --allow-dirty to run anyway` | gate-bypassing | Ask to commit/stash/clean only. |
 | `doctor.py` publish hook | `run chmod +x hooks/pre-push` | platform-specific | Describe required end state for any Git hook host. |
+| `scrub.py` (`hook_status` missing hook) | `brigade init ... --force` in `suggested_commands` | destructive/bypassing | Safe init: `brigade init --target . --depth repo`. |
+| `operator_cmd/lifecycle.py` (quickstart install failure) | `brigade init ... --force` in `next_commands` | destructive/bypassing | Point at `brigade doctor --target TARGET`. |
+| `runbook_cmd.py` (text approval refusal) | names `--approved` | gate-bypassing | Point at `brigade runbook run --help`; JSON keeps `status`/`runbook_id`. |
 
 ## Left intentionally
 
