@@ -419,6 +419,20 @@ def _commands_from_text(text: str) -> set[str]:
     commands: set[str] = set()
     command_re = re.compile(r"\bbrigade\b(?P<tail>\s+[^\n`]*)")
 
+    def is_rejected_design_section(headings: list[str]) -> bool:
+        """Return whether headings frame commands as rejected design ideas."""
+        for heading in headings:
+            if not heading:
+                continue
+            lowered = heading.casefold()
+            if any(marker in lowered for marker in ("considered and cut", "rejected", "discarded")):
+                return True
+            if re.match(r"alternative\s+[a-z](?:\s*[—\-–:]|\b)", lowered) and not any(
+                marker in lowered for marker in ("recommended", "selected", "chosen")
+            ):
+                return True
+        return False
+
     def add_command(raw_command: str, *, require_known_head: bool = False) -> None:
         match = command_re.search(raw_command)
         if not match:
@@ -438,16 +452,31 @@ def _commands_from_text(text: str) -> set[str]:
                 return
             commands.add(" ".join(["brigade", *words]))
 
-    for match in re.finditer(r"`([^\n`]*\bbrigade\b[^\n`]*)`", text):
-        add_command(match.group(1))
     in_fence = False
+    headings: list[str] = []
     for raw_line in text.splitlines():
         stripped = raw_line.strip()
+        heading_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if heading_match and not in_fence:
+            level = len(heading_match.group(1))
+            while len(headings) < level - 1:
+                headings.append("")
+            headings[level - 1 :] = [heading_match.group(2).strip()]
+        rejected_design = is_rejected_design_section(headings)
         if stripped.startswith("```"):
             in_fence = not in_fence
             continue
-        if in_fence and stripped.startswith("brigade "):
-            add_command(stripped, require_known_head=True)
+        if rejected_design:
+            continue
+        if in_fence:
+            if stripped.startswith("brigade "):
+                add_command(stripped, require_known_head=True)
+            else:
+                for match in re.finditer(r"`([^\n`]*\bbrigade\b[^\n`]*)`", raw_line):
+                    add_command(match.group(1), require_known_head=True)
+        else:
+            for match in re.finditer(r"`([^\n`]*\bbrigade\b[^\n`]*)`", raw_line):
+                add_command(match.group(1))
     return commands
 
 
