@@ -112,17 +112,17 @@ def _changelog_unreleased(path: Path) -> list[str]:
     return items
 
 
-def _release_receipt_matches_head(receipt: dict[str, Any], target: Path) -> bool:
+def _release_receipt_matches_head(receipt: dict[str, Any], target: Path, *, base_ref: str | None) -> bool:
     evidence = receipt.get("evidence") if isinstance(receipt.get("evidence"), dict) else {}
     git = evidence.get("git") if isinstance(evidence.get("git"), dict) else {}
     receipt_head = git.get("head")
     current_head = _git_value(target, "rev-parse", "HEAD")
-    return bool(receipt_head and current_head and receipt_head == current_head)
+    return bool(receipt_head and current_head and receipt_head == current_head and receipt.get("base_ref") == base_ref)
 
 
 def _latest_release_or_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     latest = _latest_release_receipt(target)
-    if latest is not None and _release_receipt_matches_head(latest, target):
+    if latest is not None and _release_receipt_matches_head(latest, target, base_ref=base_ref):
         return latest
     payload = _payload(target, base_ref=base_ref, run_checks=True)
     return {
