@@ -1,6 +1,6 @@
 # Brigade Overview
 
-The full tour: every station, diagram, and workflow. The [README](../README.md) covers the core memory loop and install; this document goes deeper. The detailed command walkthrough is in the [technical guide](technical-guide.md).
+The full tour: every station, diagram, and workflow. The [README](../README.md) covers the core memory loop and install. This document goes deeper. The detailed command walkthrough is in the [technical guide](technical-guide.md). Brigade runs only on explicit invocation: [execution model](execution-model.md).
 
 ## Stack At A Glance
 

@@ -5,14 +5,15 @@
 <h1 align="center">Brigade</h1>
 
 <p align="center">
-  <strong>Your agents run loops. Brigade keeps the receipts.</strong>
+  <strong>One command to start. One command to keep it maintained.</strong>
 </p>
 
 <p align="center">
   <strong>Built for coding agents to run end to end</strong> (install, setup, verify, handoffs), not as a human day-to-day terminal app.
   When an agent says tests passed, you get a file with the real exit code, a <strong>code graph</strong> of what changed (<code>brigade code</code>), and an <strong>evidence log</strong> you can search later (<code>brigade evidence</code>).
   Optional: one MCP and tools catalog across agents, and shared notes with a review gate.
-  Local files. No daemon. No lock-in.
+  Brigade owns the memory-care primitives and runbooks. An external scheduler (cron, systemd, CI, your agent cron) invokes them. Local files. No daemon. No lock-in.
+  Boundary: <a href="docs/execution-model.md">execution model</a>.
 </p>
 
 <p align="center">
@@ -242,7 +243,7 @@ Beyond the daily loop, the same review-and-receipt pattern covers cross-model ru
 - **Native harness memory** is a per-tool silo. It does not cross harnesses, and it writes without review. Brigade gives every tool one shared format and one canonical owner, with a review gate in between.
 - **Already running Hermes, or any self-improving agent?** Keep it. Brigade is the verification layer on top: it promotes a skill only when a real signal confirms it, keeps every learned skill as portable markdown in your git, and runs one loop across your whole fleet.
 - **A plain CLAUDE.md / AGENTS.md** works great until it bloats past the context budget and goes stale. Brigade keeps bootstrap files slim, moves detail into indexed cards, and flags staleness instead of trusting last month's facts forever.
-- **A daemon or hosted service** would be simpler to demo and worse to trust. Brigade writes local files when you run a command, and that is all it does.
+- **A daemon or hosted service** would be simpler to demo and worse to trust. Brigade writes local files when you run a command, and that is all it does. See the [execution model](docs/execution-model.md).
 
 | | Across harnesses | MCP, tools, and memory in one source | Review gate + receipts | Local files, no daemon |
 |---|:---:|:---:|:---:|:---:|
@@ -253,7 +254,7 @@ Beyond the daily loop, the same review-and-receipt pattern covers cross-model ru
 
 ## What Brigade is not
 
-Brigade is not a hosted memory service, a daemon, or an automatic release bot. It does not run in the background or install schedulers (one scoped exception: `brigade tools runtime start` launches a local runtime process, only when you start it, until you stop it). It does not push to GitHub, publish packages, save every note automatically, or skip review for ambiguous, risky, or failed notes. `brigade work brief` and related status surfaces may report notification readiness or suggest installing the notifications station, but Brigade never sends a message unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`. That pause is the point: agent memory should be useful, not noisy.
+Brigade is not a hosted memory service, a daemon, or an automatic release bot. It does not run in the background. Scheduling stays with the operator (see the [execution model](docs/execution-model.md)). It does not push to GitHub, publish packages, save every note automatically, or skip review for ambiguous, risky, or failed notes. `brigade work brief` and related status surfaces may report notification readiness or suggest installing the notifications station, but Brigade never sends a message unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`. That pause is the point: agent memory should be useful, not noisy.
 
 And it is not the other projects that share the name. This Brigade is the AI-agent operator CLI from [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), installed with `pipx install brigade-cli`. It is not the CNCF/Microsoft Brigade for Kubernetes event scripting (archived 2022), the Spinabot Brigade agent crew, or the 2017 `brigade` Python package that became Nornir.
 
@@ -289,7 +290,8 @@ Nineteen harnesses get handoff inboxes and ingest coverage, from Codex, Claude C
 ## Docs
 
 - [First 10 minutes](docs/first-10-minutes.md) · [Overview](docs/overview.md) · [Technical guide](docs/technical-guide.md)
-- [MCP sync](docs/mcp-sync.md) · [Security and Content Guard](docs/security.md) · [Handoff promotion](docs/handoff-promotion.md)
+- [Execution model](docs/execution-model.md) · [Memory care](docs/memory-care.md) · [MCP sync](docs/mcp-sync.md)
+- [Security and Content Guard](docs/security.md) · [Handoff promotion](docs/handoff-promotion.md)
 - [Command inventory](docs/command-inventory.md) · [Station contract](docs/station-contract.md)
 - [Maintainers](MAINTAINERS.md) · [Governance](GOVERNANCE.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md)
 
