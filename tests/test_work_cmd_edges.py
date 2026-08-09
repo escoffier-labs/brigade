@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -473,3 +475,43 @@ def test_stable_ready_ordering(tmp_path, monkeypatch, capsys):
     assert work_cmd.ready(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert [item["id"] for item in payload["ready"]] == [first["id"], second["id"], third["id"]]
+
+
+def test_concurrent_edge_writes_do_not_lose_dependency_edges(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    clock = {"n": 0}
+
+    def _now():
+        clock["n"] += 1
+        return datetime(2026, 8, 9, 20, 0, clock["n"], tzinfo=timezone.utc)
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", _now)
+    hub = _add(tmp_path, "Hub")
+    targets = [_add(tmp_path, f"Target {index}") for index in range(12)]
+    worker_count = len(targets)
+    ready = threading.Barrier(worker_count)
+    errors: list[str] = []
+
+    def add_edge(target_task):
+        ready.wait()
+        rc = work_cmd.task_edge_add(
+            target=tmp_path,
+            edge_type="blocks",
+            source=hub["id"],
+            target_id=target_task["id"],
+        )
+        if rc != 0:
+            errors.append(f"{target_task['id']}: rc={rc}")
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        list(executor.map(add_edge, targets))
+
+    assert errors == []
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    edge_pairs = {
+        (edge["source"], edge["target"], edge["type"])
+        for edge in ledger.get("edges", [])
+        if isinstance(edge, dict)
+    }
+    expected = {(hub["id"], target["id"], "blocks") for target in targets}
+    assert expected <= edge_pairs

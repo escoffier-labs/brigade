@@ -12,8 +12,9 @@ Edge direction (pinned for CLI and JSON):
 - ``parent-child``: ``source`` is the parent, ``target`` is the child.
   Parents are not startable work. Children do not wait for the parent to
   complete, but open blockers on an ancestor propagate to descendants.
-  ``discovered-from`` is provenance only and never participates in readiness
-  or cycle detection.
+  Direct and transitive cycles on ``blocks`` and ``parent-child`` edges are
+  rejected at mutation time. ``discovered-from`` is provenance only and never
+  participates in readiness or cycle detection.
 """
 
 from __future__ import annotations

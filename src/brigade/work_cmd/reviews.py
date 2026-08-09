@@ -222,27 +222,28 @@ def _review_import_record(finding: dict[str, Any]) -> dict[str, Any]:
 
 
 def _review_stamp_completed_tasks(target: Path, run_id: str) -> list[str]:
-    ledger = ledger_mod._read_task_ledger(target)
-    stamped: list[str] = []
-    changed = False
-    for task in ledger.get("tasks", []):
-        if not isinstance(task, dict) or task.get("status") != "done":
-            continue
-        completion = task.setdefault("completion", {})
-        if not isinstance(completion, dict):
-            completion = {}
-            task["completion"] = completion
-        review_run_ids = completion.get("review_run_ids")
-        if not isinstance(review_run_ids, list):
-            review_run_ids = []
-            completion["review_run_ids"] = review_run_ids
-        if run_id not in review_run_ids:
-            review_run_ids.append(run_id)
-            stamped.append(str(task.get("id")))
-            changed = True
-    if changed:
-        ledger_mod._write_task_ledger(target, ledger)
-    return stamped
+    with ledger_mod._task_ledger_lock(target):
+        ledger = ledger_mod._read_task_ledger(target)
+        stamped: list[str] = []
+        changed = False
+        for task in ledger.get("tasks", []):
+            if not isinstance(task, dict) or task.get("status") != "done":
+                continue
+            completion = task.setdefault("completion", {})
+            if not isinstance(completion, dict):
+                completion = {}
+                task["completion"] = completion
+            review_run_ids = completion.get("review_run_ids")
+            if not isinstance(review_run_ids, list):
+                review_run_ids = []
+                completion["review_run_ids"] = review_run_ids
+            if run_id not in review_run_ids:
+                review_run_ids.append(run_id)
+                stamped.append(str(task.get("id")))
+                changed = True
+        if changed:
+            ledger_mod._write_task_ledger(target, ledger)
+        return stamped
 
 
 def _review_run_one(target: Path, reviewer: dict[str, Any]) -> dict[str, Any]:
@@ -788,44 +789,45 @@ def _resolve_review_run(target: Path, run_id: str) -> tuple[dict[str, Any] | Non
 
 
 def _review_stamp_task_closeouts(target: Path, closeout: dict[str, Any]) -> list[str]:
-    ledger = ledger_mod._read_task_ledger(target)
-    wanted_task_ids = {
-        str(item.get("task_id"))
-        for item in closeout.get("findings", [])
-        if isinstance(item, dict) and isinstance(item.get("task_id"), str)
-    }
-    wanted_task_ids.update(
-        str(item) for item in closeout.get("completed_task_ids_reviewed", []) if isinstance(item, str)
-    )
-    stamped: list[str] = []
-    changed = False
-    for task in ledger.get("tasks", []):
-        if not isinstance(task, dict) or task.get("status") != "done" or task.get("id") not in wanted_task_ids:
-            continue
-        metadata = task.setdefault("metadata", {})
-        if not isinstance(metadata, dict):
-            metadata = {}
-            task["metadata"] = metadata
-        closeouts = metadata.get("review_closeouts")
-        if not isinstance(closeouts, list):
-            closeouts = []
-            metadata["review_closeouts"] = closeouts
-        if any(isinstance(item, dict) and item.get("review_run_id") == closeout.get("run_id") for item in closeouts):
-            continue
-        closeouts.append(
-            {
-                "review_run_id": closeout.get("run_id"),
-                "closed_at": closeout.get("closed_at"),
-                "finding_count": closeout.get("finding_count"),
-                "unresolved_count": closeout.get("unresolved_count"),
-                "resolved": closeout.get("resolved"),
-            }
+    with ledger_mod._task_ledger_lock(target):
+        ledger = ledger_mod._read_task_ledger(target)
+        wanted_task_ids = {
+            str(item.get("task_id"))
+            for item in closeout.get("findings", [])
+            if isinstance(item, dict) and isinstance(item.get("task_id"), str)
+        }
+        wanted_task_ids.update(
+            str(item) for item in closeout.get("completed_task_ids_reviewed", []) if isinstance(item, str)
         )
-        stamped.append(str(task.get("id")))
-        changed = True
-    if changed:
-        ledger_mod._write_task_ledger(target, ledger)
-    return stamped
+        stamped: list[str] = []
+        changed = False
+        for task in ledger.get("tasks", []):
+            if not isinstance(task, dict) or task.get("status") != "done" or task.get("id") not in wanted_task_ids:
+                continue
+            metadata = task.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                task["metadata"] = metadata
+            closeouts = metadata.get("review_closeouts")
+            if not isinstance(closeouts, list):
+                closeouts = []
+                metadata["review_closeouts"] = closeouts
+            if any(isinstance(item, dict) and item.get("review_run_id") == closeout.get("run_id") for item in closeouts):
+                continue
+            closeouts.append(
+                {
+                    "review_run_id": closeout.get("run_id"),
+                    "closed_at": closeout.get("closed_at"),
+                    "finding_count": closeout.get("finding_count"),
+                    "unresolved_count": closeout.get("unresolved_count"),
+                    "resolved": closeout.get("resolved"),
+                }
+            )
+            stamped.append(str(task.get("id")))
+            changed = True
+        if changed:
+            ledger_mod._write_task_ledger(target, ledger)
+        return stamped
 
 
 def _review_stamp_latest_session(target: Path, closeout: dict[str, Any]) -> str | None:

@@ -28,8 +28,10 @@ def _acquire_task_ledger_lock(path: Path) -> runguard._LockOwnership:
         try:
             return runguard._acquire_lock(path)
         except runguard.RunLockError as exc:
-            if "another brigade run appears active" not in str(exc) or time.monotonic() >= deadline:
-                raise
+            if time.monotonic() >= deadline:
+                raise runguard.RunLockError(
+                    f"task ledger lock busy after waiting: {path}. {exc}"
+                ) from exc
             time.sleep(0.01)
 
 

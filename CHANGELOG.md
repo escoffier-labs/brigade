@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   edge add|remove|list`, `work task add --deps` / `--graph`, and close-time
   newly-unblocked / completable-parent reporting cover the mutation surface.
   Only `blocks` gates readiness (with parent-child blocker propagation);
-  `discovered-from` is provenance-only. Blocks cycles are rejected at edge-add
-  time with a machine-readable `dependency_cycle` reason.
+  `discovered-from` is provenance-only. Direct and transitive cycles on
+  readiness-affecting edges (`blocks` and `parent-child`) are rejected at
+  edge-add and graph-apply time with a machine-readable `dependency_cycle`
+  reason; `discovered-from` never participates in cycle detection.
 
 ### Fixed
 - `brigade run --wait` now joins a fair per-worktree wait queue instead of

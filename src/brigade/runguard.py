@@ -209,8 +209,8 @@ def _publish_lock(path: Path, *, run_dir: Path | None) -> _LockOwnership:
         (candidate / "owner.json").write_text(json.dumps(_lock_owner_payload(owner_token=owner_token, run_dir=run_dir)))
         try:
             candidate.rename(path)
-        except OSError:
-            if _lock_path_is_directory(path) is not None:
+        except OSError as exc:
+            if exc.errno in (errno.ENOTEMPTY, errno.EEXIST) or _lock_path_is_directory(path) is not None:
                 raise FileExistsError(path) from None
             raise
     finally:
