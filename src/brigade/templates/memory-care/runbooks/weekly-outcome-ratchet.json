@@ -1,0 +1,15 @@
+{
+  "id": "weekly-outcome-ratchet",
+  "description": "Weekly outcome rank and reconcile (dry-run by default). Run from the repo or workspace root: brigade runbook run --approved .brigade/memory-care/runbooks/weekly-outcome-ratchet.json",
+  "allowed_commands": ["brigade"],
+  "steps": [
+    {
+      "id": "rank",
+      "run": "brigade outcome rank --target ."
+    },
+    {
+      "id": "reconcile",
+      "run": "brigade outcome reconcile --target ."
+    }
+  ]
+}

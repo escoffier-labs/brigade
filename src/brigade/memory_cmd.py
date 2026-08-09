@@ -7,20 +7,28 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import mcp_server, toml_compat as tomllib, work_cmd
+from . import mcp_server, runbook_cmd, toml_compat as tomllib, work_cmd
 from .budgets import MEMORY_CARD_BUDGET_BYTES
 from .install import apply_gitignore
 from .selection import Selection
-from .localio import utc_now_iso_z as _utc_iso
+from .localio import write_json as _write_json, utc_now_iso_z as _utc_iso
+from .templates import template_root
 
 CONFIG_REL_PATH = ".brigade/memory-care.toml"
 DEFAULT_OUTPUT_PATH = ".brigade/memory-care/decay"
+MEMORY_CARE_RUNBOOKS_REL = ".brigade/memory-care/runbooks"
+MEMORY_CARE_RUNBOOK_NAMES = (
+    "daily-care-pass.json",
+    "ingest-sweep.json",
+    "weekly-outcome-ratchet.json",
+)
 # Pre-0.9.1 scans wrote into the user's card tree. Readers fall back to this
 # location when the default is in effect and no new-style output exists yet.
 LEGACY_OUTPUT_PATH = "memory/cards/decay"
@@ -220,7 +228,70 @@ def _config_or_default(target: Path) -> MemoryCareConfig:
     return load_config(target) or MemoryCareConfig()
 
 
-def init(*, target: Path, force: bool = False, update_gitignore: bool = True) -> int:
+def _memory_care_runbooks_dir(target: Path) -> Path:
+    return target / MEMORY_CARE_RUNBOOKS_REL
+
+
+def _write_memory_care_runbooks(target: Path) -> int:
+    """Copy pinned mechanical memory-care runbook templates into the target.
+
+    Templates ship without pins; pins are materialized from the resolved
+    ``brigade`` binary at write time so ``brigade runbook run --approved``
+    can enforce the binary hash without a separate pin step.
+
+    Writes into a sibling temp directory first so pin-resolution failures do
+    not leave a partial runbook tree behind.
+    """
+    template_dir = template_root() / "memory-care" / "runbooks"
+    dest_dir = _memory_care_runbooks_dir(target)
+    temp_dir = dest_dir.parent / f".{dest_dir.name}.init-tmp"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True)
+    try:
+        for name in MEMORY_CARE_RUNBOOK_NAMES:
+            src = template_dir / name
+            if not src.is_file():
+                print(f"error: memory-care runbook template missing: {src}", file=sys.stderr)
+                return 4
+            try:
+                payload = json.loads(src.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                print(f"error: invalid memory-care runbook template {src}: {exc}", file=sys.stderr)
+                return 2
+            if not isinstance(payload, dict):
+                print(f"error: memory-care runbook template must be a JSON object: {src}", file=sys.stderr)
+                return 2
+            # Validate shape through the same reader runbook execution uses, then
+            # materialize pins without echoing pin() stdout into care init output.
+            dest = temp_dir / name
+            _write_json(dest, payload)
+            validated, error = runbook_cmd._read_runbook(dest, require_pin_hashes=False)
+            if validated is None:
+                print(f"error: {error}", file=sys.stderr)
+                return 2
+            pins, pin_error = runbook_cmd._pin_payload_from_runbook(target, validated)
+            if pins is None:
+                print(f"error: {pin_error}", file=sys.stderr)
+                return 2
+            validated["pins"] = pins
+            _write_json(dest, validated)
+        if dest_dir.exists():
+            shutil.rmtree(dest_dir)
+        temp_dir.replace(dest_dir)
+        return 0
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+
+
+def init(
+    *,
+    target: Path,
+    force: bool = False,
+    update_gitignore: bool = True,
+    with_runbooks: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -229,12 +300,18 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True) ->
     if path.exists() and not force:
         print(f"error: memory-care config already exists: {path}", file=sys.stderr)
         return 1
+    if with_runbooks:
+        rc = _write_memory_care_runbooks(target)
+        if rc != 0:
+            return rc
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_format_config(), encoding="utf-8")
     if update_gitignore:
         apply_gitignore(target, Selection(depth="repo", harnesses=[], owner="this-repo", includes=[]))
     print(f"memory_care_config: {path}")
     print(f"output_path: {DEFAULT_OUTPUT_PATH}")
+    if with_runbooks:
+        print(f"memory_care_runbooks: {_memory_care_runbooks_dir(target)}")
     print("next_command: brigade memory care scan")
     return 0
 

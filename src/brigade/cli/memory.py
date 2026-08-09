@@ -17,6 +17,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory_care_init = memory_care_sub.add_parser("init", help="Write local memory-care config.")
     p_memory_care_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_memory_care_init.add_argument("--force", action="store_true", help="Overwrite an existing memory-care config.")
+    p_memory_care_init.add_argument(
+        "--with-runbooks",
+        action="store_true",
+        help="Write pinned memory-care runbook templates under .brigade/memory-care/runbooks/.",
+    )
     p_memory_care_init.add_argument("--no-gitignore", action="store_true", help="Do not update the target .gitignore.")
     p_memory_care_scan = memory_care_sub.add_parser("scan", help="Scan local memory cards without editing them.")
     p_memory_care_scan.add_argument(
@@ -132,6 +137,7 @@ def dispatch(args) -> int:
                 target=args.target,
                 force=args.force,
                 update_gitignore=not args.no_gitignore,
+                with_runbooks=args.with_runbooks,
             )
         if args.memory_care_command == "scan":
             return memory_cmd.scan(target=args.target, json_output=args.json)
