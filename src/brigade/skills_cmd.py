@@ -259,7 +259,9 @@ def _copy_skill_for_harness(
     shutil.copytree(source_dir, dest)
     source_skill = _skill_md_path(source_dir)
     if source_skill.is_file():
-        rendered = _render_skill_text_for_harness(source_skill.read_text(encoding="utf-8", errors="replace"), metadata, skill_id, harness)
+        rendered = _render_skill_text_for_harness(
+            source_skill.read_text(encoding="utf-8", errors="replace"), metadata, skill_id, harness
+        )
         _skill_md_path(dest).write_text(rendered)
 
 
@@ -1023,7 +1025,9 @@ def install(
         dest.parent.mkdir(parents=True, exist_ok=True)
         _copy_skill_for_harness(source_dir, dest, metadata, skill_id, install_target)
         installed_fingerprint = _fingerprint(dest)
-        installed_skill_fingerprint = _text_fingerprint(_skill_md_path(dest).read_text(encoding="utf-8", errors="replace"))
+        installed_skill_fingerprint = _text_fingerprint(
+            _skill_md_path(dest).read_text(encoding="utf-8", errors="replace")
+        )
         installed_metadata_fingerprint = _file_fingerprint(_metadata_path(dest))
         installed_at = _now()
         receipt = {
