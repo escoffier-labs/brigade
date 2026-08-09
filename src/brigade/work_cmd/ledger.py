@@ -7,34 +7,62 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from uuid import uuid4
-from . import constants, helpers
+from . import constants, edges as edges_mod, helpers
+from .. import runguard
+
+
+def _task_ledger_lock_path(target: Path) -> Path:
+    path = helpers._tasks_path(target)
+    return path.with_name(f"{path.name}.lock")
+
+
+def _acquire_task_ledger_lock(path: Path) -> runguard._LockOwnership:
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            return runguard._acquire_lock(path)
+        except runguard.RunLockError as exc:
+            if "another brigade run appears active" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
+@contextmanager
+def _task_ledger_lock(target: Path) -> Iterator[None]:
+    path = _task_ledger_lock_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ownership = _acquire_task_ledger_lock(path)
+    try:
+        yield
+    finally:
+        runguard._release_lock(path, ownership)
 
 
 def _read_task_ledger(target: Path) -> dict[str, Any]:
     path = helpers._tasks_path(target)
     if not path.exists():
-        return {"version": 1, "tasks": []}
+        return {"version": edges_mod.TASK_LEDGER_VERSION, "tasks": [], "edges": []}
     try:
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
-        return {"version": 1, "tasks": []}
+        return {"version": edges_mod.TASK_LEDGER_VERSION, "tasks": [], "edges": []}
     if not isinstance(payload, dict):
-        return {"version": 1, "tasks": []}
+        return {"version": edges_mod.TASK_LEDGER_VERSION, "tasks": [], "edges": []}
     tasks = payload.get("tasks")
     if not isinstance(tasks, list):
         payload["tasks"] = []
-    payload["version"] = 1
+    edges_mod.ensure_ledger_edges(payload)
     return payload
 
 
 def _write_task_ledger(target: Path, payload: dict[str, Any]) -> None:
-    payload["version"] = 1
-    if not isinstance(payload.get("tasks"), list):
-        payload["tasks"] = []
+    edges_mod.ensure_ledger_edges(payload)
     helpers._write_json(helpers._tasks_path(target), payload)
 
 
@@ -878,6 +906,27 @@ def _pending_tasks(target: Path) -> list[dict[str, Any]]:
     return tasks
 
 
+def _ready_tasks(target: Path) -> list[dict[str, Any]]:
+    """Pending tasks with no open readiness blockers (wraps ``_pending_tasks`` semantics)."""
+    ledger = _read_task_ledger(target)
+    resolution = edges_mod.resolve_readiness(ledger)
+    ready_ids = {item["id"] for item in resolution.ready}
+    tasks = [task for task in _pending_tasks(target) if task.get("id") in ready_ids]
+    tasks.sort(key=_task_sort_key)
+    return tasks
+
+
+def _readiness_payload(target: Path, *, explain: bool = False) -> dict[str, Any]:
+    ledger = _read_task_ledger(target)
+    resolution = edges_mod.resolve_readiness(ledger)
+    payload = resolution.as_dict(explain=explain)
+    payload["target"] = str(target.expanduser().resolve())
+    payload["tasks_path"] = str(helpers._tasks_path(target))
+    payload["edges"] = edges_mod.ensure_ledger_edges(ledger)
+    payload["pending_count"] = len(_pending_tasks(target))
+    return payload
+
+
 def _pending_imports(target: Path) -> list[dict[str, Any]]:
     imports = [
         item
@@ -996,6 +1045,7 @@ def _mark_import_promoted(target: Path, item: dict[str, Any]) -> tuple[dict[str,
         else None
     )
     acceptance = item.get("acceptance") if isinstance(item.get("acceptance"), list) else None
+    proposed = edges_mod.proposed_edges_from_metadata(item_metadata, new_task_id="self")
     task, created = _add_task(
         target,
         text,
@@ -1005,6 +1055,7 @@ def _mark_import_promoted(target: Path, item: dict[str, Any]) -> tuple[dict[str,
         priority=str(item.get("priority") or "normal"),
         acceptance=_combined_acceptance(template, acceptance),
         template=template,
+        proposed_edges=proposed,
     )
     now = helpers._now().isoformat()
     item["status"] = "promoted"
@@ -1383,24 +1434,110 @@ def _add_task(
     acceptance: list[str] | None = None,
     template: str | None = None,
     dedupe: bool = True,
+    proposed_edges: list[dict[str, str]] | None = None,
 ) -> tuple[dict[str, Any], bool]:
-    ledger = _read_task_ledger(target)
-    if dedupe:
-        existing = _find_pending_task_by_text(target, text)
-        if existing is not None:
-            return existing, False
-    task = _make_task(
-        text,
-        source=source,
-        metadata=metadata,
-        task_type=task_type,
-        priority=priority,
-        acceptance=acceptance,
-        template=template,
-    )
-    ledger["tasks"].append(task)
-    _write_task_ledger(target, ledger)
-    return task, True
+    with _task_ledger_lock(target):
+        ledger = _read_task_ledger(target)
+        if dedupe:
+            wanted = _task_text_key(text)
+            if wanted:
+                for existing in ledger["tasks"]:
+                    if (
+                        isinstance(existing, dict)
+                        and existing.get("status", "pending") == "pending"
+                        and _task_text_key(str(existing.get("text") or "")) == wanted
+                    ):
+                        return existing, False
+        task = _make_task(
+            text,
+            source=source,
+            metadata=metadata,
+            task_type=task_type,
+            priority=priority,
+            acceptance=acceptance,
+            template=template,
+        )
+        ledger["tasks"].append(task)
+        created_edges: list[dict[str, Any]] = []
+        for proposal in proposed_edges or []:
+            source_id = proposal.get("source") or ""
+            target_id = proposal.get("target") or ""
+            if source_id in {"", "self"}:
+                source_id = str(task["id"])
+            if target_id in {"", "self"}:
+                target_id = str(task["id"])
+            edge, _created = edges_mod.add_edge_to_ledger(
+                ledger,
+                source=source_id,
+                target=target_id,
+                edge_type=str(proposal.get("type") or ""),
+            )
+            created_edges.append(edge)
+        if created_edges:
+            task["edges"] = created_edges
+        _write_task_ledger(target, ledger)
+        return task, True
+
+
+def _apply_graph_plan(
+    target: Path,
+    plan: dict[str, Any],
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    nodes, plan_edges, warnings = edges_mod.validate_graph_plan(plan)
+    if dry_run:
+        return {
+            "dry_run": True,
+            "key_map": {node["key"]: None for node in nodes},
+            "nodes": nodes,
+            "edges": plan_edges,
+            "warnings": warnings,
+        }
+    with _task_ledger_lock(target):
+        ledger = _read_task_ledger(target)
+        # Revalidate under the store lock against the current ledger snapshot.
+        nodes, plan_edges, warnings = edges_mod.validate_graph_plan(plan)
+        key_map: dict[str, str] = {}
+        created_tasks: list[dict[str, Any]] = []
+        for node in nodes:
+            task = _make_task(
+                node["text"],
+                source=str(node.get("source") or "graph"),
+                metadata=node.get("metadata") if isinstance(node.get("metadata"), dict) else None,
+                task_type=str(node.get("type") or "task"),
+                priority=str(node.get("priority") or "normal"),
+                acceptance=node.get("acceptance") if isinstance(node.get("acceptance"), list) else None,
+                template=node.get("template") if isinstance(node.get("template"), str) else None,
+            )
+            ledger["tasks"].append(task)
+            key_map[node["key"]] = str(task["id"])
+            created_tasks.append(task)
+        created_edges: list[dict[str, Any]] = []
+        for plan_edge in plan_edges:
+            edge, _ = edges_mod.add_edge_to_ledger(
+                ledger,
+                source=key_map[plan_edge["source"]],
+                target=key_map[plan_edge["target"]],
+                edge_type=plan_edge["type"],
+            )
+            created_edges.append(edge)
+        # Final readiness cycle check after id allocation.
+        cycles = edges_mod.find_readiness_cycles(edges_mod.ensure_ledger_edges(ledger))
+        if cycles:
+            raise edges_mod.EdgeError(
+                "dependency cycle rejected after graph materialization",
+                reason=edges_mod.REASON_DEPENDENCY_CYCLE,
+                details={"cycles": cycles},
+            )
+        _write_task_ledger(target, ledger)
+        return {
+            "dry_run": False,
+            "key_map": key_map,
+            "tasks": created_tasks,
+            "edges": created_edges,
+            "warnings": warnings,
+        }
 
 
 def _plan_rel_path(target: Path, path: Path) -> str:

@@ -513,6 +513,8 @@ def _inbox_payload(target: Path) -> dict[str, Any]:
             stale.append(summary)
     candidate = ledger_mod._scanner_candidate(pending)
     handoff_candidate = ledger_mod._handoff_candidate(pending)
+    readiness = ledger_mod._readiness_payload(target, explain=False)
+    ready_tasks = ledger_mod._ready_tasks(target)
     return {
         "target": str(target),
         "imports_path": str(helpers._imports_path(target)),
@@ -524,9 +526,12 @@ def _inbox_payload(target: Path) -> dict[str, Any]:
             "acceptance": acceptance,
             "handoff_ready": handoff_ready,
             "stale": len(stale),
+            "ready_tasks": len(ready_tasks),
         },
         "candidate": ledger_mod._import_summary(candidate, now=now) if candidate else None,
         "handoff_candidate": ledger_mod._import_summary(handoff_candidate, now=now) if handoff_candidate else None,
+        "ready_tasks": [ledger_mod._task_summary(task) for task in ready_tasks],
+        "ready": readiness,
         "imports": summaries,
     }
 

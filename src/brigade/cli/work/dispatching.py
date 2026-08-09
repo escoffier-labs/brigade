@@ -587,6 +587,8 @@ def dispatch(args) -> int:
         return 2
     if args.work_command == "next":
         return work_cmd.next(target=args.target, json_output=args.json)
+    if args.work_command == "ready":
+        return work_cmd.ready(target=args.target, explain=args.explain, json_output=args.json)
     if args.work_command == "tasks":
         return work_cmd.tasks(target=args.target, all_tasks=args.all, json_output=args.json)
     if args.work_command == "task":
@@ -601,9 +603,13 @@ def dispatch(args) -> int:
                 priority=args.priority,
                 acceptance=args.acceptance,
                 template=args.template,
+                deps=args.deps,
+                graph=args.graph,
+                dry_run=args.dry_run,
+                json_output=args.json,
             )
         if args.task_command == "show":
-            return work_cmd.task_show(target=args.target, task_id=args.task_id)
+            return work_cmd.task_show(target=args.target, task_id=args.task_id, json_output=args.json)
         if args.task_command == "plan":
             return work_cmd.task_plan(
                 target=args.target,
@@ -621,7 +627,29 @@ def dispatch(args) -> int:
                 from_research=args.from_research,
             )
         if args.task_command == "done":
-            return work_cmd.task_done(target=args.target, task_id=args.task_id)
+            return work_cmd.task_done(target=args.target, task_id=args.task_id, force=args.force, json_output=args.json)
+        if args.task_command == "edge":
+            if args.edge_command == "add":
+                return work_cmd.task_edge_add(
+                    target=args.target,
+                    edge_type=args.edge_type,
+                    source=args.source,
+                    target_id=args.target_id,
+                    json_output=args.json,
+                )
+            if args.edge_command == "remove":
+                return work_cmd.task_edge_remove(
+                    target=args.target,
+                    edge_id=args.edge_id,
+                    source=args.source,
+                    target_id=args.target_id,
+                    edge_type=args.edge_type,
+                    json_output=args.json,
+                )
+            if args.edge_command == "list":
+                return work_cmd.task_edge_list(target=args.target, task_id=args.task_id, json_output=args.json)
+            args._brigade_parser.error(f"unknown task edge command: {args.edge_command}")
+            return 2
         args._brigade_parser.error(f"unknown task command: {args.task_command}")
         return 2
     if args.work_command == "import":
