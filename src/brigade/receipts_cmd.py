@@ -53,7 +53,7 @@ def keygen(*, target: Path, force: bool = False) -> int:
         path, key_id = receipt_signing.generate_key(target, force=force)
     except FileExistsError:
         print(f"error: receipt signing key already exists: {receipt_signing.key_path(target)}", file=sys.stderr)
-        print("hint: pass --force to overwrite it", file=sys.stderr)
+        print("hint: leaving the existing key unchanged", file=sys.stderr)
         return 1
     print(f"receipt signing key: {path}")
     print(f"key_id: {key_id}")

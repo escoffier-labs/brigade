@@ -1411,7 +1411,11 @@ def _check_publish_gate(target: Path) -> List[CheckResult]:
         results.append((OK, "publish: hooks/pre-push", str(hook)))
         if not os.access(hook, os.X_OK):
             results.append(
-                (WARN, "publish: hooks/pre-push", "exists but not executable; run `chmod +x hooks/pre-push`")
+                (
+                    WARN,
+                    "publish: hooks/pre-push",
+                    "exists but is not executable for this process; mark hooks/pre-push executable for your Git hook host",
+                )
             )
     else:
         results.append((WARN, "publish: hooks/pre-push", f"missing at {hook}"))

@@ -111,6 +111,41 @@ The Hermes adapter is currently marked experimental. To graduate it (or any futu
 
 Open a PR with all three and we'll land it.
 
+## Agent-facing error and refusal copy
+
+Most Brigade invocations are made by agents. Agents pattern-match remediation
+commands out of error strings and automate them. Treat refusal text as a public
+API surface.
+
+When writing or changing a user-facing error, refusal, blocker, hint, or
+`suggested_next_command`:
+
+1. **State what happened**, then **state what is true now** (left unchanged,
+   gated, corrupt, missing, …).
+2. **Name a next step only if automating that step unattended is acceptable.**
+   Classify the remediation before you inline it:
+   - **Safe-to-automate** - copy-pasteable command that is correct on every
+     supported platform and does not overwrite, bypass a gate, or mutate shared
+     operator state. Name it.
+   - **Judgment-required** - describe the situation and point at `doctor`,
+     `--help`, or docs. Do **not** inline the mutating command.
+   - **Destructive or gate-bypassing** - never name `--force`,
+     `--allow-*` overrides, `--operator-confirm`, `--no-verify`, bulk release
+     overrides, or similar flags as the remediation. Operators already know
+     those flags from `--help`; agents must not learn them from refusals.
+3. **Structured before textual.** When a caller might branch on the failure,
+   put machine-readable fields on the JSON payload (`reason`, ids, holders,
+   expected/observed). Keep the text form from becoming a second parser
+   surface (no stable ``by <name>`` suffixes when a typed field exists).
+4. **Stay platform-portable.** Do not suggest `chmod`, shell-only paths, or
+     other host-specific recipes unless the message is already gated to that
+     platform (see verify's high-risk command copy). Prefer describing the
+     required end state ("mark the hook executable for your Git hook host").
+
+The audit table for the #739 sweep lives at
+[`docs/audit/2026-08-09-error-refusal-copy.md`](docs/audit/2026-08-09-error-refusal-copy.md).
+High-traffic contracts are pinned in `tests/test_error_refusal_copy.py`.
+
 ## Filing issues
 
 Please use the templates under `.github/ISSUE_TEMPLATE/` - they exist to save you from re-typing the version and install shape every time.

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Error and refusal copy is treated as an agent-facing API (#739): destructive
+  and gate-bypassing flags (`--force`, `--allow-*`, `--operator-confirm`,
+  `--allow-dirty`) are no longer named as remediations; wrong or platform-only
+  advice (init `--force` for missing templates, redundant sweep `--force`,
+  `chmod +x` hook guidance) is corrected. Convention lives in CONTRIBUTING;
+  audit table in `docs/audit/2026-08-09-error-refusal-copy.md`; contracts in
+  `tests/test_error_refusal_copy.py`.
+
 ### Added
 - Work verify plan ranks candidate verification commands from GraphTrail
   affected-test impact (#486): `brigade work verify plan` attaches

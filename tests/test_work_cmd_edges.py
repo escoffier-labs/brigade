@@ -382,6 +382,8 @@ def test_close_parent_refuses_open_children_unless_forced(tmp_path, monkeypatch,
     assert work_cmd.task_done(target=tmp_path, task_id=parent["id"], json_output=True) == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["reason"] == edges_mod.REASON_OPEN_CHILDREN
+    assert payload["error"] == "parent has open children"
+    assert "--force" not in payload["error"]
     assert work_cmd.task_done(target=tmp_path, task_id=parent["id"], force=True, json_output=True) == 0
     forced = json.loads(capsys.readouterr().out)
     assert forced["status"] == "done"

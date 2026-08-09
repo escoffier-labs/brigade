@@ -898,7 +898,7 @@ def propose_skill(
     try:
         skill_source = _write_skill_candidate_source(target, candidate, force=force)
     except FileExistsError as exc:
-        print(f"error: generated skill source already exists: {exc.args[0]} (use --force to refresh)", file=sys.stderr)
+        print(f"error: generated skill source already exists: {exc.args[0]}; leaving it unchanged", file=sys.stderr)
         return 2
     from . import skills_cmd
 

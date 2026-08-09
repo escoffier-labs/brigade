@@ -370,7 +370,7 @@ def export_handoff(
             "destination": str(destination),
             "path": str(out_path),
             "inbox": inbox_label,
-            "blockers": ["export path already exists with different content; pass --force to replace"],
+            "blockers": ["export path already exists with different content; leaving it unchanged"],
         }
     out_path.write_text(export_text, encoding="utf-8")
 
