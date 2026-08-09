@@ -49,6 +49,17 @@ KNOWN_SECTIONS = {
 }
 
 
+def has_salvageable_structure(sections: Dict[str, str]) -> bool:
+    """Return whether parsed Markdown has enough structure for manual recovery.
+
+    Ingest preserves notes with multiple populated sections in the review inbox,
+    even when their headings are not Brigade headings.  Keep this deliberately
+    conservative so a single accidental heading is not treated like a structured
+    handoff.
+    """
+    return sum(bool(body.strip()) for body in sections.values()) >= 2
+
+
 @dataclass
 class IngestStats:
     processed: int = 0

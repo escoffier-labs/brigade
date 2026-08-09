@@ -183,6 +183,7 @@ class HandoffLintResult:
     warnings: tuple[str, ...]
     hints: tuple[str, ...] = ()
     readability: tuple[ReadabilityFinding, ...] = ()
+    salvageable: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -192,6 +193,7 @@ class HandoffLintResult:
             "errors": list(self.errors),
             "warnings": list(self.warnings),
             "hints": list(self.hints),
+            "salvageable": self.salvageable,
             "readability": [finding.as_dict() for finding in self.readability],
         }
 

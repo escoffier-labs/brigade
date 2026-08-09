@@ -2037,6 +2037,29 @@ def test_handoff_lint_does_not_suggest_migrate_for_unextractable_note(tmp_path, 
     assert "handoff migrate" not in capsys.readouterr().out
 
 
+def test_handoff_lint_distinguishes_structured_homegrown_note_from_garbage(tmp_path):
+    structured = tmp_path / "structured.md"
+    structured.write_text(
+        "# Project note\n\n"
+        "## What happened\n\nThe cache was rebuilt after stale results appeared.\n\n"
+        "## Why it matters\n\nFuture runs now use current inputs.\n\n"
+        "## Decisions\n\nKeep the validation step.\n\n"
+        "## Next steps\n\nDocument the recovery command.\n"
+    )
+    garbage = tmp_path / "garbage.md"
+    garbage.write_text("random unstructured note, nothing usable\n")
+
+    structured_result = handoff_cmd.lint_file(structured)
+    garbage_result = handoff_cmd.lint_file(garbage)
+
+    assert not structured_result.valid
+    assert structured_result.salvageable
+    assert any("structured note detected" in hint for hint in structured_result.hints)
+    assert not garbage_result.valid
+    assert not garbage_result.salvageable
+    assert not garbage_result.hints
+
+
 def test_handoff_migrate_dry_run_plans_homegrown_note(tmp_path, capsys):
     inbox = tmp_path / ".claude" / "memory-handoffs"
     note = _homegrown_note(inbox)
