@@ -592,6 +592,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         missing_evidence = config.require_evidence and not has_evidence
         row["confidence"] = confidence
         row["has_evidence"] = has_evidence
+        row["evidence_pointers"] = evidence_refs
         row["evidence_ref_count"] = len(evidence_refs)
         row["missing_evidence_ref_count"] = len(missing_evidence_refs)
         card_rows.append(row)
@@ -751,6 +752,71 @@ def _write_scan_outputs(target: Path, config: MemoryCareConfig, payload: dict[st
 
 def _load_scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any] | None:
     return _load_json_file(_scan_path(target, config))
+
+
+def _archive_candidates_from_scan(scan_payload: dict[str, Any] | None, config: MemoryCareConfig) -> dict[str, Any]:
+    """Derive a read-only archive-candidate report from a saved scan payload.
+
+    Never walks the card tree. Cards are candidates only when last_reviewed is
+    parseable and age_days > 2 * stale_after_days (strict). Missing, invalid, or
+    future reviewed dates are unassessable and never inferred from mtime/git.
+    """
+    ttl_days = int(config.stale_after_days)
+    candidate_after_days = ttl_days * 2
+    scan_date_raw = scan_payload.get("scan_date") if isinstance(scan_payload, dict) else None
+    scan_date = _parse_date(scan_date_raw) if scan_date_raw else None
+    if scan_date is None:
+        scan_date = _today()
+    cards_value = scan_payload.get("cards") if isinstance(scan_payload, dict) else None
+    cards = cards_value if isinstance(cards_value, list) else []
+    candidates: list[dict[str, Any]] = []
+    unassessable_count = 0
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        reviewed = _parse_date(card.get("last_reviewed"))
+        if reviewed is None:
+            unassessable_count += 1
+            continue
+        age_days = (scan_date - reviewed).days
+        if age_days < 0:
+            unassessable_count += 1
+            continue
+        if age_days <= candidate_after_days:
+            continue
+        evidence_value = card.get("evidence_pointers")
+        if isinstance(evidence_value, list):
+            evidence_pointers = [str(item).strip() for item in evidence_value if str(item).strip()]
+        else:
+            evidence_pointers = []
+        fresh_until = card.get("fresh_until")
+        candidates.append(
+            {
+                "card_id": str(card.get("card_id") or ""),
+                "file": str(card.get("file") or ""),
+                "age_days": age_days,
+                "last_reviewed": reviewed.isoformat(),
+                "fresh_until": fresh_until if isinstance(fresh_until, str) or fresh_until is None else str(fresh_until),
+                "evidence_pointers": evidence_pointers,
+                "reason": "review_age_exceeds_2x_ttl",
+                "approval_required": True,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "read_only": True,
+        "approval_required": True,
+        "would_archive": False,
+        "scan_date": scan_date.isoformat(),
+        "threshold": {
+            "ttl_days": ttl_days,
+            "candidate_after_days": candidate_after_days,
+            "comparison": "age_days > candidate_after_days",
+        },
+        "candidate_count": len(candidates),
+        "unassessable_count": unassessable_count,
+        "candidates": candidates,
+    }
 
 
 def _autofix_plan_item(issue: dict[str, Any], *, target: Path, scan_date: str) -> dict[str, Any]:
@@ -1015,6 +1081,7 @@ def health(target: Path) -> dict[str, Any]:
     )
     autofix_items_value = autofix_plan.get("items")
     autofix_items = autofix_items_value if isinstance(autofix_items_value, list) else []
+    archive_candidates = _archive_candidates_from_scan(scan_payload if isinstance(scan_payload, dict) else None, config)
     return {
         "target": str(target),
         "config_path": str(config_path(target)),
@@ -1032,6 +1099,7 @@ def health(target: Path) -> dict[str, Any]:
             "suggested_next_command": "brigade memory care plan-fixes" if autofix_plan.get("plan_count") else None,
             "would_write": False,
         },
+        "archive_candidates": archive_candidates,
         "latest_closeout": closeout,
     }
 
@@ -1089,6 +1157,31 @@ def status(*, target: Path, json_output: bool = False) -> int:
     top = payload.get("top_issue") if isinstance(payload.get("top_issue"), dict) else None
     if top:
         print(f"top_issue: {top.get('issue_type') or top.get('name')} {top.get('file') or top.get('detail')}")
+    archive_value = payload.get("archive_candidates")
+    archive = archive_value if isinstance(archive_value, dict) else {}
+    threshold_value = archive.get("threshold")
+    threshold = threshold_value if isinstance(threshold_value, dict) else {}
+    print(
+        "archive_candidates: "
+        f"count={archive.get('candidate_count', 0)} "
+        f"unassessable={archive.get('unassessable_count', 0)} "
+        f"threshold=age_days>{threshold.get('candidate_after_days', 0)} "
+        f"approval_required={archive.get('approval_required', True)} "
+        f"would_archive={archive.get('would_archive', False)}"
+    )
+    candidates_value = archive.get("candidates")
+    candidates = candidates_value if isinstance(candidates_value, list) else []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        pointers_value = candidate.get("evidence_pointers")
+        pointers = pointers_value if isinstance(pointers_value, list) else []
+        print(
+            f"  archive_candidate: {candidate.get('file')} "
+            f"age_days={candidate.get('age_days')} "
+            f"last_reviewed={candidate.get('last_reviewed')} "
+            f"evidence={','.join(str(item) for item in pointers) if pointers else '-'}"
+        )
     return 0 if payload["valid"] else 1
 
 

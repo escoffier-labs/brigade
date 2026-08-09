@@ -1164,7 +1164,7 @@ They also include `.brigade/chat-memory-sweep.example.json` for nightly chat/ses
 Missing memory-care state is advisory for fresh installs.
 Bootstrap truncation is a hard failure to prevent, not a cosmetic warning.
 
-Memory care is local and explicit. Brigade writes scan reports, no-write fix plans, and work imports, but it does not edit memory cards, run a scheduler, mutate canonical memory, or use LLM inference for contradictions.
+Memory care is local and explicit. Brigade writes scan reports, no-write fix plans, and work imports, but it does not edit memory cards, run a scheduler, mutate canonical memory, or use LLM inference for contradictions. `brigade memory care status` adds a read-only archive-candidates report from the persisted scan: cards past `2 * stale_after_days` with age, last-reviewed, and evidence pointers, approval-gated and never archived by the command.
 
 Inspect local work sessions with:
 
