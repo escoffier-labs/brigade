@@ -198,11 +198,9 @@ def validate_manifest(payload: Any) -> dict[str, Any]:
 
 def validate_archive(archive_dir: Path) -> dict[str, Any]:
     """Validate an on-disk archive (manifest + payload digests + export privacy)."""
-    archive_dir = archive_dir.expanduser().resolve()
+    archive_dir = _normalize_user_path(archive_dir)
     if not archive_dir.is_dir():
         raise WorkRunArchiveError(f"archive directory not found: {archive_dir}", category="io")
-    if archive_dir.is_symlink():
-        raise WorkRunArchiveError("archive root must not be a symlink", category="io")
 
     manifest_path = archive_dir / WORK_RUN_MANIFEST_NAME
     if not manifest_path.is_file() or manifest_path.is_symlink():
@@ -310,16 +308,18 @@ def export_run(
     The source run directory is left unchanged. Private recovery-checkpoint
     bodies are stripped on the export copy only (#636).
     """
-    run_dir = run_dir.expanduser().resolve()
-    destination = destination.expanduser().resolve()
-    if not run_dir.is_dir() or run_dir.is_symlink():
+    run_dir = _normalize_user_path(run_dir)
+    dest_input = destination.expanduser()
+    _reject_symlink_final_component(dest_input, label="destination")
+    destination = dest_input.resolve()
+    if not run_dir.is_dir():
         raise WorkRunArchiveError(f"run directory not found: {run_dir}", category="io")
     if not (run_dir / "run.json").is_file():
         raise WorkRunArchiveError(f"run directory has no run.json: {run_dir}", category="schema")
     if destination.exists():
         if not force:
             raise WorkRunArchiveError(f"destination already exists: {destination}", category="io")
-        if destination.is_symlink() or not destination.is_dir():
+        if not destination.is_dir():
             raise WorkRunArchiveError(f"destination is not a replaceable directory: {destination}", category="io")
         shutil.rmtree(destination)
 
@@ -390,15 +390,16 @@ def import_archive(
     ``brigade runs show`` / ``audit`` after import, but local resume/recover
     that needs private checkpoint bodies is out of scope for this envelope.
     """
-    archive_dir = archive_dir.expanduser().resolve()
+    archive_dir = _normalize_user_path(archive_dir)
     runs_dir = runs_dir.expanduser().resolve()
     manifest = validate_archive(archive_dir)
     run_id = str(manifest["run_id"])
     dest = runs_dir / run_id
+    _reject_symlink_final_component(dest, label="destination run")
     if dest.exists():
         if not force:
             raise WorkRunArchiveError(f"destination run already exists: {dest}", category="io")
-        if dest.is_symlink() or not dest.is_dir():
+        if not dest.is_dir():
             raise WorkRunArchiveError(f"destination is not a replaceable directory: {dest}", category="io")
         shutil.rmtree(dest)
 
@@ -420,6 +421,7 @@ def import_archive(
             raw = path.read_bytes()
             if hashlib.sha256(raw).hexdigest() != entry["sha256"]:
                 raise WorkRunArchiveError(f"import copy sha256 mismatch for {rel}", category="integrity")
+        _reject_symlink_final_component(dest, label="destination run")
         os.rename(staging, dest)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
@@ -702,6 +704,25 @@ def _require_string(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value:
         raise WorkRunArchiveError(f"{name} must be a non-empty string")
     return value
+
+
+def _reject_symlink_final_component(path: Path, *, label: str = "path") -> None:
+    """Reject a symlinked final path component before resolve() erases it."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise WorkRunArchiveError(f"cannot stat {label}: {path}", category="io") from exc
+    if stat.S_ISLNK(st.st_mode):
+        raise WorkRunArchiveError(f"refusing symlinked {label}: {path}", category="io")
+
+
+def _normalize_user_path(path: Path) -> Path:
+    """Expand ~, refuse a symlinked final component, then resolve parents."""
+    expanded = path.expanduser()
+    _reject_symlink_final_component(expanded)
+    return expanded.resolve()
 
 
 def _require_relative_payload_path(value: Any, name: str) -> str:

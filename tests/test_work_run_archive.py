@@ -246,3 +246,56 @@ def test_export_refuses_symlink_in_run_tree(tmp_path: Path):
     (run_dir / "link.txt").symlink_to(run_dir / "final.txt")
     with pytest.raises(WorkRunArchiveError, match="symlink"):
         work_run_archive.export_run(run_dir, tmp_path / "archive")
+
+
+def test_validate_refuses_archive_root_symlink(tmp_path: Path):
+    real_archive = tmp_path / "real-archive"
+    work_run_archive.export_run(_seed_run(tmp_path / "runs" / RUN_ID), real_archive)
+    archive_link = tmp_path / "archive-link"
+    archive_link.symlink_to(real_archive)
+    with pytest.raises(WorkRunArchiveError, match="symlink"):
+        work_run_archive.validate_archive(archive_link)
+
+
+def test_export_refuses_run_root_symlink(tmp_path: Path):
+    real_run = _seed_run(tmp_path / "runs" / RUN_ID)
+    run_link = tmp_path / "run-link"
+    run_link.symlink_to(real_run)
+    with pytest.raises(WorkRunArchiveError, match="symlink"):
+        work_run_archive.export_run(run_link, tmp_path / "archive")
+
+
+def test_force_export_refuses_destination_symlink_and_preserves_target(tmp_path: Path):
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
+    victim = tmp_path / "victim-dir"
+    victim.mkdir()
+    marker = victim / "keep-me.txt"
+    marker.write_text("precious\n", encoding="utf-8")
+
+    dest_link = tmp_path / "dest-link"
+    dest_link.symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(WorkRunArchiveError, match="symlink"):
+        work_run_archive.export_run(run_dir, dest_link, force=True)
+
+    assert marker.read_text(encoding="utf-8") == "precious\n"
+    assert victim.is_dir()
+
+
+def test_import_refuses_archive_root_symlink(tmp_path: Path):
+    real_archive = tmp_path / "real-archive"
+    work_run_archive.export_run(_seed_run(tmp_path / "runs" / RUN_ID), real_archive)
+    archive_link = tmp_path / "archive-link"
+    archive_link.symlink_to(real_archive)
+    with pytest.raises(WorkRunArchiveError, match="symlink"):
+        work_run_archive.import_archive(archive_link, runs_dir=tmp_path / "imported-runs")
+
+
+def test_import_refuses_dangling_destination_run_symlink(tmp_path: Path):
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(_seed_run(tmp_path / "runs" / RUN_ID), archive)
+    runs_dir = tmp_path / "imported-runs"
+    runs_dir.mkdir()
+    (runs_dir / RUN_ID).symlink_to(tmp_path / "missing-target")
+    with pytest.raises(WorkRunArchiveError, match="symlink"):
+        work_run_archive.import_archive(archive, runs_dir=runs_dir)
