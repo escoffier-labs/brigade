@@ -995,6 +995,7 @@ def scan_target(
         "scanned_files": scanned_files,
         "scanned_file_count": len(scanned_files),
         "finding_count": len(findings),
+        # suppressed_count is per fingerprint; open findings are coalesced first.
         "suppressed_count": len(suppressed),
         "severity_counts": dict(sorted(counts.items())),
         "findings": findings,
