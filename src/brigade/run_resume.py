@@ -227,7 +227,11 @@ def resume(run_dir: Path) -> int:
         with runguard.run_lock(workspace, run_dir=run_dir):
             run_meta = _load_json(run_dir, "run.json")
             status = run_meta.get("status") if run_meta is not None else None
-            if isinstance(status, str) and status in _NONTERMINAL_RUN_STATUSES:
+            if (
+                run_meta is not None
+                and isinstance(status, str)
+                and status in _NONTERMINAL_RUN_STATUSES
+            ):
                 interrupted = _interrupted_appserver_results(run_dir)
                 if interrupted is None:
                     print(
