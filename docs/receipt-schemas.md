@@ -568,6 +568,11 @@ instead of letting the worker improvise tools.
 | `risk_class` | string \| null | Tool risk class |
 | `reasons` | array of string | Match / reject reasons |
 
+`brigade skills audit <run>` uses `selected_skill_ids` plus each skill's
+additive `skill.json` `obligations` to report missing check / review / handoff
+receipts as advisory findings (`brigade.skill_obligations_audit.v1`). See
+`docs/skill-registry.md`.
+
 ---
 
 ## `brigade.worker_results.v1`: `schema_version: 1`

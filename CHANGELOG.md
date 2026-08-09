@@ -86,6 +86,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recall (#736). A one-shot marker still backs `UserPromptSubmit` when compact
   reinjection is unavailable; the compact path clears stale markers so prompt
   submit does not double-inject.
+- Advisory `brigade skills audit <run>` compares skill.json process
+  obligations (`check` / `review` / `handoff`) declared by a run's
+  `selected_skill_ids` against captured verify, review, and handoff ingest
+  receipts (#499). Missing required evidence is reported as findings with
+  exit 0; verify commands may stamp `obligation_id` for precise matching.
+  Bundled `brigade-work` declares `verify-through-brigade` and
+  `session-handoff` obligations.
 
 ## [0.26.1] - 2026-08-09
 
