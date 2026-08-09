@@ -37,6 +37,7 @@ FAMILIES = {
             "enrichment",
             "suppression",
             "template_audit",
+            "scan_detectors",
             "scan_engine",
             "commands",
         ],
