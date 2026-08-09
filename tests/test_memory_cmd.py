@@ -1231,9 +1231,7 @@ def test_memory_care_init_without_runbooks_writes_no_templates(tmp_path):
     assert not runbook_dir.exists() or list(runbook_dir.glob("*.json")) == []
 
 
-def test_memory_care_init_with_runbooks_pin_failure_leaves_no_config_or_partial_runbooks(
-    tmp_path, monkeypatch, capsys
-):
+def test_memory_care_init_with_runbooks_pin_failure_leaves_no_config_or_partial_runbooks(tmp_path, monkeypatch, capsys):
     def _fail_pin(_target, _payload):
         return None, "runbook step 1 argv[0] could not be resolved: brigade"
 
@@ -1247,9 +1245,7 @@ def test_memory_care_init_with_runbooks_pin_failure_leaves_no_config_or_partial_
     assert not runbook_dir.exists() or list(runbook_dir.glob("*.json")) == []
 
 
-def test_memory_care_force_reinit_pin_failure_preserves_existing_runbooks_and_config(
-    tmp_path, monkeypatch, capsys
-):
+def test_memory_care_force_reinit_pin_failure_preserves_existing_runbooks_and_config(tmp_path, monkeypatch, capsys):
     assert memory_cmd.init(target=tmp_path, force=True, with_runbooks=True) == 0
     capsys.readouterr()
 
