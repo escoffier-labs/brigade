@@ -55,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--force`. Symlinked targets are skipped (including a post-`lstat` symlink
   swap). Legacy `brigade:user-profile` markers are recognized and upgraded in
   place.
+- Local memory-retrieval eval harness with a grep baseline (#722): checked-in
+  fixture corpus under `evals/memory-retrieval/` (40 cards, paraphrase-weighted
+  gold queries) and `python -m brigade.memory_retrieval_eval` comparing the
+  current keyword scorer, a naive grep floor, and an optional on-device
+  semantic adapter (skipped unless `sentence_transformers` plus a local model
+  are present). Reports Precision@K / Recall@K / hit rate / first-gold rank
+  per adapter and category, plus an oracle ceiling. Dev tooling only; no new
+  public CLI command.
 
 ### Fixed
 - DAG runs no longer deadlock on shared cover sets, accept mutual-wait cycles, misreport one-node execution, route to unhealthy seats, or miss shared-checkout isolation breaches. (#742, #788, #791, #794)

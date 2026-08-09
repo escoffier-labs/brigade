@@ -1,0 +1,199 @@
+{
+  "version": 1,
+  "k": 5,
+  "description": "Gold-labeled queries for the memory retrieval eval harness (#722). Categories: exact (token overlap), paraphrase (little lexical overlap), abbreviation, cross_tag (query uses a sibling vocabulary).",
+  "queries": [
+    {
+      "id": "q-exact-restic",
+      "query": "restic snapshot prune",
+      "gold": ["restic-backup-schedule"],
+      "category": "exact"
+    },
+    {
+      "id": "q-exact-mcp-sync",
+      "query": "mcp sync ownership managed",
+      "gold": ["mcp-sync-ownership"],
+      "category": "exact"
+    },
+    {
+      "id": "q-exact-work-ready",
+      "query": "work ready blockers edges",
+      "gold": ["work-ready-queue"],
+      "category": "exact"
+    },
+    {
+      "id": "q-exact-version-sync",
+      "query": "version sync pyproject template",
+      "gold": ["version-sync-triple"],
+      "category": "exact"
+    },
+    {
+      "id": "q-exact-coverage",
+      "query": "coverage floor pytest verify",
+      "gold": ["ci-coverage-floor"],
+      "category": "exact"
+    },
+    {
+      "id": "q-para-auth-expires",
+      "query": "login session credential went stale",
+      "gold": ["oauth-refresh-rotation"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-secret-rotate",
+      "query": "replace live production credentials on a schedule",
+      "gold": ["api-key-vault-rotation"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-disk-safety",
+      "query": "overnight filesystem mirror for disaster recovery",
+      "gold": ["restic-backup-schedule"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-server-merge",
+      "query": "who wins when two agents edit tool servers",
+      "gold": ["mcp-sync-ownership"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-card-too-long",
+      "query": "knowledge snippet ballooned past useful size",
+      "gold": ["memory-card-budget"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-stuck-notes",
+      "query": "ambiguous transfer writeups parked for judgment",
+      "gold": ["handoff-inbox-triage"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-next-task",
+      "query": "which ticket can a worker claim without waiting",
+      "gold": ["work-ready-queue"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-leak-block",
+      "query": "stop mailing addresses from leaving via git",
+      "gold": ["content-guard-prepush"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-brief-miss",
+      "query": "did the structural map overlook touched paths",
+      "gold": ["graphtrail-brief-pack"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-proof-import",
+      "query": "fold cited proof artifacts into the assignment context",
+      "gold": ["miseledger-evidence"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-quiet-doctor",
+      "query": "omit green findings so operators see only failures",
+      "gold": ["doctor-agent-mode"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-hook-spam",
+      "query": "trim startup context spam after host compaction",
+      "gold": ["hook-output-contract"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-stale-guidance",
+      "query": "spot obsolete pasted rules inside other projects",
+      "gold": ["managed-instruction-blocks"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-seat-inherit",
+      "query": "fresh linked tree should reuse parent model seats",
+      "gold": ["roster-worktree-fallback"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-para-fair-wait",
+      "query": "avoid arbitrary deadline while another execution is busy",
+      "gold": ["run-lock-wait-queue"],
+      "category": "paraphrase"
+    },
+    {
+      "id": "q-abbr-ci",
+      "query": "CI coverage gate",
+      "gold": ["ci-coverage-floor"],
+      "category": "abbreviation"
+    },
+    {
+      "id": "q-abbr-ui",
+      "query": "UI CSP loopback",
+      "gold": ["loopback-dashboard-floor"],
+      "category": "abbreviation"
+    },
+    {
+      "id": "q-abbr-ttl",
+      "query": "TTL archive candidates",
+      "gold": ["archive-candidate-threshold"],
+      "category": "abbreviation"
+    },
+    {
+      "id": "q-abbr-deps",
+      "query": "zero deps PyPI pact",
+      "gold": ["zero-runtime-deps"],
+      "category": "abbreviation"
+    },
+    {
+      "id": "q-abbr-bd",
+      "query": "bd version pin",
+      "gold": ["beads-tracker-pin"],
+      "category": "abbreviation"
+    },
+    {
+      "id": "q-xtag-embeddings",
+      "query": "local vector search for cards",
+      "gold": ["openclaw-ollama-bridge", "label-free-recall-signal"],
+      "category": "cross_tag"
+    },
+    {
+      "id": "q-xtag-schedule",
+      "query": "cron recipes for memory maintenance",
+      "gold": ["daily-care-pass", "ingest-sweep-runbook"],
+      "category": "cross_tag"
+    },
+    {
+      "id": "q-xtag-promote",
+      "query": "graduate a local workaround into the fleet skillpack",
+      "gold": ["skill-promotion-gate"],
+      "category": "cross_tag"
+    },
+    {
+      "id": "q-xtag-engines",
+      "query": "hash-pin the code graph binary",
+      "gold": ["station-binary-pins"],
+      "category": "cross_tag"
+    },
+    {
+      "id": "q-xtag-deixis",
+      "query": "ban vague pronouns in durable facts",
+      "gold": ["standalone-chunk-lint"],
+      "category": "cross_tag"
+    },
+    {
+      "id": "q-xtag-dupes",
+      "query": "strengthen existing card instead of cloning it",
+      "gold": ["reinforcement-dedup-intent"],
+      "category": "cross_tag"
+    },
+    {
+      "id": "q-xtag-browser",
+      "query": "optional browser automation package",
+      "gold": ["research-playwright-lane"],
+      "category": "cross_tag"
+    }
+  ]
+}
