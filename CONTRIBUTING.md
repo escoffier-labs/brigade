@@ -75,6 +75,19 @@ Those CLI fields do not expose unresolved review conversations. Separately check
 
 Dispatched sessions should open the pull request, run local verification, and push commits. After the final push, comment `@coderabbitai full review`. The `coderabbitai[bot]` identity records the formal GitHub review. Wait for its current `APPROVED` review before merging. A green CodeRabbit commit status alone does not satisfy this gate.
 
+## Changelog
+
+`CHANGELOG.md` uses Git's `merge=union` driver so parallel pull requests can each append an
+`[Unreleased]` bullet without manual conflict resolution. Union merge keeps every added line
+from both sides; it only conflicts when one side deletes or rewrites content the other left
+alone. Write each entry as a single self-contained line (issue reference, user-visible
+effect, no commit-subject phrasing). Do not wrap entries across multiple lines or edit
+released sections in feature branches — multi-line bullets can interleave badly, and edits
+outside `[Unreleased]` still conflict normally. Prefer an existing subsection (`Added`,
+`Changed`, `Fixed`, …) under `[Unreleased]`; if two branches both introduce the same
+subsection header, union merge folds their bullets under one header (maintainers may reorder
+for readability after merge).
+
 ## Adding a harness
 
 A harness is a manifest under `src/brigade/templates/harnesses/<id>.json` plus any template files it references. The manifest declares `role: "writer"` (gets an inbox) or `role: "reader"` (gets adapter fragments).
