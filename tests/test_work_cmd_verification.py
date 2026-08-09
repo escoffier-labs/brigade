@@ -1349,13 +1349,21 @@ def test_verification_shell_meta_allows_literal_backslashes(monkeypatch):
         assert verification._verification_shell_meta_re().search("a|b") is not None
 
 
-def test_verify_parse_command_allows_posix_literal_backslash_arguments(monkeypatch):
+def test_verify_parse_command_allows_posix_literal_backslash_arguments(tmp_path, monkeypatch):
     from brigade.work_cmd import verification
 
     monkeypatch.setattr(verification, "_verification_is_windows", lambda: False)
     command = r'python3 -c "re.match(r\"\\d+\", \"123\")"'
-    parts = verification._verification_split_command(command)
-    assert not any(verification._verification_shell_meta_re().search(part) for part in parts)
+    expected_argv = ["python3", "-c", r're.match(r"\d+", "123")']
+
+    assert verification._verification_split_command(command) == expected_argv
+
+    target = tmp_path / "repo"
+    target.mkdir()
+    argv, env, error = verification._verify_parse_command(command, target)
+    assert argv == expected_argv
+    assert env == {}
+    assert error is None
 
 
 def test_verify_parse_command_treats_windows_backslash_tokens_as_paths(tmp_path, monkeypatch):

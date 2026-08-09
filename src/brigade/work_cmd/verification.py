@@ -109,9 +109,7 @@ def _unresolvable_command_message(executable: str) -> str:
 
 def _verify_token_is_path(token: str) -> bool:
     """True when *token* should be resolved relative to --target, not via PATH."""
-    if "/" in token or (
-        _verification_is_windows() and ("\\" in token or (len(token) >= 2 and token[1] == ":"))
-    ):
+    if "/" in token or (_verification_is_windows() and ("\\" in token or (len(token) >= 2 and token[1] == ":"))):
         return True
     return False
 
