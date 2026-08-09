@@ -15,6 +15,7 @@ _MODULE_NAMES = (
     "enrichment",
     "suppression",
     "template_audit",
+    "scan_detectors",
     "scan_engine",
     "commands",
 )
@@ -90,6 +91,7 @@ _module_reports = importlib.import_module(f"{__name__}.reports")
 _module_enrichment = importlib.import_module(f"{__name__}.enrichment")
 _module_suppression = importlib.import_module(f"{__name__}.suppression")
 _module_template_audit = _facade_module("template_audit")
+_module_scan_detectors = importlib.import_module(f"{__name__}.scan_detectors")
 _module_scan_engine = importlib.import_module(f"{__name__}.scan_engine")
 _module_commands = importlib.import_module(f"{__name__}.commands")
 
@@ -99,6 +101,7 @@ from .reports import *
 from .enrichment import *
 from .suppression import *
 from .template_audit_ops import *
+from .scan_detectors import *
 from .scan_engine import *
 from .commands import *
 
@@ -109,6 +112,7 @@ _MODULES = (
     _module_enrichment,
     _module_suppression,
     _module_template_audit,
+    _module_scan_detectors,
     _module_scan_engine,
     _module_commands,
 )
