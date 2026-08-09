@@ -14,7 +14,7 @@ from typing import Callable, Iterator
 
 _DETACH_START_TIMEOUT_SECONDS = 30.0
 _DETACH_POLL_INTERVAL_SECONDS = 0.05
-_DEFAULT_RUN_LOCK_WAIT_SECONDS = 600.0
+_UNBOUNDED_RUN_LOCK_WAIT = math.inf
 
 
 @contextmanager
@@ -101,6 +101,26 @@ def _non_negative_seconds(value: str) -> float:
     return parsed
 
 
+def _run_lock_wait_arg(value: str) -> float:
+    if value.lower() in ("inf", "infinity", "unbounded"):
+        return _UNBOUNDED_RUN_LOCK_WAIT
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number of seconds or 'inf'") from exc
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be a finite non-negative number of seconds or 'inf'")
+    return parsed
+
+
+def _resolved_run_lock_wait_seconds(args, run_cwd: Path) -> float:
+    from .. import config as config_mod
+
+    if args.wait is not None:
+        return args.wait
+    return config_mod.resolve_run_lock_wait_seconds(run_cwd)
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     # run
     p_run = sub.add_parser("run", help="Run a bounded cross-model orchestration task.")
@@ -142,13 +162,15 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_run.add_argument(
         "--wait",
         nargs="?",
-        const=_DEFAULT_RUN_LOCK_WAIT_SECONDS,
-        default=0.0,
-        type=_non_negative_seconds,
+        const=_UNBOUNDED_RUN_LOCK_WAIT,
+        default=None,
+        type=_run_lock_wait_arg,
         metavar="SECONDS",
         help=(
-            "Wait up to SECONDS for an active run lock instead of failing immediately "
-            f"(default with no value: {_DEFAULT_RUN_LOCK_WAIT_SECONDS:g}s)."
+            "Wait for an active run lock in arrival order instead of failing immediately. "
+            "A bare --wait waits until the lock is available with no fixed ceiling; "
+            "pass SECONDS to bound the wait. Use --wait=0 to fail fast even when "
+            ".brigade/config.json sets run_lock_wait_seconds."
         ),
     )
     p_run.add_argument(
@@ -453,7 +475,13 @@ def dispatch(args) -> int:
                         "output_warnings": output_warnings,
                     },
                 )
-            lifecycle.enter_context(runguard.run_lock(run_cwd, run_dir=output_dir, wait_seconds=args.wait))
+            lifecycle.enter_context(
+                runguard.run_lock(
+                    run_cwd,
+                    run_dir=output_dir,
+                    wait_seconds=_resolved_run_lock_wait_seconds(args, run_cwd),
+                )
+            )
             if args.worktree:
                 worktree_cwd = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
                 effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)
@@ -827,8 +855,11 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         argv.append("--read-only")
     if args.worker is not None:
         argv.extend(["--worker", args.worker])
-    if args.wait > 0:
-        argv.extend(["--wait", f"{args.wait:g}"])
+    if args.wait is not None:
+        if math.isinf(args.wait):
+            argv.append("--wait")
+        else:
+            argv.extend(["--wait", f"{args.wait:g}"])
     if args.no_code_graph:
         argv.append("--no-code-graph")
     if args.no_evidence:

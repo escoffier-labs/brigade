@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `brigade run --wait` now joins a fair per-worktree wait queue instead of
+  timing out after 600 seconds while a legitimate run still holds the lock.
+  Waiters proceed in arrival order; stale holders and dead queue tickets are
+  reclaimed during the wait. Bare `--wait` waits without a fixed ceiling;
+  `--wait=SECONDS` keeps an optional bound. Workspace default wait is
+  configurable via `run_lock_wait_seconds` in `.brigade/config.json`; use
+  `--wait=0` to fail fast when that default is set.
+
 ## [0.26.0] - 2026-08-05
 
 ### Added
