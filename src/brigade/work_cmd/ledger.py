@@ -1132,7 +1132,15 @@ def _ready_tasks(target: Path) -> list[dict[str, Any]]:
     return tasks
 
 
-def _readiness_payload(target: Path, *, explain: bool = False) -> dict[str, Any]:
+def _readiness_payload(
+    target: Path,
+    *,
+    explain: bool = False,
+    parallel_safe: bool = False,
+    impact_runner: Any | None = None,
+) -> dict[str, Any]:
+    from . import partition as partition_mod
+
     ledger = _read_task_ledger(target)
     resolution = edges_mod.resolve_readiness(ledger)
     payload = resolution.as_dict(explain=explain)
@@ -1140,6 +1148,20 @@ def _readiness_payload(target: Path, *, explain: bool = False) -> dict[str, Any]
     payload["tasks_path"] = str(helpers._tasks_path(target))
     payload["edges"] = edges_mod.ensure_ledger_edges(ledger)
     payload["pending_count"] = len(_pending_tasks(target))
+    if parallel_safe:
+        tasks_by_id = {
+            str(task["id"]): task
+            for task in ledger.get("tasks") or []
+            if isinstance(task, dict) and isinstance(task.get("id"), str)
+        }
+        partition_payload = partition_mod.partition_ready(
+            resolution.ready,
+            tasks_by_id,
+            target,
+            impact_runner=impact_runner,
+        )
+        payload["parallel_safe"] = True
+        payload.update(partition_payload)
     return payload
 
 

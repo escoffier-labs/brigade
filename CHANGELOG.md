@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/test_error_refusal_copy.py`.
 
 ### Added
+- Parallel-safe ready partition (#778): `brigade work ready --parallel-safe`
+  wraps the native ready set with a query-time greedy partition into dispatch
+  waves by footprint intersection (exact file overlap first; one-hop
+  GraphTrail symbol impact as refinement when the binary and index exist;
+  file-overlap-only degrade otherwise). Same wave = parallel-safe; cross-wave
+  = serialize. Empty effective footprints get an exclusive wave. Waves are
+  never stored.
 - Work verify plan ranks candidate verification commands from GraphTrail
   affected-test impact (#486): `brigade work verify plan` attaches
   `graph_impact` / `ranked_candidates` with hop-distance confidence and

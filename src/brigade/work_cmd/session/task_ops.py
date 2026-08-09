@@ -555,12 +555,18 @@ def task_done(*, target: Path, task_id: str, force: bool = False, json_output: b
     return 0
 
 
-def ready(*, target: Path, explain: bool = False, json_output: bool = False) -> int:
+def ready(
+    *,
+    target: Path,
+    explain: bool = False,
+    parallel_safe: bool = False,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    payload = ledger_mod._readiness_payload(target, explain=explain)
+    payload = ledger_mod._readiness_payload(target, explain=explain, parallel_safe=parallel_safe)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -568,8 +574,20 @@ def ready(*, target: Path, explain: bool = False, json_output: bool = False) -> 
     print(f"ready: {payload['ready_count']}")
     print(f"blocked: {payload['blocked_count']}")
     print(f"cycles: {payload['cycle_count']}")
-    for item in payload["ready"]:
-        print(f"- {item['id']} {helpers._short(str(item.get('text') or ''))}")
+    if parallel_safe:
+        print(f"waves: {payload.get('wave_count', 0)}")
+        print(f"partition_mode: {payload.get('partition_mode')}")
+        if payload.get("partition_degraded"):
+            reason = payload.get("partition_degraded_reason") or "graphtrail unavailable"
+            print(f"partition_degraded: {reason}")
+        for wave in payload.get("waves") or []:
+            exclusive = " exclusive" if wave.get("exclusive") else ""
+            print(f"wave {wave.get('index')}{exclusive}:")
+            for item in wave.get("tasks") or []:
+                print(f"  - {item['id']} {helpers._short(str(item.get('text') or ''))}")
+    else:
+        for item in payload["ready"]:
+            print(f"- {item['id']} {helpers._short(str(item.get('text') or ''))}")
     if explain:
         for item in payload.get("blocked") or []:
             print(
