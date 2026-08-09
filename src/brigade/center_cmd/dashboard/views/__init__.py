@@ -18,11 +18,14 @@ from typing import Protocol
 from brigade.center_cmd.dashboard import render
 from brigade.center_cmd.dashboard.views import (
     activity_heatmap,
+    dispatch_waves,
     handoff_inbox,
     memory_cards,
     outcome_rank,
+    ready_graph,
     run_timeline,
     status_grid,
+    task_claims,
 )
 
 _VIEW_MODULES: tuple[ModuleType, ...] = (
@@ -32,6 +35,9 @@ _VIEW_MODULES: tuple[ModuleType, ...] = (
     outcome_rank,
     run_timeline,
     activity_heatmap,
+    ready_graph,
+    dispatch_waves,
+    task_claims,
 )
 
 
