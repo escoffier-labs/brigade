@@ -1203,19 +1203,189 @@ def test_work_verify_run_resolves_relative_executable_from_target(tmp_path, monk
     assert receipt["commands"][0]["stdout_summary"] == "target-ok"
 
 
-def test_work_verify_execution_argv_uses_resolved_target_path(tmp_path):
+def test_work_verify_execution_argv_uses_resolved_target_path(tmp_path, monkeypatch):
     from brigade.work_cmd import verification
 
     target = tmp_path / "repo"
     script = target / "scripts" / "verify"
     script.parent.mkdir(parents=True)
-    script.write_text("#!/bin/sh\n")
+    # No shebang: keep this assertion POSIX/Windows-identical (Windows shebang
+    # hosting is covered by dedicated unit tests below).
+    script.write_text("printf ok\n")
     relative_argv = ["./scripts/verify", "--quick"]
 
     assert verification._verify_execution_argv(relative_argv, target) == [str(script), "--quick"]
     assert relative_argv == ["./scripts/verify", "--quick"]
     assert verification._verify_execution_argv([str(script), "--quick"], target) == [str(script), "--quick"]
     assert verification._verify_execution_argv(["python3", "-V"], target) == ["python3", "-V"]
+
+
+def test_shebang_interpreter_token_parses_env_and_absolute_forms():
+    from brigade.work_cmd import verification
+
+    assert verification._shebang_interpreter_token("#!/usr/bin/env bash") == "bash"
+    assert verification._shebang_interpreter_token("#!/usr/bin/env python3") == "python3"
+    assert verification._shebang_interpreter_token("#!/bin/sh") == "/bin/sh"
+    assert verification._shebang_interpreter_token("#! /usr/bin/env -S bash -e") == "bash"
+    assert verification._shebang_interpreter_token("not a shebang") is None
+    assert verification._shebang_interpreter_token("#!") is None
+
+
+def test_windows_script_execution_argv_hosts_shebang_and_native_suffixes(tmp_path, monkeypatch):
+    from brigade.work_cmd import verification
+
+    script = tmp_path / "check.sh"
+    script.write_bytes(b"#!/usr/bin/env bash\necho hi\n")
+    fake_bash = tmp_path / "bash.exe"
+    fake_bash.write_text("")
+    monkeypatch.setattr(
+        verification,
+        "_windows_resolve_interpreter",
+        lambda token: str(fake_bash) if token in {"bash", "/bin/bash"} else None,
+    )
+
+    assert verification._windows_script_execution_argv(script, ["--flag"]) == [
+        str(fake_bash),
+        str(script),
+        "--flag",
+    ]
+
+    ps1 = tmp_path / "check.ps1"
+    ps1.write_text("Write-Output hi\n")
+    fake_pwsh = tmp_path / "pwsh.exe"
+    fake_pwsh.write_text("")
+
+    def which(name, path=None):
+        if name == "pwsh":
+            return str(fake_pwsh)
+        return None
+
+    monkeypatch.setattr(verification.shutil, "which", which)
+    assert verification._windows_script_execution_argv(ps1, ["a"]) == [
+        str(fake_pwsh),
+        "-NoProfile",
+        "-File",
+        str(ps1),
+        "a",
+    ]
+
+    cmd = tmp_path / "check.cmd"
+    cmd.write_text("@echo hi\n")
+    fake_cmd = tmp_path / "cmd.exe"
+    fake_cmd.write_text("")
+    monkeypatch.setenv("ComSpec", str(fake_cmd))
+    assert verification._windows_script_execution_argv(cmd, []) == [str(fake_cmd), "/c", str(cmd)]
+
+
+def test_verify_execution_argv_expands_shebang_only_on_windows(tmp_path, monkeypatch):
+    from brigade.work_cmd import verification
+
+    target = tmp_path / "repo"
+    script = target / "scripts" / "check.sh"
+    script.parent.mkdir(parents=True)
+    script.write_bytes(b"#!/usr/bin/env bash\necho hi\n")
+    fake_bash = tmp_path / "bash.exe"
+    fake_bash.write_text("")
+    monkeypatch.setattr(
+        verification,
+        "_windows_resolve_interpreter",
+        lambda token: str(fake_bash) if token == "bash" else None,
+    )
+
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: False)
+    assert verification._verify_execution_argv(["./scripts/check.sh"], target) == [str(script)]
+
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
+    assert verification._verify_execution_argv(["./scripts/check.sh", "x"], target) == [
+        str(fake_bash),
+        str(script),
+        "x",
+    ]
+
+
+def test_high_risk_command_message_is_platform_aware(monkeypatch):
+    from brigade.work_cmd import verification
+
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: False)
+    posix_msg = verification._high_risk_command_message("bash")
+    assert "chmod +x" in posix_msg
+    assert "./scripts/check.sh" in posix_msg
+
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
+    win_msg = verification._high_risk_command_message("bash")
+    assert "python script.py" in win_msg
+    assert ".ps1" in win_msg
+    assert "chmod +x" not in win_msg
+
+
+def test_verification_split_command_preserves_windows_backslash_paths(monkeypatch):
+    from brigade.work_cmd import verification
+
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
+    assert verification._verification_split_command(r".\scripts\check.ps1") == [r".\scripts\check.ps1"]
+    assert verification._verification_split_command(r"C:\repo\scripts\check.ps1") == [r"C:\repo\scripts\check.ps1"]
+    assert verification._verification_split_command(r'".\scripts\with spaces\check.ps1"') == [
+        r".\scripts\with spaces\check.ps1"
+    ]
+
+
+def test_verification_split_command_keeps_posix_shlex_behavior(monkeypatch):
+    from brigade.work_cmd import verification
+
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: False)
+    assert verification._verification_split_command("./scripts/check.sh") == ["./scripts/check.sh"]
+    assert verification._verification_split_command('python3 -c "print(1)"') == ["python3", "-c", "print(1)"]
+
+
+def test_verification_shell_meta_allows_literal_backslashes(monkeypatch):
+    from brigade.work_cmd import verification
+
+    for is_windows in (True, False):
+        monkeypatch.setattr(verification, "_verification_is_windows", lambda w=is_windows: w)
+        assert verification._verification_shell_meta_re().search(r".\scripts\check.ps1") is None
+        assert verification._verification_shell_meta_re().search(r"[\d]+") is None
+        assert verification._verification_shell_meta_re().search(r"foo\bar") is None
+        assert verification._verification_shell_meta_re().search("foo;bar") is not None
+        assert verification._verification_shell_meta_re().search("a|b") is not None
+
+
+def test_verify_parse_command_allows_posix_literal_backslash_arguments(tmp_path, monkeypatch):
+    from brigade.work_cmd import verification
+
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: False)
+    command = r'python3 -c "re.match(r\"\\d+\", \"123\")"'
+    expected_argv = ["python3", "-c", r're.match(r"\d+", "123")']
+
+    assert verification._verification_split_command(command) == expected_argv
+
+    target = tmp_path / "repo"
+    target.mkdir()
+    argv, env, error = verification._verify_parse_command(command, target)
+    assert argv == expected_argv
+    assert env == {}
+    assert error is None
+
+
+def test_verify_parse_command_treats_windows_backslash_tokens_as_paths(tmp_path, monkeypatch):
+    """Parsing and path-token classification; pathlib resolution is covered on Windows CI."""
+    from brigade.work_cmd import verification
+
+    target = tmp_path / "repo"
+    target.mkdir()
+    monkeypatch.setattr(verification, "_verification_is_windows", lambda: True)
+
+    for command in (
+        r".\scripts\check.ps1",
+        r'".\scripts\check.ps1"',
+        r"C:\repo\scripts\check.ps1",
+    ):
+        token = verification._verification_split_command(command)[0]
+        assert verification._verify_token_is_path(token)
+        argv, env, error = verification._verify_parse_command(command, target)
+        assert argv is None
+        assert env == {}
+        assert "shell metacharacters" not in (error or "")
+        assert error == verification._unresolvable_command_message(token)
 
 
 def test_work_verify_run_records_target_relative_process_start_failure(tmp_path, monkeypatch, capsys):
@@ -1226,7 +1396,10 @@ def test_work_verify_run_records_target_relative_process_start_failure(tmp_path,
     _init_git_repo(target)
     script = target / "scripts" / "verify"
     script.parent.mkdir()
-    script.write_text("#!/bin/sh\n")
+    # No shebang / not a native PE or +x script: CreateProcess/exec must fail so
+    # the receipt records a process-start failure. (A shebang'd script is now
+    # launchable on Windows via explicit interpreter hosting.)
+    script.write_text("not-an-executable\n")
     monkeypatch.chdir(caller)
 
     rc = cli.main(

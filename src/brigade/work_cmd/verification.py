@@ -22,6 +22,35 @@ from . import reviews as reviews_mod
 from . import scanners as scanners_mod
 
 
+def _verification_is_windows() -> bool:
+    """True on Windows; patchable in tests without mutating the shared os module."""
+    return os.name == "nt"
+
+
+def _verification_shell_meta_re() -> re.Pattern[str]:
+    """Shell-metacharacter guard for raw ``--command`` parsing.
+
+    Uses the same pattern as ``constants.SCANNER_SHELL_META_RE`` on every platform.
+    After shlex splitting, literal backslashes in argv tokens (regex escapes, Windows
+    paths, Python ``-c`` strings) are ordinary characters and must not be rejected.
+    """
+    return constants.SCANNER_SHELL_META_RE
+
+
+def _verification_strip_outer_quotes(token: str) -> str:
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
+        return token[1:-1]
+    return token
+
+
+def _verification_split_command(command: str) -> list[str]:
+    """Split a raw ``--command`` string with platform-aware shlex rules."""
+    parts = shlex.split(command, posix=not _verification_is_windows())
+    if _verification_is_windows():
+        parts = [_verification_strip_outer_quotes(token) for token in parts]
+    return parts
+
+
 def _default_verify_commands(target: Path) -> list[str]:
     if (target / "pyproject.toml").is_file() and (target / "tests").is_dir():
         if (target / "src").is_dir():
@@ -53,12 +82,20 @@ def _high_risk_command_message(executable: str) -> str:
     command directly with no shell, so a shell interpreter is never a valid
     executable. ``--argv-json`` is deliberately not suggested here because that
     path applies the same high-risk block, so the fix is a resolvable non-shell
-    executable, e.g. a chmod +x script invoked by its path.
+    executable invoked by its path. Advice is platform-aware: POSIX CreateProcess
+    honors shebang +x scripts; Windows needs an explicit host (.ps1/.cmd) or a
+    shebang'd script path that verify rewrites to the interpreter.
     """
+    if _verification_is_windows():
+        remedy = (
+            "python script.py, a .ps1/.cmd run by its path like .\\scripts\\check.ps1, "
+            "or a shebang'd script path like ./scripts/check.sh"
+        )
+    else:
+        remedy = "a chmod +x script run by its path like ./scripts/check.sh"
     return (
         f"high-risk verification command: {executable} "
-        "(verify runs with no shell; use a resolvable executable, e.g. a "
-        "chmod +x script run by its path like ./scripts/check.sh)"
+        f"(verify runs with no shell; use a resolvable executable, e.g. {remedy})"
     )
 
 
@@ -70,9 +107,134 @@ def _unresolvable_command_message(executable: str) -> str:
     return f"verification command is not resolvable: {executable}"
 
 
+def _verify_token_is_path(token: str) -> bool:
+    """True when *token* should be resolved relative to --target, not via PATH."""
+    if "/" in token or (_verification_is_windows() and ("\\" in token or (len(token) >= 2 and token[1] == ":"))):
+        return True
+    return False
+
+
+def _shebang_interpreter_token(shebang_line: str) -> str | None:
+    """Return the interpreter program token from a shebang line.
+
+    Platform-independent pure parser used by Windows script launching and tests.
+    ``#!/usr/bin/env bash`` -> ``bash``; ``#!/bin/sh`` -> ``/bin/sh``.
+    """
+    line = shebang_line.strip()
+    if not line.startswith("#!"):
+        return None
+    line = line[2:].lstrip()
+    if not line:
+        return None
+    try:
+        parts = shlex.split(line, posix=True)
+    except ValueError:
+        parts = line.split()
+    if not parts:
+        return None
+    if Path(parts[0]).name == "env":
+        for part in parts[1:]:
+            if not part.startswith("-"):
+                return part
+        return None
+    return parts[0]
+
+
+def _read_script_shebang_token(script: Path) -> str | None:
+    try:
+        with script.open("rb") as handle:
+            first = handle.readline(512)
+    except OSError:
+        return None
+    if not first.startswith(b"#!"):
+        return None
+    return _shebang_interpreter_token(first.decode("utf-8", errors="replace"))
+
+
+def _is_wsl_bash(path: str) -> bool:
+    normalized = path.replace("/", "\\").lower()
+    return normalized.endswith("\\system32\\bash.exe") or "\\windowsapps\\bash.exe" in normalized
+
+
+def _windows_git_shell_candidates(name: str) -> list[Path]:
+    """Likely Git-for-Windows locations for bash/sh (prefer over WSL bash.exe)."""
+    roots: list[Path] = []
+    for key in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        value = os.environ.get(key)
+        if value:
+            roots.append(Path(value) / "Git")
+    roots.append(Path(r"C:\Program Files\Git"))
+    roots.append(Path(r"C:\Program Files (x86)\Git"))
+    exe = f"{name}.exe"
+    out: list[Path] = []
+    for root in roots:
+        out.extend(
+            (
+                root / "bin" / exe,
+                root / "usr" / "bin" / exe,
+            )
+        )
+    return out
+
+
+def _windows_resolve_interpreter(token: str) -> str | None:
+    """Resolve a shebang interpreter token to a Windows executable path."""
+    candidate = Path(token)
+    if candidate.is_file():
+        return str(candidate)
+    name = candidate.name
+    if name.lower().endswith(".exe"):
+        name = name[:-4]
+    if name in {"bash", "sh"}:
+        for path in _windows_git_shell_candidates(name):
+            if path.is_file():
+                return str(path)
+    found = shutil.which(name)
+    if found and not (name in {"bash", "sh"} and _is_wsl_bash(found)):
+        return found
+    if name in {"bash", "sh"}:
+        # Last resort: whatever which found (may be WSL).
+        return found
+    return shutil.which(token)
+
+
+def _windows_native_script_host(script: Path) -> list[str] | None:
+    """Return argv prefix for .ps1/.cmd/.bat via their native hosts, or None."""
+    suffix = script.suffix.lower()
+    if suffix == ".ps1":
+        host = shutil.which("pwsh") or shutil.which("powershell")
+        if host is None:
+            return None
+        return [host, "-NoProfile", "-File", str(script)]
+    if suffix in {".cmd", ".bat"}:
+        comspec = os.environ.get("ComSpec") or shutil.which("cmd")
+        if comspec is None:
+            return None
+        return [comspec, "/c", str(script)]
+    return None
+
+
+def _windows_script_execution_argv(script: Path, script_args: list[str]) -> list[str] | None:
+    """Rewrite a script path into an explicitly hosted argv on Windows.
+
+    CreateProcess does not honor shebang; without this rewrite, ``./scripts/check.sh``
+    fails with WinError 193 / exit 127 even though the high-risk guard recommended it.
+    """
+    native = _windows_native_script_host(script)
+    if native is not None:
+        return native + list(script_args)
+    token = _read_script_shebang_token(script)
+    if token is None:
+        return None
+    interpreter = _windows_resolve_interpreter(token)
+    if interpreter is None:
+        return None
+    return [interpreter, str(script), *script_args]
+
+
 def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None, dict[str, str], str | None]:
     try:
-        parts = shlex.split(command)
+        parts = _verification_split_command(command)
     except ValueError as exc:
         return None, {}, f"invalid command: {exc}"
     if not parts:
@@ -87,7 +249,7 @@ def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None,
     executable = Path(argv[0]).name
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
         return None, env, _high_risk_command_message(executable)
-    if any(constants.SCANNER_SHELL_META_RE.search(part) for part in argv):
+    if any(_verification_shell_meta_re().search(part) for part in argv):
         return (
             None,
             env,
@@ -96,7 +258,7 @@ def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None,
                 "(use --argv-json to pass a pre-parsed argv list instead)"
             ),
         )
-    if "/" in argv[0]:
+    if _verify_token_is_path(argv[0]):
         executable_path = Path(argv[0]).expanduser()
         if not executable_path.is_absolute():
             executable_path = target / executable_path
@@ -123,7 +285,7 @@ def _verify_parse_argv(argv: list[str], target: Path) -> tuple[list[str] | None,
     executable = Path(argv[0]).name
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
         return None, {}, _high_risk_command_message(executable)
-    if "/" in argv[0]:
+    if _verify_token_is_path(argv[0]):
         executable_path = Path(argv[0]).expanduser()
         if not executable_path.is_absolute():
             executable_path = target / executable_path
@@ -138,11 +300,16 @@ def _verify_parse_argv(argv: list[str], target: Path) -> tuple[list[str] | None,
 
 def _verify_execution_argv(argv: list[str], target: Path) -> list[str]:
     execution_argv = list(argv)
-    if "/" in execution_argv[0]:
-        executable_path = Path(execution_argv[0]).expanduser()
-        if not executable_path.is_absolute():
-            executable_path = target / executable_path
-        execution_argv[0] = str(executable_path)
+    if not _verify_token_is_path(execution_argv[0]):
+        return execution_argv
+    executable_path = Path(execution_argv[0]).expanduser()
+    if not executable_path.is_absolute():
+        executable_path = target / executable_path
+    execution_argv[0] = str(executable_path)
+    if _verification_is_windows():
+        hosted = _windows_script_execution_argv(executable_path, execution_argv[1:])
+        if hosted is not None:
+            return hosted
     return execution_argv
 
 
