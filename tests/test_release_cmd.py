@@ -1299,6 +1299,24 @@ def test_release_candidate_build_does_not_reuse_receipt_for_different_base_ref(t
     assert candidate["release_readiness_receipt"]["run_id"] != release_receipt["run_id"]
 
 
+def test_latest_release_refreshes_clean_receipt_when_tracked_file_becomes_dirty(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+
+    assert release_cmd.run(target=tmp_path, base_ref=None, json_output=True) == 0
+    clean_receipt = json.loads(capsys.readouterr().out)
+    assert clean_receipt["evidence"]["git"]["tracked_dirty_files"] == []
+
+    (tmp_path / "README.md").write_text("uncommitted change\n")
+    readiness = release_cmd._latest_release_or_payload(tmp_path, base_ref=None)
+
+    assert readiness["run_id"] == "inline-readiness"
+    assert readiness["run_id"] != clean_receipt["run_id"]
+    assert "tracked files are dirty: 1" in readiness["blockers"]
+
+
 @pytest.mark.parametrize(
     ("check_name",),
     [
