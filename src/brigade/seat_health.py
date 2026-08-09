@@ -191,6 +191,7 @@ class SeatHealthProbe:
         *,
         workspace: Path | None = None,
         allow_model_smoke: bool = True,
+        require_hard_isolation: bool = False,
     ) -> SeatHealthResult:
         """Probe one seat.  The caller decides whether to serialize the result."""
         started = self._clock()
@@ -202,7 +203,13 @@ class SeatHealthProbe:
             # Workspace and isolation state are intentionally recomputed.
             retained = tuple(check for check in cached.checks if check.name != "isolation-compatibility")
             isolation = self._run_check(
-                "isolation-compatibility", seat, roster, workspace, PER_SEAT_TIMEOUT_SECONDS, allow_model_smoke
+                "isolation-compatibility",
+                seat,
+                roster,
+                workspace,
+                PER_SEAT_TIMEOUT_SECONDS,
+                allow_model_smoke,
+                require_hard_isolation=require_hard_isolation,
             )
             cached_checks = (*retained, isolation)
             return _result(
@@ -227,7 +234,17 @@ class SeatHealthProbe:
                 checks.append(_timeout_check(name))
                 break
             budget = min(remaining, MODEL_REACHABILITY_TIMEOUT_SECONDS) if name == "model-reachability" else remaining
-            checks.append(self._run_check(name, seat, roster, workspace, budget, allow_model_smoke))
+            checks.append(
+                self._run_check(
+                    name,
+                    seat,
+                    roster,
+                    workspace,
+                    budget,
+                    allow_model_smoke,
+                    require_hard_isolation=require_hard_isolation,
+                )
+            )
         result = _result(
             _probe_id(seat.name, started),
             seat.name,
@@ -249,6 +266,7 @@ class SeatHealthProbe:
         *,
         workspace: Path | None = None,
         allow_model_smoke: bool = True,
+        require_hard_isolation: bool = False,
     ) -> tuple[SeatHealthResult, ...]:
         """Probe every requested root and every declared fallback in parallel."""
         names = _seat_chain_names(roster)
@@ -258,7 +276,12 @@ class SeatHealthProbe:
         try:
             futures = {
                 executor.submit(
-                    self.probe, roster.agents[name], roster, workspace=workspace, allow_model_smoke=allow_model_smoke
+                    self.probe,
+                    roster.agents[name],
+                    roster,
+                    workspace=workspace,
+                    allow_model_smoke=allow_model_smoke,
+                    require_hard_isolation=require_hard_isolation,
                 ): name
                 for name in names
             }
@@ -281,6 +304,30 @@ class SeatHealthProbe:
             # independently and their results are discarded after this phase.
             executor.shutdown(wait=False, cancel_futures=True)
         return tuple(results[name] for name in names)
+
+    def invalidate(
+        self,
+        *,
+        fingerprint: str | None = None,
+        seat: str | None = None,
+    ) -> int:
+        """Drop cached probe rows after fingerprint expiry, restart, or resume.
+
+        Pass ``fingerprint`` to clear one exact entry, ``seat`` to clear every
+        cached row for that seat name, or neither to clear the whole cache.
+        Returns the number of entries removed.
+        """
+        with self._cache_lock:
+            if fingerprint is not None:
+                return 1 if self._cache.pop(fingerprint, None) is not None else 0
+            if seat is None:
+                count = len(self._cache)
+                self._cache.clear()
+                return count
+            victims = [key for key, entry in self._cache.items() if entry.result.seat == seat]
+            for key in victims:
+                del self._cache[key]
+            return len(victims)
 
     def _cached(self, fingerprint: str, now: float) -> SeatHealthResult | None:
         with self._cache_lock:
@@ -311,6 +358,8 @@ class SeatHealthProbe:
         workspace: Path | None,
         timeout_seconds: float,
         allow_model_smoke: bool,
+        *,
+        require_hard_isolation: bool = False,
     ) -> SeatHealthCheck:
         started = self._clock()
         try:
@@ -319,7 +368,15 @@ class SeatHealthProbe:
                     name, seat=seat, roster=roster, workspace=workspace, timeout_seconds=timeout_seconds
                 )
             else:
-                check = self._default_check(name, seat, roster, workspace, timeout_seconds, allow_model_smoke)
+                check = self._default_check(
+                    name,
+                    seat,
+                    roster,
+                    workspace,
+                    timeout_seconds,
+                    allow_model_smoke,
+                    require_hard_isolation=require_hard_isolation,
+                )
         except TimeoutError:
             return _timeout_check(name, self._clock() - started)
         except Exception as exc:  # provider APIs are not allowed to escape the health boundary
@@ -334,6 +391,8 @@ class SeatHealthProbe:
         workspace: Path | None,
         timeout_seconds: float,
         allow_model_smoke: bool,
+        *,
+        require_hard_isolation: bool = False,
     ) -> SeatHealthCheck:
         if name == "declaration":
             return SeatHealthCheck(name, "passed", "roster declaration validated")
@@ -377,6 +436,13 @@ class SeatHealthProbe:
             )
             if enforcement == "hard":
                 return SeatHealthCheck(name, "passed", "declared read-only enforcement is hard")
+            if require_hard_isolation and enforcement in {"soft", "none"}:
+                return SeatHealthCheck(
+                    name,
+                    "failed",
+                    f"read-only run requires hard isolation; declared enforcement is {enforcement}",
+                    cause_code="unsafe-isolation",
+                )
             return SeatHealthCheck(
                 name, "degraded", f"declared read-only enforcement is {enforcement}; postflight is deferred"
             )
@@ -612,6 +678,7 @@ def _failure_for(check: SeatHealthCheck) -> WorkerFailure:
         "app-server-unavailable": FailureClass.TRANSPORT_UNAVAILABLE,
         "initialize-no-progress": FailureClass.TRANSPORT_HANG,
         "timeout": FailureClass.TIMEOUT,
+        "unsafe-isolation": FailureClass.CONFIGURATION_INVALID,
     }
     failure_class = mapping.get(cause, FailureClass.UNCLASSIFIED)
     spec = FAILURE_CLASS_SPECS[failure_class]

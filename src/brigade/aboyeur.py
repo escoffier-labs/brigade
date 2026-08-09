@@ -35,6 +35,7 @@ from . import run_lifecycle
 from . import run_projector
 from . import run_shadow
 from . import seat_health
+from . import seat_health_policy
 from .result_integrity import validate_final_output
 from .run_receipts import (
     agent_result_from_worker as _agent_result_from_worker,
@@ -1958,6 +1959,9 @@ def dispatch(
     on_dispatch_failed: Callable[[Agent, int], None] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     build_prompt: Callable[..., str] | None = None,
+    quarantine_state: seat_health_policy.SeatQuarantineState | None = None,
+    reprobe_seat: Callable[[Agent], bool] | None = None,
+    on_failed_attempt_persisted: Callable[[WorkerResult], None] | None = None,
 ) -> list[WorkerResult]:
     from . import run_transport
 
@@ -1992,6 +1996,9 @@ def dispatch(
         on_dispatch_completed=on_dispatch_completed,
         on_dispatch_failed=on_dispatch_failed,
         process_registry=process_registry,
+        quarantine_state=quarantine_state,
+        reprobe_seat=reprobe_seat,
+        on_failed_attempt_persisted=on_failed_attempt_persisted,
     )
 
 
@@ -2875,6 +2882,9 @@ def _run_payload(
     scheduler: dict[str, object] | None = None,
     lifecycle_journal_requested: bool | None = None,
     run_journal_authority_requested: bool | None = None,
+    health: dict[str, object] | None = None,
+    worker_failure_summary: dict[str, object] | None = None,
+    transport_routing: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": receipt_schema.RUN_RECEIPT_SCHEMA,
@@ -2968,7 +2978,12 @@ def _run_payload(
             payload["control_socket"] = control_transport.path
     elif control_socket is not None:
         payload["control_socket"] = str(control_socket)
-    return payload
+    return seat_health_policy.apply_health_fields(
+        payload,
+        health=health,
+        worker_failures=worker_failure_summary,
+        transport_routing=transport_routing,
+    )
 
 
 def _direct_worker_error(worker: str, roster: Roster, *, read_only: bool = False) -> str | None:
@@ -3376,6 +3391,7 @@ def _write_run_seat_health_receipt(
     *,
     cwd: Path | None = None,
     probe: seat_health.SeatHealthProbe | None = None,
+    require_hard_isolation: bool = False,
 ) -> tuple[seat_health.SeatHealthResult, ...] | None:
     """Probe declared seats and write seat-health.json beside run.json.
 
@@ -3388,7 +3404,12 @@ def _write_run_seat_health_receipt(
     active_probe = probe or seat_health.SeatHealthProbe(collect_executable_version=False)
     probe_failed = False
     try:
-        results = active_probe.probe_roster(roster, workspace=cwd, allow_model_smoke=False)
+        results = active_probe.probe_roster(
+            roster,
+            workspace=cwd,
+            allow_model_smoke=False,
+            require_hard_isolation=require_hard_isolation,
+        )
     except Exception as exc:
         probe_failed = True
         results = seat_health.exception_results_for_probe_failure(roster, exc)
@@ -3455,6 +3476,10 @@ def run(
         "used": None,
         "fallback_reason": None,
     }
+    health_summary_payload: dict[str, object] | None = None
+    transport_routing_payload: dict[str, object] | None = None
+    quarantine_state = seat_health_policy.SeatQuarantineState()
+    active_health_probe = seat_health.SeatHealthProbe(collect_executable_version=False)
 
     def scheduler_resolved(used: str, fallback_reason: str | None) -> None:
         scheduler_resolution["used"] = used
@@ -3463,6 +3488,10 @@ def run(
     def _payload(**kwargs: Any) -> dict[str, object]:
         if "skill_route_policy" not in kwargs and skill_policy is not None:
             kwargs["skill_route_policy"] = skill_policy
+        if health_summary_payload is not None and "health" not in kwargs:
+            kwargs["health"] = health_summary_payload
+        if transport_routing_payload is not None and "transport_routing" not in kwargs:
+            kwargs["transport_routing"] = transport_routing_payload
         if output_dir is not None and (
             "lifecycle_journal_requested" not in kwargs or "run_journal_authority_requested" not in kwargs
         ):
@@ -3502,6 +3531,10 @@ def run(
                         and existing.get("run_journal_authority_requested") is True
                     ):
                         kwargs["run_journal_authority_requested"] = True
+                    if "health" not in kwargs and isinstance(existing.get("health"), dict):
+                        kwargs["health"] = dict(existing["health"])
+                    if "transport_routing" not in kwargs and isinstance(existing.get("transport_routing"), dict):
+                        kwargs["transport_routing"] = dict(existing["transport_routing"])
         return _run_payload(
             lock_workspace=lock_workspace,
             pre_run_snapshot=pre_run_snapshot_payload,
@@ -3665,21 +3698,47 @@ def run(
             ),
         )
         # After the initial run receipt, before planning: a probe failure stays receipted.
-        health_results = _write_run_seat_health_receipt(output_dir, roster, cwd=cwd)
+        health_results = _write_run_seat_health_receipt(
+            output_dir,
+            roster,
+            cwd=cwd,
+            probe=active_health_probe,
+            require_hard_isolation=read_only,
+        )
         routing = resolve_orchestrator_health_routing(
             roster,
             health_results,
             pinned_seats=frozenset({worker}) if worker is not None else frozenset(),
         )
         roster = routing.roster
+        health_summary_payload = seat_health_policy.seat_health_summary(
+            health_results,
+            routing_decisions=roster.seat_routing,
+        )
         if routing.warning is not None:
             print(routing.warning, file=sys.stderr)
+        if worker is not None and roster.seat_routing:
+            for decision in roster.seat_routing:
+                if decision.get("requested_seat") != worker or decision.get("outcome") != "fallback":
+                    continue
+                effective = decision.get("effective_seat")
+                cause = decision.get("typed_cause") or "unclassified"
+                if isinstance(effective, str):
+                    print(
+                        seat_health_policy.format_worker_seat_resolution(
+                            requested=worker,
+                            effective=effective,
+                            typed_cause=str(cause),
+                        ),
+                        file=sys.stderr,
+                    )
+                break
         if routing.receipt is not None:
             routing_receipt = dict(routing.receipt)
             routing_receipt["run_id"] = output_dir.name
             _write_seat_routing_receipt(output_dir, routing_receipt)
         if routing.abort_detail is not None:
-            if roster.seat_routing:
+            if roster.seat_routing or health_summary_payload is not None:
                 run_path = output_dir / "run.json"
                 try:
                     run_payload = json.loads(run_path.read_text())
@@ -3688,7 +3747,10 @@ def run(
                         f"failed to read run receipt before seat-routing abort: {exc}"
                     ) from exc
                 if isinstance(run_payload, dict):
-                    run_payload["seat_routing"] = [dict(decision) for decision in roster.seat_routing]
+                    if roster.seat_routing:
+                        run_payload["seat_routing"] = [dict(decision) for decision in roster.seat_routing]
+                    if health_summary_payload is not None:
+                        run_payload["health"] = dict(health_summary_payload)
                     _write_json(run_path, receipt_schema.stamp_run_receipt(run_payload))
             record_run_termination(
                 output_dir,
@@ -4014,7 +4076,21 @@ def run(
                 appserver.start()
             except codex_appserver.AppServerError as exc:
                 close_appserver()
-                print(f"warning: codex app-server unavailable ({exc}); falling back to exec", file=sys.stderr)
+                transport_routing_payload = seat_health_policy.transport_fallback_decision(
+                    requested_transport="app-server",
+                    effective_transport="exec",
+                    cause="transport-unavailable",
+                    detail=str(exc),
+                )
+                if output_dir is not None:
+                    try:
+                        _write_json(output_dir / "transport-routing.json", dict(transport_routing_payload))
+                    except OSError as write_exc:
+                        print(f"error: transport routing receipt failed: {write_exc}", file=sys.stderr)
+                print(
+                    f"warning: codex app-server unavailable ({exc}); falling back to exec [transport-unavailable]",
+                    file=sys.stderr,
+                )
                 effective_transport = "exec"
                 control_socket = None
             if appserver is not None and output_dir is not None:
@@ -4111,6 +4187,41 @@ def run(
     def dispatch_failed(agent: Agent, attempt: int) -> None:
         dispatch_fact("run.dispatch.failed", agent, attempt)
 
+    def reprobe_seat_for_retry(agent: Agent) -> bool:
+        active_health_probe.invalidate(seat=agent.name)
+        try:
+            result = active_health_probe.probe(
+                agent,
+                roster,
+                workspace=cwd,
+                allow_model_smoke=False,
+                require_hard_isolation=read_only,
+            )
+        except Exception:
+            return False
+        if output_dir is not None:
+            try:
+                seat_health.write_seat_health_receipt(
+                    output_dir / "seat-health.json",
+                    (result,),
+                    run_id=output_dir.name,
+                )
+            except OSError as exc:
+                print(f"error: seat health receipt failed: {exc}", file=sys.stderr)
+        return result.status == "healthy"
+
+    def persist_failed_attempt(result: WorkerResult) -> None:
+        if output_dir is None:
+            return
+        try:
+            write_sidecar_revision(
+                output_dir,
+                "worker-results.json",
+                receipt_schema.worker_results_document(_worker_payload([result])),
+            )
+        except OSError as exc:
+            print(f"error: worker attempt receipt failed: {exc}", file=sys.stderr)
+
     active_seat = active_seats[0] if len(active_seats) == 1 else None
     worker_prompt_builder = partial(_worker_prompt, skill_policy=skill_policy)
     try:
@@ -4145,6 +4256,9 @@ def run(
                 on_dispatch_failed=dispatch_failed,
                 process_registry=process_registry,
                 build_prompt=worker_prompt_builder,
+                quarantine_state=quarantine_state,
+                reprobe_seat=reprobe_seat_for_retry,
+                on_failed_attempt_persisted=persist_failed_attempt,
             )
         except runguard.RetainRunLockError:
             raise
@@ -4451,6 +4565,9 @@ def run(
                 suspected_noop=suspected_noop,
                 worker=worker,
                 transport_warning=direct_result.transport_warning if direct_worker else None,
+                worker_failure_summary=(
+                    seat_health_policy.worker_failure_summary(worker_results) if not workers_ok else None
+                ),
             ),
         )
     if handoff_inbox is not None and workers_ok:
@@ -4534,7 +4651,10 @@ def run(
             )
     if not workers_ok:
         print(
-            f"warning: run incomplete: {len(failed_seats)} worker(s) failed; see worker-results.json",
+            seat_health_policy.format_incomplete_warning(
+                worker_results,
+                routing_decisions=roster.seat_routing,
+            ),
             file=sys.stderr,
         )
         print(final.text)

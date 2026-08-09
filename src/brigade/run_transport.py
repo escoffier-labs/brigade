@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from . import agents, proc, run_control, runguard
 from .roster import Agent, Roster, is_cli_allowed, timeout_for
+from .seat_health_policy import SeatQuarantineState, decide_retry, failure_for_worker_result
 
 _GROK_CONTINUATION_PROMPT = (
     "Return the final answer now using the required structured answer schema. "
@@ -136,6 +137,68 @@ def _worker_attempt(
         ok=result.ok,
         timed_out=result.timed_out,
     )
+
+
+def _apply_same_seat_retry(
+    *,
+    assignment: Assignment,
+    agent: Agent,
+    prompt: str,
+    first_result: agents.AgentResult,
+    first_started: str,
+    first_finished: str,
+    invoke: Callable[..., agents.AgentResult],
+    finish: Callable[..., WorkerResult],
+    quarantine_state: SeatQuarantineState,
+    reprobe_seat: Callable[[Agent], bool] | None,
+    on_failed_attempt_persisted: Callable[[WorkerResult], None] | None,
+) -> WorkerResult:
+    """Persist a failed attempt, then re-probe and retry the same seat once.
+
+    Callers must already have confirmed the failure disposition is
+    ``same-seat-once`` and recorded that retry on ``quarantine_state``.
+    """
+    first_attempt = _worker_attempt(
+        kind="initial",
+        worker=agent,
+        task=assignment.task,
+        result=first_result,
+        started_at=first_started,
+        finished_at=first_finished,
+        selected=False,
+    )
+    persisted = finish(first_result, agent, [first_attempt])
+    if on_failed_attempt_persisted is not None:
+        on_failed_attempt_persisted(persisted)
+    failure = failure_for_worker_result(persisted)
+    failure_class = failure.failure_class.value if failure is not None else "unclassified"
+    if reprobe_seat is not None and not reprobe_seat(agent):
+        quarantine_state.quarantine(assignment.worker)
+        return replace(
+            persisted,
+            detail=(
+                f"{persisted.detail}; same-seat retry skipped because re-probe reported unhealthy [{failure_class}]"
+            ).strip("; "),
+        )
+    retry_started = _attempt_timestamp()
+    retry_result = invoke(agent, prompt)
+    retry_finished = _attempt_timestamp()
+    attempts = [
+        first_attempt,
+        _worker_attempt(
+            kind="same-seat-once",
+            worker=agent,
+            task=assignment.task,
+            result=retry_result,
+            started_at=retry_started,
+            finished_at=retry_finished,
+            selected=retry_result.ok,
+        ),
+    ]
+    finished = finish(retry_result, agent, attempts)
+    if not finished.ok:
+        quarantine_state.quarantine(assignment.worker)
+    return finished
 
 
 def _env_override_names(env: dict[str, str] | None) -> tuple[str, ...]:
@@ -281,6 +344,9 @@ def dispatch(
     on_dispatch_completed: Callable[[Agent, int], None] | None = None,
     on_dispatch_failed: Callable[[Agent, int], None] | None = None,
     process_registry: proc.ProcessRegistry | None = None,
+    quarantine_state: SeatQuarantineState | None = None,
+    reprobe_seat: Callable[[Agent], bool] | None = None,
+    on_failed_attempt_persisted: Callable[[WorkerResult], None] | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -288,9 +354,14 @@ def dispatch(
     fallback reason, so a receipt can distinguish a real DAG dispatch from a
     silent degrade to waves. Without it the fallback is stderr-only and the run
     record cannot tell the two apart.
+
+    ``quarantine_state`` / ``reprobe_seat`` implement the #474 same-seat-once
+    retry bound: persist the failed attempt, re-probe, then allow at most one
+    same-seat retry before quarantining the seat for the rest of the run.
     """
 
     process_registry = process_registry or proc.ProcessRegistry()
+    quarantine_state = quarantine_state or SeatQuarantineState()
 
     def run_direct_agent(*args: Any, **kwargs: Any) -> agents.AgentResult:
         runner = agents.run_agent
@@ -322,6 +393,16 @@ def dispatch(
 
     def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
         agent = roster.agents[assignment.worker]
+        if quarantine_state.is_quarantined(assignment.worker):
+            return WorkerResult(
+                worker=assignment.worker,
+                task=assignment.task,
+                text="",
+                ok=False,
+                detail=f"seat {assignment.worker} is quarantined for this run",
+                failure_phase="dispatch",
+                failure_kind="unclassified",
+            )
         if agent.cli is None or not is_cli_allowed(agent.cli, roster):
             return WorkerResult(
                 worker=assignment.worker,
@@ -610,7 +691,26 @@ def dispatch(
         initial_finished = _attempt_timestamp()
         recovery_candidate = direct and effective_read_only and agent.cli == "grok" and agent.transport == "direct"
         if not recovery_candidate:
-            return finish(result, agent)
+            if result.ok:
+                return finish(result, agent)
+            finished = finish(result, agent)
+            failure = failure_for_worker_result(finished)
+            decision = decide_retry(failure, seat=assignment.worker, state=quarantine_state)
+            if not decision.should_retry_same_seat:
+                return finished
+            return _apply_same_seat_retry(
+                assignment=assignment,
+                agent=agent,
+                prompt=prompt,
+                first_result=result,
+                first_started=initial_started,
+                first_finished=initial_finished,
+                invoke=invoke,
+                finish=finish,
+                quarantine_state=quarantine_state,
+                reprobe_seat=reprobe_seat,
+                on_failed_attempt_persisted=on_failed_attempt_persisted,
+            )
 
         attempts = [
             _worker_attempt(
