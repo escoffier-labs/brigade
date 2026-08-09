@@ -15,7 +15,7 @@ def test_fetch_uses_verify_runs_json(monkeypatch, tmp_path):
     monkeypatch.setattr("brigade.center_cmd.dashboard.data.run_json", fake_run_json)
 
     assert activity_heatmap.fetch(tmp_path) == expected
-    assert calls == [(tmp_path, ["work", "verify", "runs"])]
+    assert calls == [(tmp_path, ["work", "verify", "runs", "--limit", "50"])]
 
 
 def test_render_builds_year_grid_with_titles(monkeypatch):

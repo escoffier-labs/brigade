@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from brigade import config
 from brigade.center_cmd.dashboard import data
 from brigade.center_cmd.dashboard import render as html
 
@@ -23,7 +24,9 @@ _SHADE_RATIOS = (0.25, 0.5, 0.75, 1.0)
 
 
 def fetch(target: Path) -> dict:
-    return data.run_json(target, ["work", "verify", "runs"])
+    # Request the full retained verify-run history (default CLI limit is 20).
+    limit = str(config.DEFAULT_VERIFY_RUNS_KEEP)
+    return data.run_json(target, ["work", "verify", "runs", "--limit", limit])
 
 
 def _today_utc() -> date:
