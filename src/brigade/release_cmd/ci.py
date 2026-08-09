@@ -344,7 +344,7 @@ def _run_content_guard_check(
         policy_path = Path(argv[argv.index("--policy") + 1])
         try:
             report = run_audit(target, policy=load_policy(policy_path), scope="tracked")
-        except (OSError, SystemExit) as exc:
+        except (OSError, SystemExit, ValueError) as exc:
             return {
                 "name": f"content_guard_{name}",
                 "status": WARN,

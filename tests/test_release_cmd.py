@@ -184,6 +184,18 @@ def test_release_guard_broken_external_scanner_is_unavailable_warning(tmp_path, 
     assert "unavailable" in check["detail"]
 
 
+def test_release_guard_malformed_embedded_policy_is_unavailable_warning(tmp_path, monkeypatch):
+    monkeypatch.delenv("CONTENT_GUARD_DIR", raising=False)
+    policy_path = tmp_path / "broken-policy.json"
+    policy_path.write_text("{ not valid json\n")
+
+    check = release_cmd._run_content_guard_check(tmp_path, name="tip", policy=str(policy_path))
+
+    assert check["status"] == "warn"
+    assert check["available"] is False
+    assert "unavailable" in check["detail"]
+
+
 def test_release_guard_external_checkout_requires_explicit_override(tmp_path, monkeypatch):
     checkout = tmp_path / "content-guard"
     (checkout / "src").mkdir(parents=True)
