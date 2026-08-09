@@ -10,6 +10,7 @@ import math
 import os
 import shutil
 import stat
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -768,10 +769,24 @@ def _list_wait_tickets(queue_dir: Path) -> list[Path]:
 def _wait_ticket_is_live(ticket: Path) -> bool:
     try:
         payload = json.loads(ticket.read_text())
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+    except OSError:
+        # A transient unreadable ticket is not proof the waiter died; skip pruning.
+        return True
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return False
     pid = payload.get("pid") if isinstance(payload, dict) else None
     return isinstance(pid, int) and _pid_is_active(pid)
+
+
+def _remove_empty_wait_queue_dir(queue_dir: Path) -> None:
+    try:
+        if not queue_dir.is_dir():
+            return
+        if any(queue_dir.glob("*.wait")):
+            return
+        queue_dir.rmdir()
+    except OSError:
+        pass
 
 
 def _prune_stale_wait_tickets(queue_dir: Path) -> None:
@@ -782,32 +797,70 @@ def _prune_stale_wait_tickets(queue_dir: Path) -> None:
             ticket.unlink()
         except OSError:
             pass
+    _remove_empty_wait_queue_dir(queue_dir)
+
+
+def _publish_wait_ticket_exclusive(ticket: Path, encoded: bytes) -> None:
+    """Publish a complete wait ticket without exposing partial *.wait files."""
+    queue_dir = ticket.parent
+    fd, tmp_name = tempfile.mkstemp(
+        dir=queue_dir,
+        prefix=f".{ticket.name}.",
+        suffix=".enrolling",
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        try:
+            os.write(fd, encoded)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if ticket.exists():
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(ticket))
+        os.replace(tmp_path, ticket)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    else:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _enroll_wait_ticket(queue_dir: Path) -> Path:
-    queue_dir.mkdir(parents=True, exist_ok=True)
+    # Cross-process FIFO ordering sorts ticket filenames by the monotonic_ns prefix.
+    # This assumes a system-wide monotonic clock (e.g. Linux CLOCK_MONOTONIC), not
+    # per-process views that can diverge across hosts or after suspend.
     token = uuid4().hex
-    ticket = queue_dir / f"{time.monotonic_ns():020d}-{os.getpid():08d}-{token}.wait"
     payload = {
         "schema": "brigade.run_lock_wait.v1",
         "pid": os.getpid(),
         "enrolled_at": datetime.now(timezone.utc).isoformat(),
     }
-    fd = os.open(ticket, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        os.write(fd, json.dumps(payload).encode())
-    finally:
-        os.close(fd)
-    return ticket
+    encoded = json.dumps(payload).encode()
+    for _ in range(4):
+        queue_dir.mkdir(parents=True, exist_ok=True)
+        ticket = queue_dir / f"{time.monotonic_ns():020d}-{os.getpid():08d}-{token}.wait"
+        try:
+            _publish_wait_ticket_exclusive(ticket, encoded)
+        except FileExistsError:
+            continue
+        except FileNotFoundError:
+            # Another waiter removed the empty queue dir between mkdir and publish.
+            continue
+        except OSError:
+            continue
+        return ticket
+    raise RunLockError(f"could not enroll for run lock wait queue: {queue_dir}")
 
 
-def _leave_wait_ticket(ticket: Path) -> None:
+def _leave_wait_ticket(ticket: Path, queue_dir: Path | None = None) -> None:
     try:
         ticket.unlink()
     except FileNotFoundError:
         return
     except OSError:
         return
+    if queue_dir is not None:
+        _remove_empty_wait_queue_dir(queue_dir)
 
 
 def _is_wait_queue_head(ticket: Path, queue_dir: Path) -> bool:
@@ -816,13 +869,18 @@ def _is_wait_queue_head(ticket: Path, queue_dir: Path) -> bool:
     return bool(tickets) and tickets[0] == ticket
 
 
-def _lock_held_by_live_process(path: Path) -> bool:
+def _wait_retry_after_acquire_error(path: Path) -> bool:
+    """Return True when a failed acquire should retry instead of aborting.
+
+    A structurally malformed non-directory lock still raises ``RunLockError``.
+    """
     try:
-        if _lock_path_is_directory(path) is None:
-            return False
+        lock_is_directory = _lock_path_is_directory(path)
     except RunLockError:
-        return False
-    return not _lock_is_stale(path)
+        raise
+    if lock_is_directory is None:
+        return True
+    return _lock_is_stale(path)
 
 
 def _wait_to_acquire_lock(
@@ -841,25 +899,37 @@ def _wait_to_acquire_lock(
     deadline = time.monotonic() + wait_seconds if not unbounded else 0.0
     try:
         while True:
+            timed_out_acquire_exc: RunLockError | None = None
+            immediately_retryable = False
             if _is_wait_queue_head(ticket, queue_dir):
                 try:
                     return _acquire_lock(path, run_dir=run_dir)
                 except RunLockError as exc:
-                    if not _lock_held_by_live_process(path):
-                        raise
-                    if not unbounded:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            raise RunLockError(
-                                f"timed out after {wait_seconds:g}s waiting for run lock: {path}"
-                            ) from exc
-            elif not unbounded:
+                    if _wait_retry_after_acquire_error(path):
+                        immediately_retryable = True
+                    else:
+                        timed_out_acquire_exc = exc
+            if immediately_retryable:
+                if not unbounded:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RunLockError(f"timed out after {wait_seconds:g}s waiting for run lock: {path}")
+                else:
+                    time.sleep(poll_interval)
+                continue
+            if not unbounded:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    if timed_out_acquire_exc is not None:
+                        raise RunLockError(
+                            f"timed out after {wait_seconds:g}s waiting for run lock: {path}"
+                        ) from timed_out_acquire_exc
                     raise RunLockError(f"timed out after {wait_seconds:g}s waiting for run lock: {path}")
-            time.sleep(poll_interval)
+                time.sleep(min(poll_interval, remaining))
+            else:
+                time.sleep(poll_interval)
     finally:
-        _leave_wait_ticket(ticket)
+        _leave_wait_ticket(ticket, queue_dir)
 
 
 def _acquire_lock(path: Path, *, run_dir: Path | None = None) -> _LockOwnership:
