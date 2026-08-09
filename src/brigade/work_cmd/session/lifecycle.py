@@ -71,14 +71,24 @@ def _latest_completed_run_path(target: Path, output_dir: Path | None) -> str | N
 
 
 def _resolve_next_task(target: Path) -> dict[str, Any]:
-    pending = ledger_mod._pending_tasks(target)
-    if pending:
-        task = pending[0]
+    ready = ledger_mod._ready_tasks(target)
+    if ready:
+        task = ready[0]
         return {
             "task": str(task.get("text", "")).strip(),
             "source": "task_ledger",
             "task_id": task.get("id"),
             "ledger_task": task,
+            "dogfood": helpers._dogfood_snapshot(target),
+        }
+    pending = ledger_mod._pending_tasks(target)
+    if pending:
+        # Pending work exists but nothing is ready (blocked / parent-only).
+        return {
+            "task": str(pending[0].get("text", "")).strip(),
+            "source": "task_ledger_blocked",
+            "task_id": pending[0].get("id"),
+            "ledger_task": pending[0],
             "dogfood": helpers._dogfood_snapshot(target),
         }
     dogfood = helpers._dogfood_snapshot(target)

@@ -221,20 +221,21 @@ def run(
     if end_rc != 0:
         return end_rc if dogfood_rc == 0 else dogfood_rc
     if dogfood_rc == 0 and isinstance(consumed_task_id, str):
-        task, ledger = ledger_mod._find_task(target, consumed_task_id)
-        if task is not None:
-            now = helpers._now().isoformat()
-            task["status"] = "done"
-            task["updated_at"] = now
-            task["completed_at"] = now
-            task["completed_session_title"] = session_title
-            if session_dir is not None:
-                task["completed_session_path"] = str(session_dir)
-            completed_run_path = _latest_completed_run_path(target, output_dir)
-            if completed_run_path is not None:
-                task["completed_run_path"] = completed_run_path
-            task["completed_acceptance"] = ledger_mod._task_acceptance(task)
-            ledger_mod._write_task_ledger(target, ledger)
+        with ledger_mod._task_ledger_lock(target):
+            task, ledger = ledger_mod._find_task(target, consumed_task_id)
+            if task is not None:
+                now = helpers._now().isoformat()
+                task["status"] = "done"
+                task["updated_at"] = now
+                task["completed_at"] = now
+                task["completed_session_title"] = session_title
+                if session_dir is not None:
+                    task["completed_session_path"] = str(session_dir)
+                completed_run_path = _latest_completed_run_path(target, output_dir)
+                if completed_run_path is not None:
+                    task["completed_run_path"] = completed_run_path
+                task["completed_acceptance"] = ledger_mod._task_acceptance(task)
+                ledger_mod._write_task_ledger(target, ledger)
     if dogfood_rc == 0 and queue_next:
         queued_task, created, reason = _queue_latest_next(
             target,

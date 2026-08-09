@@ -80,6 +80,8 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
         return 'brigade work end --note "..." --handoff'
     if source == "task_ledger":
         return "brigade work run"
+    if source == "task_ledger_blocked":
+        return "brigade work ready --explain --json"
     if isinstance(next_text, str) and next_text.strip() and source != "default_review":
         return f"brigade work run {shlex.quote(next_text.strip())}"
     return "brigade work run"
@@ -276,6 +278,8 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     git = helpers._git_snapshot(target)
     suggested = _suggested_command(active, resolved["task"], resolved["source"])
     pending = ledger_mod._pending_tasks(target)
+    ready_tasks = ledger_mod._ready_tasks(target)
+    readiness = ledger_mod._readiness_payload(target, explain=False)
     pending_imports = ledger_mod._pending_imports(target)
     pending_import_counts = ledger_mod._import_counts(pending_imports)
     scanner_candidate = ledger_mod._scanner_candidate(pending_imports)
@@ -315,6 +319,8 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "skipped_sessions": skipped,
         "tasks_path": str(helpers._tasks_path(target)),
         "pending_tasks": pending,
+        "ready_tasks": ready_tasks,
+        "ready": readiness,
         "plan_coverage": ledger_mod._plan_coverage_payload(target),
         "imports_path": str(helpers._imports_path(target)),
         "pending_imports": pending_imports,

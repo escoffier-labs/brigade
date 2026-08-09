@@ -35,7 +35,7 @@ def test_work_task_ledger_add_list_show_and_done(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "work tasks:" in out
     assert task_id in out
-    assert "[pending] [task normal acceptance=0] Build task ledger" in out
+    assert "[pending] ready [task normal acceptance=0] Build task ledger" in out
 
     assert work_cmd.task_show(target=tmp_path, task_id=task_id[:12]) == 0
     out = capsys.readouterr().out
@@ -1017,6 +1017,10 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
                 "priority": "high",
                 "acceptance": ["passes"],
                 "template": "vertical-slice",
+                "deps": [],
+                "graph": None,
+                "dry_run": False,
+                "json_output": False,
             },
         ),
         (
@@ -1030,9 +1034,13 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
                 "priority": "normal",
                 "acceptance": [],
                 "template": None,
+                "deps": [],
+                "graph": None,
+                "dry_run": False,
+                "json_output": False,
             },
         ),
-        ("show", {"target": tmp_path, "task_id": "abc123"}),
+        ("show", {"target": tmp_path, "task_id": "abc123", "json_output": False}),
         (
             "plan",
             {
@@ -1051,5 +1059,5 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
                 "from_research": None,
             },
         ),
-        ("done", {"target": tmp_path, "task_id": "abc123"}),
+        ("done", {"target": tmp_path, "task_id": "abc123", "force": False, "json_output": False}),
     ]

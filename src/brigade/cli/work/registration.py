@@ -423,6 +423,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_next = work_sub.add_parser("next", help="Show the next daily work task and suggested command.")
     p_work_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_next.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_ready = work_sub.add_parser("ready", help="Show the ready set of work tasks (no open blockers).")
+    p_work_ready.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_ready.add_argument(
+        "--explain", action="store_true", help="Include blocked tasks, blocker paths, and cycles."
+    )
+    p_work_ready.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_tasks = work_sub.add_parser("tasks", help="List pending work tasks.")
     p_work_tasks.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_tasks.add_argument("--all", action="store_true", help="Include completed tasks.")
@@ -449,9 +455,24 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Add template acceptance criteria and planning guidance.",
     )
+    p_work_task_add.add_argument(
+        "--deps",
+        action="append",
+        default=[],
+        help="Dependency as type:id (blocks, discovered-from, parent-child). Repeatable.",
+    )
+    p_work_task_add.add_argument(
+        "--graph",
+        type=Path,
+        default=None,
+        help="Atomically create tasks+edges from a plan JSON file (nodes + edges).",
+    )
+    p_work_task_add.add_argument("--dry-run", action="store_true", help="Validate --graph without writing.")
+    p_work_task_add.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_task_show = task_sub.add_parser("show", help="Show one work task.")
     p_work_task_show.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_task_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_task_plan = task_sub.add_parser("plan", help="Show task acceptance criteria and run plan.")
     p_work_task_plan.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -493,6 +514,40 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_task_done = task_sub.add_parser("done", help="Mark one work task done.")
     p_work_task_done.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_done.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_task_done.add_argument(
+        "--force", action="store_true", help="Allow closing a parent that still has open children."
+    )
+    p_work_task_done.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_task_edge = task_sub.add_parser("edge", help="Add, remove, or list dependency edges between tasks.")
+    edge_sub = p_work_task_edge.add_subparsers(dest="edge_command", metavar="<edge-command>")
+    edge_sub.required = True
+    p_work_task_edge_add = edge_sub.add_parser("add", help="Add a dependency edge (source TYPE target).")
+    p_work_task_edge_add.add_argument("edge_type", choices=["blocks", "parent-child", "discovered-from"])
+    p_work_task_edge_add.add_argument("source", help="Source task id or unique prefix.")
+    p_work_task_edge_add.add_argument("target_id", help="Target task id or unique prefix.")
+    p_work_task_edge_add.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
+    )
+    p_work_task_edge_add.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_task_edge_remove = edge_sub.add_parser("remove", help="Remove a dependency edge by id or endpoints.")
+    p_work_task_edge_remove.add_argument("--id", dest="edge_id", default=None, help="Edge id.")
+    p_work_task_edge_remove.add_argument(
+        "--type", dest="edge_type", choices=["blocks", "parent-child", "discovered-from"]
+    )
+    p_work_task_edge_remove.add_argument("--source", default=None, help="Source task id or unique prefix.")
+    p_work_task_edge_remove.add_argument(
+        "--edge-target", dest="target_id", default=None, help="Target task id or unique prefix."
+    )
+    p_work_task_edge_remove.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
+    )
+    p_work_task_edge_remove.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_task_edge_list = edge_sub.add_parser("list", help="List dependency edges.")
+    p_work_task_edge_list.add_argument("--task", dest="task_id", default=None, help="Limit to edges touching one task.")
+    p_work_task_edge_list.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
+    )
+    p_work_task_edge_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import = work_sub.add_parser("import", help="Add, list, show, or promote scanner-ready work imports.")
     import_sub = p_work_import.add_subparsers(dest="import_command", metavar="<import-command>")
     import_sub.required = True

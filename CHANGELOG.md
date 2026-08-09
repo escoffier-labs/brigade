@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Work task ledger dependency edges and a computed ready set (#737): typed
+  edges (`blocks`, `parent-child`, `discovered-from`) live as a normalized
+  top-level `edges` array in `.brigade/work/tasks.json` (schema version 2).
+  `brigade work ready [--explain] [--json]` returns the ready set; `work task
+  edge add|remove|list`, `work task add --deps` / `--graph`, and close-time
+  newly-unblocked / completable-parent reporting cover the mutation surface.
+  Only `blocks` gates readiness (with parent-child blocker propagation);
+  `discovered-from` is provenance-only. Direct and transitive cycles on
+  readiness-affecting edges (`blocks` and `parent-child`) are rejected at
+  edge-add and graph-apply time with a machine-readable `dependency_cycle`
+  reason; `discovered-from` never participates in cycle detection.
+
 ### Fixed
 - `brigade run --wait` now joins a fair per-worktree wait queue instead of
   timing out after 600 seconds while a legitimate run still holds the lock.
