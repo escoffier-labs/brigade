@@ -117,7 +117,10 @@ def _release_receipt_matches_head(receipt: dict[str, Any], target: Path, *, base
     git = evidence.get("git") if isinstance(evidence.get("git"), dict) else {}
     receipt_head = git.get("head")
     current_head = _git_value(target, "rev-parse", "HEAD")
-    return bool(receipt_head and current_head and receipt_head == current_head and receipt.get("base_ref") == base_ref)
+    # Require an explicit top-level base_ref; legacy receipts omit it and must refresh.
+    if "base_ref" not in receipt or receipt["base_ref"] != base_ref:
+        return False
+    return bool(receipt_head and current_head and receipt_head == current_head)
 
 
 def _latest_release_or_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
