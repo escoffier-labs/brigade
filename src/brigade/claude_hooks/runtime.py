@@ -1605,10 +1605,14 @@ def _bash_write_detected(
     started = localio.parse_iso_datetime(started_at)
     if started is None:
         return True
+    # Attribute by concurrent write window, not exact fingerprint equality.
+    # Another live session may have written again (or a third write may have
+    # interleaved) after recording an older repo_fingerprint; requiring an
+    # exact match re-arms this session's closeout gate (#704 / #380 follow-up).
     for other_state in iter_session_states(target, limit=MAX_RECENT_SESSION_STATES):
         if other_state.get("session_id") == session_id:
             continue
-        if other_state.get("write_observed") is not True or other_state.get("repo_fingerprint") != current:
+        if other_state.get("write_observed") is not True:
             continue
         other_write = localio.parse_iso_datetime(other_state.get("last_write_at"))
         if other_write is not None and other_write >= started:
