@@ -128,6 +128,126 @@ def test_command_failure_preserves_installer_or_asset_error(acceptance_module):
         acceptance_module.run_checked(["pipx", "install", "brigade-cli==1.2.3"], runner=failing_runner)
 
 
+def test_github_request_headers_attach_bearer_token_when_present(acceptance_module, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "ghs_example_token_value")
+    headers = acceptance_module._github_request_headers()
+    assert headers["Authorization"] == "Bearer ghs_example_token_value"
+    assert headers["Accept"] == "application/vnd.github+json"
+    assert headers["User-Agent"] == acceptance_module.USER_AGENT
+
+
+def test_wait_for_github_release_tag_returns_immediately_when_release_is_visible(acceptance_module):
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        return 200, {"tag_name": "v1.2.3", "draft": False, "prerelease": False}
+
+    payload = acceptance_module.wait_for_github_release_tag(
+        "1.2.3",
+        fetch=fetch,
+        sleep=lambda _: pytest.fail("visible release should not sleep"),
+    )
+
+    assert payload["tag_name"] == "v1.2.3"
+    assert calls == [
+        "https://api.github.com/repos/escoffier-labs/brigade/releases/tags/v1.2.3",
+    ]
+
+
+def test_wait_for_github_release_tag_retries_transient_403_then_succeeds(acceptance_module):
+    sleeps = []
+    responses = iter(
+        (
+            (403, {"message": "rate limit"}),
+            (403, {"message": "abuse detection"}),
+            (200, {"tag_name": "v1.2.3", "draft": False, "prerelease": False}),
+        )
+    )
+
+    acceptance_module.wait_for_github_release_tag(
+        "1.2.3",
+        fetch=lambda _: next(responses),
+        sleep=lambda seconds: sleeps.append(seconds),
+        max_attempts=3,
+        initial_backoff_seconds=2,
+        max_backoff_seconds=8,
+    )
+
+    assert sleeps == [2, 4]
+
+
+def test_wait_for_github_release_tag_retries_429_with_bounded_backoff(acceptance_module):
+    sleeps = []
+    responses = iter(
+        (
+            (429, {"message": "rate limit"}),
+            (200, {"tag_name": "v1.2.3", "draft": False, "prerelease": False}),
+        )
+    )
+
+    acceptance_module.wait_for_github_release_tag(
+        "1.2.3",
+        fetch=lambda _: next(responses),
+        sleep=lambda seconds: sleeps.append(seconds),
+        max_attempts=2,
+        initial_backoff_seconds=3,
+        max_backoff_seconds=3,
+    )
+
+    assert sleeps == [3]
+
+
+def test_wait_for_github_release_tag_fails_after_max_attempts_on_persistent_403(acceptance_module):
+    sleeps = []
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="not available after 3 attempts"):
+        acceptance_module.wait_for_github_release_tag(
+            "1.2.3",
+            fetch=lambda _: (403, {"message": "rate limit"}),
+            sleep=lambda seconds: sleeps.append(seconds),
+            max_attempts=3,
+            initial_backoff_seconds=1,
+            max_backoff_seconds=4,
+        )
+
+    assert sleeps == [1, 2]
+
+
+def test_wait_for_github_release_tag_does_not_retry_permanent_404(acceptance_module):
+    with pytest.raises(acceptance_module.AcceptanceError, match="HTTP 404"):
+        acceptance_module.wait_for_github_release_tag(
+            "1.2.3",
+            fetch=lambda _: (404, {"message": "Not Found"}),
+            sleep=lambda _: pytest.fail("permanent HTTP errors should not sleep"),
+            max_attempts=3,
+        )
+
+
+def test_wait_for_github_release_tag_rejects_tag_name_mismatch(acceptance_module):
+    with pytest.raises(acceptance_module.AcceptanceError, match="did not report tag"):
+        acceptance_module.wait_for_github_release_tag(
+            "1.2.3",
+            fetch=lambda _: (200, {"tag_name": "v9.9.9", "draft": False, "prerelease": False}),
+            sleep=lambda _: pytest.fail("tag mismatch should not sleep"),
+        )
+
+
+def test_wait_for_github_release_tag_error_messages_never_include_token(acceptance_module, monkeypatch):
+    secret = "ghs_super_secret_example_token"
+    monkeypatch.setenv("GITHUB_TOKEN", secret)
+
+    with pytest.raises(acceptance_module.AcceptanceError) as excinfo:
+        acceptance_module.wait_for_github_release_tag(
+            "1.2.3",
+            fetch=lambda _: (403, {"message": "rate limit"}),
+            sleep=lambda _: None,
+            max_attempts=1,
+        )
+
+    assert secret not in str(excinfo.value)
+
+
 def test_wait_for_pypi_version_returns_when_exact_version_is_immediately_available(acceptance_module):
     calls = []
 
@@ -612,7 +732,9 @@ def test_run_acceptance_proves_go_unavailable_immediately_before_setup_and_smoke
     that excludes Go."""
     source = SCRIPT.read_text()
     run_acceptance_body = source[source.index("def run_acceptance(") :]
-    setup_call = run_acceptance_body.index('run_checked([managed_brigade, "setup"], runner=runner, env=env)')
+    setup_call = run_acceptance_body.index(
+        'run_checked(\n                [managed_brigade, "setup", "--manifest", str(manifest_path)],'
+    )
     smoke_call = run_acceptance_body.index(
         "smoke_managed_components(managed_paths, version=version, runner=runner, env=env)"
     )
@@ -632,3 +754,12 @@ def test_run_acceptance_proves_go_unavailable_immediately_before_setup_and_smoke
     assert "smoke_managed_components" not in between_smoke
     # The PATH used in run_acceptance is built through build_go_free_path so Go is excluded.
     assert "build_go_free_path(" in run_acceptance_body
+    assert "wait_for_github_release_tag(version)" in run_acceptance_body
+    assert (
+        'run_checked(\n                [managed_brigade, "setup", "--manifest", str(manifest_path)],'
+        in run_acceptance_body
+    )
+    assert (
+        'run_checked(\n                [managed_brigade, "setup", "--offline", "--manifest", str(manifest_path)],'
+        in run_acceptance_body
+    )
