@@ -483,6 +483,11 @@ def _beta_version_has_installable_wheel(files: Any) -> bool:
 def resolve_beta_cli_version(http: UpdateHttp) -> str:
     """Select the newest non-yanked ``0.27.0.devYYYYMMDD`` wheel from PyPI.
 
+    Resolution scans the project JSON ``releases`` map only. PyPI's
+    ``info.version`` field reports the latest *stable* release (for example
+    ``0.26.1`` while a ``0.27.0.devYYYYMMDD`` wheel is present) and is never
+    used as the beta candidate.
+
     Unrelated preview lines, malformed versions, yanked files, sdists-only
     uploads, and Git refs are ignored. Native GitHub release assets are never
     consulted for beta CLI resolution.

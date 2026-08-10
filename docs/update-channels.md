@@ -33,13 +33,14 @@ release only; prerelease wheels are never selected as `latest`.
 
 Run `brigade update` for the production default. `brigade update --channel beta`
 selects the newest non-yanked exact `0.27.0.devYYYYMMDD` wheel for the `0.27`
-preview line from PyPI, ignores yanked uploads, unrelated preview lines,
-unrelated prereleases, Git refs, and native release assets, and force-reinstalls
-that pin into the existing user-global pipx Brigade environment (one active CLI
-environment; no second installer). A machine already owned by the other channel
-fails until the operator supplies `--switch-channel`; a command never transfers
-ownership implicitly. `--dry-run` resolves and prints the exact planned global
-pipx and setup commands without changing pipx, managed components, or state.
+preview line from PyPI release records (never from `info.version`, which stays
+on the latest stable release such as `0.26.1`), ignores yanked uploads, unrelated
+preview lines, unrelated prereleases, Git refs, and native release assets, and
+force-reinstalls that pin into the existing user-global pipx Brigade environment
+(one active CLI environment; no second installer). A machine already owned by the
+other channel fails until the operator supplies `--switch-channel`; a command never
+transfers ownership implicitly. `--dry-run` resolves and prints the exact planned
+global pipx and setup commands without changing pipx, managed components, or state.
 
 Rollback from beta to stable is explicit:
 

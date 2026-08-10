@@ -156,14 +156,26 @@ def _sdist_file(version: str, *, yanked: bool = False) -> dict:
 
 
 class _PypiHttp(_Http):
-    def __init__(self, release, manifest, *, pypi_releases=None, tag_ref=None, tag_objects=None):
+    def __init__(
+        self,
+        release,
+        manifest,
+        *,
+        pypi_releases=None,
+        info_version: str = "0.26.1",
+        tag_ref=None,
+        tag_objects=None,
+    ):
         super().__init__(release, manifest, tag_ref=tag_ref, tag_objects=tag_objects)
         self.pypi_releases = pypi_releases if pypi_releases is not None else _default_beta_releases()
+        self.info_version = info_version
 
     def json(self, url):
         self.urls.append(url)
         if url == update_cmd.PYPI_PROJECT_JSON_URL:
-            return {"releases": self.pypi_releases}
+            # Mirror live PyPI: info.version stays on the latest stable release
+            # even when releases contains 0.27.0.devYYYYMMDD wheels.
+            return {"info": {"version": self.info_version}, "releases": self.pypi_releases}
         if url.endswith("/releases/latest"):
             return self.release
         if url == REF_URL:
@@ -325,6 +337,38 @@ def test_resolve_beta_cli_version_fails_closed_without_installable_preview_wheel
         update_cmd.resolve_beta_cli_version(http)
 
 
+def test_resolve_beta_cli_version_scans_releases_not_info_version():
+    """Live PyPI shape after workflow 31422458576: info.version stays stable."""
+    releases = {
+        "0.26.1": [_wheel_file("0.26.1")],
+        "0.27.0.dev20260810": [_wheel_file("0.27.0.dev20260810")],
+    }
+    http = _PypiHttp(
+        _release(_manifest()),
+        _manifest(),
+        pypi_releases=releases,
+        info_version="0.26.1",
+    )
+
+    assert update_cmd.resolve_beta_cli_version(http) == "0.27.0.dev20260810"
+    assert http.info_version == "0.26.1"
+
+
+def test_resolve_beta_cli_version_ignores_info_version_even_when_it_looks_like_a_dev_wheel():
+    releases = {
+        "0.26.1": [_wheel_file("0.26.1")],
+        "0.27.0.dev20260810": [_wheel_file("0.27.0.dev20260810")],
+    }
+    http = _PypiHttp(
+        _release(_manifest()),
+        _manifest(),
+        pypi_releases=releases,
+        info_version="0.27.0.dev20991231",
+    )
+
+    assert update_cmd.resolve_beta_cli_version(http) == "0.27.0.dev20260810"
+
+
 def test_resolve_beta_cli_version_fails_closed_when_releases_map_missing():
     class _MissingReleases:
         urls: list[str]
@@ -335,7 +379,7 @@ def test_resolve_beta_cli_version_fails_closed_when_releases_map_missing():
         def json(self, url: str):
             self.urls.append(url)
             assert url == update_cmd.PYPI_PROJECT_JSON_URL
-            return {"info": {"version": "1.2.3"}}
+            return {"info": {"version": "0.26.1"}}
 
         def bytes(self, url: str) -> bytes:
             raise AssertionError(url)
