@@ -44,6 +44,7 @@ def _seat_health_probe_reports_healthy(monkeypatch, request):
     """
     if request.module.__name__.rsplit(".", 1)[-1] in {
         "test_seat_health",
+        "test_seat_health_policy",
         "test_aboyeur_seat_health_probe",
         "test_aboyeur_orchestrator_health_routing",
     }:

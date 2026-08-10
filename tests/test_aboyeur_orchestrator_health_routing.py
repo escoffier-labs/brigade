@@ -263,6 +263,9 @@ def test_unhealthy_worker_routes_to_fallback_and_persists_decision(monkeypatch, 
     assert routing["decisions"] == [expected]
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["seat_routing"] == [expected]
+    assert run_meta["health"]["schema"] == "brigade.seat_health_summary.v1"
+    assert run_meta["health"]["fallbacks_selected"] == 1
+    assert run_meta["health"]["unhealthy"] >= 1
 
 
 def test_healthy_worker_path_has_no_routing_decisions(monkeypatch, tmp_path):
@@ -282,7 +285,10 @@ def test_healthy_worker_path_has_no_routing_decisions(monkeypatch, tmp_path):
     )
 
     assert not (output_dir / "seat-routing.json").exists()
-    assert "seat_routing" not in json.loads((output_dir / "run.json").read_text())
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert "seat_routing" not in run_meta
+    assert run_meta["health"]["schema"] == "brigade.seat_health_summary.v1"
+    assert run_meta["health"]["fallbacks_selected"] == 0
 
 
 def test_unhealthy_direct_worker_without_fallback_aborts(monkeypatch, tmp_path, capsys):
@@ -320,3 +326,37 @@ def test_unhealthy_direct_worker_without_fallback_aborts(monkeypatch, tmp_path, 
 
     routing = json.loads((output_dir / "seat-routing.json").read_text())
     assert routing["decisions"] == [expected]
+
+
+def test_direct_worker_fallback_prints_requested_and_effective(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        aboyeur,
+        "dispatch",
+        lambda assignments, roster, **kwargs: [
+            aboyeur.WorkerResult(worker="coder", task="build feature", text="done", ok=True)
+        ],
+    )
+    monkeypatch.setattr(
+        aboyeur,
+        "_run_orchestrator",
+        lambda *args, **kwargs: agents.AgentResult(text="final answer", ok=True),
+    )
+    _install_probe(monkeypatch, PerSeatFakeAdapter(unhealthy=frozenset({"coder"})))
+    output_dir = tmp_path / "run-direct-fallback"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(worker_fallback=("coder-fallback",)),
+            worker="coder",
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+
+    stderr = capsys.readouterr().err
+    assert "requested worker coder; effective seat coder-fallback [auth-required]" in stderr
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["health"]["fallbacks_selected"] == 1

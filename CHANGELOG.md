@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   appear on `brigade work ready` (JSON and text) when present. Stored under
   task `metadata`; absent annotations change nothing. Brigade does not dispatch
   from them. Forward-plan skill documents emitting the hints.
+- Seat-health admission now projects `brigade.seat_health_summary.v1` onto
+  `run.json`, records typed incomplete worker summaries, persists
+  same-seat-once retry attempts before re-probe, quarantines non-retryable
+  seats for the run, receipts Codex app-server→exec as
+  `brigade.transport_routing.v1`, re-probes on resume, and rejects read-only
+  seats whose declared isolation is only soft/none. (#474)
 
 ## [0.26.1] - 2026-08-09
 

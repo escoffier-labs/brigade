@@ -12,7 +12,16 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import aboyeur, agents, codex_appserver, receipt_schema, run_lifecycle, runguard, worker_events
+from . import (
+    aboyeur,
+    agents,
+    codex_appserver,
+    receipt_schema,
+    run_lifecycle,
+    runguard,
+    seat_health,
+    worker_events,
+)
 from .roster import Agent, Roster, _as_bool, _as_env
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
@@ -381,10 +390,42 @@ def _resume_locked(
             file=sys.stderr,
         )
         return 2
+    probe = seat_health.SeatHealthProbe(collect_executable_version=False)
     try:
         for entry in resumable:
             worker = entry.get("worker", "")
             agent = roster.agents.get(worker)
+            if agent is not None:
+                probe.invalidate(seat=agent.name)
+                try:
+                    health = probe.probe(
+                        agent,
+                        roster,
+                        workspace=cwd,
+                        allow_model_smoke=False,
+                        require_hard_isolation=read_only,
+                    )
+                except Exception as exc:
+                    entry["detail"] = f"resume seat probe failed: {exc}"[:200]
+                    entry["status"] = "failed"
+                    print(f"skipping resume for {worker}: seat probe failed", file=sys.stderr)
+                    continue
+                try:
+                    seat_health.write_seat_health_receipt(
+                        run_dir / "seat-health.json",
+                        (health,),
+                        run_id=run_dir.name,
+                    )
+                except OSError as exc:
+                    print(f"error: seat health receipt failed: {exc}", file=sys.stderr)
+                if health.status == "unhealthy":
+                    cause = health.failure.failure_class.value if health.failure is not None else "unclassified"
+                    entry["detail"] = f"resume blocked: seat unhealthy [{cause}]"[:200]
+                    entry["status"] = "failed"
+                    entry["failure_phase"] = "preflight"
+                    entry["failure_kind"] = cause
+                    print(f"skipping resume for {worker}: unhealthy [{cause}]", file=sys.stderr)
+                    continue
             timeout = agent.timeout_seconds if agent and agent.timeout_seconds is not None else roster.timeout_seconds
             print(f"resuming: {worker} (thread {entry['thread_id']})", file=sys.stderr)
             try:
