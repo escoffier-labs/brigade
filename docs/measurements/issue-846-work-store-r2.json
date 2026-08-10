@@ -155,7 +155,7 @@
   "results": [
     {
       "backup_restore": {
-        "backup_time_ns": 279011,
+        "backup_time_ns": 306685,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -167,8 +167,8 @@
         "config_digest_before": "3cc256440ad11ccc17242d89228802575cd7aa05704f886808340dfd6e49f490",
         "pass": true,
         "status": "measured",
-        "task_edge_digest_after": "d97a3ecd96bfd95e01672463bcea418788c430468621f1a3d1e22ee961b63754",
-        "task_edge_digest_before": "d97a3ecd96bfd95e01672463bcea418788c430468621f1a3d1e22ee961b63754"
+        "task_edge_digest_after": "3dfb0ff6f018dcd4fd4f65cdb6e7ad0077ed8059254207ce159eca86b01eae5c",
+        "task_edge_digest_before": "3dfb0ff6f018dcd4fd4f65cdb6e7ad0077ed8059254207ce159eca86b01eae5c"
       },
       "branch_diff_merge": {
         "detail": "JSON ledger has no first-class branch/diff/merge path",
@@ -180,16 +180,18 @@
           13
         ],
         "exit_13_count": 1,
-        "loser_holder": "lane-a",
+        "loser_holder": "lane-b",
         "loser_reason": "already_claimed",
         "pass": true,
         "status": "measured",
-        "winner_actor": "lane-a",
+        "winner_actor": "lane-b",
         "winner_count": 1
       },
       "cold_start": {
-        "cold_start_ns": 155073,
+        "cold": true,
+        "cold_start_ns": 217720,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured",
         "task_count": 50
       },
@@ -223,8 +225,28 @@
         "ready_count": 1
       },
       "guard_and_empty_filter": {
-        "empty_filter_exit": 2,
-        "guard_mismatch_exit": 13,
+        "empty_filter": {
+          "exit_code": 2,
+          "pass": true,
+          "reason": "empty_filter"
+        },
+        "if_actor_mismatch": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "if_status_match": {
+          "exit_code": 0,
+          "pass": true,
+          "released": true
+        },
+        "if_status_mismatch": {
+          "exit_code": 13,
+          "expected": "pending",
+          "guard": "if_status",
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
         "pass": true,
         "status": "measured",
         "still_held_after_rejects": true
@@ -247,10 +269,10 @@
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 2936757,
-        "min_ns": 1551060,
-        "p50_ns": 1773939,
-        "p95_ns": 2377470,
+        "max_ns": 3127996,
+        "min_ns": 1631671,
+        "p50_ns": 2403971,
+        "p95_ns": 2934876,
         "samples": 100
       },
       "offline_divergence": {
@@ -268,8 +290,8 @@
         "disk_bytes_before": 24699,
         "disk_growth_bytes": 240,
         "pass": true,
-        "peak_rss_kib": 44480,
-        "peak_rss_mib": 43.44,
+        "peak_rss_kib": 44656,
+        "peak_rss_mib": 43.61,
         "rss_sampling": "measured",
         "status": "measured",
         "stdout_bytes": 280
@@ -279,6 +301,7 @@
         "claim_id": "claim-restart",
         "claim_persisted": true,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured"
       },
       "same_actor_and_retry": {
@@ -329,7 +352,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 274519,
+        "backup_time_ns": 241037,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -354,16 +377,18 @@
           13
         ],
         "exit_13_count": 1,
-        "loser_holder": "lane-b",
+        "loser_holder": "lane-a",
         "loser_reason": "already_claimed",
         "pass": true,
         "status": "measured",
-        "winner_actor": "lane-b",
+        "winner_actor": "lane-a",
         "winner_count": 1
       },
       "cold_start": {
-        "cold_start_ns": 482999,
+        "cold": true,
+        "cold_start_ns": 704162,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured",
         "task_count": 50
       },
@@ -415,13 +440,14 @@
         "disable_telemetry_env": "1",
         "metrics_artifacts": [],
         "pass": true,
+        "scanned_store_path": "ws-sqlite-metrics-store-hq2rcop6",
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 3113775,
-        "min_ns": 774796,
-        "p50_ns": 877109,
-        "p95_ns": 2543934,
+        "max_ns": 3038728,
+        "min_ns": 824028,
+        "p50_ns": 968448,
+        "p95_ns": 2517497,
         "samples": 100
       },
       "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
@@ -431,8 +457,8 @@
       },
       "pass": true,
       "relative_to_json": {
-        "p50_vs_json": 0.4944414661383509,
-        "p95_vs_json": 1.070017287284382
+        "p50_vs_json": 0.4028534454034595,
+        "p95_vs_json": 0.8577864959201003
       },
       "resource_measurements": {
         "claim_exit_code": 0,
@@ -440,8 +466,8 @@
         "disk_bytes_before": 57344,
         "disk_growth_bytes": 4096,
         "pass": true,
-        "peak_rss_kib": 35888,
-        "peak_rss_mib": 35.05,
+        "peak_rss_kib": 36400,
+        "peak_rss_mib": 35.55,
         "rss_sampling": "measured",
         "status": "measured"
       },
@@ -450,6 +476,7 @@
         "claim_id": "claim-restart",
         "claim_persisted": true,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured"
       },
       "same_actor_and_retry": {
@@ -754,7 +781,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 302934,
+        "backup_time_ns": 324316,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -766,8 +793,8 @@
         "config_digest_before": "3cc256440ad11ccc17242d89228802575cd7aa05704f886808340dfd6e49f490",
         "pass": true,
         "status": "measured",
-        "task_edge_digest_after": "3da1306b8ba95ad1b388553e49b2314810500befdb3e9f844fa3e64fb2b59e17",
-        "task_edge_digest_before": "3da1306b8ba95ad1b388553e49b2314810500befdb3e9f844fa3e64fb2b59e17"
+        "task_edge_digest_after": "193f1db41275a7aec3b8cf235ffd59a8fd4ea86d3d428f7d5468d84fdf7a8862",
+        "task_edge_digest_before": "193f1db41275a7aec3b8cf235ffd59a8fd4ea86d3d428f7d5468d84fdf7a8862"
       },
       "branch_diff_merge": {
         "detail": "JSON ledger has no first-class branch/diff/merge path",
@@ -787,8 +814,10 @@
         "winner_count": 1
       },
       "cold_start": {
-        "cold_start_ns": 689640,
+        "cold": true,
+        "cold_start_ns": 1082542,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured",
         "task_count": 200
       },
@@ -822,8 +851,28 @@
         "ready_count": 1
       },
       "guard_and_empty_filter": {
-        "empty_filter_exit": 2,
-        "guard_mismatch_exit": 13,
+        "empty_filter": {
+          "exit_code": 2,
+          "pass": true,
+          "reason": "empty_filter"
+        },
+        "if_actor_mismatch": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "if_status_match": {
+          "exit_code": 0,
+          "pass": true,
+          "released": true
+        },
+        "if_status_mismatch": {
+          "exit_code": 13,
+          "expected": "pending",
+          "guard": "if_status",
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
         "pass": true,
         "status": "measured",
         "still_held_after_rejects": true
@@ -846,10 +895,10 @@
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 11488385,
-        "min_ns": 5179526,
-        "p50_ns": 6508538,
-        "p95_ns": 7208358,
+        "max_ns": 10156536,
+        "min_ns": 5360347,
+        "p50_ns": 6099404,
+        "p95_ns": 7149591,
         "samples": 100
       },
       "offline_divergence": {
@@ -867,8 +916,8 @@
         "disk_bytes_before": 140737,
         "disk_growth_bytes": 240,
         "pass": true,
-        "peak_rss_kib": 45628,
-        "peak_rss_mib": 44.56,
+        "peak_rss_kib": 45728,
+        "peak_rss_mib": 44.66,
         "rss_sampling": "measured",
         "status": "measured",
         "stdout_bytes": 282
@@ -878,6 +927,7 @@
         "claim_id": "claim-restart",
         "claim_persisted": true,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured"
       },
       "same_actor_and_retry": {
@@ -928,7 +978,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 346112,
+        "backup_time_ns": 324412,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -961,8 +1011,10 @@
         "winner_count": 1
       },
       "cold_start": {
-        "cold_start_ns": 1633259,
+        "cold": true,
+        "cold_start_ns": 2216471,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured",
         "task_count": 200
       },
@@ -1014,13 +1066,14 @@
         "disable_telemetry_env": "1",
         "metrics_artifacts": [],
         "pass": true,
+        "scanned_store_path": "ws-sqlite-metrics-store-g5_cok2u",
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 3138820,
-        "min_ns": 675688,
-        "p50_ns": 1755945,
-        "p95_ns": 2438763,
+        "max_ns": 3188709,
+        "min_ns": 702166,
+        "p50_ns": 1659846,
+        "p95_ns": 2619012,
         "samples": 100
       },
       "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
@@ -1030,8 +1083,8 @@
       },
       "pass": true,
       "relative_to_json": {
-        "p50_vs_json": 0.26979100375537485,
-        "p95_vs_json": 0.3383243451559981
+        "p50_vs_json": 0.2721324903220052,
+        "p95_vs_json": 0.3663163389346328
       },
       "resource_measurements": {
         "claim_exit_code": 0,
@@ -1039,8 +1092,8 @@
         "disk_bytes_before": 208896,
         "disk_growth_bytes": 4096,
         "pass": true,
-        "peak_rss_kib": 37616,
-        "peak_rss_mib": 36.73,
+        "peak_rss_kib": 38108,
+        "peak_rss_mib": 37.21,
         "rss_sampling": "measured",
         "status": "measured"
       },
@@ -1049,6 +1102,7 @@
         "claim_id": "claim-restart",
         "claim_persisted": true,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured"
       },
       "same_actor_and_retry": {
@@ -1353,7 +1407,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 371795,
+        "backup_time_ns": 404093,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -1365,8 +1419,8 @@
         "config_digest_before": "3cc256440ad11ccc17242d89228802575cd7aa05704f886808340dfd6e49f490",
         "pass": true,
         "status": "measured",
-        "task_edge_digest_after": "efc23e175b3c70f39cc96c7d6b093655878830993cfbc5652b05da159ff465a8",
-        "task_edge_digest_before": "efc23e175b3c70f39cc96c7d6b093655878830993cfbc5652b05da159ff465a8"
+        "task_edge_digest_after": "f4fb57135a88429a4aa628227a5cc4d3746404cb505b4fe62bec90f8aa70cad7",
+        "task_edge_digest_before": "f4fb57135a88429a4aa628227a5cc4d3746404cb505b4fe62bec90f8aa70cad7"
       },
       "branch_diff_merge": {
         "detail": "JSON ledger has no first-class branch/diff/merge path",
@@ -1378,16 +1432,18 @@
           13
         ],
         "exit_13_count": 1,
-        "loser_holder": "lane-b",
+        "loser_holder": "lane-a",
         "loser_reason": "already_claimed",
         "pass": true,
         "status": "measured",
-        "winner_actor": "lane-b",
+        "winner_actor": "lane-a",
         "winner_count": 1
       },
       "cold_start": {
-        "cold_start_ns": 1746719,
+        "cold": true,
+        "cold_start_ns": 4667939,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured",
         "task_count": 500
       },
@@ -1421,8 +1477,28 @@
         "ready_count": 500
       },
       "guard_and_empty_filter": {
-        "empty_filter_exit": 2,
-        "guard_mismatch_exit": 13,
+        "empty_filter": {
+          "exit_code": 2,
+          "pass": true,
+          "reason": "empty_filter"
+        },
+        "if_actor_mismatch": {
+          "exit_code": 13,
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
+        "if_status_match": {
+          "exit_code": 0,
+          "pass": true,
+          "released": true
+        },
+        "if_status_mismatch": {
+          "exit_code": 13,
+          "expected": "pending",
+          "guard": "if_status",
+          "pass": true,
+          "reason": "guard_mismatch"
+        },
         "pass": true,
         "status": "measured",
         "still_held_after_rejects": true
@@ -1445,10 +1521,10 @@
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 15756480,
-        "min_ns": 9991969,
-        "p50_ns": 11204831,
-        "p95_ns": 13219537,
+        "max_ns": 17359976,
+        "min_ns": 10327470,
+        "p50_ns": 11344255,
+        "p95_ns": 12295933,
         "samples": 100
       },
       "offline_divergence": {
@@ -1466,8 +1542,8 @@
         "disk_bytes_before": 353443,
         "disk_growth_bytes": 240,
         "pass": true,
-        "peak_rss_kib": 47712,
-        "peak_rss_mib": 46.59,
+        "peak_rss_kib": 47544,
+        "peak_rss_mib": 46.43,
         "rss_sampling": "measured",
         "status": "measured",
         "stdout_bytes": 279
@@ -1477,6 +1553,7 @@
         "claim_id": "claim-restart",
         "claim_persisted": true,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured"
       },
       "same_actor_and_retry": {
@@ -1527,7 +1604,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 929808,
+        "backup_time_ns": 1018028,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -1560,8 +1637,10 @@
         "winner_count": 1
       },
       "cold_start": {
-        "cold_start_ns": 3740090,
+        "cold": true,
+        "cold_start_ns": 4948832,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured",
         "task_count": 500
       },
@@ -1613,13 +1692,14 @@
         "disable_telemetry_env": "1",
         "metrics_artifacts": [],
         "pass": true,
+        "scanned_store_path": "ws-sqlite-metrics-store-frk_jj6o",
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 3014065,
-        "min_ns": 716344,
-        "p50_ns": 1879526,
-        "p95_ns": 2677631,
+        "max_ns": 2598494,
+        "min_ns": 725622,
+        "p50_ns": 1694447,
+        "p95_ns": 2394993,
         "samples": 100
       },
       "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
@@ -1629,8 +1709,8 @@
       },
       "pass": true,
       "relative_to_json": {
-        "p50_vs_json": 0.16774246751245064,
-        "p95_vs_json": 0.2025510424457377
+        "p50_vs_json": 0.14936608882645885,
+        "p95_vs_json": 0.19477928189751847
       },
       "resource_measurements": {
         "claim_exit_code": 0,
@@ -1638,8 +1718,8 @@
         "disk_bytes_before": 458752,
         "disk_growth_bytes": 0,
         "pass": true,
-        "peak_rss_kib": 42004,
-        "peak_rss_mib": 41.02,
+        "peak_rss_kib": 42696,
+        "peak_rss_mib": 41.7,
         "rss_sampling": "measured",
         "status": "measured"
       },
@@ -1648,6 +1728,7 @@
         "claim_id": "claim-restart",
         "claim_persisted": true,
         "pass": true,
+        "process_boundary": "subprocess",
         "status": "measured"
       },
       "same_actor_and_retry": {

@@ -126,8 +126,57 @@ def test_measure_matrix_json_and_sqlite_report_shape(tmp_path):
     json_result = next(item for item in report["results"] if item["shape"] == "json_ledger")
     assert json_result["guard_and_empty_filter"]["status"] == "measured"
     assert json_result["guard_and_empty_filter"]["pass"] is True
+    assert json_result["guard_and_empty_filter"]["if_actor_mismatch"]["pass"] is True
+    assert json_result["guard_and_empty_filter"]["if_status_mismatch"]["pass"] is True
+    assert json_result["guard_and_empty_filter"]["if_status_mismatch"]["guard"] == "if_status"
+    assert json_result["guard_and_empty_filter"]["if_status_match"]["pass"] is True
+    assert json_result["guard_and_empty_filter"]["empty_filter"]["pass"] is True
+    assert json_result["restart_recovery"]["process_boundary"] == "subprocess"
+    assert json_result["cold_start"]["process_boundary"] == "subprocess"
+    assert json_result["cold_start"]["cold"] is True
     sqlite_result = next(item for item in report["results"] if item["shape"] == "sqlite_wal")
     assert sqlite_result["guard_and_empty_filter"]["status"] == "unavailable"
+    assert sqlite_result["restart_recovery"]["process_boundary"] == "subprocess"
+    assert sqlite_result["cold_start"]["process_boundary"] == "subprocess"
+    assert sqlite_result["cold_start"]["cold"] is True
+    assert "scanned_store_path" in sqlite_result["metrics_state"]
+    assert sqlite_result["metrics_state"]["metrics_artifacts"] == []
+
+
+def test_sqlite_metrics_restores_env_and_scans_store(tmp_path, monkeypatch):
+    module = _load_module()
+    monkeypatch.delenv("DISABLE_TELEMETRY", raising=False)
+    monkeypatch.delenv("BRIGADE_ANONYMOUS_METRICS", raising=False)
+    result = module._sqlite_metrics_state(tmp_path, module.build_fixture("chain_50"))
+    assert result["pass"] is True
+    assert "DISABLE_TELEMETRY" not in __import__("os").environ
+    assert "BRIGADE_ANONYMOUS_METRICS" not in __import__("os").environ
+    assert result["scanned_store_path"].startswith("ws-sqlite-metrics-store-")
+
+
+def test_restart_and_cold_start_use_subprocess_boundary(tmp_path):
+    module = _load_module()
+    ledger = module.build_fixture("chain_50")
+    restart = module._json_restart_recovery(tmp_path, ledger)
+    cold = module._json_cold_start(tmp_path, ledger)
+    assert restart["process_boundary"] == "subprocess"
+    assert cold["process_boundary"] == "subprocess"
+    assert cold["cold"] is True
+    sqlite_restart = module._sqlite_restart_recovery(tmp_path, ledger)
+    sqlite_cold = module._sqlite_cold_start(tmp_path, ledger)
+    assert sqlite_restart["process_boundary"] == "subprocess"
+    assert sqlite_cold["process_boundary"] == "subprocess"
+    assert sqlite_cold["cold"] is True
+
+
+def test_json_guard_covers_if_status_match_and_mismatch(tmp_path):
+    module = _load_module()
+    result = module._json_guard_and_empty_filter(tmp_path, module.build_fixture("chain_50"))
+    assert result["pass"] is True
+    assert result["if_status_mismatch"]["exit_code"] == 13
+    assert result["if_status_mismatch"]["reason"] == "guard_mismatch"
+    assert result["if_status_match"]["exit_code"] == 0
+    assert result["if_status_match"]["released"] is True
 
 
 def test_measure_matrix_marks_dolt_shapes_blocked(tmp_path):

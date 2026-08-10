@@ -43,12 +43,12 @@ Production work-store code, engine memory projection, #843/#850, #844, #845,
 |---|---|---|---|
 | Two-claimer race (0 + 13) | measured | measured | blocked |
 | Same-actor rejection + idempotent retry | measured | measured | blocked |
-| Guard mismatch + empty-filter | measured | unavailable (adapter has no release filters) | blocked |
-| Restart recovery | measured | measured | blocked |
+| Guard mismatch + empty-filter | measured (`if_actor` + `if_status` match/mismatch) | unavailable (adapter has no release filters) | blocked |
+| Restart recovery | measured (fresh subprocess read) | measured (fresh subprocess export) | blocked |
 | Schema future/downgrade observation | measured (coerces to current; does not reject) | measured (meta preserves write; export coerces) | blocked |
 | Branch/config backup + restore digests | measured (branch unsupported; config+claim+task digests) | measured | blocked |
 | Install footprint | measured | measured | blocked |
-| Cold-start timing | measured | measured | blocked |
+| Cold-start timing | measured (fresh subprocess cold read) | measured (fresh subprocess cold export) | blocked |
 | Backup timing | measured (`backup_time_ns`) | measured | blocked |
 | Resource measurements (disk + RSS) | measured | measured | blocked |
 | Metrics state (observed, not hard-coded) | measured | measured | blocked |
@@ -58,6 +58,12 @@ Production work-store code, engine memory projection, #843/#850, #844, #845,
 Hard-coded `metrics_state` / `secret_history_handling` gate booleans from R1
 are replaced with observed harness cell results. Numbers are never fabricated:
 every residual cell is `measured`, `blocked`, or `unavailable`.
+
+Restart and cold-start cells use a fresh subprocess that receives only the
+store path and emits machine-readable JSON. SQLite metrics scans the touched
+store directory and restores `DISABLE_TELEMETRY` /
+`BRIGADE_ANONYMOUS_METRICS` after the cell. JSON guard coverage includes
+`if_status` match and mismatch with exit/reason assertions.
 
 ## Decision record (unchanged from R1)
 

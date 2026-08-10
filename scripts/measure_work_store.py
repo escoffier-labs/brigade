@@ -335,6 +335,128 @@ def _branch_heads_digest(_target: Path) -> dict[str, Any]:
     }
 
 
+@contextlib.contextmanager
+def _env_overrides(overrides: dict[str, str]) -> Any:
+    """Temporarily set process env keys; restore prior values (or absence) in finally."""
+    previous: dict[str, str] = {}
+    missing: set[str] = set()
+    for key, value in overrides.items():
+        if key in os.environ:
+            previous[key] = os.environ[key]
+        else:
+            missing.add(key)
+        os.environ[key] = value
+    try:
+        yield
+    finally:
+        for key in overrides:
+            if key in missing:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous[key]
+
+
+def _script_path() -> Path:
+    return Path(__file__).resolve()
+
+
+def _run_store_probe(
+    probe: str,
+    store: Path,
+    *,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    """Run a fresh-process probe that receives only the store path (+ optional task id)."""
+    argv = [sys.executable, str(_script_path()), "--probe", probe, "--store", str(store)]
+    if task_id is not None:
+        argv.extend(["--task-id", task_id])
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise MeasurementInputError(f"store probe {probe!r} failed (exit {proc.returncode}): {proc.stderr.strip()}")
+    line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise MeasurementInputError(f"store probe {probe!r} emitted non-JSON: {line!r}") from exc
+    if not isinstance(payload, dict):
+        raise MeasurementInputError(f"store probe {probe!r} emitted non-object JSON")
+    return payload
+
+
+def probe_json_read_claim(store: Path, task_id: str) -> dict[str, Any]:
+    loaded = ledger_mod._read_task_ledger(store)
+    stored = next((task for task in loaded.get("tasks", []) if task.get("id") == task_id), None)
+    if stored is None:
+        return {"ok": False, "error": "task_not_found", "task_id": task_id}
+    claim = stored.get("claim") if isinstance(stored.get("claim"), dict) else {}
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "status": stored.get("status"),
+        "assignee": stored.get("assignee"),
+        "claim_id": claim.get("claim_id"),
+        "process_boundary": "subprocess",
+    }
+
+
+def probe_json_cold_start(store: Path) -> dict[str, Any]:
+    start = time.perf_counter_ns()
+    loaded = ledger_mod._read_task_ledger(store)
+    elapsed = time.perf_counter_ns() - start
+    return {
+        "ok": True,
+        "cold_start_ns": elapsed,
+        "task_count": len(loaded.get("tasks", [])),
+        "process_boundary": "subprocess",
+        "cold": True,
+    }
+
+
+def probe_sqlite_read_claim(store: Path, task_id: str) -> dict[str, Any]:
+    exported = _sqlite_export_ledger(store)
+    stored = next((task for task in exported.get("tasks", []) if task.get("id") == task_id), None)
+    if stored is None:
+        return {"ok": False, "error": "task_not_found", "task_id": task_id}
+    claim = stored.get("claim") if isinstance(stored.get("claim"), dict) else {}
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "status": stored.get("status"),
+        "assignee": stored.get("assignee"),
+        "claim_id": claim.get("claim_id"),
+        "process_boundary": "subprocess",
+    }
+
+
+def probe_sqlite_cold_start(store: Path) -> dict[str, Any]:
+    start = time.perf_counter_ns()
+    exported = _sqlite_export_ledger(store)
+    elapsed = time.perf_counter_ns() - start
+    return {
+        "ok": True,
+        "cold_start_ns": elapsed,
+        "task_count": len(exported.get("tasks", [])),
+        "process_boundary": "subprocess",
+        "cold": True,
+    }
+
+
+def run_probe(probe: str, store: Path, *, task_id: str | None = None) -> dict[str, Any]:
+    if probe == "json-read-claim":
+        if not task_id:
+            raise MeasurementInputError("--task-id is required for json-read-claim")
+        return probe_json_read_claim(store, task_id)
+    if probe == "json-cold-start":
+        return probe_json_cold_start(store)
+    if probe == "sqlite-read-claim":
+        if not task_id:
+            raise MeasurementInputError("--task-id is required for sqlite-read-claim")
+        return probe_sqlite_read_claim(store, task_id)
+    if probe == "sqlite-cold-start":
+        return probe_sqlite_cold_start(store)
+    raise MeasurementInputError(f"unknown probe: {probe}")
+
+
 def _task(
     task_id: str,
     text: str,
@@ -752,22 +874,72 @@ def _json_guard_and_empty_filter(root: Path, ledger: dict[str, Any]) -> dict[str
     task_id = _claim_target_id(ledger)
     try:
         claimed = ledger_mod._claim_task(target, task_id, actor="lane-a", claim_id="guard-claim")
-        with contextlib.redirect_stdout(io.StringIO()):
-            guard_rc = work_cmd.release(
-                target=target,
-                task=[task_id],
-                if_actor="other-lane",
-                json_output=True,
-            )
+
+        def _release_task(**kwargs: Any) -> tuple[int, dict[str, Any]]:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = work_cmd.release(target=target, task=[task_id], json_output=True, **kwargs)
+            text = buf.getvalue().strip()
+            payload = json.loads(text) if text else {}
+            return rc, payload
+
+        actor_rc, actor_payload = _release_task(if_actor="other-lane")
+        status_mismatch_rc, status_mismatch_payload = _release_task(if_status="pending")
+        empty_buf = io.StringIO()
+        with contextlib.redirect_stdout(empty_buf):
             empty_rc = work_cmd.release(target=target, actor=[""], json_output=True)
+        empty_text = empty_buf.getvalue().strip()
+        empty_payload = json.loads(empty_text) if empty_text else {}
+
         after = ledger_mod._read_task_ledger(target)
         stored = next(task for task in after["tasks"] if task["id"] == task_id)
         still_held = stored.get("status") == "in_progress" and stored.get("assignee") == "lane-a"
-        ok = bool(claimed.get("created")) and guard_rc == EXIT_CLAIM_BUSY and empty_rc == 2 and still_held
+
+        status_match_rc, _status_match_payload = _release_task(if_actor="lane-a", if_status="in_progress")
+        after_match = ledger_mod._read_task_ledger(target)
+        released = next(task for task in after_match["tasks"] if task["id"] == task_id)
+        released_ok = released.get("status") == "pending" and not released.get("assignee")
+
+        actor_ok = actor_rc == EXIT_CLAIM_BUSY and actor_payload.get("reason") == claim_mod.REASON_GUARD_MISMATCH
+        status_mismatch_ok = (
+            status_mismatch_rc == EXIT_CLAIM_BUSY
+            and status_mismatch_payload.get("reason") == claim_mod.REASON_GUARD_MISMATCH
+            and status_mismatch_payload.get("guard") == "if_status"
+        )
+        empty_ok = empty_rc == 2 and empty_payload.get("reason") == claim_mod.REASON_EMPTY_FILTER
+        status_match_ok = status_match_rc == 0 and released_ok
+        ok = (
+            bool(claimed.get("created"))
+            and actor_ok
+            and status_mismatch_ok
+            and empty_ok
+            and still_held
+            and status_match_ok
+        )
         return {
             "status": "measured",
-            "guard_mismatch_exit": guard_rc,
-            "empty_filter_exit": empty_rc,
+            "if_actor_mismatch": {
+                "exit_code": actor_rc,
+                "reason": actor_payload.get("reason"),
+                "pass": actor_ok,
+            },
+            "if_status_mismatch": {
+                "exit_code": status_mismatch_rc,
+                "reason": status_mismatch_payload.get("reason"),
+                "guard": status_mismatch_payload.get("guard"),
+                "expected": status_mismatch_payload.get("expected"),
+                "pass": status_mismatch_ok,
+            },
+            "if_status_match": {
+                "exit_code": status_match_rc,
+                "released": released_ok,
+                "pass": status_match_ok,
+            },
+            "empty_filter": {
+                "exit_code": empty_rc,
+                "reason": empty_payload.get("reason"),
+                "pass": empty_ok,
+            },
             "still_held_after_rejects": still_held,
             "pass": ok,
         }
@@ -780,21 +952,21 @@ def _json_restart_recovery(root: Path, ledger: dict[str, Any]) -> dict[str, Any]
     task_id = _claim_target_id(ledger)
     try:
         claimed = ledger_mod._claim_task(target, task_id, actor="lane-restart", claim_id="claim-restart")
-        # Simulate process restart: drop in-memory handles and re-read from disk.
-        reloaded = ledger_mod._read_task_ledger(target)
-        stored = next(task for task in reloaded["tasks"] if task["id"] == task_id)
-        claim = stored.get("claim") if isinstance(stored.get("claim"), dict) else {}
+        probe = _run_store_probe("json-read-claim", target, task_id=task_id)
         ok = (
             bool(claimed.get("created"))
-            and stored.get("status") == "in_progress"
-            and stored.get("assignee") == "lane-restart"
-            and claim.get("claim_id") == "claim-restart"
+            and probe.get("ok") is True
+            and probe.get("process_boundary") == "subprocess"
+            and probe.get("status") == "in_progress"
+            and probe.get("assignee") == "lane-restart"
+            and probe.get("claim_id") == "claim-restart"
         )
         return {
             "status": "measured",
+            "process_boundary": "subprocess",
             "claim_persisted": ok,
-            "assignee": stored.get("assignee"),
-            "claim_id": claim.get("claim_id"),
+            "assignee": probe.get("assignee"),
+            "claim_id": probe.get("claim_id"),
             "pass": ok,
         }
     finally:
@@ -910,14 +1082,23 @@ def _json_install_footprint(root: Path, ledger: dict[str, Any]) -> dict[str, Any
 def _json_cold_start(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
     target = _json_load_target(root, ledger, with_git=False)
     try:
-        start = time.perf_counter_ns()
-        loaded = ledger_mod._read_task_ledger(target)
-        elapsed = time.perf_counter_ns() - start
+        probe = _run_store_probe("json-cold-start", target)
+        elapsed = probe.get("cold_start_ns")
+        ok = (
+            probe.get("ok") is True
+            and probe.get("process_boundary") == "subprocess"
+            and probe.get("cold") is True
+            and isinstance(elapsed, int)
+            and elapsed >= 0
+            and probe.get("task_count") == len(ledger["tasks"])
+        )
         return {
             "status": "measured",
+            "cold": True,
+            "process_boundary": "subprocess",
             "cold_start_ns": elapsed,
-            "task_count": len(loaded.get("tasks", [])),
-            "pass": elapsed >= 0 and len(loaded.get("tasks", [])) == len(ledger["tasks"]),
+            "task_count": probe.get("task_count"),
+            "pass": ok,
         }
     finally:
         shutil.rmtree(target, ignore_errors=True)
@@ -1426,27 +1607,81 @@ def _sqlite_restart_recovery(root: Path, ledger: dict[str, Any]) -> dict[str, An
         _sqlite_load(db_path, ledger)
         task_id = _claim_target_id(ledger)
         code, claimed = _sqlite_claim(db_path, task_id, actor="lane-restart", claim_id="claim-restart")
-        # New connection = process restart for this adapter.
-        exported = _sqlite_export_ledger(db_path)
-        stored = next(task for task in exported["tasks"] if task["id"] == task_id)
-        claim = stored.get("claim") if isinstance(stored.get("claim"), dict) else {}
+        probe = _run_store_probe("sqlite-read-claim", db_path, task_id=task_id)
         ok = (
             code == 0
             and bool(claimed.get("created"))
-            and stored.get("status") == "in_progress"
-            and stored.get("assignee") == "lane-restart"
-            and claim.get("claim_id") == "claim-restart"
+            and probe.get("ok") is True
+            and probe.get("process_boundary") == "subprocess"
+            and probe.get("status") == "in_progress"
+            and probe.get("assignee") == "lane-restart"
+            and probe.get("claim_id") == "claim-restart"
         )
         return {
             "status": "measured",
+            "process_boundary": "subprocess",
             "claim_persisted": ok,
-            "assignee": stored.get("assignee"),
-            "claim_id": claim.get("claim_id"),
+            "assignee": probe.get("assignee"),
+            "claim_id": probe.get("claim_id"),
             "pass": ok,
         }
     finally:
         for suffix in ("", "-wal", "-shm"):
             Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_cold_start(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-cold-", suffix=".db", dir=root)[1])
+    try:
+        _sqlite_load(db_path, ledger)
+        probe = _run_store_probe("sqlite-cold-start", db_path)
+        elapsed = probe.get("cold_start_ns")
+        ok = (
+            probe.get("ok") is True
+            and probe.get("process_boundary") == "subprocess"
+            and probe.get("cold") is True
+            and isinstance(elapsed, int)
+            and elapsed >= 0
+            and probe.get("task_count") == len(ledger["tasks"])
+        )
+        return {
+            "status": "measured",
+            "cold": True,
+            "process_boundary": "subprocess",
+            "cold_start_ns": elapsed,
+            "task_count": probe.get("task_count"),
+            "pass": ok,
+        }
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_metrics_state(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    store_dir = Path(tempfile.mkdtemp(prefix="ws-sqlite-metrics-store-", dir=root))
+    db_path = store_dir / "tasks.db"
+    overrides = {"DISABLE_TELEMETRY": "1", "BRIGADE_ANONYMOUS_METRICS": "0"}
+    try:
+        with _env_overrides(overrides):
+            _sqlite_load(db_path, ledger)
+            task_id = _claim_target_id(ledger)
+            code, _payload = _sqlite_claim(db_path, task_id, actor="lane-metrics", claim_id="claim-metrics")
+            # Scan the actual touched store directory (contains the DB + any sidecars).
+            artifacts = _scan_metrics_artifacts(store_dir)
+            disabled = os.environ.get("BRIGADE_ANONYMOUS_METRICS") == "0" and os.environ.get("DISABLE_TELEMETRY") == "1"
+            ok = code == 0 and disabled and artifacts == []
+            return {
+                "status": "measured",
+                "anonymous_metrics_config": "disabled",
+                "disable_telemetry_env": os.environ.get("DISABLE_TELEMETRY"),
+                "brigade_anonymous_metrics_env": os.environ.get("BRIGADE_ANONYMOUS_METRICS"),
+                "scanned_store_path": str(store_dir.name),
+                "metrics_artifacts": artifacts,
+                "claim_exit_code": code,
+                "pass": ok,
+            }
+    finally:
+        shutil.rmtree(store_dir, ignore_errors=True)
 
 
 def _sqlite_schema_version_policy(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
@@ -1572,24 +1807,6 @@ def _sqlite_install_footprint(root: Path, ledger: dict[str, Any]) -> dict[str, A
             Path(str(db_path) + suffix).unlink(missing_ok=True)
 
 
-def _sqlite_cold_start(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
-    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-cold-", suffix=".db", dir=root)[1])
-    try:
-        _sqlite_load(db_path, ledger)
-        start = time.perf_counter_ns()
-        exported = _sqlite_export_ledger(db_path)
-        elapsed = time.perf_counter_ns() - start
-        return {
-            "status": "measured",
-            "cold_start_ns": elapsed,
-            "task_count": len(exported.get("tasks", [])),
-            "pass": elapsed >= 0 and len(exported.get("tasks", [])) == len(ledger["tasks"]),
-        }
-    finally:
-        for suffix in ("", "-wal", "-shm"):
-            Path(str(db_path) + suffix).unlink(missing_ok=True)
-
-
 def _sqlite_resource_measurements(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
     db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-rss-", suffix=".db", dir=root)[1])
     try:
@@ -1620,32 +1837,6 @@ def _sqlite_resource_measurements(root: Path, ledger: dict[str, Any]) -> dict[st
     finally:
         for suffix in ("", "-wal", "-shm"):
             Path(str(db_path) + suffix).unlink(missing_ok=True)
-
-
-def _sqlite_metrics_state(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
-    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-metrics-", suffix=".db", dir=root)[1])
-    workdir = Path(tempfile.mkdtemp(prefix="ws-sqlite-metrics-dir-", dir=root))
-    try:
-        _sqlite_load(db_path, ledger)
-        task_id = _claim_target_id(ledger)
-        os.environ["DISABLE_TELEMETRY"] = "1"
-        os.environ["BRIGADE_ANONYMOUS_METRICS"] = "0"
-        code, _payload = _sqlite_claim(db_path, task_id, actor="lane-metrics", claim_id="claim-metrics")
-        artifacts = _scan_metrics_artifacts(workdir)
-        ok = code == 0 and artifacts == []
-        return {
-            "status": "measured",
-            "anonymous_metrics_config": "disabled",
-            "disable_telemetry_env": os.environ.get("DISABLE_TELEMETRY"),
-            "brigade_anonymous_metrics_env": os.environ.get("BRIGADE_ANONYMOUS_METRICS"),
-            "metrics_artifacts": artifacts,
-            "claim_exit_code": code,
-            "pass": ok,
-        }
-    finally:
-        for suffix in ("", "-wal", "-shm"):
-            Path(str(db_path) + suffix).unlink(missing_ok=True)
-        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _sqlite_secret_history(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
@@ -2058,6 +2249,22 @@ def write_report(report: dict[str, Any], output: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--probe",
+        choices=(
+            "json-read-claim",
+            "json-cold-start",
+            "sqlite-read-claim",
+            "sqlite-cold-start",
+        ),
+        help="Fresh-process store probe; prints one JSON object to stdout",
+    )
+    parser.add_argument(
+        "--store",
+        type=Path,
+        help="Store path for --probe (JSON target root or SQLite DB file)",
+    )
+    parser.add_argument("--task-id", help="Task id for claim-read probes")
+    parser.add_argument(
         "--root",
         type=Path,
         default=Path(tempfile.gettempdir()),
@@ -2066,7 +2273,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        required=True,
         help="Diffable measurement JSON output path",
     )
     parser.add_argument("--warmups", type=int, default=DEFAULT_WARMUPS)
@@ -2092,6 +2298,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional temporary dolt binary path (never persisted as a dependency)",
     )
     args = parser.parse_args(argv)
+
+    if args.probe is not None:
+        if args.store is None:
+            parser.error("--store is required with --probe")
+        payload = run_probe(args.probe, args.store, task_id=args.task_id)
+        print(json.dumps(payload, sort_keys=True))
+        return 0
+
+    if args.output is None:
+        parser.error("--output is required unless --probe is set")
 
     shapes = [item.strip() for item in args.shapes.split(",") if item.strip()]
     datasets = [item.strip() for item in args.datasets.split(",") if item.strip()]
