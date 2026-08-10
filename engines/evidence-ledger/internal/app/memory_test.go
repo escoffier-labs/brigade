@@ -435,6 +435,54 @@ func TestCrawlMemoryTwoRootNamespaceIsolation(t *testing.T) {
 	}
 }
 
+func TestCrawlMemoryFailedUnknownPathDoesNotBorrowAnotherNamespace(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	nsA := "memory-11111111-2222-4333-8444-aaaaaaaaaaaa"
+	nsB := "memory-99999999-8888-4777-8666-bbbbbbbbbbbb"
+	for _, fixture := range []struct {
+		namespace string
+		cardID    string
+	}{
+		{nsA, "card-path-a-1111-4222-8333-444444444444"},
+		{nsB, "card-path-b-1111-4222-8333-444444444444"},
+	} {
+		ws := t.TempDir()
+		writeTestNamespace(t, ws, fixture.namespace)
+		cards := filepath.Join(ws, "memory", "cards")
+		if err := os.MkdirAll(cards, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cards, "card.md"), []byte("---\nid: "+fixture.cardID+"\ntopic: path\n---\n\n# Card\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runJSON(t, "crawl", "memory", ws, "--json")
+	}
+
+	missing := filepath.Join(t.TempDir(), "vanished-workspace")
+	code, _, stderr := run("crawl", "memory", missing, "--json")
+	if code == 0 {
+		t.Fatalf("missing workspace crawl unexpectedly succeeded: %s", stderr)
+	}
+
+	db := openTestDB(t)
+	defer db.Close()
+	var failedForB, staleB int
+	if err := db.QueryRow(`select count(*) from source_scan_runs
+where source_kind = ? and status in ('failed', 'interrupted')
+  and json_extract(metadata_json, '$.memory_namespace') = ?`, ingest.MemorySourceKind, nsB).Scan(&failedForB); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select count(*) from source_scan_runs
+where source_kind = ? and status = 'completed' and stale = 1
+  and json_extract(metadata_json, '$.memory_namespace') = ?`, ingest.MemorySourceKind, nsB).Scan(&staleB); err != nil {
+		t.Fatal(err)
+	}
+	if failedForB != 0 || staleB != 0 {
+		t.Fatalf("unknown path borrowed namespace B: failed=%d stale=%d", failedForB, staleB)
+	}
+}
+
 func TestCrawlMemoryDuplicateExplicitIDFailsBeforeReconcile(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")

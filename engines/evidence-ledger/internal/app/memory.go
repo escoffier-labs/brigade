@@ -86,7 +86,7 @@ func cmdCrawlMemory(args []string, out, errw io.Writer) int {
 	} else {
 		namespace, _ = memory.ResolveNamespace(workspace)
 		if namespace == "" {
-			namespace = ingest.LastMemoryNamespace(db)
+			namespace = ingest.LastMemoryNamespace(db, workspace)
 		}
 	}
 

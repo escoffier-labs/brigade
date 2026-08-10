@@ -299,6 +299,8 @@ set target_item_id = (
          or relations.target_collection_external_id = ''
          or tc.external_id = relations.target_collection_external_id)
     and (coalesce(relations.target_collection_external_id, '') != ''
+         or coalesce(tc.external_id, '') not like ?)
+    and (coalesce(relations.target_collection_external_id, '') != ''
          or 1 = (
            select count(*)
            from items candidate
@@ -307,6 +309,7 @@ set target_item_id = (
            where cs.kind = relations.target_source_kind
              and candidate.external_id = relations.target_external_id
              and candidate.tombstoned_at is null
+             and coalesce(cc.external_id, '') not like ?
          ))
     and target.tombstoned_at is null
   order by target.created_at, target.id
@@ -326,6 +329,8 @@ where target_item_id is null
            or relations.target_collection_external_id = ''
            or tc.external_id = relations.target_collection_external_id)
       and (coalesce(relations.target_collection_external_id, '') != ''
+           or coalesce(tc.external_id, '') not like ?)
+      and (coalesce(relations.target_collection_external_id, '') != ''
            or 1 = (
              select count(*)
              from items candidate
@@ -334,9 +339,10 @@ where target_item_id is null
              where cs.kind = relations.target_source_kind
                and candidate.external_id = relations.target_external_id
                and candidate.tombstoned_at is null
+               and coalesce(cc.external_id, '') not like ?
            ))
       and target.tombstoned_at is null
-  )`)
+  )`, "__miseledger_memory_backup__:%", "__miseledger_memory_backup__:%", "__miseledger_memory_backup__:%", "__miseledger_memory_backup__:%")
 	if err != nil {
 		return 0, err
 	}
@@ -610,7 +616,7 @@ func buildIngestEnvelope(rec adapter.Record, ingestedAt string, capturedAt *stri
 		LocatorKind: locatorKind, LocatorValue: locatorValue,
 		Attribution: "observed",
 		// Modality tool-output classifies the ingest channel, not human authorship.
-		Modality: "tool-output",
+		Modality:   "tool-output",
 		TrustLabel: "quarantined", TrustAssignedBy: "ingest:ingest.upsertRecord", TrustAssignedAt: &at,
 		InjectionStatus: "pending", InjectionRules: []string{},
 		Text: text, RawBytes: raw, CapturedAt: capturedAt, IngestedAt: &at,

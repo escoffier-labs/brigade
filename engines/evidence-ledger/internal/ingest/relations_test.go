@@ -1,6 +1,8 @@
 package ingest
 
 import (
+	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,6 +51,53 @@ func TestResolveRelationsQualifiedAndLegacy(t *testing.T) {
 	if legacyResolved != 1 || qualifiedResolved != 1 || unresolved != 1 {
 		t.Fatalf("legacy=%d qualified=%d unresolved=%d", legacyResolved, qualifiedResolved, unresolved)
 	}
+}
+
+func TestResolveRelationsOptionalTargetIgnoresDetachedBackups(t *testing.T) {
+	dir := t.TempDir()
+	db, err := archive.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	const backup = "__miseledger_memory_backup__:memory-a"
+	records := strings.Join([]string{
+		memoryRecord("memory-a", "live-unique", "live unique"),
+		memoryRecord(backup, "live-unique", "backup duplicate"),
+		memoryRecord(backup, "backup-only", "backup only"),
+		memoryRecord("memory-a", "ambiguous", "A ambiguous"),
+		memoryRecord("memory-b", "ambiguous", "B ambiguous"),
+		supportRelationRecord("unique-live", "live-unique"),
+		supportRelationRecord("only-backup", "backup-only"),
+		supportRelationRecord("ambiguous-live", "ambiguous"),
+	}, "\n") + "\n"
+	if _, err := ImportAdapterReader(db, strings.NewReader(records), "optional-backup.jsonl", ""); err != nil {
+		t.Fatal(err)
+	}
+	for relationType, wantResolved := range map[string]bool{
+		"unique-live":    true,
+		"only-backup":    false,
+		"ambiguous-live": false,
+	} {
+		var target sql.NullString
+		if err := db.QueryRow(`select target_item_id from relations where relation_type = ?`, relationType).Scan(&target); err != nil {
+			t.Fatal(err)
+		}
+		if wantResolved != (target.Valid && target.String != "") {
+			t.Fatalf("%s resolved=%v target=%q", relationType, wantResolved, target.String)
+		}
+	}
+}
+
+func memoryRecord(collection, externalID, text string) string {
+	return fmt.Sprintf(`{"schema":"miseledger.adapter.v1","source":{"kind":"brigade-memory","name":"Memory"},"collection":{"external_id":%q,"kind":"memory_cards","name":"cards"},"item":{"external_id":%q,"kind":"memory_card","created_at":"2026-01-01T00:00:00Z","text":%q},"relations":[],"raw":{"format":"json","path":%q,"ordinal":1}}`, collection, externalID, text, externalID+".json")
+}
+
+func supportRelationRecord(relationType, targetID string) string {
+	return fmt.Sprintf(`{"schema":"miseledger.adapter.v1","source":{"kind":"support","name":"Support"},"collection":{"external_id":"support:records","kind":"support","name":"support"},"item":{"external_id":%q,"kind":"record","created_at":"2026-01-01T00:00:00Z","text":"support"},"relations":[{"type":%q,"target":{"source":"brigade-memory","external_id":%q}}],"raw":{"format":"json","path":%q,"ordinal":1}}`, relationType, relationType, targetID, relationType+".json")
 }
 
 func TestResolveRelationsQualifiedWithoutCollectionRequiresUniqueLiveTarget(t *testing.T) {

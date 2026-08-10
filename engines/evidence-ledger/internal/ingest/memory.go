@@ -53,14 +53,16 @@ type ObservedCard struct {
 	Outcome     string // created | updated | unchanged | skipped | failed
 }
 
-// LastMemoryNamespace returns the most recent memory_namespace recorded on a
-// source_scan_runs row, used when a failed crawl cannot re-read memory/NAMESPACE.
-func LastMemoryNamespace(db *sql.DB) string {
+// LastMemoryNamespace returns the latest namespace for sourcePath, used when a
+// failed crawl cannot re-read memory/NAMESPACE. A failed unknown path must not
+// borrow another workspace's namespace or change its health.
+func LastMemoryNamespace(db *sql.DB, sourcePath string) string {
 	var ns sql.NullString
 	_ = db.QueryRow(`select json_extract(metadata_json, '$.memory_namespace')
 from source_scan_runs
-where source_kind = ? and coalesce(json_extract(metadata_json, '$.memory_namespace'), '') != ''
-order by started_at desc limit 1`, MemorySourceKind).Scan(&ns)
+where source_kind = ? and source_path = ?
+  and coalesce(json_extract(metadata_json, '$.memory_namespace'), '') != ''
+order by started_at desc limit 1`, MemorySourceKind, sourcePath).Scan(&ns)
 	if ns.Valid {
 		return ns.String
 	}
@@ -257,18 +259,12 @@ func scanNamespace(tx *sql.Tx, scanID string) (string, error) {
 }
 
 func markPriorMemorySnapshotStale(tx *sql.Tx, namespace string) (bool, error) {
-	// Prefer namespace-scoped stale marking; fall back to source-kind when
-	// namespace is unknown so interrupted scans still leave a stale prior.
-	var res sql.Result
-	var err error
-	if namespace != "" {
-		res, err = tx.Exec(`update source_scan_runs set stale = 1
+	if namespace == "" {
+		return false, nil
+	}
+	res, err := tx.Exec(`update source_scan_runs set stale = 1
 where source_kind = ? and status = 'completed' and stale = 0
   and json_extract(metadata_json, '$.memory_namespace') = ?`, MemorySourceKind, namespace)
-	} else {
-		res, err = tx.Exec(`update source_scan_runs set stale = 1
-where source_kind = ? and status = 'completed' and stale = 0`, MemorySourceKind)
-	}
 	if err != nil {
 		return false, err
 	}
@@ -472,6 +468,9 @@ where source_kind = ? and status = 'running'
 order by started_at desc limit 1`, MemorySourceKind, namespace).Scan(&journalID); err != nil && err != sql.ErrNoRows {
 		return err
 	}
+	if err := restoreLiveRelationsToBackupTx(tx, namespace); err != nil {
+		return err
+	}
 	if err := deleteMemoryNamespaceTx(tx, namespace); err != nil {
 		return err
 	}
@@ -587,6 +586,9 @@ func AbortMemoryRebuild(db *sql.DB, namespace string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := restoreLiveRelationsToBackupTx(tx, namespace); err != nil {
+		return err
+	}
 	if err := deleteMemoryNamespaceTx(tx, namespace); err != nil {
 		return err
 	}
@@ -743,32 +745,24 @@ func deleteItemGraph(tx *sql.Tx, itemID string) error {
 }
 
 func repointBackupItemRelations(tx *sql.Tx, namespace string) error {
-	rows, err := tx.Query(`select id, target_item_id, target_external_id from relations
-where target_item_id like ? and target_source_kind = ?
-  and (target_collection_external_id = ? or (
-    coalesce(target_collection_external_id, '') = ''
-    and 1 = (
-      select count(*)
-      from items candidate
-      join sources cs on cs.id = candidate.source_id
-      join collections cc on cc.id = candidate.collection_id
-      where cs.kind = ?
-        and candidate.external_id = relations.target_external_id
-        and candidate.tombstoned_at is null
-        and cc.external_id not like ?
-    )
-  ))`, memoryItemBackupPrefix+"%", MemorySourceKind, namespace, MemorySourceKind, memoryBackupPrefix+"%")
+	rows, err := tx.Query(`select r.id, r.target_external_id,
+coalesce(r.target_source_kind, ''), coalesce(r.target_collection_external_id, ''),
+coalesce(ss.kind, '')
+from relations r
+left join items source on source.id = r.source_item_id
+left join sources ss on ss.id = source.source_id
+where r.target_item_id like ?`, memoryItemBackupPrefix+"%")
 	if err != nil {
 		return err
 	}
 	type rel struct {
-		id, target string
-		externalID sql.NullString
+		id, targetSource, targetCollection, sourceKind string
+		externalID                                     sql.NullString
 	}
 	var pending []rel
 	for rows.Next() {
 		var r rel
-		if err := rows.Scan(&r.id, &r.target, &r.externalID); err != nil {
+		if err := rows.Scan(&r.id, &r.externalID, &r.targetSource, &r.targetCollection, &r.sourceKind); err != nil {
 			rows.Close()
 			return err
 		}
@@ -779,29 +773,100 @@ where target_item_id like ? and target_source_kind = ?
 		return err
 	}
 	for _, r := range pending {
-		liveID := originalItemID(r.target)
-		if r.externalID.Valid && r.externalID.String != "" {
-			err := tx.QueryRow(`select i.id from items i
+		if !r.externalID.Valid || r.externalID.String == "" {
+			continue
+		}
+		qualified := r.targetSource == MemorySourceKind
+		legacySameSource := r.targetSource == "" && r.sourceKind == MemorySourceKind
+		if !qualified && !legacySameSource {
+			continue
+		}
+		if qualified && r.targetCollection != "" && r.targetCollection != namespace {
+			continue
+		}
+		if r.targetCollection == "" {
+			var candidates int
+			if err := tx.QueryRow(`select count(*) from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
-where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
-				MemorySourceKind, namespace, r.externalID.String).Scan(&liveID)
-			if err == sql.ErrNoRows {
-				continue
-			}
-			if err != nil {
+where s.kind = ? and i.external_id = ? and i.tombstoned_at is null
+  and c.external_id not like ?`, MemorySourceKind, r.externalID.String, memoryBackupPrefix+"%").Scan(&candidates); err != nil {
 				return err
 			}
-		} else {
-			var exists int
-			if err := tx.QueryRow(`select count(*) from items where id = ?`, liveID).Scan(&exists); err != nil {
-				return err
-			}
-			if exists == 0 {
+			if candidates != 1 {
 				continue
 			}
 		}
+		var liveID string
+		err := tx.QueryRow(`select i.id from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
+			MemorySourceKind, namespace, r.externalID.String).Scan(&liveID)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`update relations set target_item_id = ? where id = ?`, liveID, r.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// restoreLiveRelationsToBackupTx restores relation targets before a failed
+// rebuild removes its partial live collection. The collection move then maps
+// backup item ids back to their original live ids.
+func restoreLiveRelationsToBackupTx(tx *sql.Tx, namespace string) error {
+	backup := backupCollectionExternalID(namespace)
+	rows, err := tx.Query(`select r.id, i.external_id from relations r
+join items i on i.id = r.target_item_id
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ?`, MemorySourceKind, namespace)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type rel struct{ id, externalID string }
+	var pending []rel
+	for rows.Next() {
+		var r rel
+		if err := rows.Scan(&r.id, &r.externalID); err != nil {
+			return err
+		}
+		pending = append(pending, r)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, r := range pending {
+		var candidates int
+		if err := tx.QueryRow(`select count(*) from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
+			MemorySourceKind, backup, r.externalID).Scan(&candidates); err != nil {
+			return err
+		}
+		if candidates != 1 {
+			continue
+		}
+		var backupID string
+		err := tx.QueryRow(`select i.id from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
+			MemorySourceKind, backup, r.externalID).Scan(&backupID)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`update relations set target_item_id = ? where id = ?`, backupID, r.id); err != nil {
 			return err
 		}
 	}
@@ -848,10 +913,11 @@ where s.kind = ? and c.external_id = ?`, MemorySourceKind, namespace)
 		return err
 	}
 	for _, id := range ids {
-		if err := deleteItemGraph(tx, id); err != nil {
+		if _, err := tx.Exec(`update relations set target_item_id = null
+where target_item_id = ? and source_item_id != ?`, id, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`delete from relations where target_item_id = ?`, id); err != nil {
+		if err := deleteItemGraph(tx, id); err != nil {
 			return err
 		}
 	}
