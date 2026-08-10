@@ -44,7 +44,9 @@ is the audit/replay gate.
 ## Field-classification matrix
 
 Source of truth: `worker_events.FIELD_CLASSIFICATION_MATRIX` /
-`worker_events.classification_matrix()`.
+`worker_events.classification_matrix()`. The tables below document that closed
+matrix for the Codex app-server notification envelope currently recorded by
+Brigade.
 
 ### Envelope
 
@@ -71,12 +73,47 @@ Delta methods (`item/*/delta`, …) are never recorded by Brigade and are
 intentionally absent. Unknown methods or fields fail scrubbing with a bounded
 diagnostic.
 
+### Turn fields
+
+| Field | Class |
+| --- | --- |
+| `id` | public_metadata |
+| `status` | public_metadata |
+| `items` | public_metadata (each element via item-type matrix) |
+| `error` | prohibited |
+
 ### Item types
 
 Every supported item type keeps `id` and `type` as public metadata. Content
-fields (`text`, `content`, `command`, `cwd`, `changes`, `arguments`, `result`,
-`query`, `path`, `review`, `prompt`, …) are private or prohibited. See
-`classification_matrix()["item_types"]` for the closed per-type key set.
+fields are private or prohibited. Closed per-type key set:
+
+| Item type | Public fields | Stripped fields |
+| --- | --- | --- |
+| `userMessage` | `id`, `type`, `clientId` | `content` |
+| `agentMessage` | `id`, `type`, `phase` | `text` |
+| `plan` | `id`, `type` | `text` |
+| `reasoning` | `id`, `type` | `summary`, `content` |
+| `commandExecution` | `id`, `type`, `status`, `exitCode`, `durationMs` | `command`, `cwd`, `commandActions`, `aggregatedOutput` |
+| `fileChange` | `id`, `type`, `status` | `changes` |
+| `mcpToolCall` | `id`, `type`, `server`, `tool`, `status`, `pluginId` | `arguments`, `appContext`, `result`, `error`, `mcpAppResourceUri` |
+| `dynamicToolCall` | `id`, `type`, `tool`, `status`, `success`, `durationMs` | `arguments`, `contentItems` |
+| `collabToolCall` | `id`, `type`, `tool`, `status`, `senderThreadId`, `receiverThreadId`, `newThreadId`, `agentStatus` | `prompt` |
+| `webSearch` | `id`, `type` | `query`, `action` |
+| `imageView` | `id`, `type` | `path` |
+| `enteredReviewMode` | `id`, `type` | `review` |
+| `exitedReviewMode` | `id`, `type` | `review` |
+| `contextCompaction` | `id`, `type` | _(none)_ |
+
+### Global secret keys
+
+These keys are secret wherever they appear under `params` (including nested
+objects that would otherwise be public): `authorization`, `Authorization`,
+`cookie`, `Cookie`, `cookies`, `set-cookie`, `Set-Cookie`, `credentials`,
+`apiKey`, `api_key`, `token`, `accessToken`, `refreshToken`, `password`,
+`secret`, `env`, `environment`, `headers`.
+
+Absolute home paths travel in `cwd` / `path` / `grantRoot` and are classified
+`private_content`. Provider error bodies are `prohibited`.
 
 ## Schemas
 
@@ -85,6 +122,19 @@ fields (`text`, `content`, `command`, `cwd`, `changes`, `arguments`, `result`,
 
 Golden adversarial fixtures:
 `src/brigade/fixtures/worker-events-appserver.v1.golden.json`.
+
+## Acceptance mapping (#592 first slice)
+
+| Criterion | Enforcement |
+| --- | --- |
+| Documented matrix covers recorded Codex app-server events | this document + `classification_matrix()` |
+| Unknown types/fields fail closed with bounded diagnostics | `WorkerEventError` / `MAX_DIAGNOSTIC_LEN` |
+| Credentials, headers, cookies, env, prompts, private content, home paths, provider error bodies absent | scrub omit + `scrubbed_projection_omits_sensitive_material` + adversarial goldens |
+| Order, stable IDs, safe operation names, schema versions, source digests preserved | scrubbed stream document + golden stream case |
+| Distinct raw/scrubbed media types and artifact classes | `media_types()` / `artifact_classes()` |
+| Audit/replay reject raw unless `local-only` | `load_stream_for_consumer`, `run_audit.reject_raw_worker_stream_evidence` |
+| Adversarial goldens for the supported transport | fixture cases for every matrix item type |
+| Legacy streams inspectable and unclassified until scrubbed | `inspect_stream_file` |
 
 ## Non-goals (first slice)
 

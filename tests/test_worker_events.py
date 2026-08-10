@@ -47,6 +47,19 @@ def test_classification_matrix_covers_recorded_app_server_methods():
         assert item_type  # non-empty
 
 
+def test_golden_covers_adversarial_case_for_every_matrix_item_type():
+    matrix = worker_events.classification_matrix()
+    covered = {
+        case["raw"]["params"]["item"]["type"]
+        for case in _golden()["cases"]
+        if case["name"].endswith("_adversarial")
+        and case["raw"].get("method") == "item/completed"
+        and isinstance(case["raw"].get("params"), dict)
+        and isinstance(case["raw"]["params"].get("item"), dict)
+    }
+    assert covered == set(matrix["item_types"])
+
+
 def test_golden_scrubbed_projections_match_and_omit_sensitive_material():
     for case in _golden()["cases"]:
         if "expect_error_category" in case:
