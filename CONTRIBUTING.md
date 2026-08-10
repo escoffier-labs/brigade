@@ -14,17 +14,18 @@ External contributions are welcome. This section is the short path; [Pull reques
 
 ## Pull requests
 
-`main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request. GitHub enforces required checks; formal review is maintainer merge policy (branch protection does not currently require approving reviews).
+`main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request. GitHub enforces required checks and conversation resolution; formal review is maintainer merge policy (branch protection does not currently require approving reviews).
 
 **GitHub-enforced gates** on `main`:
 
-- All required GitHub Actions checks pass. The checks are pinned to GitHub Actions app id 15368, and the branch must be up to date with `main`.
+- All required GitHub Actions checks pass. The checks are pinned to GitHub Actions app id 15368.
+- All review conversations are resolved.
 
 **Maintainer merge policy** (required before merge; not enforced by GitHub branch protection today):
 
 - A current formal `APPROVED` review exists from a non-author reviewer.
-- All review conversations are resolved.
 - The approval was recorded after the last push. New commits dismiss stale approvals.
+- Keep the branch current with `main` before merge when practical (branch protection does not require strict status checks, so GitHub does not block merge solely for being behind `main`).
 
 The pull request author cannot approve their own pull request. `gh pr review --approve` fails with "Can not approve your own pull request" when the author and reviewer share one GitHub identity.
 
@@ -37,9 +38,7 @@ gh pr checks <number> --required
 gh pr view <number> --json reviewDecision,mergeStateStatus
 ```
 
-`reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`.
-
-Those CLI fields do not expose unresolved review conversations. Separately check the pull request's **Files changed** review panel in GitHub and confirm that no conversation remains unresolved.
+`reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`. Neither field exposes unresolved review conversations; GitHub still blocks merge when any remain.
 
 Dispatched sessions should open the pull request, run local verification, and push commits. After the final push, comment `@coderabbitai full review`. The `coderabbitai[bot]` identity records the formal GitHub review. Wait for its current `APPROVED` review before merging. A green CodeRabbit commit status alone does not satisfy this gate.
 
