@@ -343,7 +343,7 @@ where target_item_id = ? and source_item_id != ?`, r.id, r.id); err != nil {
 
 func liveMemoryExternalIDs(tx *sql.Tx, namespace string) (map[string]string, error) {
 	// Latest non-tombstoned version wins per external_id. Ordering uses the
-	// monotonic ingest stamp on updated_at (not content-hash item ids).
+	// DB-monotonic ingest_seq (not content-hash item ids).
 	rows, err := tx.Query(`
 select i.external_id, i.content_hash
 from items i
@@ -353,7 +353,7 @@ where s.kind = ?
   and i.kind = 'memory_card'
   and i.tombstoned_at is null
   and c.external_id = ?
-order by i.updated_at desc, i.id desc`, MemorySourceKind, namespace)
+order by i.ingest_seq desc, i.id desc`, MemorySourceKind, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +404,7 @@ where s.kind = ?
       and i2.collection_id = i.collection_id
       and i2.external_id = i.external_id
       and i2.tombstoned_at is null
-    order by i2.updated_at desc, i2.id desc
+    order by i2.ingest_seq desc, i2.id desc
     limit 1
   )`, MemorySourceKind, namespace).Scan(&n)
 	return n, err
@@ -708,8 +708,8 @@ on conflict(id) do update set external_id=excluded.external_id, kind=excluded.ki
 }
 
 func cloneItemWithNewID(tx *sql.Tx, oldID, newID, collectionID string) error {
-	if _, err := tx.Exec(`insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json, tombstoned_at)
-select ?, source_id, ?, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json, tombstoned_at
+	if _, err := tx.Exec(`insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json, tombstoned_at, ingest_seq)
+select ?, source_id, ?, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json, tombstoned_at, ingest_seq
 from items where id = ?`, newID, collectionID, oldID); err != nil {
 		return err
 	}

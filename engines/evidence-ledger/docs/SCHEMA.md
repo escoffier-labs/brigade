@@ -20,9 +20,9 @@ The MVP uses one SQLite migration with these concepts:
 Items may carry `tombstoned_at` for soft removal. Live memory cards are the
 latest non-tombstoned row per external id within a `brigade-memory` namespace
 collection (`collection.external_id = memory-<uuid4>`), ordered by the
-monotonic ingest stamp on `items.updated_at`. Legacy pre-namespace rows may
-still exist under `memory:cards` and are never rebuilt or tombstoned by a
-namespaced crawl.
+database-monotonic `items.ingest_seq` (schema v3; `id` is only a tie-break).
+Legacy pre-namespace rows may still exist under `memory:cards` and are never
+rebuilt or tombstoned by a namespaced crawl.
 
 Raw adapter lines are preserved in `items.raw_json`. Raw source references are stored in `raw_hash`, `raw_path`, and `raw_ordinal`.
 

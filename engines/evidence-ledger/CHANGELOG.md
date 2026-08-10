@@ -25,12 +25,15 @@ Releases before this changelog was started are on the [releases page](https://gi
   for duplicate detection only, duplicate explicit-id fail-closed, empty-
   namespace status/doctor dual-read across all `brigade-memory` collections,
   legacy `memory:cards` scoped-rebuild (never tombstoned by namespaced
-  crawl), and latest-version selection via monotonic ingest `updated_at`
-  stamps for relation resolution plus live health after content-addressed
-  card edits (including ignoring stale outbound unresolved on prior versions).
-  Re-ingesting known content refreshes the ingest stamp so a restored prior
-  version becomes live again without minting a duplicate item or event; direct
-  adapter AlreadyKnown re-imports also re-resolve inbound relations onto that
+  crawl), and latest-version selection via database-monotonic
+  `items.ingest_seq` for relation resolution plus live health after
+  content-addressed card edits (including equal/backward wall-clock
+  `updated_at` and ignoring stale outbound unresolved on prior versions).
+  Re-ingesting known Text+Summary identity advances `ingest_seq` and
+  reconciles metadata/tags/provenance/artifacts/relations so same-text
+  frontmatter edits (including receipt-A → receipt-B retargets) project
+  correctly without minting a duplicate item or event; direct adapter
+  AlreadyKnown re-imports also re-resolve inbound relations onto that
   restored version.
 
 ## [0.6.0] - 2026-07-18

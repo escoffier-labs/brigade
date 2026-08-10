@@ -319,7 +319,7 @@ set target_item_id = (
              and coalesce(cc.external_id, '') not like ?
          ))
     and target.tombstoned_at is null
-  order by target.updated_at desc, target.id desc
+  order by target.ingest_seq desc, target.id desc
   limit 1
 )
 where coalesce(target_source_kind, '') != ''
@@ -375,7 +375,7 @@ where coalesce(target_source_kind, '') != ''
                  and coalesce(cc.external_id, '') not like ?
              ))
         and target.tombstoned_at is null
-      order by target.updated_at desc, target.id desc
+      order by target.ingest_seq desc, target.id desc
       limit 1
     )
   )`, backupCollectionLike, backupCollectionLike, backupCollectionLike, backupCollectionLike, backupCollectionLike, backupCollectionLike)
@@ -397,7 +397,7 @@ set target_item_id = (
   where source.id = relations.source_item_id
     and (source_kind.kind != ? or target.collection_id = source.collection_id)
     and target.tombstoned_at is null
-  order by target.updated_at desc, target.id desc
+  order by target.ingest_seq desc, target.id desc
   limit 1
 )
 where coalesce(target_source_kind, '') = ''
@@ -422,7 +422,7 @@ where coalesce(target_source_kind, '') = ''
       where source.id = relations.source_item_id
         and (source_kind.kind != ? or target.collection_id = source.collection_id)
         and target.tombstoned_at is null
-      order by target.updated_at desc, target.id desc
+      order by target.ingest_seq desc, target.id desc
       limit 1
     )
   )`, MemorySourceKind, MemorySourceKind, MemorySourceKind)
@@ -556,15 +556,12 @@ func upsertRecord(tx *sql.Tx, rec adapter.Record, sourcePath string, ordinal int
 	}
 	collectionMeta := rawOrEmptyObject(rec.Collection.Metadata)
 
-	// Fast-path already-imported items. Items are content-addressed (itemID
-	// includes the content hash), so an existing row means this exact record is
-	// already stored. Still refresh the monotonic ingest/version stamp so a
-	// restore of prior content (v1 -> v2 -> v1) becomes live again without
-	// minting a duplicate item or provenance event. Skip sources/collections/
-	// actors upserts: those bump updated_at on every call and can stall retries.
+	// Fast-path already-imported text/summary identity. Refresh the DB-monotonic
+	// ingest_seq and reconcile canonical side tables (metadata/tags/provenance/
+	// artifacts/relations) without minting a duplicate item or provenance event.
 	var known int
 	if err := tx.QueryRow(`select 1 from items where id = ?`, itemID).Scan(&known); err == nil {
-		if _, err := tx.Exec(`update items set updated_at = ? where id = ?`, now, itemID); err != nil {
+		if err := reconcileKnownItem(tx, rec, itemID, sourceID, collectionID, actorID, contentHash, rawHash, rawPath, rawOrdinal, raw, body, now); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -587,14 +584,15 @@ on conflict(source_id, external_id) do update set type=excluded.type, name=exclu
 			return false, err
 		}
 	}
-	// Content-addressed item ids do not encode time. Persist a real monotonic
-	// ingestion stamp on updated_at so latest-version selection cannot fall back
-	// to lexicographic content-hash order when created_at is empty or tied.
 	createdAt := strings.TrimSpace(rec.Item.CreatedAt)
 	if createdAt == "" {
 		createdAt = now
 	}
 	updatedAt := now
+	ingestSeq, err := nextIngestSeq(tx)
+	if err != nil {
+		return false, err
+	}
 	capturedAt := optionalString(createdAt)
 	itemLocator := fmt.Sprintf("miseledger://%s/%s/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID)
 	envelope, err := buildIngestEnvelope(rec, now, capturedAt, rec.Item.Text, raw, rec.Collection.ExternalID, rec.Item.ExternalID, "uri", itemLocator)
@@ -602,25 +600,109 @@ on conflict(source_id, external_id) do update set type=excluded.type, name=exclu
 		return false, fmt.Errorf("build provenance envelope: %w", err)
 	}
 	itemMeta := itemMetadataJSON(rec, envelope)
-	res, err := tx.Exec(`insert or ignore into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
-values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIfEmpty(actorID), rec.Item.ExternalID, rec.Item.Kind, createdAt, updatedAt, rec.Item.Text, summary, contentHash, string(raw), rawHash, rawPath, rawOrdinal, string(itemMeta))
+	res, err := tx.Exec(`insert or ignore into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json, ingest_seq)
+values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIfEmpty(actorID), rec.Item.ExternalID, rec.Item.Kind, createdAt, updatedAt, rec.Item.Text, summary, contentHash, string(raw), rawHash, rawPath, rawOrdinal, string(itemMeta), ingestSeq)
 	if err != nil {
 		return false, err
 	}
 	insertedRows, _ := res.RowsAffected()
 	if insertedRows == 0 {
-		// Concurrent insert or race with the known-item probe: refresh the
-		// ingest stamp only; do not mint events/artifacts again.
-		if _, err := tx.Exec(`update items set updated_at = ? where id = ?`, now, itemID); err != nil {
+		if err := reconcileKnownItem(tx, rec, itemID, sourceID, collectionID, actorID, contentHash, rawHash, rawPath, rawOrdinal, raw, body, now); err != nil {
 			return false, err
 		}
 		return false, nil
 	}
 	eventID := stableID("event", itemID, createdAt, rec.Item.Kind)
 	_, _ = tx.Exec(`insert or ignore into events(id, source_id, collection_id, actor_id, item_id, kind, occurred_at) values(?,?,?,?,?,?,?)`, eventID, sourceID, collectionID, nullIfEmpty(actorID), itemID, rec.Item.Kind, createdAt)
-	if err := indexItemMetadata(tx, itemID, rec.Item.Tags, itemMeta); err != nil {
+	if err := replaceItemSideTables(tx, rec, itemID, sourceID, collectionID, capturedAt, raw, body, now, false); err != nil {
 		return false, err
 	}
+	return true, nil
+}
+
+func nextIngestSeq(tx *sql.Tx) (int64, error) {
+	var next int64
+	if err := tx.QueryRow(`select coalesce(max(ingest_seq), 0) + 1 from items`).Scan(&next); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+// reconcileKnownItem advances the DB-monotonic ingest_seq and rewrites canonical
+// side fields for an existing content-addressed item without minting events.
+func reconcileKnownItem(tx *sql.Tx, rec adapter.Record, itemID, sourceID, collectionID, actorID, contentHash, rawHash, rawPath string, rawOrdinal int64, raw []byte, body, now string) error {
+	// Ensure parent rows exist for FK safety without rewriting source/collection
+	// timestamps on every known-item hit (keeps retry fast-path cheap).
+	if _, err := tx.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)
+on conflict(id) do nothing`, sourceID, rec.Source.Kind, rec.Source.Name, rec.Source.Version, now, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values(?,?,?,?,?,?,?,?)
+on conflict(source_id, external_id) do nothing`, collectionID, sourceID, rec.Collection.ExternalID, rec.Collection.Kind, rec.Collection.Name, rawOrEmptyObject(rec.Collection.Metadata), now, now); err != nil {
+		return err
+	}
+	if actorID != "" {
+		actorMeta := rawOrEmptyObject(rec.Actor.Metadata)
+		if _, err := tx.Exec(`insert into actors(id, source_id, external_id, type, name, metadata_json) values(?,?,?,?,?,?)
+on conflict(source_id, external_id) do update set type=excluded.type, name=excluded.name, metadata_json=excluded.metadata_json`, actorID, sourceID, rec.Actor.ExternalID, rec.Actor.Type, rec.Actor.Name, actorMeta); err != nil {
+			return err
+		}
+	}
+	ingestSeq, err := nextIngestSeq(tx)
+	if err != nil {
+		return err
+	}
+	createdAt := strings.TrimSpace(rec.Item.CreatedAt)
+	if createdAt == "" {
+		createdAt = now
+	}
+	capturedAt := optionalString(createdAt)
+	itemLocator := fmt.Sprintf("miseledger://%s/%s/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID)
+	envelope, err := buildIngestEnvelope(rec, now, capturedAt, rec.Item.Text, raw, rec.Collection.ExternalID, rec.Item.ExternalID, "uri", itemLocator)
+	if err != nil {
+		return fmt.Errorf("build provenance envelope: %w", err)
+	}
+	itemMeta := itemMetadataJSON(rec, envelope)
+	summary := ""
+	if rec.Item.Summary != nil {
+		summary = *rec.Item.Summary
+	}
+	if _, err := tx.Exec(`update items set actor_id = ?, updated_at = ?, summary = ?, raw_json = ?, raw_hash = ?, raw_path = ?, raw_ordinal = ?, metadata_json = ?, ingest_seq = ?
+where id = ?`, nullIfEmpty(actorID), now, summary, string(raw), rawHash, rawPath, rawOrdinal, string(itemMeta), ingestSeq, itemID); err != nil {
+		return err
+	}
+	return replaceItemSideTables(tx, rec, itemID, sourceID, collectionID, capturedAt, raw, body, now, true)
+}
+
+func replaceItemSideTables(tx *sql.Tx, rec adapter.Record, itemID, sourceID, collectionID string, capturedAt *string, raw []byte, body, now string, replaceExisting bool) error {
+	if replaceExisting {
+		if _, err := tx.Exec(`delete from item_tags where item_id = ?`, itemID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`delete from item_metadata where item_id = ?`, itemID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`delete from artifacts where item_id = ?`, itemID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`delete from relations where source_item_id = ?`, itemID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`delete from item_fts where item_id = ?`, itemID); err != nil {
+			return err
+		}
+	}
+	itemLocator := fmt.Sprintf("miseledger://%s/%s/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID)
+	_ = itemLocator
+	envelope, err := buildIngestEnvelope(rec, now, capturedAt, rec.Item.Text, raw, rec.Collection.ExternalID, rec.Item.ExternalID, "uri", itemLocator)
+	if err != nil {
+		return err
+	}
+	itemMeta := itemMetadataJSON(rec, envelope)
+	if err := indexItemMetadata(tx, itemID, rec.Item.Tags, itemMeta); err != nil {
+		return err
+	}
+	ftsBody := body
 	for _, art := range rec.Artifacts {
 		artifactID := stableID("artifact", itemID, art.ExternalID, art.Kind, art.Path, art.URL, art.Hash)
 		artifactHash := art.Hash
@@ -630,14 +712,14 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIf
 		artLocatorKind, artLocatorValue := artifactLocator(rec, art)
 		artEnvelope, err := buildIngestEnvelope(rec, now, capturedAt, art.Text, nil, rec.Collection.ExternalID, art.ExternalID, artLocatorKind, artLocatorValue)
 		if err != nil {
-			return false, fmt.Errorf("build artifact provenance envelope: %w", err)
+			return fmt.Errorf("build artifact provenance envelope: %w", err)
 		}
 		artMeta := mergeMetadataJSON(art.Metadata, artEnvelope, nil)
 		if _, err := tx.Exec(`insert or ignore into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json) values(?,?,?,?,?,?,?,?,?,?,?)`, artifactID, sourceID, itemID, art.ExternalID, art.Kind, art.Path, art.URL, art.MimeType, art.Text, artifactHash, string(artMeta)); err != nil {
-			return false, err
+			return err
 		}
 		if art.Text != "" {
-			body += "\n" + textnorm.Normalize(art.Text)
+			ftsBody += "\n" + textnorm.Normalize(art.Text)
 		}
 	}
 	for _, link := range rec.Links {
@@ -648,13 +730,13 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIf
 		linkLocator := linkProvenanceLocator(rec, link.URL)
 		linkEnvelope, err := buildIngestEnvelope(rec, now, capturedAt, link.Text, nil, rec.Collection.ExternalID, link.URL, "uri", linkLocator)
 		if err != nil {
-			return false, fmt.Errorf("build link provenance envelope: %w", err)
+			return fmt.Errorf("build link provenance envelope: %w", err)
 		}
 		linkMeta := mergeMetadataJSON(nil, linkEnvelope, map[string]any{"link_text": link.Text})
 		if _, err := tx.Exec(`insert or ignore into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json) values(?,?,?,?,?,?,?,?,?,?,?)`, artifactID, sourceID, itemID, link.URL, "url", "", link.URL, "text/uri-list", link.Text, "sha256:"+hashString(link.URL), string(linkMeta)); err != nil {
-			return false, err
+			return err
 		}
-		body += "\n" + textnorm.Normalize(link.URL+" "+link.Text)
+		ftsBody += "\n" + textnorm.Normalize(link.URL+" "+link.Text)
 	}
 	for _, rel := range rec.Relations {
 		confidence := 1.0
@@ -665,17 +747,17 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIf
 		relID := stableID("relation", itemID, rel.TargetItemID, targetSource, targetCollection, targetExternal, rel.Type)
 		if _, err := tx.Exec(`insert or ignore into relations(id, source_item_id, target_item_id, target_external_id, target_source_kind, target_collection_external_id, relation_type, confidence, metadata_json) values(?,?,?,?,?,?,?,?,?)`,
 			relID, itemID, nullIfEmpty(rel.TargetItemID), nullIfEmpty(targetExternal), nullIfEmpty(targetSource), nullIfEmpty(targetCollection), rel.Type, confidence, rawOrEmptyObject(rel.Metadata)); err != nil {
-			return false, err
+			return err
 		}
 	}
 	actorType := ""
 	if rec.Actor != nil {
 		actorType = rec.Actor.Type
 	}
-	if _, err := tx.Exec(`insert into item_fts(item_id, source_kind, collection_kind, item_kind, actor_type, body) values(?,?,?,?,?,?)`, itemID, rec.Source.Kind, rec.Collection.Kind, rec.Item.Kind, actorType, body); err != nil {
-		return false, err
+	if _, err := tx.Exec(`insert into item_fts(item_id, source_kind, collection_kind, item_kind, actor_type, body) values(?,?,?,?,?,?)`, itemID, rec.Source.Kind, rec.Collection.Kind, rec.Item.Kind, actorType, ftsBody); err != nil {
+		return err
 	}
-	return true, nil
+	return nil
 }
 
 func buildIngestEnvelope(rec adapter.Record, ingestedAt string, capturedAt *string, text string, raw []byte, collectionID, itemID, locatorKind, locatorValue string) (provenance.Envelope, error) {

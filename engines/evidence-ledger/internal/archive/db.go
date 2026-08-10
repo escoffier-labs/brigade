@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 func Open(path string) (*sql.DB, error) {
 	if err := security.EnsurePrivateParent(path); err != nil {
@@ -84,6 +84,9 @@ func Migrate(db *sql.DB) error {
 	if err := ensureSchemaV2(db); err != nil {
 		return err
 	}
+	if err := ensureSchemaV3(db); err != nil {
+		return err
+	}
 	if _, err := db.Exec("PRAGMA user_version = " + fmt.Sprint(SchemaVersion)); err != nil {
 		return err
 	}
@@ -137,6 +140,18 @@ create table if not exists source_scan_observed(
   primary key(scan_id, external_id)
 );
 `)
+	return err
+}
+
+// ensureSchemaV3 adds a database-monotonic ingest sequence for latest-version
+// selection that does not depend on wall-clock updated_at.
+func ensureSchemaV3(db *sql.DB) error {
+	if _, err := db.Exec(`alter table items add column ingest_seq integer not null default 0`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
+	_, err := db.Exec(`create index if not exists idx_items_ingest_seq on items(ingest_seq)`)
 	return err
 }
 
@@ -204,6 +219,7 @@ create table if not exists items(
   raw_path text,
   raw_ordinal integer,
   metadata_json text not null default '{}',
+  ingest_seq integer not null default 0,
   unique(source_id, collection_id, external_id, content_hash)
 );
 

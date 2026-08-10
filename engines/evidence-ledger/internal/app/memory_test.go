@@ -910,7 +910,7 @@ select i.id, i.content_hash from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
-order by i.updated_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v2ID, &v2Hash); err != nil {
+order by i.ingest_seq desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v2ID, &v2Hash); err != nil {
 		t.Fatal(err)
 	}
 	if v2ID == v1ID || v2Hash == v1Hash {
@@ -960,7 +960,7 @@ select i.id, i.content_hash, i.updated_at from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
-order by i.updated_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&liveID, &liveHash, &liveStamp); err != nil {
+order by i.ingest_seq desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&liveID, &liveHash, &liveStamp); err != nil {
 		t.Fatal(err)
 	}
 	if liveID != v1ID || liveHash != v1Hash {
@@ -1096,7 +1096,7 @@ select i.id, i.content_hash, i.updated_at from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
-order by i.updated_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v1ID, &v1Hash, &v1Updated); err != nil {
+order by i.ingest_seq desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v1ID, &v1Hash, &v1Updated); err != nil {
 		t.Fatal(err)
 	}
 	if v1Updated == "" {
@@ -1159,7 +1159,7 @@ select i.id, i.content_hash, i.updated_at from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
-order by i.updated_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v2ID, &v2Hash, &v2Updated); err != nil {
+order by i.ingest_seq desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v2ID, &v2Hash, &v2Updated); err != nil {
 		t.Fatal(err)
 	}
 	if v2ID == v1ID || v2Hash == v1Hash {

@@ -301,7 +301,7 @@ func TestDirectImportReingestRepointsInboundToRestoredVersion(t *testing.T) {
 select i.id from items i
 join collections c on c.id = i.collection_id
 where c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
-order by i.updated_at desc, i.id desc`, ns, cardID).Scan(&v2ID); err != nil {
+order by i.ingest_seq desc, i.id desc`, ns, cardID).Scan(&v2ID); err != nil {
 		t.Fatal(err)
 	}
 	if v2ID == v1ID {
@@ -366,8 +366,9 @@ func TestUpsertRecordRestampsKnownContentWithoutDuplicateEvent(t *testing.T) {
 	if _, err := ImportAdapterReader(db, strings.NewReader(v1+"\n"), "v1.jsonl", ""); err != nil {
 		t.Fatal(err)
 	}
-	var v1ID, v1Stamp string
-	if err := db.QueryRow(`select id, updated_at from items where external_id = ?`, cardID).Scan(&v1ID, &v1Stamp); err != nil {
+	var v1ID string
+	var v1Seq int64
+	if err := db.QueryRow(`select id, ingest_seq from items where external_id = ?`, cardID).Scan(&v1ID, &v1Seq); err != nil {
 		t.Fatal(err)
 	}
 	var eventsBefore int
@@ -391,15 +392,16 @@ func TestUpsertRecordRestampsKnownContentWithoutDuplicateEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var v1Hash, v1StampAfter string
-	if err := db.QueryRow(`select content_hash, updated_at from items where id = ?`, v1ID).Scan(&v1Hash, &v1StampAfter); err != nil {
+	var v1Hash string
+	var v1SeqAfter int64
+	if err := db.QueryRow(`select content_hash, ingest_seq from items where id = ?`, v1ID).Scan(&v1Hash, &v1SeqAfter); err != nil {
 		t.Fatal(err)
 	}
 	if live[cardID] != v1Hash {
 		t.Fatalf("live=%s want restored v1 hash %s", live[cardID], v1Hash)
 	}
-	if v1StampAfter <= v1Stamp {
-		t.Fatalf("known re-ingest must refresh stamp before=%q after=%q", v1Stamp, v1StampAfter)
+	if v1SeqAfter <= v1Seq {
+		t.Fatalf("known re-ingest must advance ingest_seq before=%d after=%d", v1Seq, v1SeqAfter)
 	}
 	var eventsAfter int
 	if err := db.QueryRow(`select count(*) from events where item_id = ?`, v1ID).Scan(&eventsAfter); err != nil {
@@ -410,7 +412,7 @@ func TestUpsertRecordRestampsKnownContentWithoutDuplicateEvent(t *testing.T) {
 	}
 }
 
-func TestLiveMemoryLatestVersionUsesUpdatedAtNotEmptyCreatedAtHashOrder(t *testing.T) {
+func TestLiveMemoryLatestVersionUsesIngestSeqNotWallClockOrHashOrder(t *testing.T) {
 	db := openMemoryLifecycleDB(t)
 	defer db.Close()
 	const ns = "memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -424,18 +426,18 @@ func TestLiveMemoryLatestVersionUsesUpdatedAtNotEmptyCreatedAtHashOrder(t *testi
 		"col-memory", "src-memory", ns, "memory_cards", "cards", "{}", now, now); err != nil {
 		t.Fatal(err)
 	}
-	// Lexicographically greater id is the older version; smaller id is newer.
-	// Empty created_at would make ORDER BY created_at,id prefer the older row.
+	// Lexicographically greater id is older; smaller id is newer by ingest_seq.
+	// Equal/backward wall-clock updated_at must not beat the DB-monotonic seq.
 	olderID := "zzzz-older-content-hash-id"
 	newerID := "aaaa-newer-content-hash-id"
 	olderHash := "sha256:older"
 	newerHash := "sha256:newer"
-	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json)
-values(?,?,?,?,?,?,?,?,?,?,?)`, olderID, "src-memory", "col-memory", cardID, "memory_card", "", "2026-08-10T01:00:00Z", "older", olderHash, "{}", "{}"); err != nil {
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq)
+values(?,?,?,?,?,?,?,?,?,?,?,?)`, olderID, "src-memory", "col-memory", cardID, "memory_card", "", "2026-08-10T03:00:00Z", "older", olderHash, "{}", "{}", 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json)
-values(?,?,?,?,?,?,?,?,?,?,?)`, newerID, "src-memory", "col-memory", cardID, "memory_card", "", "2026-08-10T02:00:00Z", "newer", newerHash, "{}", "{}"); err != nil {
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq)
+values(?,?,?,?,?,?,?,?,?,?,?,?)`, newerID, "src-memory", "col-memory", cardID, "memory_card", "", "2026-08-10T01:00:00Z", "newer", newerHash, "{}", "{}", 2); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`insert into relations(id, source_item_id, target_item_id, target_external_id, target_source_kind, target_collection_external_id, relation_type, confidence, metadata_json)
@@ -443,12 +445,18 @@ values(?,?,?,?,?,?,?,?,?)`, "rel-stale-out", olderID, nil, "missing-target", "",
 		t.Fatal(err)
 	}
 
-	var byCreated string
-	if err := db.QueryRow(`select id from items where external_id = ? order by created_at desc, id desc`, cardID).Scan(&byCreated); err != nil {
+	var byClock, byID string
+	if err := db.QueryRow(`select id from items where external_id = ? order by updated_at desc, id desc`, cardID).Scan(&byClock); err != nil {
 		t.Fatal(err)
 	}
-	if byCreated != olderID {
-		t.Fatalf("precondition failed: empty created_at+id order should pick older %s, got %s", olderID, byCreated)
+	if byClock != olderID {
+		t.Fatalf("precondition failed: wall-clock order should pick older %s, got %s", olderID, byClock)
+	}
+	if err := db.QueryRow(`select id from items where external_id = ? order by id desc`, cardID).Scan(&byID); err != nil {
+		t.Fatal(err)
+	}
+	if byID != olderID {
+		t.Fatalf("precondition failed: id tie-break should pick older %s, got %s", olderID, byID)
 	}
 
 	live, err := LiveMemoryProjection(db, ns)
@@ -469,5 +477,170 @@ values(?,?,?,?,?,?,?,?,?)`, "rel-stale-out", olderID, nil, "missing-target", "",
 	}
 	if unresolved != 0 {
 		t.Fatalf("stale outbound unresolved on older version contaminated count: %d", unresolved)
+	}
+}
+
+func TestLiveMemoryLatestVersionEqualWallClockUsesIngestSeq(t *testing.T) {
+	db := openMemoryLifecycleDB(t)
+	defer db.Close()
+	const ns = "memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	const cardID = "card-equalclk-1111-4222-8333-444444444444"
+	now := "2026-08-10T00:00:00Z"
+	stamp := "2026-08-10T02:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)`,
+		"src-memory", MemorySourceKind, "Memory", "1.0.0", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values(?,?,?,?,?,?,?,?)`,
+		"col-memory", "src-memory", ns, "memory_cards", "cards", "{}", now, now); err != nil {
+		t.Fatal(err)
+	}
+	olderID := "zzzz-equal-clock-older"
+	newerID := "aaaa-equal-clock-newer"
+	olderHash := "sha256:equal-older"
+	newerHash := "sha256:equal-newer"
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq)
+values(?,?,?,?,?,?,?,?,?,?,?,?)`, olderID, "src-memory", "col-memory", cardID, "memory_card", "", stamp, "older", olderHash, "{}", "{}", 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq)
+values(?,?,?,?,?,?,?,?,?,?,?,?)`, newerID, "src-memory", "col-memory", cardID, "memory_card", "", stamp, "newer", newerHash, "{}", "{}", 11); err != nil {
+		t.Fatal(err)
+	}
+	var byClockID string
+	if err := db.QueryRow(`select id from items where external_id = ? order by updated_at desc, id desc`, cardID).Scan(&byClockID); err != nil {
+		t.Fatal(err)
+	}
+	if byClockID != olderID {
+		t.Fatalf("precondition failed: equal clock + id desc should pick older %s, got %s", olderID, byClockID)
+	}
+	live, err := LiveMemoryProjection(db, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live[cardID] != newerHash {
+		t.Fatalf("equal wall-clock must still prefer ingest_seq; got %q want %q", live[cardID], newerHash)
+	}
+}
+
+func TestKnownItemSameTextFrontmatterReconcilesCanonicalFieldsReceiptAToB(t *testing.T) {
+	db := openMemoryLifecycleDB(t)
+	defer db.Close()
+	const ns = "memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	const cardID = "card-front000-1111-4222-8333-444444444444"
+	const body = "same-text-frontmatter-body"
+	receiptA := `{"schema":"miseledger.adapter.v1","source":{"kind":"brigade","name":"Brigade"},"collection":{"external_id":"brigade:receipts","kind":"brigade_receipt","name":"receipts"},"item":{"external_id":"receipt:front-a","kind":"receipt","created_at":"2026-01-01T00:00:00Z","text":"receipt-a"},"relations":[],"raw":{"format":"json","path":"a.json","ordinal":1}}`
+	receiptB := `{"schema":"miseledger.adapter.v1","source":{"kind":"brigade","name":"Brigade"},"collection":{"external_id":"brigade:receipts","kind":"brigade_receipt","name":"receipts"},"item":{"external_id":"receipt:front-b","kind":"receipt","created_at":"2026-01-01T00:00:01Z","text":"receipt-b"},"relations":[],"raw":{"format":"json","path":"b.json","ordinal":1}}`
+	cardA := fmt.Sprintf(`{"schema":"miseledger.adapter.v1","source":{"kind":"brigade-memory","name":"Memory"},"collection":{"external_id":%q,"kind":"memory_cards","name":"cards"},"item":{"external_id":%q,"kind":"memory_card","created_at":"2026-01-01T00:00:02Z","text":%q,"tags":["tag-a"],"metadata":{"topic":"alpha","status":"draft"}},"artifacts":[{"external_id":"art-a","kind":"note","text":"artifact-a"}],"relations":[{"type":"derived_from","target":{"source":"brigade","collection":"brigade:receipts","external_id":"receipt:front-a"}}],"raw":{"format":"json","path":"card.json","ordinal":1}}`, ns, cardID, body)
+	cardB := fmt.Sprintf(`{"schema":"miseledger.adapter.v1","source":{"kind":"brigade-memory","name":"Memory"},"collection":{"external_id":%q,"kind":"memory_cards","name":"cards"},"item":{"external_id":%q,"kind":"memory_card","created_at":"2026-01-01T00:00:02Z","text":%q,"tags":["tag-b"],"metadata":{"topic":"beta","status":"ready"}},"artifacts":[{"external_id":"art-b","kind":"note","text":"artifact-b"}],"relations":[{"type":"derived_from","target":{"source":"brigade","collection":"brigade:receipts","external_id":"receipt:front-b"}}],"raw":{"format":"json","path":"card.json","ordinal":1}}`, ns, cardID, body)
+
+	if _, err := ImportAdapterReader(db, strings.NewReader(receiptA+"\n"+receiptB+"\n"+cardA+"\n"), "front-a.jsonl", ""); err != nil {
+		t.Fatal(err)
+	}
+	var cardItemID, receiptAID, receiptBID string
+	var seqBefore int64
+	if err := db.QueryRow(`select id, ingest_seq from items where external_id = ?`, cardID).Scan(&cardItemID, &seqBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select id from items where external_id = 'receipt:front-a'`).Scan(&receiptAID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select id from items where external_id = 'receipt:front-b'`).Scan(&receiptBID); err != nil {
+		t.Fatal(err)
+	}
+	var targetA string
+	if err := db.QueryRow(`select target_item_id from relations where source_item_id = ? and relation_type = 'derived_from'`, cardItemID).Scan(&targetA); err != nil {
+		t.Fatal(err)
+	}
+	if targetA != receiptAID {
+		t.Fatalf("initial relation target=%s want receipt A %s", targetA, receiptAID)
+	}
+	var eventsBefore int
+	if err := db.QueryRow(`select count(*) from events where item_id = ?`, cardItemID).Scan(&eventsBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := ImportAdapterReader(db, strings.NewReader(cardB+"\n"), "front-b.jsonl", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// New source path/hash is not whole-file AlreadyKnown; item identity is Text+Summary.
+	if again.Inserted != 0 {
+		t.Fatalf("same-text frontmatter edit must not mint a new item, got %+v", again)
+	}
+	var versionCount int
+	if err := db.QueryRow(`select count(*) from items where external_id = ?`, cardID).Scan(&versionCount); err != nil {
+		t.Fatal(err)
+	}
+	if versionCount != 1 {
+		t.Fatalf("same-text must keep one content-addressed row, got %d", versionCount)
+	}
+	var seqAfter int64
+	var metaJSON string
+	if err := db.QueryRow(`select ingest_seq, metadata_json from items where id = ?`, cardItemID).Scan(&seqAfter, &metaJSON); err != nil {
+		t.Fatal(err)
+	}
+	if seqAfter <= seqBefore {
+		t.Fatalf("ingest_seq must advance on known reconcile before=%d after=%d", seqBefore, seqAfter)
+	}
+	if !strings.Contains(metaJSON, `"topic":"beta"`) || !strings.Contains(metaJSON, `"status":"ready"`) {
+		t.Fatalf("metadata_json missing receipt-B frontmatter fields: %s", metaJSON)
+	}
+	if !strings.Contains(metaJSON, `"provenance"`) {
+		t.Fatalf("provenance envelope missing after reconcile: %s", metaJSON)
+	}
+	var tagCount int
+	var tag string
+	if err := db.QueryRow(`select count(*), min(tag) from item_tags where item_id = ?`, cardItemID).Scan(&tagCount, &tag); err != nil {
+		t.Fatal(err)
+	}
+	if tagCount != 1 || tag != "tag-b" {
+		t.Fatalf("tags after reconcile count=%d tag=%q want only tag-b", tagCount, tag)
+	}
+	var artCount int
+	var artExt string
+	if err := db.QueryRow(`select count(*), min(external_id) from artifacts where item_id = ?`, cardItemID).Scan(&artCount, &artExt); err != nil {
+		t.Fatal(err)
+	}
+	if artCount != 1 || artExt != "art-b" {
+		t.Fatalf("artifacts after reconcile count=%d ext=%q want only art-b", artCount, artExt)
+	}
+	var relCount int
+	var targetB string
+	if err := db.QueryRow(`select count(*), min(target_item_id) from relations where source_item_id = ? and relation_type = 'derived_from'`, cardItemID).Scan(&relCount, &targetB); err != nil {
+		t.Fatal(err)
+	}
+	if relCount != 1 || targetB != receiptBID {
+		t.Fatalf("relation after reconcile count=%d target=%s want receipt B %s", relCount, targetB, receiptBID)
+	}
+	var eventsAfter int
+	if err := db.QueryRow(`select count(*) from events where item_id = ?`, cardItemID).Scan(&eventsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if eventsAfter != eventsBefore {
+		t.Fatalf("must not mint events on known reconcile: before=%d after=%d", eventsBefore, eventsAfter)
+	}
+	live, err := LiveMemoryProjection(db, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cardHash string
+	if err := db.QueryRow(`select content_hash from items where id = ?`, cardItemID).Scan(&cardHash); err != nil {
+		t.Fatal(err)
+	}
+	if live[cardID] != cardHash {
+		t.Fatalf("live projection=%s want %s", live[cardID], cardHash)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	unresolved, err := memoryUnresolvedRelationCount(tx, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unresolved != 0 {
+		t.Fatalf("health unresolved after receipt-B reconcile: %d", unresolved)
 	}
 }
