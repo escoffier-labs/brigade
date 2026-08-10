@@ -59,11 +59,19 @@ Output is a small table plus optional JSON (`--json`) so runs are diffable.
 - Show whether keyword scoring beats plain grep on paraphrase / abbreviation / cross-tag queries.
 - Reject a semantic upgrade that only ties the baseline on aggregate scores driven by easy exact matches.
 - Publish an honest ceiling so future claims cannot exceed what the fixture set allows.
+- Exercise projection-state scenarios (#845 V1) via checked-in fixtures and the
+  `memory-projection-eval.v1` report builder in `projection.py` (schema, scope
+  annotations, nullable #495/#498 fields, cost metrics, diffable failure artifacts).
+  Runtime harness attachment lands in V2 after #843/#844.
 
 **Cannot**
 
 - Stand in for production corpora. At ~40 cards, strong systems and grep often tie on easy queries; the query set is intentionally paraphrase-heavy for that reason.
-- Measure latency, index build cost, or multi-lingual retrieval.
+- Measure production MiseLedger or Brigade facade projection fidelity (V2, after #843/#844).
+- Enforce closed repository/task/operator/branch/worktree scope on lexical adapters;
+  unavailable scope dimensions are report-level failures until a production filter ships.
+- Provide per-item selection explanations (#495) or origin-scoped redaction (#498);
+  those fields are explicitly unavailable/not_applicable in the projection report.
 - Replace the live label-free repeat-search recall signal (#723) that
   `memory care status` surfaces from `.brigade/memory/search-log.jsonl`; that
   is a usage metric, not this offline fixture. High follow-up rates here are

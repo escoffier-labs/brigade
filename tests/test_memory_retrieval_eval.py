@@ -18,6 +18,20 @@ from brigade.memory_retrieval_eval.metrics import (
     precision_at_k,
     recall_at_k,
 )
+from brigade.memory_retrieval_eval.projection import (
+    CATEGORIES,
+    PROJECTION_SCHEMA,
+    SCOPE_DIMENSIONS,
+    adapter_projection_violation,
+    build_projection_section,
+    external_contract_fields,
+    load_manifest,
+    load_projection_fixture_cards,
+    load_scenarios,
+    validate_all_fixtures,
+    validate_scope_annotation,
+)
+from brigade.memory_retrieval_eval.report import format_table
 
 
 def test_fixture_corpus_size_and_gold_resolve():
@@ -276,3 +290,114 @@ def _copy_minimal_fixture(fixture: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def test_projection_manifest_and_fixtures_validate():
+    manifest = load_manifest()
+    assert manifest["schema"] == PROJECTION_SCHEMA
+    assert set(manifest["categories"]) == set(CATEGORIES)
+    assert manifest["scope_dimensions"] == list(SCOPE_DIMENSIONS)
+    scenarios = load_scenarios()
+    assert len(scenarios) >= 20
+    assert validate_all_fixtures(scenarios) == []
+
+
+def test_scope_annotation_rejects_empty_opaque_strings():
+    problems = validate_scope_annotation({"repository": ""}, scenario_id="empty")
+    assert any("repository" in item for item in problems)
+    problems = validate_scope_annotation(
+        {
+            "repository": "opaque-repo",
+            "task": "opaque-task",
+            "operator": "opaque-operator",
+            "branch": "opaque-branch",
+        },
+        scenario_id="missing-dim",
+    )
+    assert any("worktree" in item for item in problems)
+
+
+def test_external_contract_fields_stub_495_and_498():
+    contracts = external_contract_fields()
+    assert contracts["explanation_495"]["available"] is False
+    assert contracts["explanation_495"]["selection"] is None
+    assert contracts["explanation_495"]["reason"]
+    assert contracts["redaction_498"]["available"] is False
+    assert contracts["redaction_498"]["status"] == "not_applicable"
+    assert contracts["redaction_498"]["scanner_present"] is False
+
+
+def test_build_projection_section_includes_schema_contracts_and_scope_failures():
+    section = build_projection_section(adapter="fixture-reference")
+    assert section["schema"] == PROJECTION_SCHEMA
+    assert section["issue"] == 845
+    assert section["summary"]["scenario_count"] >= 20
+    assert section["scope_enforcement"]["available"] is False
+    assert len(section["report_level_failures"]) == len(SCOPE_DIMENSIONS)
+    assert section["external_contracts"]["explanation_495"]["available"] is False
+    assert section["external_contracts"]["redaction_498"]["status"] == "not_applicable"
+    assert "instruction_like_trusted_path" in section["coverage"]
+
+
+def test_build_projection_section_with_search_records_failure_artifacts():
+    cards = load_projection_fixture_cards()
+    search = grep_adapter(cards)
+    section = build_projection_section(
+        cards=cards,
+        query_texts=["ignore prior instructions", "disregard safety policy"],
+        search=search,
+        adapter="grep",
+    )
+    assert section["cost"]["index_size_bytes"] > 0
+    failures = section["failures"]
+    assert len(failures) == 2
+    for artifact in failures:
+        assert artifact["category"] == "instruction_like_trusted_path"
+        assert set(artifact["scan"]) >= {
+            "status",
+            "created",
+            "updated",
+            "unchanged",
+            "removed",
+            "skipped",
+            "failed",
+        }
+        assert "health" in artifact
+        assert "ranked" in artifact
+        assert artifact["expected_category"] == "instruction_like_trusted_path"
+        assert artifact["violation"]
+
+
+def test_format_table_projection_summary_when_present():
+    report = {
+        "k": 5,
+        "fixture_root": "evals/memory-retrieval",
+        "corpus": {"card_count": 40, "query_count": 32},
+        "ceiling": {"overall": {"precision_at_k": 1.0, "recall_at_k": 1.0, "hit_rate": 1.0}},
+        "adapters": {},
+        "projection": {
+            "adapters": {
+                "grep": {
+                    "summary": {"passed": 24, "failed": 2, "report_level_failure_count": 5},
+                }
+            }
+        },
+    }
+    table = format_table(report)
+    assert "projection eval (#845 V1)" in table
+    assert "scope!" in table
+
+
+def test_adapter_projection_violation_detects_trusted_path_leak():
+    cards = load_projection_fixture_cards()
+    search = grep_adapter(cards)
+    scenarios = [s for s in load_scenarios() if s.category == "instruction_like_trusted_path"]
+    assert scenarios
+    for scenario in scenarios:
+        assert adapter_projection_violation(scenario, search=search)
+
+
+def test_build_projection_section_fixture_reference_passes_without_search():
+    section = build_projection_section(adapter="fixture-reference")
+    assert section["summary"]["failed"] == 0
+    assert section["summary"]["report_level_failure_count"] == len(SCOPE_DIMENSIONS)

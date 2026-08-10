@@ -64,6 +64,21 @@ def format_table(report: dict[str, Any]) -> str:
         for category, block in sorted(payload["by_category"].items()):
             lines.append(_row(f"  {name}/{category}", block))
 
+    projection = report.get("projection") or {}
+    projection_adapters: dict[str, Any] = projection.get("adapters") or {}
+    if projection_adapters:
+        lines.extend(["", "projection eval (#845 V1)", f"{'adapter':<28} {'pass':>8} {'fail':>8} {'scope!':>8}"])
+        lines.append("-" * 68)
+        for name, block in projection_adapters.items():
+            if block.get("skipped"):
+                lines.append(_row(name, None, skipped=True, reason=str(block.get("reason") or "skipped")))
+                continue
+            summary = block.get("summary") or {}
+            lines.append(
+                f"{name:<28} {summary.get('passed', 0):>8} {summary.get('failed', 0):>8} "
+                f"{summary.get('report_level_failure_count', 0):>8}"
+            )
+
     lines.append("")
     lines.append(
         "Gate reminder: semantic lands only if it beats grep on paraphrase/cross_tag, "
