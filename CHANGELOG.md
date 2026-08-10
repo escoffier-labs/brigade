@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run refuses incomplete consequential templates. Receipts record `budget_use`
   and `verification` separately from `model_completion`. Budget enforcement
   remains #593.
+- Optional dispatch annotations on work tasks (#815): `--seat-class`
+  (`mechanical` | `judgment` | `review`) and `--spend-by` (ISO-8601 deadline)
+  round-trip through `brigade work task add` / `brigade work task annotate` and
+  appear on `brigade work ready` (JSON and text) when present. Stored under
+  task `metadata`; absent annotations change nothing. Brigade does not dispatch
+  from them. Forward-plan skill documents emitting the hints.
 
 ## [0.26.1] - 2026-08-09
 

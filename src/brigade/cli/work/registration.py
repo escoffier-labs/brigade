@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ... import extras as _extras_mod
 from ...dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
-from ...work_cmd import TASK_PRIORITIES, TASK_TYPES
+from ...work_cmd import TASK_PRIORITIES, TASK_SEAT_CLASSES, TASK_TYPES
 from .. import extras as _extras_cli
 
 
@@ -558,6 +558,17 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Named file seed for predicted footprint at filing (repeatable).",
     )
     p_work_task_add.add_argument(
+        "--seat-class",
+        choices=TASK_SEAT_CLASSES,
+        default=None,
+        help="Optional dispatch seat-class hint (mechanical|judgment|review). Never a model id.",
+    )
+    p_work_task_add.add_argument(
+        "--spend-by",
+        default=None,
+        help="Optional ISO-8601 spend-by deadline for quota-driven dispatch routing.",
+    )
+    p_work_task_add.add_argument(
         "--graph",
         type=Path,
         default=None,
@@ -565,6 +576,36 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_work_task_add.add_argument("--dry-run", action="store_true", help="Validate --graph without writing.")
     p_work_task_add.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_task_annotate = task_sub.add_parser(
+        "annotate",
+        help="Set or clear seat-class / spend-by dispatch annotations on one task.",
+    )
+    p_work_task_annotate.add_argument("task_id", help="Task id or unique prefix.")
+    p_work_task_annotate.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
+    )
+    p_work_task_annotate.add_argument(
+        "--seat-class",
+        choices=TASK_SEAT_CLASSES,
+        default=None,
+        help="Dispatch seat-class hint (mechanical|judgment|review). Never a model id.",
+    )
+    p_work_task_annotate.add_argument(
+        "--spend-by",
+        default=None,
+        help="ISO-8601 spend-by deadline for quota-driven dispatch routing.",
+    )
+    p_work_task_annotate.add_argument(
+        "--clear-seat-class",
+        action="store_true",
+        help="Remove the seat-class annotation.",
+    )
+    p_work_task_annotate.add_argument(
+        "--clear-spend-by",
+        action="store_true",
+        help="Remove the spend-by annotation.",
+    )
+    p_work_task_annotate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_task_show = task_sub.add_parser("show", help="Show one work task.")
     p_work_task_show.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")

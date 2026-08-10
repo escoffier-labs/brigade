@@ -184,6 +184,20 @@ def test_forward_plan_output_contract_under_work_plans():
     assert "never a CLI subcommand" in text or re.search(r"(?i)never a subcommand", text)
 
 
+def test_forward_plan_documents_dispatch_annotations():
+    """#815: skill recipe must explain emitting seat_class / spend_by hints."""
+    text = _skill_text()
+    assert re.search(r"(?i)seat_class", text)
+    assert re.search(r"(?i)spend_by", text)
+    assert re.search(r"mechanical", text)
+    assert re.search(r"judgment", text)
+    assert re.search(r"\breview\b", text)
+    assert re.search(r"(?i)work task annotate", text)
+    assert re.search(r"(?i)never invent a model id", text)
+    metadata = _skill_metadata()
+    assert metadata.get("version") == "0.1.1"
+
+
 def test_forward_plan_template_manifest_validity():
     template_path = _bundled_skill_dir() / "plan.template.json"
     payload = json.loads(template_path.read_text(encoding="utf-8"))

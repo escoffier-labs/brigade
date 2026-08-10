@@ -95,6 +95,8 @@ def task_add(
     deps: list[str] | None = None,
     symbols: list[str] | None = None,
     files: list[str] | None = None,
+    seat_class: str | None = None,
+    spend_by: str | None = None,
     graph: Path | None = None,
     dry_run: bool = False,
     json_output: bool = False,
@@ -104,9 +106,10 @@ def task_add(
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     if graph is not None:
-        if text or from_next or from_issue or deps:
+        if text or from_next or from_issue or deps or seat_class or spend_by:
             print(
-                "error: --graph cannot be combined with task text, --from-next, --from-issue, or --deps",
+                "error: --graph cannot be combined with task text, --from-next, "
+                "--from-issue, --deps, --seat-class, or --spend-by",
                 file=sys.stderr,
             )
             return 2
@@ -121,9 +124,9 @@ def task_add(
             return 2
         try:
             result = ledger_mod._apply_graph_plan(target, plan, dry_run=dry_run)
-        except edges_mod.EdgeError as exc:
+        except (edges_mod.EdgeError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
-            if json_output:
+            if json_output and isinstance(exc, edges_mod.EdgeError):
                 print(json.dumps(exc.as_dict(), indent=2, sort_keys=True))
             return 2
         if json_output:
@@ -154,6 +157,12 @@ def task_add(
     if priority not in constants.TASK_PRIORITIES:
         print(f"error: --priority must be one of: {', '.join(constants.TASK_PRIORITIES)}", file=sys.stderr)
         return 2
+    try:
+        normalized_seat = ledger_mod._normalize_seat_class(seat_class)
+        normalized_spend = ledger_mod._normalize_spend_by(spend_by)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     task_text = (text or "").strip()
     source = "manual"
     dedupe = True
@@ -180,12 +189,16 @@ def task_add(
         dedupe = False
     else:
         metadata = None
-    if symbols or files:
+    if symbols or files or normalized_seat or normalized_spend:
         metadata = dict(metadata or {})
         if symbols:
             metadata["symbol_ids"] = list(symbols)
         if files:
             metadata["files"] = list(files)
+        if normalized_seat:
+            metadata["seat_class"] = normalized_seat
+        if normalized_spend:
+            metadata["spend_by"] = normalized_spend
     if not task_text:
         print("error: task text is required", file=sys.stderr)
         return 2
@@ -220,6 +233,9 @@ def task_add(
         if json_output:
             print(json.dumps(exc.as_dict(), indent=2, sort_keys=True))
         return 2
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     print(f"task: {task['id']}")
     print(f"status: {task['status']}")
     print(f"created: {created}")
@@ -232,6 +248,11 @@ def task_add(
     issue = ledger_mod._task_issue_metadata(task)
     if issue:
         print(f"issue: {issue.get('url') or issue.get('number')}")
+    annotations = ledger_mod._dispatch_annotations(task)
+    if annotations.get("seat_class"):
+        print(f"seat_class: {annotations['seat_class']}")
+    if annotations.get("spend_by"):
+        print(f"spend_by: {annotations['spend_by']}")
     task_edges = edges_mod.edges_for_task(ledger_mod._read_task_ledger(target), str(task["id"]))
     if task_edges:
         print(f"edges: {len(task_edges)}")
@@ -243,6 +264,70 @@ def task_add(
         print(f"footprint.files: {len(footprint.get('files') or [])}")
         print(f"footprint.symbol_ids: {len(footprint.get('symbol_ids') or [])}")
     print(f"text: {task['text']}")
+    return 0
+
+
+def task_annotate(
+    *,
+    target: Path,
+    task_id: str,
+    seat_class: str | None = None,
+    spend_by: str | None = None,
+    clear_seat_class: bool = False,
+    clear_spend_by: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if clear_seat_class and seat_class is not None:
+        print("error: --clear-seat-class cannot be combined with --seat-class", file=sys.stderr)
+        return 2
+    if clear_spend_by and spend_by is not None:
+        print("error: --clear-spend-by cannot be combined with --spend-by", file=sys.stderr)
+        return 2
+    try:
+        task = ledger_mod._annotate_task(
+            target,
+            task_id,
+            seat_class=seat_class,
+            spend_by=spend_by,
+            clear_seat_class=clear_seat_class,
+            clear_spend_by=clear_spend_by,
+        )
+    except KeyError:
+        print(f"error: task not found: {task_id}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    annotations = ledger_mod._dispatch_annotations(task)
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "task": task,
+                    "seat_class": annotations.get("seat_class"),
+                    "spend_by": annotations.get("spend_by"),
+                    "tasks_path": str(helpers._tasks_path(target)),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(f"task: {task.get('id')}")
+    print(f"status: {task.get('status', 'pending')}")
+    if annotations.get("seat_class"):
+        print(f"seat_class: {annotations['seat_class']}")
+    else:
+        print("seat_class: (none)")
+    if annotations.get("spend_by"):
+        print(f"spend_by: {annotations['spend_by']}")
+    else:
+        print("spend_by: (none)")
+    print(f"updated_at: {task.get('updated_at', '')}")
     return 0
 
 
@@ -270,6 +355,11 @@ def task_show(*, target: Path, task_id: str, json_output: bool = False) -> int:
     print(f"source: {task.get('source', '')}")
     print(f"type: {ledger_mod._normalize_task_type(task.get('type'))}")
     print(f"priority: {ledger_mod._normalize_task_priority(task.get('priority'))}")
+    annotations = ledger_mod._dispatch_annotations(task)
+    if annotations.get("seat_class"):
+        print(f"seat_class: {annotations['seat_class']}")
+    if annotations.get("spend_by"):
+        print(f"spend_by: {annotations['spend_by']}")
     if task.get("assignee"):
         print(f"assignee: {task['assignee']}")
     claim = task.get("claim") if isinstance(task.get("claim"), dict) else None
@@ -555,6 +645,17 @@ def task_done(*, target: Path, task_id: str, force: bool = False, json_output: b
     return 0
 
 
+def _format_ready_annotations(item: dict[str, Any]) -> str:
+    parts: list[str] = []
+    if item.get("seat_class"):
+        parts.append(f"seat_class={item['seat_class']}")
+    if item.get("spend_by"):
+        parts.append(f"spend_by={item['spend_by']}")
+    if not parts:
+        return ""
+    return f" [{', '.join(parts)}]"
+
+
 def ready(
     *,
     target: Path,
@@ -584,10 +685,12 @@ def ready(
             exclusive = " exclusive" if wave.get("exclusive") else ""
             print(f"wave {wave.get('index')}{exclusive}:")
             for item in wave.get("tasks") or []:
-                print(f"  - {item['id']} {helpers._short(str(item.get('text') or ''))}")
+                print(
+                    f"  - {item['id']} {helpers._short(str(item.get('text') or ''))}{_format_ready_annotations(item)}"
+                )
     else:
         for item in payload["ready"]:
-            print(f"- {item['id']} {helpers._short(str(item.get('text') or ''))}")
+            print(f"- {item['id']} {helpers._short(str(item.get('text') or ''))}{_format_ready_annotations(item)}")
     if explain:
         for item in payload.get("blocked") or []:
             print(

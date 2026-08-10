@@ -57,7 +57,14 @@ confirmation.
 
 1. **Native ready set** - `brigade work ready --json` (from the work ledger
    dependency edges / ready resolver). Prefer `--explain` when the ready set is
-   empty so blocked paths are visible.
+   empty so blocked paths are visible. Ready items may carry optional
+   `seat_class` (`mechanical` | `judgment` | `review`) and `spend_by`
+   (ISO-8601 deadline) annotations for quota-driven dispatch routing. Pass those
+   through when proposing or filing work; never invent a model id. When creating
+   or annotating tasks after confirmation, emit them with
+   `brigade work task add … --seat-class … --spend-by …` or
+   `brigade work task annotate <id> …`, or as `metadata.seat_class` /
+   `metadata.spend_by` on `--graph` nodes. Absent annotations change nothing.
 2. **Outcome rank** - `brigade outcome rank --json`. Use ranking only as a
    soft priority signal for ordering proposed work, never as a substitute for
    readiness.

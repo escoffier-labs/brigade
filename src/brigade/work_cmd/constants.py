@@ -26,6 +26,10 @@ TASK_TYPES = ("task", "feature", "bug", "docs", "security", "workflow", "researc
 TASK_PRIORITIES = ("low", "normal", "high", "urgent")
 
 
+# Dispatch-time routing hints (#815). Map to roster seat tiers; never model ids.
+TASK_SEAT_CLASSES = ("mechanical", "judgment", "review")
+
+
 TASK_TEMPLATES: dict[str, dict[str, tuple[str, ...]]] = {
     "vertical-slice": {
         "acceptance": (

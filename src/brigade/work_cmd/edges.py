@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
-from . import helpers
+from . import constants, helpers
 
 EDGE_TYPES = ("blocks", "parent-child", "discovered-from")
 READINESS_EDGE_TYPES = frozenset({"blocks", "parent-child"})
@@ -41,6 +41,20 @@ REASON_UNKNOWN_NODE_REF = "unknown_node_ref"
 REASON_INVALID_GRAPH = "invalid_graph"
 
 TASK_LEDGER_VERSION = 2
+
+
+def _ready_dispatch_annotations(task: dict[str, Any]) -> dict[str, str]:
+    """Project present, valid seat_class / spend_by hints onto ready items (#815)."""
+    raw_metadata = task.get("metadata")
+    metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+    annotations: dict[str, str] = {}
+    raw_seat = metadata.get("seat_class")
+    if isinstance(raw_seat, str) and raw_seat.strip() in constants.TASK_SEAT_CLASSES:
+        annotations["seat_class"] = raw_seat.strip()
+    raw_spend = metadata.get("spend_by")
+    if isinstance(raw_spend, str) and helpers._parse_iso_datetime(raw_spend.strip()) is not None:
+        annotations["spend_by"] = raw_spend.strip()
+    return annotations
 
 
 class EdgeError(ValueError):
@@ -420,17 +434,17 @@ def resolve_readiness(ledger: dict[str, Any]) -> ReadinessResult:
                 }
             )
             continue
-        ready.append(
-            {
-                "id": task_id,
-                "text": str(task.get("text") or ""),
-                "status": _status_of(task),
-                "source": task.get("source", "manual"),
-                "type": task.get("type", "task"),
-                "priority": task.get("priority", "normal"),
-                "created_at": task.get("created_at"),
-            }
-        )
+        ready_item: dict[str, Any] = {
+            "id": task_id,
+            "text": str(task.get("text") or ""),
+            "status": _status_of(task),
+            "source": task.get("source", "manual"),
+            "type": task.get("type", "task"),
+            "priority": task.get("priority", "normal"),
+            "created_at": task.get("created_at"),
+        }
+        ready_item.update(_ready_dispatch_annotations(task))
+        ready.append(ready_item)
 
     # Stable ready ordering: created_at then id (already sorted via candidates).
     ready.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")))
