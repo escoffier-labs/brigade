@@ -8,8 +8,11 @@ suitable for harness SessionStart injection. Failures stay fail-open.
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +21,8 @@ RECALL_MAX_LINES = 10
 RECALL_TIMEOUT_SECONDS = 5
 GENERIC_WORKSPACE_QUERY = "workspace"
 _TERM_SPLIT = re.compile(r"[-_]+")
+_RECALL_TEST_HANG_ENV = "BRIGADE_RECALL_TEST_HANG_SECONDS"
+_RECALL_WORKER_COMMAND = "from brigade.memory_hooks import _recall_worker_main; _recall_worker_main()"
 
 
 def split_cwd_terms(basename: str) -> list[str]:
@@ -111,30 +116,60 @@ def format_recall_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines[:RECALL_MAX_LINES])
 
 
-def recall_cards_payload(
+def _empty_recall_payload(
+    *,
+    target: Path,
+    cwd: Path,
+    query: str,
+    limit: int,
+    status: str,
+) -> dict[str, Any]:
+    return {
+        "target": str(target),
+        "cwd": str(cwd),
+        "query": query,
+        "match_count": 0,
+        "matches": [],
+        "limit": limit,
+        "status": status,
+    }
+
+
+def _maybe_recall_test_hang() -> None:
+    raw = os.environ.get(_RECALL_TEST_HANG_ENV)
+    if raw is None or not raw.strip():
+        return
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return
+    if seconds > 0:
+        time.sleep(seconds)
+
+
+def _recall_cards_payload_impl(
     *,
     target: Path,
     cwd: Path,
     limit: int = DEFAULT_RECALL_LIMIT,
 ) -> dict[str, Any]:
-    """Run bounded recall against ``target`` using terms derived from ``cwd``."""
+    """In-process recall body (runs in a killable child when timed)."""
     from .memory_cmd import search_cards_payload
 
+    _maybe_recall_test_hang()
     capped = _clamp_limit(limit)
     try:
         memory_root = target.expanduser().resolve(strict=False)
     except OSError:
         memory_root = target
     query = query_from_cwd(cwd, memory_root=memory_root)
-    empty: dict[str, Any] = {
-        "target": str(target),
-        "cwd": str(cwd),
-        "query": query,
-        "match_count": 0,
-        "matches": [],
-        "limit": capped,
-        "status": "ok",
-    }
+    empty = _empty_recall_payload(
+        target=target,
+        cwd=cwd,
+        query=query,
+        limit=capped,
+        status="ok",
+    )
     try:
         raw = search_cards_payload(memory_root, query, limit=capped)
     except (OSError, ValueError):
@@ -163,6 +198,80 @@ def recall_cards_payload(
         "limit": capped,
         "status": "ok",
     }
+
+
+def _recall_worker_main() -> None:
+    """Child entry for timed recall; stdin request JSON, stdout payload JSON."""
+    req = json.loads(sys.stdin.read())
+    if not isinstance(req, dict):
+        raise TypeError("recall worker stdin must be a JSON object")
+    payload = _recall_cards_payload_impl(
+        target=Path(str(req["target"])),
+        cwd=Path(str(req["cwd"])),
+        limit=int(req["limit"]),
+    )
+    sys.stdout.write(json.dumps(payload, sort_keys=True))
+
+
+def recall_cards_payload(
+    *,
+    target: Path,
+    cwd: Path,
+    limit: int = DEFAULT_RECALL_LIMIT,
+) -> dict[str, Any]:
+    """Run bounded recall against ``target`` using terms derived from ``cwd``.
+
+    Card search runs in a killable child process so a stalled scan cannot block
+    SessionStart past ``RECALL_TIMEOUT_SECONDS``. Timeout and child failures
+    return an empty fail-open payload.
+    """
+    capped = _clamp_limit(limit)
+    try:
+        memory_root = target.expanduser().resolve(strict=False)
+    except OSError:
+        memory_root = target
+    query = query_from_cwd(cwd, memory_root=memory_root)
+    empty = _empty_recall_payload(
+        target=target,
+        cwd=cwd,
+        query=query,
+        limit=capped,
+        status="error",
+    )
+    request = json.dumps(
+        {
+            "target": str(target),
+            "cwd": str(cwd),
+            "limit": capped,
+        },
+        sort_keys=True,
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", _RECALL_WORKER_COMMAND],
+            input=request,
+            capture_output=True,
+            text=True,
+            timeout=RECALL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        empty["status"] = "timeout"
+        return empty
+    except OSError:
+        return empty
+    if completed.returncode != 0:
+        return empty
+    stdout = completed.stdout.strip()
+    if not stdout:
+        return empty
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        return empty
+    if not isinstance(parsed, dict):
+        return empty
+    return parsed
 
 
 def recall_text_for_hook(

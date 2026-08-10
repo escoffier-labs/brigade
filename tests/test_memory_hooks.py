@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from brigade import cli, config, memory_hooks
@@ -166,3 +167,52 @@ def test_resolve_memory_recall_target_explicit_mirror(tmp_path: Path):
     path, status = memory_hooks.resolve_memory_recall_target(repo)
     assert status == "active"
     assert path == mirror.resolve()
+
+
+def test_recall_cards_payload_enforces_timeout_and_fail_open(tmp_path: Path, monkeypatch):
+    hub = tmp_path / "hub"
+    session = tmp_path / "astro-portfolio"
+    hub.mkdir()
+    session.mkdir()
+    _write_card(hub, "astro.md", "Astro Notes", "body", tags=["astro"])
+    monkeypatch.setenv(memory_hooks._RECALL_TEST_HANG_ENV, "30")
+    monkeypatch.setattr(memory_hooks, "RECALL_TIMEOUT_SECONDS", 0.25)
+    started = time.monotonic()
+    payload = memory_hooks.recall_cards_payload(target=hub, cwd=session)
+    elapsed = time.monotonic() - started
+    assert payload["status"] == "timeout"
+    assert payload["matches"] == []
+    assert payload["match_count"] == 0
+    assert elapsed < 2.0
+
+
+def test_recall_text_for_hook_timeout_returns_empty(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    hub = tmp_path / "hub"
+    session = tmp_path / "astro-portfolio"
+    repo.mkdir()
+    hub.mkdir()
+    session.mkdir()
+    _write_brigade_config(repo, depth="repo", memory_recall_target=str(hub))
+    _write_card(hub, "astro.md", "Astro Notes", "body", tags=["astro"])
+    monkeypatch.setenv(memory_hooks._RECALL_TEST_HANG_ENV, "30")
+    monkeypatch.setattr(memory_hooks, "RECALL_TIMEOUT_SECONDS", 0.25)
+    started = time.monotonic()
+    text = memory_hooks.recall_text_for_hook(wired_target=repo, cwd=session)
+    elapsed = time.monotonic() - started
+    assert text == ""
+    assert elapsed < 2.0
+
+
+def test_recall_cli_timeout_json_is_fail_open(tmp_path: Path, monkeypatch, capsys):
+    hub = tmp_path / "hub"
+    session = tmp_path / "astro-portfolio"
+    hub.mkdir()
+    session.mkdir()
+    monkeypatch.setenv(memory_hooks._RECALL_TEST_HANG_ENV, "30")
+    monkeypatch.setattr(memory_hooks, "RECALL_TIMEOUT_SECONDS", 0.25)
+    rc = memory_hooks.recall(target=hub, cwd=session, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["status"] == "timeout"
+    assert payload["matches"] == []
