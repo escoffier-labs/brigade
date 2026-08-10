@@ -151,6 +151,51 @@ def test_session_start_recall_fail_open_keeps_brief(tmp_path: Path, monkeypatch)
     assert "memory recall:" not in context
 
 
+def test_session_start_compact_source_restores_brief_and_recall_once(tmp_path: Path, monkeypatch):
+    from brigade.claude_hooks import compaction_marker
+
+    target = _wired_claude(tmp_path)
+    session_cwd = target / "astro-portfolio"
+    session_cwd.mkdir()
+    recall_text = "memory recall: astro portfolio\n- Astro Notes | tags: astro | memory/cards/astro.md"
+    recall_calls: list[str | None] = []
+
+    def fake_recall(_target: Path, payload: dict) -> str:
+        recall_calls.append(payload.get("source") if isinstance(payload.get("source"), str) else None)
+        return recall_text
+
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "compact-restored-brief")
+    monkeypatch.setattr(runtime, "_run_recall", fake_recall)
+
+    startup = runtime.handle_payload(
+        "SessionStart",
+        _payload(target, "SessionStart", source="startup", cwd=str(session_cwd)),
+    )
+    assert startup is not None
+    assert "compact-restored-brief" in startup["hookSpecificOutput"]["additionalContext"]
+    assert recall_calls == ["startup"]
+
+    recall_calls.clear()
+    compact = runtime.handle_payload(
+        "SessionStart",
+        _payload(target, "SessionStart", source="compact", cwd=str(session_cwd)),
+    )
+    assert compact is not None
+    context = compact["hookSpecificOutput"]["additionalContext"]
+    assert compaction_marker.RESTORE_PREFIX in context
+    assert "compact-restored-brief" in context
+    assert "memory recall: astro portfolio" in context
+    assert context.count("memory recall: astro portfolio") == 1
+    assert recall_calls == ["compact"]
+    assert (
+        runtime.handle_payload(
+            "SessionStart",
+            _payload(target, "SessionStart", source="startup", cwd=str(session_cwd)),
+        )
+        is None
+    )
+
+
 def test_all_events_are_inert_for_unwired_repo(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(runtime, "_run_brief", lambda target: (_ for _ in ()).throw(AssertionError(target)))
     assert runtime.handle_payload("SessionStart", _payload(tmp_path, "SessionStart")) is None
