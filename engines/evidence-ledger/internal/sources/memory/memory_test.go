@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/escoffier-labs/miseledger/internal/sources"
 	"github.com/escoffier-labs/miseledger/internal/textnorm"
@@ -79,6 +80,28 @@ func TestWalkValidMissingMalformedUnknownLargeInjection(t *testing.T) {
 
 	if len(result.Warnings) == 0 {
 		t.Fatal("expected malformed warning")
+	}
+}
+
+func TestBuildCardTruncatesUTF8WithinBudget(t *testing.T) {
+	marker := "\n[truncated]"
+	body := "---\nid: card-utf80000-1111-4222-8333-444444444444\nsummary: " + strings.Repeat("界", MaxTextBytes) + "\n---\n\n" + strings.Repeat("界", MaxTextBytes)
+	card, warning := buildCard("workspace", fixtureNamespace, "memory/cards/utf8.md", []byte(body))
+	if warning != "" || card.Record == nil {
+		t.Fatalf("card=%+v warning=%q", card, warning)
+	}
+	if !utf8.ValidString(card.Record.Item.Text) || !utf8.ValidString(*card.Record.Item.Summary) {
+		t.Fatal("truncation split a UTF-8 rune")
+	}
+	if len(card.Record.Item.Text) > MaxTextBytes || !strings.HasSuffix(card.Record.Item.Text, marker) {
+		t.Fatalf("text bytes=%d suffix=%v", len(card.Record.Item.Text), strings.HasSuffix(card.Record.Item.Text, marker))
+	}
+	if len(*card.Record.Item.Summary) > MaxTextBytes || !strings.HasSuffix(*card.Record.Item.Summary, marker) {
+		t.Fatalf("summary bytes=%d suffix=%v", len(*card.Record.Item.Summary), strings.HasSuffix(*card.Record.Item.Summary, marker))
+	}
+	ascii, _ := buildCard("workspace", fixtureNamespace, "memory/cards/ascii.md", []byte("---\nid: card-ascii000-1111-4222-8333-444444444444\n---\n\n"+strings.Repeat("a", MaxTextBytes+1)))
+	if ascii.Record == nil || len(ascii.Record.Item.Text) != MaxTextBytes || !strings.HasSuffix(ascii.Record.Item.Text, marker) {
+		t.Fatalf("ascii truncation = %+v", ascii)
 	}
 }
 

@@ -332,6 +332,10 @@ where s.kind = ?
 		if _, err := tx.Exec(`delete from item_fts where item_id = ?`, r.id); err != nil {
 			return 0, err
 		}
+		if _, err := tx.Exec(`update relations set target_item_id = null
+where target_item_id = ? and source_item_id != ?`, r.id, r.id); err != nil {
+			return 0, err
+		}
 		removedIDs[r.externalID] = true
 	}
 	return len(removedIDs), nil
@@ -543,6 +547,11 @@ where s.kind = ? and c.external_id = ?`, MemorySourceKind, namespace).Scan(&live
 	if err := moveCollectionExternalID(tx, namespace, backup, false); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`update relations
+set metadata_json = json_set(coalesce(metadata_json, '{}'), '$._memory_rebuild_backup_target_id', target_item_id)
+where target_item_id like ?`, memoryItemBackupPrefix+"%"); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -747,22 +756,23 @@ func deleteItemGraph(tx *sql.Tx, itemID string) error {
 func repointBackupItemRelations(tx *sql.Tx, namespace string) error {
 	rows, err := tx.Query(`select r.id, r.target_external_id,
 coalesce(r.target_source_kind, ''), coalesce(r.target_collection_external_id, ''),
-coalesce(ss.kind, '')
+coalesce(ss.kind, ''), coalesce(sc.external_id, '')
 from relations r
 left join items source on source.id = r.source_item_id
 left join sources ss on ss.id = source.source_id
+left join collections sc on sc.id = source.collection_id
 where r.target_item_id like ?`, memoryItemBackupPrefix+"%")
 	if err != nil {
 		return err
 	}
 	type rel struct {
-		id, targetSource, targetCollection, sourceKind string
-		externalID                                     sql.NullString
+		id, targetSource, targetCollection, sourceKind, sourceCollection string
+		externalID                                                       sql.NullString
 	}
 	var pending []rel
 	for rows.Next() {
 		var r rel
-		if err := rows.Scan(&r.id, &r.externalID, &r.targetSource, &r.targetCollection, &r.sourceKind); err != nil {
+		if err := rows.Scan(&r.id, &r.externalID, &r.targetSource, &r.targetCollection, &r.sourceKind, &r.sourceCollection); err != nil {
 			rows.Close()
 			return err
 		}
@@ -781,16 +791,25 @@ where r.target_item_id like ?`, memoryItemBackupPrefix+"%")
 		if !qualified && !legacySameSource {
 			continue
 		}
+		if legacySameSource && r.sourceCollection != namespace && r.sourceCollection != backupCollectionExternalID(namespace) {
+			continue
+		}
 		if qualified && r.targetCollection != "" && r.targetCollection != namespace {
 			continue
 		}
 		if r.targetCollection == "" {
 			var candidates int
-			if err := tx.QueryRow(`select count(*) from items i
+			countQuery := `select count(*) from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 where s.kind = ? and i.external_id = ? and i.tombstoned_at is null
-  and c.external_id not like ?`, MemorySourceKind, r.externalID.String, memoryBackupPrefix+"%").Scan(&candidates); err != nil {
+	  and c.external_id not like ?`
+			args := []any{MemorySourceKind, r.externalID.String, memoryBackupPrefix + "%"}
+			if legacySameSource {
+				countQuery += " and c.external_id = ?"
+				args = append(args, namespace)
+			}
+			if err := tx.QueryRow(countQuery, args...).Scan(&candidates); err != nil {
 				return err
 			}
 			if candidates != 1 {
@@ -821,7 +840,8 @@ where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at
 // backup item ids back to their original live ids.
 func restoreLiveRelationsToBackupTx(tx *sql.Tx, namespace string) error {
 	backup := backupCollectionExternalID(namespace)
-	rows, err := tx.Query(`select r.id, i.external_id from relations r
+	rows, err := tx.Query(`select r.id, i.external_id,
+coalesce(json_extract(r.metadata_json, '$._memory_rebuild_backup_target_id'), '') from relations r
 join items i on i.id = r.target_item_id
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
@@ -830,11 +850,11 @@ where s.kind = ? and c.external_id = ?`, MemorySourceKind, namespace)
 		return err
 	}
 	defer rows.Close()
-	type rel struct{ id, externalID string }
+	type rel struct{ id, externalID, recordedBackupID string }
 	var pending []rel
 	for rows.Next() {
 		var r rel
-		if err := rows.Scan(&r.id, &r.externalID); err != nil {
+		if err := rows.Scan(&r.id, &r.externalID, &r.recordedBackupID); err != nil {
 			return err
 		}
 		pending = append(pending, r)
@@ -843,6 +863,18 @@ where s.kind = ? and c.external_id = ?`, MemorySourceKind, namespace)
 		return err
 	}
 	for _, r := range pending {
+		if r.recordedBackupID != "" {
+			var exists int
+			if err := tx.QueryRow(`select count(*) from items where id = ?`, r.recordedBackupID).Scan(&exists); err != nil {
+				return err
+			}
+			if exists == 1 {
+				if _, err := tx.Exec(`update relations set target_item_id = ? where id = ?`, r.recordedBackupID, r.id); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		var candidates int
 		if err := tx.QueryRow(`select count(*) from items i
 join sources s on s.id = i.source_id
@@ -1144,11 +1176,12 @@ join sources s on s.id = c.source_id
 where s.kind = ?
   and c.kind = 'memory_cards'
   and c.external_id not like ?
-  and not exists (
+	and not exists (
     select 1 from source_scan_runs scan
     where scan.source_kind = ? and scan.status = 'completed'
-      and coalesce(json_extract(scan.metadata_json, '$.memory_namespace'), '') = c.external_id
-  )`, MemorySourceKind, memoryBackupPrefix+"%", MemorySourceKind)
+      and (coalesce(json_extract(scan.metadata_json, '$.memory_namespace'), '') = c.external_id
+           or (c.external_id = ? and coalesce(json_extract(scan.metadata_json, '$.memory_namespace'), '') = ''))
+	)`, MemorySourceKind, memoryBackupPrefix+"%", MemorySourceKind, memory.LegacyCollectionID)
 	if err != nil {
 		return 0, 0, err
 	}

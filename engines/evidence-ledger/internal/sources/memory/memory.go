@@ -18,9 +18,9 @@ import (
 )
 
 const (
-	SourceKind       = "brigade-memory"
-	SourceName       = "Brigade Memory Cards"
-	SourceVersion    = "1.0.0"
+	SourceKind    = "brigade-memory"
+	SourceName    = "Brigade Memory Cards"
+	SourceVersion = "1.0.0"
 	// LegacyCollectionID is the pre-namespace collection. Namespaced crawls
 	// never tombstone or rebuild these rows (scoped-rebuild). Empty-namespace
 	// status/doctor health dual-reads live counts across all collections,
@@ -359,7 +359,7 @@ func buildCard(workspace, namespace, rel string, body []byte) (CardOutcome, stri
 	externalID, identitySource := cardIdentity(meta, rel)
 	fingerprint := textnorm.ContentFingerprint(text)
 	markdownBody := bodyAfterFrontmatter(text, hasFrontmatter)
-	summary := firstNonEmpty(stringField(meta, "summary"), stringField(meta, "description"), stringField(meta, "title"), stringField(meta, "topic"))
+	summary := truncateText(firstNonEmpty(stringField(meta, "summary"), stringField(meta, "description"), stringField(meta, "title"), stringField(meta, "topic")), MaxTextBytes)
 	tags := stringList(meta, "tags")
 	if len(tags) == 0 {
 		tags = []string{"memory-card"}
@@ -370,7 +370,7 @@ func buildCard(workspace, namespace, rel string, body []byte) (CardOutcome, stri
 	itemText := strings.TrimSpace(markdownBody)
 	truncated := false
 	if len(itemText) > MaxTextBytes {
-		itemText = itemText[:MaxTextBytes] + "\n[truncated]"
+		itemText = truncateText(itemText, MaxTextBytes)
 		truncated = true
 	}
 
@@ -442,6 +442,22 @@ func buildCard(workspace, namespace, rel string, body []byte) (CardOutcome, stri
 		ContentHash:    contentHashForRecord(&rec),
 	}
 	return outcome, ""
+}
+
+const truncationMarker = "\n[truncated]"
+
+func truncateText(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	if limit <= len(truncationMarker) {
+		return truncationMarker[:limit]
+	}
+	cut := limit - len(truncationMarker)
+	for cut > 0 && (text[cut]&0xc0) == 0x80 {
+		cut--
+	}
+	return text[:cut] + truncationMarker
 }
 
 func cardIdentity(meta map[string]any, rel string) (string, string) {

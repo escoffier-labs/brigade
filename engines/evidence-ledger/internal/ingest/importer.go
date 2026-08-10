@@ -354,8 +354,10 @@ where target_item_id is null
 set target_item_id = (
   select target.id
   from items source
+  join sources source_kind on source_kind.id = source.source_id
   join items target on target.source_id = source.source_id and target.external_id = relations.target_external_id
   where source.id = relations.source_item_id
+    and (source_kind.kind != ? or target.collection_id = source.collection_id)
     and target.tombstoned_at is null
   order by target.created_at, target.id
   limit 1
@@ -367,10 +369,12 @@ where target_item_id is null
   and exists (
     select 1
     from items source
+    join sources source_kind on source_kind.id = source.source_id
     join items target on target.source_id = source.source_id and target.external_id = relations.target_external_id
     where source.id = relations.source_item_id
+      and (source_kind.kind != ? or target.collection_id = source.collection_id)
       and target.tombstoned_at is null
-  )`)
+  )`, MemorySourceKind, MemorySourceKind)
 	if err != nil {
 		return 0, err
 	}
