@@ -595,11 +595,11 @@ def task_claim(
                     claim_id=claim_mod.generate_claim_id(),
                     require_ready=True,
                 )
-            elif status == "in_progress" and actor_text is not None:
+            elif status == "in_progress":
                 # Legacy footprint-only in_progress rows (no claim record): adopt
-                # into CAS when assignee is empty or already this actor.
+                # into CAS using the provided actor, existing assignee, or local.
                 current_assignee = claim_mod._string_or_none(task.get("assignee"))
-                if current_assignee is not None and current_assignee != actor_text:
+                if actor_text is not None and current_assignee is not None and current_assignee != actor_text:
                     raise claim_mod.ClaimError(
                         f"task {task.get('id')} is held by {current_assignee}",
                         reason=claim_mod.REASON_ALREADY_CLAIMED,
@@ -610,9 +610,10 @@ def task_claim(
                             "assignee": current_assignee,
                         },
                     )
+                claim_actor = actor_text or current_assignee or "local"
                 claim_mod._set_claim(
                     task,
-                    actor=actor_text,
+                    actor=claim_actor,
                     claim_id=claim_mod.generate_claim_id(),
                     claimed_at=helpers._now().isoformat(),
                 )

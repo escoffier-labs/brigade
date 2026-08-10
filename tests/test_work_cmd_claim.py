@@ -629,3 +629,75 @@ def test_task_claim_text_output_includes_claim_id(tmp_path, monkeypatch, capsys)
     text_out = capsys.readouterr().out
     assert f"claim_id: {claim_id}" in text_out
     assert "status: in_progress" in text_out
+
+
+def test_task_claim_adopts_legacy_in_progress_without_actor(tmp_path, monkeypatch, capsys):
+    """#857: omitted --actor must still CAS-adopt legacy in_progress rows."""
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 8, 10, 20, 0, 0, tzinfo=timezone.utc),
+    )
+    task = _add(tmp_path, "Legacy footprint-only claim")
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    for item in ledger["tasks"]:
+        if item["id"] == task["id"]:
+            item["status"] = "in_progress"
+            item["assignee"] = "lane-a"
+            item["claimed_at"] = "2026-08-10T12:00:00+00:00"
+    work_cmd._write_task_ledger(tmp_path, ledger)
+
+    assert (
+        work_cmd.task_claim(
+            target=tmp_path,
+            task_id=task["id"],
+            files=["src/brigade/work_cmd/claiming.py"],
+            from_plan=False,
+            json_output=True,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "in_progress"
+    assert payload["claim"]["claim_id"]
+    assert payload["claim"]["actor"] == "lane-a"
+
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    stored = next(item for item in ledger["tasks"] if item["id"] == task["id"])
+    assert stored["claim"]["claim_id"] == payload["claim"]["claim_id"]
+    assert stored["claim"]["actor"] == "lane-a"
+
+    claim_id = payload["claim"]["claim_id"]
+    assert (
+        work_cmd.release(
+            target=tmp_path,
+            task=[task["id"]],
+            claim_id=[claim_id],
+            json_output=True,
+        )
+        == 0
+    )
+    release_payload = json.loads(capsys.readouterr().out)
+    assert release_payload["released_count"] == 1
+
+    unassigned = _add(tmp_path, "Legacy without assignee")
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    for item in ledger["tasks"]:
+        if item["id"] == unassigned["id"]:
+            item["status"] = "in_progress"
+            item.pop("assignee", None)
+    work_cmd._write_task_ledger(tmp_path, ledger)
+
+    assert (
+        work_cmd.task_claim(
+            target=tmp_path,
+            task_id=unassigned["id"],
+            files=["src/a.py"],
+            from_plan=False,
+            json_output=True,
+        )
+        == 0
+    )
+    local_payload = json.loads(capsys.readouterr().out)
+    assert local_payload["claim"]["actor"] == "local"
