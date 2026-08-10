@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from brigade import cli, receipt_schema, skill_obligations, skills_cmd
+
+
+def _external_public_label(path: Path) -> str:
+    """Mirror the collision-resistant external label contract for assertions."""
+    resolved = path.expanduser().resolve()
+    name = resolved.name or "path"
+    digest = hashlib.sha256(resolved.as_posix().encode("utf-8")).hexdigest()[:12]
+    return f"external:{name}-{digest}"
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -457,11 +466,12 @@ def test_audit_json_and_text_never_emit_private_absolute_paths(tmp_path: Path, c
     payload = json.loads(json_out)
     _assert_no_private_absolute_paths(json_out, tmp_path, workspace, external_skill)
 
+    expected_external = _external_public_label(external_skill)
     assert payload["target"] == skill_obligations.PUBLIC_TARGET
     assert payload["run_dir"] == f".brigade/runs/{audited}"
-    assert payload["declared_skill_ids"] == ["external:path-skill"]
+    assert payload["declared_skill_ids"] == [expected_external]
     assert payload["skills"][0]["source"]["kind"] == "path"
-    assert payload["skills"][0]["source"]["identity"] == "path:external:path-skill"
+    assert payload["skills"][0]["source"]["identity"] == f"path:{expected_external}"
     assert payload["unattributed_receipt_count"] >= 1
     for item in payload["unattributed_receipts"]:
         path = item.get("path")
@@ -498,6 +508,81 @@ def test_audit_registry_source_keeps_stable_non_path_identity(tmp_path: Path, ca
     assert source["kind"] == "registry"
     assert source["identity"] == "registry://skills/demo-skill"
     _assert_no_private_absolute_paths(json.dumps(payload), tmp_path)
+
+
+def test_missing_path_skill_load_error_redacts_absolute_path_in_json_and_text(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    missing = (tmp_path / "outside" / "missing-skill").resolve()
+    assert not missing.exists()
+    run_dir = _write_run(workspace, "20260801-audit-missing-path", [str(missing)])
+    expected = _external_public_label(missing)
+
+    metadata, source, load_error = skill_obligations._load_skill_metadata(workspace, str(missing))
+    assert metadata == {}
+    assert source is None
+    assert load_error is not None
+    assert str(missing) not in load_error
+    assert load_error == f"skill not found: {expected}"
+
+    assert skill_obligations.audit(target=workspace, run=run_dir, json_output=True) == 0
+    json_out = capsys.readouterr().out
+    payload = json.loads(json_out)
+    _assert_no_private_absolute_paths(json_out, tmp_path, workspace, missing)
+    assert payload["declared_skill_ids"] == [expected]
+    assert payload["skills"][0]["loaded"] is False
+    assert payload["skills"][0]["load_error"] == f"skill not found: {expected}"
+    assert payload["load_warnings"] == [{"skill_id": expected, "detail": f"skill not found: {expected}"}]
+
+    assert skill_obligations.audit(target=workspace, run=run_dir, json_output=False) == 0
+    text_out = capsys.readouterr().out
+    _assert_no_private_absolute_paths(text_out, tmp_path, workspace, missing)
+    assert str(missing) not in text_out
+
+
+def test_external_same_basename_paths_get_distinct_stable_public_labels(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skill_a = tmp_path / "a" / "foo"
+    skill_b = tmp_path / "b" / "foo"
+    for skill_dir, skill_id in ((skill_a, "foo-a"), (skill_b, "foo-b")):
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {skill_id}\ndescription: Same basename external skill.\n---\n\n# {skill_id}\n"
+        )
+        _write_json(
+            skill_dir / "skill.json",
+            {
+                "id": skill_id,
+                "title": skill_id,
+                "version": "0.1.0",
+                "description": "same basename external skill",
+                "tests": [f"brigade skills lint {skill_id}"],
+                "obligations": [{"id": "fresh-verify", "kind": "check", "required": True}],
+            },
+        )
+    label_a = _external_public_label(skill_a)
+    label_b = _external_public_label(skill_b)
+    assert label_a != label_b
+    assert label_a.startswith("external:foo-")
+    assert label_b.startswith("external:foo-")
+    assert skill_obligations._public_path(workspace, skill_a) == label_a
+    assert skill_obligations._public_path(workspace, skill_b) == label_b
+    assert skill_obligations._public_path(workspace, skill_a) == label_a
+
+    run_dir = _write_run(
+        workspace, "20260801-audit-basename-collision", [str(skill_a.resolve()), str(skill_b.resolve())]
+    )
+    assert skill_obligations.audit(target=workspace, run=run_dir, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["declared_skill_ids"] == [label_a, label_b]
+    identities = [skill["source"]["identity"] for skill in payload["skills"]]
+    assert identities == [f"path:{label_a}", f"path:{label_b}"]
+    _assert_no_private_absolute_paths(json.dumps(payload), tmp_path, workspace, skill_a, skill_b)
 
 
 def test_skills_lint_rejects_malformed_obligations(tmp_path: Path, capsys: pytest.CaptureFixture[str]):

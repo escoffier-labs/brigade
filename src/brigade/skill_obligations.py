@@ -37,12 +37,20 @@ RESULT_NO_DECLARED_SKILLS = "no_declared_skills"
 RESULT_NO_OBLIGATIONS = "no_obligations"
 
 # Public audit output never prints host-private absolute paths. Paths under the
-# audited target are repo-relative; everything else collapses to external:<name>.
+# audited target are repo-relative; everything else collapses to a collision-
+# resistant external:<name>-<digest> label that cannot reveal the absolute path.
 PUBLIC_TARGET = "."
 
 
+def _external_public_label(stable_key: str, *, name_hint: str | None = None) -> str:
+    """Deterministic collision-resistant public label for a path outside root."""
+    name = Path(name_hint or stable_key).name or "path"
+    digest = hashlib.sha256(stable_key.encode("utf-8")).hexdigest()[:12]
+    return f"external:{name}-{digest}"
+
+
 def _public_path(root: Path, value: object) -> str | None:
-    """Stable public path label: repo-relative under root, else external:<name>."""
+    """Stable public path label: repo-relative under root, else external:<name>-<digest>."""
     if value is None:
         return None
     if not isinstance(value, (str, Path)):
@@ -55,13 +63,11 @@ def _public_path(root: Path, value: object) -> str | None:
     try:
         resolved = path.resolve() if path.is_absolute() else (root_resolved / path).resolve()
     except OSError:
-        name = Path(text).name or "path"
-        return f"external:{name}"
+        return _external_public_label(text, name_hint=Path(text).name or "path")
     try:
         relative = resolved.relative_to(root_resolved)
     except ValueError:
-        name = resolved.name or "path"
-        return f"external:{name}"
+        return _external_public_label(resolved.as_posix(), name_hint=resolved.name or "path")
     rendered = relative.as_posix()
     return rendered if rendered else PUBLIC_TARGET
 
@@ -446,15 +452,35 @@ def _finding(
     }
 
 
+def _public_load_error_text(root: Path, skill_id: str, message: str) -> str:
+    """Rewrite known private skill-selector paths out of load-error text."""
+    public_id = _public_skill_id(root, skill_id)
+    text = message
+    candidates: list[str] = [skill_id]
+    try:
+        resolved = Path(skill_id).expanduser().resolve()
+        candidates.append(str(resolved))
+        candidates.append(resolved.as_posix())
+    except OSError:
+        pass
+    # Replace longer spellings first so partial overlaps cannot leave a leak.
+    for candidate in sorted({item for item in candidates if item}, key=len, reverse=True):
+        if candidate in text:
+            text = text.replace(candidate, public_id)
+    return text
+
+
 def _load_skill_metadata(target: Path, skill_id: str) -> tuple[dict[str, Any], dict[str, Any] | None, str | None]:
     from . import skills_cmd
 
+    public_id = _public_skill_id(target, skill_id)
     try:
         skill_dir, metadata, source = skills_cmd._load_skill(target, skill_id)
     except Exception as exc:  # noqa: BLE001 - advisory path; surface load failure
-        return {}, None, f"skill not loadable: {exc}"
+        detail = _public_load_error_text(target, skill_id, f"skill not loadable: {exc}")
+        return {}, None, detail
     if not (skill_dir / "SKILL.md").is_file() and not (skill_dir / "skill.json").is_file():
-        return {}, None, f"skill not found: {skill_id}"
+        return {}, None, f"skill not found: {public_id}"
     return metadata if isinstance(metadata, dict) else {}, source, None
 
 

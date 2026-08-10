@@ -97,8 +97,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   optional `producer_run_id`. Per-run obligation matching requires exact
   `producer_run_id` equality (never timestamp proximity); legacy unstamped
   receipts are labeled unattributed and cannot satisfy. Public JSON/text
-  output uses repo-relative or `external:<name>` path labels and never
-  prints host-private absolute paths.
+  output uses repo-relative or collision-resistant `external:<name>-<digest>`
+  path labels and never prints host-private absolute paths, including in
+  `load_error` / `load_warnings` text for missing path-based skill selectors.
 
 ## [0.26.1] - 2026-08-09
 
