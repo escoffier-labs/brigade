@@ -702,6 +702,23 @@ func replaceItemSideTables(tx *sql.Tx, rec adapter.Record, itemID, sourceID, col
 	if err := indexItemMetadata(tx, itemID, rec.Item.Tags, itemMeta); err != nil {
 		return err
 	}
+	if err := indexProvenanceProjections(tx, itemID, envelope); err != nil {
+		return err
+	}
+	// Fresh inserts append one initial trust event. Known-item reconcile
+	// (replaceExisting) must not mint duplicate provenance events.
+	if !replaceExisting {
+		contentDigest := ""
+		if envelope.Hashes.Content != nil {
+			contentDigest = *envelope.Hashes.Content
+		}
+		if err := AppendProvenanceEvent(tx, itemID, "", envelope.Trust.Label, contentDigest, envelope.Hashes.ContentScope, envelope.Trust.AssignedBy, map[string]any{
+			"source_kind": rec.Source.Kind,
+			"path":        "ingest.upsertRecord",
+		}); err != nil {
+			return err
+		}
+	}
 	ftsBody := body
 	for _, art := range rec.Artifacts {
 		artifactID := stableID("artifact", itemID, art.ExternalID, art.Kind, art.Path, art.URL, art.Hash)

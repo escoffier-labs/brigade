@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 func Open(path string) (*sql.DB, error) {
 	if err := security.EnsurePrivateParent(path); err != nil {
@@ -85,6 +85,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureSchemaV3(db); err != nil {
+		return err
+	}
+	if err := ensureSchemaV4(db); err != nil {
 		return err
 	}
 	if _, err := db.Exec("PRAGMA user_version = " + fmt.Sprint(SchemaVersion)); err != nil {
@@ -182,6 +185,27 @@ with ranked as (
 )
 update items
 set ingest_seq = (select seq from ranked where ranked.id = items.id)
+`)
+	return err
+}
+
+// ensureSchemaV4 adds append-only provenance_events for trust transitions.
+// Safe to re-run. Kept after #850 ingest_seq (v3).
+func ensureSchemaV4(db *sql.DB) error {
+	_, err := db.Exec(`
+create table if not exists provenance_events(
+  id text primary key,
+  item_id text not null references items(id) on delete cascade,
+  at text not null,
+  from_label text,
+  to_label text not null,
+  envelope_content_hash text,
+  content_scope text,
+  operator_command text,
+  evidence_json text not null default '{}',
+  event_json text not null
+);
+create index if not exists idx_provenance_events_item_at on provenance_events(item_id, at);
 `)
 	return err
 }

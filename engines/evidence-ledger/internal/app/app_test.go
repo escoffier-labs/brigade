@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/escoffier-labs/miseledger/internal/archive"
 )
 
 func TestInitCreatesPrivateDirsAndDoctorJSON(t *testing.T) {
@@ -214,6 +216,68 @@ func TestAdapterImportSearchShowExportAndIdempotency(t *testing.T) {
 	status = runJSON(t, "status", "--json")
 	if status["items"].(float64) != 4 {
 		t.Fatalf("items after reimport = %v, want 4", status["items"])
+	}
+}
+
+func TestProvenanceSearchSQLFiltersAndLegacyShowSynthesis(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	fixture := repoPath(t, "testdata/adapters/discrawl.fixture.jsonl")
+	runOK(t, "import", "adapter", fixture, "--source", "discrawl")
+
+	filtered := runJSON(t, "search", "adapter", "--origin", "external-service", "--modality", "tool-output", "--trust-label", "quarantined", "--json")
+	if len(filtered["results"].([]any)) == 0 {
+		t.Fatalf("search with provenance filters returned no hits: %v", filtered)
+	}
+	miss := runJSON(t, "search", "adapter", "--origin", "workspace", "--json")
+	if len(miss["results"].([]any)) != 0 {
+		t.Fatalf("search with wrong origin should be empty: %v", miss)
+	}
+
+	sqlOut := runJSON(t, "sql", `select count(*) as n from item_metadata where key = 'provenance.trust_label' and value = 'quarantined'`, "--json")
+	if sqlOut["rows"].([]any)[0].(map[string]any)["n"].(float64) == 0 {
+		t.Fatalf("sql provenance projection missing: %v", sqlOut)
+	}
+
+	// Seed a legacy row with no provenance for on-read synthesis.
+	paths := ResolvePaths()
+	db, err := archive.Open(paths.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := "2026-06-03T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('legacy-src','legacy','Legacy','1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('legacy-col','legacy-src','legacy:col','agent_session','legacy','{}',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
+values('legacy-item','legacy-src','legacy-col','legacy:item','message',?,?,?,'','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','{}','sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','legacy.jsonl',1,'{}')`, now, now, "legacy body"); err != nil {
+		t.Fatal(err)
+	}
+	show := runJSON(t, "show", "legacy-item", "--json")
+	if show["provenance_display"] != "UNKNOWN PROVENANCE - legacy item" {
+		t.Fatalf("provenance_display = %v", show["provenance_display"])
+	}
+	meta := show["metadata"].(map[string]any)
+	env := meta["provenance"].(map[string]any)
+	if env["origin"] != "unknown" || env["modality"] != "unknown" {
+		t.Fatalf("synthesized envelope = %#v", env)
+	}
+	trust := env["trust"].(map[string]any)
+	if trust["label"] != "unknown" {
+		t.Fatalf("synthesized trust = %#v, want unknown (never implicit trust)", trust)
+	}
+
+	first := runJSON(t, "doctor", "provenance", "backfill", "--batch", "10", "--json")
+	if first["updated"].(float64) < 1 {
+		t.Fatalf("backfill updated = %v, want at least legacy row", first["updated"])
+	}
+	second := runJSON(t, "doctor", "provenance", "backfill", "--batch", "10", "--json")
+	if second["updated"].(float64) != 0 {
+		t.Fatalf("idempotent backfill updated = %v, want 0", second["updated"])
 	}
 }
 

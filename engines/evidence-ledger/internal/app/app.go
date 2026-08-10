@@ -24,6 +24,7 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/adapter"
 	"github.com/escoffier-labs/miseledger/internal/archive"
 	"github.com/escoffier-labs/miseledger/internal/ingest"
+	"github.com/escoffier-labs/miseledger/internal/provenance"
 	"github.com/escoffier-labs/miseledger/internal/security"
 	"github.com/escoffier-labs/miseledger/internal/sources"
 	"github.com/escoffier-labs/miseledger/internal/sources/claude"
@@ -232,7 +233,11 @@ func collectStatus(db *sql.DB, paths Paths) (Status, error) {
 func cmdDoctor(args []string, out, errw io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		fmt.Fprintln(out, "usage: miseledger doctor [--json] [--mcp] [--archive]")
+		fmt.Fprintln(out, "       miseledger doctor provenance backfill [--json] [--batch N] [--after ID]")
 		return 0
+	}
+	if len(args) > 0 && args[0] == "provenance" {
+		return cmdDoctorProvenance(args[1:], out, errw)
 	}
 	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true, "mcp": true, "archive": true})
 	if err != nil {
@@ -308,6 +313,59 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 	}
 	if result["ok"] == false {
 		return 1
+	}
+	return 0
+}
+
+func cmdDoctorProvenance(args []string, out, errw io.Writer) int {
+	if len(args) == 0 {
+		return fatalf(errw, "usage: miseledger doctor provenance backfill [--json] [--batch N] [--after ID]")
+	}
+	switch args[0] {
+	case "backfill":
+		return cmdDoctorProvenanceBackfill(args[1:], out, errw)
+	default:
+		return fatalf(errw, "usage: miseledger doctor provenance backfill [--json] [--batch N] [--after ID]")
+	}
+}
+
+func cmdDoctorProvenanceBackfill(args []string, out, errw io.Writer) int {
+	values, bools, rest, err := splitFlags(args, map[string]bool{"batch": true, "after": true}, map[string]bool{"json": true})
+	if err != nil {
+		return fatalf(errw, "doctor provenance backfill: %s", err)
+	}
+	if len(rest) != 0 {
+		return fatalf(errw, "usage: miseledger doctor provenance backfill [--json] [--batch N] [--after ID]")
+	}
+	batch := 100
+	if values["batch"] != "" {
+		if _, err := fmt.Sscan(values["batch"], &batch); err != nil || batch <= 0 {
+			return fatalf(errw, "doctor provenance backfill: invalid --batch")
+		}
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		return fatalf(errw, "doctor provenance backfill: %s", err)
+	}
+	defer db.Close()
+	result, err := ingest.BackfillProvenance(db, batch, values["after"])
+	if err != nil {
+		return fatalf(errw, "doctor provenance backfill: %s", err)
+	}
+	payload := map[string]any{
+		"ok":        true,
+		"scanned":   result.Scanned,
+		"updated":   result.Updated,
+		"skipped":   result.Skipped,
+		"events":    result.Events,
+		"cursor":    result.Cursor,
+		"remaining": result.Remaining,
+	}
+	if bools["json"] {
+		writeJSON(out, payload)
+	} else {
+		fmt.Fprintf(out, "scanned=%d updated=%d skipped=%d events=%d cursor=%s remaining=%d\n",
+			result.Scanned, result.Updated, result.Skipped, result.Events, result.Cursor, result.Remaining)
 	}
 	return 0
 }
@@ -1558,7 +1616,7 @@ func parseRedactions(raw string) (map[string]bool, error) {
 }
 
 func cmdSearch(args []string, out, errw io.Writer) int {
-	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "collection": true, "kind": true, "actor-type": true, "project": true, "tags": true, "from": true, "to": true, "limit": true, "code-reference": true}, map[string]bool{"json": true})
+	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "collection": true, "kind": true, "actor-type": true, "project": true, "tags": true, "from": true, "to": true, "limit": true, "code-reference": true, "origin": true, "modality": true, "trust-label": true}, map[string]bool{"json": true})
 	if err != nil {
 		return fatalf(errw, "search: %s", err)
 	}
@@ -1581,7 +1639,7 @@ func cmdSearch(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "search: %s", err)
 	}
 	defer db.Close()
-	results, err := search(db, SearchOpts{Query: query, Source: values["source"], Collection: values["collection"], Kind: values["kind"], ActorType: values["actor-type"], From: values["from"], To: values["to"], Project: values["project"], Tags: values["tags"], Limit: limit, CodeReference: codeReference})
+	results, err := search(db, SearchOpts{Query: query, Source: values["source"], Collection: values["collection"], Kind: values["kind"], ActorType: values["actor-type"], From: values["from"], To: values["to"], Project: values["project"], Tags: values["tags"], Origin: values["origin"], Modality: values["modality"], TrustLabel: values["trust-label"], Limit: limit, CodeReference: codeReference})
 	if err != nil {
 		return fatalf(errw, "search: %s", err)
 	}
@@ -1597,6 +1655,7 @@ func cmdSearch(args []string, out, errw io.Writer) int {
 
 type SearchOpts struct {
 	Query, Source, Collection, Kind, ActorType, From, To, Project, Tags string
+	Origin, Modality, TrustLabel                                        string
 	Limit                                                               int
 	IncludeRelated                                                      bool
 	IncludeArtifactText                                                 bool
@@ -1903,6 +1962,18 @@ func appendSearchResultFilters(opts SearchOpts, where []string, params []any) ([
 	if opts.Project != "" {
 		where = append(where, `exists(select 1 from item_metadata im where im.item_id = i.id and im.key in ('project','workspace','workspace_dir','cwd') and (im.value = ? or im.value like ?))`)
 		params = append(params, opts.Project, "%"+opts.Project+"%")
+	}
+	if opts.Origin != "" {
+		where = append(where, `exists(select 1 from item_metadata im where im.item_id = i.id and im.key = ? and im.value = ?)`)
+		params = append(params, ingest.MetaKeyProvenanceOrigin, opts.Origin)
+	}
+	if opts.Modality != "" {
+		where = append(where, `exists(select 1 from item_metadata im where im.item_id = i.id and im.key = ? and im.value = ?)`)
+		params = append(params, ingest.MetaKeyProvenanceModality, opts.Modality)
+	}
+	if opts.TrustLabel != "" {
+		where = append(where, `exists(select 1 from item_metadata im where im.item_id = i.id and im.key = ? and im.value = ?)`)
+		params = append(params, ingest.MetaKeyProvenanceTrustLabel, opts.TrustLabel)
 	}
 	if opts.Tags != "" {
 		for _, tag := range strings.Split(opts.Tags, ",") {
@@ -2430,9 +2501,11 @@ where i.id = ?`, id)
 	relations := queryMaps(db, `select id, target_item_id, target_external_id, relation_type, confidence from relations where source_item_id = ? order by id`, id)
 	var raw any
 	_ = json.Unmarshal([]byte(rawJSON), &raw)
-	var metadata any
-	_ = json.Unmarshal([]byte(metadataJSON), &metadata)
-	return map[string]any{
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil || metadata == nil {
+		metadata = map[string]any{}
+	}
+	out := map[string]any{
 		"id":           itemID,
 		"external_id":  externalID,
 		"kind":         kind,
@@ -2448,7 +2521,14 @@ where i.id = ?`, id)
 		"relations":    relations,
 		"raw_ref":      map[string]any{"hash": rawHash, "path": rawPath, "ordinal": rawOrdinal},
 		"raw":          raw,
-	}, nil
+	}
+	if _, has := metadata["provenance"]; !has {
+		env, banner := provenance.SynthesizeLegacyProvenance()
+		metadata["provenance"] = env
+		out["metadata"] = metadata
+		out["provenance_display"] = banner
+	}
+	return out, nil
 }
 
 func queryMaps(db *sql.DB, sqlText string, args ...any) []map[string]any {

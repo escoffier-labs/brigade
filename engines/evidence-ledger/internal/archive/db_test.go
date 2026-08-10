@@ -111,7 +111,7 @@ func TestMigrateAddsCollectionItemsIndexToExistingArchive(t *testing.T) {
 
 func TestCoreTablesExist(t *testing.T) {
 	db := openMigrated(t)
-	for _, table := range []string{"sources", "collections", "actors", "items", "events", "artifacts", "relations", "imports", "item_fts"} {
+	for _, table := range []string{"sources", "collections", "actors", "items", "events", "artifacts", "relations", "imports", "item_fts", "provenance_events"} {
 		var name string
 		err := db.QueryRow(
 			"select name from sqlite_master where type in ('table','view') and name = ?",
@@ -120,6 +120,45 @@ func TestCoreTablesExist(t *testing.T) {
 		if err != nil {
 			t.Fatalf("table %q not found after migrate: %v", table, err)
 		}
+	}
+}
+
+func TestMigrateCreatesProvenanceEventsOnExistingArchive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miseledger.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatalf("baseline schema: %v", err)
+	}
+	if err := ensureSchemaV2(db); err != nil {
+		t.Fatalf("ensureSchemaV2: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 2"); err != nil {
+		t.Fatalf("set v2: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := Migrate(reopened); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	version, err := UserVersion(reopened)
+	if err != nil {
+		t.Fatalf("UserVersion: %v", err)
+	}
+	if version != SchemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, SchemaVersion)
+	}
+	var name string
+	if err := reopened.QueryRow(`select name from sqlite_master where type = 'table' and name = 'provenance_events'`).Scan(&name); err != nil {
+		t.Fatalf("provenance_events missing after v3 migrate: %v", err)
 	}
 }
 
