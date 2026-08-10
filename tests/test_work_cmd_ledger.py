@@ -1001,6 +1001,57 @@ def test_plan_decision_malformed_non_list_fails_closed_on_accept_claim_done(tmp_
     assert "decisions must be a list" in err
 
 
+def test_plan_decision_malformed_field_types_fail_closed_on_accept_claim_done(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+
+    # Non-list options coerce to [] and must not satisfy resolved gate via typed fields.
+    receipt["decisions"] = [
+        {
+            "id": "auth-approach",
+            "prompt": "Which auth?",
+            "options": {"oauth": True},
+            "selected": "oauth",
+            "rationale": "Matches SSO",
+            "evidence_ref": "miseledger:bundle/demo",
+        }
+    ]
+    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
+    err = capsys.readouterr().err
+    assert "field 'options' must be a list of strings" in err
+
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
+    assert "field 'options' must be a list of strings" in capsys.readouterr().err
+
+    assert work_cmd.claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
+    assert "field 'options' must be a list of strings" in capsys.readouterr().err
+
+    assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 2
+    assert "field 'options' must be a list of strings" in capsys.readouterr().err
+
+    # Representative corruption on other recognized fields (non-string selected).
+    receipt["decisions"] = [
+        {
+            "id": "auth-approach",
+            "prompt": "Which auth?",
+            "options": ["oauth", "api-key"],
+            "selected": 1,
+            "rationale": "Matches SSO",
+            "evidence_ref": "miseledger:bundle/demo",
+        }
+    ]
+    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
+    assert "field 'selected' must be a string or null" in capsys.readouterr().err
+
+
 def test_plan_decision_malformed_entry_fails_closed_and_keeps_opaque_evidence_ref(tmp_path, capsys):
     _init_git_repo(tmp_path)
     task_id = _plan_task_id(tmp_path, capsys)

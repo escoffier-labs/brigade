@@ -2062,25 +2062,63 @@ def _decision_is_resolved(decision: dict[str, Any]) -> bool:
     return True
 
 
-def _normalize_decision_entry(raw: Any, *, now: str) -> dict[str, Any] | None:
+def _validate_decision_entry_field_types(raw: dict[str, Any], *, index: int | None = None) -> None:
+    prefix = f"plan receipt decisions[{index}]" if index is not None else "plan receipt decision"
+
+    def _raise(field: str, value: Any, expected: str, **extra: Any) -> None:
+        details: dict[str, Any] = {"field": field, "value_type": type(value).__name__, **extra}
+        if index is not None:
+            details["index"] = index
+        raise PlanDecisionError(
+            f"{prefix} field {field!r} must be {expected}",
+            details=details,
+        )
+
+    if "prompt" in raw and not isinstance(raw["prompt"], str):
+        _raise("prompt", raw["prompt"], "a string")
+    if "options" in raw:
+        options = raw["options"]
+        if options is not None and not isinstance(options, list):
+            _raise("options", options, "a list of strings")
+        if isinstance(options, list):
+            for option_index, item in enumerate(options):
+                if not isinstance(item, str):
+                    _raise(
+                        "options",
+                        item,
+                        "a list of strings",
+                        option_index=option_index,
+                    )
+    for field in ("selected", "rationale", "evidence_ref", "created_at", "resolved_at"):
+        if field in raw:
+            value = raw[field]
+            if value is not None and not isinstance(value, str):
+                _raise(field, value, "a string or null")
+    if "status" in raw and not isinstance(raw["status"], str):
+        _raise("status", raw["status"], "a string")
+
+
+def _normalize_decision_entry(raw: Any, *, now: str, index: int | None = None) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     decision_id = _normalize_decision_id(raw.get("id") if isinstance(raw.get("id"), str) else None)
     if decision_id is None:
         return None
+    _validate_decision_entry_field_types(raw, index=index)
     prompt = str(raw.get("prompt") or "").strip()
     options_raw = raw.get("options")
-    if isinstance(options_raw, str):
-        options_list = [options_raw] if options_raw.strip() else []
-    elif isinstance(options_raw, list):
-        options_list = [str(item).strip() for item in options_raw if str(item).strip()]
+    if isinstance(options_raw, list):
+        options_list = [item.strip() for item in options_raw if isinstance(item, str) and item.strip()]
     else:
         options_list = []
     options = _append_dedupe([], options_list)
-    selected = str(raw.get("selected") or "").strip() or None
-    rationale = str(raw.get("rationale") or "").strip() or None
+    selected_raw = raw.get("selected")
+    selected = selected_raw.strip() or None if isinstance(selected_raw, str) else None
+    rationale_raw = raw.get("rationale")
+    rationale = rationale_raw.strip() or None if isinstance(rationale_raw, str) else None
     # Opaque receipt path or external evidence id; no local-file existence check.
-    evidence_ref = str(raw.get("evidence_ref") or "").strip() or None
+    evidence_raw = raw.get("evidence_ref")
+    evidence_ref = evidence_raw.strip() or None if isinstance(evidence_raw, str) else None
     created_at = raw.get("created_at") if isinstance(raw.get("created_at"), str) and raw.get("created_at") else now
     resolved_at = raw.get("resolved_at") if isinstance(raw.get("resolved_at"), str) and raw.get("resolved_at") else None
     entry = {
@@ -2127,7 +2165,7 @@ def _normalize_decisions(raw: Any, *, now: str | None = None) -> list[dict[str, 
                 f"plan receipt decisions[{index}] must be an object",
                 details={"index": index, "entry_type": type(item).__name__},
             )
-        entry = _normalize_decision_entry(item, now=stamp)
+        entry = _normalize_decision_entry(item, now=stamp, index=index)
         if entry is None:
             raise PlanDecisionError(
                 f"plan receipt decisions[{index}] has invalid or missing id",

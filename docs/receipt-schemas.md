@@ -287,7 +287,7 @@ A checkpoint is resolved only when `selected`, `rationale`, and `evidence_ref`
 are all non-empty and `selected` is in `options` when options are non-empty.
 Unresolved checkpoints block plan `--accept`, `work task claim`, `work claim`,
 and `work task done`. Corrupt `decisions` data (non-list, non-object entry,
-invalid/missing id, duplicate id) must fail closed with exit code 2 /
+invalid/missing id, duplicate id, wrong field types) must fail closed with exit code 2 /
 `malformed_plan_decisions` rather than being silently dropped.
 
 ---
