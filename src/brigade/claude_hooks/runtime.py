@@ -17,7 +17,7 @@ from typing import Any, Iterator
 
 from .. import localio
 from ..wiring import resolve_wired_target
-from . import envelope
+from . import compaction_marker, envelope
 from .package import PACKAGE_REF
 
 BRIEF_TIMEOUT_SECONDS = 10
@@ -1918,7 +1918,90 @@ def _unwired_init_hint(payload: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
+def _restore_brief_records(brief_text: str) -> list[str]:
+    return [compaction_marker.RESTORE_PREFIX, *_brief_records(brief_text)]
+
+
+def _attach_claim(result: dict[str, Any], claim: compaction_marker.CompactionClaim) -> dict[str, Any]:
+    attached = dict(result)
+    attached[compaction_marker.CLAIM_KEY] = str(claim.path)
+    return attached
+
+
+def _strip_claim(result: dict[str, Any] | None) -> tuple[dict[str, Any] | None, Path | None]:
+    if not isinstance(result, dict) or compaction_marker.CLAIM_KEY not in result:
+        return result, None
+    cleaned = dict(result)
+    raw = cleaned.pop(compaction_marker.CLAIM_KEY)
+    if not isinstance(raw, str) or not raw:
+        return cleaned, None
+    return cleaned, Path(raw)
+
+
+def _handle_pre_compact(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Record a pending restore marker; PreCompact cannot inject context."""
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    target = wired_target_from_payload(payload)
+    if target is None:
+        return None
+    trigger_detail = payload.get("trigger")
+    detail = trigger_detail if isinstance(trigger_detail, str) and trigger_detail.strip() else None
+    try:
+        compaction_marker.write_pending(
+            session_id,
+            target,
+            trigger="PreCompact",
+            trigger_detail=detail,
+        )
+    except OSError as exc:
+        raise HookDegraded(f"compaction marker write failed: {exc}") from exc
+    return None
+
+
+def _handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Restore the brief once after compaction; absent markers stay near-free."""
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    workspace = compaction_marker.cheap_workspace_root(payload.get("cwd"))
+    if workspace is None:
+        return None
+    key = compaction_marker.marker_key(session_id, workspace)
+    if not compaction_marker.marker_present(key):
+        return None
+    # Confirm the workspace is still a Claude-wired Brigade repo before claiming.
+    target = resolve_wired_target(str(workspace))
+    if target is None:
+        return None
+    try:
+        claim = compaction_marker.try_claim(session_id, target)
+    except OSError as exc:
+        raise HookDegraded(f"compaction marker claim failed: {exc}") from exc
+    if claim is None:
+        return None
+    try:
+        brief_text = _run_brief(target)
+        result = _additional_context(
+            "UserPromptSubmit",
+            brief_text,
+            target=target,
+            session_id=session_id,
+            records=_restore_brief_records(brief_text),
+        )
+        return _attach_claim(result, claim)
+    except Exception:
+        compaction_marker.release_claim(claim)
+        raise
+
+
 def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    if event == "PreCompact":
+        return _handle_pre_compact(payload)
+    if event == "UserPromptSubmit":
+        return _handle_user_prompt_submit(payload)
+
     target = wired_target_from_payload(payload)
     if target is None:
         if event == "SessionStart":
@@ -1935,6 +2018,31 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
     if event != "Stop":
         _touch_session_targets(session_id, target, payload)
     if event == "SessionStart":
+        # True starts and Claude's inject-capable compact source both clear any
+        # leftover marker so UserPromptSubmit does not double-inject.
+        try:
+            compaction_marker.clear_markers(session_id, target)
+        except OSError:
+            pass
+        source = payload.get("source")
+        if source == "compact":
+            # Compaction restart: restore the work brief (#736) and keep #834
+            # bounded recall on the same SessionStart injection.
+            brief_text = _run_brief(target)
+            recall_text = _run_recall(target, payload)
+            state["briefed"] = True
+            write_session_state(target, session_id, state)
+            records = _restore_brief_records(brief_text)
+            if recall_text.strip():
+                records.extend(_brief_records(recall_text))
+            combined = brief_text if not recall_text.strip() else f"{brief_text}\n{recall_text}"
+            return _additional_context(
+                "SessionStart",
+                combined,
+                target=target,
+                session_id=session_id,
+                records=records,
+            )
         if state.get("briefed"):
             return None
         brief_text = _run_brief(target)
@@ -2294,6 +2402,7 @@ def hook_run(*, event: str, package: str, stdin_text: str | None = None) -> int:
 
     log_target: Path | None = None
     raw = ""
+    claim_path: Path | None = None
     try:
         raw = sys.stdin.read() if stdin_text is None else stdin_text
         try:
@@ -2305,7 +2414,11 @@ def hook_run(*, event: str, package: str, stdin_text: str | None = None) -> int:
         payload = parsed
         log_target = _resolve_log_target(payload)
         result = _run_timed_handle_payload(event, raw)
+        result, claim_path = _strip_claim(result)
     except HookDegraded as exc:
+        if claim_path is not None:
+            compaction_marker.release_claim_path(claim_path)
+            claim_path = None
         if log_target is not None:
             envelope.append_log(log_target, f"{event}: degraded: {exc}")
         else:
@@ -2317,6 +2430,9 @@ def hook_run(*, event: str, package: str, stdin_text: str | None = None) -> int:
         envelope.emit_stdout(envelope.degraded_envelope(event))
         return 0
     except Exception as exc:  # noqa: BLE001 - hooks must fail open instead of breaking the harness
+        if claim_path is not None:
+            compaction_marker.release_claim_path(claim_path)
+            claim_path = None
         if log_target is not None:
             envelope.append_log(log_target, f"{event}: error: {type(exc).__name__}: {exc}")
         envelope.emit_stdout(envelope.degraded_envelope(event))
@@ -2325,10 +2441,16 @@ def hook_run(*, event: str, package: str, stdin_text: str | None = None) -> int:
     try:
         _emit_result(event, result, target=log_target)
     except Exception as exc:  # noqa: BLE001 - stdout failure still fails open
+        if claim_path is not None:
+            compaction_marker.release_claim_path(claim_path)
+            claim_path = None
         if log_target is not None:
             envelope.append_log(log_target, f"{event}: emit failed: {exc}")
         try:
             envelope.emit_stdout(envelope.degraded_envelope(event))
         except Exception:  # noqa: BLE001
             pass
+        return 0
+    if claim_path is not None:
+        compaction_marker.complete_claim_path(claim_path)
     return 0

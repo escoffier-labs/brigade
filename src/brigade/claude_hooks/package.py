@@ -7,10 +7,18 @@ from pathlib import Path
 from typing import Any
 
 PACKAGE_ID = "brigade-claude-work-loop"
-PACKAGE_VERSION = "1.1.0"
+PACKAGE_VERSION = "1.2.0"
 PACKAGE_REF = f"{PACKAGE_ID}@{PACKAGE_VERSION}"
 COMMAND_PREFIX = "brigade work hook-run"
-MANAGED_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop")
+MANAGED_EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PreCompact",
+    "Stop",
+)
 LEGACY_SCRIPT_NAME = "brigade-work-loop.py"
 MANAGED_MARKER_KEY = "_brigade"
 HOOK_SCRIPT_NAME = "brigade-claude-work-loop.sh"
@@ -36,9 +44,11 @@ def managed_groups() -> dict[str, list[dict[str, Any]]]:
 
     return {
         "SessionStart": [group("SessionStart")],
+        "UserPromptSubmit": [group("UserPromptSubmit")],
         "PreToolUse": [group("PreToolUse", "Bash"), group("PreToolUse", "Edit|Write|NotebookEdit")],
         "PostToolUse": [group("PostToolUse", "Bash|Edit|Write|NotebookEdit")],
         "PostToolUseFailure": [group("PostToolUseFailure", "Bash")],
+        "PreCompact": [group("PreCompact")],
         "Stop": [group("Stop")],
     }
 
@@ -91,9 +101,11 @@ def managed_user_groups(script_path: Path) -> dict[str, list[dict[str, Any]]]:
 
     return {
         "SessionStart": [group("SessionStart")],
+        "UserPromptSubmit": [group("UserPromptSubmit")],
         "PreToolUse": [group("PreToolUse", "Bash"), group("PreToolUse", "Edit|Write|NotebookEdit")],
         "PostToolUse": [group("PostToolUse", "Bash|Edit|Write|NotebookEdit")],
         "PostToolUseFailure": [group("PostToolUseFailure", "Bash")],
+        "PreCompact": [group("PreCompact")],
         "Stop": [group("Stop")],
     }
 

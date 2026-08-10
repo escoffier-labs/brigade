@@ -120,7 +120,15 @@ def test_hooks_status_reports_complete_stale_package_as_installed(tmp_path: Path
 
     assert status["installed"] is True
     assert status["current"] is False
-    assert status["managed_events"] == ["SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop"]
+    assert status["managed_events"] == [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "PreCompact",
+        "Stop",
+    ]
     assert status["missing_events"] == []
 
 

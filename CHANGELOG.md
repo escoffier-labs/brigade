@@ -81,6 +81,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   valid; malformed non-list `decisions` or invalid entries fail closed instead
   of being dropped. `--evidence-ref` stores an opaque receipt path or external
   evidence id (no local-file existence check).
+- Claude compaction restores the work brief on `SessionStart` with
+  `source=compact`, reinjecting the live brief beside bounded session-start
+  recall (#736). A one-shot marker still backs `UserPromptSubmit` when compact
+  reinjection is unavailable; the compact path clears stale markers so prompt
+  submit does not double-inject.
 
 ## [0.26.1] - 2026-08-09
 
