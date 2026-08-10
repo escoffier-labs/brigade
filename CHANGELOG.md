@@ -58,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped runbooks so scheduled fires write normal receipts; Windows prints
   Task Scheduler equivalents instead of silently no-oping; tampered blocks are
   reported and not clobbered without `--adopt`.
+- Worker event stream field classification and fail-closed scrubbed projections
+  for the Codex app-server transport (#592): closed classification matrix,
+  scrubber with adversarial golden fixtures, distinct raw/scrubbed media types
+  and artifact classes, and audit/replay rejection of raw streams unless an
+  explicit local-only policy allows salvage. Legacy raw streams stay locally
+  inspectable and marked unclassified until scrubbed.
 - Work verify plan ranks candidate verification commands from GraphTrail
   affected-test impact (#486): `brigade work verify plan` attaches
   `graph_impact` / `ranked_candidates` with hop-distance confidence and
