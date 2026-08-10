@@ -67,6 +67,35 @@ JSON Schema files.
 | `subject_binding` | object | no | Verifier-authored scoreable subject metadata (manifest runs only) |
 | `failure_class` | string | no | Receipt-level #474-style failure class when status is not completed |
 | `failure_kind` | string | no | Receipt-level failure kind paired with `failure_class` |
+| `verification_contract` | object | no | Declared `brigade.verification_contract.v1` when the verify manifest carried one (#500) |
+| `budget_use` | object | no | Observed latency/token use against the declared verification budget (#500; enforcement is #593) |
+| `verification` | object | no | Verification outcome stamped separately from model completion (#500) |
+| `model_completion` | object | no | For contract-bearing verify receipts: `{status: not_applicable, detail}` because verify is verifier-owned |
+
+**`verification_contract` object** (`brigade.verification_contract.v1`)
+
+Declared before execution on consequential runbooks (`consequential: true`) and
+consequential verify manifests. Plan reports incompleteness when any of verifier,
+rollback, or budget is missing. On verify manifests the verifier may omit an
+explicit command and use `source: manifest_checks` (the manifest's own checks).
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema` | string | `brigade.verification_contract.v1` |
+| `schema_version` | integer | `1` |
+| `verifier` | object | `{source, command?\|argv?\|manifest_id?}` with `source` in `command`, `argv`, `manifest_id`, `manifest_checks` |
+| `rollback` | object | `{policy, command?}` with `policy` in `none`, `manual`, `command`, `git-restore` |
+| `budget` | object | `{latency_seconds, token_budget?}` — declaration only; #593 enforces ceilings |
+
+**`budget_use` object**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `latency_seconds_budget` | integer | Declared latency ceiling |
+| `latency_seconds_used` | number \| null | Observed wall time |
+| `token_budget` | integer \| null | Declared token ceiling when set |
+| `tokens_used` | integer \| null | Observed tokens when an adapter reports them |
+| `exhausted` | boolean | Observation only; not an enforcement gate |
 
 **`subject_binding` object** (additive, manifest-selected runs)
 

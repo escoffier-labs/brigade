@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brigade.tools/schemas/verification-contract.v1.schema.json",
+  "title": "VerificationContract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verifier", "rollback", "budget"],
+  "properties": {
+    "schema": {"const": "brigade.verification_contract.v1"},
+    "schema_version": {"const": 1},
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "enum": ["command", "argv", "manifest_id", "manifest_checks"]
+        },
+        "command": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1}
+            }
+          ]
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "manifest_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy"],
+      "properties": {
+        "policy": {"enum": ["none", "manual", "command", "git-restore"]},
+        "command": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1}
+            }
+          ]
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["latency_seconds"],
+      "properties": {
+        "latency_seconds": {"type": "integer", "minimum": 1},
+        "token_budget": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

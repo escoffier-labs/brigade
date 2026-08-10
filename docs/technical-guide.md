@@ -994,7 +994,7 @@ Portable tool projections and first-class skills are related but separate. Tool 
 
 Explicit runbook commands:
 
-- `brigade runbook plan runbook.json` validates a reviewed local runbook file, policy checks, and exact steps without executing them.
+- `brigade runbook plan runbook.json` validates a reviewed local runbook file, policy checks, and exact steps without executing them. Consequential runbooks (`consequential: true`) must declare a `verification_contract` (independent verifier, rollback, token/latency budget) or plan reports blockers and run refuses before execution (#500).
 - `brigade runbook pin runbook.json` shlex-tokenizes each step, resolves each step's `argv[0]`, hashes the current executable, and writes or refreshes the runbook-level `pins` list.
 - `brigade runbook pin runbook.json --dry-run` prints the pins it would write without modifying the runbook file.
 - `brigade runbook run runbook.json --approved` runs foreground shell steps, then writes stdout logs, stderr logs, and a receipt under `.brigade/runbooks/runs/`.
@@ -1097,7 +1097,7 @@ Manual session commands:
 
 Work verification and closeout commands:
 
-- `brigade work verify plan` previews the local verification commands and current evidence snapshot without running anything. When GraphTrail is available it also ranks affected-test candidates (`graph_impact` / `ranked_candidates`) from changed files (`--file` or `git diff --name-only HEAD`) with hop-distance confidence and via-symbol evidence; the worker still chooses the command. Missing GraphTrail degrades to an empty advisory ranking.
+- `brigade work verify plan` previews the local verification commands and current evidence snapshot without running anything. When GraphTrail is available it also ranks affected-test candidates (`graph_impact` / `ranked_candidates`) from changed files (`--file` or `git diff --name-only HEAD`) with hop-distance confidence and via-symbol evidence; the worker still chooses the command. Missing GraphTrail degrades to an empty advisory ranking. Manifest plans also surface VerificationContract completeness when the tracked manifest declares one (#500).
 - `brigade work verify run` executes explicit local verification commands without a shell and writes receipts under `.brigade/work/verify-runs/`.
 - `brigade work verify runs` and `brigade work verify show <run-id>` inspect local verification receipts, command exit codes, summaries, and log paths.
 - `brigade receipts keygen` creates the optional local HMAC key used to sign new receipt digests. Pass `--force` to rotate the key.
