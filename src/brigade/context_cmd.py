@@ -115,6 +115,8 @@ def _safe_source_identity(target: Path, path: Path) -> str | None:
 def _safe_persisted_path(value: object) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
+    if any(ord(ch) < 32 for ch in value):
+        return None
     path = Path(value)
     if path.is_absolute() or ".." in path.parts:
         return None

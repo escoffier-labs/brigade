@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from brigade import context_cmd, proc
 
 
@@ -116,6 +118,48 @@ def test_context_freshness_reconciles_dependent_receipts(tmp_target, monkeypatch
     receipt.write_text('{"status":"closed"}\n')
     issues = context_cmd._context_pack_issues(tmp_target, payload)
     assert any(item["issue_type"] == "dependent_receipt_drift" for item in issues)
+
+
+@pytest.mark.parametrize(
+    ("field", "issue_type", "bad_path"),
+    [
+        ("sources", "unsafe_source_path", "foo\x00bar.md"),
+        ("sources", "unsafe_source_path", "foo\x01bar.md"),
+        ("dependent_receipts", "unsafe_dependent_receipt_path", "receipt\x00.json"),
+        ("dependent_receipts", "unsafe_dependent_receipt_path", "receipt\x1f.json"),
+    ],
+)
+def test_context_freshness_rejects_nul_and_control_character_paths(tmp_target, field, issue_type, bad_path):
+    tmp_target.mkdir(parents=True)
+    generator = context_cmd._generator_snapshot(kind="repo", task_id=None, tool_id=None, release_id=None)
+    freshness: dict[str, object] = {
+        "generator": generator,
+        "sources": [],
+        "dependent_receipts": [],
+    }
+    freshness[field] = [{"path": bad_path, "exists": False}]
+    pack = {"pack_id": "pack-one", "kind": "repo", "freshness": freshness}
+    issues = context_cmd._context_pack_issues(tmp_target, pack)
+    assert any(item["issue_type"] == issue_type for item in issues)
+    assert bad_path not in json.dumps(issues)
+
+
+def test_context_freshness_rejects_nul_and_control_character_source_references(tmp_target):
+    tmp_target.mkdir(parents=True)
+    for bad_path in ("secret\x00.md", "secret\x1f.md"):
+        pack = {
+            "pack_id": "pack-one",
+            "kind": "repo",
+            "freshness": {
+                "generator": context_cmd._generator_snapshot(kind="repo", task_id=None, tool_id=None, release_id=None),
+                "sources": [],
+                "dependent_receipts": [],
+            },
+            "source_references": [{"path": bad_path, "exists": True}],
+        }
+        issues = context_cmd._context_pack_issues(tmp_target, pack)
+        assert any(item["issue_type"] == "unsafe_source_reference" for item in issues)
+        assert bad_path not in json.dumps(issues)
 
 
 def test_context_freshness_malformed_and_private_paths_fail_safely(tmp_target):
