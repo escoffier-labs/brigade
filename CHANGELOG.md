@@ -8,11 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+<<<<<<< HEAD
 - `brigade update --channel beta` installs the newest non-yanked
   `brigade-cli==0.27.0.devYYYYMMDD` wheel from PyPI into the existing
   user-global pipx environment, migrates prior Git-main-SHA beta state to that
   exact wheel pin, supports dry-run without mutation, and rolls back to stable
   through `--channel stable --switch-channel`. (#852)
+=======
+- Issue #846 R2 residual work-store characterization: extend the R1 harness
+  with observed same-actor/guard/empty-filter, restart, schema coercion,
+  backup/restore, install/cold-start/backup timing, resource, metrics-state,
+  and deleted-secret cells plus diffable
+  `docs/measurements/issue-846-work-store-r2.json`. Characterization only; no
+  backend, listener, or runtime dependency.
+>>>>>>> 2afac0bd (docs(work-store): add #846 R2 residual characterization cells)
 - Issue #846 R1 work-store characterization: research report, synthetic
   chain/diamond/wide fixtures, and `scripts/measure_work_store.py` measurement
   harness with diffable JSON output. Characterization only; no backend or
