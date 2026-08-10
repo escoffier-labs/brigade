@@ -5,6 +5,10 @@ a failure/rollback path, and a token/latency budget up front. Plan surfaces
 incompleteness before anything runs. Receipts record budget use and
 verification outcome separately from model/step completion. Budget
 *enforcement* is owned by #593; this module owns declaration and recording.
+Optional ``wall_clock_seconds`` and ``worker_dispatch_count`` are the first-slice
+enforceable ceilings. When unset, ``latency_seconds`` maps to wall-clock for
+enforcement. ``token_budget`` remains observed-only until an adapter exposes an
+enforceable reservation boundary.
 """
 
 from __future__ import annotations
@@ -23,6 +27,8 @@ VERIFIER_SOURCES = frozenset({"command", "argv", "manifest_id", "manifest_checks
 class VerificationBudget:
     latency_seconds: int
     token_budget: int | None = None
+    wall_clock_seconds: int | None = None
+    worker_dispatch_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +65,10 @@ class VerificationContract:
         budget: dict[str, Any] = {"latency_seconds": self.budget.latency_seconds}
         if self.budget.token_budget is not None:
             budget["token_budget"] = self.budget.token_budget
+        if self.budget.wall_clock_seconds is not None:
+            budget["wall_clock_seconds"] = self.budget.wall_clock_seconds
+        if self.budget.worker_dispatch_count is not None:
+            budget["worker_dispatch_count"] = self.budget.worker_dispatch_count
         return {
             "schema": VERIFICATION_CONTRACT_SCHEMA,
             "schema_version": VERIFICATION_CONTRACT_SCHEMA_VERSION,
@@ -188,6 +198,10 @@ def validate_contract_payload(
         _positive_int(budget.get("latency_seconds"), field="budget.latency_seconds", errors=errors)
         if "token_budget" in budget:
             _optional_non_negative_int(budget.get("token_budget"), field="budget.token_budget", errors=errors)
+        if "wall_clock_seconds" in budget:
+            _positive_int(budget.get("wall_clock_seconds"), field="budget.wall_clock_seconds", errors=errors)
+        if "worker_dispatch_count" in budget:
+            _positive_int(budget.get("worker_dispatch_count"), field="budget.worker_dispatch_count", errors=errors)
 
     return errors
 
@@ -284,10 +298,18 @@ def contract_from_payload(
     budget_raw = payload["budget"]
     assert isinstance(budget_raw, dict)
     token_budget = budget_raw.get("token_budget")
+    wall_clock = budget_raw.get("wall_clock_seconds")
+    dispatch_count = budget_raw.get("worker_dispatch_count")
     budget = VerificationBudget(
         latency_seconds=int(budget_raw["latency_seconds"]),
         token_budget=int(token_budget)
         if isinstance(token_budget, int) and not isinstance(token_budget, bool)
+        else None,
+        wall_clock_seconds=int(wall_clock)
+        if isinstance(wall_clock, int) and not isinstance(wall_clock, bool)
+        else None,
+        worker_dispatch_count=int(dispatch_count)
+        if isinstance(dispatch_count, int) and not isinstance(dispatch_count, bool)
         else None,
     )
     return VerificationContract(verifier=verifier, rollback=rollback, budget=budget)

@@ -29,6 +29,7 @@ from . import localio
 from . import proc, receipt_schema, runguard
 from . import run_control
 from . import run_checkpoint
+from . import run_budget
 from . import run_events
 from . import run_journal
 from . import run_lifecycle
@@ -36,6 +37,7 @@ from . import run_projector
 from . import run_shadow
 from . import seat_health
 from . import seat_health_policy
+from . import verification_contract
 from .result_integrity import validate_final_output
 from .run_receipts import (
     agent_result_from_worker as _agent_result_from_worker,
@@ -2661,6 +2663,77 @@ def record_run_termination(
         raise runguard.RetainRunLockError(f"failed to write terminal run receipt: {exc}") from exc
 
 
+def _build_budget_coordinator(
+    output_dir: Path,
+    *,
+    started_at: datetime,
+    append_event: Callable[[str, Mapping[str, Any], str], Any],
+) -> run_budget.BudgetCoordinator | None:
+    """Build a budget coordinator when the run journal is active.
+
+    Declaration sources (first match wins):
+    1. ``run.json`` ``run_budget`` object
+    2. ``run.json`` / plan ``verification_contract.budget`` (#500 bridge)
+    3. Empty declaration (no enforceable ceilings; observed reconcile still works)
+
+    Returns ``None`` when the lifecycle journal is not enrolled so budget events
+    are not appended into a missing journal.
+    """
+    run_path = output_dir / "run.json"
+    try:
+        raw = json.loads(run_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    if raw.get("lifecycle_journal_requested") is not True and not (output_dir / "events" / "lifecycle.jsonl").is_file():
+        return None
+
+    declaration: run_budget.RunBudgetDeclaration
+    if isinstance(raw.get("run_budget"), dict):
+        # Full projected payload nests declaration; accept either shape.
+        nested = (
+            raw["run_budget"].get("declaration")
+            if isinstance(raw["run_budget"].get("declaration"), dict)
+            else raw["run_budget"]
+        )
+        declaration = run_budget.parse_declaration(nested if isinstance(nested, dict) else None)
+    else:
+        contract = verification_contract.extract_contract_payload(raw)
+        budget = contract.get("budget") if isinstance(contract, dict) else None
+        if not isinstance(budget, dict):
+            # Also accept a sibling plan.json contract when present.
+            plan_path = output_dir / "plan.json"
+            try:
+                plan_raw = json.loads(plan_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                plan_raw = None
+            if isinstance(plan_raw, dict):
+                contract = verification_contract.extract_contract_payload(plan_raw)
+                budget = contract.get("budget") if isinstance(contract, dict) else None
+        declaration = (
+            run_budget.declaration_from_verification_budget(budget)
+            if isinstance(budget, dict)
+            else run_budget.RunBudgetDeclaration()
+        )
+
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=declaration,
+        append_event=append_event,
+    )
+    coordinator.set_started_at(started_at)
+    journal_path = output_dir / "events" / "lifecycle.jsonl"
+    if journal_path.is_file():
+        try:
+            report = run_journal.read_journal_bounded(journal_path)
+            if report.partial_tail is None and not report.chain_errors:
+                coordinator.reload(report.events)
+        except (OSError, run_journal.RunJournalError, run_events.CanonicalizationError):
+            # Leave empty projection; append path will fail closed if the journal is broken.
+            pass
+    return coordinator
+
+
 def record_approval_pause(output_dir: Path, approval_reference: Mapping[str, Any]) -> None:
     """Commit an approval wait and refresh its compatibility snapshot.
 
@@ -4150,6 +4223,49 @@ def run(
         close_server_resources()
         raise
 
+    budget_coordinator: run_budget.BudgetCoordinator | None = None
+
+    def _budget_cancel_fn() -> tuple[str, int]:
+        """Best-effort cancel of in-flight worker processes for budget/policy stops."""
+        if process_registry is None:
+            return "unsupported", len(active_seats)
+        process_registry.cancel()
+        # Cancellation is best effort; transports that cannot interrupt leave
+        # active_remaining as the count of seats that may still finish.
+        return "partial", max(0, len(active_seats) - 1)
+
+    def _append_budget_event(event_type: str, payload: Mapping[str, Any], idempotency_key: str) -> Any:
+        assert output_dir is not None
+        return run_lifecycle.record_lifecycle_event(
+            output_dir,
+            event_type=event_type,
+            payload=dict(payload),
+            idempotency_key=idempotency_key,
+            workspace=lock_workspace,
+        )
+
+    if output_dir is not None and lock_workspace is not None:
+        try:
+            budget_coordinator = _build_budget_coordinator(
+                output_dir,
+                started_at=started_at,
+                append_event=_append_budget_event,
+            )
+        except run_budget.BudgetCompatibilityError as exc:
+            # Unknown schema/dimension must stop recovery/dispatch with a bounded diagnostic.
+            active_seat = active_seats[0] if len(active_seats) == 1 else None
+            record_run_termination(
+                output_dir,
+                status="failed",
+                failure_phase="dispatch",
+                failure_kind="unexpected-error",
+                detail=f"run budget compatibility error: {exc.diagnostic}",
+                seat=active_seat,
+                active_seats=active_seats,
+            )
+            close_server_resources()
+            return 1
+
     def stage_started(stage: int, seats: tuple[str, ...]) -> None:
         nonlocal active_stage, active_seats
         active_stage = stage
@@ -4161,6 +4277,22 @@ def run(
         if output_dir is None:
             return
         active_seat = active_seats[0] if len(active_seats) == 1 else None
+        # Operator cancellation remains outside the worker FailureClass enum
+        # (#576). Emit a durable run_budget cancel pair when the journal is
+        # active, then terminalize with the existing keyboard-interrupt kind so
+        # current receipt contracts stay stable. Policy kind operator-cancelled
+        # is used for explicit budget/policy cancel paths (#593).
+        if budget_coordinator is not None:
+            try:
+                budget_coordinator.request_cancel(
+                    request_id=f"opcancel-{uuid4().hex[:12]}",
+                    reason_class="operator_cancel",
+                    transport_capability="process_cancel" if process_registry is not None else "none",
+                    dimension="wall_clock_seconds",
+                    cancel_fn=_budget_cancel_fn,
+                )
+            except (run_budget.BudgetError, run_lifecycle.LifecycleJournalError, OSError) as exc:
+                print(f"warning: budget cancel receipt failed: {exc}", file=sys.stderr)
         record_run_termination(
             output_dir,
             status="canceled",
@@ -4190,6 +4322,24 @@ def run(
         return recorded_attempt if isinstance(recorded_attempt, int) else None
 
     def dispatch_requested(agent: Agent) -> int | None:
+        # Enforce wall-clock / worker-dispatch ceilings before new work starts (#593).
+        if budget_coordinator is not None:
+            request_id = f"dispatch-{agent.name}-{uuid4().hex[:10]}"
+            try:
+                budget_coordinator.reserve_worker_dispatch(request_id=request_id)
+            except run_budget.BudgetPolicyError as exc:
+                if exc.exhausted:
+                    try:
+                        budget_coordinator.request_cancel(
+                            request_id=f"budgetcancel-{uuid4().hex[:12]}",
+                            reason_class="budget_cancel",
+                            transport_capability="process_cancel" if process_registry is not None else "none",
+                            dimension=exc.dimension,
+                            cancel_fn=_budget_cancel_fn,
+                        )
+                    except (run_budget.BudgetError, run_lifecycle.LifecycleJournalError, OSError) as cancel_exc:
+                        print(f"warning: budget cancel receipt failed: {cancel_exc}", file=sys.stderr)
+                raise
         return dispatch_fact("run.dispatch.requested", agent)
 
     def dispatch_observed(agent: Agent, attempt: int) -> None:
@@ -4277,6 +4427,22 @@ def run(
             )
         except runguard.RetainRunLockError:
             raise
+        except run_budget.BudgetPolicyError as exc:
+            active_seat = active_seats[0] if len(active_seats) == 1 else None
+            status, kind = run_budget.terminal_status_for_policy("budget_exhausted")
+            # Reservation denial without full exhaustion still terminalizes the
+            # run: new work cannot start under the declared ceiling.
+            if output_dir is not None:
+                record_run_termination(
+                    output_dir,
+                    status=status,
+                    failure_phase="dispatch",
+                    failure_kind=kind,
+                    detail=_one_line(str(exc)) or "run budget reservation denied",
+                    seat=active_seat,
+                    active_seats=active_seats,
+                )
+            return 1
         except KeyboardInterrupt:
             active_seat = active_seats[0] if len(active_seats) == 1 else None
             if output_dir is not None:

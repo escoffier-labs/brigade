@@ -51,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `brigade.run_event.v1` records and rejects raw JSON-RPC worker envelopes.
   Source runs remain unclassified until scrubbed; audit/replay still require
   `policy=local-only` for raw salvage.
+- Run budget enforcement first slice (#593): wall-clock and worker-dispatch
+  ceilings are reserved before new worker dispatch; durable
+  `run_budget.threshold_reached` / `reservation_denied` / `exhausted` /
+  `cancel_requested` / `cancelled` / `usage_reconciled` lifecycle events use
+  stable idempotency keys; restart-safe projection rebuilds remaining
+  allocation from the journal. Model/tool/token/cost stay observed unless an
+  adapter exposes an enforceable boundary. Budget exhaustion and operator
+  cancellation are terminal policy lifecycle states (`budget-exhausted` /
+  `operator-cancelled`), not #576 worker FailureClass values and not
+  infrastructure-neutral under #580. Child allocation remains #594.
 - Issue #846 R2 residual work-store characterization: extend the R1 harness
   with observed same-actor/guard/empty-filter, restart, schema coercion,
   backup/restore, install/cold-start/backup timing, resource, metrics-state,
@@ -98,8 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an independent verifier, failure/rollback path, and token/latency budget before
   execution (`brigade.verification_contract.v1`). Plan surfaces incompleteness;
   run refuses incomplete consequential templates. Receipts record `budget_use`
-  and `verification` separately from `model_completion`. Budget enforcement
-  remains #593.
+  and `verification` separately from `model_completion`. First-slice enforcement
+  of wall-clock and worker-dispatch ceilings lands in #593.
 - Optional dispatch annotations on work tasks (#815): `--seat-class`
   (`mechanical` | `judgment` | `review`) and `--spend-by` (ISO-8601 deadline)
   round-trip through `brigade work task add` / `brigade work task annotate` and

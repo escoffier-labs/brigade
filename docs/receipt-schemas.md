@@ -69,7 +69,7 @@ JSON Schema files.
 | `failure_class` | string | no | Receipt-level #474-style failure class when status is not completed |
 | `failure_kind` | string | no | Receipt-level failure kind paired with `failure_class` |
 | `verification_contract` | object | no | Declared `brigade.verification_contract.v1` when the verify manifest carried one (#500) |
-| `budget_use` | object | no | Observed latency/token use against the declared verification budget (#500; enforcement is #593) |
+| `budget_use` | object | no | Observed latency/token use against the declared verification budget (#500). Hard wall-clock / worker-dispatch enforcement is #593 (`run_budget.*` lifecycle events). |
 | `verification` | object | no | Verification outcome stamped separately from model completion (#500) |
 | `model_completion` | object | no | For contract-bearing verify receipts: `{status: not_applicable, detail}` because verify is verifier-owned |
 
@@ -86,7 +86,7 @@ explicit command and use `source: manifest_checks` (the manifest's own checks).
 | `schema_version` | integer | `1` |
 | `verifier` | object | `{source, command?\|argv?\|manifest_id?}` with `source` in `command`, `argv`, `manifest_id`, `manifest_checks` |
 | `rollback` | object | `{policy, command?}` with `policy` in `none`, `manual`, `command`, `git-restore` |
-| `budget` | object | `{latency_seconds, token_budget?}` — declaration only; #593 enforces ceilings |
+| `budget` | object | `{latency_seconds, token_budget?, wall_clock_seconds?, worker_dispatch_count?}` — #500 declaration; #593 enforces wall-clock and worker-dispatch ceilings before new work starts. `token_budget` stays observed unless an adapter exposes an enforceable reservation boundary. When `wall_clock_seconds` is unset, `latency_seconds` maps to the wall-clock ceiling. |
 
 **`budget_use` object**
 
@@ -348,6 +348,31 @@ original file is missing, corrupt, or not an object.
 | `journal_last_sequence` | integer | no | Last event sequence applied to this snapshot |
 | `journal_last_event_digest` | string / null | no | Digest at `journal_last_sequence`. Null only at sequence zero |
 | `approval_reference` | object | no | Redacted approval identity, source, fingerprints, and decision state |
+| `run_budget` | object | no | Optional projected `brigade.run_budget.v1` summary when a coordinator wrote one (#593). Journal events remain authoritative. |
+
+### Run budget lifecycle (`brigade.run_event.v1` event types, #593)
+
+Append-only facts under `events/lifecycle.jsonl`. Status-neutral in the run
+projector; the coordinator applies terminal policy via `run.failed` /
+`run.interrupted` (or receipt termination) using run-owned kinds
+`budget-exhausted` and `operator-cancelled`. These are **not** #576 worker
+`FailureClass` values and are **not** infrastructure-neutral under #580.
+
+| Event type | Payload keys | Notes |
+| --- | --- | --- |
+| `run_budget.threshold_reached` | `dimension`, `mode`, `declared`, `used`, `remaining`, `threshold_pct`, `reason_class` | Idempotent per dimension+threshold |
+| `run_budget.reservation_denied` | `dimension`, `mode`, `declared`, `used`, `remaining`, `request_id`, `reason_class` | Emitted before new work starts |
+| `run_budget.exhausted` | `dimension`, `mode`, `declared`, `used`, `remaining`, `reason_class` | Enforceable ceiling reached |
+| `run_budget.cancel_requested` | `request_id`, `reason_class`, `transport_capability`, `dimension` | Best-effort cancel request |
+| `run_budget.cancelled` | `request_id`, `reason_class`, `transport_capability`, `transport_result`, `active_remaining`, `dimension` | Cancel receipt; names work that could not be interrupted |
+| `run_budget.usage_reconciled` | `dimension`, `mode`, `usage_source`, `estimated_used`, `provider_used`, `used`, `request_id`, `reason_class` | Estimated and provider values stay distinct |
+
+Enforceable dimensions: `wall_clock_seconds`, `worker_dispatch_count`.
+Observed dimensions (never universal hard gates in this slice):
+`model_call_count`, `tool_call_count`, `input_tokens`, `output_tokens`,
+`estimated_cost_micros`, `provider_usage_units`. Child allocation is #594.
+Unknown schema versions or dimensions fail closed with a bounded diagnostic.
+Payloads never carry raw diagnostics.
 
 **Partial stale-recovery variant**
 

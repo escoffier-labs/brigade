@@ -225,6 +225,7 @@ _RUN_OWNED_FAILURE_KINDS = frozenset(
     {
         "agent-error",
         "branch-head-drift",
+        "budget-exhausted",
         "collection-error",
         "dirty-worktree",
         "early-exit",
@@ -234,6 +235,7 @@ _RUN_OWNED_FAILURE_KINDS = frozenset(
         "invalid-plan",
         "isolation-breach",
         "keyboard-interrupt",
+        "operator-cancelled",
         "orchestrator-error",
         "planner-failure",
         "receipt-update-error",
@@ -243,6 +245,15 @@ _RUN_OWNED_FAILURE_KINDS = frozenset(
         "unexpected-error",
         "verification-failure",
         "worker-failure",
+    }
+)
+
+# Issue #593: policy terminals are run-owned lifecycle states, not worker
+# FailureClass values and not infrastructure under #580.
+RUN_POLICY_TERMINAL_FAILURE_KINDS = frozenset(
+    {
+        "budget-exhausted",
+        "operator-cancelled",
     }
 )
 
@@ -528,6 +539,7 @@ def _is_run_catch_all_failure_kind(kind: str) -> bool:
     return (
         kind not in RUN_UNAMBIGUOUS_INFRASTRUCTURE_FAILURE_KINDS
         and kind not in RUN_MODEL_CONTRACT_FAILURE_KINDS
+        and kind not in RUN_POLICY_TERMINAL_FAILURE_KINDS
         and kind != "worker-failure"
     )
 
@@ -541,6 +553,10 @@ def run_failure_is_infrastructure_at_read_time(kind: str | None, phase: str | No
 
     if kind is None:
         return None
+    if kind in RUN_POLICY_TERMINAL_FAILURE_KINDS:
+        # Budget exhaustion and operator cancellation are policy lifecycle
+        # terminals (#593). They must not neutralize under #580.
+        return False
     if is_model_quality_failure_kind(kind):
         return False
     if kind in RUN_UNAMBIGUOUS_INFRASTRUCTURE_FAILURE_KINDS:
