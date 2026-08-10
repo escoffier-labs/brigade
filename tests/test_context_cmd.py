@@ -125,8 +125,12 @@ def test_context_freshness_reconciles_dependent_receipts(tmp_target, monkeypatch
     [
         ("sources", "unsafe_source_path", "foo\x00bar.md"),
         ("sources", "unsafe_source_path", "foo\x01bar.md"),
+        ("sources", "unsafe_source_path", "foo\x7fbar.md"),
+        ("sources", "unsafe_source_path", "foo\x85bar.md"),
         ("dependent_receipts", "unsafe_dependent_receipt_path", "receipt\x00.json"),
         ("dependent_receipts", "unsafe_dependent_receipt_path", "receipt\x1f.json"),
+        ("dependent_receipts", "unsafe_dependent_receipt_path", "receipt\x7f.json"),
+        ("dependent_receipts", "unsafe_dependent_receipt_path", "receipt\x85.json"),
     ],
 )
 def test_context_freshness_rejects_nul_and_control_character_paths(tmp_target, field, issue_type, bad_path):
@@ -146,7 +150,7 @@ def test_context_freshness_rejects_nul_and_control_character_paths(tmp_target, f
 
 def test_context_freshness_rejects_nul_and_control_character_source_references(tmp_target):
     tmp_target.mkdir(parents=True)
-    for bad_path in ("secret\x00.md", "secret\x1f.md"):
+    for bad_path in ("secret\x00.md", "secret\x1f.md", "secret\x7f.md", "secret\x85.md"):
         pack = {
             "pack_id": "pack-one",
             "kind": "repo",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import unicodedata
 from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,7 +116,7 @@ def _safe_source_identity(target: Path, path: Path) -> str | None:
 def _safe_persisted_path(value: object) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
-    if any(ord(ch) < 32 for ch in value):
+    if any(unicodedata.category(ch) == "Cc" for ch in value):
         return None
     path = Path(value)
     if path.is_absolute() or ".." in path.parts:
