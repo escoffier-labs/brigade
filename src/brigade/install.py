@@ -34,6 +34,31 @@ DEFAULT_WIRED_SKILLS = ("brigade-work", "ultra-work-scout")
 SURFACE_EVIDENCE_REL_PATH = ".brigade/surface-evidence.json"
 
 
+def _writer_inbox_gitignore_lines(inbox: str) -> list[str]:
+    """Gitignore lines for a writer inbox, including parent-directory un-ignores.
+
+    A parent rule such as `.claude/` prevents descendant `!.../TEMPLATE.md`
+    negations from being traversed; un-ignore the harness root and inbox parent
+    before the managed template exception.
+    """
+    parts = Path(inbox).parts
+    if len(parts) < 2:
+        return [
+            f"{inbox}/*",
+            f"!{inbox}/TEMPLATE.md",
+            f"!{inbox}/.gitkeep",
+        ]
+    harness_root = parts[0]
+    return [
+        f"!{harness_root}/",
+        f"{harness_root}/*",
+        f"!{inbox}/",
+        f"{inbox}/*",
+        f"!{inbox}/TEMPLATE.md",
+        f"!{inbox}/.gitkeep",
+    ]
+
+
 def build_gitignore_block(selection: Selection) -> str:
     lines = [
         GITIGNORE_BEGIN,
@@ -44,15 +69,9 @@ def build_gitignore_block(selection: Selection) -> str:
     for h in selection.harnesses:
         inbox = WRITER_INBOXES.get(h)
         if inbox:
-            lines.extend(
-                [
-                    f"# {h}: handoffs are session-local and may contain private context.",
-                    f"{inbox}/*",
-                    f"!{inbox}/TEMPLATE.md",
-                    f"!{inbox}/.gitkeep",
-                    "",
-                ]
-            )
+            lines.append(f"# {h}: handoffs are session-local and may contain private context.")
+            lines.extend(_writer_inbox_gitignore_lines(inbox))
+            lines.append("")
     lines.extend(
         [
             "# Daily session logs are machine-local raw context.",

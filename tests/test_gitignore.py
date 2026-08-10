@@ -220,6 +220,9 @@ def test_gitignore_block_includes_claude_section_when_selected():
 
     sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     block = build_gitignore_block(sel)
+    assert "!.claude/" in block
+    assert ".claude/*" in block
+    assert "!.claude/memory-handoffs/" in block
     assert ".claude/memory-handoffs/*" in block
     assert "!.claude/memory-handoffs/TEMPLATE.md" in block
     assert ".brigade/dogfood.toml" in block
@@ -238,6 +241,9 @@ def test_gitignore_block_includes_codex_section_when_selected():
 
     sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
     block = build_gitignore_block(sel)
+    assert "!.codex/" in block
+    assert ".codex/*" in block
+    assert "!.codex/memory-handoffs/" in block
     assert ".claude/memory-handoffs/*" in block
     assert ".codex/memory-handoffs/*" in block
     assert "!.codex/memory-handoffs/TEMPLATE.md" in block
@@ -299,3 +305,38 @@ def test_install_writes_gitignore_block(tmp_path):
     assert ".brigade/dogfood.toml" in gi
     assert ".brigade/runs/" in gi
     assert ".brigade/work/" in gi
+
+
+def test_claude_handoff_template_stages_without_force_when_parent_claude_ignored(
+    tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert _git(repo, "init").returncode == 0
+
+    # Parent `.claude/` ignore (brigade source-repo side-harness class or global excludesFile).
+    (repo / ".gitignore").write_text(".claude/\n")
+
+    rc = install_selection(repo, _repo_selection())
+    assert rc == 0
+
+    template = repo / ".claude" / "memory-handoffs" / "TEMPLATE.md"
+    assert template.is_file()
+
+    check_template = _git(repo, "check-ignore", ".claude/memory-handoffs/TEMPLATE.md")
+    assert check_template.returncode == 1, check_template.stdout + check_template.stderr
+
+    session_note = repo / ".claude" / "memory-handoffs" / "2026-08-10-session.md"
+    session_note.write_text("# note\n")
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{}\n")
+
+    assert _git(repo, "check-ignore", ".claude/memory-handoffs/2026-08-10-session.md").returncode == 0
+    assert _git(repo, "check-ignore", ".claude/settings.json").returncode == 0
+
+    add = _git(repo, "add", ".claude/memory-handoffs/TEMPLATE.md")
+    assert add.returncode == 0, add.stderr
+
+    status = _git(repo, "status", "--porcelain", ".claude/memory-handoffs/TEMPLATE.md")
+    assert status.stdout.strip() == "A  .claude/memory-handoffs/TEMPLATE.md"

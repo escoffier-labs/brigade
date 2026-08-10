@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `brigade init` gitignore blocks now un-ignore harness parent directories before the managed handoff `TEMPLATE.md` exception so a parent `.claude/` rule cannot shadow the template; the source repo `.gitignore` matches the same repo-local recovery recipe. (#860)
+
 ### Documentation
 - Quickstart commit guidance now states that `.claude/` stays local-only except the managed `.claude/memory-handoffs/TEMPLATE.md` Claude onboarding requires tracked, cross-linking the repo-local shadow recovery from #858 without changing runtime behavior. (#860)
 
