@@ -310,8 +310,13 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
     handoff_drafts = handoff_cmd.draft_queue_payload(target)
+    from ... import brief_sections
+
     return {
         "target": str(target),
+        "session_close": {
+            "items": list(brief_sections.session_close_items()),
+        },
         "git": git,
         "active_session": active,
         "latest_session": latest_session,
@@ -546,6 +551,10 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         return 0
 
     print(f"work brief: {target}")
+    from ... import brief_sections
+
+    for line in brief_sections.render_brief_session_close_lines():
+        print(line)
     update = payload.get("update")
     if isinstance(update, dict):
         print(f'update_available: {update.get("latest")} (installed {update.get("installed")}); run "brigade update"')

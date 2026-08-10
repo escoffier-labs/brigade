@@ -53,6 +53,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ledgers stay authoritative and unchanged when the campaign file is removed.
   `--parallel-safe` with `--campaign` leaves a deferred wave-aggregation seam
   (`partition_mode=campaign_deferred`) for a later cross-repo compositor.
+- Work brief as wiring source of truth (#733): static harness instruction
+  blocks shrink to depth profiles rendered from the same ordered brief
+  sections as `brigade work brief`. Hook-capable Claude installs default to
+  a short `minimal` pointer when SessionStart injects the live brief; file-only
+  installs keep `full`. Each integration records its required depth; shared
+  files take the richest active requirement (full-then-minimal and
+  minimal-then-full converge; uninstalling the last full consumer drops back
+  to minimal). `--profile minimal|full` overrides selection. Doctor warns when
+  a minimal profile remains after brief-injecting hooks go inactive. Live
+  `brigade work brief` opens with the session-close checklist.
 
 ## [0.26.1] - 2026-08-09
 

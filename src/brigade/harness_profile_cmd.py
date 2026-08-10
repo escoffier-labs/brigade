@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__ as BRIGADE_VERSION
-from . import harness_profiles, localio, managed_block, mcp_adapters, mcp_cmd, skills_cmd
+from . import brief_sections, harness_profiles, localio, managed_block, mcp_adapters, mcp_cmd, skills_cmd
 from .toml_compat import TOMLDecodeError as _TOMLDecodeError
 from .toml_compat import loads as _toml_loads
 
@@ -27,6 +27,8 @@ _LEGACY_CURSOR_GENERATED = (
 )
 _LEGACY_CURSOR_SKILL_ID = "brigade-work"
 _LEGACY_CURSOR_SKILL_PREFIX = "skills/brigade-work/"
+_INSTRUCTION_REQUIRED_PROFILE_KEY = "required_profile"
+_INSTRUCTION_EFFECTIVE_PROFILE_KEY = "effective_profile"
 
 
 @dataclass(frozen=True)
@@ -172,6 +174,148 @@ def _block(body: str, *, profile: str = managed_block.DEFAULT_PROFILE) -> str:
         kind=managed_block.DEFAULT_KIND,
         profile=profile,
     )
+
+
+def hooks_inject_brief(profile: harness_profiles.HarnessProfile) -> bool:
+    """Return True when this harness's hooks inject the live work brief.
+
+    Only Claude Code SessionStart currently injects ``brigade work brief``.
+    Cursor's sessionStart hook injects a static one-liner, so it stays file-only
+    for instruction depth selection.
+    """
+    if profile.harness not in harness_profiles.HOOK_BRIEF_HARNESSES:
+        return False
+    from .claude_hooks.install_cmd import status_payload
+
+    try:
+        status = status_payload(Path("."), scope="user")
+    except OSError:
+        return False
+    return bool(status.get("installed"))
+
+
+def required_instruction_profile(
+    profile: harness_profiles.HarnessProfile,
+    *,
+    override: str | None = None,
+) -> str:
+    """Return this integration's required instruction depth."""
+    if override is not None:
+        return brief_sections.normalize_profile(override)
+    if profile.instruction_mode != "marked-block":
+        return brief_sections.PROFILE_FULL
+    if hooks_inject_brief(profile):
+        return brief_sections.PROFILE_MINIMAL
+    return brief_sections.PROFILE_FULL
+
+
+def _instruction_path_key(path: Path) -> Path:
+    return path.expanduser().resolve()
+
+
+def _active_instruction_requirement(state: dict[str, Any]) -> str | None:
+    """Return a required profile when this state still owns an instruction span."""
+    instruction = state.get("instructions")
+    if not isinstance(instruction, dict) or not instruction:
+        return None
+    if not isinstance(instruction.get("digest"), str):
+        return None
+    raw = instruction.get(_INSTRUCTION_REQUIRED_PROFILE_KEY)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return brief_sections.normalize_profile(raw)
+        except ValueError:
+            return brief_sections.PROFILE_FULL
+    # Pre-#733 ownership: treat as a full consumer so we never silently shrink.
+    return brief_sections.PROFILE_FULL
+
+
+def collect_path_requirements(
+    *,
+    path: Path,
+    home: Path,
+    workspace: Path,
+    exclude_harness: str | None = None,
+) -> dict[str, str]:
+    """Map harness id → required profile for every active consumer of ``path``."""
+    target = _instruction_path_key(path)
+    requirements: dict[str, str] = {}
+    for other in harness_profiles.resolve_user_profiles(harness="all", home=home, workspace=workspace):
+        if exclude_harness is not None and other.harness == exclude_harness:
+            continue
+        if other.instruction_mode != "marked-block":
+            continue
+        try:
+            if _instruction_path_key(other.instruction_path) != target:
+                continue
+        except OSError:
+            continue
+        loaded = load_profile_state(state_path=other.state_path, workspace=workspace, harness=other.harness)
+        if loaded.error:
+            continue
+        required = _active_instruction_requirement(loaded.state)
+        if required is not None:
+            requirements[other.harness] = required
+    return requirements
+
+
+def resolve_effective_instruction_profile(
+    *,
+    path: Path,
+    home: Path,
+    workspace: Path,
+    self_harness: str,
+    self_required: str,
+    exclude_harness: str | None = None,
+) -> tuple[str, dict[str, str]]:
+    """Compute effective profile as the richest active requirement for ``path``."""
+    requirements = collect_path_requirements(
+        path=path,
+        home=home,
+        workspace=workspace,
+        exclude_harness=exclude_harness,
+    )
+    requirements[self_harness] = brief_sections.normalize_profile(self_required)
+    effective = brief_sections.effective_profile(requirements.values())
+    assert effective is not None
+    return effective, requirements
+
+
+def update_shared_instruction_digests(
+    *,
+    path: Path,
+    home: Path,
+    workspace: Path,
+    digest: str,
+    effective_profile: str,
+    exclude_harness: str | None = None,
+) -> list[str]:
+    """Keep co-owners' ownership digests aligned after a shared-file rewrite."""
+    target = _instruction_path_key(path)
+    updated: list[str] = []
+    for other in harness_profiles.resolve_user_profiles(harness="all", home=home, workspace=workspace):
+        if exclude_harness is not None and other.harness == exclude_harness:
+            continue
+        if other.instruction_mode != "marked-block":
+            continue
+        try:
+            if _instruction_path_key(other.instruction_path) != target:
+                continue
+        except OSError:
+            continue
+        loaded = load_profile_state(state_path=other.state_path, workspace=workspace, harness=other.harness)
+        if loaded.error:
+            continue
+        state = json.loads(json.dumps(loaded.state))
+        instruction = state.get("instructions")
+        if not isinstance(instruction, dict) or not isinstance(instruction.get("digest"), str):
+            continue
+        instruction["digest"] = digest
+        instruction[_INSTRUCTION_EFFECTIVE_PROFILE_KEY] = effective_profile
+        state["instructions"] = instruction
+        write_profile_state(state_path=other.state_path, state=state)
+        updated.append(other.harness)
+    return updated
 
 
 def _split_components(text: str) -> tuple[str, str, str] | None:
@@ -408,18 +552,54 @@ def plan_managed_instruction_removal(*, path: Path, state: dict[str, Any]) -> Su
     return SurfacePlan("instruction", path, "conflict", "preserve", detail="owned instruction file was edited")
 
 
-def _instruction_plan(profile, state: dict[str, Any], *, adopt: bool, force: bool = False) -> SurfacePlan:
-    desired = profile.instruction_text or harness_profiles.managed_instruction_text()
+def _instruction_plan(
+    profile,
+    state: dict[str, Any],
+    *,
+    adopt: bool,
+    force: bool = False,
+    home: Path | None = None,
+    workspace: Path | None = None,
+    profile_override: str | None = None,
+) -> tuple[SurfacePlan, dict[str, Any]]:
+    """Plan instruction install and return depth-resolution metadata."""
     if profile.instruction_mode == "managed-file":
-        return plan_managed_instruction(path=profile.instruction_path, desired=desired, state=state, adopt=adopt)
-    return plan_instruction(
+        desired = profile.instruction_text or harness_profiles.managed_instruction_text()
+        plan = plan_managed_instruction(path=profile.instruction_path, desired=desired, state=state, adopt=adopt)
+        return plan, {
+            "required_profile": brief_sections.PROFILE_FULL,
+            "effective_profile": brief_sections.PROFILE_FULL,
+            "requirements": {profile.harness: brief_sections.PROFILE_FULL},
+        }
+
+    home_path = home or Path.home()
+    workspace_path = workspace or Path.cwd()
+    required = required_instruction_profile(profile, override=profile_override)
+    effective, requirements = resolve_effective_instruction_profile(
+        path=profile.instruction_path,
+        home=home_path,
+        workspace=workspace_path,
+        self_harness=profile.harness,
+        self_required=required,
+    )
+    desired = harness_profiles.managed_instruction_text(profile=effective)
+    # Co-owning a shared instruction file: when another integration already
+    # stamped the desired body, claim ownership without requiring --adopt.
+    coowned = any(name != profile.harness for name in requirements)
+    plan = plan_instruction(
         path=profile.instruction_path,
         desired=desired,
         state=state,
-        adopt=adopt,
+        adopt=adopt or coowned,
         force=force,
+        profile=effective,
         harness=profile.harness,
     )
+    return plan, {
+        "required_profile": required,
+        "effective_profile": effective,
+        "requirements": requirements,
+    }
 
 
 def _instruction_removal_plan(profile, state: dict[str, Any], *, force: bool = False) -> SurfacePlan:
@@ -1349,8 +1529,17 @@ def _prune_created_directories(paths: list[Path], root: Path) -> list[str]:
 
 
 def _sync_profile(
-    profile, workspace: Path, *, write: bool, allow_global_stdio: bool, adopt: bool, force: bool = False
+    profile,
+    workspace: Path,
+    *,
+    write: bool,
+    allow_global_stdio: bool,
+    adopt: bool,
+    force: bool = False,
+    home: Path | None = None,
+    profile_override: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
+    home_path = home or Path.home()
     surface_conflicts = _native_surface_conflicts(profile, workspace)
     if surface_conflicts:
         return _surface_conflict_result(profile, surface_conflicts)
@@ -1378,12 +1567,23 @@ def _sync_profile(
         ), False
     state = json.loads(json.dumps(loaded.state))
     instruction_existed = profile.instruction_path.exists()
-    instruction = _instruction_plan(profile, state, adopt=adopt, force=force)
+    instruction, depth = _instruction_plan(
+        profile,
+        state,
+        adopt=adopt,
+        force=force,
+        home=home_path,
+        workspace=workspace,
+        profile_override=profile_override,
+    )
     item = {
         "surface": "instruction",
         "path": str(instruction.path),
         "status": instruction.status,
         "action": instruction.action,
+        "required_profile": depth["required_profile"],
+        "effective_profile": depth["effective_profile"],
+        "requirements": dict(depth["requirements"]),
     }
     if instruction.detail:
         item["detail"] = instruction.detail
@@ -1418,6 +1618,8 @@ def _sync_profile(
             instruction_record: dict[str, Any] = {
                 "digest": instruction.desired_digest,
                 "created_file": created_file,
+                _INSTRUCTION_REQUIRED_PROFILE_KEY: depth["required_profile"],
+                _INSTRUCTION_EFFECTIVE_PROFILE_KEY: depth["effective_profile"],
             }
             if isinstance(old_instruction, dict) and old_instruction.get("created_directories"):
                 instruction_record["created_directories"] = list(old_instruction["created_directories"])
@@ -1495,6 +1697,15 @@ def _sync_profile(
             if profile.instruction_mode == "managed-file":
                 existing_dirs = proposed["instructions"].get("created_directories", [])
                 proposed["instructions"]["created_directories"] = sorted(set(existing_dirs) | set(instruction_dirs))
+            elif instruction.desired_digest:
+                update_shared_instruction_digests(
+                    path=profile.instruction_path,
+                    home=home_path,
+                    workspace=workspace,
+                    digest=instruction.desired_digest,
+                    effective_profile=depth["effective_profile"],
+                    exclude_harness=profile.harness,
+                )
         created_dirs: dict[str, list[str]] = {}
         for path, data, skill_id, _relative in skill_plan["writes"]:
             created_dirs.setdefault(skill_id, []).extend(_missing_skill_directories(profile, path))
@@ -1582,7 +1793,10 @@ def _sync_profile(
     ), False
 
 
-def _uninstall_profile(profile, workspace: Path, *, write: bool, force: bool = False) -> tuple[dict[str, Any], bool]:
+def _uninstall_profile(
+    profile, workspace: Path, *, write: bool, force: bool = False, home: Path | None = None
+) -> tuple[dict[str, Any], bool]:
+    home_path = home or Path.home()
     surface_conflicts = _native_surface_conflicts(profile, workspace)
     if surface_conflicts:
         return _surface_conflict_result(profile, surface_conflicts)
@@ -1622,11 +1836,71 @@ def _uninstall_profile(profile, workspace: Path, *, write: bool, force: bool = F
             receipt_path=profile.receipt_path,
             receipt_state="present" if profile.receipt_path.exists() else "missing",
         ), False
-    plan = _instruction_removal_plan(profile, state, force=force)
-    items = [{"surface": "instruction", "path": str(plan.path), "status": plan.status, "action": plan.action}]
+
+    remaining: dict[str, str] = {}
+    shared_rewrite: SurfacePlan | None = None
+    if profile.instruction_mode == "marked-block":
+        remaining = collect_path_requirements(
+            path=profile.instruction_path,
+            home=home_path,
+            workspace=workspace,
+            exclude_harness=profile.harness,
+        )
+        if remaining:
+            effective = brief_sections.effective_profile(remaining.values())
+            assert effective is not None
+            desired = harness_profiles.managed_instruction_text(profile=effective)
+            shared_rewrite = plan_instruction(
+                path=profile.instruction_path,
+                desired=desired,
+                state=state,
+                adopt=True,
+                force=force,
+                profile=effective,
+                harness=profile.harness,
+            )
+            if shared_rewrite.status == "conflict":
+                plan = shared_rewrite
+            elif shared_rewrite.action in {"create", "update"}:
+                plan = SurfacePlan(
+                    "instruction",
+                    profile.instruction_path,
+                    shared_rewrite.status,
+                    "update",
+                    shared_rewrite.desired_digest,
+                    shared_rewrite.rendered,
+                    (
+                        f"shared file retains consumers ({','.join(sorted(remaining))}); "
+                        f"rewriting to effective={effective}"
+                    ),
+                )
+            else:
+                plan = SurfacePlan(
+                    "instruction",
+                    profile.instruction_path,
+                    "managed",
+                    "none",
+                    shared_rewrite.desired_digest,
+                    detail=(
+                        f"shared file retains consumers ({','.join(sorted(remaining))}); "
+                        f"already at effective={effective}"
+                    ),
+                )
+        else:
+            plan = _instruction_removal_plan(profile, state, force=force)
+    else:
+        plan = _instruction_removal_plan(profile, state, force=force)
+
+    items: list[dict[str, Any]] = [
+        {"surface": "instruction", "path": str(plan.path), "status": plan.status, "action": plan.action}
+    ]
     if plan.detail:
         items[0]["detail"] = plan.detail
-    conflicts = [] if plan.status != "conflict" else [items[0] | {"detail": plan.detail or "instruction conflict"}]
+    if remaining:
+        items[0]["remaining_requirements"] = dict(remaining)
+    conflicts: list[dict[str, Any]] = (
+        [] if plan.status != "conflict" else [items[0] | {"detail": plan.detail or "instruction conflict"}]
+    )
     skill_plan = _skill_uninstall_plan(profile, state)
     items.extend(skill_plan["items"])
     conflicts.extend(skill_plan["conflicts"])
@@ -1651,7 +1925,65 @@ def _uninstall_profile(profile, workspace: Path, *, write: bool, force: bool = F
     files_removed: list[str] = []
     files_written: list[str] = []
     if write and not conflicts:
-        if plan.action == "remove":
+        if plan.action == "update" and remaining and plan.rendered is not None:
+            outcome = managed_block.write_text_nofollow_atomic(plan.path, plan.rendered)
+            if outcome.status == managed_block.WRITE_SKIPPED_SYMLINK:
+                conflicts.append(
+                    {
+                        "surface": "instruction",
+                        "path": str(plan.path),
+                        "status": "conflict",
+                        "action": "preserve",
+                        "detail": outcome.detail or "symlinked instruction path",
+                    }
+                )
+                return _result(
+                    profile,
+                    status="conflict",
+                    ready=False,
+                    items=items,
+                    conflicts=conflicts,
+                    files_written=[],
+                    files_removed=[],
+                    mcp={"status": "pending", "items": []},
+                    receipt_path=profile.receipt_path,
+                    receipt_state="present" if profile.receipt_path.exists() else "missing",
+                ), False
+            if outcome.status not in {managed_block.WRITE_WRITTEN, managed_block.WRITE_NOOP}:
+                conflicts.append(
+                    {
+                        "surface": "instruction",
+                        "path": str(plan.path),
+                        "status": "conflict",
+                        "action": "preserve",
+                        "detail": outcome.detail or "instruction write refused",
+                    }
+                )
+                return _result(
+                    profile,
+                    status="conflict",
+                    ready=False,
+                    items=items,
+                    conflicts=conflicts,
+                    files_written=[],
+                    files_removed=[],
+                    mcp={"status": "pending", "items": []},
+                    receipt_path=profile.receipt_path,
+                    receipt_state="present" if profile.receipt_path.exists() else "missing",
+                ), False
+            files_written.append(str(plan.path))
+            if plan.desired_digest:
+                effective = brief_sections.effective_profile(remaining.values())
+                assert effective is not None
+                update_shared_instruction_digests(
+                    path=profile.instruction_path,
+                    home=home_path,
+                    workspace=workspace,
+                    digest=plan.desired_digest,
+                    effective_profile=effective,
+                    exclude_harness=profile.harness,
+                )
+        elif plan.action == "remove":
             if plan.rendered is None:
                 plan.path.unlink(missing_ok=True)
             else:
@@ -1751,7 +2083,15 @@ def _uninstall_profile(profile, workspace: Path, *, write: bool, force: bool = F
     ), changed
 
 
-def _doctor_profile(profile, workspace: Path, *, verify_mcp: bool) -> tuple[dict[str, Any], bool]:
+def _doctor_profile(
+    profile,
+    workspace: Path,
+    *,
+    verify_mcp: bool,
+    home: Path | None = None,
+    profile_override: str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    home_path = home or Path.home()
     surface_conflicts = _native_surface_conflicts(profile, workspace)
     if surface_conflicts:
         return _surface_conflict_result(profile, surface_conflicts)
@@ -1777,12 +2117,22 @@ def _doctor_profile(profile, workspace: Path, *, verify_mcp: bool) -> tuple[dict
             receipt_state="missing",
         ), False
     state = loaded.state
-    instruction = _instruction_plan(profile, state, adopt=False)
+    instruction, depth = _instruction_plan(
+        profile,
+        state,
+        adopt=False,
+        home=home_path,
+        workspace=workspace,
+        profile_override=profile_override,
+    )
     item = {
         "surface": "instruction",
         "path": str(instruction.path),
         "status": instruction.status,
         "action": instruction.action,
+        "required_profile": depth["required_profile"],
+        "effective_profile": depth["effective_profile"],
+        "requirements": dict(depth["requirements"]),
     }
     if instruction.detail:
         item["detail"] = instruction.detail
@@ -1793,6 +2143,43 @@ def _doctor_profile(profile, workspace: Path, *, verify_mcp: bool) -> tuple[dict
     # Doctor --check semantics: anything not current is actionable. Preserve
     # distinct stale / missing / conflict statuses on the item itself.
     conflicts = [item] if instruction.status != "current" else []
+
+    # Hook drift: a minimal requirement without an active brief-injecting hook
+    # means the static pointer is no longer sufficient.
+    recorded_required = None
+    instruction_state = state.get("instructions")
+    if isinstance(instruction_state, dict):
+        raw_required = instruction_state.get(_INSTRUCTION_REQUIRED_PROFILE_KEY)
+        if isinstance(raw_required, str):
+            try:
+                recorded_required = brief_sections.normalize_profile(raw_required)
+            except ValueError:
+                recorded_required = None
+    hooks_active = hooks_inject_brief(profile)
+    if (
+        profile.instruction_mode == "marked-block"
+        and profile.harness in harness_profiles.HOOK_BRIEF_HARNESSES
+        and recorded_required == brief_sections.PROFILE_MINIMAL
+        and not hooks_active
+        and profile_override is None
+    ):
+        drift = {
+            "surface": "instruction-profile",
+            "path": str(profile.instruction_path),
+            "status": "stale",
+            "action": "update",
+            "detail": (
+                "minimal instruction profile remains but brief-injecting hooks are inactive; "
+                f"fix with: {_instruction_write_fix_command(profile.harness)}"
+            ),
+            "required_profile": recorded_required,
+            "hooks_active": False,
+        }
+        items_prefix = [item, drift]
+        conflicts.append(drift)
+    else:
+        items_prefix = [item]
+
     skill_plan = _skill_plans(profile, state, workspace)
     skill_issues = [entry for entry in skill_plan["items"] if entry["status"] != "current"]
     conflicts.extend(skill_issues)
@@ -1810,7 +2197,7 @@ def _doctor_profile(profile, workspace: Path, *, verify_mcp: bool) -> tuple[dict
         profile,
         status="current" if ready else "conflict",
         ready=ready,
-        items=[item, *skill_plan["items"], *generated_plan["items"], *hook_items],
+        items=[*items_prefix, *skill_plan["items"], *generated_plan["items"], *hook_items],
         conflicts=conflicts,
         files_written=[],
         files_removed=[],
@@ -1833,14 +2220,22 @@ def _run(
     verify_mcp: bool = False,
     json_output: bool = False,
     home: Path | None = None,
+    profile_override: str | None = None,
 ) -> int:
-    profiles = harness_profiles.resolve_user_profiles(harness=harness, home=home or Path.home(), workspace=workspace)
+    home_path = home or Path.home()
+    profiles = harness_profiles.resolve_user_profiles(harness=harness, home=home_path, workspace=workspace)
 
     def run_profile(profile, *, profile_write: bool) -> tuple[dict[str, Any], bool]:
         if operation == "sync":
             if check:
                 # --check is doctor-style classification for instruction freshness.
-                return _doctor_profile(profile, workspace, verify_mcp=False)
+                return _doctor_profile(
+                    profile,
+                    workspace,
+                    verify_mcp=False,
+                    home=home_path,
+                    profile_override=profile_override,
+                )
             return _sync_profile(
                 profile,
                 workspace,
@@ -1848,10 +2243,18 @@ def _run(
                 allow_global_stdio=allow_global_stdio,
                 adopt=adopt,
                 force=force,
+                home=home_path,
+                profile_override=profile_override,
             )
         elif operation == "uninstall":
-            return _uninstall_profile(profile, workspace, write=profile_write, force=force)
-        return _doctor_profile(profile, workspace, verify_mcp=verify_mcp)
+            return _uninstall_profile(profile, workspace, write=profile_write, force=force, home=home_path)
+        return _doctor_profile(
+            profile,
+            workspace,
+            verify_mcp=verify_mcp,
+            home=home_path,
+            profile_override=profile_override,
+        )
 
     if write and len(profiles) > 1 and operation in {"sync", "uninstall"}:
         preflight = [run_profile(profile, profile_write=False) for profile in profiles]
@@ -1905,6 +2308,7 @@ def sync(
     check: bool = False,
     json_output: bool = False,
     home: Path | None = None,
+    profile: str | None = None,
 ) -> int:
     return _run(
         "sync",
@@ -1917,6 +2321,7 @@ def sync(
         check=check,
         json_output=json_output,
         home=home,
+        profile_override=profile,
     )
 
 
@@ -1941,8 +2346,20 @@ def uninstall(
 
 
 def doctor(
-    *, harness: str, workspace: Path, verify_mcp: bool = False, json_output: bool = False, home: Path | None = None
+    *,
+    harness: str,
+    workspace: Path,
+    verify_mcp: bool = False,
+    json_output: bool = False,
+    home: Path | None = None,
+    profile: str | None = None,
 ) -> int:
     return _run(
-        "doctor", harness=harness, workspace=workspace, verify_mcp=verify_mcp, json_output=json_output, home=home
+        "doctor",
+        harness=harness,
+        workspace=workspace,
+        verify_mcp=verify_mcp,
+        json_output=json_output,
+        home=home,
+        profile_override=profile,
     )
