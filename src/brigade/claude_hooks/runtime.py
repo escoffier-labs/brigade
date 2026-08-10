@@ -2026,15 +2026,22 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
             pass
         source = payload.get("source")
         if source == "compact":
+            # Compaction restart: restore the work brief (#736) and keep #834
+            # bounded recall on the same SessionStart injection.
             brief_text = _run_brief(target)
+            recall_text = _run_recall(target, payload)
             state["briefed"] = True
             write_session_state(target, session_id, state)
+            records = _restore_brief_records(brief_text)
+            if recall_text.strip():
+                records.extend(_brief_records(recall_text))
+            combined = brief_text if not recall_text.strip() else f"{brief_text}\n{recall_text}"
             return _additional_context(
                 "SessionStart",
-                brief_text,
+                combined,
                 target=target,
                 session_id=session_id,
-                records=_restore_brief_records(brief_text),
+                records=records,
             )
         if state.get("briefed"):
             return None

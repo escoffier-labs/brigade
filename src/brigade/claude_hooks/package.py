@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 PACKAGE_ID = "brigade-claude-work-loop"
-PACKAGE_VERSION = "1.1.0"
+PACKAGE_VERSION = "1.2.0"
 PACKAGE_REF = f"{PACKAGE_ID}@{PACKAGE_VERSION}"
 COMMAND_PREFIX = "brigade work hook-run"
 MANAGED_EVENTS = (
