@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Bundled template-profile registry (`brigade.template_registry.v1`): named
+  profiles expose supported harness versions and deterministic rendered-file
+  hashes, and `brigade init --profile <name>` selects a bundled preset without
+  changing profile-less `--depth` / `--harnesses` installs. Refs #494.
 - Bounded session-start memory recall (#466 Slice 1): `brigade memory recall
   --target <hub-or-mirror> --cwd <session-cwd> --limit 5 [--json]` derives query
   terms from the cwd basename, returns title/tags/path only (max 5 matches /

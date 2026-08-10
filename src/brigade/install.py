@@ -237,6 +237,24 @@ def _replace_managed_gitignore_blocks(
     return "".join(output), True
 
 
+def build_render_context(selection: Selection) -> dict[str, str]:
+    """Build the placeholder context used when rendering text templates."""
+    owner_label = harness_memory_owner(selection.owner, selection.owner)
+    writer_inboxes = [WRITER_INBOXES[h] for h in selection.harnesses if h in WRITER_INBOXES]
+    owner_inbox = WRITER_INBOXES.get(selection.owner)
+    if owner_inbox:
+        writer_inboxes = [owner_inbox] + [p for p in writer_inboxes if p != owner_inbox]
+    if not writer_inboxes:
+        writer_inboxes = [WRITER_INBOXES["claude"]]
+    return {
+        "memory_owner": selection.owner,
+        "memory_owner_name": owner_label,
+        "harness": selection.owner,
+        "handoff_inbox": f"{writer_inboxes[0]}/",
+        "handoff_inboxes": ", ".join(f"`{p}/`" for p in writer_inboxes),
+    }
+
+
 def resolve_manifests(selection: Selection) -> Tuple[List[dict], List[str], List[str]]:
     """Return (files, dirs, post_install_notes) for a Selection.
 
@@ -355,20 +373,7 @@ def install_selection(
     for d in dirs:
         (target / d).mkdir(parents=True, exist_ok=True)
 
-    owner_label = harness_memory_owner(selection.owner, selection.owner)
-    writer_inboxes = [WRITER_INBOXES[h] for h in selection.harnesses if h in WRITER_INBOXES]
-    owner_inbox = WRITER_INBOXES.get(selection.owner)
-    if owner_inbox:
-        writer_inboxes = [owner_inbox] + [p for p in writer_inboxes if p != owner_inbox]
-    if not writer_inboxes:
-        writer_inboxes = [WRITER_INBOXES["claude"]]
-    context = {
-        "memory_owner": selection.owner,
-        "memory_owner_name": owner_label,
-        "harness": selection.owner,
-        "handoff_inbox": f"{writer_inboxes[0]}/",
-        "handoff_inboxes": ", ".join(f"`{p}/`" for p in writer_inboxes),
-    }
+    context = build_render_context(selection)
 
     root = template_root()
     kept_files: list[Path] = []
@@ -445,7 +450,7 @@ def install_selection(
     print(
         f"brigade: installed depth={selection.depth} harnesses={','.join(selection.harnesses) or '(none)'} -> {target}"
     )
-    print(f"brigade: memory owner -> {owner_label}")
+    print(f"brigade: memory owner -> {context['memory_owner_name']}")
     if kept_files:
         print(
             f"brigade: kept {len(kept_files)} existing file(s); re-run init only if you intend "

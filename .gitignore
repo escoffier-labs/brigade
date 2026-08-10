@@ -60,6 +60,7 @@ Thumbs.db
 !/scripts/windows-native-acceptance.ps1
 !/scripts/published-artifact-acceptance.py
 !/scripts/generate_component_manifest.py
+!/scripts/template_registry.py
 !/scripts/verify_version_check_endpoint.py
 !/scripts/hyper-v-native-acceptance.ps1
 /skills/
