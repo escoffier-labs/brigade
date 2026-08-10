@@ -285,16 +285,57 @@ func BackfillRelations(db *sql.DB) (int64, error) {
 }
 
 func resolveRelations(tx *sql.Tx) (int64, error) {
-	res, err := tx.Exec(`update relations
+	// Qualified targets (target_source_kind set) resolve across sources using
+	// source.kind + optional collection.external_id + item.external_id.
+	qualified, err := tx.Exec(`update relations
+set target_item_id = (
+  select target.id
+  from items target
+  join sources ts on ts.id = target.source_id
+  left join collections tc on tc.id = target.collection_id
+  where ts.kind = relations.target_source_kind
+    and target.external_id = relations.target_external_id
+    and (relations.target_collection_external_id is null
+         or relations.target_collection_external_id = ''
+         or tc.external_id = relations.target_collection_external_id)
+    and target.tombstoned_at is null
+  order by target.created_at, target.id
+  limit 1
+)
+where target_item_id is null
+  and coalesce(target_source_kind, '') != ''
+  and coalesce(target_external_id, '') != ''
+  and exists (
+    select 1
+    from items target
+    join sources ts on ts.id = target.source_id
+    left join collections tc on tc.id = target.collection_id
+    where ts.kind = relations.target_source_kind
+      and target.external_id = relations.target_external_id
+      and (relations.target_collection_external_id is null
+           or relations.target_collection_external_id = ''
+           or tc.external_id = relations.target_collection_external_id)
+      and target.tombstoned_at is null
+  )`)
+	if err != nil {
+		return 0, err
+	}
+	qn, _ := qualified.RowsAffected()
+
+	// Legacy same-source resolution: target_external_id only, matching the
+	// source item's source_id. Preserves pre-Slice-1a adapter compatibility.
+	legacy, err := tx.Exec(`update relations
 set target_item_id = (
   select target.id
   from items source
   join items target on target.source_id = source.source_id and target.external_id = relations.target_external_id
   where source.id = relations.source_item_id
+    and target.tombstoned_at is null
   order by target.created_at, target.id
   limit 1
 )
 where target_item_id is null
+  and coalesce(target_source_kind, '') = ''
   and target_external_id is not null
   and target_external_id != ''
   and exists (
@@ -302,12 +343,13 @@ where target_item_id is null
     from items source
     join items target on target.source_id = source.source_id and target.external_id = relations.target_external_id
     where source.id = relations.source_item_id
+      and target.tombstoned_at is null
   )`)
 	if err != nil {
 		return 0, err
 	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	ln, _ := legacy.RowsAffected()
+	return qn + ln, nil
 }
 
 // ScanRecord is a file's prior import state from the source_scans manifest.
@@ -522,8 +564,10 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIf
 		if rel.Confidence != nil {
 			confidence = *rel.Confidence
 		}
-		relID := stableID("relation", itemID, rel.TargetItemID, rel.TargetExternalID, rel.Type)
-		if _, err := tx.Exec(`insert or ignore into relations(id, source_item_id, target_item_id, target_external_id, relation_type, confidence, metadata_json) values(?,?,?,?,?,?,?)`, relID, itemID, nullIfEmpty(rel.TargetItemID), nullIfEmpty(rel.TargetExternalID), rel.Type, confidence, rawOrEmptyObject(rel.Metadata)); err != nil {
+		targetSource, targetCollection, targetExternal := rel.Qualified()
+		relID := stableID("relation", itemID, rel.TargetItemID, targetSource, targetCollection, targetExternal, rel.Type)
+		if _, err := tx.Exec(`insert or ignore into relations(id, source_item_id, target_item_id, target_external_id, target_source_kind, target_collection_external_id, relation_type, confidence, metadata_json) values(?,?,?,?,?,?,?,?,?)`,
+			relID, itemID, nullIfEmpty(rel.TargetItemID), nullIfEmpty(targetExternal), nullIfEmpty(targetSource), nullIfEmpty(targetCollection), rel.Type, confidence, rawOrEmptyObject(rel.Metadata)); err != nil {
 			return false, err
 		}
 	}

@@ -85,12 +85,67 @@ Hermes support targets `~/.hermes/sessions/session_*.json` snapshots and traject
 
 Grok support targets `~/.grok/sessions/**/summary.json` and `chat_history.jsonl`. Cursor support targets the current read-only `User/globalStorage/conversation-search.db` search database and retains the older prompt-history and chat-metadata JSON layout.
 
+## Qualified Relation Targets
+
+Relations may target an item in another source using the versioned qualified
+target object:
+
+```json
+{"type":"derived_from","target":{"source":"brigade","collection":"brigade:receipts","external_id":"receipt:handoff-demo-1"}}
+```
+
+Fields:
+
+- `target.source`: target `sources.kind`
+- `target.collection`: target `collections.external_id` (optional; when empty any collection in that source may match)
+- `target.external_id`: target `items.external_id`
+
+Legacy adapters that only set `target_external_id` remain valid. Those relations
+resolve within the source item's own `source_id`, matching pre-Slice-1a behavior.
+When `target` is present it takes precedence for resolution.
+
+Unresolved external ids stay stored with `target_item_id` null and remain
+queryable for later backfill via `miseledger relations backfill`.
+
+## Native Memory Card Source
+
+```bash
+miseledger crawl memory <workspace> [--json] [--dry-run] [--rebuild] [--limit N]
+```
+
+The native `brigade-memory` source walks `memory/cards/**/*.md`, parses the flat
+Brigade frontmatter subset (not full YAML), and emits `miseledger.adapter.v1`
+records with `item.kind=memory_card`.
+
+Identity rules:
+
+- Explicit opaque `id` / `card_id` frontmatter wins (`identity_source=explicit_id`).
+- Otherwise the normalized workspace-relative path is used (`identity_source=path`,
+  external id `path:<rel>`).
+- Explicit-id renames preserve identity. Path-fallback renames are remove+create.
+- `topic`, title, filename stem, and body text are not canonical identity.
+
+Completed-scan reconciliation:
+
+- Only a completed memory scan may soft-tombstone missing cards, and only within
+  the `brigade-memory` source.
+- Failed or interrupted scans tombstone nothing and mark the prior completed
+  snapshot stale.
+- `--rebuild` deletes only the derived memory projection, then reimports it.
+- Default retention tiers must never match `memory_card` items.
+
+Scan receipts expose `scan_id`, `created`, `updated`, `unchanged`, `removed`,
+`skipped`, and `failed`. Doctor/status expose capability/version, last completed
+scan, canonical/live counts, hash divergence, unresolved relations,
+malformed/skipped counts, and stale/partial state.
+
 ## Built-In Crawlers
 
 MiseLedger's user-facing crawlers generate the same `miseledger.adapter.v1` records internally and stream them through normal ingest:
 
 ```bash
 miseledger crawl sessions --json
+miseledger crawl memory <workspace> --json
 miseledger crawl cursor --json
 miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
 miseledger crawl claude-export ~/Downloads/claude-export.zip --json

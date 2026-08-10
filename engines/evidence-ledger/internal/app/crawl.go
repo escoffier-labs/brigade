@@ -11,11 +11,13 @@ import (
 
 func cmdCrawl(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger crawl sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|discord|github|slack|granola|notion|gmail|telegram|chatgpt-export|claude-export <path> [options]")
+		return fatalf(errw, "usage: miseledger crawl sessions|memory|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|discord|github|slack|granola|notion|gmail|telegram|chatgpt-export|claude-export <path> [options]")
 	}
 	switch args[0] {
 	case "sessions":
 		return cmdCrawlSessions(args[1:], out, errw)
+	case "memory":
+		return cmdCrawlMemory(args[1:], out, errw)
 	case "docs":
 		return cmdCrawlSourceHarvest("markdown", "docs", args[1:], out, errw)
 	case "files":
@@ -37,7 +39,7 @@ func cmdCrawl(args []string, out, errw io.Writer) int {
 	case "chatgpt-export", "claude-export":
 		return cmdImport(args, out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger crawl sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|discord|github|slack|granola|notion|gmail|telegram|chatgpt-export|claude-export <path> [options]")
+		return fatalf(errw, "usage: miseledger crawl sessions|memory|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|discord|github|slack|granola|notion|gmail|telegram|chatgpt-export|claude-export <path> [options]")
 	}
 }
 

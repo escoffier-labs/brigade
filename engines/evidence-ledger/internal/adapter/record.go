@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 const SchemaV1 = "miseledger.adapter.v1"
@@ -68,12 +69,38 @@ type Link struct {
 	Text string `json:"text"`
 }
 
+// RelationTarget is the versioned qualified cross-source target. When present it
+// takes precedence over the legacy same-source TargetExternalID field.
+type RelationTarget struct {
+	Source     string `json:"source"`
+	Collection string `json:"collection"`
+	ExternalID string `json:"external_id"`
+}
+
 type Relation struct {
+	// Target is the preferred qualified form (source + collection + external_id).
+	// Older adapters that only set TargetExternalID remain valid and resolve
+	// within the source item's own source_id.
+	Target           *RelationTarget `json:"target"`
 	TargetItemID     string          `json:"target_item_id"`
 	TargetExternalID string          `json:"target_external_id"`
 	Type             string          `json:"type"`
 	Confidence       *float64        `json:"confidence"`
 	Metadata         json.RawMessage `json:"metadata"`
+}
+
+// Qualified returns the effective (source, collection, external_id) resolution
+// key. Empty source/collection means legacy same-source external-id lookup.
+func (r Relation) Qualified() (source, collection, externalID string) {
+	if r.Target != nil {
+		source = strings.TrimSpace(r.Target.Source)
+		collection = strings.TrimSpace(r.Target.Collection)
+		externalID = strings.TrimSpace(r.Target.ExternalID)
+	}
+	if externalID == "" {
+		externalID = strings.TrimSpace(r.TargetExternalID)
+	}
+	return source, collection, externalID
 }
 
 type RawRef struct {

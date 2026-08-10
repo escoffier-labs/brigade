@@ -4,12 +4,13 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/escoffier-labs/miseledger/internal/security"
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 func Open(path string) (*sql.DB, error) {
 	if err := security.EnsurePrivateParent(path); err != nil {
@@ -80,10 +81,63 @@ func Migrate(db *sql.DB) error {
 	if _, err := db.Exec(schemaSQL); err != nil {
 		return err
 	}
+	if err := ensureSchemaV2(db); err != nil {
+		return err
+	}
 	if _, err := db.Exec("PRAGMA user_version = " + fmt.Sprint(SchemaVersion)); err != nil {
 		return err
 	}
 	return nil
+}
+
+// ensureSchemaV2 adds memory-projection columns and tables on top of the v1
+// create-if-not-exists baseline. Safe to re-run.
+func ensureSchemaV2(db *sql.DB) error {
+	alters := []string{
+		`alter table items add column tombstoned_at text`,
+		`alter table relations add column target_source_kind text`,
+		`alter table relations add column target_collection_external_id text`,
+	}
+	for _, stmt := range alters {
+		if _, err := db.Exec(stmt); err != nil {
+			// SQLite returns a duplicate-column error when the column already exists.
+			if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return err
+			}
+		}
+	}
+	_, err := db.Exec(`
+create table if not exists source_scan_runs(
+  id text primary key,
+  source_kind text not null,
+  source_path text,
+  started_at text not null,
+  completed_at text,
+  status text not null,
+  stale integer not null default 0,
+  created_count integer not null default 0,
+  updated_count integer not null default 0,
+  unchanged_count integer not null default 0,
+  removed_count integer not null default 0,
+  skipped_count integer not null default 0,
+  failed_count integer not null default 0,
+  canonical_count integer not null default 0,
+  live_count integer not null default 0,
+  hash_divergence_count integer not null default 0,
+  unresolved_relation_count integer not null default 0,
+  malformed_skipped_count integer not null default 0,
+  metadata_json text not null default '{}'
+);
+create index if not exists idx_source_scan_runs_kind on source_scan_runs(source_kind, started_at);
+create table if not exists source_scan_observed(
+  scan_id text not null references source_scan_runs(id) on delete cascade,
+  external_id text not null,
+  content_hash text,
+  raw_path text,
+  primary key(scan_id, external_id)
+);
+`)
+	return err
 }
 
 func UserVersion(db *sql.DB) (int, error) {

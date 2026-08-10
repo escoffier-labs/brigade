@@ -8,12 +8,17 @@ The MVP uses one SQLite migration with these concepts:
 - `items`: atomic records such as messages, decisions, tool calls, errors, and notes
 - `events`: timestamped occurrences tying source, collection, actor, and item together
 - `artifacts`: files, URLs, markdown exports, patches, transcripts, and generated output
-- `relations`: graph edges between items
+- `relations`: graph edges between items, including optional qualified target
+  columns `target_source_kind` and `target_collection_external_id`
 - `imports` and `import_warnings`: import run metadata
 - `item_tags`: indexed item tags from adapter records
 - `item_metadata`: indexed project, workspace, harness, event type, session, model, and file-path metadata
 - `source_scans`: source-file scan manifests for native imports
+- `source_scan_runs` / `source_scan_observed`: memory projection scan receipts and manifests
 - `item_fts`: SQLite FTS5 index for item and artifact text
+
+Items may carry `tombstoned_at` for soft removal. Live memory cards are the
+latest non-tombstoned row per external id within `brigade-memory`.
 
 Raw adapter lines are preserved in `items.raw_json`. Raw source references are stored in `raw_hash`, `raw_path`, and `raw_ordinal`.
 

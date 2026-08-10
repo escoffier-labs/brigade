@@ -180,14 +180,16 @@ func cmdStatus(args []string, out, errw io.Writer) int {
 }
 
 type Status struct {
-	SchemaVersion int              `json:"schema_version"`
-	Paths         Paths            `json:"paths"`
-	Sources       int              `json:"sources"`
-	Items         int              `json:"items"`
-	Artifacts     int              `json:"artifacts"`
-	LastImport    *string          `json:"last_import"`
-	FTS           string           `json:"fts"`
-	SourceCounts  map[string]int64 `json:"source_counts"`
+	SchemaVersion  int                    `json:"schema_version"`
+	Paths          Paths                  `json:"paths"`
+	Sources        int                    `json:"sources"`
+	Items          int                    `json:"items"`
+	Artifacts      int                    `json:"artifacts"`
+	LastImport     *string                `json:"last_import"`
+	FTS            string                 `json:"fts"`
+	SourceCounts   map[string]int64       `json:"source_counts"`
+	MemoryHealth   *ingest.MemoryHealth   `json:"memory_health,omitempty"`
+	Capability     map[string]any         `json:"capability,omitempty"`
 }
 
 func collectStatus(db *sql.DB, paths Paths) (Status, error) {
@@ -216,6 +218,13 @@ func collectStatus(db *sql.DB, paths Paths) (Status, error) {
 	}
 	if !archive.HasFTS(db) {
 		st.FTS = "unavailable"
+	}
+	st.Capability = map[string]any{
+		"engine_version": Version,
+		"memory":         ingest.MemoryCapability,
+	}
+	if health, herr := ingest.CollectMemoryHealth(db, Version); herr == nil && health.Status != "absent" {
+		st.MemoryHealth = &health
 	}
 	return st, nil
 }
@@ -258,12 +267,33 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 			add(check.Name, check.OK, check.Detail)
 		}
 	}
+	memoryHealth, memoryErr := ingest.CollectMemoryHealth(db, Version)
+	if memoryErr != nil {
+		add("memory_projection", false, memoryErr.Error())
+	} else if memoryHealth.Status != "absent" {
+		ok := memoryHealth.Status == "completed" && !memoryHealth.Stale && !memoryHealth.Partial
+		detail := fmt.Sprintf("capability=%s version=%s status=%s last_completed=%s canonical=%d live=%d hash_divergence=%d unresolved=%d malformed_skipped=%d stale=%v partial=%v",
+			memoryHealth.Capability, memoryHealth.EngineVersion, memoryHealth.Status, memoryHealth.LastCompletedScanID,
+			memoryHealth.CanonicalCount, memoryHealth.LiveCount, memoryHealth.HashDivergence, memoryHealth.UnresolvedRelations,
+			memoryHealth.MalformedSkipped, memoryHealth.Stale, memoryHealth.Partial)
+		add("memory_projection", ok, detail)
+	}
 	if checkMCP {
 		for _, check := range mcpDoctorChecks() {
 			add(check.Name, check.OK, check.Detail)
 		}
 	}
-	result := map[string]any{"ok": true, "checks": checks, "paths": paths, "wrapper_tools": wrapperTools}
+	result := map[string]any{
+		"ok":             true,
+		"checks":         checks,
+		"paths":          paths,
+		"wrapper_tools":  wrapperTools,
+		"capability":     map[string]any{"engine_version": Version, "memory": ingest.MemoryCapability},
+		"engine_version": Version,
+	}
+	if memoryErr == nil && memoryHealth.Status != "absent" {
+		result["memory_health"] = memoryHealth
+	}
 	for _, c := range checks {
 		if c["ok"] == false {
 			result["ok"] = false
