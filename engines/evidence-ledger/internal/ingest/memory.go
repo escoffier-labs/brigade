@@ -370,8 +370,8 @@ order by i.created_at desc, i.id desc`, MemorySourceKind, namespace)
 }
 
 // LegacyMemoryExternalIDs returns live rows still under the pre-namespace
-// collection memory:cards. Namespaced crawls dual-read these for diagnostics
-// and never tombstone or rebuild them (scoped-rebuild rule).
+// collection memory:cards. Empty-namespace status/doctor health dual-reads
+// these; namespaced crawls never tombstone or rebuild them (scoped-rebuild).
 func LegacyMemoryExternalIDs(db *sql.DB) (map[string]string, error) {
 	tx, err := db.Begin()
 	if err != nil {
