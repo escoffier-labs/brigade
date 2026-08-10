@@ -539,7 +539,7 @@ func FinalizeMemoryRebuild(db *sql.DB, namespace string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if err := repointBackupItemRelations(tx); err != nil {
+	if err := repointBackupItemRelations(tx, namespace); err != nil {
 		return err
 	}
 	if err := deleteMemoryNamespaceTx(tx, backup); err != nil {
@@ -716,16 +716,21 @@ func deleteItemGraph(tx *sql.Tx, itemID string) error {
 	return nil
 }
 
-func repointBackupItemRelations(tx *sql.Tx) error {
-	rows, err := tx.Query(`select id, target_item_id from relations where target_item_id like ?`, memoryItemBackupPrefix+"%")
+func repointBackupItemRelations(tx *sql.Tx, namespace string) error {
+	rows, err := tx.Query(`select id, target_item_id, target_external_id from relations
+where target_item_id like ? and target_source_kind = ? and target_collection_external_id = ?`,
+		memoryItemBackupPrefix+"%", MemorySourceKind, namespace)
 	if err != nil {
 		return err
 	}
-	type rel struct{ id, target string }
+	type rel struct {
+		id, target string
+		externalID sql.NullString
+	}
 	var pending []rel
 	for rows.Next() {
 		var r rel
-		if err := rows.Scan(&r.id, &r.target); err != nil {
+		if err := rows.Scan(&r.id, &r.target, &r.externalID); err != nil {
 			rows.Close()
 			return err
 		}
@@ -737,12 +742,26 @@ func repointBackupItemRelations(tx *sql.Tx) error {
 	}
 	for _, r := range pending {
 		liveID := originalItemID(r.target)
-		var exists int
-		if err := tx.QueryRow(`select count(*) from items where id = ?`, liveID).Scan(&exists); err != nil {
-			return err
-		}
-		if exists == 0 {
-			continue
+		if r.externalID.Valid && r.externalID.String != "" {
+			err := tx.QueryRow(`select i.id from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
+				MemorySourceKind, namespace, r.externalID.String).Scan(&liveID)
+			if err == sql.ErrNoRows {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+		} else {
+			var exists int
+			if err := tx.QueryRow(`select count(*) from items where id = ?`, liveID).Scan(&exists); err != nil {
+				return err
+			}
+			if exists == 0 {
+				continue
+			}
 		}
 		if _, err := tx.Exec(`update relations set target_item_id = ? where id = ?`, liveID, r.id); err != nil {
 			return err
@@ -879,6 +898,11 @@ order by started_at desc limit 1`, MemorySourceKind).Scan(
 	h.HashDivergence = divergence
 	h.UnresolvedRelations = unresolved
 	h.MalformedSkipped = malformed
+	if scoped == "" {
+		if err := refreshAggregateMemoryScanHealth(db, &h); err != nil {
+			return h, err
+		}
+	}
 	if status == "completed" && completed.Valid {
 		h.LastCompletedScanID = scanID
 		h.LastCompletedAt = &completed.String
@@ -926,6 +950,41 @@ order by completed_at desc limit 1`, MemorySourceKind).Scan(&lastID, &lastAt)
 	h.UnresolvedRelations = unresolvedCount
 	h.MemoryNamespace = ""
 	return h, nil
+}
+
+// refreshAggregateMemoryScanHealth folds the latest scan state from every
+// memory namespace into empty-namespace doctor/status health. A newer healthy
+// namespace must not conceal a failed or stale scan in another namespace.
+func refreshAggregateMemoryScanHealth(db *sql.DB, h *MemoryHealth) error {
+	rows, err := db.Query(`
+select status, stale from source_scan_runs current
+where source_kind = ?
+  and not exists (
+    select 1 from source_scan_runs newer
+    where newer.source_kind = current.source_kind
+      and coalesce(json_extract(newer.metadata_json, '$.memory_namespace'), '') =
+          coalesce(json_extract(current.metadata_json, '$.memory_namespace'), '')
+      and (newer.started_at > current.started_at or
+           (newer.started_at = current.started_at and newer.id > current.id))
+  )`, MemorySourceKind)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status string
+		var stale int
+		if err := rows.Scan(&status, &stale); err != nil {
+			return err
+		}
+		if stale != 0 || status != "completed" {
+			h.Stale = true
+		}
+		if status != "completed" {
+			h.Partial = true
+		}
+	}
+	return rows.Err()
 }
 
 func refreshAggregateMemoryHealth(db *sql.DB, h *MemoryHealth) error {

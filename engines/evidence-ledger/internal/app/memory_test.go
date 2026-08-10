@@ -853,6 +853,107 @@ func TestCollectMemoryHealthEmptyAggregatesAllCollections(t *testing.T) {
 	}
 }
 
+func TestCollectMemoryHealthEmptyReportsStaleNamespaceAfterNewerCompletion(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	nsA := "memory-11111111-2222-4333-8444-aaaaaaaaaaaa"
+	nsB := "memory-99999999-8888-4777-8666-bbbbbbbbbbbb"
+	for i, ns := range []string{nsA, nsB} {
+		ws := t.TempDir()
+		writeTestNamespace(t, ws, ns)
+		cards := filepath.Join(ws, "memory", "cards")
+		if err := os.MkdirAll(cards, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cardID := []string{
+			"card-aaaaaaa0-1111-4222-8333-444444444444",
+			"card-bbbbbbb0-1111-4222-8333-444444444444",
+		}[i]
+		body := "---\nid: " + cardID + "\ntopic: t\n---\n\n# Card\n"
+		if err := os.WriteFile(filepath.Join(cards, "card.md"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			runJSON(t, "crawl", "memory", ws, "--json")
+			db := openTestDB(t)
+			scanID, err := ingest.BeginMemoryScan(db, ws, Version, ns)
+			if err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			receipt := &ingest.MemoryScanReceipt{SourcePath: ws, EngineVersion: Version, Namespace: ns, Failed: 1}
+			if err := ingest.FailMemoryScan(db, scanID, "interrupted", receipt); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			db.Close()
+			continue
+		}
+		runJSON(t, "crawl", "memory", ws, "--json")
+	}
+
+	db := openTestDB(t)
+	defer db.Close()
+	agg, err := ingest.CollectMemoryHealth(db, Version, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !agg.Stale || !agg.Partial {
+		t.Fatalf("aggregate health must retain stale namespace state after newer completion: %+v", agg)
+	}
+}
+
+func TestCrawlMemoryRebuildRepointsInboundRelationForChangedContent(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	ws := t.TempDir()
+	writeTestNamespace(t, ws, testMemoryNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cardID := "card-rebuild0-1111-4222-8333-444444444444"
+	cardPath := filepath.Join(cards, "card.md")
+	initial := "---\nid: " + cardID + "\ntopic: rebuild\n---\n\n# Initial\n"
+	if err := os.WriteFile(cardPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runJSON(t, "crawl", "memory", ws, "--json")
+
+	supportJSONL := `{"schema":"miseledger.adapter.v1","source":{"kind":"brigade","name":"Brigade"},"collection":{"external_id":"brigade:receipts","kind":"brigade_receipt","name":"receipts"},"item":{"external_id":"receipt:changed-rebuild","kind":"receipt","created_at":"2026-01-01T00:00:00Z","text":"support"},"relations":[{"type":"supports","target":{"source":"brigade-memory","collection":"` + testMemoryNamespace + `","external_id":"` + cardID + `"}}],"raw":{"format":"json","path":"r.json","ordinal":1}}` + "\n"
+	supportPath := filepath.Join(t.TempDir(), "support.jsonl")
+	if err := os.WriteFile(supportPath, []byte(supportJSONL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", supportPath, "--json")
+
+	changed := "---\nid: " + cardID + "\ntopic: rebuild\n---\n\n# Changed\n"
+	if err := os.WriteFile(cardPath, []byte(changed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runJSON(t, "crawl", "memory", ws, "--rebuild", "--json")
+
+	db := openTestDB(t)
+	defer db.Close()
+	var liveID string
+	if err := db.QueryRow(`select i.id from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&liveID); err != nil {
+		t.Fatal(err)
+	}
+	var inbound int
+	if err := db.QueryRow(`select count(*) from relations
+where target_item_id = ? and target_source_kind = ? and target_collection_external_id = ? and target_external_id = ?`,
+		liveID, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&inbound); err != nil {
+		t.Fatal(err)
+	}
+	if inbound != 1 {
+		t.Fatalf("changed-content rebuild lost or mispointed inbound relation: target=%q count=%d", liveID, inbound)
+	}
+}
+
 func TestRebuildFailureAfterDetachPreservesProjectionGraph(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
