@@ -439,6 +439,13 @@ def task_plan(
     kind: str = "plan",
     steps: list[str] | None = None,
     from_research: str | None = None,
+    decision: str | None = None,
+    decision_prompt: str | None = None,
+    decision_options: list[str] | None = None,
+    resolve_decision: str | None = None,
+    selected: str | None = None,
+    rationale: str | None = None,
+    evidence_ref: str | None = None,
 ) -> int:
     if write:
         return ledger_mod._write_plan_artifact(
@@ -454,6 +461,13 @@ def task_plan(
             kind=kind,
             steps=steps,
             from_research=from_research,
+            decision=decision,
+            decision_prompt=decision_prompt,
+            decision_options=decision_options,
+            resolve_decision=resolve_decision,
+            selected=selected,
+            rationale=rationale,
+            evidence_ref=evidence_ref,
         )
     payload, rc = _task_plan_payload(target, task_id)
     if payload is None:
@@ -462,8 +476,16 @@ def task_plan(
     resolved_id = str(payload.get("id") or task_id)
     artifact = ledger_mod._plan_artifact_summary(resolved_target, resolved_id)
     meta_artifact = ledger_mod._plan_artifact_summary(resolved_target, resolved_id, kind="meta")
+    try:
+        decisions = ledger_mod._plan_decisions(resolved_target, resolved_id, kind="plan")
+    except ledger_mod.PlanDecisionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return int(exc.exit_code)
+    unresolved = ledger_mod._unresolved_decisions(decisions)
     payload["plan_artifact"] = artifact
     payload["meta_artifact"] = meta_artifact
+    payload["decisions"] = decisions
+    payload["unresolved_decision_count"] = len(unresolved)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -504,6 +526,11 @@ def task_plan(
         print("meta_artifact: none")
     else:
         print(f"meta_artifact: {meta_artifact['status']} ({meta_artifact['path']})")
+    print(f"decision_checkpoints: {len(decisions)}")
+    for item in decisions:
+        print(f"  - {item.get('id')} [{item.get('status')}] {item.get('prompt') or ''}")
+    if unresolved:
+        print(f"unresolved_decision_checkpoints: {len(unresolved)}")
     return 0
 
 
@@ -536,6 +563,14 @@ def task_claim(
         status = str(task.get("status") or "pending")
         if status in edges_mod.TERMINAL_TASK_STATUSES:
             print(f"error: task is already {status}: {task.get('id')}", file=sys.stderr)
+            return 2
+        try:
+            unresolved = ledger_mod._unresolved_plan_decisions(target, str(task.get("id")))
+        except ledger_mod.PlanDecisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return int(exc.exit_code)
+        if unresolved:
+            print(f"error: {ledger_mod._decision_gate_message(unresolved)}", file=sys.stderr)
             return 2
         plan_files: list[str] = []
         if files:
@@ -587,6 +622,14 @@ def task_done(*, target: Path, task_id: str, force: bool = False, json_output: b
             print(f"error: task not found: {task_id}", file=sys.stderr)
             return 1
         resolved_id = str(task.get("id"))
+        try:
+            unresolved = ledger_mod._unresolved_plan_decisions(target, resolved_id)
+        except ledger_mod.PlanDecisionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return int(exc.exit_code)
+        if unresolved:
+            print(f"error: {ledger_mod._decision_gate_message(unresolved)}", file=sys.stderr)
+            return 2
         open_children = edges_mod.open_children_for_parent(ledger, resolved_id)
         if open_children and not force:
             payload = {

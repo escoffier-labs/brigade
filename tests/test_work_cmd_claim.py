@@ -335,6 +335,61 @@ def test_release_compares_claim_id_against_newer_claim(tmp_path, monkeypatch, ca
     assert excinfo.value.reason == claim_mod.REASON_CLAIM_ID_MISMATCH
 
 
+@pytest.mark.parametrize("options_value", [None, [], {"oauth": True}])
+def test_claim_next_skips_task_with_malformed_plan_decision_field_types(tmp_path, monkeypatch, capsys, options_value):
+    """claim-next must not treat coerced resolved checkpoints as claimable."""
+    _init_git_repo(tmp_path)
+    clock = {"n": 0}
+
+    def _now():
+        clock["n"] += 1
+        return datetime(2026, 8, 9, 12, 0, clock["n"], tzinfo=timezone.utc)
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", _now)
+    blocked = _add(tmp_path, "Blocked by corrupt decision", priority="urgent")
+    clean = _add(tmp_path, "Clean ready task", priority="low")
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=blocked["id"],
+            write=True,
+            decision="auth-approach",
+            decision_prompt="Which auth?",
+            decision_options=["oauth", "api-key"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, blocked["id"])
+    receipt = json.loads(json_path.read_text())
+    receipt["decisions"] = [
+        {
+            "id": "auth-approach",
+            "prompt": "Which auth?",
+            "options": options_value,
+            "selected": "oauth",
+            "rationale": "Matches SSO",
+            "evidence_ref": "miseledger:bundle/demo",
+        }
+    ]
+    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+    assert (
+        work_cmd.claim(
+            target=tmp_path,
+            claim_next=True,
+            actor="lane-a",
+            claim_id="next-clean",
+            json_output=True,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task_id"] == clean["id"]
+    assert payload["task_id"] != blocked["id"]
+
+
 def test_claim_next_picks_highest_priority_ready(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     clock = {"n": 0}
