@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Issue #846 R1 work-store characterization: research report, synthetic
+  chain/diamond/wide fixtures, and `scripts/measure_work_store.py` measurement
+  harness with diffable JSON output. Characterization only; no backend or
+  runtime dependency.
 - Bounded session-start memory recall (#466 Slice 1): `brigade memory recall
   --target <hub-or-mirror> --cwd <session-cwd> --limit 5 [--json]` derives query
   terms from the cwd basename, returns title/tags/path only (max 5 matches /

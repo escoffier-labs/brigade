@@ -1,0 +1,68 @@
+{
+  "fixtures": {
+    "chain_50": {
+      "blocks_edges": 49,
+      "contains_hostnames": false,
+      "digest_sha256": "518f57a67a3e48a7c0d5b8cbc23b569d60fd2b22998a37859c0e2878c5fb366b",
+      "edge_count": 49,
+      "expected": {
+        "blocks_edges": 49,
+        "edge_count": 49,
+        "parent_child_edges": 0,
+        "provenance_edges": 0,
+        "ready_count": 1,
+        "task_count": 50
+      },
+      "machine_neutral": true,
+      "name": "chain_50",
+      "parent_child_edges": 0,
+      "provenance_edges": 0,
+      "ready_count": 1,
+      "task_count": 50
+    },
+    "diamond_200": {
+      "blocks_edges": 396,
+      "contains_hostnames": false,
+      "digest_sha256": "931215cbde02d9c3942bea3cd752c83e0048cbc4b1e32b98dc85da56bd623e8a",
+      "edge_count": 396,
+      "expected": {
+        "blocks_edges": 396,
+        "edge_count": 396,
+        "parent_child_edges": 0,
+        "provenance_edges": 0,
+        "ready_count": 1,
+        "task_count": 200
+      },
+      "machine_neutral": true,
+      "name": "diamond_200",
+      "parent_child_edges": 0,
+      "provenance_edges": 0,
+      "ready_count": 1,
+      "task_count": 200
+    },
+    "wide_500_1000": {
+      "blocks_edges": 0,
+      "contains_hostnames": false,
+      "digest_sha256": "91f344bb7e7c951e1b8542a25d5f8153b11ccdfb1194f2f6593261571c63531c",
+      "edge_count": 1000,
+      "expected": {
+        "blocks_edges": 0,
+        "edge_count": 1000,
+        "parent_child_edges": 0,
+        "provenance_edges": 1000,
+        "ready_count": 500,
+        "task_count": 500
+      },
+      "machine_neutral": true,
+      "name": "wide_500_1000",
+      "parent_child_edges": 0,
+      "provenance_edges": 1000,
+      "ready_count": 500,
+      "task_count": 500
+    }
+  },
+  "issue": 846,
+  "kind": "work-store-fixture-manifest",
+  "protocol_version": 1,
+  "slice": "R1"
+}

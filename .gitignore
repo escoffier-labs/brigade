@@ -62,6 +62,7 @@ Thumbs.db
 !/scripts/generate_component_manifest.py
 !/scripts/verify_version_check_endpoint.py
 !/scripts/hyper-v-native-acceptance.ps1
+!/scripts/measure_work_store.py
 /skills/
 
 # Local plan/spec scratch dirs only. Reviewed planning artifacts ARE

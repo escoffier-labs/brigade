@@ -1,0 +1,909 @@
+{
+  "anonymous_metrics": "disabled_in_harness",
+  "capability_notes": {
+    "dolt_cli_per_command": {
+      "branch_diff_merge": "native_candidate",
+      "concurrent_cross_machine_claim": "not_by_cli_alone",
+      "concurrent_same_store_claim": "unmeasured_r1",
+      "dolt_commit_policy": "candidate mapping: claim CAS / graph apply / release / reassign would need an explicit CALL DOLT_COMMIT after SQL commit; readiness queries would not create Dolt commits",
+      "portable_sync": "clone_push_pull_candidate",
+      "row_locks": "unsupported_select_for_update",
+      "runtime_dependency": "forbidden_unless_later_issue_approves",
+      "sql_tx_vs_claim_cas": "SQL transaction success is not Brigade claim-CAS proof; cell-level merge can allow lost updates vs row-lock DBs"
+    },
+    "dolt_sql_server": {
+      "branch_diff_merge": "native_candidate",
+      "concurrent_cross_machine_claim": "possible_but_not_current_need",
+      "eligibility_gate": "eligible only if a later concurrent-claim requirement cannot meet measured correctness through file or replica candidates",
+      "extra_ops": "users_grants_backup_version_lifecycle_listener",
+      "listener_policy": "loopback_only_with_approval_or_no_listener",
+      "portable_sync": "central_service_candidate",
+      "row_locks": "unsupported_select_for_update",
+      "runtime_dependency": "forbidden_unless_later_issue_approves",
+      "status": "blocked_no_listener_in_r1"
+    },
+    "embedded_dolt": {
+      "branch_diff_merge": "native_candidate",
+      "concurrent_cross_machine_claim": "not_by_embed_alone",
+      "portable_sync": "local_replica_candidate",
+      "row_locks": "unsupported_select_for_update",
+      "runtime_dependency": "forbidden_unless_later_issue_approves",
+      "server_lifecycle": "none",
+      "status": "blocked_no_boundary_in_repo"
+    },
+    "json_ledger": {
+      "branch_diff_merge": "absent",
+      "concurrent_cross_machine_claim": "not_supported",
+      "concurrent_same_store_claim": "supported_via_dir_lock",
+      "dolt_commit_policy": "n/a",
+      "portable_sync": "absent_first_class",
+      "row_locks": "n/a_file_cas"
+    },
+    "sources": [
+      "https://www.dolthub.com/docs/sql-reference/sql-support/supported-statements/",
+      "https://www.dolthub.com/blog/2026-02-17-dolt-concurrency/",
+      "https://www.dolthub.com/docs/introduction/installation/application-server/",
+      "https://www.dolthub.com/docs/sql-reference/server/backups/",
+      "https://www.dolthub.com/docs/other/versioning/"
+    ],
+    "sqlite_wal": {
+      "branch_diff_merge": "absent",
+      "concurrent_cross_machine_claim": "not_safe_on_shared_network_fs",
+      "concurrent_same_store_claim": "supported_via_begin_immediate",
+      "dolt_commit_policy": "n/a",
+      "portable_sync": "file_copy_only",
+      "row_locks": "sqlite_transaction_locks",
+      "runtime_dependency": "forbidden_for_brigade_runtime"
+    }
+  },
+  "datasets": [
+    "chain_50",
+    "diamond_200",
+    "wide_500_1000"
+  ],
+  "decision": {
+    "backend_adoption": false,
+    "beads": "excluded_under_770",
+    "brigade_workstore_v1": false,
+    "concurrent_cross_machine_claims": "not_current_requirement",
+    "current_need": "sequential_portable_sync_plus_reviewable_branch_merge_proposals",
+    "dolt": "characterization_candidate_not_banned_not_selected",
+    "portable_sync": "adopt_as_follow_up_requirement_not_implemented_in_r1",
+    "shared_service_eligibility": "only_if_later_concurrent_claim_requirement_fails_file_or_replica_candidates",
+    "shared_store_conformance_fixture": "not_approved",
+    "sqlite": "optional_local_characterization_only_not_runtime_dependency",
+    "store_decision": "keep_machine_local_json_ledger"
+  },
+  "environment": {
+    "directory_fsync_supported": true,
+    "dolt_on_path": false,
+    "filesystem_type": "overlay",
+    "platform": "Linux-6.12.94+-x86_64-with-glibc2.39",
+    "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+    "sqlite_version": "3.45.1"
+  },
+  "fixtures": {
+    "chain_50": {
+      "blocks_edges": 49,
+      "contains_hostnames": false,
+      "digest_sha256": "518f57a67a3e48a7c0d5b8cbc23b569d60fd2b22998a37859c0e2878c5fb366b",
+      "edge_count": 49,
+      "expected": {
+        "blocks_edges": 49,
+        "edge_count": 49,
+        "parent_child_edges": 0,
+        "provenance_edges": 0,
+        "ready_count": 1,
+        "task_count": 50
+      },
+      "machine_neutral": true,
+      "name": "chain_50",
+      "parent_child_edges": 0,
+      "provenance_edges": 0,
+      "ready_count": 1,
+      "task_count": 50
+    },
+    "diamond_200": {
+      "blocks_edges": 396,
+      "contains_hostnames": false,
+      "digest_sha256": "931215cbde02d9c3942bea3cd752c83e0048cbc4b1e32b98dc85da56bd623e8a",
+      "edge_count": 396,
+      "expected": {
+        "blocks_edges": 396,
+        "edge_count": 396,
+        "parent_child_edges": 0,
+        "provenance_edges": 0,
+        "ready_count": 1,
+        "task_count": 200
+      },
+      "machine_neutral": true,
+      "name": "diamond_200",
+      "parent_child_edges": 0,
+      "provenance_edges": 0,
+      "ready_count": 1,
+      "task_count": 200
+    },
+    "wide_500_1000": {
+      "blocks_edges": 0,
+      "contains_hostnames": false,
+      "digest_sha256": "91f344bb7e7c951e1b8542a25d5f8153b11ccdfb1194f2f6593261571c63531c",
+      "edge_count": 1000,
+      "expected": {
+        "blocks_edges": 0,
+        "edge_count": 1000,
+        "parent_child_edges": 0,
+        "provenance_edges": 1000,
+        "ready_count": 500,
+        "task_count": 500
+      },
+      "machine_neutral": true,
+      "name": "wide_500_1000",
+      "parent_child_edges": 0,
+      "provenance_edges": 1000,
+      "ready_count": 500,
+      "task_count": 500
+    }
+  },
+  "issue": 846,
+  "kind": "work-store-characterization",
+  "normative_anchors": {
+    "issue_737": "graph ready-set, chains, diamonds, cycles, provenance-only edges",
+    "issue_738": "claim CAS with one winner and exit 13 on lost race",
+    "issue_770": "BUILD native; Beads excluded"
+  },
+  "protocol_version": 1,
+  "results": [
+    {
+      "branch_diff_merge": {
+        "detail": "JSON ledger has no first-class branch/diff/merge path",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-b",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "winner_actor": "lane-b",
+        "winner_count": 1
+      },
+      "crash_consistency": {
+        "mode": "before_replace",
+        "original_intact": true,
+        "pass": true
+      },
+      "dataset": "chain_50",
+      "export_import": {
+        "digest_after": "518f57a67a3e48a7c0d5b8cbc23b569d60fd2b22998a37859c0e2878c5fb366b",
+        "digest_before": "518f57a67a3e48a7c0d5b8cbc23b569d60fd2b22998a37859c0e2878c5fb366b",
+        "pass": true
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 49,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 1
+      },
+      "mutation_latency": {
+        "max_ns": 3700338,
+        "min_ns": 1560196,
+        "p50_ns": 2573392,
+        "p95_ns": 3410443,
+        "samples": 100
+      },
+      "offline_divergence": {
+        "detail": "No portable sync primitive in current JSON ledger",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 1.0,
+        "p95_vs_json": 1.0
+      },
+      "shape": "json_ledger",
+      "status": "measured"
+    },
+    {
+      "branch_diff_merge": {
+        "detail": "SQLite WAL adapter has no branch/diff/merge",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-b",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "winner_actor": "lane-b",
+        "winner_count": 1
+      },
+      "crash_consistency": {
+        "mode": "before_commit",
+        "original_intact": true,
+        "pass": true
+      },
+      "dataset": "chain_50",
+      "export_import": {
+        "digest_after": "518f57a67a3e48a7c0d5b8cbc23b569d60fd2b22998a37859c0e2878c5fb366b",
+        "digest_before": "518f57a67a3e48a7c0d5b8cbc23b569d60fd2b22998a37859c0e2878c5fb366b",
+        "pass": true
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 49,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 1
+      },
+      "mutation_latency": {
+        "max_ns": 3145834,
+        "min_ns": 932545,
+        "p50_ns": 1057736,
+        "p95_ns": 2527593,
+        "samples": 100
+      },
+      "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
+      "offline_divergence": {
+        "detail": "File copy only; no merge protocol in this adapter",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 0.41102793511443264,
+        "p95_vs_json": 0.7411333366369119
+      },
+      "shape": "sqlite_wal",
+      "status": "measured"
+    },
+    {
+      "branch_diff_merge": {
+        "status": "unmeasured"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "dataset": "chain_50",
+      "export_import": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "unmeasured"
+      },
+      "pass": null,
+      "reason": "dolt binary not available on PATH; optional temporary CLI not supplied (--dolt-bin). Cell left unmeasured rather than fabricated",
+      "relative_to_json": null,
+      "shape": "dolt_cli_per_command",
+      "status": "blocked"
+    },
+    {
+      "branch_diff_merge": {
+        "status": "unmeasured"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "dataset": "chain_50",
+      "export_import": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "unmeasured"
+      },
+      "pass": null,
+      "reason": "No embedded Dolt boundary is checked into this repo; R1 does not build or persist a Go/Dolt dependency",
+      "relative_to_json": null,
+      "shape": "embedded_dolt",
+      "status": "blocked"
+    },
+    {
+      "branch_diff_merge": {
+        "status": "unmeasured"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "dataset": "chain_50",
+      "export_import": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "unmeasured"
+      },
+      "pass": null,
+      "reason": "R1 policy: harness must not start a network listener; operator-owned server characterization requires separate approval",
+      "relative_to_json": null,
+      "shape": "dolt_sql_server",
+      "status": "blocked"
+    },
+    {
+      "branch_diff_merge": {
+        "detail": "JSON ledger has no first-class branch/diff/merge path",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-b",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "winner_actor": "lane-b",
+        "winner_count": 1
+      },
+      "crash_consistency": {
+        "mode": "before_replace",
+        "original_intact": true,
+        "pass": true
+      },
+      "dataset": "diamond_200",
+      "export_import": {
+        "digest_after": "931215cbde02d9c3942bea3cd752c83e0048cbc4b1e32b98dc85da56bd623e8a",
+        "digest_before": "931215cbde02d9c3942bea3cd752c83e0048cbc4b1e32b98dc85da56bd623e8a",
+        "pass": true
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 199,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 1
+      },
+      "mutation_latency": {
+        "max_ns": 10797211,
+        "min_ns": 5051450,
+        "p50_ns": 6220153,
+        "p95_ns": 7052445,
+        "samples": 100
+      },
+      "offline_divergence": {
+        "detail": "No portable sync primitive in current JSON ledger",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 1.0,
+        "p95_vs_json": 1.0
+      },
+      "shape": "json_ledger",
+      "status": "measured"
+    },
+    {
+      "branch_diff_merge": {
+        "detail": "SQLite WAL adapter has no branch/diff/merge",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-b",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "winner_actor": "lane-b",
+        "winner_count": 1
+      },
+      "crash_consistency": {
+        "mode": "before_commit",
+        "original_intact": true,
+        "pass": true
+      },
+      "dataset": "diamond_200",
+      "export_import": {
+        "digest_after": "931215cbde02d9c3942bea3cd752c83e0048cbc4b1e32b98dc85da56bd623e8a",
+        "digest_before": "931215cbde02d9c3942bea3cd752c83e0048cbc4b1e32b98dc85da56bd623e8a",
+        "pass": true
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 199,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 1
+      },
+      "mutation_latency": {
+        "max_ns": 2976028,
+        "min_ns": 776509,
+        "p50_ns": 1670392,
+        "p95_ns": 2586598,
+        "samples": 100
+      },
+      "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
+      "offline_divergence": {
+        "detail": "File copy only; no merge protocol in this adapter",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 0.2685451627958348,
+        "p95_vs_json": 0.3667661357160531
+      },
+      "shape": "sqlite_wal",
+      "status": "measured"
+    },
+    {
+      "branch_diff_merge": {
+        "status": "unmeasured"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "dataset": "diamond_200",
+      "export_import": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "unmeasured"
+      },
+      "pass": null,
+      "reason": "dolt binary not available on PATH; optional temporary CLI not supplied (--dolt-bin). Cell left unmeasured rather than fabricated",
+      "relative_to_json": null,
+      "shape": "dolt_cli_per_command",
+      "status": "blocked"
+    },
+    {
+      "branch_diff_merge": {
+        "status": "unmeasured"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "dataset": "diamond_200",
+      "export_import": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "unmeasured"
+      },
+      "pass": null,
+      "reason": "No embedded Dolt boundary is checked into this repo; R1 does not build or persist a Go/Dolt dependency",
+      "relative_to_json": null,
+      "shape": "embedded_dolt",
+      "status": "blocked"
+    },
+    {
+      "branch_diff_merge": {
+        "status": "unmeasured"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "dataset": "diamond_200",
+      "export_import": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "unmeasured"
+      },
+      "pass": null,
+      "reason": "R1 policy: harness must not start a network listener; operator-owned server characterization requires separate approval",
+      "relative_to_json": null,
+      "shape": "dolt_sql_server",
+      "status": "blocked"
+    },
+    {
+      "branch_diff_merge": {
+        "detail": "JSON ledger has no first-class branch/diff/merge path",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-b",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "winner_actor": "lane-b",
+        "winner_count": 1
+      },
+      "crash_consistency": {
+        "mode": "before_replace",
+        "original_intact": true,
+        "pass": true
+      },
+      "dataset": "wide_500_1000",
+      "export_import": {
+        "digest_after": "91f344bb7e7c951e1b8542a25d5f8153b11ccdfb1194f2f6593261571c63531c",
+        "digest_before": "91f344bb7e7c951e1b8542a25d5f8153b11ccdfb1194f2f6593261571c63531c",
+        "pass": true
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 0,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 500
+      },
+      "mutation_latency": {
+        "max_ns": 17363516,
+        "min_ns": 10193128,
+        "p50_ns": 11482529,
+        "p95_ns": 12698486,
+        "samples": 100
+      },
+      "offline_divergence": {
+        "detail": "No portable sync primitive in current JSON ledger",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 1.0,
+        "p95_vs_json": 1.0
+      },
+      "shape": "json_ledger",
+      "status": "measured"
+    },
+    {
+      "branch_diff_merge": {
+        "detail": "SQLite WAL adapter has no branch/diff/merge",
+        "status": "unsupported"
+      },
+      "claim_race": {
+        "codes": [
+          0,
+          13
+        ],
+        "exit_13_count": 1,
+        "loser_holder": "lane-b",
+        "loser_reason": "already_claimed",
+        "pass": true,
+        "winner_actor": "lane-b",
+        "winner_count": 1
+      },
+      "crash_consistency": {
+        "mode": "before_commit",
+        "original_intact": true,
+        "pass": true
+      },
+      "dataset": "wide_500_1000",
+      "export_import": {
+        "digest_after": "91f344bb7e7c951e1b8542a25d5f8153b11ccdfb1194f2f6593261571c63531c",
+        "digest_before": "91f344bb7e7c951e1b8542a25d5f8153b11ccdfb1194f2f6593261571c63531c",
+        "pass": true
+      },
+      "gates": {
+        "crash_consistency": true,
+        "issue_737_graph": true,
+        "issue_738_claim": true,
+        "lossless_export": true,
+        "metrics_state": true,
+        "restore": true,
+        "secret_history_handling": true
+      },
+      "graph_conformance": {
+        "blocked_count": 0,
+        "cycle_count": 0,
+        "pass": true,
+        "provenance_ignored_for_readiness": true,
+        "ready_count": 500
+      },
+      "mutation_latency": {
+        "max_ns": 2900870,
+        "min_ns": 817923,
+        "p50_ns": 2134305,
+        "p95_ns": 2585722,
+        "samples": 100
+      },
+      "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
+      "offline_divergence": {
+        "detail": "File copy only; no merge protocol in this adapter",
+        "status": "unsupported"
+      },
+      "pass": true,
+      "relative_to_json": {
+        "p50_vs_json": 0.18587412232967146,
+        "p95_vs_json": 0.20362443207796582
+      },
+      "shape": "sqlite_wal",
+      "status": "measured"
+    },
+    {
+      "branch_diff_merge": {
+        "status": "unmeasured"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "dataset": "wide_500_1000",
+      "export_import": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "unmeasured"
+      },
+      "pass": null,
+      "reason": "dolt binary not available on PATH; optional temporary CLI not supplied (--dolt-bin). Cell left unmeasured rather than fabricated",
+      "relative_to_json": null,
+      "shape": "dolt_cli_per_command",
+      "status": "blocked"
+    },
+    {
+      "branch_diff_merge": {
+        "status": "unmeasured"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "dataset": "wide_500_1000",
+      "export_import": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "unmeasured"
+      },
+      "pass": null,
+      "reason": "No embedded Dolt boundary is checked into this repo; R1 does not build or persist a Go/Dolt dependency",
+      "relative_to_json": null,
+      "shape": "embedded_dolt",
+      "status": "blocked"
+    },
+    {
+      "branch_diff_merge": {
+        "status": "unmeasured"
+      },
+      "claim_race": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "crash_consistency": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "dataset": "wide_500_1000",
+      "export_import": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "gates": {
+        "crash_consistency": null,
+        "issue_737_graph": null,
+        "issue_738_claim": null,
+        "lossless_export": null,
+        "metrics_state": null,
+        "restore": null,
+        "secret_history_handling": null
+      },
+      "graph_conformance": {
+        "pass": null,
+        "status": "unmeasured"
+      },
+      "mutation_latency": null,
+      "offline_divergence": {
+        "status": "unmeasured"
+      },
+      "pass": null,
+      "reason": "R1 policy: harness must not start a network listener; operator-owned server characterization requires separate approval",
+      "relative_to_json": null,
+      "shape": "dolt_sql_server",
+      "status": "blocked"
+    }
+  ],
+  "shapes": [
+    "json_ledger",
+    "sqlite_wal",
+    "dolt_cli_per_command",
+    "embedded_dolt",
+    "dolt_sql_server"
+  ],
+  "slice": "R1",
+  "timebox": "R1 timebox: automate JSON baseline first; SQLite WAL is an optional stdlib characterization adapter; Dolt shapes stay optional and must not enter Brigade runtime dependencies. Server listeners require separate operator approval and are never started here.",
+  "trials": 100,
+  "warmups": 10
+}
