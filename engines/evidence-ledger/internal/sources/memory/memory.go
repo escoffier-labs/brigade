@@ -22,7 +22,9 @@ const (
 	SourceName       = "Brigade Memory Cards"
 	SourceVersion    = "1.0.0"
 	// LegacyCollectionID is the pre-namespace collection. Namespaced crawls
-	// never tombstone or rebuild these rows (scoped-rebuild + dual-read rule).
+	// never tombstone or rebuild these rows (scoped-rebuild). Empty-namespace
+	// status/doctor health dual-reads live counts across all collections,
+	// including this legacy id.
 	LegacyCollectionID = "memory:cards"
 	CollectionKind     = "memory_cards"
 	ItemKind           = "memory_card"
@@ -34,8 +36,9 @@ const (
 	NamespaceFileRel   = "memory/NAMESPACE"
 )
 
-// namespacePattern matches operator-declared opaque memory-<uuid4> identifiers.
-var namespacePattern = regexp.MustCompile(`^memory-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+// namespacePattern matches operator-declared opaque memory-<uuid4> identifiers
+// with RFC 4122 version 4 and variant bits (8/9/a/b).
+var namespacePattern = regexp.MustCompile(`^memory-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 
 // CardRoots are the default relative directories scanned under a workspace.
 var CardRoots = []string{"memory/cards"}
@@ -78,7 +81,7 @@ func ResolveNamespace(workspace string) (string, error) {
 		return "", fmt.Errorf("empty memory namespace in %s", NamespaceFileRel)
 	}
 	if !namespacePattern.MatchString(ns) {
-		return "", fmt.Errorf("invalid memory namespace %q in %s (want memory-<uuid4>)", ns, NamespaceFileRel)
+		return "", fmt.Errorf("invalid memory namespace %q in %s (want memory-<uuid4> with version 4 and RFC variant 8/9/a/b)", ns, NamespaceFileRel)
 	}
 	return ns, nil
 }

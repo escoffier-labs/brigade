@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/escoffier-labs/miseledger/internal/sources/memory"
@@ -169,6 +170,12 @@ func CompleteMemoryScan(db *sql.DB, scanID string, observed []ObservedCard, rece
 		}
 		if _, err := tx.Exec(`insert or replace into source_scan_observed(scan_id, external_id, content_hash, raw_path) values(?,?,?,?)`,
 			scanID, obsID, card.ContentHash, card.RawPath); err != nil {
+			return err
+		}
+	}
+
+	if memoryScanAfterObserveHook != nil {
+		if err := memoryScanAfterObserveHook(tx); err != nil {
 			return err
 		}
 	}
@@ -401,188 +408,351 @@ func LiveMemoryProjection(db *sql.DB, namespace string) (map[string]string, erro
 	return liveMemoryExternalIDs(tx, namespace)
 }
 
-// MemoryNamespaceSnapshot holds derived projection rows for failure-preserving rebuild.
-type MemoryNamespaceSnapshot struct {
-	Namespace string
-	Items     []memoryItemSnapshot
+// SetMemoryScanAfterObserveHookForTest injects a failure after observation rows
+// are written and before reconciliation. Tests must clear it with a nil argument.
+func SetMemoryScanAfterObserveHookForTest(fn func(tx *sql.Tx) error) {
+	memoryScanAfterObserveHook = fn
 }
 
-type memoryItemSnapshot struct {
-	ID           string
-	ActorID      sql.NullString
-	ExternalID   string
-	Kind         string
-	CreatedAt    sql.NullString
-	UpdatedAt    sql.NullString
-	Text         sql.NullString
-	Summary      sql.NullString
-	ContentHash  string
-	RawJSON      string
-	RawHash      sql.NullString
-	RawPath      sql.NullString
-	RawOrdinal   sql.NullInt64
-	MetadataJSON string
-	TombstonedAt sql.NullString
-	Tags         []string
-	FTSBody      sql.NullString
-	Relations    []memoryRelationSnapshot
+// memoryScanAfterObserveHook is set by tests to inject a failure after
+// observation rows are written and before reconciliation/tombstones.
+var memoryScanAfterObserveHook func(tx *sql.Tx) error
+
+// MemoryRebuildTestHookAfterDetach is set by tests to fail after the live
+// namespace collection has been detached aside for rebuild.
+var MemoryRebuildTestHookAfterDetach func() error
+
+const memoryBackupPrefix = "__miseledger_memory_backup__:"
+const memoryItemBackupPrefix = "__miseledger_item_backup__:"
+
+func backupCollectionExternalID(namespace string) string {
+	return memoryBackupPrefix + namespace
 }
 
-type memoryRelationSnapshot struct {
-	ID                         string
-	SourceItemID               string
-	TargetItemID               sql.NullString
-	TargetExternalID           sql.NullString
-	TargetSourceKind           sql.NullString
-	TargetCollectionExternalID sql.NullString
-	RelationType               string
-	Confidence                 float64
-	MetadataJSON               string
+func isBackupCollectionExternalID(externalID string) bool {
+	return strings.HasPrefix(externalID, memoryBackupPrefix)
 }
 
-// SnapshotMemoryNamespace captures live+tombstoned derived rows for one namespace.
-func SnapshotMemoryNamespace(db *sql.DB, namespace string) (*MemoryNamespaceSnapshot, error) {
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, err
+func backupItemID(id string) string {
+	if strings.HasPrefix(id, memoryItemBackupPrefix) {
+		return id
 	}
-	defer tx.Rollback()
-	rows, err := tx.Query(`
-select i.id, i.actor_id, i.external_id, i.kind, i.created_at, i.updated_at,
-  i.text, i.summary, i.content_hash, i.raw_json, i.raw_hash, i.raw_path, i.raw_ordinal,
-  i.metadata_json, i.tombstoned_at
-from items i
-join sources s on s.id = i.source_id
-join collections c on c.id = i.collection_id
-where s.kind = ? and c.external_id = ?`, MemorySourceKind, namespace)
-	if err != nil {
-		return nil, err
-	}
-	snap := &MemoryNamespaceSnapshot{Namespace: namespace}
-	for rows.Next() {
-		var item memoryItemSnapshot
-		if err := rows.Scan(&item.ID, &item.ActorID, &item.ExternalID, &item.Kind,
-			&item.CreatedAt, &item.UpdatedAt, &item.Text, &item.Summary, &item.ContentHash,
-			&item.RawJSON, &item.RawHash, &item.RawPath, &item.RawOrdinal, &item.MetadataJSON, &item.TombstonedAt); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		snap.Items = append(snap.Items, item)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for i := range snap.Items {
-		tagRows, err := tx.Query(`select tag from item_tags where item_id = ?`, snap.Items[i].ID)
-		if err != nil {
-			return nil, err
-		}
-		for tagRows.Next() {
-			var tag string
-			if err := tagRows.Scan(&tag); err != nil {
-				tagRows.Close()
-				return nil, err
-			}
-			snap.Items[i].Tags = append(snap.Items[i].Tags, tag)
-		}
-		tagRows.Close()
-		_ = tx.QueryRow(`select body from item_fts where item_id = ?`, snap.Items[i].ID).Scan(&snap.Items[i].FTSBody)
-		relRows, err := tx.Query(`
-select id, source_item_id, target_item_id, target_external_id, target_source_kind,
-  target_collection_external_id, relation_type, confidence, metadata_json
-from relations where source_item_id = ?`, snap.Items[i].ID)
-		if err != nil {
-			return nil, err
-		}
-		for relRows.Next() {
-			var rel memoryRelationSnapshot
-			if err := relRows.Scan(&rel.ID, &rel.SourceItemID, &rel.TargetItemID, &rel.TargetExternalID,
-				&rel.TargetSourceKind, &rel.TargetCollectionExternalID, &rel.RelationType, &rel.Confidence, &rel.MetadataJSON); err != nil {
-				relRows.Close()
-				return nil, err
-			}
-			snap.Items[i].Relations = append(snap.Items[i].Relations, rel)
-		}
-		relRows.Close()
-	}
-	return snap, nil
+	return memoryItemBackupPrefix + id
 }
 
-// RestoreMemoryNamespace restores a previously snapshotted namespace projection.
-func RestoreMemoryNamespace(db *sql.DB, snap *MemoryNamespaceSnapshot) error {
-	if snap == nil {
+func originalItemID(id string) string {
+	return strings.TrimPrefix(id, memoryItemBackupPrefix)
+}
+
+// RecoverMemoryRebuildState restores a backup collection left by a crashed
+// rebuild before any new crawl observes live hashes.
+func RecoverMemoryRebuildState(db *sql.DB, namespace string) error {
+	if namespace == "" || namespace == memory.LegacyCollectionID || isBackupCollectionExternalID(namespace) {
 		return nil
 	}
+	backup := backupCollectionExternalID(namespace)
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := deleteMemoryNamespaceTx(tx, snap.Namespace); err != nil {
+	var backupCount int
+	if err := tx.QueryRow(`select count(*) from collections c
+join sources s on s.id = c.source_id
+where s.kind = ? and c.external_id = ?`, MemorySourceKind, backup).Scan(&backupCount); err != nil {
 		return err
 	}
-	sourceID := stableID("source", MemorySourceKind)
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)
-on conflict(id) do update set updated_at=excluded.updated_at`, sourceID, MemorySourceKind, "Brigade Memory Cards", "1.0.0", now, now); err != nil {
+	if backupCount == 0 {
+		return tx.Commit()
+	}
+	if err := deleteMemoryNamespaceTx(tx, namespace); err != nil {
 		return err
 	}
-	collectionID := stableID("collection", MemorySourceKind, snap.Namespace)
-	meta := map[string]any{"memory_namespace": snap.Namespace}
-	metaJSON, _ := json.Marshal(meta)
-	if _, err := tx.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values(?,?,?,?,?,?,?,?)
-on conflict(source_id, external_id) do update set updated_at=excluded.updated_at`,
-		collectionID, sourceID, snap.Namespace, "memory_cards", "Memory cards", string(metaJSON), now, now); err != nil {
+	if err := moveCollectionExternalID(tx, backup, namespace, true); err != nil {
 		return err
 	}
-	for _, item := range snap.Items {
-		if _, err := tx.Exec(`insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json, tombstoned_at)
-values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			item.ID, sourceID, collectionID, nullString(item.ActorID), item.ExternalID, item.Kind,
-			nullString(item.CreatedAt), nullString(item.UpdatedAt), nullString(item.Text), nullString(item.Summary),
-			item.ContentHash, item.RawJSON, nullString(item.RawHash), nullString(item.RawPath),
-			nullInt64(item.RawOrdinal), item.MetadataJSON, nullString(item.TombstonedAt)); err != nil {
+	return tx.Commit()
+}
+
+// DetachMemoryNamespace moves the live namespace collection to a backup
+// collection id so a rebuild can import into a fresh live collection without
+// deleting prior rows. Item primary keys are remapped with a backup prefix so
+// re-import can recreate the original content-addressed ids.
+func DetachMemoryNamespace(db *sql.DB, namespace string) error {
+	if namespace == "" || namespace == memory.LegacyCollectionID || isBackupCollectionExternalID(namespace) {
+		return fmt.Errorf("refusing to detach legacy or invalid memory namespace %q", namespace)
+	}
+	backup := backupCollectionExternalID(namespace)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var backupCount int
+	if err := tx.QueryRow(`select count(*) from collections c
+join sources s on s.id = c.source_id
+where s.kind = ? and c.external_id = ?`, MemorySourceKind, backup).Scan(&backupCount); err != nil {
+		return err
+	}
+	var liveCount int
+	if err := tx.QueryRow(`select count(*) from collections c
+join sources s on s.id = c.source_id
+where s.kind = ? and c.external_id = ?`, MemorySourceKind, namespace).Scan(&liveCount); err != nil {
+		return err
+	}
+	if backupCount > 0 && liveCount == 0 {
+		if err := moveCollectionExternalID(tx, backup, namespace, true); err != nil {
 			return err
 		}
-		for _, tag := range item.Tags {
-			if _, err := tx.Exec(`insert or ignore into item_tags(item_id, tag) values(?,?)`, item.ID, tag); err != nil {
-				return err
-			}
+		liveCount = 1
+	}
+	if backupCount > 0 && liveCount > 0 {
+		if err := deleteMemoryNamespaceTx(tx, backup); err != nil {
+			return err
 		}
-		if item.FTSBody.Valid {
-			if _, err := tx.Exec(`insert into item_fts(item_id, source_kind, collection_kind, item_kind, actor_type, body) values(?,?,?,?,?,?)`,
-				item.ID, MemorySourceKind, "memory_cards", item.Kind, "system", item.FTSBody.String); err != nil {
-				return err
-			}
+	}
+	if liveCount == 0 {
+		return tx.Commit()
+	}
+	if err := moveCollectionExternalID(tx, namespace, backup, false); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if MemoryRebuildTestHookAfterDetach != nil {
+		if err := MemoryRebuildTestHookAfterDetach(); err != nil {
+			_ = AbortMemoryRebuild(db, namespace)
+			return err
 		}
-		for _, rel := range item.Relations {
-			if _, err := tx.Exec(`insert into relations(id, source_item_id, target_item_id, target_external_id, target_source_kind, target_collection_external_id, relation_type, confidence, metadata_json)
-values(?,?,?,?,?,?,?,?,?)`, rel.ID, rel.SourceItemID, nullString(rel.TargetItemID), nullString(rel.TargetExternalID),
-				nullString(rel.TargetSourceKind), nullString(rel.TargetCollectionExternalID), rel.RelationType, rel.Confidence, rel.MetadataJSON); err != nil {
-				return err
-			}
+	}
+	return nil
+}
+
+// FinalizeMemoryRebuild repoints inbound relations onto the new live items and
+// drops the backup collection.
+func FinalizeMemoryRebuild(db *sql.DB, namespace string) error {
+	backup := backupCollectionExternalID(namespace)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := repointBackupItemRelations(tx); err != nil {
+		return err
+	}
+	if err := deleteMemoryNamespaceTx(tx, backup); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// AbortMemoryRebuild deletes any partial new live collection and restores the
+// backup collection so prior live IDs, hashes, relations, metadata, events,
+// and artifacts remain intact.
+func AbortMemoryRebuild(db *sql.DB, namespace string) error {
+	if namespace == "" || namespace == memory.LegacyCollectionID {
+		return fmt.Errorf("refusing to abort rebuild for invalid namespace %q", namespace)
+	}
+	backup := backupCollectionExternalID(namespace)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := deleteMemoryNamespaceTx(tx, namespace); err != nil {
+		return err
+	}
+	var backupCount int
+	if err := tx.QueryRow(`select count(*) from collections c
+join sources s on s.id = c.source_id
+where s.kind = ? and c.external_id = ?`, MemorySourceKind, backup).Scan(&backupCount); err != nil {
+		return err
+	}
+	if backupCount > 0 {
+		if err := moveCollectionExternalID(tx, backup, namespace, true); err != nil {
+			return err
 		}
 	}
 	return tx.Commit()
 }
 
-func nullString(v sql.NullString) any {
-	if !v.Valid {
-		return nil
+func moveCollectionExternalID(tx *sql.Tx, fromExternal, toExternal string, restoreOriginalIDs bool) error {
+	sourceID := stableID("source", MemorySourceKind)
+	fromID := stableID("collection", MemorySourceKind, fromExternal)
+	toID := stableID("collection", MemorySourceKind, toExternal)
+	var kind, name, meta sql.NullString
+	var created, updated sql.NullString
+	if err := tx.QueryRow(`select kind, name, metadata_json, created_at, updated_at from collections where id = ?`, fromID).Scan(
+		&kind, &name, &meta, &created, &updated); err != nil {
+		return err
 	}
-	return v.String
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	kindVal := "memory_cards"
+	if kind.Valid && kind.String != "" {
+		kindVal = kind.String
+	}
+	nameVal := "Memory cards"
+	if name.Valid && name.String != "" {
+		nameVal = name.String
+	}
+	metaVal := "{}"
+	if meta.Valid && meta.String != "" {
+		metaVal = meta.String
+	}
+	createdVal := now
+	if created.Valid && created.String != "" {
+		createdVal = created.String
+	}
+	if _, err := tx.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at)
+values(?,?,?,?,?,?,?,?)
+on conflict(id) do update set external_id=excluded.external_id, kind=excluded.kind, name=excluded.name,
+  metadata_json=excluded.metadata_json, updated_at=excluded.updated_at`,
+		toID, sourceID, toExternal, kindVal, nameVal, metaVal, createdVal, now); err != nil {
+		return err
+	}
+
+	rows, err := tx.Query(`select id from items where collection_id = ?`, fromID)
+	if err != nil {
+		return err
+	}
+	var itemIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		itemIDs = append(itemIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, oldID := range itemIDs {
+		newID := backupItemID(oldID)
+		if restoreOriginalIDs {
+			newID = originalItemID(oldID)
+		}
+		if newID == oldID {
+			if _, err := tx.Exec(`update items set collection_id = ? where id = ?`, toID, oldID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`update events set collection_id = ? where item_id = ?`, toID, oldID); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := cloneItemWithNewID(tx, oldID, newID, toID); err != nil {
+			return err
+		}
+		if err := deleteItemGraph(tx, oldID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`delete from collections where id = ?`, fromID); err != nil {
+		return err
+	}
+	return nil
 }
 
-func nullInt64(v sql.NullInt64) any {
-	if !v.Valid {
-		return nil
+func cloneItemWithNewID(tx *sql.Tx, oldID, newID, collectionID string) error {
+	if _, err := tx.Exec(`insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json, tombstoned_at)
+select ?, source_id, ?, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json, tombstoned_at
+from items where id = ?`, newID, collectionID, oldID); err != nil {
+		return err
 	}
-	return v.Int64
+	if _, err := tx.Exec(`insert into item_tags(item_id, tag) select ?, tag from item_tags where item_id = ?`, newID, oldID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`insert into item_metadata(item_id, key, value) select ?, key, value from item_metadata where item_id = ?`, newID, oldID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`insert into events(id, source_id, collection_id, actor_id, item_id, kind, occurred_at, metadata_json)
+select printf('bakevt:%s:%s', ?, id), source_id, ?, actor_id, ?, kind, occurred_at, metadata_json from events where item_id = ?`, newID, collectionID, newID, oldID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`insert into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json)
+select printf('bakart:%s:%s', ?, id), source_id, ?, external_id, kind, path, url, mime_type, text, content_hash, metadata_json from artifacts where item_id = ?`, newID, newID, oldID); err != nil {
+		return err
+	}
+	_, _ = tx.Exec(`insert into item_fts(item_id, source_kind, collection_kind, item_kind, actor_type, body)
+select ?, source_kind, collection_kind, item_kind, actor_type, body from item_fts where item_id = ?`, newID, oldID)
+	if _, err := tx.Exec(`insert into relations(id, source_item_id, target_item_id, target_external_id, target_source_kind, target_collection_external_id, relation_type, confidence, metadata_json)
+select printf('bakrel:%s:%s', ?, id), ?, target_item_id, target_external_id, target_source_kind, target_collection_external_id, relation_type, confidence, metadata_json
+from relations where source_item_id = ?`, newID, newID, oldID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`update relations set target_item_id = ? where target_item_id = ?`, newID, oldID); err != nil {
+		return err
+	}
+	return nil
 }
 
-// DeleteMemoryNamespace removes only the derived projection for one namespace.
-// Legacy memory:cards rows are never touched.
+func deleteItemGraph(tx *sql.Tx, itemID string) error {
+	if _, err := tx.Exec(`delete from item_tags where item_id = ?`, itemID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`delete from item_metadata where item_id = ?`, itemID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`delete from events where item_id = ?`, itemID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`delete from artifacts where item_id = ?`, itemID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`delete from item_fts where item_id = ?`, itemID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`delete from relations where source_item_id = ?`, itemID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`delete from items where id = ?`, itemID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func repointBackupItemRelations(tx *sql.Tx) error {
+	rows, err := tx.Query(`select id, target_item_id from relations where target_item_id like ?`, memoryItemBackupPrefix+"%")
+	if err != nil {
+		return err
+	}
+	type rel struct{ id, target string }
+	var pending []rel
+	for rows.Next() {
+		var r rel
+		if err := rows.Scan(&r.id, &r.target); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, r := range pending {
+		liveID := originalItemID(r.target)
+		var exists int
+		if err := tx.QueryRow(`select count(*) from items where id = ?`, liveID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			continue
+		}
+		if _, err := tx.Exec(`update relations set target_item_id = ? where id = ?`, liveID, r.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeleteMemoryNamespace removes only the derived projection for one namespace
+// collection external id (live or backup). Legacy memory:cards rows are never touched.
 func DeleteMemoryNamespace(db *sql.DB, namespace string) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -621,30 +791,13 @@ where s.kind = ? and c.external_id = ?`, MemorySourceKind, namespace)
 		return err
 	}
 	for _, id := range ids {
-		if _, err := tx.Exec(`delete from item_tags where item_id = ?`, id); err != nil {
+		if err := deleteItemGraph(tx, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`delete from item_metadata where item_id = ?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`delete from events where item_id = ?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`delete from artifacts where item_id = ?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`delete from item_fts where item_id = ?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`delete from relations where source_item_id = ? or target_item_id = ?`, id, id); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`delete from items where id = ?`, id); err != nil {
+		if _, err := tx.Exec(`delete from relations where target_item_id = ?`, id); err != nil {
 			return err
 		}
 	}
-	// Completed scan records are intentionally retained so a failed rebuild can
-	// mark the prior snapshot stale without losing last_completed_scan_id.
 	if _, err := tx.Exec(`delete from collections where source_id in (select id from sources where kind = ?) and external_id = ?`,
 		MemorySourceKind, namespace); err != nil {
 		return err
@@ -652,10 +805,10 @@ where s.kind = ? and c.external_id = ?`, MemorySourceKind, namespace)
 	return nil
 }
 
-// RebuildMemoryProjection deletes only the named namespace's derived projection.
-// Prefer Snapshot+Delete+Restore around import for failure-preserving rebuilds.
+// RebuildMemoryProjection detaches the live namespace for a staged rebuild.
+// Callers must FinalizeMemoryRebuild on success or AbortMemoryRebuild on failure.
 func RebuildMemoryProjection(db *sql.DB, namespace string) error {
-	return DeleteMemoryNamespace(db, namespace)
+	return DetachMemoryNamespace(db, namespace)
 }
 
 // MemoryHealth summarizes doctor/status fields for the memory projection.
@@ -675,8 +828,10 @@ type MemoryHealth struct {
 	Status              string  `json:"status"`
 }
 
-// CollectMemoryHealth reads the latest scan run plus live counts for a namespace.
-// When namespace is empty it reports the latest memory scan across namespaces.
+// CollectMemoryHealth reads the latest scan run plus live counts.
+// When namespace is non-empty, live/unresolved counts are scoped to that
+// collection. When namespace is empty, status/doctor aggregation covers every
+// brigade-memory collection including legacy memory:cards (dual-read).
 func CollectMemoryHealth(db *sql.DB, engineVersion, namespace string) (MemoryHealth, error) {
 	h := MemoryHealth{
 		Capability:      MemoryCapability,
@@ -684,28 +839,33 @@ func CollectMemoryHealth(db *sql.DB, engineVersion, namespace string) (MemoryHea
 		MemoryNamespace: namespace,
 		Status:          "absent",
 	}
+	scoped := namespace
 	var scanID, status string
 	var completed sql.NullString
 	var stale, canonical, live, divergence, unresolved, malformed int
 	var err error
-	if namespace != "" {
+	if scoped != "" {
 		err = db.QueryRow(`select id, status, completed_at, stale, canonical_count, live_count,
   hash_divergence_count, unresolved_relation_count, malformed_skipped_count
 from source_scan_runs
 where source_kind = ? and json_extract(metadata_json, '$.memory_namespace') = ?
-order by started_at desc limit 1`, MemorySourceKind, namespace).Scan(
+order by started_at desc limit 1`, MemorySourceKind, scoped).Scan(
 			&scanID, &status, &completed, &stale, &canonical, &live, &divergence, &unresolved, &malformed)
 	} else {
 		err = db.QueryRow(`select id, status, completed_at, stale, canonical_count, live_count,
-  hash_divergence_count, unresolved_relation_count, malformed_skipped_count,
-  coalesce(json_extract(metadata_json, '$.memory_namespace'), '')
+  hash_divergence_count, unresolved_relation_count, malformed_skipped_count
 from source_scan_runs
 where source_kind = ?
 order by started_at desc limit 1`, MemorySourceKind).Scan(
-			&scanID, &status, &completed, &stale, &canonical, &live, &divergence, &unresolved, &malformed, &namespace)
-		h.MemoryNamespace = namespace
+			&scanID, &status, &completed, &stale, &canonical, &live, &divergence, &unresolved, &malformed)
 	}
 	if err == sql.ErrNoRows {
+		// Still surface live dual-read aggregates when cards exist without scans.
+		if scoped == "" {
+			if aggErr := refreshAggregateMemoryHealth(db, &h); aggErr != nil {
+				return h, aggErr
+			}
+		}
 		return h, nil
 	}
 	if err != nil {
@@ -725,10 +885,10 @@ order by started_at desc limit 1`, MemorySourceKind).Scan(
 	} else {
 		var lastID string
 		var lastAt sql.NullString
-		if namespace != "" {
+		if scoped != "" {
 			_ = db.QueryRow(`select id, completed_at from source_scan_runs
 where source_kind = ? and status = 'completed' and json_extract(metadata_json, '$.memory_namespace') = ?
-order by completed_at desc limit 1`, MemorySourceKind, namespace).Scan(&lastID, &lastAt)
+order by completed_at desc limit 1`, MemorySourceKind, scoped).Scan(&lastID, &lastAt)
 		} else {
 			_ = db.QueryRow(`select id, completed_at from source_scan_runs
 where source_kind = ? and status = 'completed'
@@ -740,24 +900,91 @@ order by completed_at desc limit 1`, MemorySourceKind).Scan(&lastID, &lastAt)
 		}
 	}
 
-	if namespace != "" {
-		tx, err := db.Begin()
-		if err != nil {
-			return h, err
-		}
-		defer tx.Rollback()
-		liveMap, err := liveMemoryExternalIDs(tx, namespace)
+	tx, err := db.Begin()
+	if err != nil {
+		return h, err
+	}
+	defer tx.Rollback()
+	if scoped != "" {
+		liveMap, err := liveMemoryExternalIDs(tx, scoped)
 		if err != nil {
 			return h, err
 		}
 		h.LiveCount = len(liveMap)
-		unresolved, err = memoryUnresolvedRelationCount(tx, namespace)
+		unresolved, err = memoryUnresolvedRelationCount(tx, scoped)
 		if err != nil {
 			return h, err
 		}
 		h.UnresolvedRelations = unresolved
+		return h, nil
 	}
+	liveCount, unresolvedCount, err := aggregateLiveMemoryHealth(tx)
+	if err != nil {
+		return h, err
+	}
+	h.LiveCount = liveCount
+	h.UnresolvedRelations = unresolvedCount
+	h.MemoryNamespace = ""
 	return h, nil
+}
+
+func refreshAggregateMemoryHealth(db *sql.DB, h *MemoryHealth) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	liveCount, unresolvedCount, err := aggregateLiveMemoryHealth(tx)
+	if err != nil {
+		return err
+	}
+	if liveCount > 0 {
+		h.LiveCount = liveCount
+		h.UnresolvedRelations = unresolvedCount
+		if h.Status == "absent" {
+			h.Status = "present"
+		}
+	}
+	return nil
+}
+
+func aggregateLiveMemoryHealth(tx *sql.Tx) (liveCount, unresolvedCount int, err error) {
+	rows, err := tx.Query(`
+select c.external_id
+from collections c
+join sources s on s.id = c.source_id
+where s.kind = ?
+  and c.kind = 'memory_cards'
+  and c.external_id not like ?`, MemorySourceKind, memoryBackupPrefix+"%")
+	if err != nil {
+		return 0, 0, err
+	}
+	var collections []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		collections = append(collections, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+	for _, collection := range collections {
+		live, err := liveMemoryExternalIDs(tx, collection)
+		if err != nil {
+			return 0, 0, err
+		}
+		liveCount += len(live)
+		unresolved, err := memoryUnresolvedRelationCount(tx, collection)
+		if err != nil {
+			return 0, 0, err
+		}
+		unresolvedCount += unresolved
+	}
+	return liveCount, unresolvedCount, nil
 }
 
 // ClassifyMemoryOutcomes compares pre-import live hashes to observed cards.

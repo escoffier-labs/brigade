@@ -125,7 +125,8 @@ Every memory root must declare an opaque namespace id in `memory/NAMESPACE`:
 memory-<uuid4>
 ```
 
-Rules:
+The UUID must be RFC 4122 version 4 with variant bits `8`/`9`/`a`/`b`. Other
+UUID versions and invalid variants are rejected.
 
 - Generated once by the canonical memory owner, copied with the canonical store,
   and never derived from basenames, absolute paths, gitignored aliases, or clone
@@ -135,9 +136,10 @@ Rules:
 - Two roots that share the same explicit card id remain isolated when their
   namespaces differ.
 - Legacy pre-namespace rows use `collection.external_id=memory:cards`. Namespaced
-  crawls dual-read them for diagnostics and never tombstone or rebuild them
-  (scoped-rebuild rule). Migration onto a namespace is an explicit operator step
-  outside the crawl path.
+  crawls never tombstone or rebuild them (scoped-rebuild rule). Empty-namespace
+  status/doctor health dual-reads live counts and unresolved relations across
+  every `brigade-memory` collection, including legacy `memory:cards`. Migration
+  onto a namespace is an explicit operator step outside the crawl path.
 - The engine does not mint or backfill card ids. Markdown remains canonical.
 
 Identity rules:
@@ -163,9 +165,12 @@ Completed-scan reconciliation:
   the active namespace collection.
 - Failed or interrupted scans tombstone nothing and mark the prior completed
   snapshot for that namespace stale.
-- `--rebuild` validates/walks first, then replaces the derived projection for the
-  active namespace. A failed rebuild restores prior live ids/hashes, keeps the
-  prior completed-scan record, and marks health stale or partial.
+- `--rebuild` validates/walks first, then detaches the live namespace collection
+  aside and imports into a fresh collection. Success finalizes by dropping the
+  backup; failure aborts by deleting the partial import and restoring the backup
+  collection name so prior live ids/hashes, inbound and outbound relations,
+  item_metadata, events, artifacts, and the completed-scan record remain intact
+  while health is marked stale or partial.
 - A transaction failure between observation and reconciliation creates no
   tombstones.
 - Default retention tiers must never match `memory_card` items.

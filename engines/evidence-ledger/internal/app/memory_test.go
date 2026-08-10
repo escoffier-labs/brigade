@@ -3,6 +3,7 @@ package app
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -300,10 +301,7 @@ func TestCrawlMemoryRebuildDeterminism(t *testing.T) {
 	}
 	db.Close()
 
-	rebuild := runJSON(t, "crawl", "memory", ws, "--rebuild", "--json")
-	if rebuild["rebuild"] != true || rebuild["status"] != "completed" {
-		t.Fatalf("rebuild = %v", rebuild)
-	}
+	runOK(t, "crawl", "memory", ws, "--rebuild", "--json")
 	db = openTestDB(t)
 	defer db.Close()
 	after, err := ingest.LiveMemoryProjection(db, testMemoryNamespace)
@@ -446,7 +444,14 @@ func TestCrawlMemoryDuplicateExplicitIDFailsBeforeReconcile(t *testing.T) {
 	if err := os.MkdirAll(cards, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := "---\nid: card-dup00000-1111-4222-8333-444444444444\ntopic: d\n---\n\n# Dup\n"
+	existing := "---\nid: card-exist00-1111-4222-8333-444444444444\ntopic: exist\n---\n\n# Exist\n"
+	if err := os.WriteFile(filepath.Join(cards, "exist.md"), []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runJSON(t, "crawl", "memory", ws, "--json")
+
+	dupID := "card-dup00000-1111-4222-8333-444444444444"
+	body := "---\nid: " + dupID + "\ntopic: d\n---\n\n# Dup\n"
 	if err := os.WriteFile(filepath.Join(cards, "one.md"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -462,21 +467,98 @@ func TestCrawlMemoryDuplicateExplicitIDFailsBeforeReconcile(t *testing.T) {
 	}
 	db := openTestDB(t)
 	defer db.Close()
-	var live int
-	if err := db.QueryRow(`
-select count(*) from items i join sources s on s.id = i.source_id
-where s.kind = ? and i.kind = 'memory_card'`, ingest.MemorySourceKind).Scan(&live); err != nil {
+	live, err := ingest.LiveMemoryProjection(db, testMemoryNamespace)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if live != 0 {
-		t.Fatalf("duplicate id scan must not import rows, got %d", live)
+	if live["card-exist00-1111-4222-8333-444444444444"] == "" {
+		t.Fatal("existing projection must survive duplicate-id fail-closed")
+	}
+	if _, ok := live[dupID]; ok {
+		t.Fatal("duplicate id must not import last-wins rows")
 	}
 	var tombstoned int
-	if err := db.QueryRow(`select count(*) from items where tombstoned_at is not null`).Scan(&tombstoned); err != nil {
+	if err := db.QueryRow(`
+select count(*) from items i join sources s on s.id = i.source_id
+where s.kind = ? and i.tombstoned_at is not null`, ingest.MemorySourceKind).Scan(&tombstoned); err != nil {
 		t.Fatal(err)
 	}
 	if tombstoned != 0 {
 		t.Fatalf("duplicate id failure must not reconcile/tombstone, got %d", tombstoned)
+	}
+}
+
+func TestCrawlMemoryTransactionFailureAfterObservation(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	ws := t.TempDir()
+	writeTestNamespace(t, ws, testMemoryNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keepID := "card-tx000000-1111-4222-8333-444444444444"
+	if err := os.WriteFile(filepath.Join(cards, "keep.md"), []byte("---\nid: "+keepID+"\ntopic: keep\n---\n\n# Keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cards, "gone.md"), []byte("---\nid: card-txgone00-1111-4222-8333-444444444444\ntopic: gone\n---\n\n# Gone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runJSON(t, "crawl", "memory", ws, "--json")
+	if err := os.Remove(filepath.Join(cards, "gone.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	db := openTestDB(t)
+	defer db.Close()
+	before, err := ingest.LiveMemoryProjection(db, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 2 {
+		t.Fatalf("before live=%d", len(before))
+	}
+
+	ingest.SetMemoryScanAfterObserveHookForTest(func(tx *sql.Tx) error {
+		return fmt.Errorf("injected observation-to-reconcile failure")
+	})
+	t.Cleanup(func() { ingest.SetMemoryScanAfterObserveHookForTest(nil) })
+
+	scanID, err := ingest.BeginMemoryScan(db, ws, Version, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := &ingest.MemoryScanReceipt{SourcePath: ws, Namespace: testMemoryNamespace, EngineVersion: Version}
+	err = ingest.CompleteMemoryScan(db, scanID, []ingest.ObservedCard{
+		{ExternalID: keepID, ContentHash: before[keepID], RawPath: "memory/cards/keep.md", Outcome: "unchanged"},
+	}, receipt)
+	if err == nil || !strings.Contains(err.Error(), "injected observation-to-reconcile failure") {
+		t.Fatalf("expected injected failure, got %v", err)
+	}
+	_ = ingest.FailMemoryScan(db, scanID, "failed", receipt)
+
+	after, err := ingest.LiveMemoryProjection(db, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 2 || after[keepID] == "" || after["card-txgone00-1111-4222-8333-444444444444"] == "" {
+		t.Fatalf("transaction failure after observation must not tombstone: %v", after)
+	}
+	var tombstoned int
+	if err := db.QueryRow(`
+select count(*) from items i join sources s on s.id = i.source_id
+where s.kind = ? and i.tombstoned_at is not null`, ingest.MemorySourceKind).Scan(&tombstoned); err != nil {
+		t.Fatal(err)
+	}
+	if tombstoned != 0 {
+		t.Fatalf("tombstones=%d", tombstoned)
+	}
+	health, err := ingest.CollectMemoryHealth(db, Version, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !health.Stale || !health.Partial {
+		t.Fatalf("health=%+v", health)
 	}
 }
 
@@ -593,51 +675,6 @@ func TestCrawlMemoryUnresolvedRelationsPostResolutionAgree(t *testing.T) {
 	}
 }
 
-func TestCrawlMemoryTransactionFailureCreatesNoTombstones(t *testing.T) {
-	withTempHome(t)
-	runOK(t, "init")
-	ws := t.TempDir()
-	writeTestNamespace(t, ws, testMemoryNamespace)
-	cards := filepath.Join(ws, "memory", "cards")
-	if err := os.MkdirAll(cards, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cards, "keep.md"), []byte("---\nid: card-tx000000-1111-4222-8333-444444444444\ntopic: keep\n---\n\n# Keep\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	runJSON(t, "crawl", "memory", ws, "--json")
-
-	db := openTestDB(t)
-	defer db.Close()
-	// Simulate observation-then-failure before reconciliation commit by failing
-	// a scan after Begin without CompleteMemoryScan.
-	scanID, err := ingest.BeginMemoryScan(db, ws, Version, testMemoryNamespace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ingest.FailMemoryScan(db, scanID, "failed", &ingest.MemoryScanReceipt{
-		SourcePath: ws, Namespace: testMemoryNamespace, EngineVersion: Version, Failed: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	var tombstoned int
-	if err := db.QueryRow(`
-select count(*) from items i join sources s on s.id = i.source_id
-where s.kind = ? and i.tombstoned_at is not null`, ingest.MemorySourceKind).Scan(&tombstoned); err != nil {
-		t.Fatal(err)
-	}
-	if tombstoned != 0 {
-		t.Fatalf("transaction failure created tombstones: %d", tombstoned)
-	}
-	live, err := ingest.LiveMemoryProjection(db, testMemoryNamespace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if live["card-tx000000-1111-4222-8333-444444444444"] == "" {
-		t.Fatal("prior live id must survive transaction failure")
-	}
-}
-
 func TestMemoryCardRetentionSafety(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
@@ -750,6 +787,196 @@ func TestLegacyMemoryCardsScopedRebuildRule(t *testing.T) {
 	}
 	if legacy["card-legacy0-1111-4222-8333-444444444444"] == "" {
 		t.Fatal("scoped rebuild must leave legacy memory:cards rows intact")
+	}
+
+	// Empty-namespace health dual-reads legacy + namespaced live counts.
+	agg, err := ingest.CollectMemoryHealth(db, Version, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := ingest.CollectMemoryHealth(db, Version, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agg.LiveCount < scoped.LiveCount+1 {
+		t.Fatalf("aggregate live=%d scoped=%d (expected legacy included)", agg.LiveCount, scoped.LiveCount)
+	}
+	if agg.MemoryNamespace != "" {
+		t.Fatalf("aggregate health must not claim a single namespace, got %q", agg.MemoryNamespace)
+	}
+}
+
+func TestCollectMemoryHealthEmptyAggregatesAllCollections(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	nsA := "memory-11111111-2222-4333-8444-aaaaaaaaaaaa"
+	nsB := "memory-99999999-8888-4777-8666-bbbbbbbbbbbb"
+	for i, ns := range []string{nsA, nsB} {
+		ws := t.TempDir()
+		writeTestNamespace(t, ws, ns)
+		cards := filepath.Join(ws, "memory", "cards")
+		if err := os.MkdirAll(cards, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cardID := []string{
+			"card-aaaaaaa0-1111-4222-8333-444444444444",
+			"card-bbbbbbb0-1111-4222-8333-444444444444",
+		}[i]
+		body := "---\nid: " + cardID + "\ntopic: t\n---\n\n# Card\n"
+		if err := os.WriteFile(filepath.Join(cards, "card.md"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runJSON(t, "crawl", "memory", ws, "--json")
+	}
+	db := openTestDB(t)
+	defer db.Close()
+	agg, err := ingest.CollectMemoryHealth(db, Version, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := ingest.CollectMemoryHealth(db, Version, nsA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ingest.CollectMemoryHealth(db, Version, nsB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.LiveCount != 1 || b.LiveCount != 1 {
+		t.Fatalf("scoped live A=%d B=%d", a.LiveCount, b.LiveCount)
+	}
+	if agg.LiveCount != a.LiveCount+b.LiveCount {
+		t.Fatalf("aggregate live=%d want %d", agg.LiveCount, a.LiveCount+b.LiveCount)
+	}
+	if a.MemoryNamespace != nsA || b.MemoryNamespace != nsB {
+		t.Fatalf("scoped namespaces A=%q B=%q", a.MemoryNamespace, b.MemoryNamespace)
+	}
+}
+
+func TestRebuildFailureAfterDetachPreservesProjectionGraph(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	ws := t.TempDir()
+	writeTestNamespace(t, ws, testMemoryNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cardID := "card-rb000000-1111-4222-8333-444444444444"
+	if err := os.WriteFile(filepath.Join(cards, "keep.md"), []byte("---\nid: "+cardID+"\ntopic: keep\n---\n\n# Keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	completed := runJSON(t, "crawl", "memory", ws, "--json")
+	completedScanID, _ := completed["scan_id"].(string)
+
+	db := openTestDB(t)
+	var itemID string
+	if err := db.QueryRow(`
+select i.id from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&itemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into item_metadata(item_id, key, value) values(?,?,?)`, itemID, "fixture_key", "fixture_value"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into events(id, source_id, collection_id, actor_id, item_id, kind, occurred_at, metadata_json)
+select 'evt-memory-1', i.source_id, i.collection_id, i.actor_id, i.id, 'memory_test', i.created_at, '{}' from items i where i.id = ?`, itemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into artifacts(id, source_id, item_id, external_id, kind, path, url, mime_type, text, content_hash, metadata_json)
+select 'art-memory-1', i.source_id, i.id, 'art:1', 'note', 'memory/cards/keep.md', '', 'text/plain', 'artifact', i.content_hash, '{}' from items i where i.id = ?`, itemID); err != nil {
+		t.Fatal(err)
+	}
+	// Outbound relation from a non-memory item targeting the memory card.
+	supportJSONL := `{"schema":"miseledger.adapter.v1","source":{"kind":"brigade","name":"Brigade"},"collection":{"external_id":"brigade:receipts","kind":"brigade_receipt","name":"receipts"},"item":{"external_id":"receipt:rebuild-support","kind":"receipt","created_at":"2026-01-01T00:00:00Z","text":"support"},"relations":[{"type":"supports","target":{"source":"brigade-memory","collection":"` + testMemoryNamespace + `","external_id":"` + cardID + `"}}],"raw":{"format":"json","path":"r.json","ordinal":1}}` + "\n"
+	db.Close()
+	supportPath := filepath.Join(t.TempDir(), "support.jsonl")
+	if err := os.WriteFile(supportPath, []byte(supportJSONL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", supportPath, "--json")
+
+	db = openTestDB(t)
+	before, err := ingest.LiveMemoryProjection(db, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metaBefore, eventsBefore, artsBefore, inboundBefore int
+	if err := db.QueryRow(`select count(*) from item_metadata where item_id = ?`, itemID).Scan(&metaBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select count(*) from events where item_id = ?`, itemID).Scan(&eventsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select count(*) from artifacts where item_id = ?`, itemID).Scan(&artsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select count(*) from relations where target_item_id = ?`, itemID).Scan(&inboundBefore); err != nil {
+		t.Fatal(err)
+	}
+	if metaBefore < 1 || eventsBefore < 1 || artsBefore < 1 || inboundBefore < 1 {
+		t.Fatalf("fixture graph incomplete meta=%d events=%d arts=%d inbound=%d", metaBefore, eventsBefore, artsBefore, inboundBefore)
+	}
+	db.Close()
+
+	ingest.MemoryRebuildTestHookAfterDetach = func() error {
+		return fmt.Errorf("injected post-detach rebuild failure")
+	}
+	t.Cleanup(func() { ingest.MemoryRebuildTestHookAfterDetach = nil })
+
+	code, _, stderr := run("crawl", "memory", ws, "--rebuild", "--json")
+	if code == 0 {
+		t.Fatalf("expected rebuild failure, stderr=%s", stderr)
+	}
+	if !strings.Contains(stderr, "injected post-detach rebuild failure") {
+		t.Fatalf("stderr=%q", stderr)
+	}
+
+	db = openTestDB(t)
+	defer db.Close()
+	after, err := ingest.LiveMemoryProjection(db, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after[cardID] != before[cardID] {
+		t.Fatalf("live hash changed: before=%v after=%v", before, after)
+	}
+	var metaAfter, eventsAfter, artsAfter, inboundAfter int
+	if err := db.QueryRow(`select count(*) from item_metadata where item_id = ?`, itemID).Scan(&metaAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select count(*) from events where item_id = ?`, itemID).Scan(&eventsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select count(*) from artifacts where item_id = ?`, itemID).Scan(&artsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select count(*) from relations where target_item_id = ?`, itemID).Scan(&inboundAfter); err != nil {
+		t.Fatal(err)
+	}
+	if metaAfter != metaBefore || eventsAfter != eventsBefore || artsAfter != artsBefore || inboundAfter != inboundBefore {
+		t.Fatalf("graph not preserved meta %d/%d events %d/%d arts %d/%d inbound %d/%d",
+			metaAfter, metaBefore, eventsAfter, eventsBefore, artsAfter, artsBefore, inboundAfter, inboundBefore)
+	}
+	var priorCompleted int
+	if err := db.QueryRow(`select count(*) from source_scan_runs where id = ? and status = 'completed'`, completedScanID).Scan(&priorCompleted); err != nil {
+		t.Fatal(err)
+	}
+	if priorCompleted != 1 {
+		t.Fatal("completed-scan record must survive rebuild failure")
+	}
+	health, err := ingest.CollectMemoryHealth(db, Version, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !health.Stale || !health.Partial {
+		t.Fatalf("health=%+v", health)
+	}
+	if health.LastCompletedScanID != completedScanID {
+		t.Fatalf("last_completed=%q want %q", health.LastCompletedScanID, completedScanID)
 	}
 }
 

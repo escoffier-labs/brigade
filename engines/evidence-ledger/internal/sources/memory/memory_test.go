@@ -96,6 +96,51 @@ func TestWalkRequiresOperatorNamespace(t *testing.T) {
 	}
 }
 
+func TestResolveNamespaceRejectsNonV4AndInvalidVariant(t *testing.T) {
+	cases := []struct {
+		name string
+		ns   string
+	}{
+		{"version1", "memory-aaaaaaaa-bbbb-1ccc-8ddd-eeeeeeeeeeee"},
+		{"version5", "memory-aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee"},
+		{"variant_c", "memory-aaaaaaaa-bbbb-4ccc-cddd-eeeeeeeeeeee"},
+		{"variant_0", "memory-aaaaaaaa-bbbb-4ccc-0ddd-eeeeeeeeeeee"},
+		{"not_uuid", "memory-not-a-uuid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := t.TempDir()
+			writeNamespace(t, ws, tc.ns)
+			if err := os.MkdirAll(filepath.Join(ws, "memory", "cards"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ResolveNamespace(ws)
+			if err == nil {
+				t.Fatalf("expected rejection for %s", tc.ns)
+			}
+			if !strings.Contains(err.Error(), "invalid memory namespace") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveNamespaceAcceptsUUIDV4Variants(t *testing.T) {
+	for _, ns := range []string{
+		"memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+		"memory-aaaaaaaa-bbbb-4ccc-9ddd-eeeeeeeeeeee",
+		"memory-aaaaaaaa-bbbb-4ccc-addd-eeeeeeeeeeee",
+		"memory-aaaaaaaa-bbbb-4ccc-bddd-eeeeeeeeeeee",
+	} {
+		ws := t.TempDir()
+		writeNamespace(t, ws, ns)
+		got, err := ResolveNamespace(ws)
+		if err != nil || got != ns {
+			t.Fatalf("ns=%s got=%s err=%v", ns, got, err)
+		}
+	}
+}
+
 func TestWalkOversizeSkipAndTextTruncation(t *testing.T) {
 	ws := t.TempDir()
 	writeNamespace(t, ws, fixtureNamespace)

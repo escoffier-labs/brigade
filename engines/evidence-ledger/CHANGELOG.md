@@ -17,12 +17,15 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ### Changed
 
-- Memory projection E1 hardening (#843): operator-declared `memory-<uuid4>`
-  namespace from `memory/NAMESPACE`, namespace-scoped collection/scan/rebuild,
-  failure-preserving rebuild (walk/stage before replace), post-resolution
-  `unresolved_relations`, #724 content fingerprint for duplicate detection only,
-  duplicate explicit-id fail-closed, and legacy `memory:cards` scoped-rebuild
-  dual-read rule.
+- Memory projection E1 hardening (#843): operator-declared RFC 4122
+  `memory-<uuid4>` (version 4 + variant bits) from `memory/NAMESPACE`,
+  namespace-scoped collection/scan/rebuild, detach/remap failure-preserving
+  rebuild that restores prior live IDs/hashes/relations/metadata/events/
+  artifacts, post-resolution `unresolved_relations`, #724 content fingerprint
+  for duplicate detection only, duplicate explicit-id fail-closed, empty-
+  namespace status/doctor dual-read across all `brigade-memory` collections,
+  and legacy `memory:cards` scoped-rebuild (never tombstoned by namespaced
+  crawl).
 
 ## [0.6.0] - 2026-07-18
 
