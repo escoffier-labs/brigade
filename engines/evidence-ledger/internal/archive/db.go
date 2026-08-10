@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 func Open(path string) (*sql.DB, error) {
 	if err := security.EnsurePrivateParent(path); err != nil {
@@ -84,6 +84,9 @@ func Migrate(db *sql.DB) error {
 	if err := ensureSchemaV2(db); err != nil {
 		return err
 	}
+	if err := ensureSchemaV3(db); err != nil {
+		return err
+	}
 	if _, err := db.Exec("PRAGMA user_version = " + fmt.Sprint(SchemaVersion)); err != nil {
 		return err
 	}
@@ -136,6 +139,49 @@ create table if not exists source_scan_observed(
   raw_path text,
   primary key(scan_id, external_id)
 );
+`)
+	return err
+}
+
+// ensureSchemaV3 adds a database-monotonic ingest sequence for latest-version
+// selection that does not depend on wall-clock updated_at. Pre-existing rows
+// are deterministically backfilled from prior updated_at order (id fallback)
+// so multi-version memory cards keep the previously live winner across upgrade.
+func ensureSchemaV3(db *sql.DB) error {
+	if _, err := db.Exec(`alter table items add column ingest_seq integer not null default 0`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
+	if _, err := db.Exec(`create index if not exists idx_items_ingest_seq on items(ingest_seq)`); err != nil {
+		return err
+	}
+	return backfillIngestSeqIfNeeded(db)
+}
+
+// backfillIngestSeqIfNeeded assigns ingest_seq for archives that still carry the
+// migration default (all zeros). Ordering mirrors the pre-v3 live selector:
+// updated_at ascending then id ascending, so ORDER BY ingest_seq DESC, id DESC
+// preserves the same winner. Safe to re-run: once any row has a non-zero seq,
+// existing assignments are left untouched.
+func backfillIngestSeqIfNeeded(db *sql.DB) error {
+	var maxSeq, n int64
+	if err := db.QueryRow(`select coalesce(max(ingest_seq), 0), count(*) from items`).Scan(&maxSeq, &n); err != nil {
+		return err
+	}
+	if n == 0 || maxSeq > 0 {
+		return nil
+	}
+	_, err := db.Exec(`
+with ranked as (
+  select id,
+         row_number() over (
+           order by coalesce(updated_at, '') asc, id asc
+         ) as seq
+  from items
+)
+update items
+set ingest_seq = (select seq from ranked where ranked.id = items.id)
 `)
 	return err
 }
@@ -204,6 +250,7 @@ create table if not exists items(
   raw_path text,
   raw_ordinal integer,
   metadata_json text not null default '{}',
+  ingest_seq integer not null default 0,
   unique(source_id, collection_id, external_id, content_hash)
 );
 

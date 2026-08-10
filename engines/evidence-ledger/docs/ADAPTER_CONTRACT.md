@@ -117,27 +117,93 @@ The native `brigade-memory` source walks `memory/cards/**/*.md`, parses the flat
 Brigade frontmatter subset (not full YAML), and emits `miseledger.adapter.v1`
 records with `item.kind=memory_card`.
 
+### Operator-declared memory namespace
+
+Every memory root must declare an opaque namespace id in `memory/NAMESPACE`:
+
+```text
+memory-<uuid4>
+```
+
+The UUID must be RFC 4122 version 4 with variant bits `8`/`9`/`a`/`b`. Other
+UUID versions and invalid variants are rejected.
+
+- Generated once by the canonical memory owner, copied with the canonical store,
+  and never derived from basenames, absolute paths, gitignored aliases, or clone
+  paths.
+- `collection.external_id` is the namespace id itself. Item identity, tombstones,
+  relation health, and rebuild are scoped to that collection.
+- Two roots that share the same explicit card id remain isolated when their
+  namespaces differ.
+- Legacy pre-namespace rows use `collection.external_id=memory:cards`. Namespaced
+  crawls never tombstone or rebuild them (scoped-rebuild rule). Empty-namespace
+  status/doctor health dual-reads live counts and unresolved relations across
+  every `brigade-memory` collection, including legacy `memory:cards`. Migration
+  onto a namespace is an explicit operator step outside the crawl path.
+- The engine does not mint or backfill card ids. Markdown remains canonical.
+
 Identity rules:
 
 - Explicit opaque `id` / `card_id` frontmatter wins (`identity_source=explicit_id`).
 - Otherwise the normalized workspace-relative path is used (`identity_source=path`,
   external id `path:<rel>`).
 - Explicit-id renames preserve identity. Path-fallback renames are remove+create.
-- `topic`, title, filename stem, and body text are not canonical identity.
+- `topic`, title, filename stem, body text, and the #724 content fingerprint are
+  not canonical identity.
+- Duplicate explicit ids fail the scan before reconciliation (no last-wins).
+
+Duplicate detection:
+
+- The engine reuses Brigade #724 `content_fingerprint` (normalize: strip
+  frontmatter, lowercase, strip punctuation, collapse whitespace, SHA-256).
+- Fingerprints are stored in item metadata for duplicate detection only and are
+  never used as `item.external_id`.
 
 Completed-scan reconciliation:
 
 - Only a completed memory scan may soft-tombstone missing cards, and only within
-  the `brigade-memory` source.
+  the active namespace collection.
+- Live identity for a card is the latest non-tombstoned item for
+  `(source, collection, external_id)`. Content-addressed edits mint a new item
+  id; latest selection uses the database-monotonic `items.ingest_seq` (not
+  wall-clock `updated_at` or content-hash id order) so relation resolution and
+  live/unresolved health pick the current version even when clocks are equal or
+  move backward. Existing archives upgraded to schema v3 backfill `ingest_seq`
+  from prior `updated_at` order (stable `id` fallback) so multi-version cards
+  keep the previously live winner before any crawl. Stale outbound unresolved
+  relations on prior versions do not contaminate live health. Re-ingesting known
+  Text+Summary identity advances
+  `ingest_seq` and atomically reconciles canonical metadata, tags, provenance,
+  artifacts, and outbound relations without minting a duplicate item or
+  provenance event, so same-text frontmatter edits (including receipt-A →
+  receipt-B relation retargets) project correctly. Direct adapter AlreadyKnown
+  re-imports also re-resolve inbound relations onto that restored version
+  (`CompleteMemoryScan` already did for crawls).
 - Failed or interrupted scans tombstone nothing and mark the prior completed
-  snapshot stale.
-- `--rebuild` deletes only the derived memory projection, then reimports it.
+  snapshot for that namespace stale.
+- `--rebuild` validates/walks first, then detaches the live namespace collection
+  aside and imports into a fresh collection. Success finalizes by dropping the
+  backup; failure aborts by deleting the partial import and restoring the backup
+  collection name so prior live ids/hashes, inbound and outbound relations,
+  item_metadata, events, artifacts, and the completed-scan record remain intact
+  while health is marked stale or partial.
+- A transaction failure between observation and reconciliation creates no
+  tombstones.
 - Default retention tiers must never match `memory_card` items.
+- Observable projection states: live, removed after completed scan, stale, and
+  partial scan.
 
-Scan receipts expose `scan_id`, `created`, `updated`, `unchanged`, `removed`,
-`skipped`, and `failed`. Doctor/status expose capability/version, last completed
-scan, canonical/live counts, hash divergence, unresolved relations,
+Scan receipts expose `scan_id`, `memory_namespace`, `created`, `updated`,
+`unchanged`, `removed`, `skipped`, and `failed`. `unresolved_relations` is
+counted after the final relation-resolution pass and must agree across crawl
+JSON, the scan record, and health. Doctor/status expose capability/version, last
+completed scan, canonical/live counts, hash divergence, unresolved relations,
 malformed/skipped counts, and stale/partial state.
+
+Size bounds:
+
+- Cards larger than 2 MiB are skipped.
+- Item text longer than 256 KiB is truncated with a trailing `[truncated]` marker.
 
 ## Built-In Crawlers
 

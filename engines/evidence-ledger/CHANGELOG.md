@@ -15,6 +15,29 @@ Releases before this changelog was started are on the [releases page](https://gi
   `miseledger.adapter.v1`, completed-scan soft tombstones scoped to memory,
   source-local `--rebuild`, scan receipts, and doctor/status memory health.
 
+### Changed
+
+- Memory projection E1 hardening (#843): operator-declared RFC 4122
+  `memory-<uuid4>` (version 4 + variant bits) from `memory/NAMESPACE`,
+  namespace-scoped collection/scan/rebuild, detach/remap failure-preserving
+  rebuild that restores prior live IDs/hashes/relations/metadata/events/
+  artifacts, post-resolution `unresolved_relations`, #724 content fingerprint
+  for duplicate detection only, duplicate explicit-id fail-closed, empty-
+  namespace status/doctor dual-read across all `brigade-memory` collections,
+  legacy `memory:cards` scoped-rebuild (never tombstoned by namespaced
+  crawl), and latest-version selection via database-monotonic
+  `items.ingest_seq` for relation resolution plus live health after
+  content-addressed card edits (including equal/backward wall-clock
+  `updated_at` and ignoring stale outbound unresolved on prior versions).
+  v2→v3 migration deterministically backfills `ingest_seq` from prior
+  `updated_at` order (stable `id` fallback) so existing multi-version cards
+  keep the previously live winner before any crawl. Re-ingesting known
+  Text+Summary identity advances `ingest_seq` and reconciles
+  metadata/tags/provenance/artifacts/relations so same-text frontmatter
+  edits (including receipt-A → receipt-B retargets) project correctly
+  without minting a duplicate item or event; direct adapter AlreadyKnown
+  re-imports also re-resolve inbound relations onto that restored version.
+
 ## [0.6.0] - 2026-07-18
 
 ### Added
