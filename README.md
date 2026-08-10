@@ -91,12 +91,13 @@ disable it. Details are in [docs/update-channels.md](docs/update-channels.md).
 
 Two update channels exist and they are not interchangeable. **Stable** is the
 default: immutable, PyPI-published releases like `0.26.0`, pinned exactly -
-what production and operator machines should run. **Beta** is the development
-channel: it tracks CI-green `main` daily and is an intentional opt-in for
-machines working on Brigade itself, not a preview program. Stable pinners may
+what production and operator machines should run. **Beta** is the intentional
+development-machine channel for the `0.27` preview line: it pins the newest
+non-yanked `brigade-cli==0.27.0.devYYYYMMDD` wheel from PyPI into the existing
+user-global pipx environment, not a mutable Git `main` SHA. Stable pinners may
 deliberately install an exact release with `pipx install brigade-cli==X.Y.Z`
 or refresh through `brigade update --channel stable`. Channel ownership, beta
-rules, and when to use `brigade update` are in
+selection and rollback rules, and when to use `brigade update` are in
 [docs/update-channels.md](docs/update-channels.md).
 
 `brigade operator doctor --target ./my-repo --profile local-operator` prints `ready: yes` when the wiring is healthy (without the profile flag, doctor runs the stricter internal-dogfood checks and a fresh repo reports not ready). The default footprint is small: `AGENTS.md`, `SAFETY_RULES.md`, a handoff template, and `.brigade/` state. Add `--dry-run` to preview anything before it writes. Nothing leaves your machine.
