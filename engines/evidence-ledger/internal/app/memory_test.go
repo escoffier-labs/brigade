@@ -158,6 +158,126 @@ where s.kind = ? and i.external_id = 'path:memory/cards/beta.md' and i.tombstone
 	}
 }
 
+func TestCrawlMemoryFailedCrawlPreservesPriorSnapshot(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	ws := copyEngineMemoryFixtures(t)
+
+	completed := runJSON(t, "crawl", "memory", ws, "--json")
+	if completed["status"] != "completed" {
+		t.Fatalf("first crawl = %v", completed)
+	}
+	completedScanID, _ := completed["scan_id"].(string)
+	if completedScanID == "" {
+		t.Fatalf("completed crawl missing scan_id: %v", completed)
+	}
+
+	db := openTestDB(t)
+	var liveBefore int
+	if err := db.QueryRow(`
+select count(*) from items i join sources s on s.id = i.source_id
+where s.kind = ? and i.kind = 'memory_card' and i.tombstoned_at is null`, ingest.MemorySourceKind).Scan(&liveBefore); err != nil {
+		t.Fatal(err)
+	}
+	if liveBefore < 1 {
+		t.Fatalf("expected live memory cards before failure, got %d", liveBefore)
+	}
+	db.Close()
+
+	if err := os.RemoveAll(ws); err != nil {
+		t.Fatal(err)
+	}
+	code, out, stderr := run("crawl", "memory", ws, "--json")
+	if code == 0 {
+		t.Fatalf("expected failed crawl, stdout=%s stderr=%s", out, stderr)
+	}
+	if !strings.Contains(stderr, "crawl memory:") {
+		t.Fatalf("expected crawl memory error, stderr=%q", stderr)
+	}
+
+	db = openTestDB(t)
+	defer db.Close()
+
+	var failedScanID, status string
+	var failedCount, scanStale int
+	if err := db.QueryRow(`
+select id, status, failed_count, stale from source_scan_runs
+where source_kind = ? order by started_at desc limit 1`, ingest.MemorySourceKind).Scan(&failedScanID, &status, &failedCount, &scanStale); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Fatalf("latest scan status = %q", status)
+	}
+	if failedScanID == "" || failedScanID == completedScanID {
+		t.Fatalf("failed scan_id = %q prior completed = %q", failedScanID, completedScanID)
+	}
+	if failedCount < 1 {
+		t.Fatalf("failed_count = %d", failedCount)
+	}
+	if scanStale != 1 {
+		t.Fatalf("failed scan stale = %d", scanStale)
+	}
+
+	var priorCompleted int
+	if err := db.QueryRow(`
+select count(*) from source_scan_runs
+where id = ? and status = 'completed'`, completedScanID).Scan(&priorCompleted); err != nil {
+		t.Fatal(err)
+	}
+	if priorCompleted != 1 {
+		t.Fatalf("prior completed snapshot missing for %s", completedScanID)
+	}
+	var priorStale int
+	if err := db.QueryRow(`select stale from source_scan_runs where id = ?`, completedScanID).Scan(&priorStale); err != nil {
+		t.Fatal(err)
+	}
+	if priorStale != 1 {
+		t.Fatalf("prior completed snapshot stale = %d", priorStale)
+	}
+
+	var tombstoned int
+	if err := db.QueryRow(`
+select count(*) from items i join sources s on s.id = i.source_id
+where s.kind = ? and i.tombstoned_at is not null`, ingest.MemorySourceKind).Scan(&tombstoned); err != nil {
+		t.Fatal(err)
+	}
+	if tombstoned != 0 {
+		t.Fatalf("failed crawl tombstoned %d rows", tombstoned)
+	}
+	var liveAfter int
+	if err := db.QueryRow(`
+select count(*) from items i join sources s on s.id = i.source_id
+where s.kind = ? and i.kind = 'memory_card' and i.tombstoned_at is null`, ingest.MemorySourceKind).Scan(&liveAfter); err != nil {
+		t.Fatal(err)
+	}
+	if liveAfter != liveBefore {
+		t.Fatalf("live count changed: before=%d after=%d", liveBefore, liveAfter)
+	}
+
+	health, err := ingest.CollectMemoryHealth(db, Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !health.Stale || !health.Partial {
+		t.Fatalf("health after failed crawl = %+v", health)
+	}
+	if health.LastCompletedScanID != completedScanID {
+		t.Fatalf("last_completed_scan_id = %q want %q", health.LastCompletedScanID, completedScanID)
+	}
+
+	statusJSON := runJSON(t, "status", "--json")
+	memHealth, _ := statusJSON["memory_health"].(map[string]any)
+	if memHealth == nil {
+		t.Fatalf("status missing memory_health: %v", statusJSON)
+	}
+	if memHealth["stale"] != true || memHealth["partial"] != true {
+		t.Fatalf("status memory_health = %v", memHealth)
+	}
+	if memHealth["last_completed_scan_id"] != completedScanID {
+		t.Fatalf("status last_completed_scan_id = %v", memHealth["last_completed_scan_id"])
+	}
+}
+
 func TestCrawlMemoryInterruptedDoesNotTombstone(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
