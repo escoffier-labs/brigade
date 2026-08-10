@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import re
 import sys
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from . import __version__
 from . import component_bins, proc, work_cmd
 from .localio import (
     read_json_dict as _read_json,
@@ -24,6 +26,7 @@ CONTEXT_KINDS = {"task", "repo", "release", "tool-use"}
 SYNC_MARKER = "brigade-context-sync:"
 SYNC_CONFIG_REL_PATH = ".brigade/context/sync-targets.json"
 CONTEXT_PACK_STALE_HOURS = 72
+CONTEXT_FRESHNESS_SCHEMA_VERSION = 1
 
 
 def _context_root(target: Path) -> Path:
@@ -96,6 +99,75 @@ def _latest_json(root: Path, filename: str) -> dict[str, Any] | None:
         return None
     candidates = sorted(root.glob(f"*/{filename}"), key=lambda path: path.stat().st_mtime, reverse=True)
     return _read_json(candidates[0]) if candidates else None
+
+
+def _safe_source_identity(target: Path, path: Path) -> str | None:
+    """Return a portable public identity, never an absolute/private path."""
+    try:
+        relative = path.resolve().relative_to(target.resolve())
+    except (OSError, ValueError):
+        return None
+    if not relative.parts or ".." in relative.parts:
+        return None
+    return relative.as_posix()
+
+
+def _safe_persisted_path(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    return path.as_posix()
+
+
+def _file_snapshot(target: Path, path: Path) -> dict[str, Any] | None:
+    identity = _safe_source_identity(target, path)
+    if identity is None:
+        return None
+    snapshot: dict[str, Any] = {"path": identity, "exists": path.is_file()}
+    if path.is_file():
+        try:
+            snapshot["sha256"] = sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            snapshot["exists"] = False
+    return snapshot
+
+
+def _generator_snapshot(
+    *, kind: str, task_id: str | None, tool_id: str | None, release_id: str | None
+) -> dict[str, Any]:
+    inputs = {"kind": kind, "task_id": task_id, "tool_id": tool_id, "release_id": release_id}
+    return {
+        "id": "brigade.context",
+        "version": __version__,
+        "schema_version": CONTEXT_FRESHNESS_SCHEMA_VERSION,
+        "inputs_sha256": _stable_hash(inputs),
+    }
+
+
+def _freshness_snapshot(
+    target: Path, *, kind: str, task_id: str | None, tool_id: str | None, release_id: str | None
+) -> dict[str, Any]:
+    source_paths = [target / "README.md", target / "ROADMAP.md", work_cmd._tasks_path(target)]
+    sources = [snapshot for path in source_paths if (snapshot := _file_snapshot(target, path)) is not None]
+    receipts: list[dict[str, Any]] = []
+    for root, filename, receipt_kind in (
+        (target / ".brigade" / "work" / "closeouts", "closeout.json", "work-closeout"),
+        (target / ".brigade" / "security", "security-report.json", "security-report"),
+    ):
+        candidates = sorted(root.glob(f"*/{filename}"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if candidates:
+            snapshot = _file_snapshot(target, candidates[0])
+            if snapshot is not None:
+                receipts.append({"kind": receipt_kind, **snapshot})
+    return {
+        "status": "current",
+        "generated_at": _now().isoformat(),
+        "generator": _generator_snapshot(kind=kind, task_id=task_id, tool_id=tool_id, release_id=release_id),
+        "sources": sources,
+        "dependent_receipts": receipts,
+    }
 
 
 def _graphtrail_bin() -> str | None:
@@ -223,7 +295,7 @@ def _context_payload(
             {"path": "ROADMAP.md", "exists": (target / "ROADMAP.md").is_file()},
             {"path": ".brigade/work/tasks.json", "exists": work_cmd._tasks_path(target).is_file()},
         ],
-        "freshness": {"status": "current", "generated_at": _now().isoformat()},
+        "freshness": _freshness_snapshot(target, kind=kind, task_id=task_id, tool_id=tool_id, release_id=release_id),
         "sync_plan": {"writes": [], "status": "planned-only"},
         "checks": checks,
         "issues": [check for check in checks if check["status"] != OK],
@@ -431,10 +503,9 @@ def _context_sync_plan_payload(target: Path, pack_id: str = "latest") -> dict[st
                     }
                 )
         for ref in pack.get("source_references", []) if isinstance(pack.get("source_references"), list) else []:
-            if isinstance(ref, dict) and ref.get("exists") and not (target / str(ref.get("path"))).exists():
-                checks.append(
-                    {"status": WARN, "name": "context_sync_missing_source_reference", "detail": str(ref.get("path"))}
-                )
+            safe_path = _safe_persisted_path(ref.get("path")) if isinstance(ref, dict) else None
+            if isinstance(ref, dict) and ref.get("exists") and safe_path and not (target / safe_path).exists():
+                checks.append({"status": WARN, "name": "context_sync_missing_source_reference", "detail": safe_path})
     planned: list[dict[str, Any]] = []
     for sync_target in targets:
         destination = Path(str(sync_target["path"]))
@@ -509,14 +580,87 @@ def _context_pack_issues(target: Path, pack: dict[str, Any]) -> list[dict[str, A
     issues: list[dict[str, Any]] = []
     freshness_value = pack.get("freshness")
     freshness = freshness_value if isinstance(freshness_value, dict) else {}
+    if freshness_value is not None and not isinstance(freshness_value, dict):
+        issues.append(_context_issue(pack, "malformed_freshness", "freshness must be an object"))
     created = _parse_iso_datetime(pack.get("created_at") or freshness.get("generated_at"))
     if created is not None:
         age_hours = (_now() - created).total_seconds() / 3600
         if age_hours > CONTEXT_PACK_STALE_HOURS:
             issues.append(_context_issue(pack, "pack_stale", f"{pack.get('pack_id')} is {age_hours:.1f}h old"))
+    generator = freshness.get("generator")
+    sources = freshness.get("sources")
+    dependent_receipts = freshness.get("dependent_receipts")
+    snapshot_fields_present = any(key in freshness for key in ("generator", "sources", "dependent_receipts"))
+    if snapshot_fields_present:
+        if not isinstance(generator, dict):
+            issues.append(_context_issue(pack, "malformed_generator_snapshot", "freshness.generator must be an object"))
+        else:
+            current_generator = _generator_snapshot(
+                kind=str(pack.get("kind") or "repo"),
+                task_id=pack.get("task_id") if isinstance(pack.get("task_id"), str) else None,
+                tool_id=pack.get("tool_id") if isinstance(pack.get("tool_id"), str) else None,
+                release_id=pack.get("release_id") if isinstance(pack.get("release_id"), str) else None,
+            )
+            if generator != current_generator:
+                issues.append(_context_issue(pack, "generator_drift", "context pack generator snapshot changed"))
+
+        def reconcile_snapshots(value: object, field: str, issue_prefix: str) -> None:
+            if not isinstance(value, list):
+                issues.append(
+                    _context_issue(pack, f"malformed_{issue_prefix}_snapshot", f"freshness.{field} must be a list")
+                )
+                return
+            for index, stored in enumerate(value):
+                if not isinstance(stored, dict):
+                    issues.append(
+                        _context_issue(
+                            pack, f"malformed_{issue_prefix}_snapshot", f"freshness.{field}[{index}] must be an object"
+                        )
+                    )
+                    continue
+                path_value = stored.get("path")
+                safe_path = _safe_persisted_path(path_value)
+                if safe_path is None:
+                    issues.append(
+                        _context_issue(
+                            pack, f"unsafe_{issue_prefix}_path", f"freshness.{field}[{index}] has an unsafe path"
+                        )
+                    )
+                    continue
+                current = _file_snapshot(target, target / safe_path)
+                comparable = {key: stored.get(key) for key in ("path", "exists", "sha256") if key in stored}
+                current_comparable = {key: (current or {}).get(key) for key in comparable}
+                if not isinstance(stored.get("exists"), bool) or (
+                    stored.get("exists") is True and not isinstance(stored.get("sha256"), str)
+                ):
+                    issues.append(
+                        _context_issue(
+                            pack, f"malformed_{issue_prefix}_snapshot", f"freshness.{field}[{index}] has invalid state"
+                        )
+                    )
+                elif comparable != current_comparable:
+                    issues.append(_context_issue(pack, f"{issue_prefix}_drift", safe_path))
+
+        reconcile_snapshots(sources, "sources", "source")
+        reconcile_snapshots(dependent_receipts, "dependent_receipts", "dependent_receipt")
+        if isinstance(dependent_receipts, list) and all(isinstance(item, dict) for item in dependent_receipts):
+            current_receipts = _freshness_snapshot(
+                target,
+                kind=str(pack.get("kind") or "repo"),
+                task_id=pack.get("task_id") if isinstance(pack.get("task_id"), str) else None,
+                tool_id=pack.get("tool_id") if isinstance(pack.get("tool_id"), str) else None,
+                release_id=pack.get("release_id") if isinstance(pack.get("release_id"), str) else None,
+            )["dependent_receipts"]
+            if dependent_receipts != current_receipts and not any(
+                issue.get("issue_type") == "dependent_receipt_drift" for issue in issues
+            ):
+                issues.append(_context_issue(pack, "dependent_receipt_drift", "dependent receipt state changed"))
     for ref in pack.get("source_references", []) if isinstance(pack.get("source_references"), list) else []:
-        if isinstance(ref, dict) and ref.get("exists") and not (target / str(ref.get("path"))).exists():
-            issues.append(_context_issue(pack, "missing_source_reference", str(ref.get("path"))))
+        safe_path = _safe_persisted_path(ref.get("path")) if isinstance(ref, dict) else None
+        if isinstance(ref, dict) and ref.get("exists") and safe_path is None:
+            issues.append(_context_issue(pack, "unsafe_source_reference", "source reference has an unsafe path"))
+        elif isinstance(ref, dict) and ref.get("exists") and safe_path and not (target / safe_path).exists():
+            issues.append(_context_issue(pack, "missing_source_reference", safe_path))
     task_value = pack.get("task")
     task = task_value if isinstance(task_value, dict) else {}
     task_id = task.get("id")
