@@ -38,6 +38,20 @@ def test_signal_value_treats_weak_or_unknown_signals_as_neutral():
     assert outcome.signal_value("mystery", "whatever") == 0
 
 
+def test_signal_value_treats_generated_patch_non_promoting_sources_as_neutral():
+    # GeneratedPatchQuarantine (#507): confidence / lexical similarity /
+    # repeated sampling never promote, even under "success-shaped" statuses.
+    for source in (
+        "model_confidence",
+        "confidence",
+        "lexical_similarity",
+        "textual_similarity",
+        "repeated_sampling",
+    ):
+        assert outcome.signal_value(source, "completed") == 0
+        assert source in outcome.NON_PROMOTING_SOURCES
+
+
 def test_run_capture_signal_value_distinguishes_infrastructure_from_model_quality():
     """#707: only infrastructure-only failures neutralize; model-quality failures score negative."""
 

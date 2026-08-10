@@ -78,10 +78,29 @@ JSON Schema files.
 | `content_fingerprint` | string | Subject content fingerprint at verify time |
 | `manifest_binding` | object | `{manifest_id, payload_sha256, source_path?}` for the exact tracked verifier manifest |
 | `patch_source` | string | `worktree` or `generated` (patch-backed only) |
+| `generated_patch_quarantine` | object | Required for scoreable `patch_source: generated` receipts (#507). See below. |
 | `producer_binding` | object | `{work_session_id, owned_delta_sha256, subject_clean_at_start, start_git}` for patch-backed runs |
 | `verifier_identity` | object | `{verifier_id, session_id}` independent verifier session |
 | `patch_binding` | object | Patch-backed tuple plus `subject_path` and `subject_hash` |
 | `fixture_binding` | object | `{manifest_id, case_id, check_id}` for fixture evaluation runs |
+
+**`generated_patch_quarantine` object** (additive, `patch_source: generated` only; #507)
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema` | string | `brigade.generated_patch_quarantine.v1` |
+| `schema_version` | integer | `1` |
+| `status` | string | Always `quarantined` on the proposal envelope; independent verify + effectiveness checks lift it for scoring |
+| `candidate_count` | integer | ≥ 1 sampled candidates from the producing model |
+| `model` | string | Model id that produced the candidates |
+| `model_version` | string | Model version / revision string |
+| `model_confidence`, `lexical_similarity`, `textual_similarity`, `repeated_sampling`, … | number \| integer | Optional audit-only fields. Explicitly non-promoting; ignored for eligibility and `signal_value` |
+
+Generated patches fail closed without complete quarantine metadata
+(`generated_patch_quarantine_incomplete`), without an independent verifier
+session (`verifier_not_independent`), or without at least one effectiveness
+check (`generated_patch_missing_repository_tests`). See
+[`docs/design/generated-patch-quarantine.md`](design/generated-patch-quarantine.md).
 
 Ad hoc `--command` / `--argv-json` runs omit `subject_binding` and remain audit-only (non-scoreable).
 

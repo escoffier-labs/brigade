@@ -436,7 +436,7 @@ Pre-binding receipts: permanently **non-scoring** in backfill reports (`reason: 
 | Issue | Relationship |
 | --- | --- |
 | [#503](https://github.com/escoffier-labs/brigade/issues/503) | Dual-criterion promotion, included slice 4 |
-| [#507](https://github.com/escoffier-labs/brigade/issues/507) | Requires producer/verifier independence for generated-patch receipts before scorecard eligibility |
+| [#507](https://github.com/escoffier-labs/brigade/issues/507) | Requires producer/verifier independence, repository tests, and candidate/model metadata for generated-patch receipts before scorecard eligibility; confidence / lexical similarity / repeated sampling are non-promoting |
 | [#499](https://github.com/escoffier-labs/brigade/issues/499) | Obligation ids for `utility_guardrail` manifest; advisory audit |
 | [#546](https://github.com/escoffier-labs/brigade/issues/546) | No-work hook class; parallel hardening, not a score dimension |
 | [#557](https://github.com/escoffier-labs/brigade/pull/557) | Adversarial fixtures for eligibility/taxonomy tests |
@@ -465,8 +465,10 @@ Ordered. Each slice is independently mergeable.
   tracked verifier manifest. Ad hoc `--command`, `--capture`, or caller labels cannot set them.
 - [ ] Patch-backed receipts bind `producer_binding` to the work session's owned subject delta.
   No owned delta, a concurrent session's delta, or an empty patch is ineligible.
-- [ ] Generated-patch fixtures covered by #507 require a verifier session distinct from the
-  producer session.
+- [x] Generated-patch fixtures covered by #507 require a verifier session distinct from the
+  producer session, repository-test (`effectiveness`) checks, and a
+  `generated_patch_quarantine` envelope recording `candidate_count` plus model/version.
+  Model confidence, lexical similarity, and repeated sampling remain non-promoting.
 - [ ] Receipts missing `subject_binding` or `check_role` make `project_trial` return
   `eligible: false` with a stable reason.
 - [ ] #474 taxonomy classifies infrastructure failures as ineligible. Missing taxonomy on failure

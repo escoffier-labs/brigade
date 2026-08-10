@@ -15,7 +15,16 @@ import tempfile
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from .. import config, graphtrail_delta, localio, proc, receipt_schema, receipt_signing, runguard
+from .. import (
+    config,
+    generated_patch_quarantine,
+    graphtrail_delta,
+    localio,
+    proc,
+    receipt_schema,
+    receipt_signing,
+    runguard,
+)
 from .. import verify_manifest, verify_trial
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
@@ -469,6 +478,15 @@ def _build_subject_binding(
         "subject_path": manifest.subject_path,
         "subject_hash": subject_hash,
     }
+    if manifest.patch_source == "generated":
+        metadata = generated_patch_quarantine.resolve_producer_metadata(
+            target=target,
+            session_id=session_id,
+            session_payload=session_payload if isinstance(session_payload, dict) else None,
+        )
+        quarantine = generated_patch_quarantine.stamp_quarantine_from_metadata(metadata)
+        if quarantine is not None:
+            binding["generated_patch_quarantine"] = quarantine
     return binding
 
 

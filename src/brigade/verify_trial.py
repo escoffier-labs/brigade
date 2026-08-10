@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import localio, verify_manifest
+from . import generated_patch_quarantine, localio, verify_manifest
 
 VERIFY_INFRASTRUCTURE_FAILURE_CLASSES = frozenset(
     {
@@ -609,6 +609,9 @@ def project_trial(
                 or verifier_session == producer_session
             ):
                 return TrialProjection(eligible=False, reason="verifier_not_independent", attributed=True)
+            quarantine_reason = generated_patch_quarantine.generated_patch_eligibility_reason(binding, receipt)
+            if quarantine_reason is not None:
+                return TrialProjection(eligible=False, reason=quarantine_reason, attributed=True)
         if resolved_target is not None:
             live_hash = subject_hash_for_path(resolved_target, subject_path)
             if live_hash is None or live_hash != subject_hash:

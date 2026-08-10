@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`searches`, `followup_rate`) as second-class evidence that never gates
   doctor/`valid`. Failed queries become fixture material for the #722
   retrieval eval harness.
+- GeneratedPatchQuarantine (#507): model-generated patches
+  (`patch_source: generated`) promote only through an independent verifier
+  receipt that records repository-test (`effectiveness`) checks plus
+  `candidate_count` / `model` / `model_version` on
+  `subject_binding.generated_patch_quarantine`. Model confidence, lexical or
+  textual similarity, and repeated sampling are explicitly non-promoting
+  outcome sources. Design: `docs/design/generated-patch-quarantine.md`.
 
 ## [0.26.1] - 2026-08-09
 

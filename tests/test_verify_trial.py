@@ -399,12 +399,20 @@ def test_project_trial_generated_patch_requires_independent_verifier(scoreable_t
     skill = _write_skill_subject(scoreable_target, content="# brigade-work\ngenerated\n")
     subprocess.run(["git", "add", str(skill.relative_to(scoreable_target))], cwd=scoreable_target, check=True)
     monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", "aaaaaaaaaaaaaaaa")
+    monkeypatch.setenv("BRIGADE_GENERATED_PATCH_CANDIDATE_COUNT", "3")
+    monkeypatch.setenv("BRIGADE_GENERATED_PATCH_MODEL", "gpt-test")
+    monkeypatch.setenv("BRIGADE_GENERATED_PATCH_MODEL_VERSION", "2024-01")
     receipt = _run_manifest_verify(
         scoreable_target,
         "generated-patch",
         monkeypatch=monkeypatch,
         start_session=False,
     )
+    quarantine = receipt["subject_binding"]["generated_patch_quarantine"]
+    assert quarantine["candidate_count"] == 3
+    assert quarantine["model"] == "gpt-test"
+    assert quarantine["model_version"] == "2024-01"
+    assert quarantine["status"] == "quarantined"
     producer_session = receipt["subject_binding"]["producer_binding"]["work_session_id"]
     receipt["subject_binding"]["verifier_identity"]["session_id"] = producer_session
     projection = verify_trial.project_trial(receipt, target=scoreable_target)
@@ -414,6 +422,88 @@ def test_project_trial_generated_patch_requires_independent_verifier(scoreable_t
     _stamp_receipt_digest(receipt)
     projection = verify_trial.project_trial(receipt, target=scoreable_target)
     assert projection.eligible is True
+
+
+def test_project_trial_generated_patch_requires_quarantine_metadata(scoreable_target, monkeypatch):
+    payload = _write_patch_manifest(scoreable_target, manifest_id="generated-patch-meta")
+    payload["patch_source"] = "generated"
+    verify_manifest.write_workspace_manifest(scoreable_target, payload)
+    _track_workspace_manifest(scoreable_target, "generated-patch-meta")
+    assert work_cmd.start(target=scoreable_target, title="producer") == 0
+    skill = _write_skill_subject(scoreable_target, content="# brigade-work\ngenerated-meta\n")
+    subprocess.run(["git", "add", str(skill.relative_to(scoreable_target))], cwd=scoreable_target, check=True)
+    monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", "bbbbbbbbbbbbbbbb")
+    # No BRIGADE_GENERATED_PATCH_* env: quarantine metadata stays absent.
+    receipt = _run_manifest_verify(
+        scoreable_target,
+        "generated-patch-meta",
+        monkeypatch=monkeypatch,
+        start_session=False,
+    )
+    assert "generated_patch_quarantine" not in receipt["subject_binding"]
+    producer_session = receipt["subject_binding"]["producer_binding"]["work_session_id"]
+    receipt["subject_binding"]["verifier_identity"]["session_id"] = f"{producer_session}-verifier"
+    _stamp_receipt_digest(receipt)
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is False
+    assert projection.reason == "generated_patch_quarantine_incomplete"
+
+
+def test_project_trial_generated_patch_requires_repository_tests(scoreable_target):
+    receipt = {
+        "status": "completed",
+        "commands": [
+            {
+                "status": "completed",
+                "exit_code": 0,
+                "check_role": "utility_guardrail",
+                "check_id": "guard.no-regression",
+            }
+        ],
+        "required_utility_check_ids": ["guard.no-regression"],
+        "baseline_commit": "a" * 40,
+        "tree_fingerprint": "b" * 40,
+        "changes_patch_sha256": "c" * 64,
+        "subject_binding": {
+            "binding_mode": "patch_backed",
+            "artifact_kind": "skill",
+            "artifact_id": "brigade-work",
+            "content_fingerprint": "sha256:" + "d" * 64,
+            "patch_source": "generated",
+            "manifest_binding": _minimal_manifest_binding(manifest_id="generated-no-tests"),
+            "verifier_identity": {"verifier_id": "brigade.verify.test", "session_id": "verifier-1"},
+            "producer_binding": {
+                "work_session_id": "producer-1",
+                "owned_delta_sha256": "e" * 64,
+                "subject_clean_at_start": True,
+            },
+            "patch_binding": {
+                "baseline_commit": "a" * 40,
+                "tree_fingerprint": "b" * 40,
+                "changes_patch_sha256": "c" * 64,
+                "subject_path": "skills/brigade-work/SKILL.md",
+                "subject_hash": "sha256:" + "f" * 64,
+            },
+            "generated_patch_quarantine": {
+                "schema": "brigade.generated_patch_quarantine.v1",
+                "schema_version": 1,
+                "status": "quarantined",
+                "candidate_count": 2,
+                "model": "gpt-test",
+                "model_version": "1",
+                # Audit-only non-promoting fields must not unlock eligibility.
+                "model_confidence": 0.99,
+                "lexical_similarity": 0.95,
+                "repeated_sampling": 8,
+            },
+        },
+    }
+    # Fail before empty_patch / digest by short-circuiting quarantine rules after
+    # independence: strip patch bytes path and exercise eligibility reason directly.
+    from brigade import generated_patch_quarantine
+
+    reason = generated_patch_quarantine.generated_patch_eligibility_reason(receipt["subject_binding"], receipt)
+    assert reason == "generated_patch_missing_repository_tests"
 
 
 def test_project_trial_infrastructure_failure_is_ineligible(scoreable_target):

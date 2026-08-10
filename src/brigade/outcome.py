@@ -35,6 +35,21 @@ SIGNAL_RULES: dict[tuple[str, str], int] = {
 # Sources whose every status is advisory/neutral regardless of value.
 NEUTRAL_SOURCES = frozenset({"aboyeur", "replay", "ledger-repair"})
 
+# Explicitly non-promoting signals for GeneratedPatchQuarantine (#507).
+# Model confidence, lexical/textual similarity to known fixes, and repeated
+# sampling may be recorded for audit but never earn a non-zero signal_value.
+# Kept as a dedicated frozenset (not folded into NEUTRAL_SOURCES) so the
+# quarantine contract stays searchable and testable by name.
+NON_PROMOTING_SOURCES = frozenset(
+    {
+        "model_confidence",
+        "confidence",
+        "lexical_similarity",
+        "textual_similarity",
+        "repeated_sampling",
+    }
+)
+
 
 @dataclass(frozen=True)
 class OutcomeRecord:
@@ -124,7 +139,7 @@ def wilson_lower_bound(helped: float, total: float, z: float = 1.96) -> float:
 
 def signal_value(source: str, status: str) -> int:
     """Return the verified weight (+1/0/-1) for a (source, status) signal."""
-    if source in NEUTRAL_SOURCES:
+    if source in NEUTRAL_SOURCES or source in NON_PROMOTING_SOURCES:
         return 0
     return SIGNAL_RULES.get((source, status), 0)
 
