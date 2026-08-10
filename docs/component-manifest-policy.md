@@ -123,7 +123,7 @@ Brigade does not relocate `.graphtrail/graphtrail.db` or MiseLedger archive path
 
 This policy owns one release and update contract. `brigade update --channel stable` resolves the
 latest immutable Brigade release, installs that exact CLI version, and runs setup against its
-verified manifest. Beta uses the validated main commit while retaining the verified stable release
-manifest. `brigade setup` resolves the running CLI's exact release manifest; offline automatic
-setup requires a verified exact-release cache. The bundled legacy manifest is available only with
-`--manifest-source standalone`.
+verified manifest. Beta resolves the exact non-yanked PyPI `0.27.0.devYYYYMMDD` wheel while
+retaining the verified stable release manifest. `brigade setup` resolves the running CLI's exact
+release manifest; offline automatic setup requires a verified exact-release cache. The bundled
+legacy manifest is available only with `--manifest-source standalone`.
