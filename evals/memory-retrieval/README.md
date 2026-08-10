@@ -64,7 +64,10 @@ Output is a small table plus optional JSON (`--json`) so runs are diffable.
 
 - Stand in for production corpora. At ~40 cards, strong systems and grep often tie on easy queries; the query set is intentionally paraphrase-heavy for that reason.
 - Measure latency, index build cost, or multi-lingual retrieval.
-- Replace the planned label-free repeat-search recall signal (#723); that is a live usage metric, not this offline fixture.
+- Replace the live label-free repeat-search recall signal (#723) that
+  `memory care status` surfaces from `.brigade/memory/search-log.jsonl`; that
+  is a usage metric, not this offline fixture. High follow-up rates here are
+  the demand signal to mine real failed queries into this corpus.
 
 ## Gate
 
