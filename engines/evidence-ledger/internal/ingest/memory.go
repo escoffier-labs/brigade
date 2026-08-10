@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/escoffier-labs/miseledger/internal/sources/memory"
 )
 
 // MemorySourceKind is the native source kind for canonical Markdown memory cards.
@@ -18,6 +20,7 @@ type MemoryScanReceipt struct {
 	ScanID                   string   `json:"scan_id"`
 	SourceKind               string   `json:"source_kind"`
 	SourcePath               string   `json:"source_path"`
+	Namespace                string   `json:"memory_namespace,omitempty"`
 	Status                   string   `json:"status"`
 	Stale                    bool     `json:"stale"`
 	Capability               string   `json:"capability"`
@@ -49,13 +52,28 @@ type ObservedCard struct {
 	Outcome     string // created | updated | unchanged | skipped | failed
 }
 
+// LastMemoryNamespace returns the most recent memory_namespace recorded on a
+// source_scan_runs row, used when a failed crawl cannot re-read memory/NAMESPACE.
+func LastMemoryNamespace(db *sql.DB) string {
+	var ns sql.NullString
+	_ = db.QueryRow(`select json_extract(metadata_json, '$.memory_namespace')
+from source_scan_runs
+where source_kind = ? and coalesce(json_extract(metadata_json, '$.memory_namespace'), '') != ''
+order by started_at desc limit 1`, MemorySourceKind).Scan(&ns)
+	if ns.Valid {
+		return ns.String
+	}
+	return ""
+}
+
 // BeginMemoryScan inserts a running scan row and returns its id.
-func BeginMemoryScan(db *sql.DB, sourcePath, engineVersion string) (string, error) {
+func BeginMemoryScan(db *sql.DB, sourcePath, engineVersion, namespace string) (string, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	id := stableID("memory-scan", MemorySourceKind, sourcePath, now)
+	id := stableID("memory-scan", MemorySourceKind, namespace, sourcePath, now)
 	meta, _ := json.Marshal(map[string]any{
-		"capability":     MemoryCapability,
-		"engine_version": engineVersion,
+		"capability":       MemoryCapability,
+		"engine_version":   engineVersion,
+		"memory_namespace": namespace,
 	})
 	_, err := db.Exec(`insert into source_scan_runs(
   id, source_kind, source_path, started_at, status, stale, metadata_json
@@ -64,7 +82,7 @@ func BeginMemoryScan(db *sql.DB, sourcePath, engineVersion string) (string, erro
 }
 
 // FailMemoryScan marks the scan failed/interrupted, tombstones nothing, and
-// marks the prior completed snapshot stale.
+// marks the prior completed snapshot for the same namespace stale.
 func FailMemoryScan(db *sql.DB, scanID, status string, receipt *MemoryScanReceipt) error {
 	if status == "" {
 		status = "failed"
@@ -75,35 +93,46 @@ func FailMemoryScan(db *sql.DB, scanID, status string, receipt *MemoryScanReceip
 		return err
 	}
 	defer tx.Rollback()
-	staleMarked, err := markPriorMemorySnapshotStale(tx)
+	namespace := ""
+	if receipt != nil {
+		namespace = receipt.Namespace
+	}
+	if namespace == "" && scanID != "" {
+		namespace, _ = scanNamespace(tx, scanID)
+	}
+	staleMarked, err := markPriorMemorySnapshotStale(tx, namespace)
 	if err != nil {
 		return err
 	}
 	if receipt == nil {
 		receipt = &MemoryScanReceipt{}
 	}
-	receipt.ScanID = scanID
 	receipt.SourceKind = MemorySourceKind
+	receipt.Namespace = namespace
 	receipt.Status = status
 	receipt.Stale = true
 	receipt.Partial = true
 	receipt.Capability = MemoryCapability
 	receipt.PriorSnapshotMarkedStale = staleMarked
-	if _, err := tx.Exec(`update source_scan_runs set status = ?, completed_at = ?, stale = 1,
+	if scanID != "" {
+		receipt.ScanID = scanID
+		if _, err := tx.Exec(`update source_scan_runs set status = ?, completed_at = ?, stale = 1,
   created_count=?, updated_count=?, unchanged_count=?, removed_count=?, skipped_count=?, failed_count=?,
   canonical_count=?, live_count=?, hash_divergence_count=?, unresolved_relation_count=?, malformed_skipped_count=?
   where id = ?`,
-		status, now,
-		receipt.Created, receipt.Updated, receipt.Unchanged, receipt.Removed, receipt.Skipped, receipt.Failed,
-		receipt.CanonicalCount, receipt.LiveCount, receipt.HashDivergence, receipt.UnresolvedRelations, receipt.MalformedSkipped,
-		scanID); err != nil {
-		return err
+			status, now,
+			receipt.Created, receipt.Updated, receipt.Unchanged, receipt.Removed, receipt.Skipped, receipt.Failed,
+			receipt.CanonicalCount, receipt.LiveCount, receipt.HashDivergence, receipt.UnresolvedRelations, receipt.MalformedSkipped,
+			scanID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
 
 // CompleteMemoryScan records observed ids, soft-tombstones missing memory_card
-// items scoped to brigade-memory only, and writes the receipt counts.
+// items scoped to the active namespace only, resolves relations, then stores
+// the post-resolution unresolved count.
 func CompleteMemoryScan(db *sql.DB, scanID string, observed []ObservedCard, receipt *MemoryScanReceipt) error {
 	if receipt == nil {
 		receipt = &MemoryScanReceipt{}
@@ -114,6 +143,15 @@ func CompleteMemoryScan(db *sql.DB, scanID string, observed []ObservedCard, rece
 		return err
 	}
 	defer tx.Rollback()
+
+	namespace := receipt.Namespace
+	if namespace == "" {
+		namespace, err = scanNamespace(tx, scanID)
+		if err != nil {
+			return err
+		}
+		receipt.Namespace = namespace
+	}
 
 	seen := map[string]ObservedCard{}
 	pathSet := map[string]bool{}
@@ -135,13 +173,13 @@ func CompleteMemoryScan(db *sql.DB, scanID string, observed []ObservedCard, rece
 		}
 	}
 
-	removed, err := softTombstoneMissingMemoryCards(tx, seen, now)
+	removed, err := softTombstoneMissingMemoryCards(tx, namespace, seen, now)
 	if err != nil {
 		return err
 	}
 	receipt.Removed = removed
 
-	live, err := liveMemoryExternalIDs(tx)
+	live, err := liveMemoryExternalIDs(tx, namespace)
 	if err != nil {
 		return err
 	}
@@ -162,17 +200,18 @@ func CompleteMemoryScan(db *sql.DB, scanID string, observed []ObservedCard, rece
 		}
 	}
 	receipt.HashDivergence = divergence
+	receipt.MalformedSkipped = receipt.Skipped + receipt.Failed
 
-	unresolved, err := memoryUnresolvedRelationCount(tx)
+	// Resolve first, then record the post-resolution unresolved count so crawl
+	// JSON, the scan row, and health share one meaning.
+	if _, err := resolveRelations(tx); err != nil {
+		return err
+	}
+	unresolved, err := memoryUnresolvedRelationCount(tx, namespace)
 	if err != nil {
 		return err
 	}
 	receipt.UnresolvedRelations = unresolved
-	receipt.MalformedSkipped = receipt.Skipped + receipt.Failed
-
-	if _, err := resolveRelations(tx); err != nil {
-		return err
-	}
 
 	if _, err := tx.Exec(`update source_scan_runs set status = ?, completed_at = ?, stale = 0,
   created_count=?, updated_count=?, unchanged_count=?, removed_count=?, skipped_count=?, failed_count=?,
@@ -197,9 +236,32 @@ func CompleteMemoryScan(db *sql.DB, scanID string, observed []ObservedCard, rece
 	return tx.Commit()
 }
 
-func markPriorMemorySnapshotStale(tx *sql.Tx) (bool, error) {
-	res, err := tx.Exec(`update source_scan_runs set stale = 1
+func scanNamespace(tx *sql.Tx, scanID string) (string, error) {
+	var meta string
+	if err := tx.QueryRow(`select coalesce(metadata_json, '{}') from source_scan_runs where id = ?`, scanID).Scan(&meta); err != nil {
+		return "", err
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(meta), &parsed); err != nil {
+		return "", nil
+	}
+	ns, _ := parsed["memory_namespace"].(string)
+	return ns, nil
+}
+
+func markPriorMemorySnapshotStale(tx *sql.Tx, namespace string) (bool, error) {
+	// Prefer namespace-scoped stale marking; fall back to source-kind when
+	// namespace is unknown so interrupted scans still leave a stale prior.
+	var res sql.Result
+	var err error
+	if namespace != "" {
+		res, err = tx.Exec(`update source_scan_runs set stale = 1
+where source_kind = ? and status = 'completed' and stale = 0
+  and json_extract(metadata_json, '$.memory_namespace') = ?`, MemorySourceKind, namespace)
+	} else {
+		res, err = tx.Exec(`update source_scan_runs set stale = 1
 where source_kind = ? and status = 'completed' and stale = 0`, MemorySourceKind)
+	}
 	if err != nil {
 		return false, err
 	}
@@ -207,7 +269,7 @@ where source_kind = ? and status = 'completed' and stale = 0`, MemorySourceKind)
 	return n > 0, nil
 }
 
-func softTombstoneMissingMemoryCards(tx *sql.Tx, seen map[string]ObservedCard, now string) (int, error) {
+func softTombstoneMissingMemoryCards(tx *sql.Tx, namespace string, seen map[string]ObservedCard, now string) (int, error) {
 	presentPaths := map[string]bool{}
 	presentIDs := map[string]bool{}
 	for _, card := range seen {
@@ -227,9 +289,11 @@ func softTombstoneMissingMemoryCards(tx *sql.Tx, seen map[string]ObservedCard, n
 select i.id, i.external_id, coalesce(i.raw_path, ''), coalesce(json_extract(i.metadata_json, '$.relative_path'), '')
 from items i
 join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
 where s.kind = ?
   and i.kind = 'memory_card'
-  and i.tombstoned_at is null`, MemorySourceKind)
+  and i.tombstoned_at is null
+  and c.external_id = ?`, MemorySourceKind, namespace)
 	if err != nil {
 		return 0, err
 	}
@@ -270,15 +334,17 @@ where s.kind = ?
 	return len(removedIDs), nil
 }
 
-func liveMemoryExternalIDs(tx *sql.Tx) (map[string]string, error) {
+func liveMemoryExternalIDs(tx *sql.Tx, namespace string) (map[string]string, error) {
 	rows, err := tx.Query(`
 select i.external_id, i.content_hash
 from items i
 join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
 where s.kind = ?
   and i.kind = 'memory_card'
   and i.tombstoned_at is null
-order by i.created_at desc, i.id desc`, MemorySourceKind)
+  and c.external_id = ?
+order by i.created_at desc, i.id desc`, MemorySourceKind, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -296,40 +362,248 @@ order by i.created_at desc, i.id desc`, MemorySourceKind)
 	return out, rows.Err()
 }
 
-func memoryUnresolvedRelationCount(tx *sql.Tx) (int, error) {
+// LegacyMemoryExternalIDs returns live rows still under the pre-namespace
+// collection memory:cards. Namespaced crawls dual-read these for diagnostics
+// and never tombstone or rebuild them (scoped-rebuild rule).
+func LegacyMemoryExternalIDs(db *sql.DB) (map[string]string, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	return liveMemoryExternalIDs(tx, memory.LegacyCollectionID)
+}
+
+func memoryUnresolvedRelationCount(tx *sql.Tx, namespace string) (int, error) {
 	var n int
 	err := tx.QueryRow(`
 select count(*)
 from relations r
 join items i on i.id = r.source_item_id
 join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
 where s.kind = ?
   and i.kind = 'memory_card'
   and i.tombstoned_at is null
+  and c.external_id = ?
   and r.target_item_id is null
-  and coalesce(r.target_external_id, '') != ''`, MemorySourceKind).Scan(&n)
+  and coalesce(r.target_external_id, '') != ''`, MemorySourceKind, namespace).Scan(&n)
 	return n, err
 }
 
-// LiveMemoryProjection returns live external_id -> content_hash for rebuild checks.
-func LiveMemoryProjection(db *sql.DB) (map[string]string, error) {
+// LiveMemoryProjection returns live external_id -> content_hash for a namespace.
+func LiveMemoryProjection(db *sql.DB, namespace string) (map[string]string, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	return liveMemoryExternalIDs(tx)
+	return liveMemoryExternalIDs(tx, namespace)
 }
 
-// RebuildMemoryProjection deletes only the brigade-memory derived projection.
-func RebuildMemoryProjection(db *sql.DB) error {
+// MemoryNamespaceSnapshot holds derived projection rows for failure-preserving rebuild.
+type MemoryNamespaceSnapshot struct {
+	Namespace string
+	Items     []memoryItemSnapshot
+}
+
+type memoryItemSnapshot struct {
+	ID           string
+	ActorID      sql.NullString
+	ExternalID   string
+	Kind         string
+	CreatedAt    sql.NullString
+	UpdatedAt    sql.NullString
+	Text         sql.NullString
+	Summary      sql.NullString
+	ContentHash  string
+	RawJSON      string
+	RawHash      sql.NullString
+	RawPath      sql.NullString
+	RawOrdinal   sql.NullInt64
+	MetadataJSON string
+	TombstonedAt sql.NullString
+	Tags         []string
+	FTSBody      sql.NullString
+	Relations    []memoryRelationSnapshot
+}
+
+type memoryRelationSnapshot struct {
+	ID                         string
+	SourceItemID               string
+	TargetItemID               sql.NullString
+	TargetExternalID           sql.NullString
+	TargetSourceKind           sql.NullString
+	TargetCollectionExternalID sql.NullString
+	RelationType               string
+	Confidence                 float64
+	MetadataJSON               string
+}
+
+// SnapshotMemoryNamespace captures live+tombstoned derived rows for one namespace.
+func SnapshotMemoryNamespace(db *sql.DB, namespace string) (*MemoryNamespaceSnapshot, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`
+select i.id, i.actor_id, i.external_id, i.kind, i.created_at, i.updated_at,
+  i.text, i.summary, i.content_hash, i.raw_json, i.raw_hash, i.raw_path, i.raw_ordinal,
+  i.metadata_json, i.tombstoned_at
+from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ?`, MemorySourceKind, namespace)
+	if err != nil {
+		return nil, err
+	}
+	snap := &MemoryNamespaceSnapshot{Namespace: namespace}
+	for rows.Next() {
+		var item memoryItemSnapshot
+		if err := rows.Scan(&item.ID, &item.ActorID, &item.ExternalID, &item.Kind,
+			&item.CreatedAt, &item.UpdatedAt, &item.Text, &item.Summary, &item.ContentHash,
+			&item.RawJSON, &item.RawHash, &item.RawPath, &item.RawOrdinal, &item.MetadataJSON, &item.TombstonedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		snap.Items = append(snap.Items, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range snap.Items {
+		tagRows, err := tx.Query(`select tag from item_tags where item_id = ?`, snap.Items[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		for tagRows.Next() {
+			var tag string
+			if err := tagRows.Scan(&tag); err != nil {
+				tagRows.Close()
+				return nil, err
+			}
+			snap.Items[i].Tags = append(snap.Items[i].Tags, tag)
+		}
+		tagRows.Close()
+		_ = tx.QueryRow(`select body from item_fts where item_id = ?`, snap.Items[i].ID).Scan(&snap.Items[i].FTSBody)
+		relRows, err := tx.Query(`
+select id, source_item_id, target_item_id, target_external_id, target_source_kind,
+  target_collection_external_id, relation_type, confidence, metadata_json
+from relations where source_item_id = ?`, snap.Items[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		for relRows.Next() {
+			var rel memoryRelationSnapshot
+			if err := relRows.Scan(&rel.ID, &rel.SourceItemID, &rel.TargetItemID, &rel.TargetExternalID,
+				&rel.TargetSourceKind, &rel.TargetCollectionExternalID, &rel.RelationType, &rel.Confidence, &rel.MetadataJSON); err != nil {
+				relRows.Close()
+				return nil, err
+			}
+			snap.Items[i].Relations = append(snap.Items[i].Relations, rel)
+		}
+		relRows.Close()
+	}
+	return snap, nil
+}
+
+// RestoreMemoryNamespace restores a previously snapshotted namespace projection.
+func RestoreMemoryNamespace(db *sql.DB, snap *MemoryNamespaceSnapshot) error {
+	if snap == nil {
+		return nil
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := deleteMemoryNamespaceTx(tx, snap.Namespace); err != nil {
+		return err
+	}
+	sourceID := stableID("source", MemorySourceKind)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)
+on conflict(id) do update set updated_at=excluded.updated_at`, sourceID, MemorySourceKind, "Brigade Memory Cards", "1.0.0", now, now); err != nil {
+		return err
+	}
+	collectionID := stableID("collection", MemorySourceKind, snap.Namespace)
+	meta := map[string]any{"memory_namespace": snap.Namespace}
+	metaJSON, _ := json.Marshal(meta)
+	if _, err := tx.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values(?,?,?,?,?,?,?,?)
+on conflict(source_id, external_id) do update set updated_at=excluded.updated_at`,
+		collectionID, sourceID, snap.Namespace, "memory_cards", "Memory cards", string(metaJSON), now, now); err != nil {
+		return err
+	}
+	for _, item := range snap.Items {
+		if _, err := tx.Exec(`insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json, tombstoned_at)
+values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			item.ID, sourceID, collectionID, nullString(item.ActorID), item.ExternalID, item.Kind,
+			nullString(item.CreatedAt), nullString(item.UpdatedAt), nullString(item.Text), nullString(item.Summary),
+			item.ContentHash, item.RawJSON, nullString(item.RawHash), nullString(item.RawPath),
+			nullInt64(item.RawOrdinal), item.MetadataJSON, nullString(item.TombstonedAt)); err != nil {
+			return err
+		}
+		for _, tag := range item.Tags {
+			if _, err := tx.Exec(`insert or ignore into item_tags(item_id, tag) values(?,?)`, item.ID, tag); err != nil {
+				return err
+			}
+		}
+		if item.FTSBody.Valid {
+			if _, err := tx.Exec(`insert into item_fts(item_id, source_kind, collection_kind, item_kind, actor_type, body) values(?,?,?,?,?,?)`,
+				item.ID, MemorySourceKind, "memory_cards", item.Kind, "system", item.FTSBody.String); err != nil {
+				return err
+			}
+		}
+		for _, rel := range item.Relations {
+			if _, err := tx.Exec(`insert into relations(id, source_item_id, target_item_id, target_external_id, target_source_kind, target_collection_external_id, relation_type, confidence, metadata_json)
+values(?,?,?,?,?,?,?,?,?)`, rel.ID, rel.SourceItemID, nullString(rel.TargetItemID), nullString(rel.TargetExternalID),
+				nullString(rel.TargetSourceKind), nullString(rel.TargetCollectionExternalID), rel.RelationType, rel.Confidence, rel.MetadataJSON); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
 
-	rows, err := tx.Query(`select i.id from items i join sources s on s.id = i.source_id where s.kind = ?`, MemorySourceKind)
+func nullString(v sql.NullString) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.String
+}
+
+func nullInt64(v sql.NullInt64) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.Int64
+}
+
+// DeleteMemoryNamespace removes only the derived projection for one namespace.
+// Legacy memory:cards rows are never touched.
+func DeleteMemoryNamespace(db *sql.DB, namespace string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := deleteMemoryNamespaceTx(tx, namespace); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func deleteMemoryNamespaceTx(tx *sql.Tx, namespace string) error {
+	if namespace == "" || namespace == memory.LegacyCollectionID {
+		return fmt.Errorf("refusing to delete legacy or empty memory namespace %q", namespace)
+	}
+	rows, err := tx.Query(`
+select i.id from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ?`, MemorySourceKind, namespace)
 	if err != nil {
 		return err
 	}
@@ -369,31 +643,26 @@ func RebuildMemoryProjection(db *sql.DB) error {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`delete from source_scans where source_kind = ?`, MemorySourceKind); err != nil {
+	// Completed scan records are intentionally retained so a failed rebuild can
+	// mark the prior snapshot stale without losing last_completed_scan_id.
+	if _, err := tx.Exec(`delete from collections where source_id in (select id from sources where kind = ?) and external_id = ?`,
+		MemorySourceKind, namespace); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`delete from source_scan_observed where scan_id in (select id from source_scan_runs where source_kind = ?)`, MemorySourceKind); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`delete from source_scan_runs where source_kind = ?`, MemorySourceKind); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`delete from collections where source_id in (select id from sources where kind = ?)`, MemorySourceKind); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`delete from actors where source_id in (select id from sources where kind = ?)`, MemorySourceKind); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`delete from sources where kind = ?`, MemorySourceKind); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
+}
+
+// RebuildMemoryProjection deletes only the named namespace's derived projection.
+// Prefer Snapshot+Delete+Restore around import for failure-preserving rebuilds.
+func RebuildMemoryProjection(db *sql.DB, namespace string) error {
+	return DeleteMemoryNamespace(db, namespace)
 }
 
 // MemoryHealth summarizes doctor/status fields for the memory projection.
 type MemoryHealth struct {
 	Capability          string  `json:"capability"`
 	EngineVersion       string  `json:"engine_version"`
+	MemoryNamespace     string  `json:"memory_namespace,omitempty"`
 	LastCompletedScanID string  `json:"last_completed_scan_id"`
 	LastCompletedAt     *string `json:"last_completed_at"`
 	CanonicalCount      int     `json:"canonical_count"`
@@ -406,22 +675,36 @@ type MemoryHealth struct {
 	Status              string  `json:"status"`
 }
 
-// CollectMemoryHealth reads the latest scan run plus live counts.
-func CollectMemoryHealth(db *sql.DB, engineVersion string) (MemoryHealth, error) {
+// CollectMemoryHealth reads the latest scan run plus live counts for a namespace.
+// When namespace is empty it reports the latest memory scan across namespaces.
+func CollectMemoryHealth(db *sql.DB, engineVersion, namespace string) (MemoryHealth, error) {
 	h := MemoryHealth{
-		Capability:    MemoryCapability,
-		EngineVersion: engineVersion,
-		Status:        "absent",
+		Capability:      MemoryCapability,
+		EngineVersion:   engineVersion,
+		MemoryNamespace: namespace,
+		Status:          "absent",
 	}
 	var scanID, status string
 	var completed sql.NullString
 	var stale, canonical, live, divergence, unresolved, malformed int
-	err := db.QueryRow(`select id, status, completed_at, stale, canonical_count, live_count,
+	var err error
+	if namespace != "" {
+		err = db.QueryRow(`select id, status, completed_at, stale, canonical_count, live_count,
   hash_divergence_count, unresolved_relation_count, malformed_skipped_count
+from source_scan_runs
+where source_kind = ? and json_extract(metadata_json, '$.memory_namespace') = ?
+order by started_at desc limit 1`, MemorySourceKind, namespace).Scan(
+			&scanID, &status, &completed, &stale, &canonical, &live, &divergence, &unresolved, &malformed)
+	} else {
+		err = db.QueryRow(`select id, status, completed_at, stale, canonical_count, live_count,
+  hash_divergence_count, unresolved_relation_count, malformed_skipped_count,
+  coalesce(json_extract(metadata_json, '$.memory_namespace'), '')
 from source_scan_runs
 where source_kind = ?
 order by started_at desc limit 1`, MemorySourceKind).Scan(
-		&scanID, &status, &completed, &stale, &canonical, &live, &divergence, &unresolved, &malformed)
+			&scanID, &status, &completed, &stale, &canonical, &live, &divergence, &unresolved, &malformed, &namespace)
+		h.MemoryNamespace = namespace
+	}
 	if err == sql.ErrNoRows {
 		return h, nil
 	}
@@ -442,31 +725,38 @@ order by started_at desc limit 1`, MemorySourceKind).Scan(
 	} else {
 		var lastID string
 		var lastAt sql.NullString
-		_ = db.QueryRow(`select id, completed_at from source_scan_runs
+		if namespace != "" {
+			_ = db.QueryRow(`select id, completed_at from source_scan_runs
+where source_kind = ? and status = 'completed' and json_extract(metadata_json, '$.memory_namespace') = ?
+order by completed_at desc limit 1`, MemorySourceKind, namespace).Scan(&lastID, &lastAt)
+		} else {
+			_ = db.QueryRow(`select id, completed_at from source_scan_runs
 where source_kind = ? and status = 'completed'
 order by completed_at desc limit 1`, MemorySourceKind).Scan(&lastID, &lastAt)
+		}
 		h.LastCompletedScanID = lastID
 		if lastAt.Valid {
 			h.LastCompletedAt = &lastAt.String
 		}
 	}
 
-	// Prefer live counts from the archive when present.
-	tx, err := db.Begin()
-	if err != nil {
-		return h, err
+	if namespace != "" {
+		tx, err := db.Begin()
+		if err != nil {
+			return h, err
+		}
+		defer tx.Rollback()
+		liveMap, err := liveMemoryExternalIDs(tx, namespace)
+		if err != nil {
+			return h, err
+		}
+		h.LiveCount = len(liveMap)
+		unresolved, err = memoryUnresolvedRelationCount(tx, namespace)
+		if err != nil {
+			return h, err
+		}
+		h.UnresolvedRelations = unresolved
 	}
-	defer tx.Rollback()
-	liveMap, err := liveMemoryExternalIDs(tx)
-	if err != nil {
-		return h, err
-	}
-	h.LiveCount = len(liveMap)
-	unresolved, err = memoryUnresolvedRelationCount(tx)
-	if err != nil {
-		return h, err
-	}
-	h.UnresolvedRelations = unresolved
 	return h, nil
 }
 
@@ -496,13 +786,13 @@ func ClassifyMemoryOutcomes(before map[string]string, observed []ObservedCard) (
 }
 
 // PriorLiveHashes is a convenience wrapper around LiveMemoryProjection.
-func PriorLiveHashes(db *sql.DB) (map[string]string, error) {
-	return LiveMemoryProjection(db)
+func PriorLiveHashes(db *sql.DB, namespace string) (map[string]string, error) {
+	return LiveMemoryProjection(db, namespace)
 }
 
 // SoftTombstoneCount returns how many live memory_card rows would be removed
 // for the given observed set without writing. Used by interrupted-scan tests.
-func SoftTombstoneCount(db *sql.DB, observedExternalIDs []string) (int, error) {
+func SoftTombstoneCount(db *sql.DB, namespace string, observedExternalIDs []string) (int, error) {
 	seen := map[string]ObservedCard{}
 	for _, id := range observedExternalIDs {
 		seen[id] = ObservedCard{ExternalID: id}
@@ -516,7 +806,8 @@ func SoftTombstoneCount(db *sql.DB, observedExternalIDs []string) (int, error) {
 select i.external_id
 from items i
 join sources s on s.id = i.source_id
-where s.kind = ? and i.kind = 'memory_card' and i.tombstoned_at is null`, MemorySourceKind)
+join collections c on c.id = i.collection_id
+where s.kind = ? and i.kind = 'memory_card' and i.tombstoned_at is null and c.external_id = ?`, MemorySourceKind, namespace)
 	if err != nil {
 		return 0, err
 	}

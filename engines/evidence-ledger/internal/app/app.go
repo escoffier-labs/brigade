@@ -223,7 +223,7 @@ func collectStatus(db *sql.DB, paths Paths) (Status, error) {
 		"engine_version": Version,
 		"memory":         ingest.MemoryCapability,
 	}
-	if health, herr := ingest.CollectMemoryHealth(db, Version); herr == nil && health.Status != "absent" {
+	if health, herr := ingest.CollectMemoryHealth(db, Version, ""); herr == nil && health.Status != "absent" {
 		st.MemoryHealth = &health
 	}
 	return st, nil
@@ -267,7 +267,7 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 			add(check.Name, check.OK, check.Detail)
 		}
 	}
-	memoryHealth, memoryErr := ingest.CollectMemoryHealth(db, Version)
+	memoryHealth, memoryErr := ingest.CollectMemoryHealth(db, Version, "")
 	if memoryErr != nil {
 		add("memory_projection", false, memoryErr.Error())
 	} else if memoryHealth.Status != "absent" {

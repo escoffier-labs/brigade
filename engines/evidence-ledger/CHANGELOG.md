@@ -15,6 +15,15 @@ Releases before this changelog was started are on the [releases page](https://gi
   `miseledger.adapter.v1`, completed-scan soft tombstones scoped to memory,
   source-local `--rebuild`, scan receipts, and doctor/status memory health.
 
+### Changed
+
+- Memory projection E1 hardening (#843): operator-declared `memory-<uuid4>`
+  namespace from `memory/NAMESPACE`, namespace-scoped collection/scan/rebuild,
+  failure-preserving rebuild (walk/stage before replace), post-resolution
+  `unresolved_relations`, #724 content fingerprint for duplicate detection only,
+  duplicate explicit-id fail-closed, and legacy `memory:cards` scoped-rebuild
+  dual-read rule.
+
 ## [0.6.0] - 2026-07-18
 
 ### Added

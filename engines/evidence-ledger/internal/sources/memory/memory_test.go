@@ -7,7 +7,10 @@ import (
 	"testing"
 
 	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/miseledger/internal/textnorm"
 )
+
+const fixtureNamespace = "memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
 func TestWalkValidMissingMalformedUnknownLargeInjection(t *testing.T) {
 	root := copyMemoryFixtureWorkspace(t)
@@ -27,11 +30,17 @@ func TestWalkValidMissingMalformedUnknownLargeInjection(t *testing.T) {
 	if explicit.ExternalID != "card-11111111-2222-4333-8444-555555555555" {
 		t.Fatalf("explicit id = %q", explicit.ExternalID)
 	}
+	if explicit.Record.Collection.ExternalID != fixtureNamespace {
+		t.Fatalf("collection = %q want namespace %q", explicit.Record.Collection.ExternalID, fixtureNamespace)
+	}
 	if len(explicit.Record.Relations) != 1 || explicit.Record.Relations[0].Target == nil {
 		t.Fatalf("expected qualified relation, got %+v", explicit.Record.Relations)
 	}
 	if explicit.Record.Relations[0].Target.Source != "brigade" {
 		t.Fatalf("relation target = %+v", explicit.Record.Relations[0].Target)
+	}
+	if explicit.Fingerprint == "" || explicit.Fingerprint == explicit.ExternalID {
+		t.Fatalf("fingerprint must be present and not identity: fp=%q id=%q", explicit.Fingerprint, explicit.ExternalID)
 	}
 
 	pathCard := byPath["memory/cards/valid-path.md"]
@@ -73,6 +82,121 @@ func TestWalkValidMissingMalformedUnknownLargeInjection(t *testing.T) {
 	}
 }
 
+func TestWalkRequiresOperatorNamespace(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, "memory", "cards"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "memory", "cards", "x.md"), []byte("---\ntopic: x\n---\n\n# X\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := Walk(ws, sources.Options{})
+	if err == nil || !strings.Contains(err.Error(), "memory namespace") {
+		t.Fatalf("expected namespace error, got %v", err)
+	}
+}
+
+func TestWalkOversizeSkipAndTextTruncation(t *testing.T) {
+	ws := t.TempDir()
+	writeNamespace(t, ws, fixtureNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oversize := make([]byte, MaxCardBytes+1)
+	for i := range oversize {
+		oversize[i] = 'A'
+	}
+	if err := os.WriteFile(filepath.Join(cards, "oversize.md"), oversize, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat(" truncation-body-word ", (MaxTextBytes/20)+50)
+	truncCard := "---\nid: card-trunc000-1111-4222-8333-444444444444\ntopic: trunc\n---\n\n# Trunc\n\n" + body + "\n"
+	if err := os.WriteFile(filepath.Join(cards, "trunc.md"), []byte(truncCard), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outcomes, _, err := Walk(ws, sources.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := map[string]CardOutcome{}
+	for _, o := range outcomes {
+		byPath[o.RawPath] = o
+	}
+	if byPath["memory/cards/oversize.md"].Outcome != "skipped" || byPath["memory/cards/oversize.md"].Record != nil {
+		t.Fatalf("oversize = %+v", byPath["memory/cards/oversize.md"])
+	}
+	trunc := byPath["memory/cards/trunc.md"]
+	if trunc.Record == nil || !strings.HasSuffix(trunc.Record.Item.Text, "[truncated]") {
+		t.Fatalf("truncation missing: %+v", trunc)
+	}
+	if len(trunc.Record.Item.Text) < MaxTextBytes {
+		t.Fatalf("truncated text too short: %d", len(trunc.Record.Item.Text))
+	}
+}
+
+func TestFingerprintDuplicateDetectionOnly(t *testing.T) {
+	ws := t.TempDir()
+	writeNamespace(t, ws, fixtureNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := "---\nid: card-fp000000-1111-4222-8333-444444444444\ntopic: a\n---\n\nFlush the cache after migrations.\n"
+	b := "---\nid: card-fp000000-1111-4222-8333-444444444445\ntopic: b\n---\n\nflush the cache after migrations!\n"
+	if err := os.WriteFile(filepath.Join(cards, "a.md"), []byte(a), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cards, "b.md"), []byte(b), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outcomes, result, err := Walk(ws, sources.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outcomes) != 2 {
+		t.Fatalf("outcomes=%d", len(outcomes))
+	}
+	if outcomes[0].Fingerprint != outcomes[1].Fingerprint {
+		t.Fatalf("fingerprints differ: %s vs %s", outcomes[0].Fingerprint, outcomes[1].Fingerprint)
+	}
+	want := textnorm.ContentFingerprint(a)
+	if outcomes[0].Fingerprint != want {
+		t.Fatalf("fingerprint = %s want %s", outcomes[0].Fingerprint, want)
+	}
+	if outcomes[0].ExternalID == outcomes[0].Fingerprint {
+		t.Fatal("fingerprint must not be card identity")
+	}
+	joined := strings.Join(result.Warnings, "\n")
+	if !strings.Contains(joined, "duplicate content fingerprint") {
+		t.Fatalf("expected fingerprint duplicate warning, got %v", result.Warnings)
+	}
+}
+
+func TestDuplicateExplicitIDsDetected(t *testing.T) {
+	ws := t.TempDir()
+	writeNamespace(t, ws, fixtureNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nid: card-dup00000-1111-4222-8333-444444444444\ntopic: d\n---\n\n# Dup\n"
+	if err := os.WriteFile(filepath.Join(cards, "one.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cards, "two.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outcomes, _, err := Walk(ws, sources.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dups := DuplicateExplicitIDs(outcomes)
+	if len(dups) != 1 {
+		t.Fatalf("dups=%v", dups)
+	}
+}
+
 func TestParseFrontmatterMatchesBrigadeFlatSubset(t *testing.T) {
 	meta, has, malformed := parseFrontmatter("---\ntopic: demo\ntags: [a, b]\nflag: true\n---\nbody\n")
 	if !has || malformed {
@@ -98,6 +222,7 @@ func copyMemoryFixtureWorkspace(t *testing.T) string {
 	t.Helper()
 	src := filepath.Join("..", "..", "..", "testdata", "adapters", "memory", "cards")
 	ws := t.TempDir()
+	writeNamespace(t, ws, fixtureNamespace)
 	dst := filepath.Join(ws, "memory", "cards")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		t.Fatal(err)
@@ -116,4 +241,15 @@ func copyMemoryFixtureWorkspace(t *testing.T) string {
 		}
 	}
 	return ws
+}
+
+func writeNamespace(t *testing.T, ws, ns string) {
+	t.Helper()
+	dir := filepath.Join(ws, "memory")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "NAMESPACE"), []byte(ns+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }

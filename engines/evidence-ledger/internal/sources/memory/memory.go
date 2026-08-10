@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -20,15 +21,21 @@ const (
 	SourceKind       = "brigade-memory"
 	SourceName       = "Brigade Memory Cards"
 	SourceVersion    = "1.0.0"
-	CollectionID     = "memory:cards"
-	CollectionKind   = "memory_cards"
-	ItemKind         = "memory_card"
-	IdentityExplicit = "explicit_id"
-	IdentityPath     = "path"
-	MaxCardBytes     = 2 * 1024 * 1024
-	MaxTextBytes     = 256 * 1024
-	MaxUnknownKeys   = 32
+	// LegacyCollectionID is the pre-namespace collection. Namespaced crawls
+	// never tombstone or rebuild these rows (scoped-rebuild + dual-read rule).
+	LegacyCollectionID = "memory:cards"
+	CollectionKind     = "memory_cards"
+	ItemKind           = "memory_card"
+	IdentityExplicit   = "explicit_id"
+	IdentityPath       = "path"
+	MaxCardBytes       = 2 * 1024 * 1024
+	MaxTextBytes       = 256 * 1024
+	MaxUnknownKeys     = 32
+	NamespaceFileRel   = "memory/NAMESPACE"
 )
+
+// namespacePattern matches operator-declared opaque memory-<uuid4> identifiers.
+var namespacePattern = regexp.MustCompile(`^memory-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // CardRoots are the default relative directories scanned under a workspace.
 var CardRoots = []string{"memory/cards"}
@@ -47,11 +54,38 @@ var RelationKinds = []string{
 type CardOutcome struct {
 	ExternalID     string
 	ContentHash    string
+	Fingerprint    string
 	RawPath        string
 	IdentitySource string
 	Outcome        string // created/updated/unchanged filled by crawl; skipped/failed here
 	Warning        string
 	Record         *adapter.Record
+}
+
+// ResolveNamespace reads the operator-declared opaque memory-<uuid4> from
+// memory/NAMESPACE. The engine never derives this from a clone path.
+func ResolveNamespace(workspace string) (string, error) {
+	path := filepath.Join(workspace, filepath.FromSlash(NamespaceFileRel))
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("missing operator-declared memory namespace at %s (expected opaque memory-<uuid4>)", NamespaceFileRel)
+		}
+		return "", err
+	}
+	ns := strings.TrimSpace(string(body))
+	if ns == "" {
+		return "", fmt.Errorf("empty memory namespace in %s", NamespaceFileRel)
+	}
+	if !namespacePattern.MatchString(ns) {
+		return "", fmt.Errorf("invalid memory namespace %q in %s (want memory-<uuid4>)", ns, NamespaceFileRel)
+	}
+	return ns, nil
+}
+
+// CollectionExternalID returns the namespaced collection id for a memory root.
+func CollectionExternalID(namespace string) string {
+	return namespace
 }
 
 // Generate walks workspace memory cards and emits miseledger.adapter.v1 records.
@@ -99,6 +133,10 @@ func Walk(root string, opts sources.Options) ([]CardOutcome, sources.Result, err
 	}
 	if !info.IsDir() {
 		return nil, sources.Result{}, fmt.Errorf("memory crawl path must be a workspace directory: %s", abs)
+	}
+	namespace, err := ResolveNamespace(abs)
+	if err != nil {
+		return nil, sources.Result{}, err
 	}
 
 	var outcomes []CardOutcome
@@ -152,7 +190,7 @@ func Walk(root string, opts sources.Options) ([]CardOutcome, sources.Result, err
 				result.Warnings = append(result.Warnings, rel+": "+readErr.Error())
 				continue
 			}
-			card, warn := buildCard(abs, rel, body)
+			card, warn := buildCard(abs, namespace, rel, body)
 			if card.Outcome == "failed" || card.Outcome == "skipped" {
 				outcomes = append(outcomes, card)
 				if warn != "" {
@@ -174,7 +212,7 @@ func Walk(root string, opts sources.Options) ([]CardOutcome, sources.Result, err
 		}
 		hash := "sha256:" + hex.EncodeToString(hashBytes(body))
 		scan.ContentHash = hash
-		card, warn := buildCard(abs, rel, body)
+		card, warn := buildCard(abs, namespace, rel, body)
 		card.ContentHash = contentHashForRecord(card.Record)
 		if card.ContentHash == "" {
 			card.ContentHash = hash
@@ -192,7 +230,63 @@ func Walk(root string, opts sources.Options) ([]CardOutcome, sources.Result, err
 		outcomes = append(outcomes, card)
 		result.Files = append(result.Files, scan)
 	}
+
+	if dupWarns := detectDuplicateExplicitIDs(outcomes); len(dupWarns) > 0 {
+		result.Warnings = append(result.Warnings, dupWarns...)
+	}
+	if fpWarns := detectDuplicateFingerprints(outcomes); len(fpWarns) > 0 {
+		result.Warnings = append(result.Warnings, fpWarns...)
+	}
 	return outcomes, result, nil
+}
+
+// DuplicateExplicitIDs returns external IDs that appear more than once among
+// successfully parsed cards. Callers must fail the scan before reconciliation.
+func DuplicateExplicitIDs(outcomes []CardOutcome) []string {
+	counts := map[string]int{}
+	for _, o := range outcomes {
+		if o.Record == nil || o.ExternalID == "" {
+			continue
+		}
+		if o.IdentitySource != IdentityExplicit {
+			continue
+		}
+		counts[o.ExternalID]++
+	}
+	var dups []string
+	for id, n := range counts {
+		if n > 1 {
+			dups = append(dups, id)
+		}
+	}
+	return dups
+}
+
+func detectDuplicateExplicitIDs(outcomes []CardOutcome) []string {
+	dups := DuplicateExplicitIDs(outcomes)
+	var warns []string
+	for _, id := range dups {
+		warns = append(warns, "duplicate explicit id "+id+": scan must fail before reconciliation")
+	}
+	return warns
+}
+
+func detectDuplicateFingerprints(outcomes []CardOutcome) []string {
+	byFP := map[string][]string{}
+	for _, o := range outcomes {
+		if o.Record == nil || o.Fingerprint == "" {
+			continue
+		}
+		byFP[o.Fingerprint] = append(byFP[o.Fingerprint], o.ExternalID)
+	}
+	var warns []string
+	for fp, ids := range byFP {
+		if len(ids) < 2 {
+			continue
+		}
+		warns = append(warns, fmt.Sprintf("duplicate content fingerprint %s across identities %s (fingerprint is not card identity)", fp, strings.Join(ids, ", ")))
+	}
+	return warns
 }
 
 func countEmitted(outcomes []CardOutcome) int {
@@ -245,7 +339,7 @@ func listCardFiles(root string) ([]string, error) {
 	return files, nil
 }
 
-func buildCard(workspace, rel string, body []byte) (CardOutcome, string) {
+func buildCard(workspace, namespace, rel string, body []byte) (CardOutcome, string) {
 	text := string(body)
 	meta, hasFrontmatter, malformed := parseFrontmatter(text)
 	if malformed {
@@ -260,6 +354,7 @@ func buildCard(workspace, rel string, body []byte) (CardOutcome, string) {
 	}
 
 	externalID, identitySource := cardIdentity(meta, rel)
+	fingerprint := textnorm.ContentFingerprint(text)
 	markdownBody := bodyAfterFrontmatter(text, hasFrontmatter)
 	summary := firstNonEmpty(stringField(meta, "summary"), stringField(meta, "description"), stringField(meta, "title"), stringField(meta, "topic"))
 	tags := stringList(meta, "tags")
@@ -278,15 +373,17 @@ func buildCard(workspace, rel string, body []byte) (CardOutcome, string) {
 
 	unknown := unknownFrontmatter(meta)
 	itemMeta := map[string]any{
-		"identity_source":    identitySource,
-		"relative_path":      rel,
-		"workspace":          filepath.Base(workspace),
-		"has_frontmatter":    hasFrontmatter,
-		"topic":              stringField(meta, "topic"),
-		"title":              stringField(meta, "title"),
-		"category":           stringField(meta, "category"),
-		"card_id":            stringField(meta, "id", "card_id"),
-		"truncated_text":     truncated,
+		"identity_source":     identitySource,
+		"relative_path":       rel,
+		"workspace":           filepath.Base(workspace),
+		"memory_namespace":    namespace,
+		"has_frontmatter":     hasFrontmatter,
+		"topic":               stringField(meta, "topic"),
+		"title":               stringField(meta, "title"),
+		"category":            stringField(meta, "category"),
+		"card_id":             stringField(meta, "id", "card_id"),
+		"truncated_text":      truncated,
+		"content_fingerprint": fingerprint,
 		"unknown_frontmatter": unknown,
 	}
 	for _, key := range []string{"confidence", "last_reviewed", "fresh_until", "status"} {
@@ -304,10 +401,13 @@ func buildCard(workspace, rel string, body []byte) (CardOutcome, string) {
 		Schema: adapter.SchemaV1,
 		Source: adapter.Source{Kind: SourceKind, Name: SourceName, Version: SourceVersion},
 		Collection: adapter.Collection{
-			ExternalID: CollectionID,
+			ExternalID: CollectionExternalID(namespace),
 			Kind:       CollectionKind,
 			Name:       "Memory cards",
-			Metadata:   sources.Metadata(map[string]any{"workspace": filepath.Base(workspace)}),
+			Metadata: sources.Metadata(map[string]any{
+				"workspace":        filepath.Base(workspace),
+				"memory_namespace": namespace,
+			}),
 		},
 		Item: adapter.Item{
 			ExternalID: externalID,
@@ -334,6 +434,7 @@ func buildCard(workspace, rel string, body []byte) (CardOutcome, string) {
 		ExternalID:     externalID,
 		RawPath:        rel,
 		IdentitySource: identitySource,
+		Fingerprint:    fingerprint,
 		Record:         &rec,
 		ContentHash:    contentHashForRecord(&rec),
 	}
@@ -537,6 +638,7 @@ func unknownFrontmatter(meta map[string]any) map[string]any {
 		"summary": true, "category": true, "tags": true, "confidence": true,
 		"last_reviewed": true, "fresh_until": true, "status": true,
 		"evidence": true, "sources": true, "source": true, "refs": true, "links": true,
+		"fingerprint": true, "reinforcements": true,
 	}
 	for _, kind := range RelationKinds {
 		known[kind] = true
