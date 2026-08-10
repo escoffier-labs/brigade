@@ -223,9 +223,13 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		return AdapterResult{}, err
 	}
 	if exists > 0 {
-		// Same content already fully imported. The batches above only re-ran
-		// idempotent INSERT OR IGNOREs (no-ops), so committing the final empty
-		// tx is harmless and we skip writing a duplicate import row.
+		// Same content already fully imported. Batches above may still have
+		// refreshed known-item ingest stamps (v1 -> v2 -> identical v1), so
+		// resolve relations before returning without writing a duplicate import
+		// row or minting items/events.
+		if _, err := resolveRelations(tx); err != nil {
+			return AdapterResult{}, err
+		}
 		result.AlreadyKnown = true
 		committed = true
 		return result, tx.Commit()

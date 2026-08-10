@@ -29,7 +29,9 @@ Releases before this changelog was started are on the [releases page](https://gi
   stamps for relation resolution plus live health after content-addressed
   card edits (including ignoring stale outbound unresolved on prior versions).
   Re-ingesting known content refreshes the ingest stamp so a restored prior
-  version becomes live again without minting a duplicate item or event.
+  version becomes live again without minting a duplicate item or event; direct
+  adapter AlreadyKnown re-imports also re-resolve inbound relations onto that
+  restored version.
 
 ## [0.6.0] - 2026-07-18
 

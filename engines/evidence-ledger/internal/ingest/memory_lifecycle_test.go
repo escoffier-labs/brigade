@@ -261,6 +261,101 @@ func openMemoryLifecycleDB(t *testing.T) *sql.DB {
 	return db
 }
 
+func TestDirectImportReingestRepointsInboundToRestoredVersion(t *testing.T) {
+	db := openMemoryLifecycleDB(t)
+	defer db.Close()
+	const ns = "memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	const cardID = "card-direct00-1111-4222-8333-444444444444"
+	v1 := memoryRecord(ns, cardID, "direct-body-one")
+	v2 := memoryRecord(ns, cardID, "direct-body-two")
+	inboundRec := fmt.Sprintf(`{"schema":"miseledger.adapter.v1","source":{"kind":"brigade","name":"Brigade"},"collection":{"external_id":"brigade:receipts","kind":"brigade_receipt","name":"receipts"},"item":{"external_id":"receipt:direct-inbound","kind":"receipt","created_at":"2026-01-01T00:00:00Z","text":"support"},"relations":[{"type":"direct_inbound","target":{"source":"brigade-memory","collection":%q,"external_id":%q}}],"raw":{"format":"json","path":"r.json","ordinal":1}}`, ns, cardID)
+
+	// Import v1 alone first so a later identical v1 re-import hits AlreadyKnown.
+	if _, err := ImportAdapterReader(db, strings.NewReader(v1+"\n"), "direct-v1.jsonl", ""); err != nil {
+		t.Fatal(err)
+	}
+	var v1ID string
+	if err := db.QueryRow(`select id from items where external_id = ?`, cardID).Scan(&v1ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportAdapterReader(db, strings.NewReader(inboundRec+"\n"), "direct-inbound.jsonl", ""); err != nil {
+		t.Fatal(err)
+	}
+	var inbound string
+	if err := db.QueryRow(`select target_item_id from relations where relation_type = 'direct_inbound'`).Scan(&inbound); err != nil {
+		t.Fatal(err)
+	}
+	if inbound != v1ID {
+		t.Fatalf("inbound should start on v1=%s, got %s", v1ID, inbound)
+	}
+	var eventsBefore int
+	if err := db.QueryRow(`select count(*) from events where item_id = ?`, v1ID).Scan(&eventsBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ImportAdapterReader(db, strings.NewReader(v2+"\n"), "direct-v2.jsonl", ""); err != nil {
+		t.Fatal(err)
+	}
+	var v2ID string
+	if err := db.QueryRow(`
+select i.id from items i
+join collections c on c.id = i.collection_id
+where c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
+order by i.updated_at desc, i.id desc`, ns, cardID).Scan(&v2ID); err != nil {
+		t.Fatal(err)
+	}
+	if v2ID == v1ID {
+		t.Fatal("v2 must mint a distinct content-addressed item")
+	}
+	if err := db.QueryRow(`select target_item_id from relations where relation_type = 'direct_inbound'`).Scan(&inbound); err != nil {
+		t.Fatal(err)
+	}
+	if inbound != v2ID {
+		t.Fatalf("after v2 import inbound should be v2=%s, got %s", v2ID, inbound)
+	}
+
+	// Identical v1 bytes take the AlreadyKnown source-hash return; restamp alone
+	// is not enough — resolveRelations must run before that return.
+	again, err := ImportAdapterReader(db, strings.NewReader(v1+"\n"), "direct-v1-again.jsonl", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.AlreadyKnown || again.Inserted != 0 {
+		t.Fatalf("expected AlreadyKnown identical re-import, got %+v", again)
+	}
+	var versionCount int
+	if err := db.QueryRow(`select count(*) from items where external_id = ?`, cardID).Scan(&versionCount); err != nil {
+		t.Fatal(err)
+	}
+	if versionCount != 2 {
+		t.Fatalf("versions=%d want 2", versionCount)
+	}
+	live, err := LiveMemoryProjection(db, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v1Hash string
+	if err := db.QueryRow(`select content_hash from items where id = ?`, v1ID).Scan(&v1Hash); err != nil {
+		t.Fatal(err)
+	}
+	if live[cardID] != v1Hash {
+		t.Fatalf("live projection=%s want restored v1 %s", live[cardID], v1Hash)
+	}
+	if err := db.QueryRow(`select target_item_id from relations where relation_type = 'direct_inbound'`).Scan(&inbound); err != nil {
+		t.Fatal(err)
+	}
+	if inbound != v1ID {
+		t.Fatalf("direct-import AlreadyKnown path must repoint inbound to v1=%s, got %s", v1ID, inbound)
+	}
+	var eventsAfter int
+	if err := db.QueryRow(`select count(*) from events where item_id = ?`, v1ID).Scan(&eventsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if eventsAfter != eventsBefore {
+		t.Fatalf("must not mint events on known re-import: before=%d after=%d", eventsBefore, eventsAfter)
+	}
+}
+
 func TestUpsertRecordRestampsKnownContentWithoutDuplicateEvent(t *testing.T) {
 	db := openMemoryLifecycleDB(t)
 	defer db.Close()
