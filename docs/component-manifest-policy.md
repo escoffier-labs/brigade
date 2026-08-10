@@ -83,9 +83,10 @@ attestation verify` in the release workflow rather than represented by an API bo
 Stable validation remains strict: every published component on a stable manifest must carry the full
 five-platform matrix with matching digests and provenance.
 
-Beta is the development channel for CI-green `main`. It installs the checked `main` Brigade wheel
-but reuses the last verified stable component manifest for native bytes, so beta and stable cannot
-install different native assets from two manifests at once.
+Beta is the intentional development channel for the `0.27` preview line. It installs the newest
+non-yanked `brigade-cli==0.27.0.devYYYYMMDD` wheel from PyPI into the existing user-global pipx
+environment, but reuses the last verified stable component manifest for native bytes, so beta and
+stable cannot install different native assets from two manifests at once.
 
 During the pre-pin window before `agent-notify` first appears on a stable manifest, main may list
 `agent-notify` as a known component with empty assets in the bundled compatibility manifest.
@@ -122,7 +123,7 @@ Brigade does not relocate `.graphtrail/graphtrail.db` or MiseLedger archive path
 
 This policy owns one release and update contract. `brigade update --channel stable` resolves the
 latest immutable Brigade release, installs that exact CLI version, and runs setup against its
-verified manifest. Beta uses the validated main commit while retaining the verified stable release
-manifest. `brigade setup` resolves the running CLI's exact release manifest; offline automatic
-setup requires a verified exact-release cache. The bundled legacy manifest is available only with
-`--manifest-source standalone`.
+verified manifest. Beta resolves the exact non-yanked PyPI `0.27.0.devYYYYMMDD` wheel while
+retaining the verified stable release manifest. `brigade setup` resolves the running CLI's exact
+release manifest; offline automatic setup requires a verified exact-release cache. The bundled
+legacy manifest is available only with `--manifest-source standalone`.

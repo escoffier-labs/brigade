@@ -22,12 +22,14 @@ from brigade import component_manifest, component_paths, localio
 REPOSITORY = "escoffier-labs/brigade"
 STATE_SCHEMA_VERSION = 1
 MANIFEST_ASSET = "component-manifest-v1.json"
+PYPI_PROJECT = "brigade-cli"
+PYPI_PROJECT_JSON_URL = f"https://pypi.org/pypi/{PYPI_PROJECT}/json"
+BETA_PREVIEW_BASE = "0.27.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
-_CHECK_RUN_PAGE_SIZE = 100
-_MAX_CHECK_RUN_PAGES = 100
+_BETA_DEV_VERSION = re.compile(rf"^{re.escape(BETA_PREVIEW_BASE)}\.dev([0-9]{{8}})$")
 MAX_TAG_DEREFERENCE_DEPTH = 5
 _GITHUB_RELEASE_CDN_HOSTS = frozenset({"release-assets.githubusercontent.com", "objects.githubusercontent.com"})
 _STATE_KEYS = frozenset(
@@ -95,12 +97,14 @@ class _DefaultHttp:
         self,
         url: str,
         *,
+        accept: str,
         final_url_is_allowed: Callable[[str], bool],
         redirect_error: str,
+        request_error: str,
     ) -> bytes:
         request = urllib.request.Request(
             url,
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "brigade-update/1"},
+            headers={"Accept": accept, "User-Agent": "brigade-update/1"},
         )
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
@@ -109,31 +113,57 @@ class _DefaultHttp:
                     raise UpdateError(f"{redirect_error}: {final}")
                 return response.read()
         except urllib.error.HTTPError as exc:
-            raise UpdateError(f"GitHub request failed: {url} HTTP {exc.code}") from exc
+            raise UpdateError(f"{request_error}: {url} HTTP {exc.code}") from exc
         except urllib.error.URLError as exc:
-            raise UpdateError(f"GitHub request failed: {url}") from exc
+            raise UpdateError(f"{request_error}: {url}") from exc
 
     def json(self, url: str) -> Any:
-        if not _is_github_api_url(url):
-            raise UpdateError(f"GitHub API request is not an expected API URL: {url}")
+        if _is_github_api_url(url):
+            accept = "application/vnd.github+json"
+
+            def final_url_is_allowed(final: str) -> bool:
+                return final == url and _is_github_api_url(final)
+
+            redirect_error = "GitHub API request redirected outside its exact expected URL"
+            request_error = "GitHub request failed"
+            invalid_json = f"GitHub request returned invalid JSON: {url}"
+        elif _is_pypi_project_json_url(url):
+            accept = "application/json"
+
+            def final_url_is_allowed(final: str) -> bool:
+                return final == url and _is_pypi_project_json_url(final)
+
+            redirect_error = "PyPI project JSON request redirected outside its exact expected URL"
+            request_error = "PyPI request failed"
+            invalid_json = f"PyPI request returned invalid JSON: {url}"
+        else:
+            raise UpdateError(f"JSON request is not an expected GitHub API or PyPI project URL: {url}")
         try:
             return json.loads(
                 self._read(
                     url,
-                    final_url_is_allowed=lambda final: final == url and _is_github_api_url(final),
-                    redirect_error="GitHub API request redirected outside its exact expected URL",
+                    accept=accept,
+                    final_url_is_allowed=final_url_is_allowed,
+                    redirect_error=redirect_error,
+                    request_error=request_error,
                 ).decode("utf-8")
             )
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise UpdateError(f"GitHub request returned invalid JSON: {url}") from exc
+            raise UpdateError(invalid_json) from exc
 
     def bytes(self, url: str) -> bytes:
         if not _is_manifest_release_url(url):
             raise UpdateError(f"GitHub release asset is not an exact manifest URL: {url}")
+
+        def final_url_is_allowed(final: str) -> bool:
+            return _is_release_asset_redirect(final, original=url)
+
         return self._read(
             url,
-            final_url_is_allowed=lambda final: _is_release_asset_redirect(final, original=url),
+            accept="application/octet-stream",
+            final_url_is_allowed=final_url_is_allowed,
             redirect_error="GitHub release asset redirected outside trusted HTTPS CDN hosts",
+            request_error="GitHub request failed",
         )
 
 
@@ -245,7 +275,7 @@ def _is_github_api_url(url: Any) -> bool:
     ):
         return False
     prefix = f"/repos/{REPOSITORY}/"
-    if parsed.path in {f"{prefix}releases/latest", f"{prefix}commits/main"}:
+    if parsed.path == f"{prefix}releases/latest":
         return not parsed.query
     tag = parsed.path.removeprefix(f"{prefix}releases/tags/")
     if parsed.path == f"{prefix}releases/tags/{tag}" and _parse_tag(tag) is not None:
@@ -256,16 +286,21 @@ def _is_github_api_url(url: Any) -> bool:
     tag_object = parsed.path.removeprefix(f"{prefix}git/tags/")
     if parsed.path == f"{prefix}git/tags/{tag_object}" and _SHA.fullmatch(tag_object) is not None:
         return not parsed.query
-    check_prefix = f"{prefix}commits/"
-    if not parsed.path.startswith(check_prefix) or not parsed.path.endswith("/check-runs"):
+    return False
+
+
+def _is_pypi_project_json_url(url: Any) -> bool:
+    if not isinstance(url, str):
         return False
-    sha = parsed.path[len(check_prefix) : -len("/check-runs")]
-    if not _SHA.fullmatch(sha):
-        return False
+    parsed = urlparse(url)
     return (
-        parsed.query.startswith(f"per_page={_CHECK_RUN_PAGE_SIZE}&page=")
-        and parsed.query.removeprefix(f"per_page={_CHECK_RUN_PAGE_SIZE}&page=").isdigit()
-        and int(parsed.query.removeprefix(f"per_page={_CHECK_RUN_PAGE_SIZE}&page=")) > 0
+        parsed.scheme == "https"
+        and parsed.netloc == "pypi.org"
+        and parsed.path == f"/pypi/{PYPI_PROJECT}/json"
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.username is None
+        and parsed.password is None
     )
 
 
@@ -423,52 +458,61 @@ def _cache_manifest(paths: UpdatePaths, release: ResolvedRelease) -> Path:
     return target
 
 
-def _check_beta(http: UpdateHttp) -> str:
-    commit = http.json(f"https://api.github.com/repos/{REPOSITORY}/commits/main")
-    sha = commit.get("sha") if isinstance(commit, dict) else None
-    if not isinstance(sha, str) or not _SHA.fullmatch(sha):
-        raise UpdateError("GitHub main resolution did not return a full commit SHA")
-    all_runs: list[dict[str, Any]] = []
-    seen_ids: set[int] = set()
-    total_count: int | None = None
-    for page in range(1, _MAX_CHECK_RUN_PAGES + 1):
-        checks = http.json(
-            f"https://api.github.com/repos/{REPOSITORY}/commits/{sha}/check-runs?per_page={_CHECK_RUN_PAGE_SIZE}&page={page}"
+def _parse_beta_dev_version(version: Any) -> str | None:
+    """Return YYYYMMDD when version is exactly ``0.27.0.devYYYYMMDD``."""
+    if not isinstance(version, str):
+        return None
+    match = _BETA_DEV_VERSION.fullmatch(version)
+    return match.group(1) if match is not None else None
+
+
+def _is_installable_wheel_file(entry: Any) -> bool:
+    if not isinstance(entry, dict) or entry.get("yanked") is True:
+        return False
+    filename = entry.get("filename")
+    packagetype = entry.get("packagetype")
+    if not isinstance(filename, str) or not filename.endswith(".whl"):
+        return False
+    return packagetype in {None, "bdist_wheel"}
+
+
+def _beta_version_has_installable_wheel(files: Any) -> bool:
+    return isinstance(files, list) and any(_is_installable_wheel_file(entry) for entry in files)
+
+
+def resolve_beta_cli_version(http: UpdateHttp) -> str:
+    """Select the newest non-yanked ``0.27.0.devYYYYMMDD`` wheel from PyPI.
+
+    Resolution scans the project JSON ``releases`` map only. PyPI's
+    ``info.version`` field reports the latest *stable* release (for example
+    ``0.26.1`` while a ``0.27.0.devYYYYMMDD`` wheel is present) and is never
+    used as the beta candidate.
+
+    Unrelated preview lines, malformed versions, yanked files, sdists-only
+    uploads, and Git refs are ignored. Native GitHub release assets are never
+    consulted for beta CLI resolution.
+    """
+    raw = http.json(PYPI_PROJECT_JSON_URL)
+    releases = raw.get("releases") if isinstance(raw, dict) else None
+    if not isinstance(releases, dict):
+        raise UpdateError("PyPI project JSON is missing its releases map; beta fails closed")
+    candidates: list[str] = []
+    for version, files in releases.items():
+        if _parse_beta_dev_version(version) is None:
+            continue
+        if not _beta_version_has_installable_wheel(files):
+            continue
+        candidates.append(version)
+    if not candidates:
+        raise UpdateError(
+            f"no non-yanked {BETA_PREVIEW_BASE}.devYYYYMMDD {PYPI_PROJECT} wheel on PyPI; beta fails closed"
         )
-        page_total = checks.get("total_count") if isinstance(checks, dict) else None
-        runs = checks.get("check_runs") if isinstance(checks, dict) else None
-        if (
-            not isinstance(page_total, int)
-            or isinstance(page_total, bool)
-            or page_total <= 0
-            or not isinstance(runs, list)
-        ):
-            raise UpdateError("GitHub main check-runs payload is incomplete or malformed; beta fails closed")
-        if total_count is None:
-            total_count = page_total
-            if total_count > _MAX_CHECK_RUN_PAGES * _CHECK_RUN_PAGE_SIZE:
-                raise UpdateError("GitHub main has too many check runs to validate; beta fails closed")
-        elif page_total != total_count:
-            raise UpdateError("GitHub main check-runs pages disagree on total_count; beta fails closed")
-        expected_count = min(_CHECK_RUN_PAGE_SIZE, total_count - len(all_runs))
-        if len(runs) != expected_count:
-            raise UpdateError("GitHub main check-runs page is incomplete; beta fails closed")
-        for run in runs:
-            run_id = run.get("id") if isinstance(run, dict) else None
-            if (
-                not isinstance(run_id, int)
-                or isinstance(run_id, bool)
-                or run_id <= 0
-                or run_id in seen_ids
-                or run.get("status") != "completed"
-                or run.get("conclusion") not in {"success", "neutral", "skipped"}
-            ):
-                raise UpdateError("GitHub main has a non-successful or malformed check run; beta fails closed")
-            seen_ids.add(run_id)
-            all_runs.append(run)
-        if len(all_runs) == total_count:
-            return sha
-    raise UpdateError("GitHub main check-runs pagination exceeded validation limit; beta fails closed")
+    return max(candidates)
+
+
+def is_legacy_beta_git_sha(coordinate: str) -> bool:
+    """True when prior beta state pinned a full Git main SHA instead of a wheel."""
+    return bool(_SHA.fullmatch(coordinate))
 
 
 class _UpdateLock:
@@ -574,7 +618,7 @@ def run_update(
                 release,
                 allow_compatible_stable_manifest=channel == "beta",
             )
-            coordinate = release.version if channel == "stable" else _check_beta(selected_http)
+            coordinate = release.version if channel == "stable" else resolve_beta_cli_version(selected_http)
             compatible_manifest_version = manifest.brigade_version if channel == "beta" else None
             if compatible_manifest_version is not None and compatible_manifest_version != release.version:
                 raise UpdateError("beta stable manifest compatibility handoff is internally inconsistent")
@@ -593,11 +637,9 @@ def run_update(
             if current is not None and _same_coordinates(current, next_state):
                 print(f"brigade update: {channel} already owns {coordinate}; no changes")
                 return 0
-            pipx_spec = (
-                f"brigade-cli=={coordinate}"
-                if channel == "stable"
-                else f"git+https://github.com/{REPOSITORY}@{coordinate}"
-            )
+            # Stable and beta both force-reinstall the one user-global pipx app
+            # with an exact package pin. Beta never uses a mutable Git main SHA.
+            pipx_spec = f"{PYPI_PROJECT}=={coordinate}"
             cached_manifest_path = Path(
                 component_paths.verified_manifest_path(str(selected_paths.cache_root), release.manifest_sha256)
             )

@@ -51,10 +51,16 @@ pipx install brigade-cli
 brigade setup
 ```
 
-For an intentional Brigade development machine tracking CI-green `main`:
+For an intentional Brigade development machine on the `0.27` preview line:
 
 ```bash
 brigade update --channel beta
+```
+
+Rollback to stable:
+
+```bash
+brigade update --channel stable --switch-channel
 ```
 
 ## First install
