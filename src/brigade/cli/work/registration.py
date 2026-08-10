@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from ... import extras as _extras_mod
+from ...claude_hooks.package import MANAGED_EVENTS as _CLAUDE_HOOK_EVENTS
 from ...dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
 from ...work_cmd import TASK_PRIORITIES, TASK_SEAT_CLASSES, TASK_TYPES
 from .. import extras as _extras_cli
@@ -81,7 +82,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_hook_run.add_argument(
         "--event",
         required=True,
-        choices=["SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop"],
+        choices=list(_CLAUDE_HOOK_EVENTS),
         help="Claude hook event to handle.",
     )
     p_work_hook_run.add_argument("--package", required=True, help="Managed hook package id and version.")
