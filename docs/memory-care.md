@@ -82,4 +82,40 @@ Queue entries include card identity, issue type, severity, priority, safe summar
 
 Memory care does not run a scheduler, mutate canonical memory, perform remote sync, or promote imports automatically. Card edits stay explicit: routine scan and plan commands never write card files. Only `brigade memory care backfill --apply` may add derived frontmatter, with a receipt. Refreshes stay explicit through reviewed work tasks or the existing Memory Handoff flow. Scheduling those care commands is the operator's job: see the [execution model](execution-model.md). Opt-in `brigade care install` can scaffold the operator's own crontab or systemd user timers without Brigade owning a daemon.
 
+## Session-start recall (#466 Slice 1)
+
+`brigade memory recall --target <hub-or-mirror> --cwd <session-cwd> --limit 5`
+runs the deterministic card search with terms derived from the cwd basename
+(split on `-` and `_`). Output is index-level only: title, tags, and card path
+(at most 5 matches / 10 lines). Card bodies never appear.
+
+Machine-local config key: `memory_recall_target` in `.brigade/config.json`.
+
+- Workspace-depth installs may omit the key; recall defaults to the current target.
+- Repo-depth installs stay unconfigured until an explicit hub or mirror path is set.
+- Claude's managed `SessionStart` hook merges recall beside the work brief once per
+  session and fails open when the target is missing, empty, or unreadable.
+
+### Operator smoke (before merge)
+
+Use a temp target, never the real home directory:
+
+```bash
+target="$(mktemp -d)"
+hub="$(mktemp -d)"
+git init -q -b main "$target"
+python -m brigade init --target "$target" --depth repo --harnesses claude
+# Point the repo at a local hub/mirror (edit .brigade/config.json):
+#   "memory_recall_target": "<hub>"
+mkdir -p "$hub/memory/cards"
+printf '%s\n' '---' 'title: Smoke Card' 'tags: ["smoke"]' '---' 'fixture body' \
+  > "$hub/memory/cards/smoke.md"
+python -m brigade memory recall --target "$hub" --cwd "$target/astro-portfolio" --limit 5
+# Expect title/tags/path only; no card body.
+python -m brigade work hooks install --target "$target"
+# In a real Claude Code session on $target (or a nested cwd named like
+# astro-portfolio): confirm SessionStart injects the work brief plus recall
+# exactly once, then a second SessionStart in the same session injects nothing.
+```
+
 For operator-owned cron, systemd, and CI recipes (and `brigade care`), see [scheduled care](scheduled-care.md).

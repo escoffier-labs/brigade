@@ -34,6 +34,9 @@ class Config:
     verify_archive_enabled: bool = DEFAULT_VERIFY_ARCHIVE_ENABLED
     verify_archive_dir: str = DEFAULT_VERIFY_ARCHIVE_DIR
     run_lock_wait_seconds: float = DEFAULT_RUN_LOCK_WAIT_SECONDS
+    # Machine-local hub or read-only mirror for session-start recall (#466).
+    # Absent on repo installs until the operator sets an explicit path.
+    memory_recall_target: str | None = None
 
 
 def validate_graphtrail_delta_timeout(value: Any) -> float:
@@ -100,6 +103,14 @@ def validate_run_lock_wait_seconds(value: Any) -> float:
     return timeout
 
 
+def validate_memory_recall_target(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("memory_recall_target must be a non-empty string when set")
+    return value.strip()
+
+
 def resolve_run_lock_wait_seconds(target: Path) -> float:
     cfg = load_config(target)
     if cfg is not None:
@@ -158,6 +169,9 @@ def write_config(target: Path, cfg: Config) -> None:
     run_lock_wait_seconds = validate_run_lock_wait_seconds(cfg.run_lock_wait_seconds)
     if run_lock_wait_seconds != DEFAULT_RUN_LOCK_WAIT_SECONDS:
         payload["run_lock_wait_seconds"] = run_lock_wait_seconds
+    memory_recall_target = validate_memory_recall_target(cfg.memory_recall_target)
+    if memory_recall_target is not None:
+        payload["memory_recall_target"] = memory_recall_target
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
@@ -193,6 +207,7 @@ def load_config(target: Path) -> Optional[Config]:
     run_lock_wait_seconds = validate_run_lock_wait_seconds(
         data.get("run_lock_wait_seconds", DEFAULT_RUN_LOCK_WAIT_SECONDS)
     )
+    memory_recall_target = validate_memory_recall_target(data.get("memory_recall_target"))
     return Config(
         version=version,
         selection=sel,
@@ -202,4 +217,5 @@ def load_config(target: Path) -> Optional[Config]:
         verify_archive_enabled=verify_archive_enabled,
         verify_archive_dir=verify_archive_dir,
         run_lock_wait_seconds=run_lock_wait_seconds,
+        memory_recall_target=memory_recall_target,
     )

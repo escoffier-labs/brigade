@@ -77,6 +77,80 @@ def test_session_start_injects_brief_once_per_repo(tmp_path: Path, monkeypatch):
     assert calls == [target.resolve()]
 
 
+def test_session_start_merges_recall_with_brief_once(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    cards = hub / "memory" / "cards"
+    cards.mkdir(parents=True)
+    (cards / "astro.md").write_text(
+        '---\ntitle: Astro Notes\ntags: ["astro"]\n---\nSECRET_BODY_TOKEN\n',
+        encoding="utf-8",
+    )
+    from brigade.config import Config, load_config, write_config
+
+    cfg = load_config(target)
+    assert cfg is not None
+    write_config(
+        target,
+        Config(
+            version=cfg.version,
+            selection=cfg.selection,
+            memory_recall_target=str(hub),
+            graphtrail_delta_timeout_seconds=cfg.graphtrail_delta_timeout_seconds,
+            capture_before_retry=cfg.capture_before_retry,
+            verify_runs_keep=cfg.verify_runs_keep,
+            verify_archive_enabled=cfg.verify_archive_enabled,
+            verify_archive_dir=cfg.verify_archive_dir,
+            run_lock_wait_seconds=cfg.run_lock_wait_seconds,
+        ),
+    )
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "work brief: test")
+    session_cwd = target / "astro-portfolio"
+    session_cwd.mkdir()
+    first = runtime.handle_payload(
+        "SessionStart",
+        _payload(target, "SessionStart", cwd=str(session_cwd)),
+    )
+    second = runtime.handle_payload(
+        "SessionStart",
+        _payload(target, "SessionStart", cwd=str(session_cwd)),
+    )
+    context = first["hookSpecificOutput"]["additionalContext"]
+    assert "work brief: test" in context
+    assert "memory recall: astro portfolio" in context
+    assert "Astro Notes" in context
+    assert "SECRET_BODY_TOKEN" not in context
+    assert second is None
+
+
+def test_session_start_recall_fail_open_keeps_brief(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    from brigade.config import Config, load_config, write_config
+
+    cfg = load_config(target)
+    assert cfg is not None
+    write_config(
+        target,
+        Config(
+            version=cfg.version,
+            selection=cfg.selection,
+            memory_recall_target=str(tmp_path / "missing-hub"),
+            graphtrail_delta_timeout_seconds=cfg.graphtrail_delta_timeout_seconds,
+            capture_before_retry=cfg.capture_before_retry,
+            verify_runs_keep=cfg.verify_runs_keep,
+            verify_archive_enabled=cfg.verify_archive_enabled,
+            verify_archive_dir=cfg.verify_archive_dir,
+            run_lock_wait_seconds=cfg.run_lock_wait_seconds,
+        ),
+    )
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "work brief: only")
+    result = runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert "work brief: only" in context
+    assert "memory recall:" not in context
+
+
 def test_all_events_are_inert_for_unwired_repo(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(runtime, "_run_brief", lambda target: (_ for _ in ()).throw(AssertionError(target)))
     assert runtime.handle_payload("SessionStart", _payload(tmp_path, "SessionStart")) is None
@@ -1151,8 +1225,8 @@ def test_cli_accepts_managed_posttooluse_event(monkeypatch):
 
     monkeypatch.setattr(runtime, "hook_run", fake_hook_run)
 
-    assert cli.main(["work", "hook-run", "--event", "PostToolUse", "--package", "brigade-claude-work-loop@1.0.0"]) == 0
-    assert calls == [("PostToolUse", "brigade-claude-work-loop@1.0.0")]
+    assert cli.main(["work", "hook-run", "--event", "PostToolUse", "--package", PACKAGE_REF]) == 0
+    assert calls == [("PostToolUse", PACKAGE_REF)]
 
 
 def test_posttooluse_records_only_successful_confident_bash_writes(tmp_path: Path):
@@ -1445,7 +1519,7 @@ def test_hook_run_normalizes_malformed_persisted_state_before_denial(tmp_path: P
     assert (
         runtime.hook_run(
             event="PreToolUse",
-            package="brigade-claude-work-loop@1.0.0",
+            package=PACKAGE_REF,
             stdin_text=json.dumps(payload),
         )
         == 0

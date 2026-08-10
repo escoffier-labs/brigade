@@ -80,6 +80,30 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to search.")
     p_memory_search.add_argument("--limit", type=int, default=20, help="Maximum matches to show.")
     p_memory_search.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_recall = memory_sub.add_parser(
+        "recall",
+        help="Bounded session-start recall: cwd-derived search returning title, tags, and card path only.",
+    )
+    p_memory_recall.add_argument(
+        "--target",
+        "-t",
+        type=Path,
+        required=True,
+        help="Memory hub or local read-only mirror to search.",
+    )
+    p_memory_recall.add_argument(
+        "--cwd",
+        type=Path,
+        required=True,
+        help="Session working directory (basename terms drive the query).",
+    )
+    p_memory_recall.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="Maximum matches to show (capped at 5).",
+    )
+    p_memory_recall.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_serve_mcp = memory_sub.add_parser(
         "serve-mcp", help="Expose memory cards over a read-only MCP stdio server (card:// scheme)."
     )
@@ -169,6 +193,8 @@ def dispatch(args) -> int:
         return 2
     if args.memory_command == "search":
         return memory_cmd.search(target=args.target, query=args.query, limit=args.limit, json_output=args.json)
+    if args.memory_command == "recall":
+        return memory_cmd.recall(target=args.target, cwd=args.cwd, limit=args.limit, json_output=args.json)
     if args.memory_command == "serve-mcp":
         return memory_cmd.serve_mcp(target=args.target, stdio=args.stdio, json_output=args.json)
 

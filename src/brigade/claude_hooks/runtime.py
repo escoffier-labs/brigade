@@ -605,6 +605,25 @@ def _run_brief(target: Path) -> str:
     return text
 
 
+def _run_recall(target: Path, payload: dict[str, Any]) -> str:
+    """Bounded memory recall for SessionStart; empty string on any failure."""
+    from .. import memory_hooks
+
+    raw_cwd = payload.get("cwd")
+    cwd: Path | None
+    if isinstance(raw_cwd, str) and raw_cwd.strip():
+        try:
+            cwd = Path(raw_cwd).expanduser().resolve(strict=False)
+        except OSError:
+            cwd = None
+    else:
+        cwd = None
+    try:
+        return memory_hooks.recall_text_for_hook(wired_target=target, cwd=cwd)
+    except Exception:  # noqa: BLE001 - recall must never block session start
+        return ""
+
+
 def _brief_records(text: str) -> list[str]:
     """Split a work brief into whole-record units for capped injection."""
     lines = [line.rstrip() for line in text.splitlines()]
@@ -1919,14 +1938,18 @@ def handle_payload(event: str, payload: dict[str, Any]) -> dict[str, Any] | None
         if state.get("briefed"):
             return None
         brief_text = _run_brief(target)
+        recall_text = _run_recall(target, payload)
         state["briefed"] = True
         write_session_state(target, session_id, state)
+        records = _brief_records(brief_text)
+        if recall_text.strip():
+            records.extend(_brief_records(recall_text))
         return _additional_context(
             "SessionStart",
-            brief_text,
+            brief_text if not recall_text.strip() else f"{brief_text}\n{recall_text}",
             target=target,
             session_id=session_id,
-            records=_brief_records(brief_text),
+            records=records,
         )
 
     if event == "PreToolUse":

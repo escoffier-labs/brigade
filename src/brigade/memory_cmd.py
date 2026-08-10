@@ -1760,6 +1760,13 @@ def search(*, target: Path, query: str, limit: int = 20, json_output: bool = Fal
     return 0
 
 
+def recall(*, target: Path, cwd: Path, limit: int = 5, json_output: bool = False) -> int:
+    """Bounded session-start recall over deterministic card search (#466 Slice 1)."""
+    from . import memory_hooks
+
+    return memory_hooks.recall(target=target, cwd=cwd, limit=limit, json_output=json_output)
+
+
 # --- read-only MCP server exposing memory cards over card:// ---
 
 _CARD_URI_PREFIX = "card://"

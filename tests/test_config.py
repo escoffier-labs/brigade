@@ -323,3 +323,30 @@ def test_resolve_run_lock_wait_seconds_defaults_without_config(tmp_path):
     from brigade.config import resolve_run_lock_wait_seconds
 
     assert resolve_run_lock_wait_seconds(tmp_path) == 0.0
+
+
+def test_memory_recall_target_round_trip(tmp_path):
+    sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+    cfg = Config(version=1, selection=sel, memory_recall_target="/tmp/fake-memory-hub")
+    write_config(tmp_path, cfg)
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.memory_recall_target == "/tmp/fake-memory-hub"
+    text = (tmp_path / ".brigade" / "config.json").read_text()
+    assert '"memory_recall_target": "/tmp/fake-memory-hub"' in text
+
+
+def test_memory_recall_target_defaults_absent(tmp_path):
+    sel = Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[])
+    write_config(tmp_path, Config(version=1, selection=sel))
+    loaded = load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.memory_recall_target is None
+    assert "memory_recall_target" not in (tmp_path / ".brigade" / "config.json").read_text()
+
+
+@pytest.mark.parametrize("value", ["", "   ", 12, True])
+def test_load_config_rejects_invalid_memory_recall_target(tmp_path, value):
+    _write_config_json(tmp_path, memory_recall_target=value)
+    with pytest.raises(ValueError, match="memory_recall_target must be a non-empty string"):
+        load_config(tmp_path)
