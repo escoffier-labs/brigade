@@ -177,8 +177,9 @@ def test_removing_campaign_leaves_member_ledgers_unchanged(tmp_path, monkeypatch
 
     campaign_path.unlink()
     assert work_cmd.ready(target=workspace, campaign="ephemeral", json_output=True) == 1
-    err = capsys.readouterr().err
-    assert "campaign not found" in err
+    missing = json.loads(capsys.readouterr().out)
+    assert missing["reason"] == campaign_mod.REASON_MISSING_CAMPAIGN
+    assert "campaign not found" in missing["error"]
     assert (lib / ".brigade" / "work" / "tasks.json").read_text() == lib_before
     assert (app / ".brigade" / "work" / "tasks.json").read_text() == app_before
 
