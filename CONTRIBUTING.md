@@ -11,12 +11,11 @@ External contributions are welcome. This section is the short path; **Pull reque
 3. **Install and test locally.** From a repo clone with Python 3.10+:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]" && pytest -q
 ```
 
 That is the minimal loop for a docs-only change. Code changes should pass `./scripts/verify` before you push (see **Local dev** below).
-4. **Open a pull request.** Required CI checks run automatically on the branch. You do not need to dispatch all 22 jobs yourself.
+4. **Open a pull request.** Required CI checks run automatically on the branch. You do not need to dispatch all required checks yourself.
 5. **Review turnaround.** Target an initial review within a few business days once required checks are green. Merge still waits on the formal review and gate rules in **Pull requests**.
 
 ## Pull requests
@@ -25,7 +24,7 @@ That is the minimal loop for a docs-only change. Code changes should pass `./scr
 
 The current rule set requires all of the following before a pull request can merge:
 
-- All 22 required GitHub Actions checks pass. The checks are pinned to GitHub Actions app id 15368, and the branch must be up to date with `main`.
+- All required GitHub Actions checks pass. The checks are pinned to GitHub Actions app id 15368, and the branch must be up to date with `main`.
 - A current formal `APPROVED` review exists from a non-author reviewer.
 - All review conversations are resolved.
 - The approval was recorded after the last push. New commits dismiss stale approvals.
