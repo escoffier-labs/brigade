@@ -6,10 +6,11 @@ import json
 import sys
 from pathlib import Path
 
-from brigade import acpx_adapter, agents, handoff_cmd, receipt_schema, run_transport, work_cmd
+from brigade import aboyeur, acpx_adapter, agents, handoff_cmd, receipt_schema, run_transport, work_cmd
 from brigade.roster import Agent, Roster
 from brigade.run_transport import Assignment
 from brigade.work_cmd import reviews as reviews_mod
+from tests.run_test_helpers import run_aboyeur_guarded
 
 
 def _roster(env=None):
@@ -103,6 +104,101 @@ def test_acpx_worker_receives_brigade_run_id(monkeypatch, tmp_path):
     )[0]
     assert result.ok
     assert captured["env"][receipt_schema.BRIGADE_RUN_ID_ENV] == "orch-acpx-1"
+
+
+def _legacy_aboyeur_roster():
+    """Match test_aboyeur doubles: worker has cli but no seat model/env."""
+    chef = Agent(name="chef", cli="codex", role="plan")
+    coder = Agent(name="coder", cli="ollama:llama3.3", role="worker")
+    return Roster(orchestrator="chef", agents={"chef": chef, "coder": coder})
+
+
+def test_dispatch_tolerates_run_agent_without_env_kwarg(monkeypatch):
+    """GitHub job 93432928418: fixed-signature fakes must not crash on run_id."""
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        return agents.AgentResult(text="legacy-ok", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    results = run_transport.dispatch(
+        [Assignment(worker="coder", task="do the thing")],
+        _legacy_aboyeur_roster(),
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        read_only=True,
+        run_id="orch-compat-1",
+    )
+    assert results[0].ok
+    assert results[0].text == "legacy-ok"
+
+
+def test_dispatch_still_passes_env_to_kwargs_accepting_run_agent(monkeypatch):
+    captured = {}
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return agents.AgentResult(text="kwargs-ok", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", fake_run_agent)
+    results = run_transport.dispatch(
+        [Assignment(worker="coder", task="do the thing")],
+        _legacy_aboyeur_roster(),
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        read_only=True,
+        run_id="orch-compat-2",
+    )
+    assert results[0].ok
+    assert captured["env"][receipt_schema.BRIGADE_RUN_ID_ENV] == "orch-compat-2"
+
+
+def test_appserver_run_receives_brigade_run_id_without_seat_env(monkeypatch, tmp_path):
+    """Codex app-server path must get run identity via process env, not seat.env."""
+    seen = {}
+
+    class EnvAwareAppServer:
+        def __init__(self, *, cwd, process_registry=None, env=None):
+            seen["cwd"] = cwd
+            seen["env"] = env
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_dispatch(*args, **kwargs):
+        return [aboyeur.WorkerResult(worker="cook", task="task", text="done", ok=True)]
+
+    monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", EnvAwareAppServer)
+    monkeypatch.setattr(aboyeur, "dispatch", fake_dispatch)
+
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "cook": Agent(name="cook", cli="codex", role="worker"),
+        },
+        codex_transport="app-server",
+    )
+    output_dir = tmp_path / "20260810-appserver-runid"
+    assert (
+        run_aboyeur_guarded(
+            "task",
+            roster,
+            worker="cook",
+            cwd=tmp_path,
+            output_dir=output_dir,
+            route_enabled=False,
+        )
+        == 0
+    )
+    assert seen["cwd"] == tmp_path
+    assert seen["env"] is not None
+    assert seen["env"][receipt_schema.BRIGADE_RUN_ID_ENV] == output_dir.name
+    assert "OPENAI_API_KEY" not in seen["env"]
 
 
 def _init_git(tmp_path: Path) -> None:

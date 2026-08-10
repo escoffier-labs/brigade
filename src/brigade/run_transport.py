@@ -360,9 +360,11 @@ def dispatch(
     silent degrade to waves. Without it the fallback is stderr-only and the run
     record cannot tell the two apart.
 
-    ``run_id`` is the orchestrator run identity. When set, workers receive it as
-    ``BRIGADE_RUN_ID`` through the existing env transport path so receipt
-    producers can stamp optional ``producer_run_id`` (#499).
+    ``run_id`` is the orchestrator run identity. When set, direct/ACPX workers
+    receive it as ``BRIGADE_RUN_ID`` through the existing env transport path so
+    receipt producers can stamp optional ``producer_run_id`` (#499). Codex
+    app-server workers receive the same identity via the AppServer process env
+    constructed by ``brigade run`` (run-scoped, not per-seat).
 
     ``quarantine_state`` / ``reprobe_seat`` implement the #474 same-seat-once
     retry bound: persist the failed attempt, re-probe, then allow at most one
@@ -383,14 +385,20 @@ def dispatch(
     def run_direct_agent(*args: Any, **kwargs: Any) -> agents.AgentResult:
         runner = agents.run_agent
         parameters = inspect.signature(runner).parameters.values()
-        accepts_registry = any(
-            parameter.name == "process_registry" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters
-        )
+        accepts_var_keyword = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+        accepts_registry = accepts_var_keyword or any(parameter.name == "process_registry" for parameter in parameters)
+        accepts_env = accepts_var_keyword or any(parameter.name == "env" for parameter in parameters)
         if not accepts_registry:
             kwargs.pop("process_registry", None)
         if orchestrator_run_id is not None:
-            kwargs["env"] = _with_orchestrator_run_id(kwargs.get("env"))
+            # Real agents.run_agent accepts env=; legacy fixed-signature test
+            # doubles do not. Mirror the process_registry gate so BRIGADE_RUN_ID
+            # still reaches production workers without crashing the doubles.
+            merged_env = _with_orchestrator_run_id(kwargs.get("env"))
+            if accepts_env:
+                kwargs["env"] = merged_env
+            else:
+                kwargs.pop("env", None)
         return runner(*args, **kwargs)
 
     def cancel_active_work(futures: dict[Any, int]) -> None:

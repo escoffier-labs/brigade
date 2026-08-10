@@ -4070,10 +4070,22 @@ def run(
     try:
         if effective_transport == "app-server":
             try:
+                # BRIGADE_RUN_ID is run-scoped process identity, not per-seat env.
+                # AppServer already accepts process env; seat.env stays forbidden
+                # on the shared app-server session (roster + dispatch force direct).
+                appserver_kwargs: dict[str, Any] = {"cwd": cwd}
+                if output_dir is not None:
+                    appserver_params = inspect.signature(codex_appserver.AppServer).parameters.values()
+                    accepts_env = any(
+                        parameter.name == "env" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in appserver_params
+                    )
+                    if accepts_env:
+                        appserver_kwargs["env"] = {receipt_schema.BRIGADE_RUN_ID_ENV: output_dir.name}
                 appserver = _call_with_process_registry(
                     codex_appserver.AppServer,
-                    cwd=cwd,
                     process_registry=process_registry,
+                    **appserver_kwargs,
                 )
                 appserver.start()
             except codex_appserver.AppServerError as exc:
