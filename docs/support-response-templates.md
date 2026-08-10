@@ -55,12 +55,15 @@ Usually safe to commit after review:
 - `rules/`
 - `tools/`
 - public docs
+- the managed handoff template for each selected writer harness — for Claude Code, `.claude/memory-handoffs/TEMPLATE.md` (required for Claude onboarding; `verify-harness` fails readiness when a global exclude hides it); for other writers, the matching `<inbox>/TEMPLATE.md`
+
+Handoff inboxes stay local except each inbox's managed `TEMPLATE.md`. Session handoff files in those folders stay ignored.
 
 Usually local-only:
 
 - `.brigade/`
-- `.codex/`
-- `.claude/`
+- `.codex/` (except `.codex/memory-handoffs/TEMPLATE.md` when Codex is selected)
+- `.claude/` (except `.claude/memory-handoffs/TEMPLATE.md` when Claude Code is selected)
 - `.opencode/`
 - `.antigravity/`
 - `.pi/`

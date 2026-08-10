@@ -180,6 +180,8 @@ brigade reconfigure --target . --harnesses claude --prune
 
 The starter handoff template lives at `<inbox>/TEMPLATE.md`. Copy it to a new dated file (e.g. `2026-05-16-1430-fixed-X.md`), fill it in, and the ingester promotes safe card handoffs into `memory/cards/`, appends targeted updates to the right file, and kicks ambiguous material to the review inbox.
 
+When Claude Code is a selected writer harness, commit the managed `.claude/memory-handoffs/TEMPLATE.md` so the handoff format travels with the repository and Claude onboarding can verify it; other files under `.claude/` and session handoff notes in that inbox stay local-only. The same tracked-template pattern applies to other writer inboxes. If a global Git exclude hides the Claude template, use the repo-local recovery steps in [docs/new-user-quickstart.md](docs/new-user-quickstart.md#claude-handoff-template-hidden-by-a-global-git-exclude) — Brigade never edits global Git configuration.
+
 See the [Solo Cookbook](https://github.com/escoffier-labs/solos-cookbook) for the longer-form guidance on what makes a good handoff and when to use which routing.
 
 ## Your daily loop

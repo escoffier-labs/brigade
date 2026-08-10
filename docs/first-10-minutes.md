@@ -127,14 +127,15 @@ Usually safe to commit after review:
 - `tools/`
 - `hooks/` (the pre-push content-guard hook; activate it with `git config core.hooksPath hooks`, but skip that if a global `core.hooksPath` already runs content-guard, since the repo setting would override it)
 - public docs
+- the managed handoff template for each selected writer harness — for Claude Code, `.claude/memory-handoffs/TEMPLATE.md` (required for Claude onboarding; `verify-harness` fails readiness when a global exclude hides it); for other writers, the matching `<inbox>/TEMPLATE.md`
 
-Inbox folders stay local except each inbox's `TEMPLATE.md`, which is deliberately un-ignored so the handoff format travels with the repo. A `?? .codex/` in `git status` is just that template.
+Handoff inboxes stay local except each inbox's managed `TEMPLATE.md`, which Brigade deliberately un-ignores so the handoff format travels with the repo. Session handoff files in those folders stay ignored. A `?? .claude/` or `?? .codex/` in `git status` is usually just that template file.
 
 Usually local-only:
 
 - `.brigade/`
-- `.codex/`
-- `.claude/`
+- `.codex/` (except `.codex/memory-handoffs/TEMPLATE.md` when Codex is selected)
+- `.claude/` (except `.claude/memory-handoffs/TEMPLATE.md` when Claude Code is selected)
 - `.opencode/`
 - `.antigravity/`
 - `.pi/`
@@ -162,6 +163,8 @@ brigade security scan --target . --fail-on none --json
 ```
 
 Review before sharing. Do not paste tokens, private hostnames, private repo names, or unredacted absolute paths into a public issue.
+
+If Claude verification reports `ready: no` with `handoff_template_shadowed`, a global `core.excludesFile` rule is hiding the managed template. Brigade does not edit global Git configuration. See [new-user-quickstart.md — Claude handoff template hidden by a global Git exclude](new-user-quickstart.md#claude-handoff-template-hidden-by-a-global-git-exclude) for repo-local un-ignore rules and the exact `git check-ignore` recovery command.
 
 Open the Quickstart setup problem form:
 

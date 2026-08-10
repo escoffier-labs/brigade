@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- Quickstart commit guidance now states that `.claude/` stays local-only except the managed `.claude/memory-handoffs/TEMPLATE.md` Claude onboarding requires tracked, cross-linking the repo-local shadow recovery from #858 without changing runtime behavior. (#860)
+
 ### Added
 - `brigade update --channel beta` installs the newest non-yanked
   `brigade-cli==0.27.0.devYYYYMMDD` wheel from PyPI into the existing

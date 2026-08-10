@@ -105,19 +105,22 @@ If the target is a git repo, commit repo-shareable source files only. Keep gener
 
 If the target is an operator workspace outside a git repo, treat the same split as a portability rule: durable memory and reviewed rules may be worth backing up or syncing, while `.brigade/` and harness projections are host-local state.
 
-Usually safe to commit:
+Usually safe to commit after review:
 
 - `AGENTS.md`
 - `MEMORY.md` and reviewed memory cards if this repo owns memory
 - `rules/`
 - `tools/`
 - public docs
+- the managed handoff template for each selected writer harness — for Claude Code, `.claude/memory-handoffs/TEMPLATE.md` (required for Claude onboarding; `verify-harness` fails readiness when a global exclude hides it); for other writers, the matching `<inbox>/TEMPLATE.md`
+
+Handoff inboxes stay local except each inbox's managed `TEMPLATE.md`, which Brigade deliberately un-ignores so the handoff format travels with the repository. Session handoff files in those folders stay ignored. A `?? .claude/` or `?? .codex/` in `git status` is usually just that template file.
 
 Usually local-only:
 
 - `.brigade/`
-- `.codex/`
-- `.claude/`
+- `.codex/` (except `.codex/memory-handoffs/TEMPLATE.md` when Codex is selected)
+- `.claude/` (except `.claude/memory-handoffs/TEMPLATE.md` when Claude Code is selected)
 - `.opencode/`
 - `.antigravity/`
 - `.pi/`

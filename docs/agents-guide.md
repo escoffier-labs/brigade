@@ -126,11 +126,14 @@ Usually safe to commit after review:
 
 - `AGENTS.md`, `MEMORY.md` and reviewed memory cards if this repo owns memory
 - `rules/`, `tools/`, public docs
+- the managed handoff template for each selected writer harness — for Claude Code, `.claude/memory-handoffs/TEMPLATE.md` (required for Claude onboarding; `verify-harness` fails readiness when a global exclude hides it); for other writers, the matching `<inbox>/TEMPLATE.md`
+
+Handoff inboxes stay local except each inbox's managed `TEMPLATE.md`. Session handoff files in those folders stay ignored.
 
 Usually local-only:
 
 - `.brigade/`
-- harness local dirs (`.codex/`, `.claude/`, `.cursor/`, `.openclaw/`, …)
+- harness local dirs (`.codex/`, `.claude/`, `.cursor/`, `.openclaw/`, …) except each selected writer's `<inbox>/TEMPLATE.md`
 - generated projections and scanner state
 
 Do not commit generated local state unless the user explicitly asks and the docs say it is repo-shareable.
