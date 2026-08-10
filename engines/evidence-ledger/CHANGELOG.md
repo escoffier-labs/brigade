@@ -8,6 +8,13 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+### Added
+
+- Engine Slice 1a memory projection: native `miseledger crawl memory <workspace>`
+  source (`brigade-memory`), qualified cross-source relation targets on
+  `miseledger.adapter.v1`, completed-scan soft tombstones scoped to memory,
+  source-local `--rebuild`, scan receipts, and doctor/status memory health.
+
 ## [0.6.0] - 2026-07-18
 
 ### Added

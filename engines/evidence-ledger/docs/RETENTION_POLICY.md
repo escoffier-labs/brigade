@@ -18,7 +18,10 @@ The default policy targets old operational noise:
 | --- | --- | --- |
 | `default-operational-noise` | `tool_call`, `command`, `progress`, `status`, `event`, and `queue-operation` items older than 90 days | Export, then delete |
 
-Messages, decisions, notes, issues, and pull requests are not matched by the default policy.
+Messages, decisions, notes, issues, pull requests, and `memory_card` projection
+items are not matched by the default policy. Generic retention must never prune
+canonical memory-card items; memory projection cleanup uses source-local rebuild
+(`miseledger crawl memory <workspace> --rebuild`) instead.
 
 ## Custom Policy
 
