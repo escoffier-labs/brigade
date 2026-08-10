@@ -15,7 +15,7 @@ import pytest
 from brigade import work_cmd
 from brigade.work_cmd import claiming as claim_mod
 
-from tests.work_cmd_test_helpers import _init_git_repo
+from tests.work_cmd_test_helpers import _accepted_plan_task_id, _init_git_repo
 
 
 def _add(target: Path, text: str, **kwargs):
@@ -452,3 +452,252 @@ def test_stale_claims_listed_by_age(tmp_path, monkeypatch):
     payload = work_cmd._stale_claim_payload(tmp_path, stale_after_hours=24)
     assert payload["stale_count"] == 1
     assert payload["stale"][0]["claim_id"] == "stale-1"
+
+
+def test_task_claim_returns_and_persists_claim_id(tmp_path, monkeypatch, capsys):
+    """#856: task claim must atomically create a CAS claim record."""
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 8, 10, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    task_id = _accepted_plan_task_id(tmp_path, capsys)
+
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="lane-a", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "in_progress"
+    assert payload["assignee"] == "lane-a"
+    assert payload["claim"]["claim_id"]
+    assert payload["claim"]["actor"] == "lane-a"
+    assert payload["claim"]["claimed_at"]
+
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    stored = next(item for item in ledger["tasks"] if item["id"] == task_id)
+    assert stored["status"] == "in_progress"
+    assert stored["claim"]["claim_id"] == payload["claim"]["claim_id"]
+    assert stored["claim"]["actor"] == "lane-a"
+
+
+def test_task_claim_enables_guarded_reassign_and_release(tmp_path, monkeypatch, capsys):
+    """#856: guarded reassign and release must recognize task-claim identity."""
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 8, 10, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    task_id = _accepted_plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id, actor="lane-a", json_output=True) == 0
+    claim_payload = json.loads(capsys.readouterr().out)
+    claim_id = claim_payload["claim"]["claim_id"]
+
+    assert (
+        work_cmd.reassign(
+            target=tmp_path,
+            task_id=task_id,
+            to_actor="lane-b",
+            claim_id=claim_id,
+            json_output=True,
+        )
+        == 0
+    )
+    reassign_payload = json.loads(capsys.readouterr().out)
+    assert reassign_payload["assignee"] == "lane-b"
+    new_claim_id = reassign_payload["claim"]["claim_id"]
+    assert new_claim_id != claim_id
+
+    assert (
+        work_cmd.release(
+            target=tmp_path,
+            task=[task_id],
+            claim_id=[new_claim_id],
+            json_output=True,
+        )
+        == 0
+    )
+    release_payload = json.loads(capsys.readouterr().out)
+    assert release_payload["released_count"] == 1
+
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    stored = next(item for item in ledger["tasks"] if item["id"] == task_id)
+    assert stored["status"] == "pending"
+    assert "claim" not in stored
+
+
+def test_task_claim_foreign_holder_rejects_without_stranding(tmp_path, monkeypatch, capsys):
+    """#856: footprint refine cannot steal a live CAS claim."""
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 8, 10, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    task_id = _accepted_plan_task_id(tmp_path, capsys)
+    assert (
+        work_cmd.claim(target=tmp_path, task_id=task_id[:12], actor="lane-a", claim_id="cas-1", json_output=True) == 0
+    )
+    capsys.readouterr()
+
+    rc = work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="lane-b", json_output=True)
+    assert rc == claim_mod.EXIT_GUARD_MISMATCH
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == claim_mod.REASON_ALREADY_CLAIMED
+    assert payload["holder"] == "lane-a"
+
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    stored = next(item for item in ledger["tasks"] if item["id"] == task_id)
+    assert stored["status"] == "in_progress"
+    assert stored["claim"]["claim_id"] == "cas-1"
+    assert stored["claim"]["actor"] == "lane-a"
+
+
+def test_task_claim_same_actor_refine_keeps_claim_id(tmp_path, monkeypatch, capsys):
+    """#856: same-actor footprint refine must not rotate claim_id."""
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 8, 10, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    task_id = _accepted_plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="lane-a", json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    first_claim_id = first["claim"]["claim_id"]
+
+    assert (
+        work_cmd.task_claim(
+            target=tmp_path,
+            task_id=task_id[:12],
+            actor="lane-a",
+            files=["src/brigade/work_cmd/claiming.py"],
+            from_plan=False,
+            json_output=True,
+        )
+        == 0
+    )
+    second = json.loads(capsys.readouterr().out)
+    assert second["claim"]["claim_id"] == first_claim_id
+
+
+def test_task_claim_blocked_task_rolls_back(tmp_path, monkeypatch, capsys):
+    """#856: failed claim must not leave in_progress without a usable claim."""
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 8, 10, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    blocker = _add(tmp_path, "Blocker")
+    blocked = _add(tmp_path, "Blocked work")
+    assert (
+        work_cmd.task_edge_add(
+            target=tmp_path,
+            edge_type="blocks",
+            source=blocker["id"],
+            target_id=blocked["id"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    rc = work_cmd.task_claim(target=tmp_path, task_id=blocked["id"], actor="lane-a", json_output=True)
+    assert rc == claim_mod.EXIT_GUARD_MISMATCH
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == claim_mod.REASON_NOT_READY
+
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    stored = next(item for item in ledger["tasks"] if item["id"] == blocked["id"])
+    assert stored["status"] == "pending"
+    assert "claim" not in stored
+
+
+def test_task_claim_text_output_includes_claim_id(tmp_path, monkeypatch, capsys):
+    """#856: text and JSON outputs must agree on claim_id."""
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 8, 10, 19, 0, 0, tzinfo=timezone.utc),
+    )
+    task_id = _accepted_plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="lane-a", json_output=True) == 0
+    json_payload = json.loads(capsys.readouterr().out)
+    claim_id = json_payload["claim"]["claim_id"]
+
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="lane-a") == 0
+    text_out = capsys.readouterr().out
+    assert f"claim_id: {claim_id}" in text_out
+    assert "status: in_progress" in text_out
+
+
+def test_task_claim_adopts_legacy_in_progress_without_actor(tmp_path, monkeypatch, capsys):
+    """#857: omitted --actor must still CAS-adopt legacy in_progress rows."""
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd.helpers,
+        "_now",
+        lambda: datetime(2026, 8, 10, 20, 0, 0, tzinfo=timezone.utc),
+    )
+    task = _add(tmp_path, "Legacy footprint-only claim")
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    for item in ledger["tasks"]:
+        if item["id"] == task["id"]:
+            item["status"] = "in_progress"
+            item["assignee"] = "lane-a"
+            item["claimed_at"] = "2026-08-10T12:00:00+00:00"
+    work_cmd._write_task_ledger(tmp_path, ledger)
+
+    assert (
+        work_cmd.task_claim(
+            target=tmp_path,
+            task_id=task["id"],
+            files=["src/brigade/work_cmd/claiming.py"],
+            from_plan=False,
+            json_output=True,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "in_progress"
+    assert payload["claim"]["claim_id"]
+    assert payload["claim"]["actor"] == "lane-a"
+
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    stored = next(item for item in ledger["tasks"] if item["id"] == task["id"])
+    assert stored["claim"]["claim_id"] == payload["claim"]["claim_id"]
+    assert stored["claim"]["actor"] == "lane-a"
+
+    claim_id = payload["claim"]["claim_id"]
+    assert (
+        work_cmd.release(
+            target=tmp_path,
+            task=[task["id"]],
+            claim_id=[claim_id],
+            json_output=True,
+        )
+        == 0
+    )
+    release_payload = json.loads(capsys.readouterr().out)
+    assert release_payload["released_count"] == 1
+
+    unassigned = _add(tmp_path, "Legacy without assignee")
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    for item in ledger["tasks"]:
+        if item["id"] == unassigned["id"]:
+            item["status"] = "in_progress"
+            item.pop("assignee", None)
+    work_cmd._write_task_ledger(tmp_path, ledger)
+
+    assert (
+        work_cmd.task_claim(
+            target=tmp_path,
+            task_id=unassigned["id"],
+            files=["src/a.py"],
+            from_plan=False,
+            json_output=True,
+        )
+        == 0
+    )
+    local_payload = json.loads(capsys.readouterr().out)
+    assert local_payload["claim"]["actor"] == "local"

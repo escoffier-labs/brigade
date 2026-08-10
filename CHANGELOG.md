@@ -207,6 +207,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   public CLI command.
 
 ### Fixed
+- `brigade work task claim` now atomically creates a CAS `claim_id` that guarded
+  reassign and release recognize, rejects foreign-holder footprint refine with
+  exit 13, and rolls back blocked claims instead of leaving `in_progress` rows
+  without a usable claim record. (#856)
 - DAG runs no longer deadlock on shared cover sets, accept mutual-wait cycles, misreport one-node execution, route to unhealthy seats, or miss shared-checkout isolation breaches. (#742, #788, #791, #794)
 - `brigade run --wait` uses a fair FIFO queue, reclaims dead or stale holders, and retries the head waiter after a failed handoff instead of starving or timing out at 600 seconds. (#781, #790)
 - Release and security checks now reject stale readiness receipts across HEAD, base-ref, or tracked-tree changes, limit release content scans to tracked files, tolerate broken external scanners, point failures to `brigade scrub`, and coalesce overlapping open security findings while preserving per-fingerprint suppression and hiding internal metadata. (#753, #756, #774, #775, #776, #793)
