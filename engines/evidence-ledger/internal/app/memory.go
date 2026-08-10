@@ -128,6 +128,14 @@ func cmdCrawlMemory(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "crawl memory: %s", err)
 	}
 
+	// Begin the scan before a rebuild detaches the live projection. This row is
+	// the durable journal that lets recovery mark a crash between detach and
+	// import as interrupted instead of silently restoring a healthy snapshot.
+	scanID, err := ingest.BeginMemoryScan(db, workspace, Version, namespace)
+	if err != nil {
+		return fatalf(errw, "crawl memory: %s", err)
+	}
+
 	detached := false
 	abortRebuild := func() {
 		if detached {
@@ -141,28 +149,11 @@ func cmdCrawlMemory(args []string, out, errw io.Writer) int {
 			receipt := &ingest.MemoryScanReceipt{
 				SourcePath: workspace, EngineVersion: Version, Namespace: namespace, Failed: 1,
 			}
-			scanID, beginErr := ingest.BeginMemoryScan(db, workspace, Version, namespace)
-			if beginErr == nil {
-				_ = ingest.FailMemoryScan(db, scanID, "failed", receipt)
-			} else {
-				_ = ingest.FailMemoryScan(db, "", "failed", receipt)
-			}
+			_ = ingest.FailMemoryScan(db, scanID, "failed", receipt)
 			return fatalf(errw, "crawl memory rebuild: %s", err)
 		}
 		detached = true
 		before = map[string]string{}
-	}
-
-	scanID, err := ingest.BeginMemoryScan(db, workspace, Version, namespace)
-	if err != nil {
-		abortRebuild()
-		if bools["rebuild"] {
-			receipt := &ingest.MemoryScanReceipt{
-				SourcePath: workspace, EngineVersion: Version, Namespace: namespace, Failed: 1,
-			}
-			_ = ingest.FailMemoryScan(db, "", "failed", receipt)
-		}
-		return fatalf(errw, "crawl memory: %s", err)
 	}
 
 	skipped, failed := 0, 0

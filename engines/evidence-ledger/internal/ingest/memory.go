@@ -465,13 +465,39 @@ where s.kind = ? and c.external_id = ?`, MemorySourceKind, backup).Scan(&backupC
 	if backupCount == 0 {
 		return tx.Commit()
 	}
+	var journalID sql.NullString
+	if err := tx.QueryRow(`select id from source_scan_runs
+where source_kind = ? and status = 'running'
+  and json_extract(metadata_json, '$.memory_namespace') = ?
+order by started_at desc limit 1`, MemorySourceKind, namespace).Scan(&journalID); err != nil && err != sql.ErrNoRows {
+		return err
+	}
 	if err := deleteMemoryNamespaceTx(tx, namespace); err != nil {
 		return err
 	}
 	if err := moveCollectionExternalID(tx, backup, namespace, true); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// A durable journal exists for current rebuilds because cmdCrawlMemory
+	// starts the scan before detaching. Older interrupted rebuilds can lack one;
+	// create an interrupted record during recovery so the restored snapshot is
+	// never reported healthy before a successful new rebuild completes.
+	scanID := journalID.String
+	if scanID == "" {
+		var err error
+		scanID, err = BeginMemoryScan(db, "", "", namespace)
+		if err != nil {
+			return err
+		}
+	}
+	return FailMemoryScan(db, scanID, "interrupted", &MemoryScanReceipt{
+		SourceKind: MemorySourceKind,
+		Namespace:  namespace,
+		Failed:     1,
+	})
 }
 
 // DetachMemoryNamespace moves the live namespace collection to a backup
@@ -719,8 +745,19 @@ func deleteItemGraph(tx *sql.Tx, itemID string) error {
 func repointBackupItemRelations(tx *sql.Tx, namespace string) error {
 	rows, err := tx.Query(`select id, target_item_id, target_external_id from relations
 where target_item_id like ? and target_source_kind = ?
-  and (target_collection_external_id = ? or coalesce(target_collection_external_id, '') = '')`,
-		memoryItemBackupPrefix+"%", MemorySourceKind, namespace)
+  and (target_collection_external_id = ? or (
+    coalesce(target_collection_external_id, '') = ''
+    and 1 = (
+      select count(*)
+      from items candidate
+      join sources cs on cs.id = candidate.source_id
+      join collections cc on cc.id = candidate.collection_id
+      where cs.kind = ?
+        and candidate.external_id = relations.target_external_id
+        and candidate.tombstoned_at is null
+        and cc.external_id not like ?
+    )
+  ))`, memoryItemBackupPrefix+"%", MemorySourceKind, namespace, MemorySourceKind, memoryBackupPrefix+"%")
 	if err != nil {
 		return err
 	}
@@ -860,32 +897,20 @@ func CollectMemoryHealth(db *sql.DB, engineVersion, namespace string) (MemoryHea
 		Status:          "absent",
 	}
 	scoped := namespace
+	if scoped == "" {
+		return collectAggregateMemoryHealth(db, &h)
+	}
 	var scanID, status string
 	var completed sql.NullString
 	var stale, canonical, live, divergence, unresolved, malformed int
 	var err error
-	if scoped != "" {
-		err = db.QueryRow(`select id, status, completed_at, stale, canonical_count, live_count,
+	err = db.QueryRow(`select id, status, completed_at, stale, canonical_count, live_count,
   hash_divergence_count, unresolved_relation_count, malformed_skipped_count
 from source_scan_runs
 where source_kind = ? and json_extract(metadata_json, '$.memory_namespace') = ?
 order by started_at desc limit 1`, MemorySourceKind, scoped).Scan(
-			&scanID, &status, &completed, &stale, &canonical, &live, &divergence, &unresolved, &malformed)
-	} else {
-		err = db.QueryRow(`select id, status, completed_at, stale, canonical_count, live_count,
-  hash_divergence_count, unresolved_relation_count, malformed_skipped_count
-from source_scan_runs
-where source_kind = ?
-order by started_at desc limit 1`, MemorySourceKind).Scan(
-			&scanID, &status, &completed, &stale, &canonical, &live, &divergence, &unresolved, &malformed)
-	}
+		&scanID, &status, &completed, &stale, &canonical, &live, &divergence, &unresolved, &malformed)
 	if err == sql.ErrNoRows {
-		// Still surface live dual-read aggregates when cards exist without scans.
-		if scoped == "" {
-			if aggErr := refreshAggregateMemoryHealth(db, &h); aggErr != nil {
-				return h, aggErr
-			}
-		}
 		return h, nil
 	}
 	if err != nil {
@@ -899,26 +924,15 @@ order by started_at desc limit 1`, MemorySourceKind).Scan(
 	h.HashDivergence = divergence
 	h.UnresolvedRelations = unresolved
 	h.MalformedSkipped = malformed
-	if scoped == "" {
-		if err := refreshAggregateMemoryScanHealth(db, &h); err != nil {
-			return h, err
-		}
-	}
 	if status == "completed" && completed.Valid {
 		h.LastCompletedScanID = scanID
 		h.LastCompletedAt = &completed.String
 	} else {
 		var lastID string
 		var lastAt sql.NullString
-		if scoped != "" {
-			_ = db.QueryRow(`select id, completed_at from source_scan_runs
+		_ = db.QueryRow(`select id, completed_at from source_scan_runs
 where source_kind = ? and status = 'completed' and json_extract(metadata_json, '$.memory_namespace') = ?
 order by completed_at desc limit 1`, MemorySourceKind, scoped).Scan(&lastID, &lastAt)
-		} else {
-			_ = db.QueryRow(`select id, completed_at from source_scan_runs
-where source_kind = ? and status = 'completed'
-order by completed_at desc limit 1`, MemorySourceKind).Scan(&lastID, &lastAt)
-		}
 		h.LastCompletedScanID = lastID
 		if lastAt.Valid {
 			h.LastCompletedAt = &lastAt.String
@@ -930,34 +944,27 @@ order by completed_at desc limit 1`, MemorySourceKind).Scan(&lastID, &lastAt)
 		return h, err
 	}
 	defer tx.Rollback()
-	if scoped != "" {
-		liveMap, err := liveMemoryExternalIDs(tx, scoped)
-		if err != nil {
-			return h, err
-		}
-		h.LiveCount = len(liveMap)
-		unresolved, err = memoryUnresolvedRelationCount(tx, scoped)
-		if err != nil {
-			return h, err
-		}
-		h.UnresolvedRelations = unresolved
-		return h, nil
-	}
-	liveCount, unresolvedCount, err := aggregateLiveMemoryHealth(tx)
+	liveMap, err := liveMemoryExternalIDs(tx, scoped)
 	if err != nil {
 		return h, err
 	}
-	h.LiveCount = liveCount
-	h.UnresolvedRelations = unresolvedCount
-	h.MemoryNamespace = ""
+	h.LiveCount = len(liveMap)
+	unresolved, err = memoryUnresolvedRelationCount(tx, scoped)
+	if err != nil {
+		return h, err
+	}
+	h.UnresolvedRelations = unresolved
 	return h, nil
 }
 
-// refreshAggregateMemoryScanHealth folds the latest scan state from every
-// memory namespace into empty-namespace doctor/status health. A newer healthy
-// namespace must not conceal a failed or stale scan in another namespace.
-func refreshAggregateMemoryScanHealth(db *sql.DB, h *MemoryHealth) error {
-	rows, err := db.Query(`
+// collectAggregateMemoryHealth folds independently scoped projections for
+// empty-namespace status and doctor views. Count fields come from each
+// namespace's latest completed scan; status, stale, and partial come from each
+// namespace's latest scan so a newer interrupted scan cannot be hidden by a
+// healthy completion elsewhere. Status uses failed > interrupted > running >
+// completed > absent, and LastCompletedAt/ID come from the newest completion.
+func collectAggregateMemoryHealth(db *sql.DB, h *MemoryHealth) (MemoryHealth, error) {
+	states, err := db.Query(`
 select status, stale from source_scan_runs current
 where source_kind = ?
   and not exists (
@@ -969,70 +976,122 @@ where source_kind = ?
            (newer.started_at = current.started_at and newer.id > current.id))
   )`, MemorySourceKind)
 	if err != nil {
-		return err
+		return *h, err
 	}
-	defer rows.Close()
-	for rows.Next() {
+	defer states.Close()
+	for states.Next() {
 		var status string
 		var stale int
-		if err := rows.Scan(&status, &stale); err != nil {
-			return err
+		if err := states.Scan(&status, &stale); err != nil {
+			return *h, err
 		}
-		if stale != 0 || status != "completed" {
-			h.Stale = true
+		if memoryHealthStatusRank(status) > memoryHealthStatusRank(h.Status) {
+			h.Status = status
 		}
-		if status != "completed" {
-			h.Partial = true
+		h.Stale = h.Stale || stale != 0 || status != "completed"
+		h.Partial = h.Partial || status != "completed"
+	}
+	if err := states.Err(); err != nil {
+		return *h, err
+	}
+
+	completed, err := db.Query(`
+select id, completed_at, canonical_count, live_count, hash_divergence_count,
+  unresolved_relation_count, malformed_skipped_count
+from source_scan_runs current
+where source_kind = ? and status = 'completed' and completed_at is not null
+  and not exists (
+    select 1 from source_scan_runs newer
+    where newer.source_kind = current.source_kind and newer.status = 'completed'
+      and coalesce(json_extract(newer.metadata_json, '$.memory_namespace'), '') =
+          coalesce(json_extract(current.metadata_json, '$.memory_namespace'), '')
+      and (newer.completed_at > current.completed_at or
+           (newer.completed_at = current.completed_at and newer.id > current.id))
+  )`, MemorySourceKind)
+	if err != nil {
+		return *h, err
+	}
+	defer completed.Close()
+	var newestAt string
+	for completed.Next() {
+		var id, at string
+		var canonical, live, divergence, unresolved, malformed int
+		if err := completed.Scan(&id, &at, &canonical, &live, &divergence, &unresolved, &malformed); err != nil {
+			return *h, err
+		}
+		h.CanonicalCount += canonical
+		h.LiveCount += live
+		h.HashDivergence += divergence
+		h.UnresolvedRelations += unresolved
+		h.MalformedSkipped += malformed
+		if at > newestAt {
+			newestAt = at
+			h.LastCompletedScanID = id
 		}
 	}
-	return rows.Err()
+	if err := completed.Err(); err != nil {
+		return *h, err
+	}
+	if newestAt != "" {
+		h.LastCompletedAt = &newestAt
+	}
+	// Legacy memory:cards rows can predate scan receipts. Preserve the
+	// documented empty-namespace dual-read without double-counting collections
+	// represented by a completed scan above.
+	legacyLive, legacyUnresolved, err := aggregateUnscannedMemoryHealth(db)
+	if err != nil {
+		return *h, err
+	}
+	h.LiveCount += legacyLive
+	h.UnresolvedRelations += legacyUnresolved
+	if h.Status == "absent" && legacyLive > 0 {
+		h.Status = "present"
+	}
+	return *h, nil
 }
 
-func refreshAggregateMemoryHealth(db *sql.DB, h *MemoryHealth) error {
+func memoryHealthStatusRank(status string) int {
+	switch status {
+	case "failed":
+		return 4
+	case "interrupted":
+		return 3
+	case "running":
+		return 2
+	case "completed":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func aggregateUnscannedMemoryHealth(db *sql.DB) (liveCount, unresolvedCount int, err error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	defer tx.Rollback()
-	liveCount, unresolvedCount, err := aggregateLiveMemoryHealth(tx)
-	if err != nil {
-		return err
-	}
-	if liveCount > 0 {
-		h.LiveCount = liveCount
-		h.UnresolvedRelations = unresolvedCount
-		if h.Status == "absent" {
-			h.Status = "present"
-		}
-	}
-	return nil
-}
-
-func aggregateLiveMemoryHealth(tx *sql.Tx) (liveCount, unresolvedCount int, err error) {
 	rows, err := tx.Query(`
 select c.external_id
 from collections c
 join sources s on s.id = c.source_id
 where s.kind = ?
   and c.kind = 'memory_cards'
-  and c.external_id not like ?`, MemorySourceKind, memoryBackupPrefix+"%")
+  and c.external_id not like ?
+  and not exists (
+    select 1 from source_scan_runs scan
+    where scan.source_kind = ? and scan.status = 'completed'
+      and coalesce(json_extract(scan.metadata_json, '$.memory_namespace'), '') = c.external_id
+  )`, MemorySourceKind, memoryBackupPrefix+"%", MemorySourceKind)
 	if err != nil {
 		return 0, 0, err
 	}
-	var collections []string
+	defer rows.Close()
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+		var collection string
+		if err := rows.Scan(&collection); err != nil {
 			return 0, 0, err
 		}
-		collections = append(collections, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return 0, 0, err
-	}
-	for _, collection := range collections {
 		live, err := liveMemoryExternalIDs(tx, collection)
 		if err != nil {
 			return 0, 0, err
@@ -1044,7 +1103,7 @@ where s.kind = ?
 		}
 		unresolvedCount += unresolved
 	}
-	return liveCount, unresolvedCount, nil
+	return liveCount, unresolvedCount, rows.Err()
 }
 
 // ClassifyMemoryOutcomes compares pre-import live hashes to observed cards.

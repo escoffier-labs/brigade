@@ -298,6 +298,16 @@ set target_item_id = (
     and (relations.target_collection_external_id is null
          or relations.target_collection_external_id = ''
          or tc.external_id = relations.target_collection_external_id)
+    and (coalesce(relations.target_collection_external_id, '') != ''
+         or 1 = (
+           select count(*)
+           from items candidate
+           join sources cs on cs.id = candidate.source_id
+           left join collections cc on cc.id = candidate.collection_id
+           where cs.kind = relations.target_source_kind
+             and candidate.external_id = relations.target_external_id
+             and candidate.tombstoned_at is null
+         ))
     and target.tombstoned_at is null
   order by target.created_at, target.id
   limit 1
@@ -315,6 +325,16 @@ where target_item_id is null
       and (relations.target_collection_external_id is null
            or relations.target_collection_external_id = ''
            or tc.external_id = relations.target_collection_external_id)
+      and (coalesce(relations.target_collection_external_id, '') != ''
+           or 1 = (
+             select count(*)
+             from items candidate
+             join sources cs on cs.id = candidate.source_id
+             left join collections cc on cc.id = candidate.collection_id
+             where cs.kind = relations.target_source_kind
+               and candidate.external_id = relations.target_external_id
+               and candidate.tombstoned_at is null
+           ))
       and target.tombstoned_at is null
   )`)
 	if err != nil {

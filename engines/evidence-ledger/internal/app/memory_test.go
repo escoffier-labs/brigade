@@ -822,14 +822,33 @@ func TestCollectMemoryHealthEmptyAggregatesAllCollections(t *testing.T) {
 			"card-aaaaaaa0-1111-4222-8333-444444444444",
 			"card-bbbbbbb0-1111-4222-8333-444444444444",
 		}[i]
-		body := "---\nid: " + cardID + "\ntopic: t\n---\n\n# Card\n"
+		body := "---\nid: " + cardID + "\ntopic: t\n"
+		if i == 0 {
+			body += "supported_by: missing\nsupported_by_target_source: brigade-memory\n"
+		}
+		body += "---\n\n# Card\n"
 		if err := os.WriteFile(filepath.Join(cards, "card.md"), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
+		}
+		if i == 1 {
+			if err := os.WriteFile(filepath.Join(cards, "second.md"), []byte("---\nid: card-ccccccc0-1111-4222-8333-444444444444\ntopic: t\n---\n\n# Second\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
 		runJSON(t, "crawl", "memory", ws, "--json")
 	}
 	db := openTestDB(t)
 	defer db.Close()
+	if _, err := db.Exec(`update source_scan_runs set canonical_count = ?, hash_divergence_count = ?, malformed_skipped_count = ?, completed_at = ?
+where source_kind = ? and json_extract(metadata_json, '$.memory_namespace') = ?`,
+		4, 3, 2, "2026-01-01T00:00:00Z", ingest.MemorySourceKind, nsA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update source_scan_runs set canonical_count = ?, hash_divergence_count = ?, malformed_skipped_count = ?, completed_at = ?
+where source_kind = ? and json_extract(metadata_json, '$.memory_namespace') = ?`,
+		7, 5, 6, "2026-01-02T00:00:00Z", ingest.MemorySourceKind, nsB); err != nil {
+		t.Fatal(err)
+	}
 	agg, err := ingest.CollectMemoryHealth(db, Version, "")
 	if err != nil {
 		t.Fatal(err)
@@ -842,7 +861,7 @@ func TestCollectMemoryHealthEmptyAggregatesAllCollections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.LiveCount != 1 || b.LiveCount != 1 {
+	if a.LiveCount != 1 || b.LiveCount != 2 {
 		t.Fatalf("scoped live A=%d B=%d", a.LiveCount, b.LiveCount)
 	}
 	if agg.LiveCount != a.LiveCount+b.LiveCount {
@@ -850,6 +869,15 @@ func TestCollectMemoryHealthEmptyAggregatesAllCollections(t *testing.T) {
 	}
 	if a.MemoryNamespace != nsA || b.MemoryNamespace != nsB {
 		t.Fatalf("scoped namespaces A=%q B=%q", a.MemoryNamespace, b.MemoryNamespace)
+	}
+	if agg.CanonicalCount != a.CanonicalCount+b.CanonicalCount || agg.HashDivergence != a.HashDivergence+b.HashDivergence || agg.MalformedSkipped != a.MalformedSkipped+b.MalformedSkipped || agg.UnresolvedRelations != a.UnresolvedRelations+b.UnresolvedRelations {
+		t.Fatalf("aggregate scan fields = %+v; scoped A=%+v B=%+v", agg, a, b)
+	}
+	if agg.Status != "completed" || agg.Stale || agg.Partial {
+		t.Fatalf("aggregate completed health = %+v", agg)
+	}
+	if agg.LastCompletedScanID != b.LastCompletedScanID || agg.LastCompletedAt == nil || *agg.LastCompletedAt != "2026-01-02T00:00:00Z" {
+		t.Fatalf("aggregate completion = id %q at %v; want newest namespace B completion", agg.LastCompletedScanID, agg.LastCompletedAt)
 	}
 }
 
@@ -1003,6 +1031,105 @@ where target_item_id = ? and target_source_kind = ? and target_collection_extern
 	}
 	if inbound != 1 {
 		t.Fatalf("changed-content rebuild lost or mispointed unscoped inbound relation: target=%q count=%d", liveID, inbound)
+	}
+}
+
+func TestCrawlMemoryRebuildDoesNotRepointAmbiguousUnscopedRelationAcrossNamespaces(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	const sharedID = "card-ambiguous-1111-4222-8333-444444444444"
+	nsA := "memory-11111111-2222-4333-8444-aaaaaaaaaaaa"
+	nsB := "memory-99999999-8888-4777-8666-bbbbbbbbbbbb"
+	workspaces := make([]string, 0, 2)
+	for _, ns := range []string{nsA, nsB} {
+		ws := t.TempDir()
+		writeTestNamespace(t, ws, ns)
+		cards := filepath.Join(ws, "memory", "cards")
+		if err := os.MkdirAll(cards, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cards, "shared.md"), []byte("---\nid: "+sharedID+"\ntopic: shared\n---\n\n# Initial "+ns+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runJSON(t, "crawl", "memory", ws, "--json")
+		workspaces = append(workspaces, ws)
+	}
+	supportPath := filepath.Join(t.TempDir(), "support.jsonl")
+	supportJSONL := `{"schema":"miseledger.adapter.v1","source":{"kind":"brigade","name":"Brigade"},"collection":{"external_id":"brigade:receipts","kind":"brigade_receipt","name":"receipts"},"item":{"external_id":"receipt:ambiguous-rebuild","kind":"receipt","created_at":"2026-01-01T00:00:00Z","text":"support"},"relations":[{"type":"supports","target":{"source":"brigade-memory","external_id":"` + sharedID + `"}}],"raw":{"format":"json","path":"r.json","ordinal":1}}` + "\n"
+	if err := os.WriteFile(supportPath, []byte(supportJSONL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", supportPath, "--json")
+
+	changedPath := filepath.Join(workspaces[0], "memory", "cards", "shared.md")
+	if err := os.WriteFile(changedPath, []byte("---\nid: "+sharedID+"\ntopic: shared\n---\n\n# Changed A\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runJSON(t, "crawl", "memory", workspaces[0], "--rebuild", "--json")
+
+	db := openTestDB(t)
+	defer db.Close()
+	var target sql.NullString
+	if err := db.QueryRow(`select target_item_id from relations where relation_type = 'supports'`).Scan(&target); err != nil {
+		t.Fatal(err)
+	}
+	if target.Valid && target.String != "" {
+		t.Fatalf("ambiguous unscoped rebuild relation repointed to %q", target.String)
+	}
+}
+
+func TestRecoverMemoryRebuildAfterDetachMarksJournalInterrupted(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	ws := t.TempDir()
+	writeTestNamespace(t, ws, testMemoryNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const cardID = "card-recover0-1111-4222-8333-444444444444"
+	if err := os.WriteFile(filepath.Join(cards, "card.md"), []byte("---\nid: "+cardID+"\ntopic: recover\n---\n\n# Keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runJSON(t, "crawl", "memory", ws, "--json")
+
+	db := openTestDB(t)
+	journalID, err := ingest.BeginMemoryScan(db, ws, Version, testMemoryNamespace)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := ingest.DetachMemoryNamespace(db, testMemoryNamespace); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close() // Simulate process death after detach and before the next rebuild step.
+
+	db = openTestDB(t)
+	defer db.Close()
+	if err := ingest.RecoverMemoryRebuildState(db, testMemoryNamespace); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := ingest.LiveMemoryProjection(db, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection[cardID] == "" {
+		t.Fatalf("recovery did not restore %q: %v", cardID, projection)
+	}
+	var status string
+	if err := db.QueryRow(`select status from source_scan_runs where id = ?`, journalID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "interrupted" {
+		t.Fatalf("rebuild recovery journal status = %q; want interrupted", status)
+	}
+	health, err := ingest.CollectMemoryHealth(db, Version, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !health.Stale || !health.Partial || health.Status != "interrupted" {
+		t.Fatalf("recovered rebuild health = %+v", health)
 	}
 }
 
