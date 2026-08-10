@@ -287,6 +287,9 @@ func BackfillRelations(db *sql.DB) (int64, error) {
 func resolveRelations(tx *sql.Tx) (int64, error) {
 	// Qualified targets (target_source_kind set) resolve across sources using
 	// source.kind + optional collection.external_id + item.external_id.
+	// Always select the latest non-tombstoned version for that identity so an
+	// edit that mints a new content-addressed item id repoints existing edges.
+	const backupCollectionLike = "__miseledger_memory_backup__:%"
 	qualified, err := tx.Exec(`update relations
 set target_item_id = (
   select target.id
@@ -312,11 +315,10 @@ set target_item_id = (
              and coalesce(cc.external_id, '') not like ?
          ))
     and target.tombstoned_at is null
-  order by target.created_at, target.id
+  order by target.created_at desc, target.id desc
   limit 1
 )
-where target_item_id is null
-  and coalesce(target_source_kind, '') != ''
+where coalesce(target_source_kind, '') != ''
   and coalesce(target_external_id, '') != ''
   and exists (
     select 1
@@ -342,7 +344,37 @@ where target_item_id is null
                and coalesce(cc.external_id, '') not like ?
            ))
       and target.tombstoned_at is null
-  )`, "__miseledger_memory_backup__:%", "__miseledger_memory_backup__:%", "__miseledger_memory_backup__:%", "__miseledger_memory_backup__:%")
+  )
+  and (
+    target_item_id is null
+    or target_item_id != (
+      select target.id
+      from items target
+      join sources ts on ts.id = target.source_id
+      left join collections tc on tc.id = target.collection_id
+      where ts.kind = relations.target_source_kind
+        and target.external_id = relations.target_external_id
+        and (relations.target_collection_external_id is null
+             or relations.target_collection_external_id = ''
+             or tc.external_id = relations.target_collection_external_id)
+        and (coalesce(relations.target_collection_external_id, '') != ''
+             or coalesce(tc.external_id, '') not like ?)
+        and (coalesce(relations.target_collection_external_id, '') != ''
+             or 1 = (
+               select count(*)
+               from items candidate
+               join sources cs on cs.id = candidate.source_id
+               left join collections cc on cc.id = candidate.collection_id
+               where cs.kind = relations.target_source_kind
+                 and candidate.external_id = relations.target_external_id
+                 and candidate.tombstoned_at is null
+                 and coalesce(cc.external_id, '') not like ?
+             ))
+        and target.tombstoned_at is null
+      order by target.created_at desc, target.id desc
+      limit 1
+    )
+  )`, backupCollectionLike, backupCollectionLike, backupCollectionLike, backupCollectionLike, backupCollectionLike, backupCollectionLike)
 	if err != nil {
 		return 0, err
 	}
@@ -350,6 +382,8 @@ where target_item_id is null
 
 	// Legacy same-source resolution: target_external_id only, matching the
 	// source item's source_id. Preserves pre-Slice-1a adapter compatibility.
+	// Memory cards stay collection-scoped so cross-namespace same-id edges do
+	// not collide; always prefer the latest non-tombstoned version.
 	legacy, err := tx.Exec(`update relations
 set target_item_id = (
   select target.id
@@ -359,11 +393,10 @@ set target_item_id = (
   where source.id = relations.source_item_id
     and (source_kind.kind != ? or target.collection_id = source.collection_id)
     and target.tombstoned_at is null
-  order by target.created_at, target.id
+  order by target.created_at desc, target.id desc
   limit 1
 )
-where target_item_id is null
-  and coalesce(target_source_kind, '') = ''
+where coalesce(target_source_kind, '') = ''
   and target_external_id is not null
   and target_external_id != ''
   and exists (
@@ -374,7 +407,21 @@ where target_item_id is null
     where source.id = relations.source_item_id
       and (source_kind.kind != ? or target.collection_id = source.collection_id)
       and target.tombstoned_at is null
-  )`, MemorySourceKind, MemorySourceKind)
+  )
+  and (
+    target_item_id is null
+    or target_item_id != (
+      select target.id
+      from items source
+      join sources source_kind on source_kind.id = source.source_id
+      join items target on target.source_id = source.source_id and target.external_id = relations.target_external_id
+      where source.id = relations.source_item_id
+        and (source_kind.kind != ? or target.collection_id = source.collection_id)
+        and target.tombstoned_at is null
+      order by target.created_at desc, target.id desc
+      limit 1
+    )
+  )`, MemorySourceKind, MemorySourceKind, MemorySourceKind)
 	if err != nil {
 		return 0, err
 	}

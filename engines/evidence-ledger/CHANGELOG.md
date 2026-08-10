@@ -24,8 +24,9 @@ Releases before this changelog was started are on the [releases page](https://gi
   artifacts, post-resolution `unresolved_relations`, #724 content fingerprint
   for duplicate detection only, duplicate explicit-id fail-closed, empty-
   namespace status/doctor dual-read across all `brigade-memory` collections,
-  and legacy `memory:cards` scoped-rebuild (never tombstoned by namespaced
-  crawl).
+  legacy `memory:cards` scoped-rebuild (never tombstoned by namespaced
+  crawl), and latest-version selection for relation resolution plus live
+  health after content-addressed card edits.
 
 ## [0.6.0] - 2026-07-18
 

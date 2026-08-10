@@ -163,6 +163,10 @@ Completed-scan reconciliation:
 
 - Only a completed memory scan may soft-tombstone missing cards, and only within
   the active namespace collection.
+- Live identity for a card is the latest non-tombstoned item for
+  `(source, collection, external_id)`. Content-addressed edits mint a new item
+  id; relation resolution and live/unresolved health select that latest version
+  (including re-pointing previously resolved inbound edges).
 - Failed or interrupted scans tombstone nothing and mark the prior completed
   snapshot for that namespace stale.
 - `--rebuild` validates/walks first, then detaches the live namespace collection

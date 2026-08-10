@@ -854,6 +854,113 @@ func TestLegacyMemoryCardsScopedRebuildRule(t *testing.T) {
 	}
 }
 
+func TestCrawlMemoryEditRepointsInboundRelationsToLatestVersion(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	ws := t.TempDir()
+	writeTestNamespace(t, ws, testMemoryNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cardID := "card-edit0000-1111-4222-8333-444444444444"
+	cardPath := filepath.Join(cards, "edit.md")
+	if err := os.WriteFile(cardPath, []byte("---\nid: "+cardID+"\ntopic: edit\n---\n\n# Original\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runJSON(t, "crawl", "memory", ws, "--json")
+
+	db := openTestDB(t)
+	var v1ID, v1Hash string
+	if err := db.QueryRow(`
+select i.id, i.content_hash from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
+order by i.created_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v1ID, &v1Hash); err != nil {
+		t.Fatal(err)
+	}
+	supportJSONL := `{"schema":"miseledger.adapter.v1","source":{"kind":"brigade","name":"Brigade"},"collection":{"external_id":"brigade:receipts","kind":"brigade_receipt","name":"receipts"},"item":{"external_id":"receipt:edit-support","kind":"receipt","created_at":"2026-01-01T00:00:00Z","text":"support"},"relations":[{"type":"supports","target":{"source":"brigade-memory","collection":"` + testMemoryNamespace + `","external_id":"` + cardID + `"}}],"raw":{"format":"json","path":"r.json","ordinal":1}}` + "\n"
+	db.Close()
+	supportPath := filepath.Join(t.TempDir(), "support.jsonl")
+	if err := os.WriteFile(supportPath, []byte(supportJSONL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", supportPath, "--json")
+
+	db = openTestDB(t)
+	var inboundTarget string
+	if err := db.QueryRow(`select target_item_id from relations where target_external_id = ? and target_source_kind = ?`,
+		cardID, ingest.MemorySourceKind).Scan(&inboundTarget); err != nil {
+		t.Fatal(err)
+	}
+	if inboundTarget != v1ID {
+		t.Fatalf("inbound should resolve to v1=%s, got %s", v1ID, inboundTarget)
+	}
+	db.Close()
+
+	// Non-rebuild edit: content-addressed import creates a second item id while
+	// the prior version stays untombstoned (same external id still observed).
+	if err := os.WriteFile(cardPath, []byte("---\nid: "+cardID+"\ntopic: edit\n---\n\n# Edited body\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	edited := runJSON(t, "crawl", "memory", ws, "--json")
+	if edited["updated"].(float64) < 1 {
+		t.Fatalf("expected non-rebuild update: %v", edited)
+	}
+
+	db = openTestDB(t)
+	defer db.Close()
+	var versionCount int
+	if err := db.QueryRow(`
+select count(*) from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&versionCount); err != nil {
+		t.Fatal(err)
+	}
+	if versionCount < 2 {
+		t.Fatalf("expected prior+latest content-addressed versions, got %d", versionCount)
+	}
+	var v2ID, v2Hash string
+	if err := db.QueryRow(`
+select i.id, i.content_hash from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
+order by i.created_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v2ID, &v2Hash); err != nil {
+		t.Fatal(err)
+	}
+	if v2ID == v1ID || v2Hash == v1Hash {
+		t.Fatalf("edit must mint a new content-addressed item id/hash (v1=%s/%s v2=%s/%s)", v1ID, v1Hash, v2ID, v2Hash)
+	}
+	if err := db.QueryRow(`select target_item_id from relations where target_external_id = ? and target_source_kind = ?`,
+		cardID, ingest.MemorySourceKind).Scan(&inboundTarget); err != nil {
+		t.Fatal(err)
+	}
+	if inboundTarget != v2ID {
+		t.Fatalf("inbound relation must repoint to latest version %s, still on %s", v2ID, inboundTarget)
+	}
+	live, err := ingest.LiveMemoryProjection(db, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live[cardID] != v2Hash {
+		t.Fatalf("live health hash for %s = %q want latest %q", cardID, live[cardID], v2Hash)
+	}
+	health, err := ingest.CollectMemoryHealth(db, Version, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.LiveCount != 1 {
+		t.Fatalf("live_count should count latest external ids once, got %d", health.LiveCount)
+	}
+	if health.UnresolvedRelations != 0 {
+		t.Fatalf("resolved inbound must not leave unresolved_relations=%d", health.UnresolvedRelations)
+	}
+}
+
 func TestCollectMemoryHealthEmptyAggregatesAllCollections(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
