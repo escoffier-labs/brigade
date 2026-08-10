@@ -954,6 +954,58 @@ where target_item_id = ? and target_source_kind = ? and target_collection_extern
 	}
 }
 
+func TestCrawlMemoryRebuildRepointsInboundRelationWithoutTargetCollection(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	ws := t.TempDir()
+	writeTestNamespace(t, ws, testMemoryNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cardID := "card-unscoped111-1111-4222-8333-444444444444"
+	cardPath := filepath.Join(cards, "card.md")
+	initial := "---\nid: " + cardID + "\ntopic: rebuild\n---\n\n# Initial\n"
+	if err := os.WriteFile(cardPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runJSON(t, "crawl", "memory", ws, "--json")
+
+	// The adapter contract permits a source-qualified target without a collection.
+	supportJSONL := `{"schema":"miseledger.adapter.v1","source":{"kind":"brigade","name":"Brigade"},"collection":{"external_id":"brigade:receipts","kind":"brigade_receipt","name":"receipts"},"item":{"external_id":"receipt:unscoped-rebuild","kind":"receipt","created_at":"2026-01-01T00:00:00Z","text":"support"},"relations":[{"type":"supports","target":{"source":"brigade-memory","external_id":"` + cardID + `"}}],"raw":{"format":"json","path":"r.json","ordinal":1}}` + "\n"
+	supportPath := filepath.Join(t.TempDir(), "support.jsonl")
+	if err := os.WriteFile(supportPath, []byte(supportJSONL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", supportPath, "--json")
+
+	changed := "---\nid: " + cardID + "\ntopic: rebuild\n---\n\n# Changed\n"
+	if err := os.WriteFile(cardPath, []byte(changed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runJSON(t, "crawl", "memory", ws, "--rebuild", "--json")
+
+	db := openTestDB(t)
+	defer db.Close()
+	var liveID string
+	if err := db.QueryRow(`select i.id from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&liveID); err != nil {
+		t.Fatal(err)
+	}
+	var inbound int
+	if err := db.QueryRow(`select count(*) from relations
+where target_item_id = ? and target_source_kind = ? and target_collection_external_id is null and target_external_id = ?`,
+		liveID, ingest.MemorySourceKind, cardID).Scan(&inbound); err != nil {
+		t.Fatal(err)
+	}
+	if inbound != 1 {
+		t.Fatalf("changed-content rebuild lost or mispointed unscoped inbound relation: target=%q count=%d", liveID, inbound)
+	}
+}
+
 func TestRebuildFailureAfterDetachPreservesProjectionGraph(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")

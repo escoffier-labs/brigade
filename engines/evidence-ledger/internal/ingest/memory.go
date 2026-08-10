@@ -718,7 +718,8 @@ func deleteItemGraph(tx *sql.Tx, itemID string) error {
 
 func repointBackupItemRelations(tx *sql.Tx, namespace string) error {
 	rows, err := tx.Query(`select id, target_item_id, target_external_id from relations
-where target_item_id like ? and target_source_kind = ? and target_collection_external_id = ?`,
+where target_item_id like ? and target_source_kind = ?
+  and (target_collection_external_id = ? or coalesce(target_collection_external_id, '') = '')`,
 		memoryItemBackupPrefix+"%", MemorySourceKind, namespace)
 	if err != nil {
 		return err
