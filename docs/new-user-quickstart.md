@@ -147,6 +147,38 @@ brigade skills doctor --target ./my-repo --json
 brigade security scan --target ./my-repo --fail-on none --json
 ```
 
+### Claude handoff template hidden by a global Git exclude
+
+If Claude verification reports `ready: no` with `handoff_template_shadowed`, a
+global `core.excludesFile` rule such as `.claude/` is hiding the managed
+handoff template. Brigade does not edit global Git configuration. Diagnose with
+the exact recovery command from verify-harness or quickstart `next_commands`:
+
+```bash
+git check-ignore -v .claude/memory-handoffs/TEMPLATE.md
+```
+
+Then add narrow repo-local un-ignore rules to the target `.gitignore` (keep them
+outside the managed Brigade block so re-init does not drop them):
+
+```gitignore
+!.claude/
+.claude/*
+!.claude/memory-handoffs/
+.claude/memory-handoffs/*
+!.claude/memory-handoffs/TEMPLATE.md
+```
+
+Re-run `git check-ignore -v .claude/memory-handoffs/TEMPLATE.md` until it no
+longer reports the template as ignored, then:
+
+```bash
+brigade operator verify-harness --target ./my-repo --harness claude
+```
+
+Codex-only onboarding keeps its warning-only contract: a shadowed Codex
+template stays an advisory warning and does not block readiness.
+
 Open a quickstart issue here:
 
 ```text

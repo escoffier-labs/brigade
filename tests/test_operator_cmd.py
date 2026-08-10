@@ -1610,10 +1610,63 @@ def test_verify_harness_warns_when_inbox_template_shadowed_by_external_ignore(tm
     shadow = [c for c in payload["checks"] if c["name"] == "handoff_template_shadowed"]
     assert shadow and shadow[0]["status"] == "warn"
     assert "shadow" in shadow[0]["detail"] or "global" in shadow[0]["detail"]
-    # A portability advisory must not flip readiness: warns inform, fails block.
+    # Codex keeps the warning-only contract: warns inform, fails block.
     assert payload["ready"] is True
     assert payload["issue_count"] == 0
     assert payload["warning_count"] >= 1
+
+
+def test_claude_handoff_template_shadowed_by_core_excludes_file_blocks_readiness(tmp_path, capsys, monkeypatch):
+    """Global core.excludesFile hiding .claude/ must block Claude readiness (#855).
+
+    Uses an isolated GIT_CONFIG_GLOBAL so the worker's real excludesFile is never
+    read or mutated.
+    """
+    import os
+    import subprocess
+
+    excludes = tmp_path / "isolated-excludes"
+    excludes.write_text(".claude/\n")
+    gitconfig = tmp_path / "isolated-gitconfig"
+    gitconfig.write_text(f"[core]\n\texcludesFile = {excludes}\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+
+    # Codex-only onboarding stays unchanged under a .claude/ exclude.
+    assert cli.main(["operator", "quickstart", "--target", str(repo), "--harnesses", "codex", "--json"]) == 0
+    codex_qs = json.loads(capsys.readouterr().out)
+    assert codex_qs["status"] == "ok"
+
+    # Re-run with Claude selected: quickstart must not report ok while the
+    # managed Claude handoff template remains hidden from Git.
+    qs_rc = cli.main(["operator", "quickstart", "--target", str(repo), "--harnesses", "codex,claude", "--json"])
+    qs_payload = json.loads(capsys.readouterr().out)
+    assert qs_rc != 0
+    assert qs_payload["status"] != "ok"
+    verify_claude = next(step for step in qs_payload["steps"] if step.get("id") == "verify-claude")
+    assert verify_claude.get("return_code") != 0
+    assert "git check-ignore -v .claude/memory-handoffs/TEMPLATE.md" in (qs_payload.get("next_commands") or [])
+
+    verify_rc = cli.main(["operator", "verify-harness", "--target", str(repo), "--harness", "claude", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert verify_rc == 1
+    assert payload["ready"] is False
+    assert payload["issue_count"] >= 1
+    shadow = [c for c in payload["checks"] if c["name"] == "handoff_template_shadowed"]
+    assert shadow and shadow[0]["status"] == "fail"
+    assert payload["next_command"] == "git check-ignore -v .claude/memory-handoffs/TEMPLATE.md"
+
+    # Text output must agree with JSON readiness.
+    assert cli.main(["operator", "verify-harness", "--target", str(repo), "--harness", "claude"]) == 1
+    text = capsys.readouterr().out
+    assert "ready: no" in text
+    assert "[fail] handoff_template_shadowed:" in text
+    assert "git check-ignore -v .claude/memory-handoffs/TEMPLATE.md" in text
 
 
 def test_local_operator_doctor_does_not_block_on_inactive_content_guard_hook(tmp_path, capsys, monkeypatch):

@@ -535,11 +535,24 @@ def quickstart(
             if verify_rc == 0 and advisories:
                 step["advisory_count"] = advisories
                 step["advisory_next_command"] = f"brigade operator verify-harness --harness {harness} --target ."
+            if verify_rc != 0 and isinstance(verify_payload, dict):
+                recovery = verify_payload.get("next_command")
+                if isinstance(recovery, str) and recovery.strip():
+                    step["recovery_command"] = recovery.strip()
             steps.append(step)
 
     ok = all(step.get("return_code", 0) == 0 for step in steps if step.get("status") not in {"skipped", "planned"})
     if dry_run:
         ok = install_rc == 0 and init_rc == 0 and portable_rc == 0
+    next_commands = _quickstart_next_commands(selected_harnesses, dry_run=dry_run)
+    if not dry_run and not ok:
+        recoveries = [
+            step.get("recovery_command")
+            for step in steps
+            if isinstance(step.get("recovery_command"), str) and step.get("recovery_command")
+        ]
+        # Exact non-mutating recovery first when a harness verify blocked readiness.
+        next_commands = list(dict.fromkeys([*recoveries, *next_commands]))
     payload = {
         "target": str(target),
         "depth": depth,
@@ -550,7 +563,7 @@ def quickstart(
         "force": force,
         "steps": steps,
         "status": "ok" if ok else "warn",
-        "next_commands": _quickstart_next_commands(selected_harnesses, dry_run=dry_run),
+        "next_commands": next_commands,
         "local_only_notes": _quickstart_local_notes(),
     }
     payload["issue_report"] = _quickstart_issue_report(payload)
