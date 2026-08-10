@@ -1,0 +1,17 @@
+{
+  "schema": "memory-projection-eval.v1",
+  "issue": 845,
+  "description": "Checked-in projection scenarios for the #722 retrieval harness (#845 V1).",
+  "categories": [
+    "identity_drift",
+    "stale_partial_scan",
+    "superseded_leakage",
+    "duplicate_live",
+    "scope_leakage",
+    "provenance_completeness",
+    "instruction_like_trusted_path",
+    "cost"
+  ],
+  "scope_dimensions": ["repository", "task", "operator", "branch", "worktree"],
+  "identity_operations": ["create", "edit", "rename", "move", "removal"]
+}

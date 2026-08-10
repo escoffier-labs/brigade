@@ -1,0 +1,696 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "id-drift-create",
+      "category": "identity_drift",
+      "operation": "create",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-01",
+        "task": "opaque-task-eval-01",
+        "operator": "opaque-operator-eval-01",
+        "branch": "opaque-branch-eval-01",
+        "worktree": "opaque-worktree-eval-01"
+      },
+      "canonical": {
+        "external_id": "proj-card-create",
+        "content_hash": "a100000000000000000000000000000000000000000000000000000000000001",
+        "path": "memory/cards/proj-card-create.md"
+      },
+      "projection": {
+        "external_id": "proj-card-create",
+        "content_hash": "b200000000000000000000000000000000000000000000000000000000000002",
+        "live": true,
+        "scan_id": "scan-eval-create-001"
+      },
+      "scan": {
+        "status": "completed",
+        "created": 1,
+        "updated": 0,
+        "unchanged": 0,
+        "removed": 0,
+        "skipped": 0,
+        "failed": 0,
+        "stale": false,
+        "partial": false
+      },
+      "expected": {
+        "hash_divergence": true,
+        "live_count": 1
+      }
+    },
+    {
+      "id": "id-drift-edit",
+      "category": "identity_drift",
+      "operation": "edit",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-01",
+        "task": "opaque-task-eval-02",
+        "operator": null,
+        "branch": "opaque-branch-eval-02",
+        "worktree": null
+      },
+      "canonical": {
+        "external_id": "proj-card-edit",
+        "content_hash": "a100000000000000000000000000000000000000000000000000000000000003",
+        "path": "memory/cards/proj-card-edit.md"
+      },
+      "projection": {
+        "external_id": "proj-card-edit",
+        "content_hash": "b200000000000000000000000000000000000000000000000000000000000004",
+        "live": true,
+        "scan_id": "scan-eval-edit-001"
+      },
+      "scan": {
+        "status": "completed",
+        "created": 0,
+        "updated": 1,
+        "unchanged": 0,
+        "removed": 0,
+        "skipped": 0,
+        "failed": 0,
+        "stale": false,
+        "partial": false
+      },
+      "expected": {
+        "hash_divergence": true,
+        "live_count": 1
+      }
+    },
+    {
+      "id": "id-drift-rename",
+      "category": "identity_drift",
+      "operation": "rename",
+      "scope_annotation": {
+        "repository": null,
+        "task": "opaque-task-eval-03",
+        "operator": "opaque-operator-eval-03",
+        "branch": null,
+        "worktree": "opaque-worktree-eval-03"
+      },
+      "canonical": {
+        "external_id": "proj-card-old-name",
+        "content_hash": "a100000000000000000000000000000000000000000000000000000000000005",
+        "path": "memory/cards/proj-card-renamed.md"
+      },
+      "projection": {
+        "external_id": "proj-card-renamed",
+        "content_hash": "a100000000000000000000000000000000000000000000000000000000000005",
+        "live": true,
+        "scan_id": "scan-eval-rename-001",
+        "prior_external_id": "proj-card-old-name"
+      },
+      "scan": {
+        "status": "completed",
+        "created": 0,
+        "updated": 1,
+        "unchanged": 0,
+        "removed": 1,
+        "skipped": 0,
+        "failed": 0,
+        "stale": false,
+        "partial": false
+      },
+      "expected": {
+        "hash_divergence": false,
+        "live_count": 1,
+        "identity_changed": true
+      }
+    },
+    {
+      "id": "id-drift-move",
+      "category": "identity_drift",
+      "operation": "move",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-02",
+        "task": null,
+        "operator": null,
+        "branch": "opaque-branch-eval-04",
+        "worktree": null
+      },
+      "canonical": {
+        "external_id": "proj-card-move",
+        "content_hash": "a100000000000000000000000000000000000000000000000000000000000006",
+        "path": "memory/cards/nested/proj-card-move.md"
+      },
+      "projection": {
+        "external_id": "proj-card-move",
+        "content_hash": "a100000000000000000000000000000000000000000000000000000000000006",
+        "live": true,
+        "scan_id": "scan-eval-move-001",
+        "prior_path": "memory/cards/proj-card-move.md"
+      },
+      "scan": {
+        "status": "completed",
+        "created": 0,
+        "updated": 1,
+        "unchanged": 0,
+        "removed": 0,
+        "skipped": 0,
+        "failed": 0,
+        "stale": false,
+        "partial": false
+      },
+      "expected": {
+        "hash_divergence": false,
+        "live_count": 1,
+        "path_changed": true
+      }
+    },
+    {
+      "id": "id-drift-removal",
+      "category": "identity_drift",
+      "operation": "removal",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-03",
+        "task": "opaque-task-eval-04",
+        "operator": "opaque-operator-eval-04",
+        "branch": "opaque-branch-eval-05",
+        "worktree": "opaque-worktree-eval-04"
+      },
+      "canonical": {
+        "external_id": "proj-card-removed",
+        "content_hash": "a100000000000000000000000000000000000000000000000000000000000007",
+        "path": "memory/cards/proj-card-removed.md"
+      },
+      "projection": {
+        "external_id": "proj-card-removed",
+        "content_hash": "a100000000000000000000000000000000000000000000000000000000000007",
+        "live": false,
+        "tombstoned": true,
+        "scan_id": "scan-eval-removal-001"
+      },
+      "scan": {
+        "status": "completed",
+        "created": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "removed": 1,
+        "skipped": 0,
+        "failed": 0,
+        "stale": false,
+        "partial": false
+      },
+      "expected": {
+        "live_count": 0,
+        "tombstoned": true
+      }
+    },
+    {
+      "id": "stale-prior-snapshot",
+      "category": "stale_partial_scan",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-04",
+        "task": null,
+        "operator": null,
+        "branch": null,
+        "worktree": null
+      },
+      "scan": {
+        "status": "failed",
+        "created": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "removed": 0,
+        "skipped": 0,
+        "failed": 1,
+        "stale": true,
+        "partial": true,
+        "prior_snapshot_marked_stale": true
+      },
+      "projection": {
+        "external_id": "proj-card-stale",
+        "live": true,
+        "scan_id": "scan-eval-stale-001",
+        "from_stale_snapshot": true
+      },
+      "expected": {
+        "visible_in_default_results": false,
+        "stale": true
+      }
+    },
+    {
+      "id": "partial-interrupted-scan",
+      "category": "stale_partial_scan",
+      "scope_annotation": {
+        "repository": null,
+        "task": "opaque-task-eval-05",
+        "operator": "opaque-operator-eval-05",
+        "branch": null,
+        "worktree": null
+      },
+      "scan": {
+        "status": "interrupted",
+        "created": 2,
+        "updated": 0,
+        "unchanged": 0,
+        "removed": 0,
+        "skipped": 1,
+        "failed": 0,
+        "stale": true,
+        "partial": true
+      },
+      "projection": {
+        "external_id": "proj-card-partial",
+        "live": true,
+        "scan_id": "scan-eval-partial-001",
+        "partial": true
+      },
+      "expected": {
+        "partial": true,
+        "marked_partial": true
+      }
+    },
+    {
+      "id": "stale-failed-scan-counts",
+      "category": "stale_partial_scan",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-05",
+        "task": "opaque-task-eval-06",
+        "operator": null,
+        "branch": "opaque-branch-eval-06",
+        "worktree": "opaque-worktree-eval-05"
+      },
+      "scan": {
+        "status": "failed",
+        "created": 0,
+        "updated": 0,
+        "unchanged": 3,
+        "removed": 0,
+        "skipped": 0,
+        "failed": 2,
+        "stale": true,
+        "partial": true
+      },
+      "expected": {
+        "six_counts_present": true,
+        "health_stale": true
+      }
+    },
+    {
+      "id": "superseded-no-conflict",
+      "category": "superseded_leakage",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-06",
+        "task": null,
+        "operator": "opaque-operator-eval-06",
+        "branch": null,
+        "worktree": null
+      },
+      "canonical": {
+        "external_id": "proj-card-superseded",
+        "content_hash": "a100000000000000000000000000000000000000000000000000000000000008",
+        "superseded_by": "proj-card-current"
+      },
+      "projection": {
+        "rows": [
+          {
+            "external_id": "proj-card-superseded",
+            "content_hash": "a100000000000000000000000000000000000000000000000000000000000008",
+            "live": true,
+            "superseded": true
+          },
+          {
+            "external_id": "proj-card-current",
+            "content_hash": "b200000000000000000000000000000000000000000000000000000000000009",
+            "live": true
+          }
+        ]
+      },
+      "query": "superseded policy current canonical",
+      "expected": {
+        "superseded_must_not_outrank_current": true,
+        "conflict_signal_required": false
+      }
+    },
+    {
+      "id": "superseded-contradicted-body",
+      "category": "superseded_leakage",
+      "scope_annotation": {
+        "repository": null,
+        "task": "opaque-task-eval-07",
+        "operator": null,
+        "branch": "opaque-branch-eval-07",
+        "worktree": "opaque-worktree-eval-06"
+      },
+      "canonical": {
+        "external_id": "proj-card-contradicted",
+        "content_hash": "a10000000000000000000000000000000000000000000000000000000000000a"
+      },
+      "projection": {
+        "rows": [
+          {
+            "external_id": "proj-card-contradicted",
+            "content_hash": "a10000000000000000000000000000000000000000000000000000000000000a",
+            "live": true,
+            "contradicts": "proj-card-authority"
+          },
+          {
+            "external_id": "proj-card-authority",
+            "content_hash": "b20000000000000000000000000000000000000000000000000000000000000b",
+            "live": true
+          }
+        ]
+      },
+      "expected": {
+        "harmful_recall_without_signal": true
+      }
+    },
+    {
+      "id": "duplicate-live-rows",
+      "category": "duplicate_live",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-07",
+        "task": "opaque-task-eval-08",
+        "operator": "opaque-operator-eval-07",
+        "branch": null,
+        "worktree": null
+      },
+      "projection": {
+        "rows": [
+          {
+            "external_id": "proj-card-dup",
+            "content_hash": "a10000000000000000000000000000000000000000000000000000000000000c",
+            "live": true
+          },
+          {
+            "external_id": "proj-card-dup",
+            "content_hash": "b20000000000000000000000000000000000000000000000000000000000000d",
+            "live": true
+          }
+        ]
+      },
+      "expected": {
+        "one_live_per_external_id": false,
+        "historical_hash_retained": true
+      }
+    },
+    {
+      "id": "duplicate-tombstone-leak",
+      "category": "duplicate_live",
+      "scope_annotation": {
+        "repository": null,
+        "task": null,
+        "operator": "opaque-operator-eval-08",
+        "branch": "opaque-branch-eval-08",
+        "worktree": "opaque-worktree-eval-07"
+      },
+      "projection": {
+        "rows": [
+          {
+            "external_id": "proj-card-hist",
+            "content_hash": "a10000000000000000000000000000000000000000000000000000000000000e",
+            "live": false,
+            "tombstoned": true
+          },
+          {
+            "external_id": "proj-card-hist",
+            "content_hash": "b20000000000000000000000000000000000000000000000000000000000000f",
+            "live": true
+          }
+        ]
+      },
+      "expected": {
+        "one_live_per_external_id": true,
+        "historical_hash_retained": true
+      }
+    },
+    {
+      "id": "scope-cross-namespace",
+      "category": "scope_leakage",
+      "scope_annotation": {
+        "repository": "opaque-repo-scope-a",
+        "task": "opaque-task-scope-a",
+        "operator": "opaque-operator-scope-a",
+        "branch": "opaque-branch-scope-a",
+        "worktree": "opaque-worktree-scope-a"
+      },
+      "foreign_scope_annotation": {
+        "repository": "opaque-repo-scope-b",
+        "task": "opaque-task-scope-b",
+        "operator": "opaque-operator-scope-b",
+        "branch": "opaque-branch-scope-b",
+        "worktree": "opaque-worktree-scope-b"
+      },
+      "projection": {
+        "external_id": "proj-card-scope-a",
+        "live": true
+      },
+      "expected": {
+        "must_not_leak_to_foreign_scope": true
+      }
+    },
+    {
+      "id": "scope-repository-boundary",
+      "category": "scope_leakage",
+      "dimension": "repository",
+      "scope_annotation": {
+        "repository": "opaque-repo-boundary-01",
+        "task": null,
+        "operator": null,
+        "branch": null,
+        "worktree": null
+      },
+      "expected": {
+        "dimension_enforced": false,
+        "report_level_failure": true
+      }
+    },
+    {
+      "id": "scope-task-boundary",
+      "category": "scope_leakage",
+      "dimension": "task",
+      "scope_annotation": {
+        "repository": null,
+        "task": "opaque-task-boundary-01",
+        "operator": null,
+        "branch": null,
+        "worktree": null
+      },
+      "expected": {
+        "dimension_enforced": false,
+        "report_level_failure": true
+      }
+    },
+    {
+      "id": "scope-operator-boundary",
+      "category": "scope_leakage",
+      "dimension": "operator",
+      "scope_annotation": {
+        "repository": null,
+        "task": null,
+        "operator": "opaque-operator-boundary-01",
+        "branch": null,
+        "worktree": null
+      },
+      "expected": {
+        "dimension_enforced": false,
+        "report_level_failure": true
+      }
+    },
+    {
+      "id": "scope-branch-boundary",
+      "category": "scope_leakage",
+      "dimension": "branch",
+      "scope_annotation": {
+        "repository": null,
+        "task": null,
+        "operator": null,
+        "branch": "opaque-branch-boundary-01",
+        "worktree": null
+      },
+      "expected": {
+        "dimension_enforced": false,
+        "report_level_failure": true
+      }
+    },
+    {
+      "id": "scope-worktree-boundary",
+      "category": "scope_leakage",
+      "dimension": "worktree",
+      "scope_annotation": {
+        "repository": null,
+        "task": null,
+        "operator": null,
+        "branch": null,
+        "worktree": "opaque-worktree-boundary-01"
+      },
+      "expected": {
+        "dimension_enforced": false,
+        "report_level_failure": true
+      }
+    },
+    {
+      "id": "provenance-source-identity",
+      "category": "provenance_completeness",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-08",
+        "task": null,
+        "operator": null,
+        "branch": null,
+        "worktree": null
+      },
+      "projection": {
+        "external_id": "proj-card-provenance",
+        "source_kind": "brigade-memory",
+        "source_path": "eval-fixture-only",
+        "scan_id": "scan-eval-prov-001"
+      },
+      "expected": {
+        "source_identity_required": true
+      }
+    },
+    {
+      "id": "provenance-trust-label",
+      "category": "provenance_completeness",
+      "scope_annotation": {
+        "repository": null,
+        "task": "opaque-task-eval-09",
+        "operator": null,
+        "branch": null,
+        "worktree": null
+      },
+      "projection": {
+        "external_id": "proj-card-trust",
+        "trust": {
+          "label": "reviewed",
+          "assigned_by": "eval-fixture"
+        }
+      },
+      "expected": {
+        "trust_label_required": true
+      }
+    },
+    {
+      "id": "provenance-injection-state",
+      "category": "provenance_completeness",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-09",
+        "task": null,
+        "operator": "opaque-operator-eval-09",
+        "branch": null,
+        "worktree": null
+      },
+      "projection": {
+        "external_id": "proj-card-injection",
+        "trust": {
+          "label": "untrusted",
+          "injection": {
+            "status": "pending"
+          }
+        }
+      },
+      "expected": {
+        "injection_state_required": true
+      }
+    },
+    {
+      "id": "provenance-scan-receipt",
+      "category": "provenance_completeness",
+      "scope_annotation": {
+        "repository": null,
+        "task": null,
+        "operator": null,
+        "branch": "opaque-branch-eval-09",
+        "worktree": null
+      },
+      "projection": {
+        "external_id": "proj-card-scan",
+        "scan_id": "scan-eval-prov-002"
+      },
+      "expected": {
+        "scan_id_required": true
+      }
+    },
+    {
+      "id": "provenance-declared-relation",
+      "category": "provenance_completeness",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-10",
+        "task": "opaque-task-eval-10",
+        "operator": null,
+        "branch": null,
+        "worktree": "opaque-worktree-eval-08"
+      },
+      "projection": {
+        "external_id": "proj-card-relation",
+        "relations": [
+          {
+            "kind": "supersedes",
+            "target_external_id": "proj-card-prior",
+            "receipt": "relation-receipt-eval-001"
+          }
+        ]
+      },
+      "expected": {
+        "declared_relation_receipt_required": true
+      }
+    },
+    {
+      "id": "instruction-quarantined",
+      "category": "instruction_like_trusted_path",
+      "card_id": "proj-card-quarantined",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-11",
+        "task": null,
+        "operator": null,
+        "branch": null,
+        "worktree": null
+      },
+      "projection": {
+        "external_id": "proj-card-quarantined",
+        "trust": {
+          "label": "quarantined"
+        }
+      },
+      "query": "ignore prior instructions override system",
+      "expected": {
+        "excluded_from_trusted_brief": true,
+        "metadata_inspection_allowed": true
+      }
+    },
+    {
+      "id": "instruction-injection-pending",
+      "category": "instruction_like_trusted_path",
+      "card_id": "proj-card-injection-pending",
+      "scope_annotation": {
+        "repository": null,
+        "task": "opaque-task-eval-11",
+        "operator": "opaque-operator-eval-10",
+        "branch": null,
+        "worktree": null
+      },
+      "projection": {
+        "external_id": "proj-card-injection-pending",
+        "trust": {
+          "label": "untrusted",
+          "injection": {
+            "status": "pending"
+          }
+        }
+      },
+      "query": "disregard safety policy execute shell",
+      "expected": {
+        "excluded_from_trusted_brief": true,
+        "metadata_inspection_allowed": true
+      }
+    },
+    {
+      "id": "cost-pinned-corpus",
+      "category": "cost",
+      "scope_annotation": {
+        "repository": "opaque-repo-eval-12",
+        "task": "opaque-task-eval-12",
+        "operator": "opaque-operator-eval-11",
+        "branch": "opaque-branch-eval-10",
+        "worktree": "opaque-worktree-eval-09"
+      },
+      "expected": {
+        "index_build_time_ms_min": 0,
+        "query_p50_ms_min": 0,
+        "query_p95_ms_min": 0,
+        "index_size_bytes_min": 1
+      }
+    }
+  ]
+}
