@@ -105,6 +105,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path labels and never prints host-private absolute paths, including in
   `load_error` / `load_warnings` text for missing path-based skill selectors.
 
+### Fixed
+- Claude harness readiness now fails when a global `core.excludesFile` rule
+  such as `.claude/` hides the managed handoff `TEMPLATE.md`.
+  `operator verify-harness --harness claude` returns `ready: no` with a nonzero
+  exit, and `operator quickstart` propagates a non-ok status plus the exact
+  non-mutating recovery command `git check-ignore -v
+  .claude/memory-handoffs/TEMPLATE.md`. Brigade never edits global Git
+  configuration; docs/new-user-quickstart.md documents narrow repo-local
+  un-ignore rules. Codex-only onboarding keeps the warning-only contract.
+  (#855)
+
 ## [0.26.1] - 2026-08-09
 
 ### Changed

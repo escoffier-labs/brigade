@@ -389,22 +389,29 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
         )
 
     # The managed .gitignore un-ignores each inbox's TEMPLATE.md so the format
-    # travels with the repo. Git cannot re-include a file whose parent dir is
-    # excluded by another source (commonly a global gitignore with a bare
-    # `.claude/` or `.codex/` entry), and that shadowing is otherwise silent.
+    # travels with the repo. A global core.excludesFile entry like `.claude/`
+    # can still hide it; Claude treats that as a readiness blocker because the
+    # required handoff template cannot be committed. Other writer harnesses
+    # keep the advisory warn so Codex-only onboarding stays unchanged.
     template_path = inbox_path / "TEMPLATE.md"
+    template_shadowed = False
     if template_path.is_file():
         template_ignored = localio.check_git_ignored(target, template_path)
         if template_ignored == "yes":
+            template_shadowed = True
             inbox_root = inbox_rel.split("/")[0]
+            shadow_status = "fail" if harness == "claude" else "warn"
             checks.append(
                 {
-                    "status": "warn",
+                    "status": shadow_status,
                     "name": "handoff_template_shadowed",
                     "detail": (
                         f"{inbox_rel}/TEMPLATE.md is gitignored despite the managed un-ignore rule; "
                         f"an external ignore source (often a global gitignore entry like `{inbox_root}/`) "
-                        "is shadowing it, so the template will not travel with the repo"
+                        "is shadowing it, so the template will not travel with the repo. "
+                        "Do not edit global Git config from Brigade; diagnose with "
+                        f"`git check-ignore -v {inbox_rel}/TEMPLATE.md` and add narrow "
+                        "repo-local un-ignore rules (see docs/new-user-quickstart.md)."
                     ),
                 }
             )
@@ -438,9 +445,8 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
     else:
         checks.append({"status": "ok", "name": "handoff_lint", "detail": f"no pending {harness} handoffs"})
 
-    # Fails block readiness; warns are advisories (host conditions like a
-    # global gitignore shadowing an inbox template) and stay visible without
-    # flipping ready to no.
+    # Fails block readiness. Warns stay advisory (including non-Claude template
+    # shadowing) and do not flip ready to no.
     issue_count = sum(1 for item in checks if item.get("status") == "fail")
     warning_count = sum(1 for item in checks if item.get("status") == "warn")
     hermes_adapter_issues = [
@@ -449,7 +455,9 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
         if str(item.get("name", "")).startswith("hermes_adapter_") and item.get("status") in {"fail", "warn"}
     ]
     if issue_count:
-        if harness == "hermes" and hermes_adapter_issues and not (inbox_health and inbox_health.exists):
+        if harness == "claude" and template_shadowed:
+            next_command = f"git check-ignore -v {inbox_rel}/TEMPLATE.md"
+        elif harness == "hermes" and hermes_adapter_issues and not (inbox_health and inbox_health.exists):
             next_command = "brigade init --target . --depth workspace --harnesses hermes"
         elif harness == "hermes" and hermes_adapter_issues:
             next_command = "brigade hermes-fragments --out .brigade/hermes"
