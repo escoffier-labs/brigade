@@ -14,18 +14,21 @@ External contributions are welcome. This section is the short path; [Pull reques
 
 ## Pull requests
 
-`main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request, and GitHub enforces the gate regardless of the dispatch prompt.
+`main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request. GitHub enforces required checks; formal review is maintainer merge policy (branch protection does not currently require approving reviews).
 
-The current rule set requires all of the following before a pull request can merge:
+**GitHub-enforced gates** on `main`:
 
 - All required GitHub Actions checks pass. The checks are pinned to GitHub Actions app id 15368, and the branch must be up to date with `main`.
+
+**Maintainer merge policy** (required before merge; not enforced by GitHub branch protection today):
+
 - A current formal `APPROVED` review exists from a non-author reviewer.
 - All review conversations are resolved.
 - The approval was recorded after the last push. New commits dismiss stale approvals.
 
 The pull request author cannot approve their own pull request. `gh pr review --approve` fails with "Can not approve your own pull request" when the author and reviewer share one GitHub identity.
 
-CodeRabbit is the current external review identity. Its green commit status is not the grading artifact because the status can be green while the formal GitHub review is still `CHANGES_REQUESTED`. The artifacts that count are a current formal non-author `APPROVED` review and all required checks passing.
+CodeRabbit is the current external review identity. Its green commit status is not the grading artifact because the status can be green while the formal GitHub review is still `CHANGES_REQUESTED`. Under maintainer policy, merge waits on a current formal non-author `APPROVED` review and all required checks passing.
 
 Inspect the gate before attempting a merge:
 
@@ -79,7 +82,8 @@ python -m venv .venv
 Activate the environment before installing:
 
 - **POSIX (macOS, Linux):** `source .venv/bin/activate`
-- **Windows:** `.venv\Scripts\activate`
+- **Windows PowerShell:** `.\.venv\Scripts\Activate.ps1`
+- **Windows cmd:** `.venv\Scripts\activate.bat`
 
 Then install dev dependencies:
 
@@ -89,7 +93,13 @@ pip install -e ".[dev]"
 
 On PEP 668-managed Python (many Linux distributions), installing into the system interpreter fails; a virtual environment avoids that.
 
-**Docs-only changes:** CI runs the `content-guard` job on the repo. Locally, scan each edited markdown file before you push:
+**Docs-only changes:** CI runs the `content-guard` job on the repo. Locally, scan each edited markdown file before you push (one path per invocation):
+
+```bash
+brigade guard scan <edited-file>.md --policy src/brigade/guard/policies/public-repo.json
+```
+
+Example when only `CONTRIBUTING.md` and `README.md` changed:
 
 ```bash
 brigade guard scan CONTRIBUTING.md --policy src/brigade/guard/policies/public-repo.json
