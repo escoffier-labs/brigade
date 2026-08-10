@@ -155,7 +155,7 @@
   "results": [
     {
       "backup_restore": {
-        "backup_time_ns": 306685,
+        "backup_time_ns": 305344,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -167,8 +167,8 @@
         "config_digest_before": "3cc256440ad11ccc17242d89228802575cd7aa05704f886808340dfd6e49f490",
         "pass": true,
         "status": "measured",
-        "task_edge_digest_after": "3dfb0ff6f018dcd4fd4f65cdb6e7ad0077ed8059254207ce159eca86b01eae5c",
-        "task_edge_digest_before": "3dfb0ff6f018dcd4fd4f65cdb6e7ad0077ed8059254207ce159eca86b01eae5c"
+        "task_edge_digest_after": "bea1405db88901a810891711ea4bffc93b02e983874a06279e621d1247da9916",
+        "task_edge_digest_before": "bea1405db88901a810891711ea4bffc93b02e983874a06279e621d1247da9916"
       },
       "branch_diff_merge": {
         "detail": "JSON ledger has no first-class branch/diff/merge path",
@@ -180,16 +180,16 @@
           13
         ],
         "exit_13_count": 1,
-        "loser_holder": "lane-b",
+        "loser_holder": "lane-a",
         "loser_reason": "already_claimed",
         "pass": true,
         "status": "measured",
-        "winner_actor": "lane-b",
+        "winner_actor": "lane-a",
         "winner_count": 1
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 217720,
+        "cold_start_ns": 209266,
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -269,10 +269,10 @@
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 3127996,
-        "min_ns": 1631671,
-        "p50_ns": 2403971,
-        "p95_ns": 2934876,
+        "max_ns": 3083351,
+        "min_ns": 1546333,
+        "p50_ns": 2284977,
+        "p95_ns": 2730703,
         "samples": 100
       },
       "offline_divergence": {
@@ -290,8 +290,8 @@
         "disk_bytes_before": 24699,
         "disk_growth_bytes": 240,
         "pass": true,
-        "peak_rss_kib": 44656,
-        "peak_rss_mib": 43.61,
+        "peak_rss_kib": 44732,
+        "peak_rss_mib": 43.68,
         "rss_sampling": "measured",
         "status": "measured",
         "stdout_bytes": 280
@@ -352,7 +352,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 241037,
+        "backup_time_ns": 241402,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -377,16 +377,16 @@
           13
         ],
         "exit_13_count": 1,
-        "loser_holder": "lane-a",
+        "loser_holder": "lane-b",
         "loser_reason": "already_claimed",
         "pass": true,
         "status": "measured",
-        "winner_actor": "lane-a",
+        "winner_actor": "lane-b",
         "winner_count": 1
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 704162,
+        "cold_start_ns": 679398,
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -440,14 +440,14 @@
         "disable_telemetry_env": "1",
         "metrics_artifacts": [],
         "pass": true,
-        "scanned_store_path": "ws-sqlite-metrics-store-hq2rcop6",
+        "scanned_store_path": "ws-sqlite-metrics-store-u6rja11o",
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 3038728,
-        "min_ns": 824028,
-        "p50_ns": 968448,
-        "p95_ns": 2517497,
+        "max_ns": 3139440,
+        "min_ns": 809031,
+        "p50_ns": 868856,
+        "p95_ns": 2385262,
         "samples": 100
       },
       "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
@@ -457,8 +457,8 @@
       },
       "pass": true,
       "relative_to_json": {
-        "p50_vs_json": 0.4028534454034595,
-        "p95_vs_json": 0.8577864959201003
+        "p50_vs_json": 0.380247153472442,
+        "p95_vs_json": 0.8734974107400182
       },
       "resource_measurements": {
         "claim_exit_code": 0,
@@ -466,7 +466,7 @@
         "disk_bytes_before": 57344,
         "disk_growth_bytes": 4096,
         "pass": true,
-        "peak_rss_kib": 36400,
+        "peak_rss_kib": 36404,
         "peak_rss_mib": 35.55,
         "rss_sampling": "measured",
         "status": "measured"
@@ -781,7 +781,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 324316,
+        "backup_time_ns": 320199,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -793,8 +793,8 @@
         "config_digest_before": "3cc256440ad11ccc17242d89228802575cd7aa05704f886808340dfd6e49f490",
         "pass": true,
         "status": "measured",
-        "task_edge_digest_after": "193f1db41275a7aec3b8cf235ffd59a8fd4ea86d3d428f7d5468d84fdf7a8862",
-        "task_edge_digest_before": "193f1db41275a7aec3b8cf235ffd59a8fd4ea86d3d428f7d5468d84fdf7a8862"
+        "task_edge_digest_after": "defc7840f6994e2b14de922180263564ddf83baa48eda70e897bb61ae16a8ca2",
+        "task_edge_digest_before": "defc7840f6994e2b14de922180263564ddf83baa48eda70e897bb61ae16a8ca2"
       },
       "branch_diff_merge": {
         "detail": "JSON ledger has no first-class branch/diff/merge path",
@@ -815,7 +815,7 @@
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 1082542,
+        "cold_start_ns": 1109717,
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -895,10 +895,10 @@
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 10156536,
-        "min_ns": 5360347,
-        "p50_ns": 6099404,
-        "p95_ns": 7149591,
+        "max_ns": 10804373,
+        "min_ns": 5009679,
+        "p50_ns": 5842282,
+        "p95_ns": 6717176,
         "samples": 100
       },
       "offline_divergence": {
@@ -978,7 +978,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 324412,
+        "backup_time_ns": 347862,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -1012,7 +1012,7 @@
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 2216471,
+        "cold_start_ns": 2109651,
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -1066,14 +1066,14 @@
         "disable_telemetry_env": "1",
         "metrics_artifacts": [],
         "pass": true,
-        "scanned_store_path": "ws-sqlite-metrics-store-g5_cok2u",
+        "scanned_store_path": "ws-sqlite-metrics-store-f3xyfj0f",
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 3188709,
-        "min_ns": 702166,
-        "p50_ns": 1659846,
-        "p95_ns": 2619012,
+        "max_ns": 2941768,
+        "min_ns": 675664,
+        "p50_ns": 1701602,
+        "p95_ns": 2630614,
         "samples": 100
       },
       "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
@@ -1083,8 +1083,8 @@
       },
       "pass": true,
       "relative_to_json": {
-        "p50_vs_json": 0.2721324903220052,
-        "p95_vs_json": 0.3663163389346328
+        "p50_vs_json": 0.29125639604524395,
+        "p95_vs_json": 0.39162499240752363
       },
       "resource_measurements": {
         "claim_exit_code": 0,
@@ -1092,8 +1092,8 @@
         "disk_bytes_before": 208896,
         "disk_growth_bytes": 4096,
         "pass": true,
-        "peak_rss_kib": 38108,
-        "peak_rss_mib": 37.21,
+        "peak_rss_kib": 38156,
+        "peak_rss_mib": 37.26,
         "rss_sampling": "measured",
         "status": "measured"
       },
@@ -1407,7 +1407,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 404093,
+        "backup_time_ns": 451010,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -1419,8 +1419,8 @@
         "config_digest_before": "3cc256440ad11ccc17242d89228802575cd7aa05704f886808340dfd6e49f490",
         "pass": true,
         "status": "measured",
-        "task_edge_digest_after": "f4fb57135a88429a4aa628227a5cc4d3746404cb505b4fe62bec90f8aa70cad7",
-        "task_edge_digest_before": "f4fb57135a88429a4aa628227a5cc4d3746404cb505b4fe62bec90f8aa70cad7"
+        "task_edge_digest_after": "078e75eb53de7e04f5a40ee7a40fce264e05551ad7e09871de26be0b47e6cf38",
+        "task_edge_digest_before": "078e75eb53de7e04f5a40ee7a40fce264e05551ad7e09871de26be0b47e6cf38"
       },
       "branch_diff_merge": {
         "detail": "JSON ledger has no first-class branch/diff/merge path",
@@ -1441,7 +1441,7 @@
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 4667939,
+        "cold_start_ns": 2970619,
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -1521,10 +1521,10 @@
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 17359976,
-        "min_ns": 10327470,
-        "p50_ns": 11344255,
-        "p95_ns": 12295933,
+        "max_ns": 19285493,
+        "min_ns": 10018884,
+        "p50_ns": 11327861,
+        "p95_ns": 12080697,
         "samples": 100
       },
       "offline_divergence": {
@@ -1542,8 +1542,8 @@
         "disk_bytes_before": 353443,
         "disk_growth_bytes": 240,
         "pass": true,
-        "peak_rss_kib": 47544,
-        "peak_rss_mib": 46.43,
+        "peak_rss_kib": 47492,
+        "peak_rss_mib": 46.38,
         "rss_sampling": "measured",
         "status": "measured",
         "stdout_bytes": 279
@@ -1604,7 +1604,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 1018028,
+        "backup_time_ns": 1133151,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -1629,16 +1629,16 @@
           13
         ],
         "exit_13_count": 1,
-        "loser_holder": "lane-a",
+        "loser_holder": "lane-b",
         "loser_reason": "already_claimed",
         "pass": true,
         "status": "measured",
-        "winner_actor": "lane-a",
+        "winner_actor": "lane-b",
         "winner_count": 1
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 4948832,
+        "cold_start_ns": 5545899,
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -1692,14 +1692,14 @@
         "disable_telemetry_env": "1",
         "metrics_artifacts": [],
         "pass": true,
-        "scanned_store_path": "ws-sqlite-metrics-store-frk_jj6o",
+        "scanned_store_path": "ws-sqlite-metrics-store-lv_w5dzu",
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 2598494,
-        "min_ns": 725622,
-        "p50_ns": 1694447,
-        "p95_ns": 2394993,
+        "max_ns": 2676221,
+        "min_ns": 787602,
+        "p50_ns": 1827302,
+        "p95_ns": 2487992,
         "samples": 100
       },
       "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
@@ -1709,8 +1709,8 @@
       },
       "pass": true,
       "relative_to_json": {
-        "p50_vs_json": 0.14936608882645885,
-        "p95_vs_json": 0.19477928189751847
+        "p50_vs_json": 0.16131041862183867,
+        "p95_vs_json": 0.20594771973835616
       },
       "resource_measurements": {
         "claim_exit_code": 0,
@@ -1718,7 +1718,7 @@
         "disk_bytes_before": 458752,
         "disk_growth_bytes": 0,
         "pass": true,
-        "peak_rss_kib": 42696,
+        "peak_rss_kib": 42704,
         "peak_rss_mib": 41.7,
         "rss_sampling": "measured",
         "status": "measured"
