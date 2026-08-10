@@ -1,0 +1,900 @@
+{
+  "edges": [
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0000",
+      "source": "synth-chain-0000",
+      "target": "synth-chain-0001",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0001",
+      "source": "synth-chain-0001",
+      "target": "synth-chain-0002",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0002",
+      "source": "synth-chain-0002",
+      "target": "synth-chain-0003",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0003",
+      "source": "synth-chain-0003",
+      "target": "synth-chain-0004",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0004",
+      "source": "synth-chain-0004",
+      "target": "synth-chain-0005",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0005",
+      "source": "synth-chain-0005",
+      "target": "synth-chain-0006",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0006",
+      "source": "synth-chain-0006",
+      "target": "synth-chain-0007",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0007",
+      "source": "synth-chain-0007",
+      "target": "synth-chain-0008",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0008",
+      "source": "synth-chain-0008",
+      "target": "synth-chain-0009",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0009",
+      "source": "synth-chain-0009",
+      "target": "synth-chain-0010",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0010",
+      "source": "synth-chain-0010",
+      "target": "synth-chain-0011",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0011",
+      "source": "synth-chain-0011",
+      "target": "synth-chain-0012",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0012",
+      "source": "synth-chain-0012",
+      "target": "synth-chain-0013",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0013",
+      "source": "synth-chain-0013",
+      "target": "synth-chain-0014",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0014",
+      "source": "synth-chain-0014",
+      "target": "synth-chain-0015",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0015",
+      "source": "synth-chain-0015",
+      "target": "synth-chain-0016",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0016",
+      "source": "synth-chain-0016",
+      "target": "synth-chain-0017",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0017",
+      "source": "synth-chain-0017",
+      "target": "synth-chain-0018",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0018",
+      "source": "synth-chain-0018",
+      "target": "synth-chain-0019",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0019",
+      "source": "synth-chain-0019",
+      "target": "synth-chain-0020",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0020",
+      "source": "synth-chain-0020",
+      "target": "synth-chain-0021",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0021",
+      "source": "synth-chain-0021",
+      "target": "synth-chain-0022",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0022",
+      "source": "synth-chain-0022",
+      "target": "synth-chain-0023",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0023",
+      "source": "synth-chain-0023",
+      "target": "synth-chain-0024",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0024",
+      "source": "synth-chain-0024",
+      "target": "synth-chain-0025",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0025",
+      "source": "synth-chain-0025",
+      "target": "synth-chain-0026",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0026",
+      "source": "synth-chain-0026",
+      "target": "synth-chain-0027",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0027",
+      "source": "synth-chain-0027",
+      "target": "synth-chain-0028",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0028",
+      "source": "synth-chain-0028",
+      "target": "synth-chain-0029",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0029",
+      "source": "synth-chain-0029",
+      "target": "synth-chain-0030",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0030",
+      "source": "synth-chain-0030",
+      "target": "synth-chain-0031",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0031",
+      "source": "synth-chain-0031",
+      "target": "synth-chain-0032",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0032",
+      "source": "synth-chain-0032",
+      "target": "synth-chain-0033",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0033",
+      "source": "synth-chain-0033",
+      "target": "synth-chain-0034",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0034",
+      "source": "synth-chain-0034",
+      "target": "synth-chain-0035",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0035",
+      "source": "synth-chain-0035",
+      "target": "synth-chain-0036",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0036",
+      "source": "synth-chain-0036",
+      "target": "synth-chain-0037",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0037",
+      "source": "synth-chain-0037",
+      "target": "synth-chain-0038",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0038",
+      "source": "synth-chain-0038",
+      "target": "synth-chain-0039",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0039",
+      "source": "synth-chain-0039",
+      "target": "synth-chain-0040",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0040",
+      "source": "synth-chain-0040",
+      "target": "synth-chain-0041",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0041",
+      "source": "synth-chain-0041",
+      "target": "synth-chain-0042",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0042",
+      "source": "synth-chain-0042",
+      "target": "synth-chain-0043",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0043",
+      "source": "synth-chain-0043",
+      "target": "synth-chain-0044",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0044",
+      "source": "synth-chain-0044",
+      "target": "synth-chain-0045",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0045",
+      "source": "synth-chain-0045",
+      "target": "synth-chain-0046",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0046",
+      "source": "synth-chain-0046",
+      "target": "synth-chain-0047",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0047",
+      "source": "synth-chain-0047",
+      "target": "synth-chain-0048",
+      "type": "blocks"
+    },
+    {
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-edge-0048",
+      "source": "synth-chain-0048",
+      "target": "synth-chain-0049",
+      "type": "blocks"
+    }
+  ],
+  "tasks": [
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0000",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 0",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0001",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 1",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0002",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 2",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0003",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 3",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0004",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 4",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0005",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 5",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0006",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 6",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0007",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 7",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0008",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 8",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0009",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 9",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0010",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 10",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0011",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 11",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0012",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 12",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0013",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 13",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0014",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 14",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0015",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 15",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0016",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 16",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0017",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 17",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0018",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 18",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0019",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 19",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0020",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 20",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0021",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 21",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0022",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 22",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0023",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 23",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0024",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 24",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0025",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 25",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0026",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 26",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0027",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 27",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0028",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 28",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0029",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 29",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0030",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 30",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0031",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 31",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0032",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 32",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0033",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 33",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0034",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 34",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0035",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 35",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0036",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 36",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0037",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 37",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0038",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 38",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0039",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 39",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0040",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 40",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0041",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 41",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0042",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 42",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0043",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 43",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0044",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 44",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0045",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 45",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0046",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 46",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0047",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 47",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0048",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 48",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    },
+    {
+      "acceptance": [],
+      "created_at": "2026-01-01T00:00:00+00:00",
+      "id": "synth-chain-0049",
+      "priority": "normal",
+      "source": "synthetic",
+      "status": "pending",
+      "text": "Chain task 49",
+      "type": "task",
+      "updated_at": "2026-01-01T00:00:00+00:00"
+    }
+  ],
+  "version": 2
+}
