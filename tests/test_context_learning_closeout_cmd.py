@@ -191,11 +191,17 @@ def test_context_pack_freshness_doctor_imports_and_daily_release_surfaces(tmp_pa
     assert context_cmd.doctor(target=tmp_path, json_output=True) == 0
     health = json.loads(capsys.readouterr().out)
     issue_types = {issue["issue_type"] for issue in health["issues"] if issue.get("issue_type")}
-    assert {"pack_stale", "missing_source_reference", "task_acceptance_stale", "tool_reference_stale"} <= issue_types
+    assert {
+        "pack_stale",
+        "missing_source_reference",
+        "source_drift",
+        "task_acceptance_stale",
+        "tool_reference_stale",
+    } <= issue_types
 
     assert context_cmd.import_issues(target=tmp_path, json_output=True) == 0
     imports = json.loads(capsys.readouterr().out)
-    assert imports["created"] == 4
+    assert imports["created"] == 6
     assert {item["source"] for item in imports["imports"]} == {"context-pack"}
 
     assert work_cmd.brief(target=tmp_path) == 0
