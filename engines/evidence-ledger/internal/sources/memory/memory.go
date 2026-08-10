@@ -193,7 +193,7 @@ func Walk(root string, opts sources.Options) ([]CardOutcome, sources.Result, err
 				result.Warnings = append(result.Warnings, rel+": "+readErr.Error())
 				continue
 			}
-			card, warn := buildCard(abs, namespace, rel, body)
+			card, warn := buildCard(abs, namespace, rel, body, scan.MTime)
 			if card.Outcome == "failed" || card.Outcome == "skipped" {
 				outcomes = append(outcomes, card)
 				if warn != "" {
@@ -215,15 +215,12 @@ func Walk(root string, opts sources.Options) ([]CardOutcome, sources.Result, err
 		}
 		hash := "sha256:" + hex.EncodeToString(hashBytes(body))
 		scan.ContentHash = hash
-		card, warn := buildCard(abs, namespace, rel, body)
+		card, warn := buildCard(abs, namespace, rel, body, scan.MTime)
 		card.ContentHash = contentHashForRecord(card.Record)
 		if card.ContentHash == "" {
 			card.ContentHash = hash
 		}
 		if card.Record != nil {
-			card.Record.Item.CreatedAt = scan.MTime
-			card.Record.Item.UpdatedAt = scan.MTime
-			card.ContentHash = contentHashForRecord(card.Record)
 			scan.Records = 1
 		}
 		if warn != "" {
@@ -342,7 +339,7 @@ func listCardFiles(root string) ([]string, error) {
 	return files, nil
 }
 
-func buildCard(workspace, namespace, rel string, body []byte) (CardOutcome, string) {
+func buildCard(workspace, namespace, rel string, body []byte, mtime string) (CardOutcome, string) {
 	text := string(body)
 	meta, hasFrontmatter, malformed := parseFrontmatter(text)
 	if malformed {
@@ -415,6 +412,8 @@ func buildCard(workspace, namespace, rel string, body []byte) (CardOutcome, stri
 		Item: adapter.Item{
 			ExternalID: externalID,
 			Kind:       ItemKind,
+			CreatedAt:  mtime,
+			UpdatedAt:  mtime,
 			Text:       itemText,
 			Summary:    summaryPtr,
 			Tags:       tags,

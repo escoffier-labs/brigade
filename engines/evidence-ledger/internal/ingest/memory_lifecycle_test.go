@@ -260,3 +260,65 @@ func openMemoryLifecycleDB(t *testing.T) *sql.DB {
 	}
 	return db
 }
+
+func TestLiveMemoryLatestVersionUsesUpdatedAtNotEmptyCreatedAtHashOrder(t *testing.T) {
+	db := openMemoryLifecycleDB(t)
+	defer db.Close()
+	const ns = "memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	const cardID = "card-order000-1111-4222-8333-444444444444"
+	now := "2026-08-10T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)`,
+		"src-memory", MemorySourceKind, "Memory", "1.0.0", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values(?,?,?,?,?,?,?,?)`,
+		"col-memory", "src-memory", ns, "memory_cards", "cards", "{}", now, now); err != nil {
+		t.Fatal(err)
+	}
+	// Lexicographically greater id is the older version; smaller id is newer.
+	// Empty created_at would make ORDER BY created_at,id prefer the older row.
+	olderID := "zzzz-older-content-hash-id"
+	newerID := "aaaa-newer-content-hash-id"
+	olderHash := "sha256:older"
+	newerHash := "sha256:newer"
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?)`, olderID, "src-memory", "col-memory", cardID, "memory_card", "", "2026-08-10T01:00:00Z", "older", olderHash, "{}", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?)`, newerID, "src-memory", "col-memory", cardID, "memory_card", "", "2026-08-10T02:00:00Z", "newer", newerHash, "{}", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into relations(id, source_item_id, target_item_id, target_external_id, target_source_kind, target_collection_external_id, relation_type, confidence, metadata_json)
+values(?,?,?,?,?,?,?,?,?)`, "rel-stale-out", olderID, nil, "missing-target", "", "", "supported_by", 1.0, "{}"); err != nil {
+		t.Fatal(err)
+	}
+
+	var byCreated string
+	if err := db.QueryRow(`select id from items where external_id = ? order by created_at desc, id desc`, cardID).Scan(&byCreated); err != nil {
+		t.Fatal(err)
+	}
+	if byCreated != olderID {
+		t.Fatalf("precondition failed: empty created_at+id order should pick older %s, got %s", olderID, byCreated)
+	}
+
+	live, err := LiveMemoryProjection(db, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live[cardID] != newerHash {
+		t.Fatalf("live projection selected %q, want newer hash %q", live[cardID], newerHash)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	unresolved, err := memoryUnresolvedRelationCount(tx, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unresolved != 0 {
+		t.Fatalf("stale outbound unresolved on older version contaminated count: %d", unresolved)
+	}
+}

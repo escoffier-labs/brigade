@@ -315,7 +315,7 @@ set target_item_id = (
              and coalesce(cc.external_id, '') not like ?
          ))
     and target.tombstoned_at is null
-  order by target.created_at desc, target.id desc
+  order by target.updated_at desc, target.id desc
   limit 1
 )
 where coalesce(target_source_kind, '') != ''
@@ -371,7 +371,7 @@ where coalesce(target_source_kind, '') != ''
                  and coalesce(cc.external_id, '') not like ?
              ))
         and target.tombstoned_at is null
-      order by target.created_at desc, target.id desc
+      order by target.updated_at desc, target.id desc
       limit 1
     )
   )`, backupCollectionLike, backupCollectionLike, backupCollectionLike, backupCollectionLike, backupCollectionLike, backupCollectionLike)
@@ -393,7 +393,7 @@ set target_item_id = (
   where source.id = relations.source_item_id
     and (source_kind.kind != ? or target.collection_id = source.collection_id)
     and target.tombstoned_at is null
-  order by target.created_at desc, target.id desc
+  order by target.updated_at desc, target.id desc
   limit 1
 )
 where coalesce(target_source_kind, '') = ''
@@ -418,7 +418,7 @@ where coalesce(target_source_kind, '') = ''
       where source.id = relations.source_item_id
         and (source_kind.kind != ? or target.collection_id = source.collection_id)
         and target.tombstoned_at is null
-      order by target.created_at desc, target.id desc
+      order by target.updated_at desc, target.id desc
       limit 1
     )
   )`, MemorySourceKind, MemorySourceKind, MemorySourceKind)
@@ -580,7 +580,15 @@ on conflict(source_id, external_id) do update set type=excluded.type, name=exclu
 			return false, err
 		}
 	}
-	capturedAt := optionalString(rec.Item.CreatedAt)
+	// Content-addressed item ids do not encode time. Persist a real monotonic
+	// ingestion stamp on updated_at so latest-version selection cannot fall back
+	// to lexicographic content-hash order when created_at is empty or tied.
+	createdAt := strings.TrimSpace(rec.Item.CreatedAt)
+	if createdAt == "" {
+		createdAt = now
+	}
+	updatedAt := now
+	capturedAt := optionalString(createdAt)
 	itemLocator := fmt.Sprintf("miseledger://%s/%s/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID)
 	envelope, err := buildIngestEnvelope(rec, now, capturedAt, rec.Item.Text, raw, rec.Collection.ExternalID, rec.Item.ExternalID, "uri", itemLocator)
 	if err != nil {
@@ -588,7 +596,7 @@ on conflict(source_id, external_id) do update set type=excluded.type, name=exclu
 	}
 	itemMeta := itemMetadataJSON(rec, envelope)
 	res, err := tx.Exec(`insert or ignore into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
-values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIfEmpty(actorID), rec.Item.ExternalID, rec.Item.Kind, rec.Item.CreatedAt, rec.Item.UpdatedAt, rec.Item.Text, summary, contentHash, string(raw), rawHash, rawPath, rawOrdinal, string(itemMeta))
+values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIfEmpty(actorID), rec.Item.ExternalID, rec.Item.Kind, createdAt, updatedAt, rec.Item.Text, summary, contentHash, string(raw), rawHash, rawPath, rawOrdinal, string(itemMeta))
 	if err != nil {
 		return false, err
 	}
@@ -596,8 +604,8 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIf
 	if insertedRows == 0 {
 		return false, nil
 	}
-	eventID := stableID("event", itemID, rec.Item.CreatedAt, rec.Item.Kind)
-	_, _ = tx.Exec(`insert or ignore into events(id, source_id, collection_id, actor_id, item_id, kind, occurred_at) values(?,?,?,?,?,?,?)`, eventID, sourceID, collectionID, nullIfEmpty(actorID), itemID, rec.Item.Kind, rec.Item.CreatedAt)
+	eventID := stableID("event", itemID, createdAt, rec.Item.Kind)
+	_, _ = tx.Exec(`insert or ignore into events(id, source_id, collection_id, actor_id, item_id, kind, occurred_at) values(?,?,?,?,?,?,?)`, eventID, sourceID, collectionID, nullIfEmpty(actorID), itemID, rec.Item.Kind, createdAt)
 	if err := indexItemMetadata(tx, itemID, rec.Item.Tags, itemMeta); err != nil {
 		return false, err
 	}

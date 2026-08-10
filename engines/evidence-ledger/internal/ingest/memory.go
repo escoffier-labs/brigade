@@ -342,8 +342,8 @@ where target_item_id = ? and source_item_id != ?`, r.id, r.id); err != nil {
 }
 
 func liveMemoryExternalIDs(tx *sql.Tx, namespace string) (map[string]string, error) {
-	// Latest non-tombstoned version wins per external_id (content-addressed
-	// edits keep prior rows; live health selects the newest).
+	// Latest non-tombstoned version wins per external_id. Ordering uses the
+	// monotonic ingest stamp on updated_at (not content-hash item ids).
 	rows, err := tx.Query(`
 select i.external_id, i.content_hash
 from items i
@@ -353,7 +353,7 @@ where s.kind = ?
   and i.kind = 'memory_card'
   and i.tombstoned_at is null
   and c.external_id = ?
-order by i.created_at desc, i.id desc`, MemorySourceKind, namespace)
+order by i.updated_at desc, i.id desc`, MemorySourceKind, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +404,7 @@ where s.kind = ?
       and i2.collection_id = i.collection_id
       and i2.external_id = i.external_id
       and i2.tombstoned_at is null
-    order by i2.created_at desc, i2.id desc
+    order by i2.updated_at desc, i2.id desc
     limit 1
   )`, MemorySourceKind, namespace).Scan(&n)
 	return n, err

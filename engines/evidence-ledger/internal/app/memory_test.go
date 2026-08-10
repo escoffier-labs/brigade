@@ -854,6 +854,79 @@ func TestLegacyMemoryCardsScopedRebuildRule(t *testing.T) {
 	}
 }
 
+
+
+func TestCrawlMemoryLatestVersionUsesIngestStampNotHashOrder(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	ws := t.TempDir()
+	writeTestNamespace(t, ws, testMemoryNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cardID := "card-ctime000-1111-4222-8333-444444444444"
+	path := filepath.Join(cards, "c.md")
+	v1 := "---\nid: " + cardID + "\ntopic: c\nsupported_by: [missing-target-v1]\n---\n\n# Original body ZZZ\n"
+	v2 := "---\nid: " + cardID + "\ntopic: c\n---\n\n# Edited body AAA latest\n"
+	if err := os.WriteFile(path, []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := runJSON(t, "crawl", "memory", ws, "--json")
+	if first["unresolved_relations"].(float64) < 1 {
+		t.Fatalf("v1 should record unresolved outbound: %v", first)
+	}
+	if err := os.WriteFile(path, []byte(v2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := runJSON(t, "crawl", "memory", ws, "--json")
+	if second["updated"].(float64) < 1 {
+		t.Fatalf("expected edit update: %v", second)
+	}
+
+	db := openTestDB(t)
+	defer db.Close()
+	var v1ID, v2ID, v2Hash, v1Updated, v2Updated string
+	if err := db.QueryRow(`
+select i.id, i.updated_at from items i
+join sources s on s.id = i.source_id join collections c on c.id = i.collection_id
+where s.kind=? and c.external_id=? and i.external_id=? and i.text like '%Original%'`,
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v1ID, &v1Updated); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`
+select i.id, i.content_hash, i.updated_at from items i
+join sources s on s.id = i.source_id join collections c on c.id = i.collection_id
+where s.kind=? and c.external_id=? and i.external_id=? and i.text like '%Edited%'`,
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v2ID, &v2Hash, &v2Updated); err != nil {
+		t.Fatal(err)
+	}
+	if v1Updated == "" || v2Updated == "" || v2Updated <= v1Updated {
+		t.Fatalf("ingest stamps missing/non-monotonic v1=%q v2=%q", v1Updated, v2Updated)
+	}
+	// Reproduce Terra condition: empty created_at ties; hash/id order may disagree.
+	if _, err := db.Exec(`update items set created_at = '' where external_id = ?`, cardID); err != nil {
+		t.Fatal(err)
+	}
+	live, err := ingest.LiveMemoryProjection(db, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live[cardID] != v2Hash {
+		t.Fatalf("live selection ignored ingest stamp after empty created_at: got %s want %s (v1ID=%s v2ID=%s)", live[cardID], v2Hash, v1ID, v2ID)
+	}
+	health, err := ingest.CollectMemoryHealth(db, Version, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.UnresolvedRelations != 0 {
+		t.Fatalf("stale outbound unresolved on prior version contaminated health: %+v", health)
+	}
+	if health.LiveCount != 1 {
+		t.Fatalf("live_count=%d", health.LiveCount)
+	}
+}
+
 func TestCrawlMemoryEditRepointsInboundRelationsToLatestVersion(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
@@ -865,20 +938,33 @@ func TestCrawlMemoryEditRepointsInboundRelationsToLatestVersion(t *testing.T) {
 	}
 	cardID := "card-edit0000-1111-4222-8333-444444444444"
 	cardPath := filepath.Join(cards, "edit.md")
-	if err := os.WriteFile(cardPath, []byte("---\nid: "+cardID+"\ntopic: edit\n---\n\n# Original\n"), 0o600); err != nil {
+	if err := os.WriteFile(cardPath, []byte("---\nid: "+cardID+"\ntopic: edit\nsupported_by: [missing-outbound-v1]\n---\n\n# Original\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runJSON(t, "crawl", "memory", ws, "--json")
+	first := runJSON(t, "crawl", "memory", ws, "--json")
+	if first["unresolved_relations"].(float64) < 1 {
+		t.Fatalf("expected v1 unresolved outbound: %v", first)
+	}
 
 	db := openTestDB(t)
-	var v1ID, v1Hash string
+	var v1ID, v1Hash, v1Updated string
 	if err := db.QueryRow(`
-select i.id, i.content_hash from items i
+select i.id, i.content_hash, i.updated_at from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
-order by i.created_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v1ID, &v1Hash); err != nil {
+order by i.updated_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v1ID, &v1Hash, &v1Updated); err != nil {
 		t.Fatal(err)
+	}
+	if v1Updated == "" {
+		t.Fatal("ingest must persist non-empty updated_at version stamp")
+	}
+	healthV1, err := ingest.CollectMemoryHealth(db, Version, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healthV1.UnresolvedRelations < 1 {
+		t.Fatalf("v1 health should count outbound unresolved, got %+v", healthV1)
 	}
 	supportJSONL := `{"schema":"miseledger.adapter.v1","source":{"kind":"brigade","name":"Brigade"},"collection":{"external_id":"brigade:receipts","kind":"brigade_receipt","name":"receipts"},"item":{"external_id":"receipt:edit-support","kind":"receipt","created_at":"2026-01-01T00:00:00Z","text":"support"},"relations":[{"type":"supports","target":{"source":"brigade-memory","collection":"` + testMemoryNamespace + `","external_id":"` + cardID + `"}}],"raw":{"format":"json","path":"r.json","ordinal":1}}` + "\n"
 	db.Close()
@@ -901,6 +987,7 @@ order by i.created_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNames
 
 	// Non-rebuild edit: content-addressed import creates a second item id while
 	// the prior version stays untombstoned (same external id still observed).
+	// Drop the unresolved outbound relation on v2.
 	if err := os.WriteFile(cardPath, []byte("---\nid: "+cardID+"\ntopic: edit\n---\n\n# Edited body\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -923,17 +1010,24 @@ where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at
 	if versionCount < 2 {
 		t.Fatalf("expected prior+latest content-addressed versions, got %d", versionCount)
 	}
-	var v2ID, v2Hash string
+	var v2ID, v2Hash, v2Updated string
 	if err := db.QueryRow(`
-select i.id, i.content_hash from items i
+select i.id, i.content_hash, i.updated_at from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
-order by i.created_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v2ID, &v2Hash); err != nil {
+order by i.updated_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v2ID, &v2Hash, &v2Updated); err != nil {
 		t.Fatal(err)
 	}
 	if v2ID == v1ID || v2Hash == v1Hash {
 		t.Fatalf("edit must mint a new content-addressed item id/hash (v1=%s/%s v2=%s/%s)", v1ID, v1Hash, v2ID, v2Hash)
+	}
+	if v2Updated == "" || v2Updated <= v1Updated {
+		t.Fatalf("updated_at ingest stamp must advance for edited version v1=%q v2=%q", v1Updated, v2Updated)
+	}
+	// Empty created_at must not change latest selection.
+	if _, err := db.Exec(`update items set created_at = '' where external_id = ?`, cardID); err != nil {
+		t.Fatal(err)
 	}
 	if err := db.QueryRow(`select target_item_id from relations where target_external_id = ? and target_source_kind = ?`,
 		cardID, ingest.MemorySourceKind).Scan(&inboundTarget); err != nil {
@@ -957,7 +1051,7 @@ order by i.created_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNames
 		t.Fatalf("live_count should count latest external ids once, got %d", health.LiveCount)
 	}
 	if health.UnresolvedRelations != 0 {
-		t.Fatalf("resolved inbound must not leave unresolved_relations=%d", health.UnresolvedRelations)
+		t.Fatalf("stale v1 outbound unresolved must not contaminate live health: %+v", health)
 	}
 }
 

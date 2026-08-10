@@ -86,7 +86,7 @@ func TestWalkValidMissingMalformedUnknownLargeInjection(t *testing.T) {
 func TestBuildCardTruncatesUTF8WithinBudget(t *testing.T) {
 	marker := "\n[truncated]"
 	body := "---\nid: card-utf80000-1111-4222-8333-444444444444\nsummary: " + strings.Repeat("界", MaxTextBytes) + "\n---\n\n" + strings.Repeat("界", MaxTextBytes)
-	card, warning := buildCard("workspace", fixtureNamespace, "memory/cards/utf8.md", []byte(body))
+	card, warning := buildCard("workspace", fixtureNamespace, "memory/cards/utf8.md", []byte(body), "2026-01-01T00:00:00Z")
 	if warning != "" || card.Record == nil {
 		t.Fatalf("card=%+v warning=%q", card, warning)
 	}
@@ -99,7 +99,7 @@ func TestBuildCardTruncatesUTF8WithinBudget(t *testing.T) {
 	if len(*card.Record.Item.Summary) > MaxTextBytes || !strings.HasSuffix(*card.Record.Item.Summary, marker) {
 		t.Fatalf("summary bytes=%d suffix=%v", len(*card.Record.Item.Summary), strings.HasSuffix(*card.Record.Item.Summary, marker))
 	}
-	ascii, _ := buildCard("workspace", fixtureNamespace, "memory/cards/ascii.md", []byte("---\nid: card-ascii000-1111-4222-8333-444444444444\n---\n\n"+strings.Repeat("a", MaxTextBytes+1)))
+	ascii, _ := buildCard("workspace", fixtureNamespace, "memory/cards/ascii.md", []byte("---\nid: card-ascii000-1111-4222-8333-444444444444\n---\n\n"+strings.Repeat("a", MaxTextBytes+1)), "2026-01-01T00:00:00Z")
 	if ascii.Record == nil || len(ascii.Record.Item.Text) != MaxTextBytes || !strings.HasSuffix(ascii.Record.Item.Text, marker) {
 		t.Fatalf("ascii truncation = %+v", ascii)
 	}

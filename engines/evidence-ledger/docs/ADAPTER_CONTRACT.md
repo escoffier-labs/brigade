@@ -165,8 +165,11 @@ Completed-scan reconciliation:
   the active namespace collection.
 - Live identity for a card is the latest non-tombstoned item for
   `(source, collection, external_id)`. Content-addressed edits mint a new item
-  id; relation resolution and live/unresolved health select that latest version
-  (including re-pointing previously resolved inbound edges).
+  id; ingest always stamps `updated_at` with a monotonic ingestion time so
+  relation resolution and live/unresolved health select that latest version
+  even when `created_at` is empty or tied (including re-pointing previously
+  resolved inbound edges). Stale outbound unresolved relations on prior
+  versions do not contaminate live health.
 - Failed or interrupted scans tombstone nothing and mark the prior completed
   snapshot for that namespace stale.
 - `--rebuild` validates/walks first, then detaches the live namespace collection
