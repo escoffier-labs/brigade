@@ -17,6 +17,7 @@ import hashlib
 import json
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -197,8 +198,45 @@ def _evidence_ref(
     return ref
 
 
-def collect_receipt_evidence(target: Path) -> dict[str, list[dict[str, Any]]]:
-    """Load workspace verify / review / handoff receipts for obligation matching."""
+def _run_window_bounds(run_meta: dict[str, Any] | None) -> tuple[datetime | None, datetime | None]:
+    """Return UTC bounds for receipts eligible for one Brigade run audit."""
+    if not isinstance(run_meta, dict):
+        return None, None
+    started = localio.parse_iso_datetime(run_meta.get("started_at"))
+    ended = localio.parse_iso_datetime(run_meta.get("finished_at"))
+    if ended is None:
+        ended = localio.parse_iso_datetime(run_meta.get("completed_at"))
+    return started, ended
+
+
+def _receipt_started_at(receipt: dict[str, Any]) -> datetime | None:
+    return localio.parse_iso_datetime(receipt.get("started_at"))
+
+
+def _receipt_in_run_window(
+    receipt: dict[str, Any],
+    *,
+    run_started_at: datetime | None,
+    run_ended_at: datetime | None,
+) -> bool:
+    """Match receipts to the audited run using the same started_at convention as aboyeur ground truth."""
+    if run_started_at is None:
+        return False
+    receipt_started_at = _receipt_started_at(receipt)
+    if receipt_started_at is None or receipt_started_at < run_started_at:
+        return False
+    if run_ended_at is not None and receipt_started_at > run_ended_at:
+        return False
+    return True
+
+
+def collect_receipt_evidence(
+    target: Path,
+    *,
+    run_started_at: datetime | None = None,
+    run_ended_at: datetime | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Load verify / review / handoff receipts eligible for one Brigade run audit."""
     from . import scorecard
     from .handoff_cmd import drafts as handoff_drafts
     from .work_cmd import reviews as reviews_mod
@@ -210,11 +248,33 @@ def collect_receipt_evidence(target: Path) -> dict[str, list[dict[str, Any]]]:
             continue
         receipt = dict(receipt)
         receipt.setdefault("path", str(path.parent))
+        if not _receipt_in_run_window(
+            receipt,
+            run_started_at=run_started_at,
+            run_ended_at=run_ended_at,
+        ):
+            continue
         verify_receipts.append(receipt)
     verify_receipts.sort(key=_receipt_timestamp, reverse=True)
 
-    review_receipts = reviews_mod._review_receipts(target)
-    handoff_receipts = handoff_drafts._ingest_receipts(target)
+    review_receipts = [
+        receipt
+        for receipt in reviews_mod._review_receipts(target)
+        if _receipt_in_run_window(
+            receipt,
+            run_started_at=run_started_at,
+            run_ended_at=run_ended_at,
+        )
+    ]
+    handoff_receipts = [
+        receipt
+        for receipt in handoff_drafts._ingest_receipts(target)
+        if _receipt_in_run_window(
+            receipt,
+            run_started_at=run_started_at,
+            run_ended_at=run_ended_at,
+        )
+    ]
     return {
         KIND_CHECK: verify_receipts,
         KIND_REVIEW: review_receipts,
@@ -335,7 +395,12 @@ def build_audit_payload(
     plan = localio.read_json_dict(run_dir / "plan.json")
     run_meta = localio.read_json_dict(run_dir / "run.json")
     declared_skill_ids = declared_skill_ids_from_plan(plan if isinstance(plan, dict) else None)
-    evidence = collect_receipt_evidence(target)
+    run_started_at, run_ended_at = _run_window_bounds(run_meta if isinstance(run_meta, dict) else None)
+    evidence = collect_receipt_evidence(
+        target,
+        run_started_at=run_started_at,
+        run_ended_at=run_ended_at,
+    )
 
     skills: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []

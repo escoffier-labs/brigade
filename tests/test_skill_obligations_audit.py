@@ -208,6 +208,82 @@ def test_audit_satisfies_check_review_handoff_and_obligation_id(tmp_path: Path, 
     assert payload["evidence_counts"] == {"check": 1, "review": 1, "handoff": 1}
 
 
+def test_earlier_run_receipts_do_not_satisfy_audited_run_obligations(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    _write_skill(
+        tmp_path,
+        "demo-skill",
+        obligations=[
+            {"id": "fresh-verify", "kind": "check", "required": True},
+            {"id": "code-review", "kind": "review", "required": True},
+            {"id": "memory-handoff", "kind": "handoff", "required": True},
+        ],
+    )
+    run_dir = _write_run(tmp_path, "20260801-audit-window", ["demo-skill"])
+    _write_json(
+        run_dir / "run.json",
+        {
+            "run_id": "20260801-audit-window",
+            "status": "completed",
+            "started_at": "2026-08-01T02:00:00Z",
+            "completed_at": "2026-08-01T03:00:00Z",
+        },
+    )
+    _write_json(
+        tmp_path / ".brigade" / "work" / "verify-runs" / "verify-earlier" / "receipt.json",
+        {
+            "run_id": "verify-earlier",
+            "status": "completed",
+            "started_at": "2026-08-01T00:10:00Z",
+            "completed_at": "2026-08-01T00:11:00Z",
+            "commands": [
+                {
+                    "command": "pytest -q",
+                    "argv": ["pytest", "-q"],
+                    "status": "completed",
+                    "exit_code": 0,
+                    "check_id": "verify.pytest",
+                    "check_role": "effectiveness",
+                    "obligation_id": "fresh-verify",
+                }
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / ".brigade" / "reviews" / "runs" / "review-earlier" / "receipt.json",
+        {
+            "run_id": "review-earlier",
+            "reviewer_id": "local",
+            "status": "completed",
+            "exit_code": 0,
+            "started_at": "2026-08-01T00:20:00Z",
+            "completed_at": "2026-08-01T00:21:00Z",
+        },
+    )
+    _write_json(
+        tmp_path / ".brigade" / "handoffs" / "ingest-runs" / "handoff-earlier.json",
+        {
+            "run_id": "handoff-earlier",
+            "status": "ingested",
+            "started_at": "2026-08-01T00:30:00Z",
+            "completed_at": "2026-08-01T00:31:00Z",
+            "processed_handoff_paths": ["memory-handoffs/demo.md"],
+            "skipped_handoff_paths": [],
+            "failed_handoff_paths": [],
+            "safe_summary": "ingested demo handoff",
+        },
+    )
+
+    assert skill_obligations.audit(target=tmp_path, run=run_dir, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"] == skill_obligations.RESULT_WARN
+    assert payload["finding_count"] == 3
+    assert payload["evidence_counts"] == {"check": 0, "review": 0, "handoff": 0}
+    kinds = {finding["obligation_kind"] for finding in payload["findings"]}
+    assert kinds == {"check", "review", "handoff"}
+
+
 def test_stamped_obligation_id_failure_does_not_fall_back_to_unrelated_verify(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
