@@ -4,19 +4,13 @@ Brigade is the local-first operator CLI for agent memory, handoffs, and reviewab
 
 ## Your first PR
 
-External contributions are welcome. This section is the short path; **Pull requests** below lists the full merge gates.
+External contributions are welcome. This section is the short path; [Pull requests](#pull-requests) below lists the full merge gates.
 
 1. **Pick work.** Look for issues labeled `good first issue` or `help wanted`. If nothing fits, comment on an existing issue or open one before you spend time on a surprise scope.
 2. **Claim it.** Comment on the issue that you are working on it. The maintainer holds off internal lanes for **48 hours** so your branch is not steamrolled.
-3. **Install and test locally.** From a repo clone with Python 3.10+:
-
-```bash
-pip install -e ".[dev]" && pytest -q
-```
-
-That is the minimal loop for a docs-only change. Code changes should pass `./scripts/verify` before you push (see **Local dev** below).
+3. **Install and verify locally.** Clone with Python 3.10+, then follow [Local dev](#local-dev): use a virtual environment (required on PEP 668-managed Python and on Windows), install dev dependencies, and run the verification path that matches your change (content-guard scan for docs-only; `./scripts/verify` for code).
 4. **Open a pull request.** Required CI checks run automatically on the branch. You do not need to dispatch all required checks yourself.
-5. **Review turnaround.** Target an initial review within a few business days once required checks are green. Merge still waits on the formal review and gate rules in **Pull requests**.
+5. **Review turnaround.** Target an initial review within a few business days once required checks are green. Merge still waits on the formal review and gate rules in [Pull requests](#pull-requests).
 
 ## Pull requests
 
@@ -74,12 +68,38 @@ Reviewed planning docs are public and tracked: the phase plans (`docs/phase-*.md
 
 ## Local dev
 
+From a repo clone with Python 3.10+:
+
 ```bash
 git clone https://github.com/escoffier-labs/brigade.git
 cd brigade
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+```
+
+Activate the environment before installing:
+
+- **POSIX (macOS, Linux):** `source .venv/bin/activate`
+- **Windows:** `.venv\Scripts\activate`
+
+Then install dev dependencies:
+
+```bash
 pip install -e ".[dev]"
-pytest -q
+```
+
+On PEP 668-managed Python (many Linux distributions), installing into the system interpreter fails; a virtual environment avoids that.
+
+**Docs-only changes:** CI runs the `content-guard` job on the repo. Locally, scan each edited markdown file before you push:
+
+```bash
+brigade guard scan CONTRIBUTING.md --policy src/brigade/guard/policies/public-repo.json
+brigade guard scan README.md --policy src/brigade/guard/policies/public-repo.json
+```
+
+**Code or test changes:** run the full local gate before you push:
+
+```bash
+./scripts/verify
 ```
 
 To smoke-test an install end-to-end the same way CI does:

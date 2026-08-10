@@ -103,7 +103,7 @@ rules, and when to use `brigade update` are in
 
 Per-OS setup (apt, Homebrew, Scoop, PowerShell), workspace depth, and multi-harness installs: [install guide](https://brigade.tools/docs/getting-started/install), [QUICKSTART.md](QUICKSTART.md), [first 10 minutes](docs/first-10-minutes.md). Homegrown setup already? `brigade operator adopt plan`.
 
-**Contributing?** See [CONTRIBUTING.md](CONTRIBUTING.md) for starter issues, the 48-hour claim convention, and the minimal local test command (`pip install -e ".[dev]" && pytest -q`).
+**Contributing?** See [Your first PR](CONTRIBUTING.md#your-first-pr) in [CONTRIBUTING.md](CONTRIBUTING.md) for starter issues, the 48-hour claim convention, and local verification ([Local dev](CONTRIBUTING.md#local-dev): content-guard scan for docs-only changes; `./scripts/verify` for code).
 
 ## Auditable agents: every action leaves a receipt
 
