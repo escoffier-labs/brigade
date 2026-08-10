@@ -456,9 +456,8 @@ def campaign_readiness_payload(
         # Partial aggregates that omit a configured member are not authoritative.
         raise CampaignError(
             "campaign members missing or unreadable",
-            reason=REASON_MISSING_MEMBER if any(
-                err.get("reason") == REASON_MISSING_MEMBER for err in errors
-            )
+            reason=REASON_MISSING_MEMBER
+            if any(err.get("reason") == REASON_MISSING_MEMBER for err in errors)
             else REASON_UNREADABLE_MEMBER,
             details={"members": members_info, "member_errors": errors, "errors": errors},
             exit_code=1,
