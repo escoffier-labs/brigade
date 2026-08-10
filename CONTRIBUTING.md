@@ -77,16 +77,40 @@ Dispatched sessions should open the pull request, run local verification, and pu
 
 ## Changelog
 
-`CHANGELOG.md` uses Git's `merge=union` driver so parallel pull requests can each append an
-`[Unreleased]` bullet without manual conflict resolution. Union merge keeps every added line
-from both sides; it only conflicts when one side deletes or rewrites content the other left
-alone. Write each entry as a single self-contained line (issue reference, user-visible
-effect, no commit-subject phrasing). Do not wrap entries across multiple lines or edit
-released sections in feature branches — multi-line bullets can interleave badly, and edits
-outside `[Unreleased]` still conflict normally. Prefer an existing subsection (`Added`,
-`Changed`, `Fixed`, …) under `[Unreleased]`; if two branches both introduce the same
-subsection header, union merge folds their bullets under one header (maintainers may reorder
-for readability after merge).
+Parallel pull requests often append one bullet under `[Unreleased]`. Whole-file
+`merge=union` would auto-keep **every** conflicting line in `CHANGELOG.md`,
+including edits to released/versioned sections, which is unsafe for a public
+changelog. This repository instead uses a **section-aware** merge driver:
+
+| Region | Behavior |
+|---|---|
+| `## [Unreleased]` (and its `###` subsections) | Union of bullets; parallel new subsections with the same name fold into one |
+| Preamble and every released `## [x.y.z]` section | Strict 3-way region merge — diverging edits conflict |
+
+Wire the driver once per clone (not inherited from the remote):
+
+```bash
+./scripts/configure_changelog_merge_driver.sh
+```
+
+That registers `merge.changelog-unreleased` so local `git merge` / `git pull`
+use `scripts/git_merge_changelog_unreleased.py`. `.gitattributes` names the
+driver; without local config Git falls back to the default text merge (conflicts
+everywhere, including Unreleased), which is the safe failure mode.
+
+**Limits (read these):**
+
+- GitHub's server-side merge button does **not** run custom merge drivers. PR
+  merges on github.com still conflict on overlapping Unreleased edits; resolve
+  locally with the driver configured, or resolve the conflict markers by hand.
+- Write each Unreleased entry as a **single self-contained line** (issue
+  reference, user-visible effect, no commit-subject phrasing). Multi-line
+  bullets can still interleave badly under union.
+- Prefer an existing subsection (`Added`, `Changed`, `Fixed`, …). The driver
+  folds parallel same-named subsections; maintainers may still reorder for
+  readability after merge.
+- Do not edit released sections in feature branches. If you must, expect a
+  real conflict — that is intentional.
 
 ## Adding a harness
 

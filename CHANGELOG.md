@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Contributor changelog merges use a section-aware Git merge driver that unions `[Unreleased]` bullets while still conflicting on released sections; configure with `./scripts/configure_changelog_merge_driver.sh` (see CONTRIBUTING.md).
+
 ### Added
 - `brigade center serve` gains work-graph views over existing `--json` contracts:
   an SVG ready/blocked dependency graph, parallel-safe dispatch-wave swim-lanes
