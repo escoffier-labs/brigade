@@ -545,56 +545,106 @@ def task_claim(
 ) -> int:
     """Claim a task and refine its footprint from plan-named files.
 
-    This is the footprint refine seam (#777). Atomic compare-and-set claim
-    guards land in #738; this command is the additive lifecycle write that
-    claim will call.
+    Footprint refine (#777) shares the CAS claim surface (#738): pending tasks
+    gain a real claim record, and a different actor cannot steal a live claim
+    under the guise of footprint refinement.
     """
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    from .. import claiming as claim_mod
     from .. import footprint as footprint_mod
 
-    with ledger_mod._task_ledger_lock(target):
-        task, ledger = ledger_mod._find_task(target, task_id)
-        if task is None:
-            print(f"error: task not found: {task_id}", file=sys.stderr)
-            return 1
-        status = str(task.get("status") or "pending")
-        if status in edges_mod.TERMINAL_TASK_STATUSES:
-            print(f"error: task is already {status}: {task.get('id')}", file=sys.stderr)
-            return 2
-        try:
-            unresolved = ledger_mod._unresolved_plan_decisions(target, str(task.get("id")))
-        except ledger_mod.PlanDecisionError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return int(exc.exit_code)
-        if unresolved:
-            print(f"error: {ledger_mod._decision_gate_message(unresolved)}", file=sys.stderr)
-            return 2
-        plan_files: list[str] = []
-        if files:
-            plan_files = list(files)
-        elif from_plan:
-            plan = ledger_mod._read_plan_receipt(target, str(task.get("id")), kind="plan")
-            plan_files = footprint_mod.extract_plan_files(plan)
-        footprint = footprint_mod.refine_footprint(
-            files=plan_files,
-            prior=footprint_mod.task_footprint(task),
-        )
-        footprint_mod.set_task_footprint(task, footprint)
-        now = helpers._now().isoformat()
-        task["status"] = "in_progress"
-        task["updated_at"] = now
-        task["claimed_at"] = now
-        if actor and actor.strip():
-            task["assignee"] = actor.strip()
-        ledger_mod._write_task_ledger(target, ledger)
+    try:
+        with ledger_mod._task_ledger_lock(target):
+            task, ledger = ledger_mod._find_task(target, task_id)
+            if task is None:
+                print(f"error: task not found: {task_id}", file=sys.stderr)
+                return 1
+            status = str(task.get("status") or "pending")
+            if status in edges_mod.TERMINAL_TASK_STATUSES:
+                print(f"error: task is already {status}: {task.get('id')}", file=sys.stderr)
+                return 2
+            try:
+                unresolved = ledger_mod._unresolved_plan_decisions(target, str(task.get("id")))
+            except ledger_mod.PlanDecisionError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return int(exc.exit_code)
+            if unresolved:
+                print(f"error: {ledger_mod._decision_gate_message(unresolved)}", file=sys.stderr)
+                return 2
+
+            existing = claim_mod.claim_record(task)
+            actor_text = actor.strip() if isinstance(actor, str) and actor.strip() else None
+            if existing is not None:
+                if actor_text is not None and existing["actor"] != actor_text:
+                    raise claim_mod.ClaimError(
+                        claim_mod.conflict_message(task),
+                        reason=claim_mod.REASON_ALREADY_CLAIMED,
+                        details=claim_mod.holder_payload(task),
+                    )
+            elif status == "pending":
+                # Keep --actor optional for the footprint claim CLI (additive),
+                # but always write a CAS claim record so release can find it.
+                claim_actor = actor_text or "local"
+                claim_mod.apply_claim_to_task(
+                    ledger,
+                    task,
+                    actor=claim_actor,
+                    claim_id=claim_mod.generate_claim_id(),
+                    require_ready=True,
+                )
+            elif status == "in_progress" and actor_text is not None:
+                # Legacy footprint-only in_progress rows (no claim record): adopt
+                # into CAS when assignee is empty or already this actor.
+                current_assignee = claim_mod._string_or_none(task.get("assignee"))
+                if current_assignee is not None and current_assignee != actor_text:
+                    raise claim_mod.ClaimError(
+                        f"task {task.get('id')} is held by {current_assignee}",
+                        reason=claim_mod.REASON_ALREADY_CLAIMED,
+                        details={
+                            "task_id": task.get("id"),
+                            "status": status,
+                            "holder": current_assignee,
+                            "assignee": current_assignee,
+                        },
+                    )
+                claim_mod._set_claim(
+                    task,
+                    actor=actor_text,
+                    claim_id=claim_mod.generate_claim_id(),
+                    claimed_at=helpers._now().isoformat(),
+                )
+            elif status != "in_progress":
+                raise claim_mod.ClaimError(
+                    f"task {task.get('id')} is not ready for claim (status={status})",
+                    reason=claim_mod.REASON_NOT_READY,
+                    details={"task_id": task.get("id"), "status": status},
+                )
+
+            plan_files: list[str] = []
+            if files:
+                plan_files = list(files)
+            elif from_plan:
+                plan = ledger_mod._read_plan_receipt(target, str(task.get("id")), kind="plan")
+                plan_files = footprint_mod.extract_plan_files(plan)
+            footprint = footprint_mod.refine_footprint(
+                files=plan_files,
+                prior=footprint_mod.task_footprint(task),
+            )
+            footprint_mod.set_task_footprint(task, footprint)
+            ledger_mod._write_task_ledger(target, ledger)
+    except claim_mod.ClaimError as exc:
+        return _emit_claim_error(exc, json_output=json_output)
+
+    record = claim_mod.claim_record(task)
     payload = {
         "task": task.get("id"),
         "status": task.get("status"),
         "assignee": task.get("assignee"),
-        "claimed_at": task.get("claimed_at"),
+        "claimed_at": (record or {}).get("claimed_at") or task.get("claimed_at"),
+        "claim": record,
         "footprint": footprint,
     }
     if json_output:
@@ -604,6 +654,8 @@ def task_claim(
     print("status: in_progress")
     if task.get("assignee"):
         print(f"assignee: {task['assignee']}")
+    if record is not None:
+        print(f"claim_id: {record.get('claim_id')}")
     print(f"footprint.phase: {footprint.get('phase')}")
     print(f"footprint.files: {len(footprint.get('files') or [])}")
     for path in footprint.get("files") or []:
