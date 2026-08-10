@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Bounded session-start memory recall (#466 Slice 1): `brigade memory recall
+  --target <hub-or-mirror> --cwd <session-cwd> --limit 5 [--json]` derives query
+  terms from the cwd basename, returns title/tags/path only (max 5 matches /
+  10 lines), and reads a machine-local `memory_recall_target`. Workspace depth
+  may default to the current target; repo depth stays unconfigured until an
+  explicit hub or mirror is set. The managed Claude `SessionStart` hook merges
+  recall beside the work brief once per session and fails open on missing or
+  broken targets. Operator smoke steps live in `docs/memory-care.md`.
 - `brigade center serve` gains work-graph views over existing `--json` contracts:
   an SVG ready/blocked dependency graph, parallel-safe dispatch-wave swim-lanes
   (seam-ready for `work ready --parallel-safe` when #803 lands), and per-task

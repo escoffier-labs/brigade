@@ -7,13 +7,15 @@ from pathlib import Path
 from typing import Any
 
 PACKAGE_ID = "brigade-claude-work-loop"
-PACKAGE_VERSION = "1.0.0"
+PACKAGE_VERSION = "1.1.0"
 PACKAGE_REF = f"{PACKAGE_ID}@{PACKAGE_VERSION}"
 COMMAND_PREFIX = "brigade work hook-run"
 MANAGED_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop")
 LEGACY_SCRIPT_NAME = "brigade-work-loop.py"
 MANAGED_MARKER_KEY = "_brigade"
 HOOK_SCRIPT_NAME = "brigade-claude-work-loop.sh"
+SESSION_START_TIMEOUT_SECONDS = 20
+DEFAULT_HOOK_TIMEOUT_SECONDS = 15
 
 
 def managed_command(event: str) -> str:
@@ -21,7 +23,8 @@ def managed_command(event: str) -> str:
 
 
 def managed_handler(event: str) -> dict[str, Any]:
-    return {"type": "command", "command": managed_command(event), "timeout": 15}
+    timeout = SESSION_START_TIMEOUT_SECONDS if event == "SessionStart" else DEFAULT_HOOK_TIMEOUT_SECONDS
+    return {"type": "command", "command": managed_command(event), "timeout": timeout}
 
 
 def managed_groups() -> dict[str, list[dict[str, Any]]]:
@@ -70,10 +73,11 @@ def managed_user_command(event: str, script_path: Path) -> str:
 
 
 def managed_user_handler(event: str, script_path: Path) -> dict[str, Any]:
+    timeout = SESSION_START_TIMEOUT_SECONDS if event == "SessionStart" else DEFAULT_HOOK_TIMEOUT_SECONDS
     return {
         "type": "command",
         "command": managed_user_command(event, script_path),
-        "timeout": 15,
+        "timeout": timeout,
         MANAGED_MARKER_KEY: PACKAGE_REF,
     }
 
