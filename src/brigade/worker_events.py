@@ -304,11 +304,14 @@ FIELD_CLASSIFICATION_MATRIX: dict[str, Any] = {
     "item_types": {name: dict(fields) for name, fields in sorted(_ITEM_TYPE_FIELDS.items())},
     "global_secret_keys": dict(_GLOBAL_SECRET_KEYS),
     "notes": (
-        "Delta methods are never recorded by Brigade and are intentionally absent. "
-        "Unknown methods or fields fail closed. Only "
-        "item/commandExecution/requestApproval#auto-declined is accepted; other "
-        "*#auto-declined bases fail closed. Absolute home paths travel in cwd/path/"
-        "grantRoot and are classified private_content. Provider error bodies are prohibited."
+        "Raw Codex app-server capture is open-ended for non-delta notifications; "
+        "this matrix is the closed scrub/export contract, not a recorder allowlist. "
+        "Delta methods are never written to events/<worker>.jsonl and are intentionally "
+        "absent here. Unknown methods remain local/unclassified and fail scrub/export "
+        "closed. Only item/commandExecution/requestApproval#auto-declined is accepted; "
+        "other *#auto-declined bases fail closed. Absolute home paths travel in "
+        "cwd/path/grantRoot and are classified private_content. Provider error bodies "
+        "are prohibited."
     ),
 }
 

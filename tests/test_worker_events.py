@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from brigade import run_audit, worker_events
+from brigade import codex_appserver, run_audit, worker_events
 
 FIXTURES = Path(__file__).resolve().parents[1] / "src" / "brigade" / "fixtures"
 GOLDEN_PATH = FIXTURES / "worker-events-appserver.v1.golden.json"
+DOCS_PATH = Path(__file__).resolve().parents[1] / "docs" / "worker-event-streams.md"
 
 
 def _golden():
@@ -45,6 +46,47 @@ def test_classification_matrix_covers_recorded_app_server_methods():
         for classification in fields.values():
             assert classification in worker_events.FIELD_CLASSES
         assert item_type  # non-empty
+
+
+def test_recorder_to_matrix_contract_keeps_raw_capture_open_ended(tmp_path: Path):
+    """Matrix is a scrub allowlist only; raw non-delta capture stays open-ended."""
+    docs = " ".join(DOCS_PATH.read_text(encoding="utf-8").split())
+    assert "Raw capture vs scrub matrix" in docs
+    assert "intentionally open-ended for non-delta methods" in docs
+    assert "must not be read as the set of methods the recorder is allowed to capture" in docs
+    assert "Methods classified for scrubbed projection" in docs
+    assert "Methods recorded by the app-server transport" not in docs
+
+    matrix = worker_events.classification_matrix()
+    scrub_methods = set(matrix["methods"])
+    assert scrub_methods.isdisjoint(codex_appserver._DELTA_METHODS)
+    assert "totally/unknown" not in scrub_methods
+    assert "open-ended" in matrix["notes"]
+    assert "not a recorder allowlist" in matrix["notes"]
+
+    unknown = {
+        "jsonrpc": "2.0",
+        "method": "totally/unknown",
+        "params": {"threadId": "thread-demo-1", "mystery": True},
+    }
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    raw_path = events_dir / "coder.jsonl"
+    raw_path.write_text(json.dumps(unknown) + "\n", encoding="utf-8")
+
+    info = worker_events.inspect_stream_file(raw_path)
+    assert info.status == worker_events.STATUS_UNCLASSIFIED
+    assert info.artifact_class == worker_events.UNCLASSIFIED_ARTIFACT_CLASS
+
+    with pytest.raises(worker_events.WorkerEventError) as scrub_exc:
+        worker_events.scrub_event(unknown)
+    assert scrub_exc.value.category == "unknown-method"
+    assert len(scrub_exc.value.diagnostic) <= worker_events.MAX_DIAGNOSTIC_LEN
+
+    with pytest.raises(worker_events.WorkerEventPolicyError):
+        worker_events.load_stream_for_consumer(raw_path, consumer="run_audit")
+    with pytest.raises(worker_events.WorkerEventPolicyError):
+        run_audit.reject_raw_worker_stream_evidence(tmp_path)
 
 
 def test_golden_covers_adversarial_case_for_every_matrix_item_type():
