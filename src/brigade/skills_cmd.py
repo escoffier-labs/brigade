@@ -581,6 +581,11 @@ def _lint_payload(
     for key in ("required_tools", "required_mcp_servers", "supported_harnesses", "tests"):
         if key in metadata and not isinstance(metadata[key], list):
             errors.append(f"metadata {key} must be a list")
+    if "obligations" in metadata:
+        from . import skill_obligations
+
+        _, obligation_errors = skill_obligations.parse_obligations(metadata)
+        errors.extend(obligation_errors)
     format_result = agent_skill_format.validate(skill_dir, mode=mode)
     errors.extend(format_result.errors)
     warnings.extend(format_result.diagnostics)

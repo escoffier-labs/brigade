@@ -69,3 +69,21 @@ One markdown file per skill, byte-identical to its source in
 [escoffier-labs/skillet](https://github.com/escoffier-labs/skillet). No
 dependencies, no code execution, no config changes. Read the file before you
 adopt it, like anything else that instructs an agent.
+
+## Process obligations (advisory)
+
+Registry `skill.json` may declare an additive `obligations` list. Each entry
+has `id`, `kind` (`check` | `review` | `handoff`), optional `required`
+(default `true`), and optional `description`.
+
+```bash
+brigade skills audit latest --target . --json
+```
+
+`brigade skills audit` reads `selected_skill_ids` from a run's `plan.json`,
+loads each skill's obligations, and compares them to captured verify, review,
+and handoff ingest receipts. Missing required evidence is reported as advisory
+findings (exit 0). Verify receipt commands may stamp `obligation_id` for
+precise check matching; when no stamp exists, a completed verify receipt
+satisfies a `check` obligation at the kind level. This audit never blocks
+verify or promotion (see #499 / skill scorecards).

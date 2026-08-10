@@ -14,9 +14,13 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
-from . import agents, proc, run_control, runguard
+from . import agents, proc, receipt_schema, run_control, runguard
 from .roster import Agent, Roster, is_cli_allowed, timeout_for
 from .seat_health_policy import SeatQuarantineState, decide_retry, failure_for_worker_result
+
+# Re-export the stable worker env key so transport tests and callers document
+# one name: BRIGADE_RUN_ID (see receipt_schema.BRIGADE_RUN_ID_ENV).
+BRIGADE_RUN_ID_ENV = receipt_schema.BRIGADE_RUN_ID_ENV
 
 _GROK_CONTINUATION_PROMPT = (
     "Return the final answer now using the required structured answer schema. "
@@ -347,6 +351,7 @@ def dispatch(
     quarantine_state: SeatQuarantineState | None = None,
     reprobe_seat: Callable[[Agent], bool] | None = None,
     on_failed_attempt_persisted: Callable[[WorkerResult], None] | None = None,
+    run_id: str | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -355,6 +360,12 @@ def dispatch(
     silent degrade to waves. Without it the fallback is stderr-only and the run
     record cannot tell the two apart.
 
+    ``run_id`` is the orchestrator run identity. When set, direct/ACPX workers
+    receive it as ``BRIGADE_RUN_ID`` through the existing env transport path so
+    receipt producers can stamp optional ``producer_run_id`` (#499). Codex
+    app-server workers receive the same identity via the AppServer process env
+    constructed by ``brigade run`` (run-scoped, not per-seat).
+
     ``quarantine_state`` / ``reprobe_seat`` implement the #474 same-seat-once
     retry bound: persist the failed attempt, re-probe, then allow at most one
     same-seat retry before quarantining the seat for the rest of the run.
@@ -362,16 +373,32 @@ def dispatch(
 
     process_registry = process_registry or proc.ProcessRegistry()
     quarantine_state = quarantine_state or SeatQuarantineState()
+    orchestrator_run_id = run_id.strip() if isinstance(run_id, str) and run_id.strip() else None
+
+    def _with_orchestrator_run_id(env: dict[str, str] | None) -> dict[str, str] | None:
+        if orchestrator_run_id is None:
+            return env
+        merged = dict(env) if env is not None else {}
+        merged[BRIGADE_RUN_ID_ENV] = orchestrator_run_id
+        return merged
 
     def run_direct_agent(*args: Any, **kwargs: Any) -> agents.AgentResult:
         runner = agents.run_agent
         parameters = inspect.signature(runner).parameters.values()
-        accepts_registry = any(
-            parameter.name == "process_registry" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters
-        )
+        accepts_var_keyword = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+        accepts_registry = accepts_var_keyword or any(parameter.name == "process_registry" for parameter in parameters)
+        accepts_env = accepts_var_keyword or any(parameter.name == "env" for parameter in parameters)
         if not accepts_registry:
             kwargs.pop("process_registry", None)
+        if orchestrator_run_id is not None:
+            # Real agents.run_agent accepts env=; legacy fixed-signature test
+            # doubles do not. Mirror the process_registry gate so BRIGADE_RUN_ID
+            # still reaches production workers without crashing the doubles.
+            merged_env = _with_orchestrator_run_id(kwargs.get("env"))
+            if accepts_env:
+                kwargs["env"] = merged_env
+            else:
+                kwargs.pop("env", None)
         return runner(*args, **kwargs)
 
     def cancel_active_work(futures: dict[Any, int]) -> None:
@@ -443,16 +470,21 @@ def dispatch(
             if selected_agent.transport == "acpx":
                 from . import acpx_adapter
 
-                return acpx_adapter.run_cursor(
-                    selected_prompt,
-                    cwd=cwd or Path.cwd(),
-                    timeout=timeout_for(selected_agent, roster),
-                    model=selected_agent.model or "",
-                    version=selected_agent.transport_version or "",
-                    read_only=effective_read_only,
-                    writable_worktree=authorized_writable_worktree,
-                    process_registry=process_registry,
+                acpx_kwargs: dict[str, Any] = {
+                    "cwd": cwd or Path.cwd(),
+                    "timeout": timeout_for(selected_agent, roster),
+                    "model": selected_agent.model or "",
+                    "version": selected_agent.transport_version or "",
+                    "read_only": effective_read_only,
+                    "writable_worktree": authorized_writable_worktree,
+                    "process_registry": process_registry,
+                }
+                worker_env = _with_orchestrator_run_id(
+                    dict(selected_agent.env) if selected_agent.env is not None else None
                 )
+                if worker_env is not None:
+                    acpx_kwargs["env"] = worker_env
+                return acpx_adapter.run_cursor(selected_prompt, **acpx_kwargs)
             if resume_session_id is not None:
                 return run_direct_agent(
                     cli_ref,

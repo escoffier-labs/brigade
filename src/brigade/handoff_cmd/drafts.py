@@ -226,6 +226,9 @@ def _normalize_ingest_receipt(
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             normalized[key] = value.strip()
+    producer_run_id = payload.get("producer_run_id")
+    if isinstance(producer_run_id, str) and producer_run_id.strip():
+        normalized["producer_run_id"] = producer_run_id.strip()
     normalized["outcomes"] = _ingest_receipt_outcomes(target, normalized)
     return normalized
 

@@ -32,6 +32,31 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_doctor = skills_sub.add_parser("doctor", help="Check reviewed skill registry health.")
     p_skills_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
     p_skills_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_audit = skills_sub.add_parser(
+        "audit",
+        help=(
+            "Advisory audit: compare declared skill process obligations "
+            "(checks, reviews, handoffs) against captured receipts for one run."
+        ),
+    )
+    p_skills_audit.add_argument(
+        "run",
+        help="Run directory path, run id under --runs-dir, or 'latest'.",
+    )
+    p_skills_audit.add_argument(
+        "--target",
+        "-t",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose skill registry and receipts should be audited.",
+    )
+    p_skills_audit.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --target.",
+    )
+    p_skills_audit.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_import_issues = skills_sub.add_parser(
         "import-issues", help="Import skill registry issues into the work inbox."
     )
@@ -222,6 +247,15 @@ def dispatch(args) -> int:
         )
     if args.skills_command == "doctor":
         return skills_cmd.doctor(target=args.target, json_output=args.json)
+    if args.skills_command == "audit":
+        from .. import skill_obligations
+
+        return skill_obligations.audit(
+            target=args.target,
+            run=args.run,
+            runs_dir=args.runs_dir,
+            json_output=args.json,
+        )
     if args.skills_command == "import-issues":
         return skills_cmd.import_issues(target=args.target, json_output=args.json)
     if args.skills_command == "install":

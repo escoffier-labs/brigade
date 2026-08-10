@@ -247,3 +247,49 @@ def test_windows_appserver_uses_group_and_registry_tree_termination(monkeypatch)
     assert captured["creationflags"] == getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     assert "start_new_session" not in captured
     assert events == [("register", 4242), ("terminate", 4242), ("unregister", 4242)]
+
+
+def test_appserver_env_reaches_child_without_seat_env(monkeypatch):
+    """Run-scoped identity can ride AppServer process env (not per-seat env)."""
+    from brigade import receipt_schema
+
+    captured = {}
+
+    class StubProcess:
+        pid = 4242
+
+    class StubRegistry:
+        def register(self, process):
+            pass
+
+        def terminate(self, process):
+            pass
+
+        def unregister(self, process):
+            pass
+
+    class StubThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    def fake_popen(*args, **kwargs):
+        captured.update(kwargs)
+        return StubProcess()
+
+    server = codex_appserver.AppServer(
+        argv=["codex", "app-server"],
+        process_registry=StubRegistry(),
+        env={receipt_schema.BRIGADE_RUN_ID_ENV: "orch-appserver-1"},
+    )
+    monkeypatch.setattr(codex_appserver.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(codex_appserver.threading, "Thread", StubThread)
+    monkeypatch.setattr(server, "request", lambda *args, **kwargs: {})
+    monkeypatch.setattr(server, "_send", lambda *args, **kwargs: None)
+
+    server.start()
+    server.close()
+
+    assert captured["env"][receipt_schema.BRIGADE_RUN_ID_ENV] == "orch-appserver-1"
