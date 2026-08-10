@@ -2060,6 +2060,26 @@ def test_handoff_lint_distinguishes_structured_homegrown_note_from_garbage(tmp_p
     assert not garbage_result.hints
 
 
+def test_handoff_lint_text_and_json_agree_on_salvageable_verdict(tmp_path, capsys):
+    structured = tmp_path / "structured.md"
+    structured.write_text(
+        "# Project note\n\n"
+        "## What happened\n\nThe cache was rebuilt after stale results appeared.\n\n"
+        "## Why it matters\n\nFuture runs now use current inputs.\n\n"
+        "## Decisions\n\nKeep the validation step.\n\n"
+        "## Next steps\n\nDocument the recovery command.\n"
+    )
+
+    for strict in (False, True):
+        assert handoff_cmd.lint(target=tmp_path, paths=[structured], strict=strict) == 1
+        text_output = capsys.readouterr().out
+        assert "hint: structured note detected" in text_output
+
+        assert handoff_cmd.lint(target=tmp_path, paths=[structured], json_output=True, strict=strict) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["results"][0]["salvageable"] is True
+
+
 def test_handoff_migrate_dry_run_plans_homegrown_note(tmp_path, capsys):
     inbox = tmp_path / ".claude" / "memory-handoffs"
     note = _homegrown_note(inbox)
