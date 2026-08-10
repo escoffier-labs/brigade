@@ -96,7 +96,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workers as `BRIGADE_RUN_ID`; verify, review, and handoff producers stamp
   optional `producer_run_id`. Per-run obligation matching requires exact
   `producer_run_id` equality (never timestamp proximity); legacy unstamped
-  receipts are labeled unattributed and cannot satisfy.
+  receipts are labeled unattributed and cannot satisfy. Public JSON/text
+  output uses repo-relative or `external:<name>` path labels and never
+  prints host-private absolute paths.
 
 ## [0.26.1] - 2026-08-09
 

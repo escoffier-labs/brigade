@@ -386,3 +386,6 @@ def test_skills_audit_text_output_labels_unattributed_without_secrets(tmp_path, 
     assert "producer_run_id" in out
     assert "sk-secret-should-not-leak" not in out
     assert "OPENAI_API_KEY" not in out
+    assert str(tmp_path.resolve()) not in out
+    assert f"target: {skill_obligations.PUBLIC_TARGET}" in out
+    assert f"run: .brigade/runs/{run_dir.name}" in out

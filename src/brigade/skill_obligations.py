@@ -36,6 +36,65 @@ RESULT_WARN = "warn"
 RESULT_NO_DECLARED_SKILLS = "no_declared_skills"
 RESULT_NO_OBLIGATIONS = "no_obligations"
 
+# Public audit output never prints host-private absolute paths. Paths under the
+# audited target are repo-relative; everything else collapses to external:<name>.
+PUBLIC_TARGET = "."
+
+
+def _public_path(root: Path, value: object) -> str | None:
+    """Stable public path label: repo-relative under root, else external:<name>."""
+    if value is None:
+        return None
+    if not isinstance(value, (str, Path)):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    root_resolved = root.expanduser().resolve()
+    path = Path(text).expanduser()
+    try:
+        resolved = path.resolve() if path.is_absolute() else (root_resolved / path).resolve()
+    except OSError:
+        name = Path(text).name or "path"
+        return f"external:{name}"
+    try:
+        relative = resolved.relative_to(root_resolved)
+    except ValueError:
+        name = resolved.name or "path"
+        return f"external:{name}"
+    rendered = relative.as_posix()
+    return rendered if rendered else PUBLIC_TARGET
+
+
+def _looks_like_filesystem_ref(value: str) -> bool:
+    if not value:
+        return False
+    if value.startswith((".", "~", "/", "\\")):
+        return True
+    if "/" in value or "\\" in value:
+        return True
+    try:
+        return Path(value).expanduser().is_absolute()
+    except OSError:
+        return False
+
+
+def _public_skill_id(root: Path, skill_id: str) -> str:
+    if not _looks_like_filesystem_ref(skill_id):
+        return skill_id
+    return _public_path(root, skill_id) or skill_id
+
+
+def _public_source(root: Path, source: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(source, dict):
+        return source
+    public = dict(source)
+    identity = public.get("identity")
+    if public.get("kind") == "path" and isinstance(identity, str):
+        raw = identity.removeprefix("path:") if identity.startswith("path:") else identity
+        public["identity"] = f"path:{_public_path(root, raw) or 'external:path'}"
+    return public
+
 
 @dataclass(frozen=True)
 class SkillObligation:
@@ -179,13 +238,14 @@ def _evidence_ref(
     *,
     kind: str,
     receipt: dict[str, Any],
+    target: Path,
     obligation_id: str | None = None,
     check_id: str | None = None,
 ) -> dict[str, Any]:
     ref: dict[str, Any] = {
         "kind": kind,
         "run_id": receipt.get("run_id"),
-        "path": receipt.get("path"),
+        "path": _public_path(target, receipt.get("path")),
         "status": receipt.get("status"),
         "started_at": receipt.get("started_at"),
         "completed_at": receipt.get("completed_at"),
@@ -228,8 +288,8 @@ def _receipt_attribution(
     return "foreign"
 
 
-def _unattributed_ref(*, kind: str, receipt: dict[str, Any]) -> dict[str, Any]:
-    ref = _evidence_ref(kind=kind, receipt=receipt)
+def _unattributed_ref(*, kind: str, receipt: dict[str, Any], target: Path) -> dict[str, Any]:
+    ref = _evidence_ref(kind=kind, receipt=receipt, target=target)
     ref["attribution"] = "unattributed"
     return ref
 
@@ -278,7 +338,7 @@ def collect_receipt_evidence(
             if attribution == "attributed":
                 attributed[kind].append(receipt)
             elif attribution == "unattributed":
-                unattributed.append(_unattributed_ref(kind=kind, receipt=receipt))
+                unattributed.append(_unattributed_ref(kind=kind, receipt=receipt, target=target))
     return {
         "attributed": attributed,
         "unattributed": unattributed,
@@ -288,6 +348,8 @@ def collect_receipt_evidence(
 def match_obligation(
     obligation: SkillObligation,
     evidence: dict[str, list[dict[str, Any]]],
+    *,
+    target: Path,
 ) -> dict[str, Any] | None:
     """Return an evidence ref when captured receipts satisfy the obligation."""
     if obligation.kind == KIND_CHECK:
@@ -302,6 +364,7 @@ def match_obligation(
                 ref = _evidence_ref(
                     kind=KIND_CHECK,
                     receipt=receipt,
+                    target=target,
                     obligation_id=obligation.id,
                     check_id=command.get("check_id") if isinstance(command.get("check_id"), str) else None,
                 )
@@ -319,19 +382,34 @@ def match_obligation(
             return None
         for receipt in verify_receipts:
             if _verify_receipt_succeeded(receipt):
-                return _evidence_ref(kind=KIND_CHECK, receipt=receipt, obligation_id=obligation.id)
+                return _evidence_ref(
+                    kind=KIND_CHECK,
+                    receipt=receipt,
+                    target=target,
+                    obligation_id=obligation.id,
+                )
         return None
 
     if obligation.kind == KIND_REVIEW:
         for receipt in evidence.get(KIND_REVIEW) or []:
             if _review_receipt_succeeded(receipt):
-                return _evidence_ref(kind=KIND_REVIEW, receipt=receipt, obligation_id=obligation.id)
+                return _evidence_ref(
+                    kind=KIND_REVIEW,
+                    receipt=receipt,
+                    target=target,
+                    obligation_id=obligation.id,
+                )
         return None
 
     if obligation.kind == KIND_HANDOFF:
         for receipt in evidence.get(KIND_HANDOFF) or []:
             if _handoff_receipt_succeeded(receipt):
-                return _evidence_ref(kind=KIND_HANDOFF, receipt=receipt, obligation_id=obligation.id)
+                return _evidence_ref(
+                    kind=KIND_HANDOFF,
+                    receipt=receipt,
+                    target=target,
+                    obligation_id=obligation.id,
+                )
         return None
 
     return None
@@ -409,13 +487,15 @@ def build_audit_payload(
     skipped: list[dict[str, Any]] = []
     load_warnings: list[dict[str, Any]] = []
 
+    public_declared = [_public_skill_id(target, skill_id) for skill_id in declared_skill_ids]
     for skill_id in declared_skill_ids:
+        public_skill_id = _public_skill_id(target, skill_id)
         metadata, source, load_error = _load_skill_metadata(target, skill_id)
         if load_error is not None:
-            load_warnings.append({"skill_id": skill_id, "detail": load_error})
+            load_warnings.append({"skill_id": public_skill_id, "detail": load_error})
             skills.append(
                 {
-                    "skill_id": skill_id,
+                    "skill_id": public_skill_id,
                     "loaded": False,
                     "load_error": load_error,
                     "obligations": [],
@@ -425,9 +505,9 @@ def build_audit_payload(
             continue
         obligations, obligation_errors = parse_obligations(metadata)
         skill_row: dict[str, Any] = {
-            "skill_id": skill_id,
+            "skill_id": public_skill_id,
             "loaded": True,
-            "source": source,
+            "source": _public_source(target, source),
             "obligations": [item.to_dict() for item in obligations],
             "obligation_errors": obligation_errors,
         }
@@ -437,7 +517,7 @@ def build_audit_payload(
                 {
                     "id": f"skill-obligation-parse-{hashlib.sha256(f'{skill_id}:{message}'.encode()).hexdigest()[:12]}",
                     "finding_id": f"skill-obligation-parse-{hashlib.sha256(f'{skill_id}:{message}'.encode()).hexdigest()[:12]}",
-                    "skill_id": skill_id,
+                    "skill_id": public_skill_id,
                     "obligation_id": None,
                     "obligation_kind": None,
                     "required": False,
@@ -447,13 +527,13 @@ def build_audit_payload(
                     "safe_summary": message,
                     "detail": message,
                     "source_fingerprint": hashlib.sha256(f"{skill_id}:{message}".encode()).hexdigest()[:16],
-                    "suggested_next_command": f"brigade skills lint {skill_id}",
+                    "suggested_next_command": f"brigade skills lint {public_skill_id}",
                 }
             )
         for obligation in obligations:
-            match = match_obligation(obligation, attributed)
+            match = match_obligation(obligation, attributed, target=target)
             row = {
-                "skill_id": skill_id,
+                "skill_id": public_skill_id,
                 "obligation": obligation.to_dict(),
                 "evidence": match,
             }
@@ -461,12 +541,12 @@ def build_audit_payload(
                 satisfied.append(row)
                 continue
             detail = (
-                f"Skill {skill_id!r} declares required {obligation.kind} obligation "
+                f"Skill {public_skill_id!r} declares required {obligation.kind} obligation "
                 f"{obligation.id!r}, but no matching {obligation.kind} receipt was captured "
                 f"with producer_run_id={audited_run_id!r}."
             )
             if obligation.required:
-                findings.append(_finding(skill_id=skill_id, obligation=obligation, detail=detail))
+                findings.append(_finding(skill_id=public_skill_id, obligation=obligation, detail=detail))
             else:
                 skipped.append({**row, "detail": detail.replace("required ", "optional ")})
 
@@ -486,15 +566,16 @@ def build_audit_payload(
             str(item.get("id") or ""),
         )
     )
+    public_run_dir = _public_path(target, run_dir) or f".brigade/runs/{audited_run_id}"
     payload: dict[str, Any] = {
         "schema": AUDIT_SCHEMA,
         "schema_version": AUDIT_SCHEMA_VERSION,
-        "target": str(target),
-        "run_dir": str(run_dir),
+        "target": PUBLIC_TARGET,
+        "run_dir": public_run_dir,
         "run_id": audited_run_id,
         "result": result,
         "status": "warn" if findings else "ok",
-        "declared_skill_ids": declared_skill_ids,
+        "declared_skill_ids": public_declared,
         "skills": skills,
         "satisfied_count": len(satisfied),
         "satisfied": satisfied,
@@ -542,7 +623,7 @@ def audit(
 
     print(f"skills audit: {payload['result']}")
     print(f"target: {payload['target']}")
-    print(f"run: {payload['run_id']}")
+    print(f"run: {payload['run_dir']}")
     print(f"declared_skills: {len(payload['declared_skill_ids'])}")
     print(f"findings: {payload['finding_count']}")
     print(f"satisfied: {payload['satisfied_count']}")

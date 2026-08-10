@@ -414,6 +414,92 @@ def test_missing_run_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     assert "not found" in err
 
 
+def _assert_no_private_absolute_paths(text: str, *private_roots: Path) -> None:
+    for root in private_roots:
+        resolved = str(root.resolve())
+        assert resolved not in text
+        assert resolved.replace("\\", "/") not in text
+
+
+def test_audit_json_and_text_never_emit_private_absolute_paths(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external_skill = tmp_path / "outside" / "path-skill"
+    external_skill.mkdir(parents=True)
+    (external_skill / "SKILL.md").write_text(
+        "---\nname: path-skill\ndescription: External path skill.\n---\n\n# path-skill\n"
+    )
+    _write_json(
+        external_skill / "skill.json",
+        {
+            "id": "path-skill",
+            "title": "path-skill",
+            "version": "0.1.0",
+            "description": "external path skill",
+            "tests": ["brigade skills lint path-skill"],
+            "obligations": [{"id": "fresh-verify", "kind": "check", "required": True}],
+        },
+    )
+    audited = "20260801-audit-paths"
+    run_dir = _write_run(workspace, audited, [str(external_skill.resolve())])
+    _write_verify_receipt(workspace, "verify-legacy", obligation_id="fresh-verify")
+    _write_review_receipt(workspace, "review-legacy")
+    _write_handoff_receipt(workspace, "handoff-legacy")
+    _write_verify_receipt(
+        workspace,
+        "verify-ok",
+        obligation_id="fresh-verify",
+        producer_run_id=audited,
+    )
+
+    assert skill_obligations.audit(target=workspace, run=run_dir, json_output=True) == 0
+    json_out = capsys.readouterr().out
+    payload = json.loads(json_out)
+    _assert_no_private_absolute_paths(json_out, tmp_path, workspace, external_skill)
+
+    assert payload["target"] == skill_obligations.PUBLIC_TARGET
+    assert payload["run_dir"] == f".brigade/runs/{audited}"
+    assert payload["declared_skill_ids"] == ["external:path-skill"]
+    assert payload["skills"][0]["source"]["kind"] == "path"
+    assert payload["skills"][0]["source"]["identity"] == "path:external:path-skill"
+    assert payload["unattributed_receipt_count"] >= 1
+    for item in payload["unattributed_receipts"]:
+        path = item.get("path")
+        if path is not None:
+            assert not Path(str(path)).is_absolute()
+            assert str(path).startswith((".brigade/", "external:"))
+    satisfied_paths = [
+        item["evidence"].get("path") for item in payload["satisfied"] if isinstance(item.get("evidence"), dict)
+    ]
+    assert satisfied_paths
+    assert all(
+        path is None or (not Path(str(path)).is_absolute() and str(path).startswith((".brigade/", "external:")))
+        for path in satisfied_paths
+    )
+
+    assert skill_obligations.audit(target=workspace, run=run_dir, json_output=False) == 0
+    text_out = capsys.readouterr().out
+    _assert_no_private_absolute_paths(text_out, tmp_path, workspace, external_skill)
+    assert f"target: {skill_obligations.PUBLIC_TARGET}" in text_out
+    assert f"run: .brigade/runs/{audited}" in text_out
+    assert "unattributed" in text_out
+
+
+def test_audit_registry_source_keeps_stable_non_path_identity(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    _write_skill(
+        tmp_path,
+        "demo-skill",
+        obligations=[{"id": "fresh-verify", "kind": "check", "required": True}],
+    )
+    run_dir = _write_run(tmp_path, "20260801-audit-registry-src", ["demo-skill"])
+    assert skill_obligations.audit(target=tmp_path, run=run_dir, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    source = payload["skills"][0]["source"]
+    assert source["kind"] == "registry"
+    assert source["identity"] == "registry://skills/demo-skill"
+    _assert_no_private_absolute_paths(json.dumps(payload), tmp_path)
+
+
 def test_skills_lint_rejects_malformed_obligations(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     _write_skill(
         tmp_path,
