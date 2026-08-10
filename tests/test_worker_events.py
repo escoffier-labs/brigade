@@ -288,7 +288,9 @@ def test_deeply_nested_public_list_in_scrubbed_stream_is_bounded(tmp_path: Path)
     raw_path = tmp_path / "coder.jsonl"
     raw_path.write_text(json.dumps(_case("auto_declined_with_secrets")["raw"]) + "\n", encoding="utf-8")
     doc = worker_events.scrub_stream_file(raw_path)
-    doc["events"][0]["params"]["availableDecisions"] = _nested_public_list(5000)
+    doc["events"][0]["params"]["availableDecisions"] = _nested_public_list(
+        worker_events.MAX_PUBLIC_LIST_DEPTH + 1
+    )
     path = tmp_path / "coder.scrubbed.json"
     path.write_text(json.dumps(doc), encoding="utf-8")
 
