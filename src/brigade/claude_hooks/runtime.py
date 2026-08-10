@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .. import localio
+from ..work_cmd.verification import _tree_fingerprint
 from ..wiring import resolve_wired_target
 from . import compaction_marker, envelope
 from .package import PACKAGE_REF
@@ -1823,15 +1824,25 @@ def _normalize_state(target: Path, session_id: str, payload: dict[str, Any] | No
 
 
 def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str | None = None) -> bool:
+    """Return whether a completed verify receipt covers the current write boundary.
+
+    A timestamp by itself is not evidence that the verification exercised this
+    session's source tree.  Bind the receipt to the routed Claude session, the
+    target, and (when Git can provide it) the exact tree that is being audited.
+    """
     started = localio.parse_iso_datetime(started_at)
     if started is None:
         return False
+    target = target.expanduser().resolve()
+    # Snapshotting is an optional strengthening signal.  ``None`` preserves
+    # hook operation in non-Git workspaces and on local Git/tool errors.
+    audited_tree = _tree_fingerprint(target)
     root = target / ".brigade" / "work" / "verify-runs"
     if not root.is_dir():
         return False
     for path in root.glob("*/receipt.json"):
         receipt = localio.read_json_dict(path)
-        if not receipt or receipt.get("status") not in {"completed", "failed", "rejected"}:
+        if not receipt or receipt.get("status") != "completed":
             continue
         if session_fingerprint is not None:
             harness_session = receipt.get("harness_session")
@@ -1839,9 +1850,21 @@ def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str
                 continue
             if harness_session.get("harness") != "claude" or harness_session.get("fingerprint") != session_fingerprint:
                 continue
+        receipt_target = receipt.get("target")
+        if not isinstance(receipt_target, str):
+            continue
+        try:
+            if Path(receipt_target).expanduser().resolve() != target:
+                continue
+        except OSError:
+            continue
         receipt_started = localio.parse_iso_datetime(receipt.get("started_at"))
-        if receipt_started is not None and receipt_started >= started:
-            return True
+        completed = localio.parse_iso_datetime(receipt.get("completed_at"))
+        if receipt_started is None or completed is None or receipt_started < started or completed < receipt_started:
+            continue
+        if audited_tree is not None and receipt.get("tree_fingerprint") != audited_tree:
+            continue
+        return True
     return False
 
 
