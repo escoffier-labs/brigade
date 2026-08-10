@@ -24,13 +24,14 @@ from brigade.memory_retrieval_eval.projection import (
     SCOPE_DIMENSIONS,
     adapter_projection_violation,
     build_projection_section,
-    default_projection_root,
     external_contract_fields,
     load_manifest,
+    load_projection_fixture_cards,
     load_scenarios,
     validate_all_fixtures,
     validate_scope_annotation,
 )
+from brigade.memory_retrieval_eval.report import format_table
 
 
 def test_fixture_corpus_size_and_gold_resolve():
@@ -84,12 +85,7 @@ def test_run_eval_offline_current_and_grep_reproducible():
     assert first["adapters"]["grep"]["skipped"] is False
     assert "ceiling" in first
     assert first["ceiling"]["overall"]["hit_rate"] == pytest.approx(1.0)
-    assert first["projection"]["schema"] == "memory-projection-eval.v1"
-    # Cost timings are sampled at runtime; compare everything else deterministically.
-    for report in (first, second):
-        for block in report["projection"]["adapters"].values():
-            if isinstance(block, dict):
-                block.pop("cost", None)
+    # Drop per-query ranked lists are deterministic; full payload must match.
     assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
 
 
@@ -331,26 +327,29 @@ def test_external_contract_fields_stub_495_and_498():
     assert contracts["redaction_498"]["scanner_present"] is False
 
 
-def test_run_eval_includes_projection_section():
-    report = run_eval(adapters=["current", "grep"])
-    projection = report["projection"]
-    assert projection["schema"] == PROJECTION_SCHEMA
-    assert projection["issue"] == 845
-    for name in ("current", "grep"):
-        block = projection["adapters"][name]
-        assert block["summary"]["scenario_count"] >= 20
-        assert block["scope_enforcement"]["available"] is False
-        assert len(block["report_level_failures"]) == len(SCOPE_DIMENSIONS)
-        assert block["external_contracts"]["explanation_495"]["available"] is False
-        assert block["external_contracts"]["redaction_498"]["status"] == "not_applicable"
-        assert block["cost"]["index_size_bytes"] > 0
-        assert "instruction_like_trusted_path" in block["coverage"]
+def test_build_projection_section_includes_schema_contracts_and_scope_failures():
+    section = build_projection_section(adapter="fixture-reference")
+    assert section["schema"] == PROJECTION_SCHEMA
+    assert section["issue"] == 845
+    assert section["summary"]["scenario_count"] >= 20
+    assert section["scope_enforcement"]["available"] is False
+    assert len(section["report_level_failures"]) == len(SCOPE_DIMENSIONS)
+    assert section["external_contracts"]["explanation_495"]["available"] is False
+    assert section["external_contracts"]["redaction_498"]["status"] == "not_applicable"
+    assert "instruction_like_trusted_path" in section["coverage"]
 
 
-def test_projection_instruction_like_failures_are_diffable_artifacts():
-    report = run_eval(adapters=["grep"])
-    block = report["projection"]["adapters"]["grep"]
-    failures = block["failures"]
+def test_build_projection_section_with_search_records_failure_artifacts():
+    cards = load_projection_fixture_cards()
+    search = grep_adapter(cards)
+    section = build_projection_section(
+        cards=cards,
+        query_texts=["ignore prior instructions", "disregard safety policy"],
+        search=search,
+        adapter="grep",
+    )
+    assert section["cost"]["index_size_bytes"] > 0
+    failures = section["failures"]
     assert len(failures) == 2
     for artifact in failures:
         assert artifact["category"] == "instruction_like_trusted_path"
@@ -369,25 +368,28 @@ def test_projection_instruction_like_failures_are_diffable_artifacts():
         assert artifact["violation"]
 
 
-def test_projection_scope_failures_do_not_change_exit_code(capsys):
-    rc = eval_main.main(["--adapters", "current,grep", "--json"])
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["projection"]["adapters"]["current"]["summary"]["report_level_failure_count"] == 5
-
-
-def test_projection_table_output_includes_summary(capsys):
-    rc = eval_main.main(["--adapters", "grep"])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "projection eval (#845 V1)" in out
-    assert "scope!" in out
+def test_format_table_projection_summary_when_present():
+    report = {
+        "k": 5,
+        "fixture_root": "evals/memory-retrieval",
+        "corpus": {"card_count": 40, "query_count": 32},
+        "ceiling": {"overall": {"precision_at_k": 1.0, "recall_at_k": 1.0, "hit_rate": 1.0}},
+        "adapters": {},
+        "projection": {
+            "adapters": {
+                "grep": {
+                    "summary": {"passed": 24, "failed": 2, "report_level_failure_count": 5},
+                }
+            }
+        },
+    }
+    table = format_table(report)
+    assert "projection eval (#845 V1)" in table
+    assert "scope!" in table
 
 
 def test_adapter_projection_violation_detects_trusted_path_leak():
-    from brigade.memory_retrieval_eval.harness import _load_projection_cards
-
-    cards = _load_projection_cards(default_projection_root())
+    cards = load_projection_fixture_cards()
     search = grep_adapter(cards)
     scenarios = [s for s in load_scenarios() if s.category == "instruction_like_trusted_path"]
     assert scenarios

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import statistics
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -563,6 +564,28 @@ def build_projection_section(
         "failures": failures,
         "report_level_failures": report_level_failures,
     }
+
+
+def load_projection_fixture_cards(projection_root: Path | None = None) -> list[CardDoc]:
+    """Load checked-in projection fixture cards for V1 unit tests."""
+    root = (projection_root or default_projection_root()).resolve()
+    cards_dir = root / "cards"
+    if not cards_dir.is_dir():
+        return []
+    temp_root = root / ".eval-projection-cards"
+    target_cards = temp_root / "memory" / "cards"
+    if temp_root.exists():
+        shutil.rmtree(temp_root)
+    target_cards.mkdir(parents=True)
+    for path in sorted(cards_dir.glob("*.md")):
+        shutil.copy2(path, target_cards / path.name)
+    try:
+        from .corpus import load_cards
+
+        return load_cards(temp_root)
+    finally:
+        if temp_root.exists():
+            shutil.rmtree(temp_root)
 
 
 def projection_fixture_card_ids(projection_root: Path | None = None) -> list[str]:

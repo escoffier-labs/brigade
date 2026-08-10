@@ -59,10 +59,10 @@ Output is a small table plus optional JSON (`--json`) so runs are diffable.
 - Show whether keyword scoring beats plain grep on paraphrase / abbreviation / cross-tag queries.
 - Reject a semantic upgrade that only ties the baseline on aggregate scores driven by easy exact matches.
 - Publish an honest ceiling so future claims cannot exceed what the fixture set allows.
-- Exercise projection-state scenarios (#845 V1): identity drift, stale/partial scans,
-  superseded leakage, duplicate live rows, scope annotations, provenance fields,
-  instruction-like trusted-path checks, and index/query cost metrics via the
-  versioned `projection` section in the JSON report.
+- Exercise projection-state scenarios (#845 V1) via checked-in fixtures and the
+  `memory-projection-eval.v1` report builder in `projection.py` (schema, scope
+  annotations, nullable #495/#498 fields, cost metrics, diffable failure artifacts).
+  Runtime harness attachment lands in V2 after #843/#844.
 
 **Cannot**
 
