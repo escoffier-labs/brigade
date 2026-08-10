@@ -1084,9 +1084,7 @@ def _assert_plan_decision_options_gate_fails_closed(tmp_path, capsys, *, task_id
 
 
 @pytest.mark.parametrize("options_value", [None, []])
-def test_plan_decision_null_or_empty_options_fail_closed_on_accept_claim_done(
-    tmp_path, capsys, options_value
-):
+def test_plan_decision_null_or_empty_options_fail_closed_on_accept_claim_done(tmp_path, capsys, options_value):
     _init_git_repo(tmp_path)
     task_id = _plan_task_id(tmp_path, capsys)
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
@@ -1132,9 +1130,7 @@ def test_plan_decision_missing_options_key_fail_closed_on_accept_claim_done(tmp_
 
 
 @pytest.mark.parametrize("legacy_mode", ["absent", "null"])
-def test_plan_decision_absent_or_null_decisions_field_remains_valid_legacy(
-    tmp_path, capsys, legacy_mode
-):
+def test_plan_decision_absent_or_null_decisions_field_remains_valid_legacy(tmp_path, capsys, legacy_mode):
     _init_git_repo(tmp_path)
     task_id = _plan_task_id(tmp_path, capsys)
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
