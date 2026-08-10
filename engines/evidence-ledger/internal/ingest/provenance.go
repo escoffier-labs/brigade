@@ -39,13 +39,31 @@ type ProvenanceEvent struct {
 
 // BackfillProvenanceResult reports one resumable backfill batch.
 type BackfillProvenanceResult struct {
-	Scanned   int    `json:"scanned"`
-	Updated   int    `json:"updated"`
-	Skipped   int    `json:"skipped"`
-	Events    int    `json:"events"`
-	Cursor    string `json:"cursor"`
-	Remaining int    `json:"remaining"`
+	Scanned    int                       `json:"scanned"`
+	Updated    int                       `json:"updated"`
+	Skipped    int                       `json:"skipped"`
+	Malformed  int                       `json:"malformed"`
+	Events     int                       `json:"events"`
+	Cursor     string                    `json:"cursor"`
+	Remaining  int                       `json:"remaining"`
+	Evidence   []BackfillItemEvidence    `json:"evidence,omitempty"`
 }
+
+// BackfillItemEvidence is bounded per-item evidence for isolated malformed rows.
+type BackfillItemEvidence struct {
+	ItemID string `json:"item_id"`
+	Reason string `json:"reason"`
+}
+
+const maxBackfillEvidence = 32
+
+type backfillOutcome int
+
+const (
+	backfillSkipped backfillOutcome = iota
+	backfillUpdated
+	backfillMalformed
+)
 
 func indexProvenanceProjections(tx *sql.Tx, itemID string, env provenance.Envelope) error {
 	pairs := []struct {
@@ -187,8 +205,10 @@ func TransitionTrustLabel(db *sql.DB, itemID, toLabel, operatorCommand string, e
 
 // BackfillProvenance walks items after afterID in batches, writing inferred
 // envelopes for rows missing provenance and ensuring indexed projections exist.
-// Inferred rows always use trust.label=unknown. Idempotent when the stored
-// envelope content digest already matches the item text.
+// Structurally valid existing envelopes are preserved regardless of content
+// digest match; only projections are repaired. Malformed provenance is isolated
+// per row with bounded evidence so the batch stays resumable. Inferred rows
+// always use trust.label=unknown.
 func BackfillProvenance(db *sql.DB, batchSize int, afterID string) (BackfillProvenanceResult, error) {
 	if batchSize <= 0 {
 		batchSize = 100
@@ -228,13 +248,19 @@ limit ?`, afterID, batchSize)
 	for _, row := range batch {
 		result.Scanned++
 		result.Cursor = row.id
-		changed, events, err := backfillOneItem(tx, row.id, row.text, row.metadataJSON, row.rawHash, row.rawPath, row.sourceID, row.collectionID, row.externalID)
+		outcome, events, evidence, err := backfillOneItem(tx, row.id, row.text, row.metadataJSON, row.rawHash, row.rawPath, row.sourceID, row.collectionID, row.externalID)
 		if err != nil {
 			return result, err
 		}
-		if changed {
+		switch outcome {
+		case backfillUpdated:
 			result.Updated++
-		} else {
+		case backfillMalformed:
+			result.Malformed++
+			if evidence != nil && len(result.Evidence) < maxBackfillEvidence {
+				result.Evidence = append(result.Evidence, *evidence)
+			}
+		default:
 			result.Skipped++
 		}
 		result.Events += events
@@ -248,34 +274,59 @@ limit ?`, afterID, batchSize)
 	return result, nil
 }
 
-func backfillOneItem(tx *sql.Tx, itemID, text, metadataJSON, rawHash, rawPath, sourceID, collectionID, externalID string) (changed bool, events int, err error) {
+func backfillOneItem(tx *sql.Tx, itemID, text, metadataJSON, rawHash, rawPath, sourceID, collectionID, externalID string) (outcome backfillOutcome, events int, evidence *BackfillItemEvidence, err error) {
 	meta := map[string]any{}
 	if strings.TrimSpace(metadataJSON) != "" {
 		if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
 			meta = map[string]any{}
 		}
 	}
-	exactDigest := provenance.ContentSHA256(text)
 	if rawEnv, ok := meta["provenance"]; ok && rawEnv != nil {
-		envBytes, marshalErr := json.Marshal(rawEnv)
-		if marshalErr != nil {
-			return false, 0, marshalErr
+		env, parseErr := parseRetainableEnvelope(rawEnv)
+		if parseErr != nil {
+			return backfillMalformed, 0, &BackfillItemEvidence{
+				ItemID: itemID,
+				Reason: "malformed provenance: " + parseErr.Error(),
+			}, nil
 		}
-		var env provenance.Envelope
-		if unmarshalErr := json.Unmarshal(envBytes, &env); unmarshalErr != nil {
-			return false, 0, unmarshalErr
+		if projectionsComplete(tx, itemID, env) {
+			return backfillSkipped, 0, nil, nil
 		}
-		if env.Hashes.Content != nil && *env.Hashes.Content == exactDigest {
-			if projectionsComplete(tx, itemID, env) {
-				return false, 0, nil
-			}
-			if err := replaceProvenanceProjections(tx, itemID, env); err != nil {
-				return false, 0, err
-			}
-			return true, 0, nil
+		if err := replaceProvenanceProjections(tx, itemID, env); err != nil {
+			return backfillSkipped, 0, nil, err
 		}
+		return backfillUpdated, 0, nil, nil
 	}
 
+	env, err := buildInferredBackfillEnvelope(tx, itemID, text, rawHash, sourceID, collectionID, externalID)
+	if err != nil {
+		return backfillSkipped, 0, nil, err
+	}
+	meta["provenance"] = env
+	updated, err := json.Marshal(meta)
+	if err != nil {
+		return backfillSkipped, 0, nil, err
+	}
+	if _, err := tx.Exec(`update items set metadata_json = ? where id = ?`, string(updated), itemID); err != nil {
+		return backfillSkipped, 0, nil, err
+	}
+	if err := replaceProvenanceProjections(tx, itemID, env); err != nil {
+		return backfillSkipped, 0, nil, err
+	}
+	contentHash := ""
+	if env.Hashes.Content != nil {
+		contentHash = *env.Hashes.Content
+	}
+	if err := AppendProvenanceEvent(tx, itemID, "", "unknown", contentHash, env.Hashes.ContentScope, "ingest:ingest.BackfillProvenance", map[string]any{
+		"attribution": "inferred",
+		"raw_path":    rawPath,
+	}); err != nil {
+		return backfillSkipped, 0, nil, err
+	}
+	return backfillUpdated, 1, nil, nil
+}
+
+func buildInferredBackfillEnvelope(tx *sql.Tx, itemID, text, rawHash, sourceID, collectionID, externalID string) (provenance.Envelope, error) {
 	var sourceKind, collectionExternalID string
 	_ = tx.QueryRow(`select kind from sources where id = ?`, sourceID).Scan(&sourceKind)
 	_ = tx.QueryRow(`select external_id from collections where id = ?`, collectionID).Scan(&collectionExternalID)
@@ -317,10 +368,8 @@ func backfillOneItem(tx *sql.Tx, itemID, text, metadataJSON, rawHash, rawPath, s
 	}
 	env, err := provenance.NewEvidenceEnvelope(in)
 	if err != nil {
-		return false, 0, err
+		return provenance.Envelope{}, err
 	}
-	// Prefer legacy raw_hash digest when already a prefixed sha256; do not invent
-	// raw bytes. Keep hashes.raw null unless we have a digest string.
 	if strings.HasPrefix(rawHash, "sha256:") && len(strings.TrimPrefix(rawHash, "sha256:")) == 64 {
 		digest := strings.TrimPrefix(rawHash, "sha256:")
 		algo, scope := provenance.HashAlgorithm, provenance.RawScope
@@ -328,31 +377,54 @@ func backfillOneItem(tx *sql.Tx, itemID, text, metadataJSON, rawHash, rawPath, s
 		env.Hashes.RawScope = &scope
 		env.Hashes.Raw = &digest
 		if err := provenance.Validate(env, provenance.ValidationContext{}); err != nil {
-			return false, 0, err
+			return provenance.Envelope{}, err
 		}
 	}
-	meta["provenance"] = env
-	updated, err := json.Marshal(meta)
+	return env, nil
+}
+
+// ParseRetainableEnvelope unmarshals and validates an existing provenance value
+// for retention. Content digest may be nil; other structural rules still apply.
+func ParseRetainableEnvelope(raw any) (provenance.Envelope, error) {
+	return parseRetainableEnvelope(raw)
+}
+
+// ValidateRetainableEnvelope reports whether env can be retained without
+// rewriting trust history. Nil hashes.content is allowed when the rest is valid.
+func ValidateRetainableEnvelope(env provenance.Envelope) error {
+	return validateRetainableEnvelope(env)
+}
+
+func parseRetainableEnvelope(raw any) (provenance.Envelope, error) {
+	envBytes, err := json.Marshal(raw)
 	if err != nil {
-		return false, 0, err
+		return provenance.Envelope{}, err
 	}
-	if _, err := tx.Exec(`update items set metadata_json = ? where id = ?`, string(updated), itemID); err != nil {
-		return false, 0, err
+	var env provenance.Envelope
+	if err := json.Unmarshal(envBytes, &env); err != nil {
+		return provenance.Envelope{}, err
 	}
-	if err := replaceProvenanceProjections(tx, itemID, env); err != nil {
-		return false, 0, err
+	if err := validateRetainableEnvelope(env); err != nil {
+		return provenance.Envelope{}, err
 	}
-	contentHash := ""
-	if env.Hashes.Content != nil {
-		contentHash = *env.Hashes.Content
+	return env, nil
+}
+
+func validateRetainableEnvelope(env provenance.Envelope) error {
+	if err := provenance.Validate(env, provenance.ValidationContext{}); err == nil {
+		return nil
+	} else if env.Hashes.Content != nil {
+		return err
 	}
-	if err := AppendProvenanceEvent(tx, itemID, "", "unknown", contentHash, env.Hashes.ContentScope, "ingest:ingest.BackfillProvenance", map[string]any{
-		"attribution": "inferred",
-		"raw_path":    rawPath,
-	}); err != nil {
-		return false, 0, err
+	// Historical rows may omit hashes.content. Probe structural validity with a
+	// temporary well-formed digest without mutating the retained envelope.
+	probe := env
+	placeholder := strings.Repeat("a", 64)
+	probe.Hashes.Content = &placeholder
+	if err := provenance.Validate(probe, provenance.ValidationContext{}); err != nil {
+		return err
 	}
-	return true, 1, nil
+	return nil
 }
 
 func projectionsComplete(tx *sql.Tx, itemID string, env provenance.Envelope) bool {

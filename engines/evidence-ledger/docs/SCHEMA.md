@@ -42,8 +42,8 @@ New MiseLedger `items` rows carry a `brigade.provenance-envelope.v1` envelope un
 - Go mirror package: `internal/provenance` (`Envelope`, `Validate`, `SynthesizeLegacyProvenance`).
 - Indexed projections in `item_metadata`: `provenance.origin`, `provenance.modality`, `provenance.trust_label`, `provenance.content_scope`, `provenance.content_digest`.
 - Trust transitions: append-only `provenance_events` rows (`brigade.provenance-event.v1`) with `ON DELETE CASCADE` so prune and rebuild remain safe.
-- Legacy show: when `metadata.provenance` is absent, `show` synthesizes an unknown envelope and surfaces `provenance_display = UNKNOWN PROVENANCE - legacy item`.
-- Operator backfill: `miseledger doctor provenance backfill [--batch N] [--after ID]` is batched, resumable, and idempotent; inferred rows use `trust.label=unknown`.
+- Legacy show: when `metadata.provenance` is absent, `show` synthesizes an unknown envelope and surfaces `provenance_display = UNKNOWN PROVENANCE - legacy item`. When provenance is present but malformed, `show` keeps the raw value and sets `provenance_warning`.
+- Operator backfill: `miseledger doctor provenance backfill [--batch N] [--after ID]` is batched, resumable, and idempotent; inferred rows use `trust.label=unknown`. Structurally valid existing envelopes are preserved even when `hashes.content` is nil or differs (projections only). Malformed provenance is isolated per row with bounded `evidence` and does not abort the batch.
 
 ### Field sets
 

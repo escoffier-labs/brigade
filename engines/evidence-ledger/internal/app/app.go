@@ -353,19 +353,21 @@ func cmdDoctorProvenanceBackfill(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "doctor provenance backfill: %s", err)
 	}
 	payload := map[string]any{
-		"ok":        true,
-		"scanned":   result.Scanned,
-		"updated":   result.Updated,
-		"skipped":   result.Skipped,
-		"events":    result.Events,
-		"cursor":    result.Cursor,
-		"remaining": result.Remaining,
+		"ok":         true,
+		"scanned":    result.Scanned,
+		"updated":    result.Updated,
+		"skipped":    result.Skipped,
+		"malformed":  result.Malformed,
+		"events":     result.Events,
+		"cursor":     result.Cursor,
+		"remaining":  result.Remaining,
+		"evidence":   result.Evidence,
 	}
 	if bools["json"] {
 		writeJSON(out, payload)
 	} else {
-		fmt.Fprintf(out, "scanned=%d updated=%d skipped=%d events=%d cursor=%s remaining=%d\n",
-			result.Scanned, result.Updated, result.Skipped, result.Events, result.Cursor, result.Remaining)
+		fmt.Fprintf(out, "scanned=%d updated=%d skipped=%d malformed=%d events=%d cursor=%s remaining=%d\n",
+			result.Scanned, result.Updated, result.Skipped, result.Malformed, result.Events, result.Cursor, result.Remaining)
 	}
 	return 0
 }
@@ -2522,13 +2524,22 @@ where i.id = ?`, id)
 		"raw_ref":      map[string]any{"hash": rawHash, "path": rawPath, "ordinal": rawOrdinal},
 		"raw":          raw,
 	}
-	if _, has := metadata["provenance"]; !has {
+	attachShowProvenance(out, metadata)
+	return out, nil
+}
+
+func attachShowProvenance(out map[string]any, metadata map[string]any) {
+	rawEnv, has := metadata["provenance"]
+	if !has || rawEnv == nil {
 		env, banner := provenance.SynthesizeLegacyProvenance()
 		metadata["provenance"] = env
 		out["metadata"] = metadata
 		out["provenance_display"] = banner
+		return
 	}
-	return out, nil
+	if _, err := ingest.ParseRetainableEnvelope(rawEnv); err != nil {
+		out["provenance_warning"] = "malformed provenance: " + err.Error()
+	}
 }
 
 func queryMaps(db *sql.DB, sqlText string, args ...any) []map[string]any {

@@ -199,3 +199,219 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Fatalf("idempotent pass = %+v, want updated=0 skipped=3", third)
 	}
 }
+
+func validHistoricalEnvelope(trustLabel string, contentDigest *string) map[string]any {
+	at := "2026-06-03T00:00:00Z"
+	hashes := map[string]any{
+		"content_algorithm": "sha256",
+		"content_scope":     "item.text.utf8.v1",
+		"content":           nil,
+		"raw_algorithm":     nil,
+		"raw_scope":         nil,
+		"raw":               nil,
+	}
+	if contentDigest != nil {
+		hashes["content"] = *contentDigest
+	}
+	return map[string]any{
+		"schema":         "brigade.provenance-envelope.v1",
+		"schema_version": 1,
+		"source":         map[string]any{"system": "miseledger", "kind": "legacy-source", "producer": "historical"},
+		"origin":         "external-service",
+		"repository":     map[string]any{"id": "unknown", "revision": nil},
+		"session":        map[string]any{"id": nil, "harness": nil},
+		"collection_id":  "legacy:collection",
+		"item_id":        "legacy:item",
+		"locator":        map[string]any{"kind": "uri", "value": "miseledger://legacy-source/legacy:collection/legacy:item"},
+		"attribution":    "observed",
+		"modality":       "tool-output",
+		"trust": map[string]any{
+			"label":       trustLabel,
+			"assigned_by": "ingest:historical",
+			"assigned_at": at,
+			"trust_policy": map[string]any{
+				"schema":         "brigade.trust-policy.v1",
+				"schema_version": 1,
+			},
+			"injection": map[string]any{"status": "pending", "count": 0, "rules": []any{}},
+		},
+		"hashes":      hashes,
+		"captured_at": at,
+		"ingested_at": at,
+	}
+}
+
+func TestBackfillPreservesValidEnvelopeWithNilOrMismatchedDigest(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-06-03T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('src1','legacy-source','Legacy','1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('col1','src1','legacy:collection','agent_session','legacy','{}',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	wrong := strings.Repeat("b", 64)
+	cases := []struct {
+		id       string
+		text     string
+		envelope map[string]any
+	}{
+		{"item-nil", "nil digest body", validHistoricalEnvelope("reviewed", nil)},
+		{"item-mismatch", "mismatch digest body", validHistoricalEnvelope("verified", &wrong)},
+	}
+	for i, tc := range cases {
+		meta, _ := json.Marshal(map[string]any{"provenance": tc.envelope})
+		if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			tc.id, "src1", "col1", "legacy:item:"+tc.id, "message", now, now, tc.text, "", "sha256:"+hashString(tc.text+"\n"), `{}`, "sha256:"+hashString("raw"+tc.id), "legacy.jsonl", i+1, string(meta)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := BackfillProvenance(db, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Malformed != 0 {
+		t.Fatalf("malformed = %d evidence=%v, want 0", result.Malformed, result.Evidence)
+	}
+	if result.Updated != 2 {
+		t.Fatalf("updated = %d, want 2 projection repairs", result.Updated)
+	}
+	for _, tc := range cases {
+		var metadataJSON string
+		if err := db.QueryRow(`select metadata_json from items where id = ?`, tc.id).Scan(&metadataJSON); err != nil {
+			t.Fatal(err)
+		}
+		var meta map[string]any
+		if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+			t.Fatal(err)
+		}
+		trust := meta["provenance"].(map[string]any)["trust"].(map[string]any)
+		want := tc.envelope["trust"].(map[string]any)["label"]
+		if trust["label"] != want {
+			t.Fatalf("%s trust reset to %v, want preserved %v", tc.id, trust["label"], want)
+		}
+		var events int
+		if err := db.QueryRow(`select count(*) from provenance_events where item_id = ?`, tc.id).Scan(&events); err != nil {
+			t.Fatal(err)
+		}
+		if events != 0 {
+			t.Fatalf("%s grew provenance_events = %d, want 0 (no trust rewrite)", tc.id, events)
+		}
+		var trustProj string
+		if err := db.QueryRow(`select value from item_metadata where item_id = ? and key = ?`, tc.id, MetaKeyProvenanceTrustLabel).Scan(&trustProj); err != nil {
+			t.Fatal(err)
+		}
+		if trustProj != want {
+			t.Fatalf("%s trust projection = %q, want %v", tc.id, trustProj, want)
+		}
+	}
+}
+
+func TestBackfillIsolatesMalformedProvenanceAndRemainsResumable(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-06-03T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('src1','legacy-source','Legacy','1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('col1','src1','legacy:collection','agent_session','legacy','{}',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(id, text, metadataJSON string, ordinal int) {
+		t.Helper()
+		if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			id, "src1", "col1", "legacy:item:"+id, "message", now, now, text, "", "sha256:"+hashString(text+"\n"), `{}`, "sha256:"+hashString("raw"+id), "legacy.jsonl", ordinal, metadataJSON); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("itema", "good before", `{}`, 1)
+	badExact := provenance.ContentSHA256("matching but malformed")
+	badEnv := validHistoricalEnvelope("quarantined", &badExact)
+	badEnv["origin"] = "not-a-real-origin"
+	badMeta, _ := json.Marshal(map[string]any{"provenance": badEnv})
+	insert("itemb", "matching but malformed", string(badMeta), 2)
+	insert("itemc", "good after", `{}`, 3)
+
+	first, err := BackfillProvenance(db, 10, "")
+	if err != nil {
+		t.Fatalf("batch aborted on malformed row: %v", err)
+	}
+	if first.Malformed != 1 || first.Updated != 2 || first.Skipped != 0 {
+		t.Fatalf("first = %+v, want malformed=1 updated=2 skipped=0", first)
+	}
+	if len(first.Evidence) != 1 || first.Evidence[0].ItemID != "itemb" {
+		t.Fatalf("evidence = %#v, want itemb", first.Evidence)
+	}
+	var badMetaAfter string
+	if err := db.QueryRow(`select metadata_json from items where id = 'itemb'`).Scan(&badMetaAfter); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(badMetaAfter, "not-a-real-origin") {
+		t.Fatalf("malformed envelope was rewritten: %s", badMetaAfter)
+	}
+	// Retry from start must still advance: malformed stays isolated, goods skip.
+	second, err := BackfillProvenance(db, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Malformed != 1 || second.Updated != 0 || second.Skipped != 2 {
+		t.Fatalf("retry = %+v, want malformed=1 updated=0 skipped=2", second)
+	}
+	// Resume after malformed cursor progresses past the bad row.
+	third, err := BackfillProvenance(db, 10, "itemb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Scanned != 1 || third.Cursor != "itemc" || third.Malformed != 0 {
+		t.Fatalf("resume after malformed = %+v, want progress past itemb", third)
+	}
+}
+
+func TestBackfillValidatesMatchingDigestBeforeRetain(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-06-03T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('src1','legacy-source','Legacy','1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('col1','src1','legacy:collection','agent_session','legacy','{}',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	text := "matching digest malformed trust"
+	digest := provenance.ContentSHA256(text)
+	env := validHistoricalEnvelope("trusted", &digest) // closed-set violation
+	meta, _ := json.Marshal(map[string]any{"provenance": env})
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"item-match-bad", "src1", "col1", "legacy:item:match-bad", "message", now, now, text, "", "sha256:"+hashString(text+"\n"), `{}`, "sha256:"+hashString("raw"), "legacy.jsonl", 1, string(meta)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := BackfillProvenance(db, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Malformed != 1 || result.Updated != 0 {
+		t.Fatalf("result = %+v, want matching-but-invalid treated as malformed", result)
+	}
+}

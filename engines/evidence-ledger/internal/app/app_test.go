@@ -281,6 +281,42 @@ values('legacy-item','legacy-src','legacy-col','legacy:item','message',?,?,?,'',
 	}
 }
 
+func TestShowWarnsOnPresentMalformedProvenance(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	paths := ResolvePaths()
+	db, err := archive.Open(paths.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := "2026-06-03T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('legacy-src','legacy','Legacy','1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('legacy-col','legacy-src','legacy:col','agent_session','legacy','{}',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	bad := `{"provenance":{"schema":"brigade.provenance-envelope.v1","schema_version":1,"origin":"not-a-real-origin","modality":"tool-output","attribution":"observed","trust":{"label":"quarantined","assigned_by":"x","trust_policy":{"schema":"brigade.trust-policy.v1","schema_version":1},"injection":{"status":"pending","count":0,"rules":[]}},"hashes":{"content_algorithm":"sha256","content_scope":"item.text.utf8.v1","content":null},"source":{"system":"miseledger","kind":"legacy","producer":"x"},"repository":{"id":"unknown"},"session":{},"collection_id":"c","item_id":"i","locator":{"kind":"uri","value":"miseledger://legacy/c/i"}}}`
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
+values('malformed-item','legacy-src','legacy-col','legacy:malformed','message',?,?,'body','','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','{}','sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','legacy.jsonl',1,?)`, now, now, bad); err != nil {
+		t.Fatal(err)
+	}
+	show := runJSON(t, "show", "malformed-item", "--json")
+	warning, _ := show["provenance_warning"].(string)
+	if warning == "" || !strings.Contains(warning, "malformed provenance") {
+		t.Fatalf("expected provenance_warning, got %#v", show["provenance_warning"])
+	}
+	if _, ok := show["provenance_display"]; ok {
+		t.Fatalf("malformed present provenance must not synthesize legacy display: %#v", show["provenance_display"])
+	}
+	meta := show["metadata"].(map[string]any)
+	env := meta["provenance"].(map[string]any)
+	if env["origin"] != "not-a-real-origin" {
+		t.Fatalf("show rewrote malformed provenance: %#v", env)
+	}
+}
+
 func TestImportWarningsForInvalidRecords(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
