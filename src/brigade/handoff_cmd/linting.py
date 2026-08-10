@@ -148,6 +148,7 @@ def lint(
                 warnings=result.warnings + injection_messages,
                 hints=result.hints,
                 readability=result.readability,
+                salvageable=result.salvageable,
             )
         )
     if strict:
@@ -166,6 +167,7 @@ def lint(
                     warnings=result.warnings,
                     hints=result.hints,
                     readability=result.readability,
+                    salvageable=result.salvageable,
                 )
             )
         enriched_results = strict_results
