@@ -1,5 +1,6 @@
 import json
 import subprocess
+import os
 from datetime import datetime, timezone
 
 from brigade import aboyeur
@@ -511,6 +512,66 @@ def test_work_show_accepts_session_id(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "id: 20260526-120000-build-work-loop" in out
     assert "status: active" in out
+
+
+def test_work_show_surfaces_newest_matching_claude_resume_pointer(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc))
+    home = tmp_path / "home"
+    monkeypatch.setattr("brigade.work_cmd.session_resume.Path.home", lambda: home)
+    project = home / ".claude" / "projects" / "safe-project"
+    project.mkdir(parents=True)
+    older = project / "older.jsonl"
+    newer = project / "newer.jsonl"
+    older.write_text(json.dumps({"sessionId": "claude-old", "cwd": str(tmp_path)}) + "\nsecret transcript body\n")
+    newer.write_text(json.dumps({"sessionId": "claude-new", "cwd": str(tmp_path)}) + "\nprivate body must not print\n")
+    os.utime(older, ns=(1, 1))
+    os.utime(newer, ns=(2, 2))
+    assert work_cmd.start(target=tmp_path, title="Build Work Loop") == 0
+    capsys.readouterr()
+
+    assert work_cmd.show(target=tmp_path, session="20260526-120000-build-work-loop") == 0
+    out = capsys.readouterr().out
+    assert "session_resume:" in out
+    assert "harness: claude" in out
+    assert "command: claude --resume claude-new" in out
+    assert "metadata: ~/.claude/projects/safe-project/newer.jsonl" in out
+    assert "private body" not in out
+    assert str(home) not in out
+
+
+def test_work_show_ignores_malformed_and_unrelated_states_and_supports_codex(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc))
+    home = tmp_path / "home"
+    monkeypatch.setattr("brigade.work_cmd.session_resume.Path.home", lambda: home)
+    sessions = home / ".codex" / "sessions" / "2026" / "05" / "26"
+    sessions.mkdir(parents=True)
+    (sessions / "malformed.jsonl").write_text("not json\n")
+    (sessions / "other.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": "other", "cwd": str(home)}}) + "\n"
+    )
+    (sessions / "match.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": "codex-1", "cwd": str(tmp_path)}}) + "\ntranscript body\n"
+    )
+    assert work_cmd.start(target=tmp_path, title="Build Work Loop") == 0
+    capsys.readouterr()
+
+    assert work_cmd.show(target=tmp_path, session="20260526-120000-build-work-loop") == 0
+    out = capsys.readouterr().out
+    assert "command: codex resume codex-1" in out
+    assert "metadata: ~/.codex/sessions/2026/05/26/match.jsonl" in out
+    assert "transcript body" not in out
+
+
+def test_work_show_preserves_output_when_no_resume_state_exists(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr("brigade.work_cmd.session_resume.Path.home", lambda: tmp_path / "empty-home")
+    assert work_cmd.start(target=tmp_path, title="Build Work Loop") == 0
+    capsys.readouterr()
+    assert work_cmd.show(target=tmp_path, session="20260526-120000-build-work-loop") == 0
+    assert "session_resume:" not in capsys.readouterr().out
 
 
 def test_work_latest_reports_no_sessions(tmp_path, capsys):

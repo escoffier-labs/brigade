@@ -15,7 +15,7 @@ from uuid import uuid4
 from ... import dogfood_cmd, localio
 from ...install import apply_gitignore
 from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
-from .. import scanners as scanners_mod, reviews as reviews_mod
+from .. import scanners as scanners_mod, reviews as reviews_mod, session_resume as session_resume_mod
 
 
 def _latest_run_next_metadata(target: Path) -> tuple[str | None, dict[str, Any]]:
@@ -148,7 +148,7 @@ def _task_plan_payload(target: Path, task_id: str) -> tuple[dict[str, Any] | Non
     return summary, 0
 
 
-def _display_session(path: Path, payload: dict[str, Any]) -> None:
+def _display_session(path: Path, payload: dict[str, Any], *, target: Path | None = None) -> None:
     print(f"session: {path}")
     print(f"id: {payload.get('id', path.name)}")
     print(f"status: {payload.get('status', 'unknown')}")
@@ -167,6 +167,14 @@ def _display_session(path: Path, payload: dict[str, Any]) -> None:
             print(f"latest_note: {helpers._short(str(notes[-1]['text']))}")
     if payload.get("handoff"):
         print(f"handoff: {payload['handoff']}")
+    if payload.get("status") == "active" and target is not None:
+        resume = session_resume_mod.find_session_resume(target)
+        if resume is not None:
+            print("session_resume:")
+            print(f"  harness: {resume['harness']}")
+            print(f"  session_id: {resume['session_id']}")
+            print(f"  command: {resume['command']}")
+            print(f"  metadata: {resume['metadata']}")
     task = payload.get("task")
     if isinstance(task, dict):
         print("task:")
@@ -531,7 +539,7 @@ def latest(*, target: Path) -> int:
         print(f"error: no work sessions found in {root}", file=sys.stderr)
         return 1
     path, payload = sessions[0]
-    _display_session(path, payload)
+    _display_session(path, payload, target=target)
     return 0
 
 
@@ -548,7 +556,7 @@ def show(*, target: Path, session: str | Path) -> int:
     if payload is None:
         print(f"error: session.json not found or invalid in {path}", file=sys.stderr)
         return 2
-    _display_session(path, payload)
+    _display_session(path, payload, target=target)
     return 0
 
 
