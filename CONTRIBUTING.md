@@ -2,6 +2,46 @@
 
 Brigade is the local-first operator CLI for agent memory, handoffs, and reviewable work receipts. It grew out of [Solomon's Cookbook](https://github.com/escoffier-labs/solos-cookbook), and patches are welcome. Before you start, please skim this file so we both spend our time on the right things.
 
+## Your first PR
+
+External contributions are welcome. This section is the short path; [Pull requests](#pull-requests) below lists the full merge gates.
+
+1. **Pick work.** Look for issues labeled `good first issue` or `help wanted`. If nothing fits, comment on an existing issue or open one before you spend time on a surprise scope.
+2. **Claim it.** Comment on the issue that you are working on it. The maintainer holds off internal lanes for **48 hours** so your branch is not steamrolled.
+3. **Install and verify locally.** Clone with Python 3.10+, then follow [Local dev](#local-dev): use a virtual environment (required on PEP 668-managed Python and on Windows), install dev dependencies, and run the verification path that matches your change (content-guard scan for docs-only; `./scripts/verify` for code).
+4. **Open a pull request.** Required CI checks run automatically on the branch. You do not need to dispatch all required checks yourself.
+5. **Review turnaround.** Target an initial review within a few business days once required checks are green. Merge still waits on the formal review and gate rules in [Pull requests](#pull-requests).
+
+## Pull requests
+
+`main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request. GitHub enforces required checks and conversation resolution; formal review is maintainer merge policy (branch protection does not currently require approving reviews).
+
+**GitHub-enforced gates** on `main`:
+
+- All required GitHub Actions checks pass. The checks are pinned to GitHub Actions app id 15368.
+- All review conversations are resolved.
+
+**Maintainer merge policy** (required before merge; not enforced by GitHub branch protection today):
+
+- A current formal `APPROVED` review exists from a non-author reviewer.
+- The approval was recorded after the last push. New commits dismiss stale approvals.
+- Keep the branch current with `main` before merge when practical (branch protection does not require strict status checks, so GitHub does not block merge solely for being behind `main`).
+
+The pull request author cannot approve their own pull request. `gh pr review --approve` fails with "Can not approve your own pull request" when the author and reviewer share one GitHub identity.
+
+CodeRabbit is the current external review identity. Its green commit status is not the grading artifact because the status can be green while the formal GitHub review is still `CHANGES_REQUESTED`. Under maintainer policy, merge waits on a current formal non-author `APPROVED` review and all required checks passing.
+
+Inspect the gate before attempting a merge:
+
+```bash
+gh pr checks <number> --required
+gh pr view <number> --json reviewDecision,mergeStateStatus
+```
+
+`reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`. Neither field exposes unresolved review conversations; GitHub still blocks merge when any remain.
+
+Dispatched sessions should open the pull request, run local verification, and push commits. After the final push, comment `@coderabbitai full review`. The `coderabbitai[bot]` identity records the formal GitHub review. Wait for its current `APPROVED` review before merging. A green CodeRabbit commit status alone does not satisfy this gate.
+
 ## What kinds of changes land easily
 
 - **Bug fixes** for `brigade init`, `doctor`, `scrub`, quickstart, security scanning, or the ingester.
@@ -30,12 +70,45 @@ Reviewed planning docs are public and tracked: the phase plans (`docs/phase-*.md
 
 ## Local dev
 
+From a repo clone with Python 3.10+:
+
 ```bash
 git clone https://github.com/escoffier-labs/brigade.git
 cd brigade
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+```
+
+Activate the environment before installing:
+
+- **POSIX (macOS, Linux):** `source .venv/bin/activate`
+- **Windows PowerShell:** `.\.venv\Scripts\Activate.ps1`
+- **Windows cmd:** `.venv\Scripts\activate.bat`
+
+Then install dev dependencies:
+
+```bash
 pip install -e ".[dev]"
-pytest -q
+```
+
+On PEP 668-managed Python (many Linux distributions), installing into the system interpreter fails; a virtual environment avoids that.
+
+**Docs-only changes:** CI runs the `content-guard` job on the repo. Locally, scan each edited markdown file before you push (one path per invocation):
+
+```bash
+brigade guard scan <edited-file>.md --policy src/brigade/guard/policies/public-repo.json
+```
+
+Example when only `CONTRIBUTING.md` and `README.md` changed:
+
+```bash
+brigade guard scan CONTRIBUTING.md --policy src/brigade/guard/policies/public-repo.json
+brigade guard scan README.md --policy src/brigade/guard/policies/public-repo.json
+```
+
+**Code or test changes:** run the full local gate before you push:
+
+```bash
+./scripts/verify
 ```
 
 To smoke-test an install end-to-end the same way CI does:
@@ -46,34 +119,6 @@ git init -q -b main "$target"
 python -m brigade init --target "$target" --depth workspace --harnesses claude,codex,openclaw
 python -m brigade doctor --target "$target"
 ```
-
-## Pull requests
-
-`main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request, and GitHub enforces the gate regardless of the dispatch prompt.
-
-The current rule set requires all of the following before a pull request can merge:
-
-- All 22 required GitHub Actions checks pass. The checks are pinned to GitHub Actions app id 15368, and the branch must be up to date with `main`.
-- A current formal `APPROVED` review exists from a non-author reviewer.
-- All review conversations are resolved.
-- The approval was recorded after the last push. New commits dismiss stale approvals.
-
-The pull request author cannot approve their own pull request. `gh pr review --approve` fails with "Can not approve your own pull request" when the author and reviewer share one GitHub identity.
-
-CodeRabbit is the current external review identity. Its green commit status is not the grading artifact because the status can be green while the formal GitHub review is still `CHANGES_REQUESTED`. The artifacts that count are a current formal non-author `APPROVED` review and all required checks passing.
-
-Inspect the gate before attempting a merge:
-
-```bash
-gh pr checks <number> --required
-gh pr view <number> --json reviewDecision,mergeStateStatus
-```
-
-`reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`.
-
-Those CLI fields do not expose unresolved review conversations. Separately check the pull request's **Files changed** review panel in GitHub and confirm that no conversation remains unresolved.
-
-Dispatched sessions should open the pull request, run local verification, and push commits. After the final push, comment `@coderabbitai full review`. The `coderabbitai[bot]` identity records the formal GitHub review. Wait for its current `APPROVED` review before merging. A green CodeRabbit commit status alone does not satisfy this gate.
 
 ## Adding a harness
 
