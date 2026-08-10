@@ -77,6 +77,7 @@ def build_gitignore_block(selection: Selection) -> str:
             ".brigade/projects.toml",
             ".brigade/release/",
             ".brigade/repos.toml",
+            ".brigade/campaigns/",
             ".brigade/chat-surfaces.toml",
             ".brigade/daily.toml",
             ".brigade/memory-care.toml",

@@ -46,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seats for the run, receipts Codex app-server→exec as
   `brigade.transport_routing.v1`, re-probes on resume, and rejects read-only
   seats whose declared isolation is only soft/none. (#474)
+- Cross-repo campaign ready view (#814): `brigade work ready --campaign <name>`
+  aggregates per-repo work graphs through a named lens under
+  `.brigade/campaigns/<name>.json` (member targets + optional cross-repo
+  `blocks` edges). Task ids are repo-qualified (`member:local-id`); member
+  ledgers stay authoritative and unchanged when the campaign file is removed.
+  `--parallel-safe` with `--campaign` leaves a deferred wave-aggregation seam
+  (`partition_mode=campaign_deferred`) for a later cross-repo compositor.
 
 ## [0.26.1] - 2026-08-09
 
