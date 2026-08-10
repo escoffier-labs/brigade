@@ -8,11 +8,9 @@ suitable for harness SessionStart injection. Failures stay fail-open.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +19,6 @@ RECALL_MAX_LINES = 10
 RECALL_TIMEOUT_SECONDS = 5
 GENERIC_WORKSPACE_QUERY = "workspace"
 _TERM_SPLIT = re.compile(r"[-_]+")
-_RECALL_TEST_HANG_ENV = "BRIGADE_RECALL_TEST_HANG_SECONDS"
 _RECALL_WORKER_COMMAND = "from brigade.memory_hooks import _recall_worker_main; _recall_worker_main()"
 
 
@@ -135,18 +132,6 @@ def _empty_recall_payload(
     }
 
 
-def _maybe_recall_test_hang() -> None:
-    raw = os.environ.get(_RECALL_TEST_HANG_ENV)
-    if raw is None or not raw.strip():
-        return
-    try:
-        seconds = float(raw)
-    except ValueError:
-        return
-    if seconds > 0:
-        time.sleep(seconds)
-
-
 def _recall_cards_payload_impl(
     *,
     target: Path,
@@ -156,7 +141,6 @@ def _recall_cards_payload_impl(
     """In-process recall body (runs in a killable child when timed)."""
     from .memory_cmd import search_cards_payload
 
-    _maybe_recall_test_hang()
     capped = _clamp_limit(limit)
     try:
         memory_root = target.expanduser().resolve(strict=False)

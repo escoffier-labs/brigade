@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-import time
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 from brigade import cli, config, memory_hooks
 from brigade.config import Config
@@ -169,21 +170,68 @@ def test_resolve_memory_recall_target_explicit_mirror(tmp_path: Path):
     assert path == mirror.resolve()
 
 
+def _stub_recall_subprocess(
+    monkeypatch,
+    *,
+    timeout: bool = False,
+    returncode: int = 0,
+    stdout: str = "",
+) -> None:
+    def fake_run(*args, **kwargs):
+        if timeout:
+            raise subprocess.TimeoutExpired(
+                cmd=kwargs.get("args") or (args[0] if args else []),
+                timeout=kwargs.get("timeout") or 0.0,
+            )
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(memory_hooks.subprocess, "run", fake_run)
+
+
 def test_recall_cards_payload_enforces_timeout_and_fail_open(tmp_path: Path, monkeypatch):
     hub = tmp_path / "hub"
     session = tmp_path / "astro-portfolio"
     hub.mkdir()
     session.mkdir()
     _write_card(hub, "astro.md", "Astro Notes", "body", tags=["astro"])
-    monkeypatch.setenv(memory_hooks._RECALL_TEST_HANG_ENV, "30")
-    monkeypatch.setattr(memory_hooks, "RECALL_TIMEOUT_SECONDS", 0.25)
-    started = time.monotonic()
+    _stub_recall_subprocess(monkeypatch, timeout=True)
     payload = memory_hooks.recall_cards_payload(target=hub, cwd=session)
-    elapsed = time.monotonic() - started
     assert payload["status"] == "timeout"
     assert payload["matches"] == []
     assert payload["match_count"] == 0
-    assert elapsed < 2.0
+    assert payload["target"] == str(hub)
+    assert payload["cwd"] == str(session)
+
+
+def test_recall_cards_payload_nonzero_exit_and_malformed_stdout_fail_open(
+    tmp_path: Path, monkeypatch
+):
+    hub = tmp_path / "hub"
+    session = tmp_path / "astro-portfolio"
+    hub.mkdir()
+    session.mkdir()
+
+    _stub_recall_subprocess(monkeypatch, returncode=1)
+    failed = memory_hooks.recall_cards_payload(target=hub, cwd=session)
+    assert failed["status"] == "error"
+    assert failed["matches"] == []
+
+    _stub_recall_subprocess(monkeypatch, stdout="not-json")
+    malformed = memory_hooks.recall_cards_payload(target=hub, cwd=session)
+    assert malformed["status"] == "error"
+    assert malformed["matches"] == []
+
+
+def test_recall_ignores_legacy_hang_env_variable(tmp_path: Path, monkeypatch):
+    hub = tmp_path / "hub"
+    session = tmp_path / "astro-portfolio"
+    hub.mkdir()
+    session.mkdir()
+    _write_card(hub, "astro.md", "Astro Notes", "body", tags=["astro"])
+    monkeypatch.setenv("BRIGADE_RECALL_TEST_HANG_SECONDS", "30")
+    payload = memory_hooks.recall_cards_payload(target=hub, cwd=session)
+    assert payload["status"] == "ok"
+    assert payload["matches"]
 
 
 def test_recall_text_for_hook_timeout_returns_empty(tmp_path: Path, monkeypatch):
@@ -195,13 +243,9 @@ def test_recall_text_for_hook_timeout_returns_empty(tmp_path: Path, monkeypatch)
     session.mkdir()
     _write_brigade_config(repo, depth="repo", memory_recall_target=str(hub))
     _write_card(hub, "astro.md", "Astro Notes", "body", tags=["astro"])
-    monkeypatch.setenv(memory_hooks._RECALL_TEST_HANG_ENV, "30")
-    monkeypatch.setattr(memory_hooks, "RECALL_TIMEOUT_SECONDS", 0.25)
-    started = time.monotonic()
+    _stub_recall_subprocess(monkeypatch, timeout=True)
     text = memory_hooks.recall_text_for_hook(wired_target=repo, cwd=session)
-    elapsed = time.monotonic() - started
     assert text == ""
-    assert elapsed < 2.0
 
 
 def test_recall_cli_timeout_json_is_fail_open(tmp_path: Path, monkeypatch, capsys):
@@ -209,8 +253,7 @@ def test_recall_cli_timeout_json_is_fail_open(tmp_path: Path, monkeypatch, capsy
     session = tmp_path / "astro-portfolio"
     hub.mkdir()
     session.mkdir()
-    monkeypatch.setenv(memory_hooks._RECALL_TEST_HANG_ENV, "30")
-    monkeypatch.setattr(memory_hooks, "RECALL_TIMEOUT_SECONDS", 0.25)
+    _stub_recall_subprocess(monkeypatch, timeout=True)
     rc = memory_hooks.recall(target=hub, cwd=session, json_output=True)
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
