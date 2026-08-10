@@ -2,7 +2,43 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
+from typing import Any
+
 VERIFY_RECEIPT_SCHEMA_VERSION = 2
+
+# Stable env key: orchestrator run identity exported into worker environments
+# via run/transport (#499). Receipt producers may stamp the value as optional
+# ``producer_run_id``; omit the field when unset for legacy compatibility.
+BRIGADE_RUN_ID_ENV = "BRIGADE_RUN_ID"
+
+
+def producer_run_id_from_env(environ: Mapping[str, str] | None = None) -> str | None:
+    """Return the orchestrator run id from ``BRIGADE_RUN_ID``, or None when absent."""
+    source = environ if environ is not None else os.environ
+    value = source.get(BRIGADE_RUN_ID_ENV, "")
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def stamp_optional_producer_run_id(
+    payload: dict[str, Any],
+    *,
+    producer_run_id: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Stamp optional ``producer_run_id`` when present; omit when absent."""
+    value = producer_run_id if producer_run_id is not None else producer_run_id_from_env(environ)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned:
+            payload["producer_run_id"] = cleaned
+    return payload
+
+
 WORK_CLOSEOUT_SCHEMA_VERSION = 1
 RUN_RECEIPT_SCHEMA_VERSION = 1
 OUTCOME_RECORD_SCHEMA_VERSION = 1

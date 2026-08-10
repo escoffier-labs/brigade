@@ -17,7 +17,6 @@ import hashlib
 import json
 import sys
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -191,6 +190,9 @@ def _evidence_ref(
         "started_at": receipt.get("started_at"),
         "completed_at": receipt.get("completed_at"),
     }
+    producer_run_id = receipt.get("producer_run_id")
+    if isinstance(producer_run_id, str) and producer_run_id:
+        ref["producer_run_id"] = producer_run_id
     if obligation_id is not None:
         ref["obligation_id"] = obligation_id
     if check_id is not None:
@@ -198,87 +200,88 @@ def _evidence_ref(
     return ref
 
 
-def _run_window_bounds(run_meta: dict[str, Any] | None) -> tuple[datetime | None, datetime | None]:
-    """Return UTC bounds for receipts eligible for one Brigade run audit."""
-    if not isinstance(run_meta, dict):
-        return None, None
-    started = localio.parse_iso_datetime(run_meta.get("started_at"))
-    ended = localio.parse_iso_datetime(run_meta.get("finished_at"))
-    if ended is None:
-        ended = localio.parse_iso_datetime(run_meta.get("completed_at"))
-    return started, ended
+def _receipt_producer_run_id(receipt: dict[str, Any]) -> str | None:
+    value = receipt.get("producer_run_id")
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned:
+            return cleaned
+    return None
 
 
-def _receipt_started_at(receipt: dict[str, Any]) -> datetime | None:
-    return localio.parse_iso_datetime(receipt.get("started_at"))
-
-
-def _receipt_in_run_window(
+def _receipt_attribution(
     receipt: dict[str, Any],
     *,
-    run_started_at: datetime | None,
-    run_ended_at: datetime | None,
-) -> bool:
-    """Match receipts to the audited run using the same started_at convention as aboyeur ground truth."""
-    if run_started_at is None:
-        return False
-    receipt_started_at = _receipt_started_at(receipt)
-    if receipt_started_at is None or receipt_started_at < run_started_at:
-        return False
-    if run_ended_at is not None and receipt_started_at > run_ended_at:
-        return False
-    return True
+    audited_run_id: str,
+) -> str:
+    """Classify a receipt relative to the audited orchestrator run.
+
+    Exact ``producer_run_id`` equality attributes the receipt. Missing
+    ``producer_run_id`` is legacy/unattributed and never satisfies. A different
+    stamped id is foreign (wrong-run); timestamp proximity must not attribute.
+    """
+    producer_run_id = _receipt_producer_run_id(receipt)
+    if producer_run_id is None:
+        return "unattributed"
+    if producer_run_id == audited_run_id:
+        return "attributed"
+    return "foreign"
+
+
+def _unattributed_ref(*, kind: str, receipt: dict[str, Any]) -> dict[str, Any]:
+    ref = _evidence_ref(kind=kind, receipt=receipt)
+    ref["attribution"] = "unattributed"
+    return ref
 
 
 def collect_receipt_evidence(
     target: Path,
     *,
-    run_started_at: datetime | None = None,
-    run_ended_at: datetime | None = None,
-) -> dict[str, list[dict[str, Any]]]:
-    """Load verify / review / handoff receipts eligible for one Brigade run audit."""
+    audited_run_id: str,
+) -> dict[str, Any]:
+    """Load verify / review / handoff receipts and partition by producer_run_id.
+
+    Only receipts with ``producer_run_id`` equal to ``audited_run_id`` can
+    satisfy per-run obligations. Legacy receipts without the field are listed
+    as unattributed and remain visible without satisfying.
+    """
     from . import scorecard
     from .handoff_cmd import drafts as handoff_drafts
     from .work_cmd import reviews as reviews_mod
 
-    verify_receipts: list[dict[str, Any]] = []
+    verify_all: list[dict[str, Any]] = []
     for path in scorecard.discover_verify_receipt_paths(target):
         receipt = localio.read_json_dict(path)
         if not isinstance(receipt, dict):
             continue
         receipt = dict(receipt)
         receipt.setdefault("path", str(path.parent))
-        if not _receipt_in_run_window(
-            receipt,
-            run_started_at=run_started_at,
-            run_ended_at=run_ended_at,
-        ):
-            continue
-        verify_receipts.append(receipt)
-    verify_receipts.sort(key=_receipt_timestamp, reverse=True)
+        verify_all.append(receipt)
+    verify_all.sort(key=_receipt_timestamp, reverse=True)
 
-    review_receipts = [
-        receipt
-        for receipt in reviews_mod._review_receipts(target)
-        if _receipt_in_run_window(
-            receipt,
-            run_started_at=run_started_at,
-            run_ended_at=run_ended_at,
-        )
-    ]
-    handoff_receipts = [
-        receipt
-        for receipt in handoff_drafts._ingest_receipts(target)
-        if _receipt_in_run_window(
-            receipt,
-            run_started_at=run_started_at,
-            run_ended_at=run_ended_at,
-        )
-    ]
+    review_all = list(reviews_mod._review_receipts(target))
+    handoff_all = list(handoff_drafts._ingest_receipts(target))
+
+    attributed: dict[str, list[dict[str, Any]]] = {
+        KIND_CHECK: [],
+        KIND_REVIEW: [],
+        KIND_HANDOFF: [],
+    }
+    unattributed: list[dict[str, Any]] = []
+    for kind, receipts in (
+        (KIND_CHECK, verify_all),
+        (KIND_REVIEW, review_all),
+        (KIND_HANDOFF, handoff_all),
+    ):
+        for receipt in receipts:
+            attribution = _receipt_attribution(receipt, audited_run_id=audited_run_id)
+            if attribution == "attributed":
+                attributed[kind].append(receipt)
+            elif attribution == "unattributed":
+                unattributed.append(_unattributed_ref(kind=kind, receipt=receipt))
     return {
-        KIND_CHECK: verify_receipts,
-        KIND_REVIEW: review_receipts,
-        KIND_HANDOFF: handoff_receipts,
+        "attributed": attributed,
+        "unattributed": unattributed,
     }
 
 
@@ -395,12 +398,10 @@ def build_audit_payload(
     plan = localio.read_json_dict(run_dir / "plan.json")
     run_meta = localio.read_json_dict(run_dir / "run.json")
     declared_skill_ids = declared_skill_ids_from_plan(plan if isinstance(plan, dict) else None)
-    run_started_at, run_ended_at = _run_window_bounds(run_meta if isinstance(run_meta, dict) else None)
-    evidence = collect_receipt_evidence(
-        target,
-        run_started_at=run_started_at,
-        run_ended_at=run_ended_at,
-    )
+    audited_run_id = run_dir.name
+    evidence_bundle = collect_receipt_evidence(target, audited_run_id=audited_run_id)
+    attributed = evidence_bundle["attributed"]
+    unattributed = evidence_bundle["unattributed"]
 
     skills: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
@@ -450,7 +451,7 @@ def build_audit_payload(
                 }
             )
         for obligation in obligations:
-            match = match_obligation(obligation, evidence)
+            match = match_obligation(obligation, attributed)
             row = {
                 "skill_id": skill_id,
                 "obligation": obligation.to_dict(),
@@ -461,7 +462,8 @@ def build_audit_payload(
                 continue
             detail = (
                 f"Skill {skill_id!r} declares required {obligation.kind} obligation "
-                f"{obligation.id!r}, but no matching {obligation.kind} receipt was captured."
+                f"{obligation.id!r}, but no matching {obligation.kind} receipt was captured "
+                f"with producer_run_id={audited_run_id!r}."
             )
             if obligation.required:
                 findings.append(_finding(skill_id=skill_id, obligation=obligation, detail=detail))
@@ -489,7 +491,7 @@ def build_audit_payload(
         "schema_version": AUDIT_SCHEMA_VERSION,
         "target": str(target),
         "run_dir": str(run_dir),
-        "run_id": run_dir.name if isinstance(run_meta, dict) else run_dir.name,
+        "run_id": audited_run_id,
         "result": result,
         "status": "warn" if findings else "ok",
         "declared_skill_ids": declared_skill_ids,
@@ -501,12 +503,15 @@ def build_audit_payload(
         "findings": findings,
         "load_warnings": load_warnings,
         "evidence_counts": {
-            KIND_CHECK: len(evidence.get(KIND_CHECK) or []),
-            KIND_REVIEW: len(evidence.get(KIND_REVIEW) or []),
-            KIND_HANDOFF: len(evidence.get(KIND_HANDOFF) or []),
+            KIND_CHECK: len(attributed.get(KIND_CHECK) or []),
+            KIND_REVIEW: len(attributed.get(KIND_REVIEW) or []),
+            KIND_HANDOFF: len(attributed.get(KIND_HANDOFF) or []),
         },
+        "unattributed_receipt_count": len(unattributed),
+        "unattributed_receipts": unattributed,
         "advisory": True,
         "blocking": False,
+        "matching": "producer_run_id",
     }
     if isinstance(run_meta, dict):
         if isinstance(run_meta.get("started_at"), str):
@@ -541,10 +546,16 @@ def audit(
     print(f"declared_skills: {len(payload['declared_skill_ids'])}")
     print(f"findings: {payload['finding_count']}")
     print(f"satisfied: {payload['satisfied_count']}")
+    print(f"unattributed_receipts: {payload['unattributed_receipt_count']}")
     if payload["result"] == RESULT_NO_DECLARED_SKILLS:
         print("note: plan.json has no selected_skill_ids; nothing to audit")
     elif payload["result"] == RESULT_NO_OBLIGATIONS:
         print("note: declared skills have no process obligations")
     for finding in payload["findings"]:
         print(f"- {finding['skill_id']}:{finding.get('obligation_id') or 'parse'} {finding['title']}")
+    for item in payload["unattributed_receipts"]:
+        print(
+            f"- unattributed:{item.get('kind')} run_id={item.get('run_id')} "
+            "(legacy receipt lacks producer_run_id; cannot satisfy per-run obligation)"
+        )
     return 0

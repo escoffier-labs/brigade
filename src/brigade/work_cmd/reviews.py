@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from .. import dogfood_cmd
+from .. import dogfood_cmd, receipt_schema
 from ..install import apply_gitignore
 from . import constants, helpers, ledger as ledger_mod, config as config_mod
 from . import scanners as scanners_mod
@@ -283,6 +283,7 @@ def _review_run_one(target: Path, reviewer: dict[str, Any]) -> dict[str, Any]:
         "supported_modes": reviewer.get("supported_modes") or [],
         "privacy_mode": reviewer.get("privacy_mode"),
     }
+    receipt_schema.stamp_optional_producer_run_id(receipt)
     helpers._write_json(receipt_path, receipt)
     if blocker is not None:
         completed = helpers._now()

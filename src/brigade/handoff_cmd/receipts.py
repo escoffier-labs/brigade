@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .. import scrub
+from .. import receipt_schema, scrub
 from ..budgets import HANDOFF_BACKLOG_STALE_SECONDS
 from ..config import load_config as load_brigade_config
 from ..localio import write_json as _write_json
@@ -176,6 +176,7 @@ def _receipt_payload_for_drafts(
         "recorded_by": "brigade handoff receipt record",
         "recorded_at": now,
     }
+    receipt_schema.stamp_optional_producer_run_id(payload)
     if status == "ingested":
         for draft in drafts:
             if draft.target_card:

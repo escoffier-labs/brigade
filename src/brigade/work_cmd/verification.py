@@ -1538,6 +1538,7 @@ def _run_verify_commands(
             "planned_commands": _planned_commands_display(commands),
         }
         receipt.update(identity)
+        receipt_schema.stamp_optional_producer_run_id(receipt)
         _stamp_harness_session(receipt)
         _stamp_outcome_capture(receipt, capture, capture_kind)
         try:
@@ -1697,6 +1698,7 @@ def _write_reused_receipt(
         "planned_commands": planned_display,
     }
     receipt.update(identity)
+    receipt_schema.stamp_optional_producer_run_id(receipt)
     _stamp_harness_session(receipt)
     _stamp_outcome_capture(receipt, capture, capture_kind)
     reused_from = latest.get("run_id")

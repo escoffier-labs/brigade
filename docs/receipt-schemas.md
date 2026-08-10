@@ -50,6 +50,7 @@ JSON Schema files.
 | `duration_seconds` | number | no | Wall time |
 | `timeout` | integer | no | Per-command timeout seconds |
 | `path` | string | yes | Run directory path |
+| `producer_run_id` | string | no | Orchestrator run id from `BRIGADE_RUN_ID` when the producer ran under a Brigade run (#499). Omitted when unset; legacy receipts without it remain readable |
 | `commands` | array of object | yes | See command object below |
 | `planned_commands` | array of string | no | Display argv joined |
 | `evidence` | object | no | Workspace evidence snapshot |
@@ -570,8 +571,12 @@ instead of letting the worker improvise tools.
 
 `brigade skills audit <run>` uses `selected_skill_ids` plus each skill's
 additive `skill.json` `obligations` to report missing check / review / handoff
-receipts as advisory findings (`brigade.skill_obligations_audit.v1`). See
-`docs/skill-registry.md`.
+receipts as advisory findings (`brigade.skill_obligations_audit.v1`). Per-run
+matching requires exact `producer_run_id` equality with the audited
+orchestrator run id; timestamp proximity never satisfies. Legacy receipts
+without `producer_run_id` are reported as unattributed and cannot satisfy.
+Workers receive the orchestrator id as `BRIGADE_RUN_ID` through the run
+transport env path. See `docs/skill-registry.md`.
 
 ---
 

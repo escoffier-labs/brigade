@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -366,6 +367,7 @@ def run_cursor(
     read_only: bool,
     writable_worktree: bool = False,
     process_registry: proc.ProcessRegistry | None = None,
+    env: dict[str, str] | None = None,
 ) -> AgentResult:
     if version != SUPPORTED_VERSION:
         return AgentResult(
@@ -459,10 +461,15 @@ def run_cursor(
             acpx_version=installed,
             safe_events=(auth_event,),
         )
+    child_env = None
+    if env is not None:
+        child_env = dict(os.environ)
+        child_env.update(env)
     result = proc.run(
         argv,
         timeout=timeout + 5.0,
         cwd=cwd,
+        env=child_env,
         process_registry=process_registry,
     )
     if result.decode_failed:

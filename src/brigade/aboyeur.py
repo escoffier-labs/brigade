@@ -1962,6 +1962,7 @@ def dispatch(
     quarantine_state: seat_health_policy.SeatQuarantineState | None = None,
     reprobe_seat: Callable[[Agent], bool] | None = None,
     on_failed_attempt_persisted: Callable[[WorkerResult], None] | None = None,
+    run_id: str | None = None,
 ) -> list[WorkerResult]:
     from . import run_transport
 
@@ -1999,6 +2000,7 @@ def dispatch(
         quarantine_state=quarantine_state,
         reprobe_seat=reprobe_seat,
         on_failed_attempt_persisted=on_failed_attempt_persisted,
+        run_id=run_id,
     )
 
 
@@ -4259,6 +4261,7 @@ def run(
                 quarantine_state=quarantine_state,
                 reprobe_seat=reprobe_seat_for_retry,
                 on_failed_attempt_persisted=persist_failed_attempt,
+                run_id=output_dir.name if output_dir is not None else None,
             )
         except runguard.RetainRunLockError:
             raise

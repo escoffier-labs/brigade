@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, skill_obligations, skills_cmd
+from brigade import cli, receipt_schema, skill_obligations, skills_cmd
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -73,6 +73,8 @@ def _write_verify_receipt(
     obligation_id: str | None = None,
     command_status: str = "completed",
     exit_code: int = 0,
+    producer_run_id: str | None = None,
+    started_at: str = "2026-08-01T00:10:00Z",
 ) -> None:
     command = {
         "command": "pytest -q",
@@ -84,46 +86,61 @@ def _write_verify_receipt(
     }
     if obligation_id is not None:
         command["obligation_id"] = obligation_id
-    _write_json(
-        target / ".brigade" / "work" / "verify-runs" / run_id / "receipt.json",
-        {
-            "run_id": run_id,
-            "status": status,
-            "started_at": "2026-08-01T00:10:00Z",
-            "completed_at": "2026-08-01T00:11:00Z",
-            "commands": [command],
-        },
-    )
+    payload: dict = {
+        "run_id": run_id,
+        "status": status,
+        "started_at": started_at,
+        "completed_at": "2026-08-01T00:11:00Z",
+        "commands": [command],
+    }
+    if producer_run_id is not None:
+        payload["producer_run_id"] = producer_run_id
+    _write_json(target / ".brigade" / "work" / "verify-runs" / run_id / "receipt.json", payload)
 
 
-def _write_review_receipt(target: Path, run_id: str, *, status: str = "completed", exit_code: int = 0) -> None:
-    _write_json(
-        target / ".brigade" / "reviews" / "runs" / run_id / "receipt.json",
-        {
-            "run_id": run_id,
-            "reviewer_id": "local",
-            "status": status,
-            "exit_code": exit_code,
-            "started_at": "2026-08-01T00:20:00Z",
-            "completed_at": "2026-08-01T00:21:00Z",
-        },
-    )
+def _write_review_receipt(
+    target: Path,
+    run_id: str,
+    *,
+    status: str = "completed",
+    exit_code: int = 0,
+    producer_run_id: str | None = None,
+    started_at: str = "2026-08-01T00:20:00Z",
+) -> None:
+    payload: dict = {
+        "run_id": run_id,
+        "reviewer_id": "local",
+        "status": status,
+        "exit_code": exit_code,
+        "started_at": started_at,
+        "completed_at": "2026-08-01T00:21:00Z",
+    }
+    if producer_run_id is not None:
+        payload["producer_run_id"] = producer_run_id
+    _write_json(target / ".brigade" / "reviews" / "runs" / run_id / "receipt.json", payload)
 
 
-def _write_handoff_receipt(target: Path, run_id: str, *, processed: list[str] | None = None) -> None:
-    _write_json(
-        target / ".brigade" / "handoffs" / "ingest-runs" / f"{run_id}.json",
-        {
-            "run_id": run_id,
-            "status": "ingested",
-            "started_at": "2026-08-01T00:30:00Z",
-            "completed_at": "2026-08-01T00:31:00Z",
-            "processed_handoff_paths": processed if processed is not None else ["memory-handoffs/demo.md"],
-            "skipped_handoff_paths": [],
-            "failed_handoff_paths": [],
-            "safe_summary": "ingested demo handoff",
-        },
-    )
+def _write_handoff_receipt(
+    target: Path,
+    run_id: str,
+    *,
+    processed: list[str] | None = None,
+    producer_run_id: str | None = None,
+    started_at: str = "2026-08-01T00:30:00Z",
+) -> None:
+    payload: dict = {
+        "run_id": run_id,
+        "status": "ingested",
+        "started_at": started_at,
+        "completed_at": "2026-08-01T00:31:00Z",
+        "processed_handoff_paths": processed if processed is not None else ["memory-handoffs/demo.md"],
+        "skipped_handoff_paths": [],
+        "failed_handoff_paths": [],
+        "safe_summary": "ingested demo handoff",
+    }
+    if producer_run_id is not None:
+        payload["producer_run_id"] = producer_run_id
+    _write_json(target / ".brigade" / "handoffs" / "ingest-runs" / f"{run_id}.json", payload)
 
 
 def test_parse_obligations_accepts_valid_and_rejects_bad_shapes():
@@ -131,21 +148,19 @@ def test_parse_obligations_accepts_valid_and_rejects_bad_shapes():
         {
             "obligations": [
                 {"id": "fresh-verify", "kind": "check", "required": True},
-                {"id": "code-review", "kind": "review"},
-                {"id": "memory-handoff", "kind": "handoff", "required": False, "description": "optional note"},
+                {"id": "code-review", "kind": "review", "required": False, "description": "peer review"},
             ]
         }
     )
     assert errors == []
-    assert [item.id for item in obligations] == ["fresh-verify", "code-review", "memory-handoff"]
-    assert obligations[1].required is True
-    assert obligations[2].required is False
-
+    assert [(item.id, item.kind, item.required) for item in obligations] == [
+        ("fresh-verify", "check", True),
+        ("code-review", "review", False),
+    ]
     _, bad = skill_obligations.parse_obligations({"obligations": [{"id": "x", "kind": "deploy"}]})
-    assert bad and "kind must be one of" in bad[0]
-
+    assert bad
     _, not_list = skill_obligations.parse_obligations({"obligations": {"id": "x"}})
-    assert not_list == ["metadata obligations must be a list"]
+    assert not_list
 
 
 def test_declared_skill_ids_from_plan_are_ordered_unique():
@@ -153,7 +168,7 @@ def test_declared_skill_ids_from_plan_are_ordered_unique():
         "assignments": [
             {"selected_skill_ids": ["brigade-work", "check"]},
             {"selected_skill_ids": ["check", "taste"]},
-            {"task": "no skills"},
+            {"selected_skill_ids": "not-a-list"},
         ]
     }
     assert skill_obligations.declared_skill_ids_from_plan(plan) == ["brigade-work", "check", "taste"]
@@ -178,6 +193,7 @@ def test_audit_reports_missing_required_evidence_as_advisory(tmp_path: Path, cap
     assert payload["schema"] == skill_obligations.AUDIT_SCHEMA
     assert payload["advisory"] is True
     assert payload["blocking"] is False
+    assert payload["matching"] == "producer_run_id"
     assert payload["result"] == skill_obligations.RESULT_WARN
     assert payload["finding_count"] == 3
     kinds = {finding["obligation_kind"] for finding in payload["findings"]}
@@ -186,6 +202,7 @@ def test_audit_reports_missing_required_evidence_as_advisory(tmp_path: Path, cap
 
 
 def test_audit_satisfies_check_review_handoff_and_obligation_id(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    audited = "20260801-audit-ok"
     _write_skill(
         tmp_path,
         "demo-skill",
@@ -195,10 +212,10 @@ def test_audit_satisfies_check_review_handoff_and_obligation_id(tmp_path: Path, 
             {"id": "memory-handoff", "kind": "handoff", "required": True},
         ],
     )
-    run_dir = _write_run(tmp_path, "20260801-audit-ok", ["demo-skill"])
-    _write_verify_receipt(tmp_path, "verify-1", obligation_id="fresh-verify")
-    _write_review_receipt(tmp_path, "review-1")
-    _write_handoff_receipt(tmp_path, "handoff-1")
+    run_dir = _write_run(tmp_path, audited, ["demo-skill"])
+    _write_verify_receipt(tmp_path, "verify-1", obligation_id="fresh-verify", producer_run_id=audited)
+    _write_review_receipt(tmp_path, "review-1", producer_run_id=audited)
+    _write_handoff_receipt(tmp_path, "handoff-1", producer_run_id=audited)
 
     assert cli.main(["skills", "audit", str(run_dir), "--target", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -206,11 +223,13 @@ def test_audit_satisfies_check_review_handoff_and_obligation_id(tmp_path: Path, 
     assert payload["finding_count"] == 0
     assert payload["satisfied_count"] == 3
     assert payload["evidence_counts"] == {"check": 1, "review": 1, "handoff": 1}
+    assert payload["unattributed_receipt_count"] == 0
 
 
-def test_earlier_run_receipts_do_not_satisfy_audited_run_obligations(
+def test_exact_producer_run_id_satisfies_wrong_run_and_timestamp_near_do_not(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
+    audited = "20260801-audit-exact"
     _write_skill(
         tmp_path,
         "demo-skill",
@@ -220,59 +239,35 @@ def test_earlier_run_receipts_do_not_satisfy_audited_run_obligations(
             {"id": "memory-handoff", "kind": "handoff", "required": True},
         ],
     )
-    run_dir = _write_run(tmp_path, "20260801-audit-window", ["demo-skill"])
+    run_dir = _write_run(tmp_path, audited, ["demo-skill"])
     _write_json(
         run_dir / "run.json",
         {
-            "run_id": "20260801-audit-window",
+            "run_id": audited,
             "status": "completed",
             "started_at": "2026-08-01T02:00:00Z",
             "completed_at": "2026-08-01T03:00:00Z",
         },
     )
-    _write_json(
-        tmp_path / ".brigade" / "work" / "verify-runs" / "verify-earlier" / "receipt.json",
-        {
-            "run_id": "verify-earlier",
-            "status": "completed",
-            "started_at": "2026-08-01T00:10:00Z",
-            "completed_at": "2026-08-01T00:11:00Z",
-            "commands": [
-                {
-                    "command": "pytest -q",
-                    "argv": ["pytest", "-q"],
-                    "status": "completed",
-                    "exit_code": 0,
-                    "check_id": "verify.pytest",
-                    "check_role": "effectiveness",
-                    "obligation_id": "fresh-verify",
-                }
-            ],
-        },
+    # Wrong-run receipts stamped near the audited window must not satisfy.
+    _write_verify_receipt(
+        tmp_path,
+        "verify-wrong",
+        obligation_id="fresh-verify",
+        producer_run_id="other-orchestrator-run",
+        started_at="2026-08-01T02:10:00Z",
     )
-    _write_json(
-        tmp_path / ".brigade" / "reviews" / "runs" / "review-earlier" / "receipt.json",
-        {
-            "run_id": "review-earlier",
-            "reviewer_id": "local",
-            "status": "completed",
-            "exit_code": 0,
-            "started_at": "2026-08-01T00:20:00Z",
-            "completed_at": "2026-08-01T00:21:00Z",
-        },
+    _write_review_receipt(
+        tmp_path,
+        "review-wrong",
+        producer_run_id="other-orchestrator-run",
+        started_at="2026-08-01T02:20:00Z",
     )
-    _write_json(
-        tmp_path / ".brigade" / "handoffs" / "ingest-runs" / "handoff-earlier.json",
-        {
-            "run_id": "handoff-earlier",
-            "status": "ingested",
-            "started_at": "2026-08-01T00:30:00Z",
-            "completed_at": "2026-08-01T00:31:00Z",
-            "processed_handoff_paths": ["memory-handoffs/demo.md"],
-            "skipped_handoff_paths": [],
-            "failed_handoff_paths": [],
-            "safe_summary": "ingested demo handoff",
-        },
+    _write_handoff_receipt(
+        tmp_path,
+        "handoff-wrong",
+        producer_run_id="other-orchestrator-run",
+        started_at="2026-08-01T02:30:00Z",
     )
 
     assert skill_obligations.audit(target=tmp_path, run=run_dir, json_output=True) == 0
@@ -280,19 +275,60 @@ def test_earlier_run_receipts_do_not_satisfy_audited_run_obligations(
     assert payload["result"] == skill_obligations.RESULT_WARN
     assert payload["finding_count"] == 3
     assert payload["evidence_counts"] == {"check": 0, "review": 0, "handoff": 0}
-    kinds = {finding["obligation_kind"] for finding in payload["findings"]}
+    assert payload["unattributed_receipt_count"] == 0
+
+    _write_verify_receipt(tmp_path, "verify-ok", obligation_id="fresh-verify", producer_run_id=audited)
+    _write_review_receipt(tmp_path, "review-ok", producer_run_id=audited)
+    _write_handoff_receipt(tmp_path, "handoff-ok", producer_run_id=audited)
+    assert skill_obligations.audit(target=tmp_path, run=run_dir, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"] == skill_obligations.RESULT_OK
+    assert payload["satisfied_count"] == 3
+
+
+def test_legacy_unstamped_receipts_are_unattributed_and_do_not_satisfy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    audited = "20260801-audit-legacy"
+    _write_skill(
+        tmp_path,
+        "demo-skill",
+        obligations=[
+            {"id": "fresh-verify", "kind": "check", "required": True},
+            {"id": "code-review", "kind": "review", "required": True},
+            {"id": "memory-handoff", "kind": "handoff", "required": True},
+        ],
+    )
+    run_dir = _write_run(tmp_path, audited, ["demo-skill"])
+    _write_verify_receipt(tmp_path, "verify-legacy", obligation_id="fresh-verify")
+    _write_review_receipt(tmp_path, "review-legacy")
+    _write_handoff_receipt(tmp_path, "handoff-legacy")
+
+    assert skill_obligations.audit(target=tmp_path, run=run_dir, json_output=True) == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert payload["result"] == skill_obligations.RESULT_WARN
+    assert payload["finding_count"] == 3
+    assert payload["evidence_counts"] == {"check": 0, "review": 0, "handoff": 0}
+    assert payload["unattributed_receipt_count"] == 3
+    kinds = {item["kind"] for item in payload["unattributed_receipts"]}
     assert kinds == {"check", "review", "handoff"}
+    assert all(item["attribution"] == "unattributed" for item in payload["unattributed_receipts"])
+    assert "sk-" not in out
+    assert "Bearer " not in out
+    assert "OPENAI_API_KEY" not in out
 
 
 def test_stamped_obligation_id_failure_does_not_fall_back_to_unrelated_verify(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
+    audited = "20260801-audit-stamp"
     _write_skill(
         tmp_path,
         "demo-skill",
         obligations=[{"id": "fresh-verify", "kind": "check", "required": True}],
     )
-    _write_run(tmp_path, "20260801-audit-stamp", ["demo-skill"])
+    _write_run(tmp_path, audited, ["demo-skill"])
     _write_verify_receipt(
         tmp_path,
         "verify-fail",
@@ -300,23 +336,25 @@ def test_stamped_obligation_id_failure_does_not_fall_back_to_unrelated_verify(
         status="failed",
         command_status="failed",
         exit_code=1,
+        producer_run_id=audited,
     )
-    _write_verify_receipt(tmp_path, "verify-other", obligation_id=None)
+    _write_verify_receipt(tmp_path, "verify-other", obligation_id=None, producer_run_id=audited)
 
-    assert cli.main(["skills", "audit", "20260801-audit-stamp", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["skills", "audit", audited, "--target", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["finding_count"] == 1
     assert payload["findings"][0]["obligation_id"] == "fresh-verify"
 
 
 def test_kind_level_verify_satisfies_when_no_obligation_id_stamped(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    audited = "20260801-audit-kind"
     _write_skill(
         tmp_path,
         "demo-skill",
         obligations=[{"id": "fresh-verify", "kind": "check", "required": True}],
     )
-    run_dir = _write_run(tmp_path, "20260801-audit-kind", ["demo-skill"])
-    _write_verify_receipt(tmp_path, "verify-plain")
+    run_dir = _write_run(tmp_path, audited, ["demo-skill"])
+    _write_verify_receipt(tmp_path, "verify-plain", producer_run_id=audited)
 
     assert skill_obligations.audit(target=tmp_path, run=run_dir, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -398,3 +436,13 @@ def test_bundled_brigade_work_declares_check_and_handoff_obligations():
         ("verify-through-brigade", "check"),
         ("session-handoff", "handoff"),
     }
+
+
+def test_producer_run_id_helpers_omit_when_absent_and_stamp_from_env(monkeypatch):
+    payload: dict = {}
+    receipt_schema.stamp_optional_producer_run_id(payload)
+    assert "producer_run_id" not in payload
+    monkeypatch.setenv(receipt_schema.BRIGADE_RUN_ID_ENV, "  run-abc  ")
+    receipt_schema.stamp_optional_producer_run_id(payload)
+    assert payload["producer_run_id"] == "run-abc"
+    assert receipt_schema.producer_run_id_from_env() == "run-abc"

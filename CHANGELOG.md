@@ -92,7 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receipts (#499). Missing required evidence is reported as findings with
   exit 0; verify commands may stamp `obligation_id` for precise matching.
   Bundled `brigade-work` declares `verify-through-brigade` and
-  `session-handoff` obligations.
+  `session-handoff` obligations. Orchestrator run identity is exported to
+  workers as `BRIGADE_RUN_ID`; verify, review, and handoff producers stamp
+  optional `producer_run_id`. Per-run obligation matching requires exact
+  `producer_run_id` equality (never timestamp proximity); legacy unstamped
+  receipts are labeled unattributed and cannot satisfy.
 
 ## [0.26.1] - 2026-08-09
 
