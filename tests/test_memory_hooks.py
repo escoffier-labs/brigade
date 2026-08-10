@@ -203,9 +203,7 @@ def test_recall_cards_payload_enforces_timeout_and_fail_open(tmp_path: Path, mon
     assert payload["cwd"] == str(session)
 
 
-def test_recall_cards_payload_nonzero_exit_and_malformed_stdout_fail_open(
-    tmp_path: Path, monkeypatch
-):
+def test_recall_cards_payload_nonzero_exit_and_malformed_stdout_fail_open(tmp_path: Path, monkeypatch):
     hub = tmp_path / "hub"
     session = tmp_path / "astro-portfolio"
     hub.mkdir()
