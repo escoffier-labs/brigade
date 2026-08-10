@@ -168,8 +168,11 @@ Completed-scan reconciliation:
   id; latest selection uses the database-monotonic `items.ingest_seq` (not
   wall-clock `updated_at` or content-hash id order) so relation resolution and
   live/unresolved health pick the current version even when clocks are equal or
-  move backward. Stale outbound unresolved relations on prior versions do not
-  contaminate live health. Re-ingesting known Text+Summary identity advances
+  move backward. Existing archives upgraded to schema v3 backfill `ingest_seq`
+  from prior `updated_at` order (stable `id` fallback) so multi-version cards
+  keep the previously live winner before any crawl. Stale outbound unresolved
+  relations on prior versions do not contaminate live health. Re-ingesting known
+  Text+Summary identity advances
   `ingest_seq` and atomically reconciles canonical metadata, tags, provenance,
   artifacts, and outbound relations without minting a duplicate item or
   provenance event, so same-text frontmatter edits (including receipt-A →

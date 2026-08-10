@@ -29,12 +29,14 @@ Releases before this changelog was started are on the [releases page](https://gi
   `items.ingest_seq` for relation resolution plus live health after
   content-addressed card edits (including equal/backward wall-clock
   `updated_at` and ignoring stale outbound unresolved on prior versions).
-  Re-ingesting known Text+Summary identity advances `ingest_seq` and
-  reconciles metadata/tags/provenance/artifacts/relations so same-text
-  frontmatter edits (including receipt-A → receipt-B retargets) project
-  correctly without minting a duplicate item or event; direct adapter
-  AlreadyKnown re-imports also re-resolve inbound relations onto that
-  restored version.
+  v2→v3 migration deterministically backfills `ingest_seq` from prior
+  `updated_at` order (stable `id` fallback) so existing multi-version cards
+  keep the previously live winner before any crawl. Re-ingesting known
+  Text+Summary identity advances `ingest_seq` and reconciles
+  metadata/tags/provenance/artifacts/relations so same-text frontmatter
+  edits (including receipt-A → receipt-B retargets) project correctly
+  without minting a duplicate item or event; direct adapter AlreadyKnown
+  re-imports also re-resolve inbound relations onto that restored version.
 
 ## [0.6.0] - 2026-07-18
 

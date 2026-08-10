@@ -644,3 +644,192 @@ func TestKnownItemSameTextFrontmatterReconcilesCanonicalFieldsReceiptAToB(t *tes
 		t.Fatalf("health unresolved after receipt-B reconcile: %d", unresolved)
 	}
 }
+
+func TestV2ToV3UpgradePreservesLiveVersionRelationsAndHealth(t *testing.T) {
+	// Explicit multi-version v2 archive → Migrate to v3, then assert live
+	// projection / relations / health with no crawl or import in between.
+	path := filepath.Join(t.TempDir(), "v2-memory.db")
+	db, err := archive.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ns = "memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	const cardID = "card-upgrade0-1111-4222-8333-444444444444"
+	olderID := "zzzz-upgrade-older-hash-id"
+	newerID := "aaaa-upgrade-newer-hash-id"
+	olderHash := "sha256:upgrade-older"
+	newerHash := "sha256:upgrade-newer"
+	if err := seedV2MultiVersionMemoryArchive(db, ns, cardID, olderID, newerID, olderHash, newerHash); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := archive.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	if err := archive.Migrate(upgraded); err != nil {
+		t.Fatalf("v2→v3 migrate: %v", err)
+	}
+
+	// Precondition of the defect: content-hash id order alone would revive older.
+	var byID string
+	if err := upgraded.QueryRow(`select id from items where external_id = ? order by id desc`, cardID).Scan(&byID); err != nil {
+		t.Fatal(err)
+	}
+	if byID != olderID {
+		t.Fatalf("precondition failed: id order should prefer older %s, got %s", olderID, byID)
+	}
+	var olderSeq, newerSeq int64
+	if err := upgraded.QueryRow(`select ingest_seq from items where id = ?`, olderID).Scan(&olderSeq); err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.QueryRow(`select ingest_seq from items where id = ?`, newerID).Scan(&newerSeq); err != nil {
+		t.Fatal(err)
+	}
+	if !(newerSeq > olderSeq && olderSeq > 0) {
+		t.Fatalf("migration backfill older=%d newer=%d", olderSeq, newerSeq)
+	}
+
+	live, err := LiveMemoryProjection(upgraded, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live[cardID] != newerHash {
+		t.Fatalf("live projection after upgrade=%q want previously live %q", live[cardID], newerHash)
+	}
+
+	var inboundTarget string
+	if err := upgraded.QueryRow(`select target_item_id from relations where relation_type = 'upgrade_inbound'`).Scan(&inboundTarget); err != nil {
+		t.Fatal(err)
+	}
+	if inboundTarget != newerID {
+		t.Fatalf("inbound relation target=%s want previously live %s", inboundTarget, newerID)
+	}
+
+	tx, err := upgraded.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	unresolved, err := memoryUnresolvedRelationCount(tx, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unresolved != 0 {
+		t.Fatalf("stale outbound on older version contaminated live health: %d", unresolved)
+	}
+	health, err := CollectMemoryHealth(upgraded, "test", ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No crawl yet: status stays absent, but dual-read must not invent unresolved
+	// from the pre-upgrade stale outbound edge.
+	if health.UnresolvedRelations != 0 {
+		t.Fatalf("health unresolved=%d want 0 before crawl", health.UnresolvedRelations)
+	}
+}
+
+func seedV2MultiVersionMemoryArchive(db *sql.DB, ns, cardID, olderID, newerID, olderHash, newerHash string) error {
+	stmts := []string{
+		`create table sources(
+  id text primary key, kind text not null, name text, version text,
+  created_at text not null, updated_at text not null)`,
+		`create table collections(
+  id text primary key, source_id text not null references sources(id),
+  external_id text not null, kind text not null, name text,
+  metadata_json text not null default '{}', created_at text, updated_at text,
+  unique(source_id, external_id))`,
+		`create table items(
+  id text primary key, source_id text not null references sources(id),
+  collection_id text not null references collections(id),
+  actor_id text, external_id text not null, kind text not null,
+  created_at text, updated_at text, text text, summary text,
+  content_hash text not null, raw_json text not null, raw_hash text,
+  raw_path text, raw_ordinal integer, metadata_json text not null default '{}',
+  unique(source_id, collection_id, external_id, content_hash))`,
+		`create table relations(
+  id text primary key, source_item_id text not null, target_item_id text,
+  target_external_id text, relation_type text not null,
+  confidence real not null default 1.0, metadata_json text not null default '{}')`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	// Reuse Migrate's v2 path by invoking through a throwaway migrate of empty
+	// companion objects: call ensure via archive.Migrate after inserts would add
+	// ingest_seq too early, so apply the v2 alters inline to match production v2.
+	for _, alter := range []string{
+		`alter table items add column tombstoned_at text`,
+		`alter table relations add column target_source_kind text`,
+		`alter table relations add column target_collection_external_id text`,
+	} {
+		if _, err := db.Exec(alter); err != nil {
+			return err
+		}
+	}
+	if _, err := db.Exec(`
+create table if not exists source_scan_runs(
+  id text primary key, source_kind text not null, source_path text,
+  started_at text not null, completed_at text, status text not null,
+  stale integer not null default 0, created_count integer not null default 0,
+  updated_count integer not null default 0, unchanged_count integer not null default 0,
+  removed_count integer not null default 0, skipped_count integer not null default 0,
+  failed_count integer not null default 0, canonical_count integer not null default 0,
+  live_count integer not null default 0, hash_divergence_count integer not null default 0,
+  unresolved_relation_count integer not null default 0,
+  malformed_skipped_count integer not null default 0,
+  metadata_json text not null default '{}'
+)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+		return err
+	}
+	now := "2026-08-10T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)`,
+		"src-memory", MemorySourceKind, "Memory", "1.0.0", now, now); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values(?,?,?,?,?,?,?,?)`,
+		"col-memory", "src-memory", ns, "memory_cards", "cards", "{}", now, now); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?)`, olderID, "src-memory", "col-memory", cardID, "memory_card", "", "2026-08-10T01:00:00Z", "older", olderHash, "{}", "{}"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?)`, newerID, "src-memory", "col-memory", cardID, "memory_card", "", "2026-08-10T02:00:00Z", "newer", newerHash, "{}", "{}"); err != nil {
+		return err
+	}
+	// Stale unresolved outbound on the older version must not affect live health.
+	if _, err := db.Exec(`insert into relations(id, source_item_id, target_item_id, target_external_id, target_source_kind, target_collection_external_id, relation_type, confidence, metadata_json)
+values(?,?,?,?,?,?,?,?,?)`, "rel-stale-out", olderID, nil, "missing-target", "", "", "supported_by", 1.0, "{}"); err != nil {
+		return err
+	}
+	// Inbound edge already resolved onto the previously live (newer) version.
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)`,
+		"src-brigade", "brigade", "Brigade", "1.0.0", now, now); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values(?,?,?,?,?,?,?,?)`,
+		"col-receipts", "src-brigade", "brigade:receipts", "brigade_receipt", "receipts", "{}", now, now); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?)`, "receipt-upgrade", "src-brigade", "col-receipts", "receipt:upgrade", "receipt", now, now, "support", "sha256:receipt", "{}", "{}"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`insert into relations(id, source_item_id, target_item_id, target_external_id, target_source_kind, target_collection_external_id, relation_type, confidence, metadata_json)
+values(?,?,?,?,?,?,?,?,?)`, "rel-inbound", "receipt-upgrade", newerID, cardID, MemorySourceKind, ns, "upgrade_inbound", 1.0, "{}"); err != nil {
+		return err
+	}
+	return nil
+}

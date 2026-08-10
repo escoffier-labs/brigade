@@ -21,8 +21,11 @@ Items may carry `tombstoned_at` for soft removal. Live memory cards are the
 latest non-tombstoned row per external id within a `brigade-memory` namespace
 collection (`collection.external_id = memory-<uuid4>`), ordered by the
 database-monotonic `items.ingest_seq` (schema v3; `id` is only a tie-break).
-Legacy pre-namespace rows may still exist under `memory:cards` and are never
-rebuilt or tombstoned by a namespaced crawl.
+Upgrading a v2 archive deterministically backfills `ingest_seq` from prior
+`updated_at` order (stable `id` fallback) so multi-version cards keep the
+previously live winner before any crawl. Legacy pre-namespace rows may still
+exist under `memory:cards` and are never rebuilt or tombstoned by a namespaced
+crawl.
 
 Raw adapter lines are preserved in `items.raw_json`. Raw source references are stored in `raw_hash`, `raw_path`, and `raw_ordinal`.
 
