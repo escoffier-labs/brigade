@@ -2,6 +2,8 @@ import json
 import subprocess
 from datetime import datetime, timezone
 
+import pytest
+
 from brigade import cli
 from brigade import dogfood_cmd
 from brigade import work_cmd
@@ -1009,7 +1011,7 @@ def test_plan_decision_malformed_field_types_fail_closed_on_accept_claim_done(tm
     json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
     receipt = json.loads(json_path.read_text())
 
-    # Non-list options coerce to [] and must not satisfy resolved gate via typed fields.
+    # Non-list options must fail closed and must not satisfy resolved gate via typed fields.
     receipt["decisions"] = [
         {
             "id": "auth-approach",
@@ -1024,16 +1026,16 @@ def test_plan_decision_malformed_field_types_fail_closed_on_accept_claim_done(tm
 
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
     err = capsys.readouterr().err
-    assert "field 'options' must be a list of strings" in err
+    assert "field 'options' must be a non-empty list of non-empty strings" in err
 
     assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
-    assert "field 'options' must be a list of strings" in capsys.readouterr().err
+    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
 
     assert work_cmd.claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
-    assert "field 'options' must be a list of strings" in capsys.readouterr().err
+    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
 
     assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 2
-    assert "field 'options' must be a list of strings" in capsys.readouterr().err
+    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
 
     # Representative corruption on other recognized fields (non-string selected).
     receipt["decisions"] = [
@@ -1050,6 +1052,106 @@ def test_plan_decision_malformed_field_types_fail_closed_on_accept_claim_done(tm
 
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
     assert "field 'selected' must be a string or null" in capsys.readouterr().err
+
+
+def _assert_plan_decision_options_gate_fails_closed(tmp_path, capsys, *, task_id, options_value):
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    receipt["decisions"] = [
+        {
+            "id": "auth-approach",
+            "prompt": "Which auth?",
+            "options": options_value,
+            "selected": "oauth",
+            "rationale": "Matches SSO",
+            "evidence_ref": "miseledger:bundle/demo",
+        }
+    ]
+    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
+    err = capsys.readouterr().err
+    assert "field 'options' must be a non-empty list of non-empty strings" in err
+
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
+    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
+
+    assert work_cmd.claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
+    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
+
+    assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 2
+    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("options_value", [None, []])
+def test_plan_decision_null_or_empty_options_fail_closed_on_accept_claim_done(
+    tmp_path, capsys, options_value
+):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    _assert_plan_decision_options_gate_fails_closed(
+        tmp_path,
+        capsys,
+        task_id=task_id,
+        options_value=options_value,
+    )
+
+
+def test_plan_decision_missing_options_key_fail_closed_on_accept_claim_done(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    receipt["decisions"] = [
+        {
+            "id": "auth-approach",
+            "prompt": "Which auth?",
+            "selected": "oauth",
+            "rationale": "Matches SSO",
+            "evidence_ref": "miseledger:bundle/demo",
+        }
+    ]
+    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
+    err = capsys.readouterr().err
+    assert "field 'options' must be a non-empty list of non-empty strings" in err
+
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
+    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
+
+    assert work_cmd.claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
+    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
+
+    assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 2
+    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("legacy_mode", ["absent", "null"])
+def test_plan_decision_absent_or_null_decisions_field_remains_valid_legacy(
+    tmp_path, capsys, legacy_mode
+):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    if legacy_mode == "absent":
+        receipt.pop("decisions", None)
+    else:
+        receipt["decisions"] = None
+    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 0
+    capsys.readouterr()
+    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 0
+    out = capsys.readouterr().out
+    assert "status: in_progress" in out
 
 
 def test_plan_decision_malformed_entry_fails_closed_and_keeps_opaque_evidence_ref(tmp_path, capsys):

@@ -2055,11 +2055,10 @@ def _decision_is_resolved(decision: dict[str, Any]) -> bool:
     if not (selected and rationale and evidence_ref):
         return False
     options = decision.get("options")
-    if isinstance(options, list) and options:
-        allowed = {str(item) for item in options}
-        if selected not in allowed:
-            return False
-    return True
+    if not isinstance(options, list) or not options:
+        return False
+    allowed = {str(item) for item in options}
+    return selected in allowed
 
 
 def _validate_decision_entry_field_types(raw: dict[str, Any], *, index: int | None = None) -> None:
@@ -2076,19 +2075,21 @@ def _validate_decision_entry_field_types(raw: dict[str, Any], *, index: int | No
 
     if "prompt" in raw and not isinstance(raw["prompt"], str):
         _raise("prompt", raw["prompt"], "a string")
-    if "options" in raw:
-        options = raw["options"]
-        if options is not None and not isinstance(options, list):
-            _raise("options", options, "a list of strings")
-        if isinstance(options, list):
-            for option_index, item in enumerate(options):
-                if not isinstance(item, str):
-                    _raise(
-                        "options",
-                        item,
-                        "a list of strings",
-                        option_index=option_index,
-                    )
+    if "options" not in raw:
+        _raise("options", None, "a non-empty list of non-empty strings")
+    options = raw["options"]
+    if not isinstance(options, list):
+        _raise("options", options, "a non-empty list of non-empty strings")
+    if not options:
+        _raise("options", options, "a non-empty list of non-empty strings")
+    for option_index, item in enumerate(options):
+        if not isinstance(item, str) or not item.strip():
+            _raise(
+                "options",
+                item,
+                "a non-empty list of non-empty strings",
+                option_index=option_index,
+            )
     for field in ("selected", "rationale", "evidence_ref", "created_at", "resolved_at"):
         if field in raw:
             value = raw[field]
@@ -2106,12 +2107,18 @@ def _normalize_decision_entry(raw: Any, *, now: str, index: int | None = None) -
         return None
     _validate_decision_entry_field_types(raw, index=index)
     prompt = str(raw.get("prompt") or "").strip()
-    options_raw = raw.get("options")
-    if isinstance(options_raw, list):
-        options_list = [item.strip() for item in options_raw if isinstance(item, str) and item.strip()]
-    else:
-        options_list = []
+    options_raw = raw["options"]
+    options_list = [item.strip() for item in options_raw if isinstance(item, str) and item.strip()]
     options = _append_dedupe([], options_list)
+    if not options:
+        prefix = f"plan receipt decisions[{index}]" if index is not None else "plan receipt decision"
+        details: dict[str, Any] = {"field": "options"}
+        if index is not None:
+            details["index"] = index
+        raise PlanDecisionError(
+            f"{prefix} field 'options' must be a non-empty list of non-empty strings",
+            details=details,
+        )
     selected_raw = raw.get("selected")
     selected = selected_raw.strip() or None if isinstance(selected_raw, str) else None
     rationale_raw = raw.get("rationale")
@@ -2278,7 +2285,9 @@ def _resolve_plan_decision(
     if missing:
         return decisions, "resolve requires " + ", ".join(missing)
     options = existing.get("options") if isinstance(existing.get("options"), list) else []
-    if options and selected_text not in {str(item) for item in options}:
+    if not options:
+        return decisions, f"decision checkpoint has no options: {normalized_id}"
+    if selected_text not in {str(item) for item in options}:
         return (
             decisions,
             f"selected option {selected_text!r} is not in decision options: {', '.join(str(item) for item in options)}",

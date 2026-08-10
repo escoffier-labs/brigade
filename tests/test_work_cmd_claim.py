@@ -335,7 +335,10 @@ def test_release_compares_claim_id_against_newer_claim(tmp_path, monkeypatch, ca
     assert excinfo.value.reason == claim_mod.REASON_CLAIM_ID_MISMATCH
 
 
-def test_claim_next_skips_task_with_malformed_plan_decision_field_types(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("options_value", [None, [], {"oauth": True}])
+def test_claim_next_skips_task_with_malformed_plan_decision_field_types(
+    tmp_path, monkeypatch, capsys, options_value
+):
     """claim-next must not treat coerced resolved checkpoints as claimable."""
     _init_git_repo(tmp_path)
     clock = {"n": 0}
@@ -366,7 +369,7 @@ def test_claim_next_skips_task_with_malformed_plan_decision_field_types(tmp_path
         {
             "id": "auth-approach",
             "prompt": "Which auth?",
-            "options": {"oauth": True},
+            "options": options_value,
             "selected": "oauth",
             "rationale": "Matches SSO",
             "evidence_ref": "miseledger:bundle/demo",

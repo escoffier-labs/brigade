@@ -275,7 +275,7 @@ receipts that omit optional fields.
 | --- | --- | --- | --- |
 | `id` | string | yes | `[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}` |
 | `prompt` | string | yes | Checkpoint question |
-| `options` | array of string | yes | Allowed selections |
+| `options` | array of string | yes | Non-empty allowed selections (each entry a non-empty string) |
 | `selected` | string \| null | yes | Chosen option when resolved |
 | `rationale` | string \| null | yes | Why that option |
 | `evidence_ref` | string \| null | yes | Opaque receipt path or external evidence id. Stored as written; **not** validated as a local file path (external/opaque ids are allowed) |
@@ -284,7 +284,9 @@ receipts that omit optional fields.
 | `resolved_at` | string \| null | yes | ISO-8601 when resolved |
 
 A checkpoint is resolved only when `selected`, `rationale`, and `evidence_ref`
-are all non-empty and `selected` is in `options` when options are non-empty.
+are all non-empty and `selected` is one of the non-empty `options`. Every
+decision entry must include a present, non-empty `options` array of non-empty
+strings; `options: null`, `options: []`, or missing `options` fail closed.
 Unresolved checkpoints block plan `--accept`, `work task claim`, `work claim`,
 and `work task done`. Corrupt `decisions` data (non-list, non-object entry,
 invalid/missing id, duplicate id, wrong field types) must fail closed with exit code 2 /
