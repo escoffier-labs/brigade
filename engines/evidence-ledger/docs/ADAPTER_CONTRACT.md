@@ -169,7 +169,9 @@ Completed-scan reconciliation:
   relation resolution and live/unresolved health select that latest version
   even when `created_at` is empty or tied (including re-pointing previously
   resolved inbound edges). Stale outbound unresolved relations on prior
-  versions do not contaminate live health.
+  versions do not contaminate live health. Re-ingesting byte-identical prior
+  content refreshes that ingest stamp so the restored version becomes current
+  without minting a duplicate item or provenance event.
 - Failed or interrupted scans tombstone nothing and mark the prior completed
   snapshot for that namespace stale.
 - `--rebuild` validates/walks first, then detaches the live namespace collection

@@ -554,12 +554,15 @@ func upsertRecord(tx *sql.Tx, rec adapter.Record, sourcePath string, ordinal int
 
 	// Fast-path already-imported items. Items are content-addressed (itemID
 	// includes the content hash), so an existing row means this exact record is
-	// already stored. Short-circuit before the sources/collections/actors
-	// upserts: those bump updated_at on every call, so without this probe a
-	// re-run (or a retry after a timeout) rewrites the whole committed prefix
-	// row by row and makes no forward progress within a time budget.
+	// already stored. Still refresh the monotonic ingest/version stamp so a
+	// restore of prior content (v1 -> v2 -> v1) becomes live again without
+	// minting a duplicate item or provenance event. Skip sources/collections/
+	// actors upserts: those bump updated_at on every call and can stall retries.
 	var known int
 	if err := tx.QueryRow(`select 1 from items where id = ?`, itemID).Scan(&known); err == nil {
+		if _, err := tx.Exec(`update items set updated_at = ? where id = ?`, now, itemID); err != nil {
+			return false, err
+		}
 		return false, nil
 	} else if err != sql.ErrNoRows {
 		return false, err
@@ -602,6 +605,11 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, nullIf
 	}
 	insertedRows, _ := res.RowsAffected()
 	if insertedRows == 0 {
+		// Concurrent insert or race with the known-item probe: refresh the
+		// ingest stamp only; do not mint events/artifacts again.
+		if _, err := tx.Exec(`update items set updated_at = ? where id = ?`, now, itemID); err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 	eventID := stableID("event", itemID, createdAt, rec.Item.Kind)

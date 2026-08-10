@@ -261,6 +261,60 @@ func openMemoryLifecycleDB(t *testing.T) *sql.DB {
 	return db
 }
 
+func TestUpsertRecordRestampsKnownContentWithoutDuplicateEvent(t *testing.T) {
+	db := openMemoryLifecycleDB(t)
+	defer db.Close()
+	const ns = "memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	const cardID = "card-restamp0-1111-4222-8333-444444444444"
+	v1 := memoryRecord(ns, cardID, "body-one")
+	v2 := memoryRecord(ns, cardID, "body-two")
+	if _, err := ImportAdapterReader(db, strings.NewReader(v1+"\n"), "v1.jsonl", ""); err != nil {
+		t.Fatal(err)
+	}
+	var v1ID, v1Stamp string
+	if err := db.QueryRow(`select id, updated_at from items where external_id = ?`, cardID).Scan(&v1ID, &v1Stamp); err != nil {
+		t.Fatal(err)
+	}
+	var eventsBefore int
+	if err := db.QueryRow(`select count(*) from events where item_id = ?`, v1ID).Scan(&eventsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportAdapterReader(db, strings.NewReader(v2+"\n"), "v2.jsonl", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportAdapterReader(db, strings.NewReader(v1+"\n"), "v1-again.jsonl", ""); err != nil {
+		t.Fatal(err)
+	}
+	var versionCount int
+	if err := db.QueryRow(`select count(*) from items where external_id = ?`, cardID).Scan(&versionCount); err != nil {
+		t.Fatal(err)
+	}
+	if versionCount != 2 {
+		t.Fatalf("versions=%d want 2", versionCount)
+	}
+	live, err := LiveMemoryProjection(db, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v1Hash, v1StampAfter string
+	if err := db.QueryRow(`select content_hash, updated_at from items where id = ?`, v1ID).Scan(&v1Hash, &v1StampAfter); err != nil {
+		t.Fatal(err)
+	}
+	if live[cardID] != v1Hash {
+		t.Fatalf("live=%s want restored v1 hash %s", live[cardID], v1Hash)
+	}
+	if v1StampAfter <= v1Stamp {
+		t.Fatalf("known re-ingest must refresh stamp before=%q after=%q", v1Stamp, v1StampAfter)
+	}
+	var eventsAfter int
+	if err := db.QueryRow(`select count(*) from events where item_id = ?`, v1ID).Scan(&eventsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if eventsAfter != eventsBefore {
+		t.Fatalf("events before=%d after=%d", eventsBefore, eventsAfter)
+	}
+}
+
 func TestLiveMemoryLatestVersionUsesUpdatedAtNotEmptyCreatedAtHashOrder(t *testing.T) {
 	db := openMemoryLifecycleDB(t)
 	defer db.Close()

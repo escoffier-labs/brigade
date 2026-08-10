@@ -28,6 +28,8 @@ Releases before this changelog was started are on the [releases page](https://gi
   crawl), and latest-version selection via monotonic ingest `updated_at`
   stamps for relation resolution plus live health after content-addressed
   card edits (including ignoring stale outbound unresolved on prior versions).
+  Re-ingesting known content refreshes the ingest stamp so a restored prior
+  version becomes live again without minting a duplicate item or event.
 
 ## [0.6.0] - 2026-07-18
 

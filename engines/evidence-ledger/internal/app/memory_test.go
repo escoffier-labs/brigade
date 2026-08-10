@@ -856,6 +856,149 @@ func TestLegacyMemoryCardsScopedRebuildRule(t *testing.T) {
 
 
 
+func TestCrawlMemoryReingestPriorContentBecomesLiveAgain(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	ws := t.TempDir()
+	writeTestNamespace(t, ws, testMemoryNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cardID := "card-revisit0-1111-4222-8333-444444444444"
+	path := filepath.Join(cards, "revisit.md")
+	v1Body := "---\nid: " + cardID + "\ntopic: revisit\nsupported_by: [missing-outbound-v1]\n---\n\n# Version one body\n"
+	v2Body := "---\nid: " + cardID + "\ntopic: revisit\n---\n\n# Version two body\n"
+	if err := os.WriteFile(path, []byte(v1Body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := runJSON(t, "crawl", "memory", ws, "--json")
+	if first["unresolved_relations"].(float64) < 1 {
+		t.Fatalf("v1 unresolved outbound expected: %v", first)
+	}
+
+	db := openTestDB(t)
+	var v1ID, v1Hash, v1Stamp string
+	if err := db.QueryRow(`
+select i.id, i.content_hash, i.updated_at from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v1ID, &v1Hash, &v1Stamp); err != nil {
+		t.Fatal(err)
+	}
+	supportJSONL := `{"schema":"miseledger.adapter.v1","source":{"kind":"brigade","name":"Brigade"},"collection":{"external_id":"brigade:receipts","kind":"brigade_receipt","name":"receipts"},"item":{"external_id":"receipt:revisit-support","kind":"receipt","created_at":"2026-01-01T00:00:00Z","text":"support"},"relations":[{"type":"supports","target":{"source":"brigade-memory","collection":"` + testMemoryNamespace + `","external_id":"` + cardID + `"}}],"raw":{"format":"json","path":"r.json","ordinal":1}}` + "\n"
+	db.Close()
+	supportPath := filepath.Join(t.TempDir(), "support.jsonl")
+	if err := os.WriteFile(supportPath, []byte(supportJSONL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", supportPath, "--json")
+
+	if err := os.WriteFile(path, []byte(v2Body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := runJSON(t, "crawl", "memory", ws, "--json")
+	if second["updated"].(float64) < 1 {
+		t.Fatalf("expected v2 update: %v", second)
+	}
+
+	db = openTestDB(t)
+	var v2ID, v2Hash string
+	if err := db.QueryRow(`
+select i.id, i.content_hash from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
+order by i.updated_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&v2ID, &v2Hash); err != nil {
+		t.Fatal(err)
+	}
+	if v2ID == v1ID || v2Hash == v1Hash {
+		t.Fatalf("v2 must be a distinct content-addressed row")
+	}
+	var inbound string
+	if err := db.QueryRow(`select target_item_id from relations where target_external_id = ? and target_source_kind = ?`,
+		cardID, ingest.MemorySourceKind).Scan(&inbound); err != nil {
+		t.Fatal(err)
+	}
+	if inbound != v2ID {
+		t.Fatalf("inbound should track live v2=%s, got %s", v2ID, inbound)
+	}
+	var eventsBefore int
+	if err := db.QueryRow(`select count(*) from events where item_id = ?`, v1ID).Scan(&eventsBefore); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// Restore byte-identical v1: known-content early return must refresh the
+	// ingest stamp so v1 becomes live again without minting a duplicate row/event.
+	if err := os.WriteFile(path, []byte(v1Body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third := runJSON(t, "crawl", "memory", ws, "--json")
+	if third["inserted_items"].(float64) != 0 {
+		t.Fatalf("re-ingest of known v1 must not mint a duplicate item: %v", third)
+	}
+
+	db = openTestDB(t)
+	defer db.Close()
+	var versionCount int
+	if err := db.QueryRow(`
+select count(*) from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&versionCount); err != nil {
+		t.Fatal(err)
+	}
+	if versionCount != 2 {
+		t.Fatalf("expected exactly two content versions, got %d", versionCount)
+	}
+	var liveID, liveHash, liveStamp string
+	if err := db.QueryRow(`
+select i.id, i.content_hash, i.updated_at from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null
+order by i.updated_at desc, i.id desc`, ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&liveID, &liveHash, &liveStamp); err != nil {
+		t.Fatal(err)
+	}
+	if liveID != v1ID || liveHash != v1Hash {
+		t.Fatalf("restored v1 must be live: got id=%s hash=%s want id=%s hash=%s", liveID, liveHash, v1ID, v1Hash)
+	}
+	if liveStamp <= v1Stamp {
+		t.Fatalf("known-content re-ingest must refresh ingest stamp: before=%q after=%q", v1Stamp, liveStamp)
+	}
+	live, err := ingest.LiveMemoryProjection(db, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live[cardID] != v1Hash {
+		t.Fatalf("projection live hash=%s want v1 %s", live[cardID], v1Hash)
+	}
+	if err := db.QueryRow(`select target_item_id from relations where target_external_id = ? and target_source_kind = ?`,
+		cardID, ingest.MemorySourceKind).Scan(&inbound); err != nil {
+		t.Fatal(err)
+	}
+	if inbound != v1ID {
+		t.Fatalf("inbound relation must re-point to restored v1=%s, got %s", v1ID, inbound)
+	}
+	health, err := ingest.CollectMemoryHealth(db, Version, testMemoryNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.UnresolvedRelations < 1 {
+		t.Fatalf("live health must count v1 outgoing unresolved relations: %+v", health)
+	}
+	var eventsAfter int
+	if err := db.QueryRow(`select count(*) from events where item_id = ?`, v1ID).Scan(&eventsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if eventsAfter != eventsBefore {
+		t.Fatalf("re-ingest must not mint provenance events: before=%d after=%d", eventsBefore, eventsAfter)
+	}
+}
+
 func TestCrawlMemoryLatestVersionUsesIngestStampNotHashOrder(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
