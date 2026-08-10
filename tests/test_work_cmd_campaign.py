@@ -352,6 +352,43 @@ def test_campaign_dangling_edge_endpoint_fails_closed(tmp_path, monkeypatch, cap
     assert lib_task["id"]  # keep member ledger populated for the assertion above
 
 
+def test_campaign_unreadable_member_ledger_fails_closed(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    lib = _member_repo(workspace, "lib")
+    broken = _member_repo(workspace, "broken")
+
+    clock = {"n": 0}
+
+    def _now():
+        clock["n"] += 1
+        return datetime(2026, 8, 9, 18, 55, clock["n"], tzinfo=timezone.utc)
+
+    monkeypatch.setattr(work_cmd.helpers, "_now", _now)
+    _add(lib, "Healthy member task")
+    tasks_path = broken / ".brigade" / "work" / "tasks.json"
+    tasks_path.parent.mkdir(parents=True, exist_ok=True)
+    tasks_path.write_text("{not-json\n")
+    _write_campaign(
+        workspace,
+        "unreadable",
+        {
+            "version": 1,
+            "name": "unreadable",
+            "members": [
+                {"id": "lib", "path": "lib"},
+                {"id": "broken", "path": "broken"},
+            ],
+        },
+    )
+
+    assert work_cmd.ready(target=workspace, campaign="unreadable", json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reason"] == campaign_mod.REASON_UNREADABLE_MEMBER
+    assert any(err.get("member_id") == "broken" for err in payload["member_errors"])
+    assert "ready" not in payload
+
+
 def test_campaign_ready_preserves_seat_class_spend_by(tmp_path, monkeypatch, capsys):
     """Merged #815 annotations must survive campaign aggregation (#814 lens)."""
     workspace = tmp_path / "workspace"
@@ -365,12 +402,17 @@ def test_campaign_ready_preserves_seat_class_spend_by(tmp_path, monkeypatch, cap
         return datetime(2026, 8, 9, 19, 0, clock["n"], tzinfo=timezone.utc)
 
     monkeypatch.setattr(work_cmd.helpers, "_now", _now)
-    task = _add(
-        lib,
-        "Annotated library work",
-        seat_class="judgment",
-        spend_by="2026-08-15T12:00:00Z",
+    assert (
+        work_cmd.task_add(
+            target=lib,
+            text="Annotated library work",
+            seat_class="judgment",
+            spend_by="2026-08-15T12:00:00Z",
+        )
+        == 0
     )
+    out = capsys.readouterr().out
+    local_id = out.split("task: ", 1)[1].splitlines()[0]
     _write_campaign(
         workspace,
         "annotated",
@@ -383,7 +425,7 @@ def test_campaign_ready_preserves_seat_class_spend_by(tmp_path, monkeypatch, cap
 
     assert work_cmd.ready(target=workspace, campaign="annotated", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    qualified = campaign_mod.qualify_task_id("lib", task["id"])
+    qualified = campaign_mod.qualify_task_id("lib", local_id)
     item = next(entry for entry in payload["ready"] if entry["id"] == qualified)
     assert item["seat_class"] == "judgment"
     assert item["spend_by"] == "2026-08-15T12:00:00Z"
