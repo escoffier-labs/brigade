@@ -653,6 +653,8 @@ def test_stop_keeps_prior_receipt_when_interleaved_foreign_write_lags_fingerprin
                 "run_id": "run-1",
                 "status": "completed",
                 "started_at": write_at,
+                "completed_at": write_at,
+                "target": str(target.resolve()),
                 "harness_session": {
                     "harness": "claude",
                     "fingerprint": state["session_fingerprint"],
@@ -802,6 +804,8 @@ def test_final_bash_handoff_write_does_not_require_verification_again(tmp_path: 
                 "run_id": "run-1",
                 "status": "completed",
                 "started_at": state["last_verification_write_at"],
+                "completed_at": state["last_verification_write_at"],
+                "target": str(target.resolve()),
                 "harness_session": {
                     "harness": "claude",
                     "fingerprint": state["session_fingerprint"],
@@ -876,6 +880,8 @@ def test_mixed_bash_code_and_handoff_write_requires_new_verification(tmp_path: P
                 "run_id": "run-1",
                 "status": "completed",
                 "started_at": state["last_verification_write_at"],
+                "completed_at": state["last_verification_write_at"],
+                "target": str(target.resolve()),
                 "harness_session": {
                     "harness": "claude",
                     "fingerprint": state["session_fingerprint"],
@@ -926,6 +932,8 @@ def test_stop_ignores_postcapture_brigade_run_artifact_writes(tmp_path: Path, mo
                 "run_id": "run-1",
                 "status": "completed",
                 "started_at": state["last_verification_write_at"],
+                "completed_at": state["last_verification_write_at"],
+                "target": str(target.resolve()),
                 "harness_session": {
                     "harness": "claude",
                     "fingerprint": state["session_fingerprint"],
@@ -977,6 +985,8 @@ def test_stop_still_blocks_after_source_edit_post_capture(tmp_path: Path, monkey
                 "run_id": "run-1",
                 "status": "completed",
                 "started_at": state["last_verification_write_at"],
+                "completed_at": state["last_verification_write_at"],
+                "target": str(target.resolve()),
                 "harness_session": {
                     "harness": "claude",
                     "fingerprint": state["session_fingerprint"],
@@ -1345,7 +1355,7 @@ def test_stop_quotes_target_in_replacement_guidance(tmp_path: Path, monkeypatch)
     assert f"--target {shlex.quote(str(target.resolve()))}" in result["reason"]
 
 
-def test_stop_accepts_failed_or_rejected_routed_receipt_and_nudges_handoff(tmp_path: Path, monkeypatch):
+def test_stop_rejects_failed_or_rejected_routed_receipt(tmp_path: Path, monkeypatch):
     target = _wired_claude(tmp_path)
     monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
     runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id="receipt"))
@@ -1368,6 +1378,8 @@ def test_stop_accepts_failed_or_rejected_routed_receipt_and_nudges_handoff(tmp_p
                 "run_id": "run-1",
                 "status": "rejected",
                 "started_at": state["last_write_at"],
+                "completed_at": state["last_write_at"],
+                "target": str(target.resolve()),
                 "harness_session": {
                     "harness": "claude",
                     "fingerprint": state["session_fingerprint"],
@@ -1378,8 +1390,7 @@ def test_stop_accepts_failed_or_rejected_routed_receipt_and_nudges_handoff(tmp_p
     )
 
     result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id="receipt", stop_hook_active=False))
-    assert "decision" not in result
-    assert "Memory Handoff" in result["hookSpecificOutput"]["additionalContext"]
+    assert result["decision"] == "block"
 
 
 def test_final_handoff_write_does_not_require_verification_again(tmp_path: Path, monkeypatch):
@@ -1406,6 +1417,8 @@ def test_final_handoff_write_does_not_require_verification_again(tmp_path: Path,
                 "run_id": "run-1",
                 "status": "completed",
                 "started_at": state["last_write_at"],
+                "completed_at": state["last_write_at"],
+                "target": str(target.resolve()),
                 "harness_session": {
                     "harness": "claude",
                     "fingerprint": state["session_fingerprint"],
@@ -1470,6 +1483,8 @@ def test_stop_accepts_session_receipt_after_wrapped_verify_posttooluse(tmp_path:
                 "run_id": "wrapped-run",
                 "status": "completed",
                 "started_at": state["last_write_at"],
+                "completed_at": state["last_write_at"],
+                "target": str(target.resolve()),
                 "harness_session": {
                     "harness": "claude",
                     "fingerprint": state["session_fingerprint"],
@@ -1534,6 +1549,80 @@ def test_stop_rejects_receipt_created_before_later_write(tmp_path: Path):
     result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
 
     assert result["decision"] == "block"
+
+
+def test_receipt_since_requires_exact_completed_audit_boundary(tmp_path: Path):
+    target = _git_wired_claude(tmp_path)
+    (target / "source.py").write_text("value = 1\n")
+    subprocess.run(["git", "add", "."], cwd=target, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=target, check=True, capture_output=True, text=True)
+    (target / "source.py").write_text("value = 2\n")
+
+    threshold = localio.utc_now()
+    fingerprint = runtime._session_fingerprint("audited-session")
+    from brigade.work_cmd.verification import _tree_fingerprint
+
+    receipt_tree = _tree_fingerprint(target)
+    assert receipt_tree is not None
+    root = target / ".brigade" / "work" / "verify-runs"
+
+    def write_receipt(run_id: str, **overrides: object) -> None:
+        run_dir = root / run_id
+        run_dir.mkdir(parents=True)
+        payload = {
+            "run_id": run_id,
+            "target": str(target.resolve()),
+            "status": "completed",
+            "started_at": (threshold + timedelta(seconds=1)).isoformat(),
+            "completed_at": (threshold + timedelta(seconds=2)).isoformat(),
+            "tree_fingerprint": receipt_tree,
+            "harness_session": {"harness": "claude", "fingerprint": fingerprint},
+            **overrides,
+        }
+        (run_dir / "receipt.json").write_text(json.dumps(payload) + "\n")
+
+    invalid_cases = [
+        {"completed_at": None},
+        {"completed_at": "not-a-timestamp"},
+        {"status": "running"},
+        {"status": "failed"},
+        {"status": "rejected"},
+        {"started_at": (threshold - timedelta(seconds=1)).isoformat()},
+        {"target": str(tmp_path / "other")},
+        {"tree_fingerprint": "0" * 40},
+        {"harness_session": {"harness": "claude", "fingerprint": runtime._session_fingerprint("other")}},
+    ]
+    for index, overrides in enumerate(invalid_cases):
+        write_receipt(f"invalid-{index}", **overrides)
+
+    assert runtime._receipt_since(target, threshold.isoformat(), session_fingerprint=fingerprint) is False
+
+    write_receipt("matching")
+
+    assert runtime._receipt_since(target, threshold.isoformat(), session_fingerprint=fingerprint) is True
+
+
+def test_receipt_since_fails_open_when_tree_snapshot_is_unavailable(tmp_path: Path):
+    target = _wired_claude(tmp_path)
+    threshold = localio.utc_now()
+    fingerprint = runtime._session_fingerprint("non-git-session")
+    run_dir = target / ".brigade" / "work" / "verify-runs" / "matching"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "target": str(target.resolve()),
+                "status": "completed",
+                "started_at": (threshold + timedelta(seconds=1)).isoformat(),
+                "completed_at": (threshold + timedelta(seconds=2)).isoformat(),
+                "tree_fingerprint": None,
+                "harness_session": {"harness": "claude", "fingerprint": fingerprint},
+            }
+        )
+        + "\n"
+    )
+
+    assert runtime._receipt_since(target, threshold.isoformat(), session_fingerprint=fingerprint) is True
 
 
 def test_hook_run_normalizes_malformed_persisted_state_before_denial(tmp_path: Path, capsys):
@@ -1610,6 +1699,8 @@ def test_stop_persists_normalized_future_timestamps(tmp_path: Path):
             {
                 "status": "completed",
                 "started_at": localio.utc_now_iso(),
+                "completed_at": localio.utc_now_iso(),
+                "target": str(target.resolve()),
                 "harness_session": {"harness": "claude", "fingerprint": fingerprint},
             }
         )
@@ -1813,6 +1904,8 @@ def test_wrapped_verify_credits_target_repo_not_cwd_repo(tmp_path: Path, monkeyp
                 "run_id": "wrapped-run",
                 "status": "completed",
                 "started_at": state["last_write_at"],
+                "completed_at": state["last_write_at"],
+                "target": str(target.resolve()),
                 "harness_session": {
                     "harness": "claude",
                     "fingerprint": state["session_fingerprint"],
