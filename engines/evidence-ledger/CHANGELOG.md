@@ -10,6 +10,10 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ### Added
 
+- Provenance persistence Slice 2: ingest stamps indexed `provenance.*` projections,
+  append-only `provenance_events`, resumable `miseledger doctor provenance backfill`,
+  on-read legacy show synthesis, and search/SQL filters for origin, modality, and
+  trust label without nested JSON parsing.
 - Engine Slice 1a memory projection: native `miseledger crawl memory <workspace>`
   source (`brigade-memory`), qualified cross-source relation targets on
   `miseledger.adapter.v1`, completed-scan soft tombstones scoped to memory,

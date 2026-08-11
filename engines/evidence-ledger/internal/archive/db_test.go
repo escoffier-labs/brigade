@@ -111,7 +111,7 @@ func TestMigrateAddsCollectionItemsIndexToExistingArchive(t *testing.T) {
 
 func TestCoreTablesExist(t *testing.T) {
 	db := openMigrated(t)
-	for _, table := range []string{"sources", "collections", "actors", "items", "events", "artifacts", "relations", "imports", "item_fts"} {
+	for _, table := range []string{"sources", "collections", "actors", "items", "events", "artifacts", "relations", "imports", "item_fts", "provenance_events"} {
 		var name string
 		err := db.QueryRow(
 			"select name from sqlite_master where type in ('table','view') and name = ?",
@@ -120,6 +120,110 @@ func TestCoreTablesExist(t *testing.T) {
 		if err != nil {
 			t.Fatalf("table %q not found after migrate: %v", table, err)
 		}
+	}
+}
+
+func TestMigrateCreatesProvenanceEventsOnExistingArchive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miseledger.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatalf("baseline schema: %v", err)
+	}
+	if err := ensureSchemaV2(db); err != nil {
+		t.Fatalf("ensureSchemaV2: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 2"); err != nil {
+		t.Fatalf("set v2: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := Migrate(reopened); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	version, err := UserVersion(reopened)
+	if err != nil {
+		t.Fatalf("UserVersion: %v", err)
+	}
+	if version != SchemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, SchemaVersion)
+	}
+	var name string
+	if err := reopened.QueryRow(`select name from sqlite_master where type = 'table' and name = 'provenance_events'`).Scan(&name); err != nil {
+		t.Fatalf("provenance_events missing after v4 migrate: %v", err)
+	}
+	var ingestSeqCol int
+	if err := reopened.QueryRow(`select count(*) from pragma_table_info('items') where name = 'ingest_seq'`).Scan(&ingestSeqCol); err != nil || ingestSeqCol != 1 {
+		t.Fatalf("ingest_seq column missing after migrate through v3: %v count=%d", err, ingestSeqCol)
+	}
+}
+
+func TestMigrateV3ToV4AddsProvenanceEventsPreservingIngestSeq(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v3.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSchemaV2(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSchemaV3(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 3"); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-06-03T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('src1','legacy','Legacy','1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('col1','src1','legacy:col','agent_session','legacy','{}',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq)
+values('item-v3','src1','col1','legacy:item','message',?,?,?,'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','{}','{}',7)`, now, now, "v3 body"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := Migrate(reopened); err != nil {
+		t.Fatalf("migrate v3->v4: %v", err)
+	}
+	version, err := UserVersion(reopened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 4 {
+		t.Fatalf("user_version=%d want 4", version)
+	}
+	var name string
+	if err := reopened.QueryRow(`select name from sqlite_master where type='table' and name='provenance_events'`).Scan(&name); err != nil {
+		t.Fatalf("provenance_events missing after v3->v4: %v", err)
+	}
+	var seq int64
+	if err := reopened.QueryRow(`select ingest_seq from items where id='item-v3'`).Scan(&seq); err != nil {
+		t.Fatal(err)
+	}
+	if seq != 7 {
+		t.Fatalf("ingest_seq reshuffled across v4 migrate: got %d want 7", seq)
 	}
 }
 
