@@ -136,7 +136,7 @@ def adoption_import_issues(*, target: Path, dry_run: bool = False, json_output: 
     records = _adoption_import_records(plan)
     from .. import work_cmd
 
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "target": str(target),
         "source": "operator-adoption",

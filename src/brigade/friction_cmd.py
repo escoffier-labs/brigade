@@ -1055,7 +1055,7 @@ def _import_candidates(target: Path, candidates: list[dict[str, Any]], *, dry_ru
                 },
             }
         )
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     return len(imported), len(skipped), len(skipped_dismissed)
 
 
@@ -1163,7 +1163,7 @@ def add(
     }
     if evidence:
         record["metadata"]["evidence"] = evidence
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, [record])
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, [record])
     payload = {
         "imported": len(imported),
         "skipped": len(skipped),

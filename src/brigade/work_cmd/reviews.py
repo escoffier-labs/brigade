@@ -1211,7 +1211,7 @@ def review_import_findings(*, target: Path, run_id: str, json_output: bool = Fal
                 print(f"error: {error}", file=sys.stderr)
         return 2
     records = [_review_import_record(finding) for finding in findings]
-    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "target": str(target),
         "run_id": run.get("run_id"),

@@ -164,7 +164,7 @@ def _import_memory_refresh_queue(
             for error in errors:
                 print(f"error: {error}", file=sys.stderr)
         return 2
-    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(target, records, dry_run=dry_run)
     output = {
         "queue": str(queue_path),
         "imports_path": str(helpers._imports_path(target)),

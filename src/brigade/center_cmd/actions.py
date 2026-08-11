@@ -302,7 +302,7 @@ def actions_import_issues(*, target: Path, dry_run: bool = False, json_output: b
     actions_by_id = {str(action.get("action_id") or ""): action for action in actions}
     issues = _action_policy_issues(actions)
     records = [_action_policy_import_record(issue, actions_by_id) for issue in issues]
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": _action_schema("center-actions-import-issues"),

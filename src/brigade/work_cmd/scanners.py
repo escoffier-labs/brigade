@@ -900,7 +900,7 @@ def scanners_doctor(*, target: Path, json_output: bool = False, import_issues: b
     skipped_dismissed: list[dict[str, Any]] = []
     if import_issues:
         records = _scanner_health_issue_records(target)
-        imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records)
+        imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(target, records)
         health["import_issues"] = {
             "created": len(imported),
             "skipped": len(skipped),
@@ -1058,7 +1058,7 @@ def _scanners_run_payload(
             }
             return payload, 2
         for _scanner, run, path, records in ingest_payloads:
-            imported, skipped_records, skipped_dismissed = ledger_mod._append_import_records(target, records)
+            imported, skipped_records, skipped_dismissed, _rejected = ledger_mod._append_import_records(target, records)
             run["ingest_output"] = {
                 "path": str(path),
                 "created": len(imported),

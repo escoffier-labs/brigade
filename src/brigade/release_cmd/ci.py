@@ -250,7 +250,7 @@ def ci_import_issues(
     target = target.expanduser().resolve()
     payload = ci_platform_payload(target, summary_path=summary_path)
     records = _ci_import_records(payload)
-    imported, skipped, dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     result = {
         "target_label": "release-ci",
         "dry_run": dry_run,

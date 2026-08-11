@@ -321,7 +321,7 @@ def actions_dispatch_apply(
             continue
         entry, _ = _action_target_entry(target, action)
         assert entry is not None
-        imported, skipped, skipped_dismissed = work_cmd._append_import_records(
+        imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(
             entry.path, [plan["record"]], dry_run=dry_run
         )
         imported_ids = {str(item.get("id")) for item in imported if item.get("id")}

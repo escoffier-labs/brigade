@@ -63,9 +63,9 @@ def _is_absolute_locator(value: Any) -> bool:
         return False
     if value.startswith("/"):
         return True
-    if len(value) >= 2 and value[1] == ":" and value[0].isalpha():
+    if value.startswith("\\"):
         return True
-    if value.startswith("\\\\"):
+    if len(value) >= 2 and value[1] == ":" and value[0].isalpha():
         return True
     if value.lower().startswith("file:"):
         return True

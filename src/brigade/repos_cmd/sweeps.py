@@ -68,7 +68,7 @@ def _import_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def import_issues(*, target: Path, json_output: bool = False, dry_run: bool = False) -> int:
     payload = fleet.scan_payload(target)
     records = _import_records(payload)
-    imported, skipped, dismissed = work_cmd._append_import_records(
+    imported, skipped, dismissed, _rejected = work_cmd._append_import_records(
         target.expanduser().resolve(), records, dry_run=dry_run
     )
     output = {

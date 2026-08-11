@@ -1128,7 +1128,7 @@ def _import_findings(
             }
         )
         existing_identities.setdefault(content_identity, set()).add(severity)
-    imported, duplicate_records, dismissed_records = work_cmd._append_import_records(target, records)
+    imported, duplicate_records, dismissed_records, _rejected = work_cmd._append_import_records(target, records)
     skipped.extend(duplicate_records)
     skipped.extend(dismissed_records)
     return imported, skipped

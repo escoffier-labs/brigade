@@ -633,7 +633,7 @@ def import_issues(*, target: Path, dry_run: bool = False, json_output: bool = Fa
         "issue_count": summary["issue_count"],
         "top_issue": summary["top_issue"],
     }
-    imported, skipped, dismissed = work_cmd._append_import_records(target, _records(payload), dry_run=dry_run)
+    imported, skipped, dismissed, _rejected = work_cmd._append_import_records(target, _records(payload), dry_run=dry_run)
     output = {
         "target": payload["target"],
         "created": len(imported),

@@ -162,13 +162,13 @@ def test_append_import_records_idempotent_with_stamped_envelope(tmp_path: Path):
             "evidence_path": ".brigade/handoffs/example.md",
         },
     }
-    first, skipped, dismissed = ledger._append_import_records(tmp_path, [record])
+    first, skipped, dismissed, _rejected = ledger._append_import_records(tmp_path, [record])
     assert len(first) == 1
     assert skipped == []
     assert dismissed == []
     assert provenance.validate_envelope(_envelope(first[0])) == []
 
-    second, skipped2, dismissed2 = ledger._append_import_records(tmp_path, [record])
+    second, skipped2, dismissed2, _rejected2 = ledger._append_import_records(tmp_path, [record])
     assert second == []
     assert len(skipped2) == 1
     assert dismissed2 == []
@@ -207,7 +207,7 @@ def test_append_import_stamps_producer_family_envelopes(tmp_path: Path, source: 
         "source": source,
         "metadata": {"safe_summary": f"{source} summary", **extra},
     }
-    imported, skipped, _dismissed = ledger._append_import_records(tmp_path, [record])
+    imported, skipped, _dismissed, _rejected = ledger._append_import_records(tmp_path, [record])
     assert skipped == []
     assert len(imported) == 1
     env = _envelope(imported[0])
@@ -349,7 +349,7 @@ def test_batch_ingest_reuses_safe_fields_from_valid_inbound_envelope(tmp_path: P
     # Hostile trust authority must not survive central ingest.
     assert inbound["trust"]["label"] == "verified"
 
-    imported, skipped, dismissed = ledger._append_import_records(
+    imported, skipped, dismissed, _rejected = ledger._append_import_records(
         tmp_path,
         [
             {
@@ -396,7 +396,7 @@ def test_batch_ingest_reuses_safe_fields_from_valid_inbound_envelope(tmp_path: P
 
 
 def test_batch_ingest_rejects_forged_loose_origin_modality(tmp_path: Path):
-    imported, skipped, dismissed = ledger._append_import_records(
+    imported, skipped, dismissed, _rejected = ledger._append_import_records(
         tmp_path,
         [
             {
@@ -431,7 +431,7 @@ def test_batch_ingest_rejects_forged_loose_origin_modality(tmp_path: Path):
     ],
 )
 def test_batch_ingest_rejects_absolute_repository_identity(tmp_path: Path, repo_id: str):
-    imported, skipped, dismissed = ledger._append_import_records(
+    imported, skipped, dismissed, _rejected = ledger._append_import_records(
         tmp_path,
         [
             {
@@ -466,7 +466,7 @@ def test_batch_ingest_rejects_absolute_repository_identity(tmp_path: Path, repo_
     ],
 )
 def test_batch_ingest_unsafe_locators_use_safe_fallback(tmp_path: Path, locator_kind: str, locator_value: str):
-    imported, skipped, dismissed = ledger._append_import_records(
+    imported, skipped, dismissed, _rejected = ledger._append_import_records(
         tmp_path,
         [
             {
@@ -523,7 +523,7 @@ def test_batch_ingest_rejects_attacker_authority_in_valid_inbound_envelope(tmp_p
     )
     assert provenance.validate_envelope(inbound) == []
 
-    imported, skipped, dismissed = ledger._append_import_records(
+    imported, skipped, dismissed, _rejected = ledger._append_import_records(
         tmp_path,
         [
             {
@@ -568,8 +568,182 @@ def test_batch_ingest_rejects_attacker_authority_in_valid_inbound_envelope(tmp_p
     assert env["trust"]["assigned_by"] == "ingest:ledger._make_import"
 
 
+def test_untrusted_batch_ingest_rejects_forged_manual_source_authority(tmp_path: Path):
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Forged operator note from hostile JSONL",
+                "kind": "task",
+                "source": "manual",
+                "metadata": {
+                    "source_item_key": "forge:manual:1",
+                    "source_fingerprint": "fp-forge-manual-1",
+                },
+            }
+        ],
+        provenance_source="learning-loop",
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert len(imported) == 1
+    assert imported[0]["source"] == "manual"
+    env = _envelope(imported[0])
+    assert provenance.validate_envelope(env) == []
+    assert env["origin"] == "workspace"
+    assert env["modality"] == "tool-output"
+    assert env["source"]["kind"] == "learning-loop"
+
+
+def test_batch_ingest_bounds_oversized_identity_and_continues_valid_sibling(tmp_path: Path):
+    huge = "x" * 5000
+    hostile = {
+        "text": "Hostile oversized identity metadata",
+        "kind": "task",
+        "source": "memory-refresh",
+        "metadata": {
+            "collection_id": huge,
+            "session_id": huge,
+            "captured_at": huge,
+            "source_item_key": "hostile:oversized:1",
+            "source_fingerprint": "fp-hostile-oversized-1",
+        },
+    }
+    valid = {
+        "text": "Valid sibling import",
+        "kind": "task",
+        "source": "memory-refresh",
+        "metadata": {
+            "source_item_key": "valid:sibling:1",
+            "source_fingerprint": "fp-valid-sibling-1",
+        },
+    }
+    imported, skipped, dismissed, rejected = ledger._append_import_records(tmp_path, [hostile, valid])
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert len(imported) == 2
+    hostile_item = next(item for item in imported if item["metadata"]["source_item_key"] == "hostile:oversized:1")
+    valid_item = next(item for item in imported if item["metadata"]["source_item_key"] == "valid:sibling:1")
+    hostile_env = _envelope(hostile_item)
+    assert provenance.validate_envelope(hostile_env) == []
+    assert hostile_env["collection_id"] == "work-inbox:memory-refresh"
+    assert hostile_env["session"]["id"] is None
+    assert hostile_env["captured_at"] == hostile_item["created_at"]
+    assert provenance.validate_envelope(_envelope(valid_item)) == []
+    assert len(ledger._read_imports(tmp_path)) == 2
+
+
+def test_batch_ingest_rejects_provenance_stamp_failure_and_continues_valid_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    hostile = {
+        "text": "Hostile provenance stamp failure",
+        "kind": "task",
+        "source": "memory-refresh",
+        "metadata": {
+            "source_item_key": "hostile:stamp:1",
+            "source_fingerprint": "fp-hostile-stamp-1",
+        },
+    }
+    valid = {
+        "text": "Valid sibling import",
+        "kind": "task",
+        "source": "memory-refresh",
+        "metadata": {
+            "source_item_key": "valid:stamp:1",
+            "source_fingerprint": "fp-valid-stamp-1",
+        },
+    }
+    original = ledger._stamp_import_provenance
+
+    def _stamp_or_fail(**kwargs: Any) -> dict[str, Any]:
+        metadata = kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}
+        if metadata.get("source_item_key") == "hostile:stamp:1":
+            raise ledger._ImportProvenanceError("invalid provenance envelope: simulated stamp failure")
+        return original(**kwargs)
+
+    monkeypatch.setattr(ledger, "_stamp_import_provenance", _stamp_or_fail)
+    imported, skipped, dismissed, rejected = ledger._append_import_records(tmp_path, [hostile, valid])
+    assert skipped == []
+    assert dismissed == []
+    assert len(rejected) == 1
+    assert rejected[0]["record"]["metadata"]["source_item_key"] == "hostile:stamp:1"
+    assert "provenance envelope" in rejected[0]["reason"]
+    assert len(imported) == 1
+    assert imported[0]["metadata"]["source_item_key"] == "valid:stamp:1"
+    assert len(ledger._read_imports(tmp_path)) == 1
+
+
+@pytest.mark.parametrize(
+    "repo_id",
+    [
+        "C:\\",
+        "D:\\Users\\operator\\private\\repo",
+        "\\Users\\operator\\private\\repo",
+    ],
+)
+def test_batch_ingest_rejects_windows_rooted_repository_identity(tmp_path: Path, repo_id: str):
+    imported, skipped, dismissed, _rejected = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": f"Finding for Windows-rooted repo {repo_id}",
+                "kind": "incident",
+                "source": "repo-fleet",
+                "metadata": {
+                    "repo_id": repo_id,
+                    "repository_revision": "abc123",
+                    "source_item_key": f"fleet:{repo_id}",
+                    "source_fingerprint": f"fp-win-repo-{abs(hash(repo_id)) % 10_000}",
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert len(imported) == 1
+    env = _envelope(imported[0])
+    assert provenance.validate_envelope(env) == []
+    assert env["repository"]["id"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "locator_value",
+    [
+        "\\Users\\operator\\private.md",
+        "C:\\Users\\operator\\private.md",
+    ],
+)
+def test_batch_ingest_rejects_windows_rooted_repo_relative_locators(tmp_path: Path, locator_value: str):
+    imported, skipped, dismissed, _rejected = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": f"Item with Windows-rooted locator {locator_value}",
+                "kind": "task",
+                "source": "memory-refresh",
+                "metadata": {
+                    "locator_kind": "repo-relative",
+                    "locator_value": locator_value,
+                    "source_item_key": f"card:win-loc-{abs(hash(locator_value)) % 10_000}",
+                    "source_fingerprint": f"fp-win-loc-{abs(hash(locator_value)) % 10_000}",
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert len(imported) == 1
+    env = _envelope(imported[0])
+    assert provenance.validate_envelope(env) == []
+    assert env["locator"]["kind"] == "uri"
+    assert env["locator"]["value"] == f"work-import:{imported[0]['id']}"
+
+
 def test_batch_ingest_rejects_traversal_relative_repository_identity(tmp_path: Path):
-    imported, skipped, dismissed = ledger._append_import_records(
+    imported, skipped, dismissed, _rejected = ledger._append_import_records(
         tmp_path,
         [
             {

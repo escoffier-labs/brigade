@@ -566,7 +566,7 @@ def release_waiver_import_issues(
     target = target.expanduser().resolve()
     health = _release_waiver_health_payload(target, train_id)
     records = _release_waiver_import_records(health)
-    imported, skipped, dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "target_label": "repo-fleet",
         "train_id": health.get("train_id"),
@@ -1248,7 +1248,7 @@ def release_import_issues(
         return 1 if error and "not found" in error else 2
     summary = _release_summary_payload(target, train)
     records = _release_import_records(summary)
-    imported, skipped, dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "target_label": "repo-fleet",
         "train_id": train.get("train_id"),

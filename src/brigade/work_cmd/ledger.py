@@ -11,7 +11,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
 from .. import provenance, runguard
@@ -1141,6 +1141,46 @@ def _import_origin_modality(source: str) -> tuple[str, str]:
     return _IMPORT_SOURCE_ORIGIN_MODALITY.get(source, ("workspace", "tool-output"))
 
 
+_IMPORT_IDENTITY_MAX_LEN = 256
+_IMPORT_CAPTURED_AT_MAX_LEN = 64
+
+
+class _ImportProvenanceError(ValueError):
+    """Raised when local provenance stamping fails for one import record."""
+
+
+def _bound_import_identity(value: object, *, max_len: int = _IMPORT_IDENTITY_MAX_LEN) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned or len(cleaned.encode("utf-8")) > max_len:
+        return None
+    return cleaned
+
+
+def _resolve_import_provenance_source(
+    record: dict[str, Any],
+    provenance_source: str | Callable[[dict[str, Any]], str] | None,
+) -> str:
+    record_source = str(record.get("source") or "manual").strip() or "manual"
+    if provenance_source is None:
+        return record_source
+    if isinstance(provenance_source, str):
+        resolved = provenance_source.strip()
+        return resolved or "learning-loop"
+    return str(provenance_source(record)).strip() or "learning-loop"
+
+
+def _jsonl_batch_ingest_provenance_source(record: dict[str, Any]) -> str:
+    """Derive provenance authority for untrusted JSONL batch ingest."""
+    claimed = str(record.get("source") or "manual").strip() or "manual"
+    if claimed == "manual":
+        return "learning-loop"
+    if claimed in constants.PROVENANCE_AUDIT_SOURCES:
+        return claimed
+    return "learning-loop"
+
+
 def _repository_id_is_unsafe(value: str) -> bool:
     if provenance._is_absolute_locator(value):
         return True
@@ -1162,31 +1202,25 @@ def _import_repository_fields(metadata: dict[str, Any]) -> tuple[str, str | None
     if isinstance(repo, dict):
         repo_id = _safe_repository_id(repo.get("id"))
         if repo_id is not None:
-            revision = repo.get("revision")
-            return repo_id, revision if isinstance(revision, str) else None
+            revision = _bound_import_identity(repo.get("revision"))
+            return repo_id, revision
     for key in ("repository_id", "repo_id"):
         repo_id = _safe_repository_id(metadata.get(key))
         if repo_id is not None:
-            revision = metadata.get("repository_revision")
-            return repo_id, revision if isinstance(revision, str) else None
+            revision = _bound_import_identity(metadata.get("repository_revision"))
+            return repo_id, revision
     return "unknown", None
 
 
 def _import_session_fields(metadata: dict[str, Any]) -> tuple[str | None, str | None]:
     session = metadata.get("session")
     if isinstance(session, dict):
-        session_id = session.get("id")
-        harness = session.get("harness")
-        return (
-            session_id if isinstance(session_id, str) and session_id.strip() else None,
-            harness if isinstance(harness, str) and harness.strip() else None,
-        )
-    session_id = metadata.get("session_id")
-    harness = metadata.get("session_harness")
-    return (
-        session_id.strip() if isinstance(session_id, str) and session_id.strip() else None,
-        harness.strip() if isinstance(harness, str) and harness.strip() else None,
-    )
+        session_id = _bound_import_identity(session.get("id"))
+        harness = _bound_import_identity(session.get("harness"))
+        return session_id, harness
+    session_id = _bound_import_identity(metadata.get("session_id"))
+    harness = _bound_import_identity(metadata.get("session_harness"))
+    return session_id, harness
 
 
 def _locator_is_unsafe(kind: object, value: str) -> bool:
@@ -1210,7 +1244,10 @@ def _safe_locator_fields(
         or _locator_is_unsafe(locator_kind, locator_value.strip())
     ):
         return "uri", f"work-import:{fallback_item_id}"
-    return str(locator_kind), locator_value.strip()
+    bounded = _bound_import_identity(locator_value.strip())
+    if bounded is None:
+        return "uri", f"work-import:{fallback_item_id}"
+    return str(locator_kind), bounded
 
 
 def _import_injection_trust(text: str) -> tuple[str, str, int, list[str]]:
@@ -1265,12 +1302,14 @@ def _stamp_import_provenance(
         repo_obj = reusable["repository"]
         repository_id = _safe_repository_id(repo_obj.get("id")) or "unknown"
         revision = repo_obj.get("revision")
-        repository_revision = revision if repository_id != "unknown" and isinstance(revision, str) else None
+        repository_revision = (
+            _bound_import_identity(revision) if repository_id != "unknown" and isinstance(revision, str) else None
+        )
         session_obj = reusable["session"]
-        session_id = session_obj.get("id") if isinstance(session_obj.get("id"), str) else None
-        session_harness = session_obj.get("harness") if isinstance(session_obj.get("harness"), str) else None
-        collection_id = str(reusable["collection_id"])
-        envelope_item_id = str(reusable["item_id"])
+        session_id = _bound_import_identity(session_obj.get("id"))
+        session_harness = _bound_import_identity(session_obj.get("harness"))
+        collection_id = _bound_import_identity(reusable["collection_id"]) or f"work-inbox:{source}"
+        envelope_item_id = _bound_import_identity(reusable["item_id"]) or item_id
         locator_obj = reusable["locator"]
         locator_kind, locator_value = _safe_locator_fields(
             locator_kind=locator_obj.get("kind"),
@@ -1278,57 +1317,59 @@ def _stamp_import_provenance(
             fallback_item_id=item_id,
         )
         attribution = str(reusable["attribution"])
-        captured_at = reusable.get("captured_at")
-        if not isinstance(captured_at, str) or not captured_at.strip():
+        captured_at = _bound_import_identity(reusable.get("captured_at"), max_len=_IMPORT_CAPTURED_AT_MAX_LEN)
+        if captured_at is None:
             captured_at = ingested_at
     else:
         repository_id, repository_revision = _import_repository_fields(metadata)
         session_id, session_harness = _import_session_fields(metadata)
 
-        collection_id = metadata.get("collection_id")
-        if not isinstance(collection_id, str) or not collection_id.strip():
+        collection_id = _bound_import_identity(metadata.get("collection_id"))
+        if collection_id is None:
             collection_id = f"work-inbox:{source}"
-        else:
-            collection_id = collection_id.strip()
 
         envelope_item_id = _import_source_key({"metadata": metadata, "source": source}) or item_id
+        envelope_item_id = _bound_import_identity(envelope_item_id) or item_id
         locator_kind, locator_value = _safe_locator_fields(
             locator_kind=metadata.get("locator_kind"),
             locator_value=metadata.get("locator_value"),
             fallback_item_id=item_id,
         )
         attribution = "observed"
-        captured_at = metadata.get("captured_at")
-        if not isinstance(captured_at, str) or not captured_at.strip():
+        captured_at = _bound_import_identity(metadata.get("captured_at"), max_len=_IMPORT_CAPTURED_AT_MAX_LEN)
+        if captured_at is None:
             captured_at = ingested_at
 
-    return provenance.build_envelope(
-        source_system=source_system,
-        source_kind=source_kind,
-        source_producer=source_producer,
-        origin=origin,
-        repository_id=repository_id,
-        repository_revision=repository_revision,
-        session_id=session_id,
-        session_harness=session_harness,
-        collection_id=collection_id,
-        item_id=envelope_item_id,
-        locator_kind=locator_kind,
-        locator_value=locator_value,
-        attribution=attribution,
-        modality=modality,
-        trust_label=trust_label,
-        trust_assigned_by="ingest:ledger._make_import",
-        trust_assigned_at=ingested_at,
-        injection_status=injection_status,
-        injection_count=injection_count,
-        injection_rules=injection_rules,
-        text=text,
-        raw_bytes=None,
-        content_scope="item.text.utf8.v1",
-        captured_at=captured_at,
-        ingested_at=ingested_at,
-    )
+    try:
+        return provenance.build_envelope(
+            source_system=source_system,
+            source_kind=source_kind,
+            source_producer=source_producer,
+            origin=origin,
+            repository_id=repository_id,
+            repository_revision=repository_revision,
+            session_id=session_id,
+            session_harness=session_harness,
+            collection_id=collection_id,
+            item_id=envelope_item_id,
+            locator_kind=locator_kind,
+            locator_value=locator_value,
+            attribution=attribution,
+            modality=modality,
+            trust_label=trust_label,
+            trust_assigned_by="ingest:ledger._make_import",
+            trust_assigned_at=ingested_at,
+            injection_status=injection_status,
+            injection_count=injection_count,
+            injection_rules=injection_rules,
+            text=text,
+            raw_bytes=None,
+            content_scope="item.text.utf8.v1",
+            captured_at=captured_at,
+            ingested_at=ingested_at,
+        )
+    except ValueError as exc:
+        raise _ImportProvenanceError(str(exc)) from exc
 
 
 def _import_source_identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
@@ -1447,7 +1488,8 @@ def _append_import_records(
     records: list[dict[str, Any]],
     *,
     dry_run: bool = False,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    provenance_source: str | Callable[[dict[str, Any]], str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     imports = _read_imports(target)
     existing = {
         _import_record_key(item)
@@ -1464,6 +1506,7 @@ def _append_import_records(
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     skipped_dismissed: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
     for record in records:
         key = _import_record_key(record)
         identity = _import_source_identity(record)
@@ -1479,16 +1522,21 @@ def _append_import_records(
         elif key[2] and key in existing:
             skipped.append(record)
             continue
-        item = _make_import(
-            str(record["text"]),
-            kind=str(record["kind"]),
-            source=str(record["source"]),
-            metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
-            task_type=record.get("type") if isinstance(record.get("type"), str) else None,
-            priority=record.get("priority") if isinstance(record.get("priority"), str) else None,
-            acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
-            template=record.get("template") if isinstance(record.get("template"), str) else None,
-        )
+        try:
+            item = _make_import(
+                str(record["text"]),
+                kind=str(record["kind"]),
+                source=str(record["source"]),
+                metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
+                task_type=record.get("type") if isinstance(record.get("type"), str) else None,
+                priority=record.get("priority") if isinstance(record.get("priority"), str) else None,
+                acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
+                template=record.get("template") if isinstance(record.get("template"), str) else None,
+                provenance_source=_resolve_import_provenance_source(record, provenance_source),
+            )
+        except _ImportProvenanceError as exc:
+            rejected.append({"record": record, "reason": str(exc)})
+            continue
         imported.append(item)
         existing.add(key)
         if identity is not None:
@@ -1496,7 +1544,7 @@ def _append_import_records(
     if imported and not dry_run:
         imports.extend(imported)
         _write_imports(target, imports)
-    return imported, skipped, skipped_dismissed
+    return imported, skipped, skipped_dismissed, rejected
 
 
 def _pending_tasks(target: Path) -> list[dict[str, Any]]:
@@ -2120,10 +2168,14 @@ def _make_import(
     priority: str | None = None,
     acceptance: list[str] | None = None,
     template: str | None = None,
+    provenance_source: str | None = None,
 ) -> dict[str, Any]:
     now = helpers._now()
     created = now.isoformat()
     source_text = source.strip() if isinstance(source, str) and source.strip() else "manual"
+    provenance_authority = (
+        provenance_source.strip() if isinstance(provenance_source, str) and provenance_source.strip() else source_text
+    )
     item_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{kind}-{helpers._slug(text)}-{uuid4().hex[:6]}"
     item: dict[str, Any] = {
         "id": item_id,
@@ -2149,7 +2201,7 @@ def _make_import(
     inbound_provenance = stamped_metadata.pop("provenance", None)
     stamped_metadata["provenance"] = _stamp_import_provenance(
         text=text,
-        source=source_text,
+        source=provenance_authority,
         item_id=item_id,
         metadata=stamped_metadata,
         ingested_at=created,

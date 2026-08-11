@@ -117,7 +117,7 @@ def import_issues(*, target: Path, json_output: bool = False) -> int:
     records = _issue_records(target)
     from .. import work_cmd
 
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records)
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records)
     payload = {
         "target": str(target),
         "imports_path": str(work_cmd._imports_path(target)),

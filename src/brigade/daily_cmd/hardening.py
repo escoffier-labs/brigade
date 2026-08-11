@@ -710,7 +710,7 @@ def hardening_import_issues(*, target: Path, dry_run: bool = False, json_output:
                 },
             }
         )
-    created, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    created, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": {"name": "daily-hardening-import-issues", "version": SCHEMA_VERSION},

@@ -686,7 +686,7 @@ def audit(*, target: Path, json_output: bool = False, import_issues: bool = Fals
     skipped: list[dict[str, Any]] = []
     dismissed: list[dict[str, Any]] = []
     if import_issues:
-        imported, skipped, dismissed = work_cmd._append_import_records(
+        imported, skipped, dismissed, _rejected = work_cmd._append_import_records(
             target.expanduser().resolve(), _roadmap_import_records(payload)
         )
         payload["imported"] = len(imported)

@@ -2720,7 +2720,7 @@ def import_issues(*, target: Path, json_output: bool = False) -> int:
     from . import work_cmd
 
     records = _skill_issue_records(target)
-    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records)
+    imported, skipped, skipped_dismissed, _rejected = work_cmd._append_import_records(target, records)
     payload = {
         "target": str(target),
         "source": "skill-registry",
