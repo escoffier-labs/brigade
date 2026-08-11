@@ -154,11 +154,31 @@ brigade security scan --target ./my-repo --fail-on none --json
 
 If Claude verification reports `ready: no` with `handoff_template_shadowed`, a
 global `core.excludesFile` rule such as `.claude/` is hiding the managed
-handoff template. Brigade does not edit global Git configuration. Diagnose with
-the exact recovery command from verify-harness or quickstart `next_commands`:
+handoff template. Brigade does not edit global Git configuration.
+
+**Fresh install:** `brigade init` (or `brigade operator quickstart`) writes the
+managed gitignore block with parent-directory un-ignore rules so
+`.claude/memory-handoffs/TEMPLATE.md` can be tracked while session handoffs stay
+local.
+
+**Upgrade / idempotent rerun:** Re-run `brigade init --target <path> --harnesses claude --force`
+to replace only the managed brigade gitignore block with the current parent
+un-ignore recipe. User rules outside the brigade markers are preserved.
+
+**Manual recovery** when a parent `.claude/` rule lives outside the managed block
+(or in a global excludes file Brigade cannot edit): diagnose with the exact
+recovery command from verify-harness or quickstart `next_commands`:
+
+Linux, macOS, or Git Bash:
 
 ```bash
 git check-ignore -v .claude/memory-handoffs/TEMPLATE.md
+```
+
+Windows PowerShell (native paths; WSL optional):
+
+```powershell
+git check-ignore -v .\.claude\memory-handoffs\TEMPLATE.md
 ```
 
 Then add narrow repo-local un-ignore rules to the target `.gitignore` (keep them
@@ -172,11 +192,19 @@ outside the managed Brigade block so re-init does not drop them):
 !.claude/memory-handoffs/TEMPLATE.md
 ```
 
-Re-run `git check-ignore -v .claude/memory-handoffs/TEMPLATE.md` until it no
-longer reports the template as ignored, then:
+Re-run the `git check-ignore` command above until it no longer reports the
+template as ignored by a parent `.claude/` rule, then:
+
+Linux, macOS, or Git Bash:
 
 ```bash
 brigade operator verify-harness --target ./my-repo --harness claude
+```
+
+Windows PowerShell:
+
+```powershell
+brigade operator verify-harness --target .\my-repo --harness claude
 ```
 
 Codex-only onboarding keeps its warning-only contract: a shadowed Codex

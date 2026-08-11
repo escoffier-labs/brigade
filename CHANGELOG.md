@@ -8,12 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-<<<<<<< HEAD
-- `brigade init` gitignore blocks now un-ignore harness parent directories before the managed handoff `TEMPLATE.md` exception so a parent `.claude/` rule cannot shadow the template; the source repo `.gitignore` matches the same repo-local recovery recipe. (#860)
-
-### Documentation
-- Quickstart commit guidance now states that `.claude/` stays local-only except the managed `.claude/memory-handoffs/TEMPLATE.md` Claude onboarding requires tracked, cross-linking the repo-local shadow recovery from #858 without changing runtime behavior. (#860)
-=======
 - Issue #846 R2 harness sendback (comment 5247390894): JSON secret-history
   proves synthetic Git/ignore-path; SQLite marks Git history unavailable;
   cold-start uses parent `subprocess.run` wall with distinct inner timing;
@@ -21,7 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Issue #846 R2 harness sendback: SQLite metrics scans the touched store and
   restores env overrides; restart/cold-start use a fresh subprocess probe;
   JSON guards cover `if_status` match and mismatch.
->>>>>>> origin/main
+- `brigade init` gitignore blocks now un-ignore harness parent directories
+  before the managed handoff `TEMPLATE.md` exception so a parent `.claude/`
+  rule cannot shadow the template; the source repo `.gitignore` matches the
+  same repo-local recovery recipe. (#860)
+
+### Documentation
+- Quickstart commit guidance now states that `.claude/` stays local-only
+  except the managed `.claude/memory-handoffs/TEMPLATE.md` Claude onboarding
+  requires tracked, cross-linking the repo-local shadow recovery from #858.
+  (#860)
 
 ### Added
 - Issue #846 R2 residual work-store characterization: extend the R1 harness

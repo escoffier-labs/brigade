@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from brigade import cli, operator_cmd, work_cmd
+from brigade import cli, install as install_mod, operator_cmd, work_cmd
 
 
 def _fake_surface_run(argv, timeout=8):
@@ -1604,6 +1604,11 @@ def test_verify_harness_warns_when_inbox_template_shadowed_by_external_ignore(tm
     shadow = [c for c in payload["checks"] if c["name"] == "handoff_template_shadowed"]
     assert shadow and shadow[0]["status"] == "ok"
 
+    # Downgrade managed block to legacy inbox-only rules so info/exclude can shadow again.
+    gi = (tmp_path / ".gitignore").read_text()
+    gi = gi.replace("!.codex/\n.codex/*\n!.codex/memory-handoffs/\n", "")
+    (tmp_path / ".gitignore").write_text(gi)
+
     (tmp_path / ".git" / "info" / "exclude").write_text(".codex/\n")
     cli.main(["operator", "verify-harness", "--target", str(tmp_path), "--harness", "codex", "--json"])
     payload = json.loads(capsys.readouterr().out)
@@ -1615,9 +1620,19 @@ def test_verify_harness_warns_when_inbox_template_shadowed_by_external_ignore(tm
     assert payload["issue_count"] == 0
     assert payload["warning_count"] >= 1
 
+    # Upgrading the managed block with parent un-ignore rules recovers visibility.
+    assert cli.main(["init", "--target", str(tmp_path), "--harnesses", "codex", "--force"]) == 0
+    capsys.readouterr()
+    cli.main(["operator", "verify-harness", "--target", str(tmp_path), "--harness", "codex", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    shadow = [c for c in payload["checks"] if c["name"] == "handoff_template_shadowed"]
+    assert shadow and shadow[0]["status"] == "ok"
+    assert payload["ready"] is True
+
 
 def test_claude_handoff_template_shadowed_by_core_excludes_file_blocks_readiness(tmp_path, capsys, monkeypatch):
-    """Global core.excludesFile hiding .claude/ must block Claude readiness (#855).
+    """Global core.excludesFile hiding .claude/ blocks Claude when the managed block
+    lacks parent un-ignore rules; upgrading via init recovers readiness (#855, #860).
 
     Uses an isolated GIT_CONFIG_GLOBAL so the worker's real excludesFile is never
     read or mutated.
@@ -1642,15 +1657,18 @@ def test_claude_handoff_template_shadowed_by_core_excludes_file_blocks_readiness
     codex_qs = json.loads(capsys.readouterr().out)
     assert codex_qs["status"] == "ok"
 
-    # Re-run with Claude selected: quickstart must not report ok while the
-    # managed Claude handoff template remains hidden from Git.
-    qs_rc = cli.main(["operator", "quickstart", "--target", str(repo), "--harnesses", "codex,claude", "--json"])
-    qs_payload = json.loads(capsys.readouterr().out)
-    assert qs_rc != 0
-    assert qs_payload["status"] != "ok"
-    verify_claude = next(step for step in qs_payload["steps"] if step.get("id") == "verify-claude")
-    assert verify_claude.get("return_code") != 0
-    assert "git check-ignore -v .claude/memory-handoffs/TEMPLATE.md" in (qs_payload.get("next_commands") or [])
+    # Legacy inbox-only managed rules leave Claude shadowed under a global exclude.
+    (repo / ".claude" / "memory-handoffs").mkdir(parents=True)
+    (repo / ".claude" / "memory-handoffs" / "TEMPLATE.md").write_text("# Template\n")
+    from brigade.install import build_gitignore_block
+    from brigade.selection import Selection
+
+    sel = Selection(depth="repo", harnesses=["codex", "claude"], owner="claude", includes=[])
+    legacy_block = build_gitignore_block(sel)
+    legacy_block = legacy_block.replace("!.codex/\n.codex/*\n!.codex/memory-handoffs/\n", "")
+    legacy_block = legacy_block.replace("!.claude/\n.claude/*\n!.claude/memory-handoffs/\n", "")
+    pre_block = (repo / ".gitignore").read_text().split(install_mod.GITIGNORE_BEGIN)[0]
+    (repo / ".gitignore").write_text(pre_block + legacy_block)
 
     verify_rc = cli.main(["operator", "verify-harness", "--target", str(repo), "--harness", "claude", "--json"])
     payload = json.loads(capsys.readouterr().out)
@@ -1667,6 +1685,18 @@ def test_claude_handoff_template_shadowed_by_core_excludes_file_blocks_readiness
     assert "ready: no" in text
     assert "[fail] handoff_template_shadowed:" in text
     assert "git check-ignore -v .claude/memory-handoffs/TEMPLATE.md" in text
+
+    # Upgrade managed block and handoff coverage without touching global Git config.
+    qs_rc = cli.main(["operator", "quickstart", "--target", str(repo), "--harnesses", "codex,claude", "--json"])
+    qs_payload = json.loads(capsys.readouterr().out)
+    assert qs_rc == 0
+    assert qs_payload["status"] == "ok"
+    verify_rc = cli.main(["operator", "verify-harness", "--target", str(repo), "--harness", "claude", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert verify_rc == 0
+    assert payload["ready"] is True
+    shadow = [c for c in payload["checks"] if c["name"] == "handoff_template_shadowed"]
+    assert shadow and shadow[0]["status"] == "ok"
 
 
 def test_local_operator_doctor_does_not_block_on_inactive_content_guard_hook(tmp_path, capsys, monkeypatch):
