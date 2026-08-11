@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `brigade init --profile` now merges repeatable `--include` values into the
+  profile includes with first-seen de-duplication before `--full` appends
+  `repo-extras`. Refs #494.
 - Issue #846 R2 harness sendback (comment 5247390894): JSON secret-history
   proves synthetic Git/ignore-path; SQLite marks Git history unavailable;
   cold-start uses parent `subprocess.run` wall with distinct inner timing;

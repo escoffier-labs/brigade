@@ -131,6 +131,105 @@ def test_init_profile_conflicts_with_depth(tmp_path, capsys):
     assert "--profile cannot be combined" in capsys.readouterr().err
 
 
+def test_init_profile_conflicts_with_harnesses(tmp_path, capsys):
+    rc = cli.main(
+        [
+            "init",
+            "--target",
+            str(tmp_path),
+            "--profile",
+            "repo-claude",
+            "--harnesses",
+            "claude",
+        ]
+    )
+    assert rc == 2
+    assert "--profile cannot be combined" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_init_profile_merges_includes_with_first_seen_dedupe(tmp_path):
+    rc = cli.main(
+        [
+            "init",
+            "--target",
+            str(tmp_path),
+            "--profile",
+            "repo-claude-full",
+            "--include",
+            "publisher",
+            "--include",
+            "repo-extras",
+            "--include",
+            "publisher",
+            "--no-wire",
+        ]
+    )
+    assert rc == 0
+    config = json.loads((tmp_path / ".brigade" / "config.json").read_text(encoding="utf-8"))
+    assert config["includes"] == ["repo-extras", "publisher"]
+    assert (tmp_path / "INSTALL_FOR_AGENTS.md").is_file()
+
+
+def test_init_profile_owner_override_propagates(tmp_path):
+    rc = cli.main(
+        [
+            "init",
+            "--target",
+            str(tmp_path),
+            "--profile",
+            "workspace-claude-codex",
+            "--owner",
+            "codex",
+            "--no-wire",
+        ]
+    )
+    assert rc == 0
+    config = json.loads((tmp_path / ".brigade" / "config.json").read_text(encoding="utf-8"))
+    assert config["owner"] == "codex"
+    assert config["harnesses"] == ["claude", "codex"]
+
+
+def test_init_profile_full_appends_repo_extras_after_include_merge(tmp_path):
+    rc = cli.main(
+        [
+            "init",
+            "--target",
+            str(tmp_path),
+            "--profile",
+            "repo-claude",
+            "--include",
+            "publisher",
+            "--full",
+            "--no-wire",
+        ]
+    )
+    assert rc == 0
+    config = json.loads((tmp_path / ".brigade" / "config.json").read_text(encoding="utf-8"))
+    assert config["includes"] == ["publisher", "repo-extras"]
+    assert (tmp_path / "INSTALL_FOR_AGENTS.md").is_file()
+
+
+def test_init_profile_dry_run_leaves_no_files(tmp_path, capsys):
+    before = list(tmp_path.iterdir())
+    rc = cli.main(
+        [
+            "init",
+            "--target",
+            str(tmp_path),
+            "--profile",
+            "repo-claude",
+            "--dry-run",
+            "--no-wire",
+        ]
+    )
+    assert rc == 0
+    assert list(tmp_path.iterdir()) == before
+    out = capsys.readouterr().out
+    assert "[dry-run]" in out
+    assert "repo" in out
+
+
 def test_init_legacy_default_without_profile_unchanged(tmp_path):
     """Profile-less installs keep the existing depth/harness default path."""
     rc = cli.main(

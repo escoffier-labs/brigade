@@ -100,7 +100,10 @@ def dispatch(args) -> int:
         except ValueError as exc:
             print(f"error: template profile snapshot invalid: {exc}", file=sys.stderr)
             return 2
-        includes = list(sel.includes)
+        includes: list[str] = []
+        for include in list(sel.includes) + list(args.includes):
+            if include not in includes:
+                includes.append(include)
         if getattr(args, "full", False) and sel.depth == "repo" and "repo-extras" not in includes:
             includes.append("repo-extras")
         if args.owner is not None:
