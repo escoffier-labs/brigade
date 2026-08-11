@@ -329,8 +329,13 @@ def import_ingest(
         return 2
 
     imported, skipped, skipped_dismissed, rejected = ledger_mod._append_import_records(
-        target, records, dry_run=dry_run, provenance_source="learning-loop"
+        target,
+        records,
+        dry_run=dry_run,
+        provenance_source="learning-loop",
+        contain_provenance_errors=True,
     )
+    rejection_reasons = {"provenance_stamp_failed": len(rejected)} if rejected else {}
     payload = {
         "path": str(path),
         "imports_path": str(helpers._imports_path(target)),
@@ -342,6 +347,7 @@ def import_ingest(
         "dismissed": len(skipped_dismissed),
         "skipped_dismissed": len(skipped_dismissed),
         "rejected": len(rejected),
+        "rejection_reasons": rejection_reasons,
         "invalid": 0,
         "imports": imported,
     }
@@ -353,6 +359,9 @@ def import_ingest(
     print(f"dry_run: {dry_run}")
     print(f"imported: {len(imported)}")
     print(f"skipped_duplicates: {len(skipped)}")
+    print(f"rejected: {len(rejected)}")
+    if rejection_reasons:
+        print("rejection_reasons: " + ", ".join(f"{reason}={count}" for reason, count in rejection_reasons.items()))
     if skipped_dismissed:
         print(f"skipped_dismissed: {len(skipped_dismissed)}")
     for item in imported:

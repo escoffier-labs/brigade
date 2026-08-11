@@ -405,6 +405,66 @@ def test_work_import_validate_and_ingest_jsonl(tmp_path, monkeypatch, capsys):
     assert payload["imports"][0]["metadata"]["thread"] == "abc123"
 
 
+def test_work_import_ingest_contains_stamp_failure_without_leaking_record_content(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    hostile_marker = "HOSTILE-PRIVATE-PAYLOAD-DO-NOT-LEAK"
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "text": hostile_marker,
+                        "kind": "task",
+                        "source": "scanner",
+                        "metadata": {
+                            "source_item_key": "hostile:stamp:1",
+                            "source_fingerprint": "fp-hostile-stamp-1",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "text": "Valid sibling import",
+                        "kind": "task",
+                        "source": "scanner",
+                        "metadata": {
+                            "source_item_key": "valid:stamp:1",
+                            "source_fingerprint": "fp-valid-stamp-1",
+                        },
+                    }
+                ),
+            )
+        )
+        + "\n"
+    )
+    original = work_cmd.ledger._stamp_import_provenance
+
+    def _stamp_or_fail(**kwargs):
+        metadata = kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}
+        if metadata.get("source_item_key") == "hostile:stamp:1":
+            raise work_cmd.ledger._ImportProvenanceError("simulated stamp failure")
+        return original(**kwargs)
+
+    monkeypatch.setattr(work_cmd.ledger, "_stamp_import_provenance", _stamp_or_fail)
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    payload_text = capsys.readouterr().out
+    payload = json.loads(payload_text)
+    assert payload["imported"] == 1
+    assert payload["rejected"] == 1
+    assert payload["rejection_reasons"] == {"provenance_stamp_failed": 1}
+    assert hostile_marker not in payload_text
+    assert "simulated stamp failure" not in payload_text
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    output = capsys.readouterr().out
+    assert "rejected: 1" in output
+    assert "rejection_reasons: provenance_stamp_failed=1" in output
+    assert hostile_marker not in output
+    assert "simulated stamp failure" not in output
+
+
 def test_work_import_validate_ingest_and_promote_task_metadata(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     times = iter(

@@ -635,7 +635,35 @@ def test_batch_ingest_bounds_oversized_identity_and_continues_valid_sibling(tmp_
     assert len(ledger._read_imports(tmp_path)) == 2
 
 
-def test_batch_ingest_rejects_provenance_stamp_failure_and_continues_valid_sibling(
+def test_batch_ingest_raises_provenance_stamp_failure_without_containment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    hostile = {
+        "text": "Internal provenance stamp failure",
+        "kind": "task",
+        "source": "memory-refresh",
+        "metadata": {
+            "source_item_key": "internal:stamp:1",
+            "source_fingerprint": "fp-internal-stamp-1",
+        },
+    }
+    original = ledger._stamp_import_provenance
+
+    def _stamp_or_fail(**kwargs: Any) -> dict[str, Any]:
+        metadata = kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}
+        if metadata.get("source_item_key") == "internal:stamp:1":
+            raise ledger._ImportProvenanceError("simulated stamp failure")
+        return original(**kwargs)
+
+    monkeypatch.setattr(ledger, "_stamp_import_provenance", _stamp_or_fail)
+
+    with pytest.raises(ledger._ImportProvenanceError, match="simulated stamp failure"):
+        ledger._append_import_records(tmp_path, [hostile])
+
+    assert ledger._read_imports(tmp_path) == []
+
+
+def test_batch_ingest_containment_opt_in_rejects_provenance_stamp_failure_and_continues_valid_sibling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     hostile = {
@@ -665,12 +693,12 @@ def test_batch_ingest_rejects_provenance_stamp_failure_and_continues_valid_sibli
         return original(**kwargs)
 
     monkeypatch.setattr(ledger, "_stamp_import_provenance", _stamp_or_fail)
-    imported, skipped, dismissed, rejected = ledger._append_import_records(tmp_path, [hostile, valid])
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path, [hostile, valid], contain_provenance_errors=True
+    )
     assert skipped == []
     assert dismissed == []
-    assert len(rejected) == 1
-    assert rejected[0]["record"]["metadata"]["source_item_key"] == "hostile:stamp:1"
-    assert "provenance envelope" in rejected[0]["reason"]
+    assert rejected == ["provenance_stamp_failed"]
     assert len(imported) == 1
     assert imported[0]["metadata"]["source_item_key"] == "valid:stamp:1"
     assert len(ledger._read_imports(tmp_path)) == 1

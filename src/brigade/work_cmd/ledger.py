@@ -1149,6 +1149,9 @@ class _ImportProvenanceError(ValueError):
     """Raised when local provenance stamping fails for one import record."""
 
 
+_IMPORT_PROVENANCE_REJECTION_REASON = "provenance_stamp_failed"
+
+
 def _bound_import_identity(value: object, *, max_len: int = _IMPORT_IDENTITY_MAX_LEN) -> str | None:
     if not isinstance(value, str):
         return None
@@ -1476,7 +1479,8 @@ def _append_import_records(
     *,
     dry_run: bool = False,
     provenance_source: str | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    contain_provenance_errors: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     imports = _read_imports(target)
     existing = {
         _import_record_key(item)
@@ -1493,7 +1497,7 @@ def _append_import_records(
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     skipped_dismissed: list[dict[str, Any]] = []
-    rejected: list[dict[str, Any]] = []
+    rejected: list[str] = []
     for record in records:
         key = _import_record_key(record)
         identity = _import_source_identity(record)
@@ -1521,8 +1525,10 @@ def _append_import_records(
                 template=record.get("template") if isinstance(record.get("template"), str) else None,
                 provenance_source=_resolve_import_provenance_source(record, provenance_source),
             )
-        except _ImportProvenanceError as exc:
-            rejected.append({"record": record, "reason": str(exc)})
+        except _ImportProvenanceError:
+            if not contain_provenance_errors:
+                raise
+            rejected.append(_IMPORT_PROVENANCE_REJECTION_REASON)
             continue
         imported.append(item)
         existing.add(key)
