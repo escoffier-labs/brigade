@@ -564,6 +564,9 @@ func upsertRecord(tx *sql.Tx, rec adapter.Record, sourcePath string, ordinal int
 		if err := reconcileKnownItem(tx, rec, itemID, sourceID, collectionID, actorID, contentHash, rawHash, rawPath, rawOrdinal, raw, body, now); err != nil {
 			return false, err
 		}
+		if err := softTombstoneSupersededVersions(tx, sourceID, collectionID, rec.Item.ExternalID, itemID, now); err != nil {
+			return false, err
+		}
 		return false, nil
 	} else if err != sql.ErrNoRows {
 		return false, err
@@ -610,6 +613,9 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, null
 		if err := reconcileKnownItem(tx, rec, itemID, sourceID, collectionID, actorID, contentHash, rawHash, rawPath, rawOrdinal, raw, body, now); err != nil {
 			return false, err
 		}
+		if err := softTombstoneSupersededVersions(tx, sourceID, collectionID, rec.Item.ExternalID, itemID, now); err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 	eventID := stableID("event", itemID, createdAt, rec.Item.Kind)
@@ -617,7 +623,57 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, null
 	if err := replaceItemSideTables(tx, rec, itemID, sourceID, collectionID, capturedAt, raw, body, now, false); err != nil {
 		return false, err
 	}
+	if err := softTombstoneSupersededVersions(tx, sourceID, collectionID, rec.Item.ExternalID, itemID, now); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+// softTombstoneSupersededVersions keeps one default-live content version per
+// (source, collection, external_id). Older non-tombstoned rows are soft-
+// tombstoned and removed from FTS so their unique text cannot surface in
+// default search. Inbound relation targets pointing at superseded ids are
+// cleared for later re-resolution onto the live winner. The kept id is
+// revived when a previously superseded content-hash is re-imported.
+func softTombstoneSupersededVersions(tx *sql.Tx, sourceID, collectionID, externalID, keepItemID, now string) error {
+	if externalID == "" || keepItemID == "" {
+		return nil
+	}
+	if _, err := tx.Exec(`update items set tombstoned_at = null where id = ?`, keepItemID); err != nil {
+		return err
+	}
+	rows, err := tx.Query(`
+select id from items
+where source_id = ? and collection_id = ? and external_id = ?
+  and tombstoned_at is null and id != ?`, sourceID, collectionID, externalID, keepItemID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var superseded []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		superseded = append(superseded, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range superseded {
+		if _, err := tx.Exec(`update items set tombstoned_at = ? where id = ? and tombstoned_at is null`, now, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`delete from item_fts where item_id = ?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`update relations set target_item_id = null
+where target_item_id = ? and source_item_id != ?`, id, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func nextIngestSeq(tx *sql.Tx) (int64, error) {
