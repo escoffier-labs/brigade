@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
-from .. import runguard
+from .. import provenance, runguard
+from ..untrusted import scan_handoff_injection_heuristics
 
 
 def _task_ledger_lock_path(target: Path) -> Path:
@@ -1079,6 +1080,40 @@ def _import_source_key(item: dict[str, Any]) -> str | None:
     return None
 
 
+# Central envelope stamps land under metadata.provenance after identity is fixed.
+# Exclude them from dedupe fingerprints so repeated imports stay idempotent.
+_IMPORT_FINGERPRINT_METADATA_SKIP = frozenset(
+    {
+        "source_fingerprint",
+        "sweep_path",
+        "queue_path",
+        "provenance",
+    }
+)
+
+
+# Default origin/modality for work-inbox producers. Metadata may override with
+# closed-set values; unknown sources stay workspace/tool-output.
+_IMPORT_SOURCE_ORIGIN_MODALITY: dict[str, tuple[str, str]] = {
+    "manual": ("operator-input", "human-written"),
+    "backup-health": ("workspace", "tool-output"),
+    "chat-memory-sweep": ("agent-session", "mixed"),
+    "code-review": ("workspace", "tool-output"),
+    "context-pack": ("workspace", "tool-output"),
+    "handoff-ingest": ("agent-session", "mixed"),
+    "learning-loop": ("workspace", "tool-output"),
+    "memory-care": ("workspace", "tool-output"),
+    "memory-refresh": ("workspace", "tool-output"),
+    "project-consolidation": ("workspace", "tool-output"),
+    "repo-fleet": ("workspace", "tool-output"),
+    "repo-fleet-release": ("workspace", "tool-output"),
+    "roadmap-audit": ("workspace", "tool-output"),
+    "scanner-health": ("workspace", "tool-output"),
+    "security-scan": ("workspace", "tool-output"),
+    "tool-catalog": ("workspace", "tool-output"),
+}
+
+
 def _import_fingerprint(item: dict[str, Any]) -> str | None:
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     value = metadata.get("source_fingerprint")
@@ -1095,12 +1130,131 @@ def _import_fingerprint(item: dict[str, Any]) -> str | None:
             "priority": item.get("priority"),
             "template": item.get("template"),
             "acceptance": item.get("acceptance"),
-            "metadata": {
-                key: value
-                for key, value in metadata.items()
-                if key not in {"source_fingerprint", "sweep_path", "queue_path"}
-            },
+            "metadata": {key: value for key, value in metadata.items() if key not in _IMPORT_FINGERPRINT_METADATA_SKIP},
         }
+    )
+
+
+def _import_origin_modality(source: str, metadata: dict[str, Any]) -> tuple[str, str]:
+    default_origin, default_modality = _IMPORT_SOURCE_ORIGIN_MODALITY.get(source, ("workspace", "tool-output"))
+    origin = metadata.get("origin")
+    modality = metadata.get("modality")
+    if origin not in provenance.ORIGINS:
+        origin = default_origin
+    if modality not in provenance.MODALITIES:
+        modality = default_modality
+    return str(origin), str(modality)
+
+
+def _import_repository_fields(metadata: dict[str, Any]) -> tuple[str, str | None]:
+    repo = metadata.get("repository")
+    if isinstance(repo, dict):
+        repo_id = repo.get("id")
+        revision = repo.get("revision")
+        if isinstance(repo_id, str) and repo_id.strip():
+            return repo_id.strip(), revision if isinstance(revision, str) else None
+    for key in ("repository_id", "repo_id"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            revision = metadata.get("repository_revision")
+            return value.strip(), revision if isinstance(revision, str) else None
+    return "unknown", None
+
+
+def _import_session_fields(metadata: dict[str, Any]) -> tuple[str | None, str | None]:
+    session = metadata.get("session")
+    if isinstance(session, dict):
+        session_id = session.get("id")
+        harness = session.get("harness")
+        return (
+            session_id if isinstance(session_id, str) and session_id.strip() else None,
+            harness if isinstance(harness, str) and harness.strip() else None,
+        )
+    session_id = metadata.get("session_id")
+    harness = metadata.get("session_harness")
+    return (
+        session_id.strip() if isinstance(session_id, str) and session_id.strip() else None,
+        harness.strip() if isinstance(harness, str) and harness.strip() else None,
+    )
+
+
+def _import_injection_trust(text: str) -> tuple[str, str, int, list[str]]:
+    """Map injection scan outcome to trust label and injection fields.
+
+    Hit -> quarantined/flagged; clean -> untrusted/clean; unavailable ->
+    quarantined/pending. Does not upgrade trust.
+    """
+    try:
+        hits = scan_handoff_injection_heuristics(text)
+        warnings = [hit for hit in hits if hit.severity == "warning"]
+    except Exception:
+        return "quarantined", "pending", 0, []
+    if warnings:
+        rules = sorted({hit.rule for hit in warnings if isinstance(hit.rule, str) and hit.rule})
+        return "quarantined", "flagged", len(warnings), rules
+    return "untrusted", "clean", 0, []
+
+
+def _stamp_import_provenance(
+    *,
+    text: str,
+    source: str,
+    item_id: str,
+    metadata: dict[str, Any],
+    ingested_at: str,
+) -> dict[str, Any]:
+    """Build a locally assigned work-inbox provenance envelope for one import."""
+    origin, modality = _import_origin_modality(source, metadata)
+    trust_label, injection_status, injection_count, injection_rules = _import_injection_trust(text)
+    repository_id, repository_revision = _import_repository_fields(metadata)
+    session_id, session_harness = _import_session_fields(metadata)
+
+    collection_id = metadata.get("collection_id")
+    if not isinstance(collection_id, str) or not collection_id.strip():
+        collection_id = f"work-inbox:{source}"
+    else:
+        collection_id = collection_id.strip()
+
+    envelope_item_id = _import_source_key({"metadata": metadata, "source": source}) or item_id
+
+    locator_kind = metadata.get("locator_kind")
+    locator_value = metadata.get("locator_value")
+    if locator_kind not in provenance.LOCATOR_KINDS or not isinstance(locator_value, str) or not locator_value.strip():
+        locator_kind = "uri"
+        locator_value = f"work-import:{item_id}"
+    else:
+        locator_value = locator_value.strip()
+
+    captured_at = metadata.get("captured_at")
+    if not isinstance(captured_at, str) or not captured_at.strip():
+        captured_at = ingested_at
+
+    return provenance.build_envelope(
+        source_system="work-inbox",
+        source_kind=source,
+        source_producer="ledger._make_import",
+        origin=origin,
+        repository_id=repository_id,
+        repository_revision=repository_revision,
+        session_id=session_id,
+        session_harness=session_harness,
+        collection_id=collection_id,
+        item_id=envelope_item_id,
+        locator_kind=str(locator_kind),
+        locator_value=locator_value,
+        attribution="observed",
+        modality=modality,
+        trust_label=trust_label,
+        trust_assigned_by="ingest:ledger._make_import",
+        trust_assigned_at=ingested_at,
+        injection_status=injection_status,
+        injection_count=injection_count,
+        injection_rules=injection_rules,
+        text=text,
+        raw_bytes=None,
+        content_scope="item.text.utf8.v1",
+        captured_at=captured_at,
+        ingested_at=ingested_at,
     )
 
 
@@ -1519,6 +1673,10 @@ def _handoff_private_fields(value: object, *, path: tuple[str, ...] = ()) -> lis
             key_text = str(key)
             normalized = key_text.strip().casefold()
             is_top_text = not path and normalized == "text"
+            # Envelope schema fields include hashes.raw / raw_* digests (often null).
+            # Those are integrity metadata, not private chat bodies.
+            if normalized == "provenance" and isinstance(item, dict) and item.get("schema") == provenance.SCHEMA:
+                continue
             if not is_top_text and (normalized in constants.RAW_CHAT_FIELDS or normalized.startswith("raw_")):
                 found.append(".".join((*path, key_text)))
                 continue
@@ -1803,10 +1961,12 @@ def _make_import(
 ) -> dict[str, Any]:
     now = helpers._now()
     created = now.isoformat()
+    source_text = source.strip() if isinstance(source, str) and source.strip() else "manual"
+    item_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{kind}-{helpers._slug(text)}-{uuid4().hex[:6]}"
     item: dict[str, Any] = {
-        "id": f"{now.strftime('%Y%m%d-%H%M%S')}-{kind}-{helpers._slug(text)}-{uuid4().hex[:6]}",
+        "id": item_id,
         "kind": kind,
-        "source": source,
+        "source": source_text,
         "text": text,
         "status": "pending",
         "created_at": created,
@@ -1820,8 +1980,18 @@ def _make_import(
         item["template"] = template
     if acceptance is not None:
         item["acceptance"] = _normalize_acceptance(acceptance)
-    if metadata:
-        item["metadata"] = metadata
+    # Preserve producer metadata (scanner/session/capture/repo hints) and always
+    # stamp a locally assigned envelope. Inbound provenance is not authority.
+    stamped_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    stamped_metadata.pop("provenance", None)
+    stamped_metadata["provenance"] = _stamp_import_provenance(
+        text=text,
+        source=source_text,
+        item_id=item_id,
+        metadata=stamped_metadata,
+        ingested_at=created,
+    )
+    item["metadata"] = stamped_metadata
     return item
 
 

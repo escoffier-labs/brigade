@@ -511,7 +511,21 @@ def test_security_agent_guardrail_surfaces_and_safe_imports(tmp_path, capsys):
     assert payload["imported_findings"] >= 1
     imports = work_cmd._read_imports(tmp_path)
     assert imports
-    assert all("raw" not in json.dumps(item).lower() for item in imports)
+    # Safety property: imports must not carry private chat/raw evidence bodies.
+    # Provenance envelopes legitimately include null hashes.raw* schema keys.
+    for item in imports:
+        metadata = item.get("metadata") or {}
+        assert isinstance(metadata, dict)
+        assert not any(
+            str(key).casefold() in work_cmd.constants.RAW_CHAT_FIELDS or str(key).casefold().startswith("raw_")
+            for key in metadata
+            if key != "provenance"
+        )
+        assert work_cmd._handoff_private_fields(item) == []
+        envelope = metadata.get("provenance")
+        assert isinstance(envelope, dict)
+        assert envelope.get("schema") == "brigade.provenance-envelope.v1"
+        assert envelope.get("hashes", {}).get("raw") is None
     assert all((item.get("metadata") or {}).get("remediation_hint") for item in imports)
 
 
