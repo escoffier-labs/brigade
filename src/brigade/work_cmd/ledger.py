@@ -1185,17 +1185,25 @@ def _safe_repository_id(value: object) -> str | None:
     return cleaned
 
 
+def _safe_repository_revision(value: object) -> str | None:
+    """Return a bounded revision label, never a platform-rooted locator."""
+    cleaned = _bound_import_identity(value)
+    if cleaned is None or provenance._is_absolute_locator(cleaned):
+        return None
+    return cleaned
+
+
 def _import_repository_fields(metadata: dict[str, Any]) -> tuple[str, str | None]:
     repo = metadata.get("repository")
     if isinstance(repo, dict):
         repo_id = _safe_repository_id(repo.get("id"))
         if repo_id is not None:
-            revision = _bound_import_identity(repo.get("revision"))
+            revision = _safe_repository_revision(repo.get("revision"))
             return repo_id, revision
     for key in ("repository_id", "repo_id"):
         repo_id = _safe_repository_id(metadata.get(key))
         if repo_id is not None:
-            revision = _bound_import_identity(metadata.get("repository_revision"))
+            revision = _safe_repository_revision(metadata.get("repository_revision"))
             return repo_id, revision
     return "unknown", None
 
@@ -1290,9 +1298,7 @@ def _stamp_import_provenance(
         repo_obj = reusable["repository"]
         repository_id = _safe_repository_id(repo_obj.get("id")) or "unknown"
         revision = repo_obj.get("revision")
-        repository_revision = (
-            _bound_import_identity(revision) if repository_id != "unknown" and isinstance(revision, str) else None
-        )
+        repository_revision = _safe_repository_revision(revision) if repository_id != "unknown" else None
         session_obj = reusable["session"]
         session_id = _bound_import_identity(session_obj.get("id"))
         session_harness = _bound_import_identity(session_obj.get("harness"))

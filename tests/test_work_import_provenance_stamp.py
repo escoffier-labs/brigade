@@ -552,6 +552,109 @@ def test_batch_ingest_bounds_repository_identity_from_valid_inbound_envelope(
 
 
 @pytest.mark.parametrize(
+    "revision",
+    [
+        "abc123",
+        "release/2026-08-11",
+        "/var/private/revision",
+        "C:\\Users\\operator\\revision",
+        "\\\\server\\share\\revision",
+        "file:///var/private/revision",
+        "é" * 129,
+    ],
+)
+def test_batch_ingest_rejects_rooted_or_oversized_repository_revisions_from_metadata(tmp_path: Path, revision: str):
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": f"Finding with metadata revision {revision}",
+                "kind": "finding",
+                "source": "repo-fleet",
+                "metadata": {
+                    "repo_id": "escoffier-labs/brigade",
+                    "repository_revision": revision,
+                    "source_item_key": f"metadata-revision:{revision}",
+                    "source_fingerprint": f"metadata-revision:{revision}",
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    expected = revision if revision in {"abc123", "release/2026-08-11"} else None
+    assert _envelope(imported[0])["repository"] == {"id": "escoffier-labs/brigade", "revision": expected}
+
+
+@pytest.mark.parametrize(
+    "revision",
+    [
+        "abc123",
+        "release/2026-08-11",
+        "/var/private/revision",
+        "C:\\Users\\operator\\revision",
+        "\\\\server\\share\\revision",
+        "file:///var/private/revision",
+        "é" * 129,
+    ],
+)
+def test_batch_ingest_rejects_rooted_or_oversized_repository_revisions_from_valid_envelope(
+    tmp_path: Path, revision: str
+):
+    text = "Finding with reusable revision"
+    inbound = provenance.build_envelope(
+        source_system="external",
+        source_kind="finding-export",
+        source_producer="external.export",
+        origin="external-web",
+        repository_id="escoffier-labs/brigade",
+        repository_revision=revision,
+        session_id=None,
+        session_harness=None,
+        collection_id="external:findings",
+        item_id="finding:revision",
+        locator_kind="uri",
+        locator_value="https://example.test/finding",
+        attribution="declared",
+        modality="tool-output",
+        trust_label="untrusted",
+        trust_assigned_by="external",
+        trust_assigned_at="2026-08-01T12:00:00+00:00",
+        injection_status="clean",
+        injection_count=0,
+        injection_rules=[],
+        text=text,
+        raw_bytes=None,
+        content_scope="item.text.utf8.v1",
+        captured_at="2026-08-01T11:00:00+00:00",
+        ingested_at="2026-08-01T12:00:00+00:00",
+    )
+    assert provenance.validate_envelope(inbound) == []
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": text,
+                "kind": "finding",
+                "source": "repo-fleet",
+                "metadata": {
+                    "source_item_key": f"envelope-revision:{revision}",
+                    "source_fingerprint": f"envelope-revision:{revision}",
+                    "provenance": inbound,
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    expected = revision if revision in {"abc123", "release/2026-08-11"} else None
+    assert _envelope(imported[0])["repository"] == {"id": "escoffier-labs/brigade", "revision": expected}
+
+
+@pytest.mark.parametrize(
     ("locator_kind", "locator_value"),
     [
         ("uri", "file:///home/operator/private.md"),

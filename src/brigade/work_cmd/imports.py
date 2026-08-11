@@ -12,6 +12,71 @@ from . import scanners as scanners_mod
 from . import services as services_mod
 
 
+_UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS = frozenset(
+    {
+        "proposed_edges",
+        "edges",
+        "seat_class",
+        "spend_by",
+        "handoff_target_document",
+        "target_document",
+        "handoff_type",
+        "category",
+        "issue_type",
+        "handoff_category",
+        "memory_target",
+        "reason",
+    }
+)
+_UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS = (
+    "source_item_key",
+    "source_item_id",
+    "scanner_item_id",
+    "sweep_issue_id",
+    "issue_id",
+    "card_id",
+    "card_file",
+    "source_fingerprint",
+)
+
+
+def _ingest_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    """Return untrusted JSONL metadata with importer-owned identity fields."""
+    raw_metadata = record.get("metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    stamped_metadata = {
+        key: value
+        for key, value in metadata.items()
+        if key not in _UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS
+        and key not in _UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS
+        and not (isinstance(key, str) and key.startswith("declared_"))
+        and key != "provenance"
+    }
+
+    canonical_record = {
+        "text": record["text"],
+        "kind": record["kind"],
+        "type": record.get("type"),
+        "priority": record.get("priority"),
+        "template": record.get("template"),
+        "acceptance": record.get("acceptance"),
+        "metadata": stamped_metadata,
+    }
+    canonical_hash = helpers._stable_hash(canonical_record)
+
+    declared_source = ledger_mod._bound_import_identity(record.get("source"))
+    if declared_source is not None:
+        stamped_metadata["declared_source"] = declared_source
+    for key in _UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS:
+        declared_value = ledger_mod._bound_import_identity(metadata.get(key))
+        if declared_value is not None:
+            stamped_metadata[f"declared_{key}"] = declared_value
+
+    stamped_metadata["source_item_key"] = f"learning-loop:{canonical_hash}"
+    stamped_metadata["source_fingerprint"] = canonical_hash
+    return stamped_metadata
+
+
 def import_add(
     *,
     target: Path,
@@ -331,13 +396,7 @@ def import_ingest(
     importer_source = "learning-loop"
     imported_records: list[dict[str, Any]] = []
     for record in records:
-        metadata = record.get("metadata")
-        stamped_metadata = dict(metadata) if isinstance(metadata, dict) else {}
-        declared_source = ledger_mod._bound_import_identity(record.get("source"))
-        stamped_metadata.pop("declared_source", None)
-        if declared_source is not None:
-            stamped_metadata["declared_source"] = declared_source
-        imported_records.append({**record, "source": importer_source, "metadata": stamped_metadata})
+        imported_records.append({**record, "source": importer_source, "metadata": _ingest_metadata(record)})
 
     imported, skipped, skipped_dismissed, rejected = ledger_mod._append_import_records(
         target,

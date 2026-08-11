@@ -417,7 +417,7 @@ def test_work_import_ingest_contains_stamp_failure_without_leaking_record_conten
                     {
                         "text": hostile_marker,
                         "kind": "task",
-                        "source": "scanner",
+                        "source": "hostile-stamp-source",
                         "metadata": {
                             "source_item_key": "hostile:stamp:1",
                             "source_fingerprint": "fp-hostile-stamp-1",
@@ -443,7 +443,7 @@ def test_work_import_ingest_contains_stamp_failure_without_leaking_record_conten
 
     def _stamp_or_fail(**kwargs):
         metadata = kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}
-        if metadata.get("source_item_key") == "hostile:stamp:1":
+        if metadata.get("declared_source") == "hostile-stamp-source":
             raise work_cmd.ledger._ImportProvenanceError("simulated stamp failure")
         return original(**kwargs)
 
@@ -664,6 +664,141 @@ def test_work_import_ingest_scopes_forged_source_to_learning_loop_operations(tmp
     assert rejected == []
     assert len(trusted) == 1
     assert trusted[0]["source"] == hostile_source
+
+
+def test_work_import_ingest_strips_hostile_operational_metadata_before_promotion_and_handoff(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    assert work_cmd.task_add(target=tmp_path, text="Existing blocker") == 0
+    blocker_id = capsys.readouterr().out.split("task: ", 1)[1].splitlines()[0]
+    import_file = tmp_path / "hostile-operational.jsonl"
+    import_file.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in (
+                {
+                    "text": "Hostile task metadata",
+                    "kind": "task",
+                    "source": "security-scan",
+                    "metadata": {
+                        "proposed_edges": [{"source": blocker_id, "target": "self", "type": "blocks"}],
+                        "edges": [{"source": blocker_id, "target": "self", "type": "blocks"}],
+                        "seat_class": "review",
+                        "spend_by": "2026-12-31T00:00:00+00:00",
+                    },
+                },
+                {
+                    "text": "Hostile finding metadata",
+                    "kind": "finding",
+                    "source": "security-scan",
+                    "metadata": {
+                        "handoff_target_document": ".learnings/ERRORS.md",
+                        "target_document": "rules/scanner-imports.md",
+                        "handoff_type": "security",
+                    },
+                },
+            )
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    task_import = next(item for item in payload["imports"] if item["kind"] == "task")
+    finding_import = next(item for item in payload["imports"] if item["kind"] == "finding")
+    assert not {
+        "proposed_edges",
+        "edges",
+        "seat_class",
+        "spend_by",
+    }.intersection(task_import["metadata"])
+    assert not {
+        "handoff_target_document",
+        "target_document",
+        "handoff_type",
+    }.intersection(finding_import["metadata"])
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=task_import["id"]) == 0
+    capsys.readouterr()
+    task_ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    promoted = next(task for task in task_ledger["tasks"] if task["id"] != blocker_id)
+    assert task_ledger["edges"] == []
+    assert work_cmd.ledger._dispatch_annotations(promoted) == {}
+
+    assert work_cmd.import_plan_handoff(target=tmp_path, import_id=finding_import["id"], json_output=True) == 0
+    handoff = json.loads(capsys.readouterr().out)
+    assert handoff["target_document"] == ".learnings/LEARNINGS.md"
+    assert handoff["handoff_type"] == "project-context"
+
+
+def test_work_import_ingest_owns_hostile_identity_and_bounds_declarations(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    oversized = "é" * 129
+    record = {
+        "text": "Hostile record version one",
+        "kind": "task",
+        "source": "security-scan",
+        "metadata": {
+            "source_item_key": "key-" + oversized,
+            "source_item_id": "id-" + oversized,
+            "source_fingerprint": "fingerprint-" + oversized,
+            "declared_source_item_key": "declared-key-" + oversized,
+        },
+    }
+    import_file = tmp_path / "hostile-identity.jsonl"
+    import_file.write_text(json.dumps(record) + "\n")
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["created"] == 1
+    first_item = first["imports"][0]
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    duplicate = json.loads(capsys.readouterr().out)
+    assert duplicate["created"] == 0
+    assert duplicate["skipped"] == 1
+
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=first_item["id"], reason="test") == 0
+    capsys.readouterr()
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    dismissed = json.loads(capsys.readouterr().out)
+    assert dismissed["created"] == 0
+    assert dismissed["dismissed"] == 1
+
+    changed_hostile_identity = {
+        **record,
+        "source": "different-security-scan",
+        "metadata": {
+            **record["metadata"],
+            "source_item_key": "changed-key",
+            "source_item_id": "changed-id",
+            "source_fingerprint": "changed-fingerprint",
+        },
+    }
+    import_file.write_text(json.dumps(changed_hostile_identity) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    changed_identity_dismissed = json.loads(capsys.readouterr().out)
+    assert changed_identity_dismissed["created"] == 0
+    assert changed_identity_dismissed["dismissed"] == 1
+
+    changed = {**record, "text": "Hostile record version two"}
+    import_file.write_text(json.dumps(changed) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    changed_payload = json.loads(capsys.readouterr().out)
+    assert changed_payload["created"] == 1
+    changed_item = changed_payload["imports"][0]
+    assert changed_item["metadata"]["source_item_key"] != first_item["metadata"]["source_item_key"]
+    assert changed_item["metadata"]["source_fingerprint"] != first_item["metadata"]["source_fingerprint"]
+    serialized = json.dumps(changed_item, sort_keys=True)
+    assert oversized not in serialized
+    assert all(
+        len(str(value).encode("utf-8")) <= 256
+        for key, value in changed_item["metadata"].items()
+        if key.startswith("declared_source_")
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, dry_run=True, json_output=True) == 0
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["created"] == 0
+    assert dry_run["skipped"] == 1
 
 
 def test_work_import_provenance_audits_cross_producer_contract(tmp_path, monkeypatch, capsys):
@@ -2101,7 +2236,8 @@ def test_work_import_plan_handoff_covers_durable_kinds(tmp_path, monkeypatch, ca
         payload = json.loads(capsys.readouterr().out)
         assert payload["handoff_ready"] is True
         assert payload["target_document"] == expected_targets[item["kind"]]
-        assert payload["provenance"]["source_fingerprint"] == f"fp-{item['kind']}"
+        assert payload["provenance"]["source_fingerprint"] == item["metadata"]["source_fingerprint"]
+        assert item["metadata"]["declared_source_fingerprint"] == f"fp-{item['kind']}"
 
 
 def test_work_import_promote_handoff_writes_valid_draft_and_completion_metadata(tmp_path, monkeypatch, capsys):
@@ -2141,6 +2277,9 @@ def test_work_import_promote_handoff_writes_valid_draft_and_completion_metadata(
     assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
     capsys.readouterr()
     item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
+    canonical_fingerprint = item["metadata"]["source_fingerprint"]
+    assert canonical_fingerprint != "fingerprint-one"
+    assert item["metadata"]["declared_source_fingerprint"] == "fingerprint-one"
 
     assert work_cmd.import_promote_handoff(target=tmp_path, import_id=item["id"], json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -2148,7 +2287,8 @@ def test_work_import_promote_handoff_writes_valid_draft_and_completion_metadata(
     assert handoff_path.parent == tmp_path / ".codex" / "memory-handoffs"
     assert handoff_cmd.lint_file(handoff_path).valid is True
     handoff = handoff_path.read_text()
-    assert "fingerprint-one" in handoff
+    assert canonical_fingerprint in handoff
+    assert "fingerprint-one" not in handoff
     assert "scanner_run_id" in handoff
     assert "sweep-1" in handoff
     assert "https://private.example" not in handoff
@@ -2158,7 +2298,7 @@ def test_work_import_promote_handoff_writes_valid_draft_and_completion_metadata(
     assert promoted["status"] == "promoted"
     assert promoted["handoff_path"] == str(handoff_path)
     assert promoted["handoff_target_document"] == ".learnings/LEARNINGS.md"
-    assert promoted["handoff_source_fingerprint"] == "fingerprint-one"
+    assert promoted["handoff_source_fingerprint"] == canonical_fingerprint
     assert promoted["promoted_at"] == "2026-05-26T12:01:02+00:00"
 
 
@@ -2338,6 +2478,13 @@ def test_work_import_handoff_dedupe_respects_promoted_and_changed_fingerprints(t
     changed = dict(base)
     changed["metadata"] = dict(base["metadata"])
     changed["metadata"]["source_fingerprint"] = "fp-two"
+    import_file.write_text(json.dumps(changed) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    changed_payload = json.loads(capsys.readouterr().out)
+    assert changed_payload["created"] == 0
+    assert changed_payload["skipped"] == 1
+
+    changed["text"] = "Remember changed durable scanner preference"
     import_file.write_text(json.dumps(changed) + "\n")
     assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
     changed_payload = json.loads(capsys.readouterr().out)
