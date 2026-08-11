@@ -177,6 +177,11 @@ def test_validate_rejects_unsafe_absolute_locators(name, value):
         (("session", "harness"), " file:///private/harness"),
         (("collection_id",), "collection/../private"),
         (("item_id",), "item\\private"),
+        (("repository", "id"), "https://example.test/repository"),
+        (("session", "id"), "https://example.test/session"),
+        (("session", "harness"), "https://example.test/harness"),
+        (("collection_id",), "https://example.test/collection"),
+        (("item_id",), "https://example.test/item"),
     ],
 )
 def test_validate_rejects_path_looking_identity_labels(path, value):
@@ -194,6 +199,8 @@ def test_validate_accepts_ordinary_identity_labels():
     env["collection_id"] = "collection:alpha"
     env["item_id"] = "item-42"
     assert provenance.validate_envelope(env) == []
+    assert provenance.is_safe_identity_label("owner/repo")
+    assert provenance.is_safe_identity_label("collection:alpha")
 
 
 @pytest.mark.parametrize(

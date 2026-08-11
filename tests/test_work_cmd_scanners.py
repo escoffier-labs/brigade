@@ -1235,3 +1235,90 @@ def test_scanner_weekly_stale_threshold_is_longer_than_daily():
     assert scanners_mod._scanner_stale_hours("daily@02:15") == constants.SCANNER_OUTPUT_STALE_HOURS
     assert scanners_mod._scanner_stale_hours("weekly@05:00") == constants.SCANNER_WEEKLY_STALE_HOURS
     assert constants.SCANNER_WEEKLY_STALE_HOURS > 7 * 24
+
+
+def test_scanners_run_restores_same_id_rows_and_discards_malformed_self_imports(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    trusted = work_cmd.ledger._make_import(
+        "Trusted local scanner work",
+        kind="task",
+        source="security-scan",
+        metadata={"safe_evidence": "trusted-local-record"},
+    )
+    work_cmd.ledger._write_imports(tmp_path, [trusted])
+    script = tmp_path / "self_import.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+inbox = Path.cwd() / ".brigade" / "work" / "imports" / "inbox.jsonl"
+existing = [json.loads(line) for line in inbox.read_text().splitlines() if line.strip()]
+trusted_id = existing[0]["id"]
+rows = [
+    {"id": trusted_id, "kind": "task", "source": "github-issue", "text": "Hostile replacement for trusted work", "metadata": {"github_issue_url": "https://example.test/hostile", "handoff_issue_id": "hostile-handoff", "provenance": {"source": {"system": "hostile"}}}},
+    {"kind": "task", "source": "declared-source", "text": "Valid new scanner work"},
+    {"kind": "task", "source": "declared-source"},
+    {"kind": "invalid-kind", "source": "declared-source", "text": "Invalid kind"},
+    {"kind": "task", "source": "declared-source", "text": "Invalid shape", "metadata": []},
+]
+inbox.write_text("\\n".join(json.dumps(row) for row in rows) + "\\n")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "self-import"
+source = "self-import"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/self-import-output.json"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="self-import", ingest_output=True, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)["runs"][0]
+    assert first["provenance_imports_stamped"] == 1
+    assert first["self_import"] == {
+        "created": 1,
+        "rejected": 3,
+        "rejection_reasons": {"provenance_stamp_failed": 3},
+    }
+
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    imports = [json.loads(line) for line in imports_path.read_text().splitlines()]
+    assert imports[0] == trusted
+    assert len(imports) == 2
+    assert imports[1]["source"] == "self-import"
+    assert imports[1]["text"] == "Valid new scanner work"
+    rendered = json.dumps(imports, sort_keys=True)
+    for marker in ("Hostile replacement", "github-issue", "hostile-handoff", "https://example.test/hostile"):
+        assert marker not in rendered
+
+    assert (
+        work_cmd.scanners_run(
+            target=tmp_path, scanner_id="self-import", force=True, ingest_output=True, json_output=True
+        )
+        == 0
+    )
+    second = json.loads(capsys.readouterr().out)["runs"][0]
+    assert second["provenance_imports_stamped"] == 0
+    assert second["self_import"] == {
+        "created": 0,
+        "rejected": 3,
+        "rejection_reasons": {"provenance_stamp_failed": 3},
+    }
+    retained = [json.loads(line) for line in imports_path.read_text().splitlines()]
+    assert retained[0] == trusted
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=trusted["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    assert task["text"] == trusted["text"]
+    assert task["source"] == "import:security-scan"
+    assert task["metadata"]["safe_evidence"] == "trusted-local-record"

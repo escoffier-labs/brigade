@@ -794,6 +794,51 @@ def test_untrusted_identity_migration_is_scoped_to_trusted_legacy_source(tmp_pat
     assert imported[0]["metadata"]["source_fingerprint"] == ledger._untrusted_import_canonical_hash(changed)
 
 
+@pytest.mark.parametrize(
+    ("name", "mutate"),
+    [
+        ("wrong source system", lambda item: item["metadata"]["provenance"]["source"].update(system="external")),
+        ("missing source system", lambda item: item["metadata"]["provenance"]["source"].pop("system")),
+        ("wrong source kind", lambda item: item["metadata"]["provenance"]["source"].update(kind="repo-scan")),
+        ("missing source kind", lambda item: item["metadata"]["provenance"]["source"].pop("kind")),
+        ("wrong producer", lambda item: item["metadata"]["provenance"]["source"].update(producer="hostile")),
+        ("missing producer", lambda item: item["metadata"]["provenance"]["source"].pop("producer")),
+        ("wrong assignment", lambda item: item["metadata"]["provenance"]["trust"].update(assigned_by="external")),
+        ("missing assignment", lambda item: item["metadata"]["provenance"]["trust"].pop("assigned_by")),
+        ("wrong digest", lambda item: item["metadata"]["provenance"]["hashes"].update(content="0" * 64)),
+        ("missing digest", lambda item: item["metadata"]["provenance"]["hashes"].pop("content")),
+        ("changed item content", lambda item: item.update(text="Changed legacy content")),
+        ("unprovenanced", lambda item: item["metadata"].pop("provenance")),
+    ],
+)
+def test_untrusted_identity_migration_requires_locally_stamped_legacy_proof(tmp_path: Path, name: str, mutate: Any):
+    record = {
+        "text": "Legacy locally stamped import",
+        "kind": "task",
+        "source": "learning-loop",
+        "metadata": {"source_item_key": "legacy-proof", "source_fingerprint": "legacy-proof"},
+    }
+    legacy = ledger._make_import(
+        record["text"], kind=record["kind"], source=record["source"], metadata=record["metadata"]
+    )
+    mutate(legacy)
+    ledger._write_imports(tmp_path, [legacy])
+
+    incoming = ledger._sanitize_untrusted_import_record(record, importer_source="learning-loop")
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+    )
+
+    assert name
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+
+
 def test_batch_ingest_rejects_whitespace_identity_metadata_before_persistence(tmp_path: Path):
     padded = {
         "repository": {"id": " owner/repo ", "revision": " abc123 "},

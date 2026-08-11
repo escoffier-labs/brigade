@@ -1225,13 +1225,25 @@ def _legacy_import_source_content_identity(item: dict[str, Any]) -> tuple[str, s
     """Return a legacy identity only when local provenance establishes its source."""
     source = item.get("source")
     metadata = item.get("metadata")
-    if not isinstance(source, str) or not source or not isinstance(metadata, dict):
+    text = item.get("text")
+    if not isinstance(source, str) or not source or not isinstance(text, str) or not isinstance(metadata, dict):
         return None
     envelope = metadata.get("provenance")
     if provenance.validate_envelope(envelope):
         return None
     envelope_source = envelope.get("source") if isinstance(envelope, Mapping) else None
-    if not isinstance(envelope_source, Mapping) or envelope_source.get("kind") != source:
+    envelope_trust = envelope.get("trust") if isinstance(envelope, Mapping) else None
+    envelope_hashes = envelope.get("hashes") if isinstance(envelope, Mapping) else None
+    if (
+        not isinstance(envelope_source, Mapping)
+        or envelope_source.get("system") != "work-inbox"
+        or envelope_source.get("kind") != source
+        or envelope_source.get("producer") != "ledger._make_import"
+        or not isinstance(envelope_trust, Mapping)
+        or envelope_trust.get("assigned_by") != "ingest:ledger._make_import"
+        or not isinstance(envelope_hashes, Mapping)
+        or envelope_hashes.get("content") != provenance.content_sha256(text)
+    ):
         return None
     content_identity = _import_content_identity(item)
     if content_identity is None:
@@ -1727,7 +1739,11 @@ def _append_import_records(
             elif _import_fingerprint(existing_item) == _import_fingerprint(record):
                 skipped.append(record)
                 continue
-        elif key[2] and key in existing:
+        elif (
+            key[2]
+            and key in existing
+            and not (migrate_untrusted_identities and _has_canonical_untrusted_import_identity(record))
+        ):
             skipped.append(record)
             continue
         elif migrate_untrusted_identities and _has_canonical_untrusted_import_identity(record):

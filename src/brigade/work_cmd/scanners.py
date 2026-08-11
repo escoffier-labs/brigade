@@ -203,16 +203,26 @@ def _scanner_stamp_new_imports(
     existing_identities = {
         ledger_mod._import_source_identity(item) for item in before_imports if isinstance(item, dict)
     }
+    before_by_id = {
+        item["id"]: item for item in before_imports if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
     retained: list[dict[str, Any]] = []
     retained_ids: set[str] = set()
     discarded_duplicate = False
+    restored_before_row = False
     for item in imports:
         import_id = item.get("id")
         if isinstance(import_id, str) and import_id in before_ids:
-            retained.append(item)
-            retained_ids.add(import_id)
+            if import_id not in retained_ids:
+                retained.append(before_by_id[import_id])
+                retained_ids.add(import_id)
+            restored_before_row = True
             continue
-        sanitized = ledger_mod._sanitize_untrusted_import_record(item, importer_source=scanner_source)
+        raw_record, errors = ledger_mod._validate_import_record(item, label="self-import")
+        if errors or raw_record is None:
+            rejected += 1
+            continue
+        sanitized = ledger_mod._sanitize_untrusted_import_record(raw_record, importer_source=scanner_source)
         identity = ledger_mod._import_source_identity(sanitized)
         if identity in existing_identities:
             discarded_duplicate = True
@@ -242,7 +252,7 @@ def _scanner_stamp_new_imports(
         if isinstance(import_id, str) and import_id not in retained_ids:
             retained.append(item)
             retained_ids.add(import_id)
-    if stamped_ids or rejected or discarded_duplicate:
+    if stamped_ids or rejected or discarded_duplicate or restored_before_row:
         ledger_mod._write_imports(target, retained)
     if stamped_ids or rejected:
         run["self_import"] = {
