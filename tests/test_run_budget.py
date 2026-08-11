@@ -672,6 +672,72 @@ def test_stable_reservation_identity_is_idempotent_across_retry_and_restart():
     assert final.projection.used["worker_dispatch_count"] == 1
 
 
+def test_expired_wall_clock_blocks_reclaim_of_pending_durable_dispatch():
+    """Restart reclaim must not authorize work after the wall-clock ceiling."""
+    recorded: list[dict] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        recorded.append({"event_type": event_type, "payload": dict(payload), "idempotency_key": idempotency_key})
+        return recorded[-1]
+
+    declaration = run_budget.RunBudgetDeclaration(wall_clock_seconds=5, worker_dispatch_count=10)
+    started = datetime(2026, 8, 10, 21, 0, 0, tzinfo=timezone.utc)
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=declaration,
+        append_event=append_event,
+        clock=lambda: started + timedelta(seconds=1),
+    )
+    coordinator.set_started_at(started)
+    attempt = coordinator.reserve_and_record_dispatch(
+        seat="coder",
+        allocate_attempt=lambda: 1,
+        record_requested=lambda value: value,
+    )
+    assert attempt == 1
+    durable = [event for event in coordinator._events_cache if event["event_type"] == "run.dispatch.requested"]
+    assert len(durable) == 1
+    assert durable[0]["payload"]["attempt"] == 1
+
+    # Restart with recovered clock past the 5s ceiling while attempt 1 is still open.
+    restarted = run_budget.BudgetCoordinator(
+        declaration=declaration,
+        append_event=append_event,
+        clock=lambda: started + timedelta(seconds=10),
+    )
+    restarted.set_started_at(started)
+    restarted.reload(list(coordinator._events_cache))
+    assert restarted._open_pending_attempt_unlocked("coder") == 1
+
+    with pytest.raises(run_budget.BudgetPolicyError) as exc:
+        restarted.reserve_and_record_dispatch(
+            seat="coder",
+            allocate_attempt=lambda: (_ for _ in ()).throw(AssertionError("must not allocate")),
+            record_requested=lambda _attempt: (_ for _ in ()).throw(AssertionError("must not re-record")),
+        )
+    assert exc.value.dimension == "wall_clock_seconds"
+    assert exc.value.exhausted is True
+    assert "dispatch:coder:1" not in restarted._launch_claims
+    assert any(event["event_type"] == "run_budget.exhausted" for event in recorded)
+    assert any(event["event_type"] == "run_budget.reservation_denied" for event in recorded)
+
+    # Undeclared wall-clock still reclaims open pending (declared-only contract).
+    unbounded = run_budget.BudgetCoordinator(
+        declaration=run_budget.RunBudgetDeclaration(worker_dispatch_count=10),
+        append_event=append_event,
+        clock=lambda: started + timedelta(seconds=10),
+    )
+    unbounded.set_started_at(started)
+    unbounded.reload(list(durable))
+    assert (
+        unbounded.reserve_and_record_dispatch(
+            seat="coder",
+            allocate_attempt=lambda: (_ for _ in ()).throw(AssertionError("must not allocate")),
+            record_requested=lambda _attempt: (_ for _ in ()).throw(AssertionError("must not re-record")),
+        )
+        == 1
+    )
+
+
 def test_parallel_same_seat_dispatch_count_one_launches_once():
     """Concurrent same-seat callers with count=1 launch exactly one reservation."""
     import threading

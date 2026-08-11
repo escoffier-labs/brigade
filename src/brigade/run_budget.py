@@ -1094,6 +1094,37 @@ class BudgetCoordinator:
                 attempts.append(attempt)
         return max(attempts, default=0)
 
+    def _ensure_wall_clock_allows_unlocked(self, *, request_id: str) -> None:
+        """Deny authorization when the wall-clock ceiling is already exhausted.
+
+        Used by restart reclaim before handing a durable pending identity back
+        to the caller for external launch. Dispatch-count is not re-checked:
+        the durable ``run.dispatch.requested`` already owns that unit.
+        """
+        if self.declaration.wall_clock_seconds is None:
+            return
+        wall_only = replace(self._projection_unlocked(), declaration=replace(self.declaration, worker_dispatch_count=None))
+        decision = evaluate_dispatch_reservation(
+            wall_only,
+            request_id=request_id,
+            now=self.clock(),
+            started_at=self._started_at,
+            units=1,
+        )
+        if decision.events:
+            self._commit(decision.events)
+        if not decision.allowed:
+            raise BudgetPolicyError(
+                _bound(
+                    f"run budget reservation denied for {decision.dimension}"
+                    + (" (exhausted)" if decision.exhausted else "")
+                ),
+                code="reservation_denied" if not decision.exhausted else "budget_exhausted",
+                dimension=decision.dimension,
+                exhausted=decision.exhausted,
+                request_id=request_id,
+            )
+
     def reserve_and_record_dispatch(
         self,
         *,
@@ -1105,9 +1136,10 @@ class BudgetCoordinator:
 
         Attempt allocation and reservation share one lock so parallel same-seat
         callers cannot both claim attempt 1. A durable open pending identity is
-        reclaimed once per process (crash/retry); concurrent callers then
-        allocate a fresh attempt. The durable ``run.dispatch.requested`` fact is
-        written before unlock so external transport cannot start without it.
+        reclaimed once per process (crash/retry) only after the wall-clock
+        ceiling still allows authorization; concurrent callers then allocate a
+        fresh attempt. The durable ``run.dispatch.requested`` fact is written
+        before unlock so external transport cannot start without it.
         """
         if not isinstance(seat, str) or not seat:
             raise BudgetError("seat must be a non-empty string", code="reservation_invalid")
@@ -1116,7 +1148,9 @@ class BudgetCoordinator:
             if pending is not None:
                 pending_id = dispatch_reservation_request_id(seat, pending)
                 if pending_id not in self._launch_claims and self._has_durable_dispatch_requested(seat, pending):
-                    # Restart/recovery: reclaim the unfinished durable identity once.
+                    # Restart/recovery: reclaim the unfinished durable identity
+                    # once, but never authorize launch past a wall-clock ceiling.
+                    self._ensure_wall_clock_allows_unlocked(request_id=pending_id)
                     self._launch_claims.add(pending_id)
                     self._reserved_request_ids.add(pending_id)
                     return pending

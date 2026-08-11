@@ -170,6 +170,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `load_error` / `load_warnings` text for missing path-based skill selectors.
 
 ### Fixed
+- Run budget restart reclaim (#593 / PR #864): evaluate the wall-clock ceiling
+  before reclaiming a durable pending dispatch can authorize external work, so
+  an expired run cannot relaunch attempt 1 after recovery.
 - Run budget declared-only contract (#593 / PR #864): document that hard
   wall-clock / worker-dispatch ceilings apply only when a run carries
   `run_budget` or `verification_contract.budget`; ordinary undeclared
