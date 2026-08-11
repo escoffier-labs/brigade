@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--force`. (#860)
 
 ### Added
+- Bundled template-profile selection and render-hash snapshot for #494: named
+  presets (`repo-claude`, `workspace-claude-codex`, `repo-claude-full`) via
+  `brigade init --profile`, deterministic rendered-file digests checked by
+  `scripts/template_profile_snapshot.py`, and harness compatibility projected
+  from existing `harness-contract.v1` `tested_version` / provenance / evidence
+  fields. No public registry schema, profile URIs, `supported_harness_versions`,
+  or install-time version gate. Profile-less `--depth` / `--harnesses` init is
+  unchanged.
 - `brigade runs export` / `validate-archive` enforce the #592 worker-event
   privacy boundary: raw worker-like JSONL anywhere under `events/` (including
   nested paths such as `events/nested/coder.jsonl`) stays local-only and is
