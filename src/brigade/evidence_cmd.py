@@ -97,6 +97,7 @@ _HEALTH_RANK = {
     "warn": 1,
     "incomplete": 2,
     "partial": 2,
+    "dry_run": 2,
     "unwired": 3,
     "timeout": 4,
     "missing": 5,
@@ -240,8 +241,8 @@ def _enrich_memory_projection_health(payload: dict[str, Any], target: Path) -> d
         failed=failed if failed is not None else (0 if status == "completed" and latest == "ok" else None),
         engine_ok=engine_ok and latest != "fail",
     )
-    # A failed/partial last-run or missing required capability is never healthy.
-    if latest in ("fail", "partial"):
+    # A failed/partial/dry-run last-run or missing required capability is never healthy.
+    if latest in ("fail", "partial", "dry_run"):
         healthy = False
     if capability and capability != evidence_runtime.MEMORY_PROJECTION_CAPABILITY:
         healthy = False
@@ -260,16 +261,18 @@ def _enrich_memory_projection_health(payload: dict[str, Any], target: Path) -> d
         "status": status,
         "failed": failed,
         "healthy": healthy,
-        "latest_run": last_run,
+        "latest_run": evidence_runtime.public_memory_latest_run(last_run),
     }
     payload["memory_projection"] = block
 
     # Absent (never crawled) is informational only. Failed/partial last-runs and
     # non-absent unhealthy engine health must surface on the station health.
     should_affect_overall = last_run is not None or (status is not None and status != "absent")
+    if latest in ("fail", "partial", "dry_run"):
+        should_affect_overall = True
     if not healthy and merged and should_affect_overall:
         projected = "fail" if latest == "fail" or (isinstance(failed, int) and failed > 0) else "incomplete"
-        if latest == "partial":
+        if latest in ("partial", "dry_run"):
             projected = "incomplete"
         if _health_rank(projected) > _health_rank(payload.get("health")):
             payload["health"] = projected
@@ -286,8 +289,13 @@ def _run_miseledger_result(
     arguments: list[str],
     *,
     env: dict[str, str] | None = None,
+    binary: str | None = None,
 ) -> proc.Result:
-    """Run MiseLedger and return the raw result without printing."""
+    """Run MiseLedger and return the raw result without printing.
+
+    When ``binary`` is provided it is used verbatim (the preflight-resolved
+    path). Otherwise fall back to the configured MiseLedger resolver.
+    """
 
     timeout_env = _CRAWL_TIMEOUT_ENV if verb == "crawl" else _SHORT_OPERATION_TIMEOUT_ENV
     timeout_default = _CRAWL_TIMEOUT_SECONDS if verb == "crawl" else _SHORT_OPERATION_TIMEOUT_SECONDS
@@ -297,14 +305,14 @@ def _run_miseledger_result(
         return proc.Result(2, "", "")
     timeout = configured_timeout
 
-    binary = evidence_brief._miseledger_bin()
-    if binary is None:
+    resolved = binary if binary is not None else evidence_brief._miseledger_bin()
+    if resolved is None:
         print("error: the evidence engine (miseledger) is not installed; run `brigade setup`", file=sys.stderr)
         return proc.Result(127, "", "the evidence engine (miseledger) is not installed; run `brigade setup`")
     run_kwargs: dict[str, Any] = {}
     if env is not None:
         run_kwargs["env"] = env
-    return proc.run([binary, verb, *arguments], timeout=timeout, **run_kwargs)
+    return proc.run([resolved, verb, *arguments], timeout=timeout, **run_kwargs)
 
 
 def _run_miseledger(verb: str, arguments: list[str], *, env: dict[str, str] | None = None) -> int:
@@ -347,6 +355,26 @@ def _run_memory_crawl(
     workspace = Path(arguments[1]).expanduser().resolve()
     rest = list(arguments[2:])
     target = workspace
+    option_error, want_json, dry_run, passthrough = evidence_runtime.parse_memory_crawl_options(rest)
+    if option_error is not None:
+        print(f"error: evidence crawl refused for memory: {option_error}", file=sys.stderr)
+        _write_last_run(
+            target=target,
+            source=evidence_runtime.MEMORY_SOURCE,
+            status="fail",
+            exit_code=2,
+            crawler_version=None,
+            database=None,
+            started_at=started_at,
+            finished_at=_now(),
+            detail=option_error,
+            extra={
+                "required_capability": evidence_runtime.MEMORY_PROJECTION_CAPABILITY,
+                "preflight": "refused",
+            },
+        )
+        return 2
+
     binary = evidence_brief._miseledger_bin()
     probe = evidence_runtime.probe_memory_projection(binary, env=env)
     compat = evidence_runtime.check_memory_projection_preflight(probe)
@@ -372,78 +400,85 @@ def _run_memory_crawl(
         )
         return 1
 
-    # Ensure JSON receipt for pass-through counts; still honor caller --json.
-    want_json = "--json" in rest
-    crawl_args = ["memory", str(workspace), *rest]
-    if not want_json:
+    if compat.resolved_path is None:
+        print("error: evidence crawl refused for memory: no executable resolved", file=sys.stderr)
+        return 1
+
+    # Invoke the exact binary that passed capability/version preflight.
+    crawl_args = ["memory", str(workspace), *passthrough]
+    if dry_run:
+        crawl_args.append("--dry-run")
+    # Always request JSON for fail-closed receipt parsing; still honor caller --json for stdout.
+    if "--json" not in crawl_args:
         crawl_args.append("--json")
 
-    result = _run_miseledger_result("crawl", crawl_args, env=env)
+    result = _run_miseledger_result("crawl", crawl_args, env=env, binary=compat.resolved_path)
     receipt: dict[str, Any] | None = None
     parsed = result.json()
     if isinstance(parsed, dict):
         receipt = parsed
-    counts = (
-        evidence_runtime.extract_memory_crawl_counts(receipt)
-        if receipt
-        else {
-            "scan_id": None,
-            "created": 0,
-            "updated": 0,
-            "unchanged": 0,
-            "removed": 0,
-            "skipped": 0,
-            "failed": 0,
-        }
-    )
-    run_status = evidence_runtime.classify_memory_crawl_status(exit_code=result.code, receipt=receipt)
-    health = evidence_runtime.body_free_memory_health(
-        receipt.get("memory_health") if isinstance(receipt, dict) else None
-    )
+
+    if result.code != 0:
+        run_status = "fail"
+        counts = None
+        receipt_detail = (result.stderr or "").strip()[:500] or "memory crawl engine exit nonzero"
+    else:
+        run_status, counts, parsed_detail = evidence_runtime.parse_memory_crawl_receipt(receipt, dry_run=dry_run)
+        receipt_detail = parsed_detail or (f"memory crawl {run_status}; scan_id={(counts or {}).get('scan_id')}")
+
     extra: dict[str, Any] = {
         "capability": (receipt or {}).get("capability") or probe.capability,
         "engine_version": (receipt or {}).get("engine_version") or probe.engine_version or probe.version,
         "required_capability": evidence_runtime.MEMORY_PROJECTION_CAPABILITY,
-        "workspace": str(workspace),
         "preflight": "ok",
-        **counts,
+        "resolved_path": compat.resolved_path,
     }
-    if isinstance(receipt, dict):
-        for key in (
-            "status",
-            "stale",
-            "partial",
-            "canonical_count",
-            "live_count",
-            "hash_divergence",
-            "unresolved_relations",
-            "malformed_skipped",
-            "memory_namespace",
-        ):
-            if key in receipt:
-                extra[key] = receipt[key]
-        if health:
-            if not extra.get("last_completed_scan_id") and health.get("last_completed_scan_id"):
-                extra["last_completed_scan_id"] = health.get("last_completed_scan_id")
-            # Prefer receipt scan as last completed when healthy/completed.
+    if dry_run or (isinstance(receipt, dict) and receipt.get("dry_run") is True):
+        extra["dry_run"] = True
+    # Persist typed counts only when the receipt validated; never fabricate zeros.
+    if counts is not None:
+        extra.update(counts)
+        if isinstance(receipt, dict):
+            for key in (
+                "status",
+                "stale",
+                "partial",
+                "canonical_count",
+                "live_count",
+                "hash_divergence",
+                "unresolved_relations",
+                "malformed_skipped",
+                "memory_namespace",
+            ):
+                if key in receipt:
+                    extra[key] = receipt[key]
             if receipt.get("status") == "completed" and counts.get("scan_id"):
                 extra["last_completed_scan_id"] = counts["scan_id"]
+    elif isinstance(receipt, dict) and run_status == "dry_run":
+        # Dry-run may expose capability/version/namespace without inventing counts.
+        for key in ("capability", "engine_version", "memory_namespace", "canonical_count"):
+            if key in receipt and key not in extra:
+                extra[key] = receipt[key]
+
+    exit_code = result.code if result.code != 0 else (0 if run_status == "ok" else 1)
     _write_last_run(
         target=target,
         source=evidence_runtime.MEMORY_SOURCE,
         status=run_status,
-        exit_code=result.code if result.code != 0 else (0 if run_status == "ok" else 1),
+        exit_code=exit_code,
         crawler_version=extra.get("engine_version"),
         database=compat.database,
         started_at=started_at,
         finished_at=_now(),
-        detail=(result.stderr or "").strip()[:500] or (f"memory crawl {run_status}; scan_id={counts.get('scan_id')}"),
+        detail=receipt_detail,
         extra=extra,
     )
 
     if want_json and result.stdout:
         print(result.stdout, end="")
-    elif receipt is not None:
+    elif run_status == "dry_run":
+        print(f"memory crawl dry-run: non-current; status={run_status}")
+    elif counts is not None:
         print(
             "scan={scan_id} created={created} updated={updated} unchanged={unchanged} "
             "removed={removed} skipped={skipped} failed={failed} status={status}".format(
@@ -457,8 +492,10 @@ def _run_memory_crawl(
                 status=run_status,
             )
         )
-    elif result.stdout:
+    elif result.stdout and want_json:
         print(result.stdout, end="")
+    else:
+        print(f"memory crawl {run_status}: {receipt_detail}", file=sys.stderr)
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
 

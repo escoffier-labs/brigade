@@ -388,6 +388,98 @@ def test_classify_memory_crawl_status_partial_and_counts():
     }
 
 
+def test_parse_memory_receipt_fail_closed_missing_fields():
+    incomplete = {
+        "capability": "memory-projection.v1",
+        "status": "completed",
+        "stale": False,
+        "partial": False,
+        "scan_id": "scan-1",
+        "created": 1,
+        # missing updated/unchanged/removed/skipped/failed
+    }
+    status, counts, detail = evidence_runtime.parse_memory_crawl_receipt(incomplete)
+    assert status == "fail"
+    assert counts is None
+    assert detail is not None
+    assert "updated" in detail
+    assert evidence_runtime.extract_memory_crawl_counts(incomplete) is None
+
+
+def test_parse_memory_receipt_rejects_bool_and_string_counts():
+    receipt = {
+        "capability": "memory-projection.v1",
+        "status": "completed",
+        "stale": False,
+        "partial": False,
+        "scan_id": "scan-1",
+        "created": True,  # bool must not coerce to 1
+        "updated": 0,
+        "unchanged": 0,
+        "removed": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    status, counts, detail = evidence_runtime.parse_memory_crawl_receipt(receipt)
+    assert status == "fail"
+    assert counts is None
+    assert detail is not None
+
+    receipt["created"] = "0"
+    status, counts, _detail = evidence_runtime.parse_memory_crawl_receipt(receipt)
+    assert status == "fail"
+    assert counts is None
+
+
+def test_parse_memory_receipt_dry_run_is_non_current():
+    receipt = {
+        "capability": "memory-projection.v1",
+        "dry_run": True,
+        "skipped": 1,
+        "failed": 0,
+    }
+    status, counts, detail = evidence_runtime.parse_memory_crawl_receipt(receipt, dry_run=True)
+    assert status == "dry_run"
+    assert counts is None
+    assert detail is not None
+    assert evidence_runtime.classify_memory_crawl_status(exit_code=0, receipt=receipt, dry_run=True) == "dry_run"
+
+
+def test_parse_memory_options_rejects_rebuild_and_full():
+    err, *_rest = evidence_runtime.parse_memory_crawl_options(["--rebuild"])
+    assert err is not None
+    assert "--rebuild" in err
+    err, *_rest = evidence_runtime.parse_memory_crawl_options(["--full"])
+    assert err is not None
+    assert "--full" in err
+
+
+def test_public_memory_latest_run_whitelist():
+    raw = {
+        "status": "ok",
+        "exit_code": 0,
+        "capability": "memory-projection.v1",
+        "scan_id": "scan-1",
+        "created": 1,
+        "workspace": "/abs/secret/workspace",
+        "detail": "stderr leak",
+        "text": "CARD BODY",
+        "raw": {"body": "nope"},
+        "resolved_path": "/abs/bin/miseledger",
+        "database": "ok",
+    }
+    public = evidence_runtime.public_memory_latest_run(raw)
+    assert public is not None
+    assert public["status"] == "ok"
+    assert public["scan_id"] == "scan-1"
+    assert public["database"] == "ok"
+    assert "workspace" not in public
+    assert "detail" not in public
+    assert "text" not in public
+    assert "raw" not in public
+    assert "resolved_path" not in public
+
+
 def test_body_free_memory_health_strips_bodies():
     raw = {
         "capability": "memory-projection.v1",

@@ -112,6 +112,43 @@ MEMORY_HEALTH_SAFE_KEYS = (
     "failed",
 )
 
+# Public doctor/status latest-run whitelist: body-free and path-safe (no
+# absolute workspace, detail/stderr, or arbitrary text/raw payloads).
+MEMORY_LATEST_RUN_PUBLIC_KEYS = (
+    "status",
+    "exit_code",
+    "crawler_version",
+    "database",
+    "started_at",
+    "finished_at",
+    "capability",
+    "engine_version",
+    "required_capability",
+    "preflight",
+    "scan_id",
+    "scan_status",
+    "created",
+    "updated",
+    "unchanged",
+    "removed",
+    "skipped",
+    "failed",
+    "stale",
+    "partial",
+    "canonical_count",
+    "live_count",
+    "hash_divergence",
+    "unresolved_relations",
+    "malformed_skipped",
+    "memory_namespace",
+    "last_completed_scan_id",
+    "dry_run",
+)
+
+MEMORY_COUNT_KEYS = ("created", "updated", "unchanged", "removed", "skipped", "failed")
+MEMORY_F2_REJECTED_FLAGS = frozenset({"--rebuild", "--full"})
+MEMORY_ALLOWED_FLAGS = frozenset({"--json", "--dry-run", "--limit"})
+
 _CAPABILITY_CANDIDATES = ("version", "doctor", "export", "crawl")
 _READ_ONLY_TIMEOUT = 30.0
 
@@ -594,6 +631,78 @@ def body_free_memory_health(raw: dict[str, Any] | None) -> dict[str, Any] | None
     return out or None
 
 
+def public_memory_latest_run(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Whitelist body-free, path-safe fields from a memory last-run record."""
+
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key in MEMORY_LATEST_RUN_PUBLIC_KEYS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if key == "database" and isinstance(value, str) and value not in {"ok", "unreadable"}:
+            # Avoid leaking absolute archive paths via database.
+            continue
+        out[key] = value
+    return out or None
+
+
+def parse_memory_crawl_options(rest: list[str]) -> tuple[str | None, bool, bool, list[str]]:
+    """Parse F1 crawl trailing options.
+
+    Returns ``(error, want_json, dry_run, passthrough)``. Rejects F2
+    ``--rebuild``/``--full``. Unknown options are refused rather than forwarded.
+    """
+
+    want_json = False
+    dry_run = False
+    passthrough: list[str] = []
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg in MEMORY_F2_REJECTED_FLAGS:
+            return (
+                f"option {arg} is out of scope for evidence crawl memory F1 (projection rebuild belongs to F2)",
+                False,
+                False,
+                [],
+            )
+        if arg == "--json":
+            want_json = True
+            i += 1
+            continue
+        if arg == "--dry-run":
+            dry_run = True
+            i += 1
+            continue
+        if arg == "--limit":
+            if i + 1 >= len(rest):
+                return "option --limit requires a positive integer value", False, False, []
+            value = rest[i + 1]
+            if not value.isdigit() or int(value) < 1:
+                return f"option --limit requires a positive integer, observed {value!r}", False, False, []
+            passthrough.extend(["--limit", value])
+            i += 2
+            continue
+        if arg.startswith("--limit="):
+            value = arg.split("=", 1)[1]
+            if not value.isdigit() or int(value) < 1:
+                return f"option --limit requires a positive integer, observed {value!r}", False, False, []
+            passthrough.append(arg)
+            i += 1
+            continue
+        if arg.startswith("-"):
+            return (
+                f"unsupported evidence crawl memory option {arg!r}; allowed: {', '.join(sorted(MEMORY_ALLOWED_FLAGS))}",
+                False,
+                False,
+                [],
+            )
+        return f"unexpected positional argument after workspace: {arg!r}", False, False, []
+    return None, want_json, dry_run, passthrough
+
+
 def memory_projection_is_healthy(
     *,
     capability: str | None,
@@ -620,49 +729,110 @@ def memory_projection_is_healthy(
     return True
 
 
-def classify_memory_crawl_status(
-    *,
-    exit_code: int,
-    receipt: dict[str, Any] | None,
-) -> str:
-    """Map engine crawl outcome to last-run status: ok | partial | fail."""
+def _typed_nonneg_int(value: object) -> int | None:
+    """Accept only real ints (reject bool, str, float, missing)."""
 
-    if exit_code != 0:
-        return "fail"
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def parse_memory_crawl_receipt(
+    receipt: dict[str, Any] | None,
+    *,
+    dry_run: bool = False,
+) -> tuple[str, dict[str, Any] | None, str | None]:
+    """Validate an engine memory crawl receipt fail-closed.
+
+    Returns ``(status, counts_or_none, detail)``. Status is one of
+    ``ok | partial | fail | dry_run``. Missing/malformed fields never fabricate
+    zero counts; ``counts_or_none`` is None when the receipt is incomplete.
+    """
+
     if not isinstance(receipt, dict):
-        return "fail"
+        return "fail", None, "malformed memory crawl receipt: expected JSON object"
+
+    if dry_run or receipt.get("dry_run") is True:
+        # Dry-run is non-mutating and never current/healthy.
+        return "dry_run", None, "memory crawl dry-run is non-current; no scan receipt recorded as healthy"
+
     capability = receipt.get("capability")
+    if capability != MEMORY_PROJECTION_CAPABILITY:
+        return (
+            "fail",
+            None,
+            f"incomplete memory crawl receipt: capability must be {MEMORY_PROJECTION_CAPABILITY}, "
+            f"observed {capability!r}",
+        )
+
+    scan_id = receipt.get("scan_id")
+    if not isinstance(scan_id, str) or not scan_id.strip():
+        return "fail", None, "incomplete memory crawl receipt: missing or empty scan_id"
+
     status = receipt.get("status")
-    stale = bool(receipt.get("stale"))
-    partial = bool(receipt.get("partial"))
-    failed = int(receipt.get("failed") or 0)
+    if status != "completed":
+        return (
+            "fail",
+            None,
+            f"incomplete memory crawl receipt: status must be 'completed', observed {status!r}",
+        )
+
+    if not isinstance(receipt.get("stale"), bool):
+        return "fail", None, "incomplete memory crawl receipt: stale must be an explicit boolean"
+    if not isinstance(receipt.get("partial"), bool):
+        return "fail", None, "incomplete memory crawl receipt: partial must be an explicit boolean"
+
+    counts: dict[str, Any] = {"scan_id": scan_id.strip()}
+    for key in MEMORY_COUNT_KEYS:
+        parsed = _typed_nonneg_int(receipt.get(key))
+        if parsed is None:
+            return (
+                "fail",
+                None,
+                f"incomplete memory crawl receipt: {key} must be a non-negative int, observed {receipt.get(key)!r}",
+            )
+        counts[key] = parsed
+
+    stale = receipt["stale"]
+    partial = receipt["partial"]
+    failed = counts["failed"]
     if memory_projection_is_healthy(
-        capability=capability if isinstance(capability, str) else None,
-        status=status if isinstance(status, str) else None,
+        capability=MEMORY_PROJECTION_CAPABILITY,
+        status="completed",
         stale=stale,
         partial=partial,
         failed=failed,
         engine_ok=True,
     ):
-        return "ok"
-    if status == "completed" and (failed > 0 or partial or stale):
-        return "partial"
-    return "fail"
+        return "ok", counts, None
+    if failed > 0 or partial or stale:
+        return "partial", counts, "memory crawl completed with partial/stale/failed state"
+    return "fail", counts, "memory crawl receipt did not meet healthy contract"
 
 
-def extract_memory_crawl_counts(receipt: dict[str, Any]) -> dict[str, Any]:
-    """Pass through scan_id and the six result counts from an engine receipt."""
+def classify_memory_crawl_status(
+    *,
+    exit_code: int,
+    receipt: dict[str, Any] | None,
+    dry_run: bool = False,
+) -> str:
+    """Map engine crawl outcome to last-run status: ok | partial | fail | dry_run."""
 
-    def _int(key: str) -> int:
-        value = receipt.get(key)
-        return int(value) if isinstance(value, int) else 0
+    if exit_code != 0:
+        return "fail"
+    status, _counts, _detail = parse_memory_crawl_receipt(receipt, dry_run=dry_run)
+    return status
 
-    return {
-        "scan_id": receipt.get("scan_id") if isinstance(receipt.get("scan_id"), str) else None,
-        "created": _int("created"),
-        "updated": _int("updated"),
-        "unchanged": _int("unchanged"),
-        "removed": _int("removed"),
-        "skipped": _int("skipped"),
-        "failed": _int("failed"),
-    }
+
+def extract_memory_crawl_counts(receipt: dict[str, Any]) -> dict[str, Any] | None:
+    """Return scan_id and the six typed counts, or None when incomplete.
+
+    Unlike a soft coerce-to-zero helper, missing or mistyped fields fail closed.
+    """
+
+    status, counts, _detail = parse_memory_crawl_receipt(receipt, dry_run=False)
+    if status == "dry_run":
+        return None
+    return counts
