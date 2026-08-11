@@ -17,8 +17,12 @@ Enforceable dimensions (hard gates before new work starts):
 Observed dimensions (recorded when an adapter reports reliable data; never
 universal hard gates in this slice):
   - ``model_call_count``, ``tool_call_count``
-  - ``input_tokens``, ``output_tokens``
+  - ``input_tokens``, ``output_tokens`` (explicit split dimensions only)
   - ``estimated_cost_micros``, ``provider_usage_units``
+
+Legacy VerificationContract ``token_budget`` is an **aggregate** token ceiling
+(paired with receipt ``tokens_used``). It is preserved as declaration
+``token_budget`` and must not be reinterpreted as ``input_tokens``.
 
 Child frame / durable child-run allocation belongs to #594 and is out of scope.
 Missing child-allocation fields default to "no child budget" and remain
@@ -209,6 +213,8 @@ class RunBudgetDeclaration:
     wall_clock_seconds: int | None = None
     worker_dispatch_count: int | None = None
     threshold_pct: int = DEFAULT_THRESHOLD_PCT
+    # Aggregate #500 token ceiling (receipt tokens_used). Not input_tokens.
+    token_budget: int | None = None
     # Observed-only declared caps (informational; never hard-gated here).
     observed_caps: Mapping[str, int | None] = field(default_factory=dict)
 
@@ -226,7 +232,7 @@ class RunBudgetDeclaration:
 
     def to_payload(self) -> dict[str, Any]:
         observed = {key: self.observed_caps.get(key) for key in sorted(OBSERVED_DIMENSIONS)}
-        return {
+        payload: dict[str, Any] = {
             "schema": RUN_BUDGET_SCHEMA,
             "schema_version": self.schema_version,
             "ceilings": {
@@ -236,6 +242,9 @@ class RunBudgetDeclaration:
             "observed": observed,
             "threshold_pct": self.threshold_pct,
         }
+        if self.token_budget is not None:
+            payload["token_budget"] = self.token_budget
+        return payload
 
 
 def parse_declaration(payload: Mapping[str, Any] | None) -> RunBudgetDeclaration:
@@ -298,11 +307,23 @@ def parse_declaration(payload: Mapping[str, Any] | None) -> RunBudgetDeclaration
         for key in OBSERVED_DIMENSIONS
         if key in observed_raw
     }
+    token_budget_raw = payload.get("token_budget")
+    token_budget: int | None
+    if token_budget_raw is None:
+        token_budget = None
+    elif isinstance(token_budget_raw, bool) or not isinstance(token_budget_raw, int) or token_budget_raw < 0:
+        raise BudgetCompatibilityError(
+            _bound("token_budget must be a non-negative integer when set"),
+            code="schema_incompatible",
+        )
+    else:
+        token_budget = token_budget_raw
     return RunBudgetDeclaration(
         schema_version=int(version),
         wall_clock_seconds=_opt_pos(ceilings.get("wall_clock_seconds"), field_name="wall_clock_seconds"),
         worker_dispatch_count=_opt_pos(ceilings.get("worker_dispatch_count"), field_name="worker_dispatch_count"),
         threshold_pct=threshold,
+        token_budget=token_budget,
         observed_caps=observed_caps,
     )
 
@@ -313,7 +334,9 @@ def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> Ru
     ``wall_clock_seconds`` / ``worker_dispatch_count`` are preferred when set.
     Otherwise ``latency_seconds`` maps to the enforceable wall-clock ceiling so
     existing contracts become enforceable without a template rewrite.
-    ``token_budget`` stays observed-only.
+    ``token_budget`` stays observed-only and aggregate (receipt ``tokens_used``);
+    it is never reinterpreted as ``input_tokens``. Explicit ``input_tokens`` /
+    ``output_tokens`` caps come only from those observed fields.
     """
     if not isinstance(budget, Mapping):
         return RunBudgetDeclaration()
@@ -321,12 +344,9 @@ def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> Ru
     if wall is None:
         wall = budget.get("latency_seconds")
     dispatch = budget.get("worker_dispatch_count")
-    observed: dict[str, int | None] = {}
     token = budget.get("token_budget")
-    if isinstance(token, int) and not isinstance(token, bool) and token >= 0:
-        # Informational observed cap on total tokens (input+output not split here).
-        observed["input_tokens"] = token
-    payload = {
+    token_budget = token if isinstance(token, int) and not isinstance(token, bool) and token >= 0 else None
+    payload: dict[str, Any] = {
         "schema": RUN_BUDGET_SCHEMA,
         "schema_version": RUN_BUDGET_SCHEMA_VERSION,
         "ceilings": {
@@ -335,9 +355,11 @@ def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> Ru
                 dispatch if isinstance(dispatch, int) and not isinstance(dispatch, bool) else None
             ),
         },
-        "observed": observed,
+        "observed": {},
         "threshold_pct": DEFAULT_THRESHOLD_PCT,
     }
+    if token_budget is not None:
+        payload["token_budget"] = token_budget
     return parse_declaration(payload)
 
 

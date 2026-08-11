@@ -170,6 +170,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `load_error` / `load_warnings` text for missing path-based skill selectors.
 
 ### Fixed
+- Run budget `token_budget` bridge (#593 / PR #864): preserve aggregate
+  VerificationContract `token_budget` / receipt `tokens_used` semantics; do not
+  map the legacy ceiling onto `observed.input_tokens`. Explicit `input_tokens` /
+  `output_tokens` remain separate observed dimensions.
 - Run budget dispatch reservations (#593 / PR #864): serialize parallel
   same-stage reservations under the coordinator lock; use stable
   `dispatch:{seat}:{attempt}` request identities with durable

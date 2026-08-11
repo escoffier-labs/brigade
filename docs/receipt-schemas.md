@@ -86,7 +86,7 @@ explicit command and use `source: manifest_checks` (the manifest's own checks).
 | `schema_version` | integer | `1` |
 | `verifier` | object | `{source, command?\|argv?\|manifest_id?}` with `source` in `command`, `argv`, `manifest_id`, `manifest_checks` |
 | `rollback` | object | `{policy, command?}` with `policy` in `none`, `manual`, `command`, `git-restore` |
-| `budget` | object | `{latency_seconds, token_budget?, wall_clock_seconds?, worker_dispatch_count?}` — #500 declaration; #593 enforces wall-clock and worker-dispatch ceilings before new work starts. `token_budget` stays observed unless an adapter exposes an enforceable reservation boundary. When `wall_clock_seconds` is unset, `latency_seconds` maps to the wall-clock ceiling. |
+| `budget` | object | `{latency_seconds, token_budget?, wall_clock_seconds?, worker_dispatch_count?}` — #500 declaration; #593 enforces wall-clock and worker-dispatch ceilings before new work starts. Aggregate `token_budget` (receipt `tokens_used`) stays observed and is not reinterpreted as `input_tokens`; explicit input/output token caps use separate observed dimensions when declared. When `wall_clock_seconds` is unset, `latency_seconds` maps to the wall-clock ceiling. |
 
 **`budget_use` object**
 
@@ -370,7 +370,9 @@ projector; the coordinator applies terminal policy via `run.failed` /
 Enforceable dimensions: `wall_clock_seconds`, `worker_dispatch_count`.
 Observed dimensions (never universal hard gates in this slice):
 `model_call_count`, `tool_call_count`, `input_tokens`, `output_tokens`,
-`estimated_cost_micros`, `provider_usage_units`. Child allocation is #594.
+`estimated_cost_micros`, `provider_usage_units`. Legacy aggregate
+`token_budget` (paired with receipt `tokens_used`) is preserved on the
+declaration and is not an `input_tokens` alias. Child allocation is #594.
 Unknown schema versions or dimensions fail closed with a bounded diagnostic.
 Payloads never carry raw diagnostics.
 

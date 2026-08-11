@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from brigade import outcome, run_budget, run_events, run_projector, worker_failure
+from brigade import outcome, run_budget, run_events, run_projector, verification_contract, worker_failure
 from brigade.receipt_schema import RUN_EVENT_SCHEMA, RUN_EVENT_SCHEMA_VERSION
 
 RUN_ID = "20260810-210000-budget593"
@@ -308,7 +308,9 @@ def test_verification_budget_bridge_maps_latency_to_wall_clock_tokens_observed()
     )
     assert declaration.wall_clock_seconds == 45
     assert declaration.worker_dispatch_count == 3
-    assert declaration.observed_caps.get("input_tokens") == 1000
+    assert declaration.token_budget == 1000
+    assert declaration.observed_caps.get("input_tokens") is None
+    assert declaration.observed_caps.get("output_tokens") is None
 
     explicit = run_budget.declaration_from_verification_budget(
         {
@@ -318,6 +320,61 @@ def test_verification_budget_bridge_maps_latency_to_wall_clock_tokens_observed()
         }
     )
     assert explicit.wall_clock_seconds == 90
+
+
+def test_legacy_token_budget_is_aggregate_not_input_only():
+    """token_budget=100 stays aggregate (tokens_used), never input_tokens."""
+    declaration = run_budget.declaration_from_verification_budget(
+        {
+            "latency_seconds": 30,
+            "token_budget": 100,
+        }
+    )
+    assert declaration.token_budget == 100
+    assert declaration.ceiling("input_tokens") is None
+    assert declaration.ceiling("output_tokens") is None
+    payload = declaration.to_payload()
+    assert payload["token_budget"] == 100
+    assert payload["observed"].get("input_tokens") is None
+    assert payload["observed"].get("output_tokens") is None
+    rebuilt = run_budget.parse_declaration(payload)
+    assert rebuilt.token_budget == 100
+    assert rebuilt.observed_caps.get("input_tokens") is None
+
+    # Explicit split dimensions remain independent of aggregate token_budget.
+    split = run_budget.parse_declaration(
+        {
+            "schema": run_budget.RUN_BUDGET_SCHEMA,
+            "schema_version": run_budget.RUN_BUDGET_SCHEMA_VERSION,
+            "ceilings": {},
+            "observed": {"input_tokens": 40, "output_tokens": 60},
+            "threshold_pct": 80,
+            "token_budget": 100,
+        }
+    )
+    assert split.token_budget == 100
+    assert split.ceiling("input_tokens") == 40
+    assert split.ceiling("output_tokens") == 60
+
+    contract = verification_contract.VerificationContract(
+        verifier=verification_contract.VerificationVerifier(source="command", command="true"),
+        rollback=verification_contract.VerificationRollback(policy="none"),
+        budget=verification_contract.VerificationBudget(latency_seconds=30, token_budget=100),
+    )
+    within = verification_contract.budget_use_payload(contract, latency_seconds_used=1.0, tokens_used=100)
+    assert within == {
+        "latency_seconds_budget": 30,
+        "latency_seconds_used": 1.0,
+        "token_budget": 100,
+        "tokens_used": 100,
+        "exhausted": False,
+    }
+    over = verification_contract.budget_use_payload(contract, latency_seconds_used=1.0, tokens_used=101)
+    assert over["token_budget"] == 100
+    assert over["tokens_used"] == 101
+    assert over["exhausted"] is True
+    assert "input_tokens" not in over
+    assert "output_tokens" not in over
 
 
 def test_budget_exhaustion_and_operator_cancel_are_policy_terminals_not_infra():
