@@ -2674,7 +2674,9 @@ def _build_budget_coordinator(
     Declaration sources (first match wins):
     1. ``run.json`` ``run_budget`` object
     2. ``run.json`` / plan ``verification_contract.budget`` (#500 bridge)
-    3. Empty declaration (no enforceable ceilings; observed reconcile still works)
+    3. Empty declaration (no enforceable ceilings; observed reconcile still
+       works). Ordinary undeclared ``brigade run`` / dogfood / model-trial
+       paths stay unbounded for backward compatibility.
 
     Returns ``None`` when the lifecycle journal is not enrolled so budget events
     are not appended into a missing journal.

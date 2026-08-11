@@ -14,6 +14,12 @@ Enforceable dimensions (hard gates before new work starts):
   - ``wall_clock_seconds``
   - ``worker_dispatch_count``
 
+Hard ceilings apply only when a run carries a persisted ``run_budget``
+declaration or ``verification_contract.budget`` with those fields. Ordinary
+``brigade run``, dogfood, and model-trial paths without a declaration remain
+unbounded for backward compatibility (no invented defaults, CLI flags, or
+timeout→budget mapping).
+
 Observed dimensions (recorded when an adapter reports reliable data; never
 universal hard gates in this slice):
   - ``model_call_count``, ``tool_call_count``

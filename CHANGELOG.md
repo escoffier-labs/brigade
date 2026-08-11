@@ -170,6 +170,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `load_error` / `load_warnings` text for missing path-based skill selectors.
 
 ### Fixed
+- Run budget declared-only contract (#593 / PR #864): document that hard
+  wall-clock / worker-dispatch ceilings apply only when a run carries
+  `run_budget` or `verification_contract.budget`; ordinary undeclared
+  `brigade run`, dogfood, and model-trial paths remain unbounded for
+  backward compatibility (no invented flags, defaults, or timeout→budget
+  mapping). Add undeclared-path regressions alongside the declared
+  enforcement test.
 - Run budget normal-run wiring (#593 / PR #864): persist declared
   verification-contract / run_budget through start and plan receipts so the
   coordinator enforces real wall-clock and dispatch ceilings; allocate

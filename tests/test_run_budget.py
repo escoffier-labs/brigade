@@ -435,6 +435,25 @@ def test_missing_child_allocation_defaults_remain_readable():
     assert "child" not in payload["declaration"]["ceilings"]
 
 
+def test_empty_declaration_allows_unlimited_dispatch_reservations():
+    """Undeclared ceilings stay None; many dispatches are allowed."""
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=run_budget.RunBudgetDeclaration(),
+        append_event=lambda *_args, **_kwargs: None,
+    )
+    started = datetime(2026, 8, 10, 21, 0, 0, tzinfo=timezone.utc)
+    coordinator.set_started_at(started)
+    for index in range(5):
+        decision = coordinator.reserve_worker_dispatch(
+            request_id=f"dispatch:worker:{index + 1}",
+        )
+        assert decision.allowed is True
+        assert decision.exhausted is False
+    assert coordinator.declaration.wall_clock_seconds is None
+    assert coordinator.declaration.worker_dispatch_count is None
+    assert coordinator.projection.used.get("worker_dispatch_count", 0) == 5
+
+
 def test_estimated_and_provider_usage_remain_distinct_in_projection_payload():
     declaration = run_budget.RunBudgetDeclaration()
     events = [

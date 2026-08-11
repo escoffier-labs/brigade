@@ -378,6 +378,15 @@ declaration and is not an `input_tokens` alias. Child allocation is #594.
 Unknown schema versions or dimensions fail closed with a bounded diagnostic.
 Payloads never carry raw diagnostics.
 
+**Declared-only hard ceilings.** Only runs that carry a persisted
+`run_budget` declaration or a `verification_contract.budget` with enforceable
+fields receive hard wall-clock / worker-dispatch ceilings. Ordinary
+`brigade run`, dogfood, and model-trial paths that supply neither declaration
+remain unbounded for backward compatibility: Brigade does not invent CLI
+flags, default numeric ceilings, or a dogfood-timeout→budget mapping on those
+entry paths. Agent process timeouts (`timeout_seconds`) stay separate from
+run-budget enforcement.
+
 **Partial stale-recovery variant**
 
 When no valid original `run.json` object survives, `runguard._recover_run_artifact`

@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 
 from brigade import aboyeur
 from brigade import agents
@@ -441,6 +442,34 @@ def test_dogfood_next_reports_missing_step(tmp_path, capsys):
 
     assert dogfood_cmd.next_step(target=tmp_path) == 1
     assert "no next step found" in capsys.readouterr().err
+
+
+def test_dogfood_ordinary_path_does_not_declare_run_budget(tmp_path, monkeypatch):
+    """Dogfood CLI start must not invent verification_contract / run_budget payloads."""
+    dogfood_cmd.init(target=tmp_path, inspect=False, timeout_seconds=12)
+    start_kwargs: list[dict] = []
+    run_kwargs: list[dict] = []
+
+    def fake_record_run_start(output_dir, **kwargs):
+        start_kwargs.append(dict(kwargs))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "run.json").write_text(json.dumps({"status": "started", "task": kwargs.get("task")}))
+
+    def fake_run(*args, **kwargs):
+        run_kwargs.append(dict(kwargs))
+        return 0
+
+    monkeypatch.setattr(aboyeur, "record_run_start", fake_record_run_start)
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(dogfood_cmd.runguard, "run_lock", lambda *a, **k: nullcontext())
+
+    assert dogfood_cmd.run(None, target=tmp_path) == 0
+    assert start_kwargs
+    assert "verification_contract_payload" not in start_kwargs[0]
+    assert "run_budget_payload" not in start_kwargs[0]
+    assert run_kwargs
+    assert "verification_contract_payload" not in run_kwargs[0]
+    assert "run_budget_payload" not in run_kwargs[0]
 
 
 def test_dogfood_latest_uses_configured_artifacts(tmp_path, monkeypatch):

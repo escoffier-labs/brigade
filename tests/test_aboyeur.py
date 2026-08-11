@@ -1323,6 +1323,67 @@ def test_normal_run_persists_and_enforces_declared_dispatch_ceiling(monkeypatch,
     assert exhausted
 
 
+def test_undeclared_ordinary_run_invents_no_hard_ceiling(monkeypatch, tmp_path):
+    """Undeclared brigade-run shape: no verification_contract/run_budget → no ceiling."""
+    from brigade import run_journal, run_lifecycle
+
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    calls: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        calls.append(str(cli_ref))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps(
+                    {
+                        "assignments": [
+                            {"stage": 1, "worker": "coder", "task": "implement"},
+                            {"stage": 1, "worker": "reviewer", "task": "review"},
+                        ]
+                    }
+                ),
+                ok=True,
+            )
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "run"
+
+    assert (
+        run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            cwd=tmp_path,
+            output_dir=output_dir,
+            route_enabled=False,
+            code_graph_enabled=False,
+            evidence_enabled=False,
+        )
+        == 0
+    )
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert "verification_contract" not in run_meta
+    # Coordinator must not invent enforceable ceilings on undeclared runs.
+    if isinstance(run_meta.get("run_budget"), dict):
+        nested = run_meta["run_budget"].get("declaration", run_meta["run_budget"])
+        ceilings = nested.get("ceilings", {}) if isinstance(nested, dict) else {}
+        assert ceilings.get("wall_clock_seconds") is None
+        assert ceilings.get("worker_dispatch_count") is None
+    assert run_meta["status"] == "ok"
+
+    events = run_journal.read_journal(run_lifecycle._journal_path(output_dir)).events
+    requested = [event for event in events if event.event_type == "run.dispatch.requested"]
+    denied = [event for event in events if event.event_type == "run_budget.reservation_denied"]
+    exhausted = [event for event in events if event.event_type == "run_budget.exhausted"]
+    assert len(requested) == 2
+    assert denied == []
+    assert exhausted == []
+    # Chef plan + two worker CLIs + chef synthesize (cli refs, not seat names).
+    assert "ollama:llama3.3" in calls
+    assert calls.count("codex") >= 2
+
+
 def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_path):
     def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
         return agents.AgentResult(
