@@ -564,12 +564,16 @@ def _known_local_issue_ids(target: Path) -> set[str]:
 
     known: set[str] = set()
     for item in work_cmd._read_imports(target):
+        if item.get("source") != "handoff-ingest":
+            continue
         issue_id = _handoff_issue_id(item)
         if issue_id:
             known.add(issue_id)
     ledger = work_cmd._read_task_ledger(target)
     for task in ledger.get("tasks", []):
-        issue_id = _handoff_issue_id(task) if isinstance(task, dict) else None
+        if not isinstance(task, dict) or task.get("source") != "import:handoff-ingest":
+            continue
+        issue_id = _handoff_issue_id(task)
         if issue_id:
             known.add(issue_id)
     return known

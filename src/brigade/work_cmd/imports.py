@@ -6,7 +6,7 @@ import math
 import sys
 from pathlib import Path
 from typing import Any
-from .. import evidence_brief, scrub
+from .. import evidence_brief, provenance, scrub
 from ..untrusted import scan_untrusted, wrap_untrusted
 from . import constants, helpers, ledger as ledger_mod
 from . import scanners as scanners_mod
@@ -42,19 +42,9 @@ _UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS = (
 _UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS = frozenset(
     {
         *_UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS,
-        "repository",
-        "repository_id",
-        "repo_id",
-        "repository_revision",
-        "session",
-        "session_id",
-        "session_harness",
-        "collection_id",
-        "item_id",
-        "locator_kind",
-        "locator_value",
-        "captured_at",
+        *provenance.ENVELOPE_METADATA_RESERVED_KEYS,
         "provenance",
+        "handoff_issue_id",
     }
 )
 

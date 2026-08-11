@@ -1188,7 +1188,7 @@ def _safe_repository_id(value: object) -> str | None:
 def _safe_repository_revision(value: object) -> str | None:
     """Return a bounded revision label, never a platform-rooted locator."""
     cleaned = _bound_import_identity(value)
-    if cleaned is None or provenance._is_absolute_locator(cleaned):
+    if cleaned is None or "\\" in cleaned or provenance._is_absolute_locator(cleaned):
         return None
     if ".." in cleaned.replace("\\", "/").split("/"):
         return None

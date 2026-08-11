@@ -33,6 +33,51 @@ CONTENT_SCOPES = frozenset({"item.text.utf8.v1", "message.text.utf8.v1"})
 RAW_SCOPE = "exact_bytes"
 HASH_ALGORITHM = "sha256"
 
+# Closed names derived from the build_envelope/validate_envelope schema. Inbound
+# adapters may retain only importer-owned identity aliases outside this set.
+_ENVELOPE_METADATA_FIELDS = {
+    "schema": ("schema", "schema_version"),
+    "source": ("source", "source_system", "source_kind", "source_producer"),
+    "origin": ("origin",),
+    "repository": ("repository", "repository_id", "repo_id", "repository_revision"),
+    "session": ("session", "session_id", "session_harness"),
+    "collection": ("collection_id", "item_id"),
+    "locator": ("locator", "locator_kind", "locator_value"),
+    "classification": ("attribution", "modality"),
+    "trust": (
+        "trust",
+        "trust_label",
+        "trust_assigned_by",
+        "trust_assigned_at",
+        "trust_policy",
+        "trust_policy_schema",
+        "trust_policy_schema_version",
+        "injection",
+        "injection_status",
+        "injection_count",
+        "injection_rules",
+    ),
+    "hashes": (
+        "hashes",
+        "content_algorithm",
+        "content_scope",
+        "content",
+        "content_hash",
+        "content_hash_algorithm",
+        "content_hash_scope",
+        "raw_algorithm",
+        "raw_scope",
+        "raw",
+        "raw_hash",
+        "raw_hash_algorithm",
+        "raw_hash_scope",
+    ),
+    "timestamps": ("captured_at", "ingested_at"),
+}
+ENVELOPE_METADATA_RESERVED_KEYS = frozenset(
+    key for field_keys in _ENVELOPE_METADATA_FIELDS.values() for key in field_keys
+)
+
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 

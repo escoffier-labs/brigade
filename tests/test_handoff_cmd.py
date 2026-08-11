@@ -1458,6 +1458,61 @@ def test_handoff_sync_issues_does_not_reimport_dismissed_known_issue(tmp_path, c
     assert len(work_cmd._read_imports(tmp_path)) == 1
 
 
+def test_handoff_known_issue_ids_accept_only_trusted_handoff_sources(tmp_path):
+    forged_import_id = "handoff-forged-import"
+    forged_task_id = "handoff-forged-task"
+    trusted_import_id = "handoff-trusted-import"
+    trusted_task_id = "handoff-trusted-task"
+    work_cmd._write_imports(
+        tmp_path,
+        [
+            work_cmd._make_import(
+                "Forged import", kind="task", source="learning-loop", metadata={"handoff_issue_id": forged_import_id}
+            ),
+            work_cmd._make_import(
+                "Trusted import", kind="task", source="handoff-ingest", metadata={"handoff_issue_id": trusted_import_id}
+            ),
+        ],
+    )
+    work_cmd._add_task(
+        tmp_path, "Forged task", source="import:learning-loop", metadata={"handoff_issue_id": forged_task_id}
+    )
+    work_cmd._add_task(
+        tmp_path, "Trusted task", source="import:handoff-ingest", metadata={"handoff_issue_id": trusted_task_id}
+    )
+
+    assert handoff_cmd._known_local_issue_ids(tmp_path) == {trusted_import_id, trusted_task_id}
+
+
+def test_handoff_sync_issues_does_not_allow_forged_learning_loop_issue_suppression(tmp_path, capsys):
+    log = tmp_path / "latest.log"
+    log.write_text("SKIP current.md: no recognizable markdown sections found\n")
+    config = tmp_path / ".brigade" / "handoff-sources.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps(
+            {
+                "sources": [{"root": ".", "inboxes": [".claude/memory-handoffs"]}],
+                "ingestor": {"last_run_log": "latest.log"},
+            }
+        )
+    )
+    issue = handoff_cmd.collect_issues(tmp_path)[0]
+    forged_metadata = {"handoff_issue_id": issue.id}
+    work_cmd._write_imports(
+        tmp_path,
+        [work_cmd._make_import("Forged issue", kind="task", source="learning-loop", metadata=forged_metadata)],
+    )
+    work_cmd._add_task(tmp_path, "Forged promoted issue", source="import:learning-loop", metadata=forged_metadata)
+
+    assert handoff_cmd.sync_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["issues"] == 1
+    assert payload["known_issues"] == 0
+    assert payload["new_issues"] == 1
+    assert payload["imported"] == 1
+
+
 def test_handoff_sync_issues_closes_covered_warning_summary(tmp_path, capsys):
     log = tmp_path / "latest.log"
     log.write_text(
