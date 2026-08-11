@@ -365,12 +365,24 @@ def _run_store_probe(
     store: Path,
     *,
     task_id: str | None = None,
-) -> dict[str, Any]:
-    """Run a fresh-process probe that receives only the store path (+ optional task id)."""
+    actor: str | None = None,
+    claim_id: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Run a fresh-process probe.
+
+    Returns ``(payload, subprocess_wall_ns)`` where wall time is measured in the
+    parent around ``subprocess.run`` (startup + imports + probe work).
+    """
     argv = [sys.executable, str(_script_path()), "--probe", probe, "--store", str(store)]
     if task_id is not None:
         argv.extend(["--task-id", task_id])
+    if actor is not None:
+        argv.extend(["--actor", actor])
+    if claim_id is not None:
+        argv.extend(["--claim-id", claim_id])
+    start = time.perf_counter_ns()
     proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    wall_ns = time.perf_counter_ns() - start
     if proc.returncode != 0:
         raise MeasurementInputError(f"store probe {probe!r} failed (exit {proc.returncode}): {proc.stderr.strip()}")
     line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
@@ -380,7 +392,7 @@ def _run_store_probe(
         raise MeasurementInputError(f"store probe {probe!r} emitted non-JSON: {line!r}") from exc
     if not isinstance(payload, dict):
         raise MeasurementInputError(f"store probe {probe!r} emitted non-object JSON")
-    return payload
+    return payload, wall_ns
 
 
 def probe_json_read_claim(store: Path, task_id: str) -> dict[str, Any]:
@@ -405,10 +417,9 @@ def probe_json_cold_start(store: Path) -> dict[str, Any]:
     elapsed = time.perf_counter_ns() - start
     return {
         "ok": True,
-        "cold_start_ns": elapsed,
+        "inner_operation_ns": elapsed,
         "task_count": len(loaded.get("tasks", [])),
         "process_boundary": "subprocess",
-        "cold": True,
     }
 
 
@@ -434,14 +445,30 @@ def probe_sqlite_cold_start(store: Path) -> dict[str, Any]:
     elapsed = time.perf_counter_ns() - start
     return {
         "ok": True,
-        "cold_start_ns": elapsed,
+        "inner_operation_ns": elapsed,
         "task_count": len(exported.get("tasks", [])),
         "process_boundary": "subprocess",
-        "cold": True,
     }
 
 
-def run_probe(probe: str, store: Path, *, task_id: str | None = None) -> dict[str, Any]:
+def probe_sqlite_claim(store: Path, task_id: str, *, actor: str, claim_id: str) -> dict[str, Any]:
+    code, payload = _sqlite_claim(store, task_id, actor=actor, claim_id=claim_id)
+    return {
+        "ok": code == 0 and bool(payload.get("created")),
+        "exit_code": code,
+        "created": bool(payload.get("created")),
+        "process_boundary": "subprocess",
+    }
+
+
+def run_probe(
+    probe: str,
+    store: Path,
+    *,
+    task_id: str | None = None,
+    actor: str | None = None,
+    claim_id: str | None = None,
+) -> dict[str, Any]:
     if probe == "json-read-claim":
         if not task_id:
             raise MeasurementInputError("--task-id is required for json-read-claim")
@@ -454,7 +481,64 @@ def run_probe(probe: str, store: Path, *, task_id: str | None = None) -> dict[st
         return probe_sqlite_read_claim(store, task_id)
     if probe == "sqlite-cold-start":
         return probe_sqlite_cold_start(store)
+    if probe == "sqlite-claim":
+        if not task_id or not actor or not claim_id:
+            raise MeasurementInputError("--task-id/--actor/--claim-id required for sqlite-claim")
+        return probe_sqlite_claim(store, task_id, actor=actor, claim_id=claim_id)
     raise MeasurementInputError(f"unknown probe: {probe}")
+
+
+def _git_output(cwd: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise MeasurementInputError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def _synthesize_git_secret_history(repo: Path, *, tracked_relpath: str) -> dict[str, Any]:
+    """Create synthetic commits and inspect retained deleted-secret history."""
+    if not (repo / ".git").exists():
+        _init_git_repo(repo)
+    tracked = repo / tracked_relpath
+    tracked.parent.mkdir(parents=True, exist_ok=True)
+    tracked.write_text(f"tracked probe {SYNTHETIC_SECRET}\n", encoding="utf-8")
+    _git_output(repo, "add", tracked_relpath)
+    _git_output(
+        repo,
+        "-c",
+        "user.email=synth@example.invalid",
+        "-c",
+        "user.name=Synth",
+        "commit",
+        "-m",
+        "synth secret",
+    )
+    tracked.write_text("tracked probe redacted\n", encoding="utf-8")
+    _git_output(repo, "add", tracked_relpath)
+    _git_output(
+        repo,
+        "-c",
+        "user.email=synth@example.invalid",
+        "-c",
+        "user.name=Synth",
+        "commit",
+        "-m",
+        "synth redact",
+    )
+    history = _git_output(repo, "log", "--all", "-p", "--", tracked_relpath)
+    retained = SYNTHETIC_SECRET in history
+    return {
+        "status": "measured",
+        "tracked_path": tracked_relpath,
+        "deleted_secret_retained_in_history": retained,
+        "pass": retained is True,
+    }
 
 
 def _task(
@@ -952,7 +1036,7 @@ def _json_restart_recovery(root: Path, ledger: dict[str, Any]) -> dict[str, Any]
     task_id = _claim_target_id(ledger)
     try:
         claimed = ledger_mod._claim_task(target, task_id, actor="lane-restart", claim_id="claim-restart")
-        probe = _run_store_probe("json-read-claim", target, task_id=task_id)
+        probe, _wall_ns = _run_store_probe("json-read-claim", target, task_id=task_id)
         ok = (
             bool(claimed.get("created"))
             and probe.get("ok") is True
@@ -1082,21 +1166,26 @@ def _json_install_footprint(root: Path, ledger: dict[str, Any]) -> dict[str, Any
 def _json_cold_start(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
     target = _json_load_target(root, ledger, with_git=False)
     try:
-        probe = _run_store_probe("json-cold-start", target)
-        elapsed = probe.get("cold_start_ns")
+        probe, wall_ns = _run_store_probe("json-cold-start", target)
+        inner_ns = probe.get("inner_operation_ns")
         ok = (
             probe.get("ok") is True
             and probe.get("process_boundary") == "subprocess"
-            and probe.get("cold") is True
-            and isinstance(elapsed, int)
-            and elapsed >= 0
+            and isinstance(wall_ns, int)
+            and wall_ns >= 0
+            and isinstance(inner_ns, int)
+            and inner_ns >= 0
+            and wall_ns >= inner_ns
             and probe.get("task_count") == len(ledger["tasks"])
         )
         return {
             "status": "measured",
             "cold": True,
             "process_boundary": "subprocess",
-            "cold_start_ns": elapsed,
+            "cold_start_ns": wall_ns,
+            "cold_start_timing_scope": "parent_subprocess_wall",
+            "inner_operation_ns": inner_ns,
+            "inner_operation_timing_scope": "probe_read_after_import",
             "task_count": probe.get("task_count"),
             "pass": ok,
         }
@@ -1137,21 +1226,19 @@ def _json_resource_measurements(root: Path, ledger: dict[str, Any]) -> dict[str,
             time.sleep(0.002)
         stdout, _stderr = proc.communicate()
         after_bytes = _tree_size_bytes(work_helpers._work_root(target))
-        if peak_rss_kib is None and proc.pid:
-            # Final sample after exit may still be unavailable; mark unavailable RSS.
-            rss_status = "unavailable"
-        else:
-            rss_status = "measured"
+        rss_status = "measured" if peak_rss_kib is not None else "unavailable"
         ok = proc.returncode == 0
         return {
             "status": "measured",
+            "rss_scope": "subprocess_child",
+            "rss_protocol": "popen_sample_child",
             "claim_exit_code": proc.returncode,
             "disk_bytes_before": before_bytes,
             "disk_bytes_after": after_bytes,
             "disk_growth_bytes": after_bytes - before_bytes,
             "peak_rss_kib": peak_rss_kib,
             "peak_rss_mib": None if peak_rss_kib is None else round(peak_rss_kib / 1024, 2),
-            "rss_sampling": rss_status if peak_rss_kib is None else "measured",
+            "rss_sampling": rss_status,
             "stdout_bytes": len(stdout.encode("utf-8")),
             "pass": ok and after_bytes >= before_bytes,
         }
@@ -1210,10 +1297,61 @@ def _json_secret_history(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
         if task["id"] == task_id:
             task["text"] = f"probe {SYNTHETIC_SECRET} path={SYNTHETIC_SECRET_PATH}"
             break
-    target = _json_load_target(root, seeded, with_git=False)
+    target = _json_load_target(root, seeded, with_git=True)
     backup_pre = Path(tempfile.mkdtemp(prefix="ws-secret-pre-", dir=root))
     backup_post = Path(tempfile.mkdtemp(prefix="ws-secret-post-", dir=root))
     try:
+        ignore_path = target / ".gitignore"
+        ignore_path.write_text(".brigade/work/\n", encoding="utf-8")
+        _git_output(target, "add", ".gitignore")
+        _git_output(
+            target,
+            "-c",
+            "user.email=synth@example.invalid",
+            "-c",
+            "user.name=Synth",
+            "commit",
+            "-m",
+            "synth ignore work path",
+        )
+        work_rel = ".brigade/work/tasks.json"
+        ignore_check = subprocess.run(
+            ["git", "check-ignore", "-v", work_rel],
+            cwd=target,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        work_path_ignored = ignore_check.returncode == 0
+        # Commit unrelated tracked content so the repo has objects while the
+        # ignored work ledger with the secret stays out of the index.
+        (target / "README.synth.md").write_text("synth characterization\n", encoding="utf-8")
+        _git_output(target, "add", "README.synth.md")
+        _git_output(
+            target,
+            "-c",
+            "user.email=synth@example.invalid",
+            "-c",
+            "user.name=Synth",
+            "commit",
+            "-m",
+            "synth tracked readme",
+        )
+        objects_blob = _git_output(target, "rev-list", "--objects", "--all")
+        # Prefer explicit grep against reachable commits.
+        rev_list = _git_output(target, "rev-list", "--all").split()
+        found_in_git = False
+        if rev_list:
+            grep2 = subprocess.run(
+                ["git", "grep", "-F", SYNTHETIC_SECRET, *rev_list],
+                cwd=target,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            found_in_git = grep2.returncode == 0 and SYNTHETIC_SECRET in grep2.stdout
+        ignored_secret_absent_from_git = (not found_in_git) and (SYNTHETIC_SECRET not in objects_blob)
+
         shutil.copytree(target / ".brigade", backup_pre / ".brigade")
         live = ledger_mod._read_task_ledger(target)
         for task in live["tasks"]:
@@ -1225,9 +1363,18 @@ def _json_secret_history(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
         pre_has = _path_contains_marker(backup_pre, SYNTHETIC_SECRET)
         post_has = _path_contains_marker(backup_post, SYNTHETIC_SECRET)
         path_live_has = _path_contains_marker(work_helpers._tasks_path(target), SYNTHETIC_SECRET_PATH)
-        # JSON ledger has no VC history; deleted values must not remain in live
-        # store or post-delete backups. Pre-delete file-copy backups retain bytes.
-        ok = (not live_has) and (not post_has) and pre_has and (not path_live_has)
+        live_backup_ok = (not live_has) and (not post_has) and pre_has and (not path_live_has)
+
+        tracked_history = _synthesize_git_secret_history(target, tracked_relpath="synth/tracked-secret.txt")
+        git_history = {
+            "status": "measured",
+            "work_path_ignored": work_path_ignored,
+            "ignore_path": ".brigade/work/",
+            "ignored_path_secret_absent_from_git": ignored_secret_absent_from_git,
+            "synthetic_tracked_history": tracked_history,
+            "pass": work_path_ignored and ignored_secret_absent_from_git and bool(tracked_history.get("pass")),
+        }
+        ok = live_backup_ok and bool(git_history["pass"])
         return {
             "status": "measured",
             "synthetic_secret_marker": SYNTHETIC_SECRET,
@@ -1235,7 +1382,8 @@ def _json_secret_history(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
             "pre_delete_backup_retains_secret": pre_has,
             "post_delete_backup_retains_secret": post_has,
             "live_retains_deleted_path": path_live_has,
-            "version_control_history": "absent",
+            "live_and_backup_pass": live_backup_ok,
+            "git_history": git_history,
             "pass": ok,
         }
     finally:
@@ -1607,7 +1755,7 @@ def _sqlite_restart_recovery(root: Path, ledger: dict[str, Any]) -> dict[str, An
         _sqlite_load(db_path, ledger)
         task_id = _claim_target_id(ledger)
         code, claimed = _sqlite_claim(db_path, task_id, actor="lane-restart", claim_id="claim-restart")
-        probe = _run_store_probe("sqlite-read-claim", db_path, task_id=task_id)
+        probe, _wall_ns = _run_store_probe("sqlite-read-claim", db_path, task_id=task_id)
         ok = (
             code == 0
             and bool(claimed.get("created"))
@@ -1634,27 +1782,145 @@ def _sqlite_cold_start(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
     db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-cold-", suffix=".db", dir=root)[1])
     try:
         _sqlite_load(db_path, ledger)
-        probe = _run_store_probe("sqlite-cold-start", db_path)
-        elapsed = probe.get("cold_start_ns")
+        probe, wall_ns = _run_store_probe("sqlite-cold-start", db_path)
+        inner_ns = probe.get("inner_operation_ns")
         ok = (
             probe.get("ok") is True
             and probe.get("process_boundary") == "subprocess"
-            and probe.get("cold") is True
-            and isinstance(elapsed, int)
-            and elapsed >= 0
+            and isinstance(wall_ns, int)
+            and wall_ns >= 0
+            and isinstance(inner_ns, int)
+            and inner_ns >= 0
+            and wall_ns >= inner_ns
             and probe.get("task_count") == len(ledger["tasks"])
         )
         return {
             "status": "measured",
             "cold": True,
             "process_boundary": "subprocess",
-            "cold_start_ns": elapsed,
+            "cold_start_ns": wall_ns,
+            "cold_start_timing_scope": "parent_subprocess_wall",
+            "inner_operation_ns": inner_ns,
+            "inner_operation_timing_scope": "probe_export_after_import",
             "task_count": probe.get("task_count"),
             "pass": ok,
         }
     finally:
         for suffix in ("", "-wal", "-shm"):
             Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_resource_measurements(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-rss-", suffix=".db", dir=root)[1])
+    try:
+        _sqlite_load(db_path, ledger)
+        task_id = _claim_target_id(ledger)
+        before = db_path.stat().st_size
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(_script_path()),
+                "--probe",
+                "sqlite-claim",
+                "--store",
+                str(db_path),
+                "--task-id",
+                task_id,
+                "--actor",
+                "lane-rss",
+                "--claim-id",
+                "claim-rss",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        peak_rss_kib: int | None = None
+        while proc.poll() is None:
+            sample = _proc_peak_rss_kib(proc.pid)
+            if sample is not None:
+                peak_rss_kib = sample if peak_rss_kib is None else max(peak_rss_kib, sample)
+            time.sleep(0.002)
+        stdout, _stderr = proc.communicate()
+        after = db_path.stat().st_size
+        payload: dict[str, Any] = {}
+        if stdout.strip():
+            try:
+                payload = json.loads(stdout.strip().splitlines()[-1])
+            except json.JSONDecodeError:
+                payload = {}
+        rss_status = "measured" if peak_rss_kib is not None else "unavailable"
+        ok = proc.returncode == 0 and bool(payload.get("ok"))
+        return {
+            "status": "measured",
+            "rss_scope": "subprocess_child",
+            "rss_protocol": "popen_sample_child",
+            "claim_exit_code": proc.returncode,
+            "disk_bytes_before": before,
+            "disk_bytes_after": after,
+            "disk_growth_bytes": after - before,
+            "peak_rss_kib": peak_rss_kib,
+            "peak_rss_mib": None if peak_rss_kib is None else round(peak_rss_kib / 1024, 2),
+            "rss_sampling": rss_status,
+            "pass": ok,
+        }
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_secret_history(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    seeded = _clone_ledger(ledger)
+    task_id = _claim_target_id(seeded)
+    for task in seeded["tasks"]:
+        if task["id"] == task_id:
+            task["text"] = f"probe {SYNTHETIC_SECRET} path={SYNTHETIC_SECRET_PATH}"
+            break
+    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-secret-", suffix=".db", dir=root)[1])
+    backup_pre = Path(tempfile.mkstemp(prefix="ws-sqlite-secret-pre-", suffix=".db", dir=root)[1])
+    backup_post = Path(tempfile.mkstemp(prefix="ws-sqlite-secret-post-", suffix=".db", dir=root)[1])
+    try:
+        _sqlite_load(db_path, seeded)
+        shutil.copy2(db_path, backup_pre)
+        # Delete secret from live payload.
+        conn = _sqlite_connect(db_path)
+        try:
+            row = conn.execute("SELECT payload FROM tasks WHERE id=?", (task_id,)).fetchone()
+            task = json.loads(row[0])
+            task["text"] = "probe redacted"
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE tasks SET payload=? WHERE id=?",
+                (json.dumps(task, sort_keys=True), task_id),
+            )
+            conn.execute("COMMIT")
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+        shutil.copy2(db_path, backup_post)
+        live_has = _path_contains_marker(db_path, SYNTHETIC_SECRET)
+        pre_has = _path_contains_marker(backup_pre, SYNTHETIC_SECRET)
+        post_has = _path_contains_marker(backup_post, SYNTHETIC_SECRET)
+        live_backup_ok = (not live_has) and (not post_has) and pre_has
+        # SQLite adapter has no native VCS; do not claim git-history coverage.
+        git_history = _cell_unavailable(
+            "sqlite characterization adapter has no native VCS; JSON ledger measures synthetic git/ignore-path history"
+        )
+        ok = live_backup_ok
+        return {
+            "status": "measured",
+            "synthetic_secret_marker": SYNTHETIC_SECRET,
+            "live_retains_deleted_secret": live_has,
+            "pre_delete_backup_retains_secret": pre_has,
+            "post_delete_backup_retains_secret": post_has,
+            "live_and_backup_pass": live_backup_ok,
+            "git_history": git_history,
+            "pass": ok,
+        }
+    finally:
+        for path in (db_path, backup_pre, backup_post):
+            for suffix in ("", "-wal", "-shm"):
+                Path(str(path) + suffix).unlink(missing_ok=True)
 
 
 def _sqlite_metrics_state(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
@@ -1805,89 +2071,6 @@ def _sqlite_install_footprint(root: Path, ledger: dict[str, Any]) -> dict[str, A
     finally:
         for suffix in ("", "-wal", "-shm"):
             Path(str(db_path) + suffix).unlink(missing_ok=True)
-
-
-def _sqlite_resource_measurements(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
-    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-rss-", suffix=".db", dir=root)[1])
-    try:
-        _sqlite_load(db_path, ledger)
-        task_id = _claim_target_id(ledger)
-        before = db_path.stat().st_size
-        # Measure RSS of this process around the claim (adapter is in-process).
-        pid = os.getpid()
-        before_rss = _proc_peak_rss_kib(pid)
-        code, payload = _sqlite_claim(db_path, task_id, actor="lane-rss", claim_id="claim-rss")
-        after_rss = _proc_peak_rss_kib(pid)
-        after = db_path.stat().st_size
-        peak = None
-        if before_rss is not None or after_rss is not None:
-            candidates = [value for value in (before_rss, after_rss) if value is not None]
-            peak = max(candidates) if candidates else None
-        return {
-            "status": "measured",
-            "claim_exit_code": code,
-            "disk_bytes_before": before,
-            "disk_bytes_after": after,
-            "disk_growth_bytes": after - before,
-            "peak_rss_kib": peak,
-            "peak_rss_mib": None if peak is None else round(peak / 1024, 2),
-            "rss_sampling": "measured" if peak is not None else "unavailable",
-            "pass": code == 0 and bool(payload.get("created")),
-        }
-    finally:
-        for suffix in ("", "-wal", "-shm"):
-            Path(str(db_path) + suffix).unlink(missing_ok=True)
-
-
-def _sqlite_secret_history(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
-    seeded = _clone_ledger(ledger)
-    task_id = _claim_target_id(seeded)
-    for task in seeded["tasks"]:
-        if task["id"] == task_id:
-            task["text"] = f"probe {SYNTHETIC_SECRET} path={SYNTHETIC_SECRET_PATH}"
-            break
-    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-secret-", suffix=".db", dir=root)[1])
-    backup_pre = Path(tempfile.mkstemp(prefix="ws-sqlite-secret-pre-", suffix=".db", dir=root)[1])
-    backup_post = Path(tempfile.mkstemp(prefix="ws-sqlite-secret-post-", suffix=".db", dir=root)[1])
-    try:
-        _sqlite_load(db_path, seeded)
-        shutil.copy2(db_path, backup_pre)
-        # Delete secret from live payload.
-        conn = _sqlite_connect(db_path)
-        try:
-            row = conn.execute("SELECT payload FROM tasks WHERE id=?", (task_id,)).fetchone()
-            task = json.loads(row[0])
-            task["text"] = "probe redacted"
-            conn.execute(
-                "BEGIN IMMEDIATE",
-            )
-            conn.execute(
-                "UPDATE tasks SET payload=? WHERE id=?",
-                (json.dumps(task, sort_keys=True), task_id),
-            )
-            conn.execute("COMMIT")
-            # Compact so deleted payload pages are not left in the live file.
-            conn.execute("VACUUM")
-        finally:
-            conn.close()
-        shutil.copy2(db_path, backup_post)
-        live_has = _path_contains_marker(db_path, SYNTHETIC_SECRET)
-        pre_has = _path_contains_marker(backup_pre, SYNTHETIC_SECRET)
-        post_has = _path_contains_marker(backup_post, SYNTHETIC_SECRET)
-        ok = (not live_has) and (not post_has) and pre_has
-        return {
-            "status": "measured",
-            "synthetic_secret_marker": SYNTHETIC_SECRET,
-            "live_retains_deleted_secret": live_has,
-            "pre_delete_backup_retains_secret": pre_has,
-            "post_delete_backup_retains_secret": post_has,
-            "version_control_history": "absent",
-            "pass": ok,
-        }
-    finally:
-        for path in (db_path, backup_pre, backup_post):
-            for suffix in ("", "-wal", "-shm"):
-                Path(str(path) + suffix).unlink(missing_ok=True)
 
 
 def measure_sqlite_wal(
@@ -2255,6 +2438,7 @@ def main(argv: list[str] | None = None) -> int:
             "json-cold-start",
             "sqlite-read-claim",
             "sqlite-cold-start",
+            "sqlite-claim",
         ),
         help="Fresh-process store probe; prints one JSON object to stdout",
     )
@@ -2263,7 +2447,9 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Store path for --probe (JSON target root or SQLite DB file)",
     )
-    parser.add_argument("--task-id", help="Task id for claim-read probes")
+    parser.add_argument("--task-id", help="Task id for claim-read / claim probes")
+    parser.add_argument("--actor", default="probe-actor", help="Actor for sqlite-claim probe")
+    parser.add_argument("--claim-id", default="probe-claim", help="Claim id for sqlite-claim probe")
     parser.add_argument(
         "--root",
         type=Path,
@@ -2302,7 +2488,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.probe is not None:
         if args.store is None:
             parser.error("--store is required with --probe")
-        payload = run_probe(args.probe, args.store, task_id=args.task_id)
+        payload = run_probe(
+            args.probe,
+            args.store,
+            task_id=args.task_id,
+            actor=args.actor,
+            claim_id=args.claim_id,
+        )
         print(json.dumps(payload, sort_keys=True))
         return 0
 

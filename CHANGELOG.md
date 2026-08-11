@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Issue #846 R2 harness sendback (comment 5247390894): JSON secret-history
+  proves synthetic Git/ignore-path; SQLite marks Git history unavailable;
+  cold-start uses parent `subprocess.run` wall with distinct inner timing;
+  RSS uses one subprocess-child sampling protocol with explicit scope labels.
 - Issue #846 R2 harness sendback: SQLite metrics scans the touched store and
   restores env overrides; restart/cold-start use a fresh subprocess probe;
   JSON guards cover `if_status` match and mismatch.

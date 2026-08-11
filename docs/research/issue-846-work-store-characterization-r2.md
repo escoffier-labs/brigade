@@ -48,22 +48,37 @@ Production work-store code, engine memory projection, #843/#850, #844, #845,
 | Schema future/downgrade observation | measured (coerces to current; does not reject) | measured (meta preserves write; export coerces) | blocked |
 | Branch/config backup + restore digests | measured (branch unsupported; config+claim+task digests) | measured | blocked |
 | Install footprint | measured | measured | blocked |
-| Cold-start timing | measured (fresh subprocess cold read) | measured (fresh subprocess cold export) | blocked |
+| Cold-start timing | measured (parent `subprocess.run` wall; inner probe op labeled separately) | measured (parent `subprocess.run` wall; inner probe op labeled separately) | blocked |
 | Backup timing | measured (`backup_time_ns`) | measured | blocked |
-| Resource measurements (disk + RSS) | measured | measured | blocked |
+| Resource measurements (disk + RSS) | measured (`rss_scope=subprocess_child`) | measured (`rss_scope=subprocess_child`) | blocked |
 | Metrics state (observed, not hard-coded) | measured | measured | blocked |
-| Deleted secret / history | measured | measured | blocked |
+| Deleted secret / history | measured (live/backup + synthetic Git/ignore-path) | measured (live/backup; Git history unavailable — no native VCS) | blocked |
 | Server auth / TLS / permissions | blocked (needs listener + approval) | blocked | blocked |
 
 Hard-coded `metrics_state` / `secret_history_handling` gate booleans from R1
 are replaced with observed harness cell results. Numbers are never fabricated:
 every residual cell is `measured`, `blocked`, or `unavailable`.
 
-Restart and cold-start cells use a fresh subprocess that receives only the
-store path and emits machine-readable JSON. SQLite metrics scans the touched
-store directory and restores `DISABLE_TELEMETRY` /
-`BRIGADE_ANONYMOUS_METRICS` after the cell. JSON guard coverage includes
-`if_status` match and mismatch with exit/reason assertions.
+Restart cells use a fresh subprocess that receives only the store path and
+emits machine-readable JSON. Cold-start timing is the parent wall clock around
+`subprocess.run` (`cold_start_timing_scope=parent_subprocess_wall`); the probe
+also reports `inner_operation_ns` for the in-process read/export after import.
+JSON and SQLite RSS samples use the same `popen_sample_child` protocol
+(`rss_scope=subprocess_child`). JSON secret-history proves ignore-path
+exclusion and synthetic tracked Git retention of a deleted marker; SQLite marks
+the Git-history subcell `unavailable` and does not claim it in the pass.
+
+SQLite metrics scans the touched store directory and restores
+`DISABLE_TELEMETRY` / `BRIGADE_ANONYMOUS_METRICS` after the cell. JSON guard
+coverage includes `if_status` match and mismatch with exit/reason assertions.
+
+## Sendback repair (comment 5247390894)
+
+- Secret history: JSON measures synthetic Git + ignore-path; SQLite marks
+  `git_history` unavailable (live/backup still measured).
+- Cold-start: parent times `subprocess.run`; inner operation labeled separately.
+- RSS: both shapes sample a short-lived child via one Popen protocol and label
+  `rss_scope` / `rss_protocol` explicitly.
 
 ## Decision record (unchanged from R1)
 

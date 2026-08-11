@@ -134,11 +134,30 @@ def test_measure_matrix_json_and_sqlite_report_shape(tmp_path):
     assert json_result["restart_recovery"]["process_boundary"] == "subprocess"
     assert json_result["cold_start"]["process_boundary"] == "subprocess"
     assert json_result["cold_start"]["cold"] is True
+    assert json_result["cold_start"]["cold_start_timing_scope"] == "parent_subprocess_wall"
+    assert json_result["cold_start"]["inner_operation_timing_scope"] == "probe_read_after_import"
+    assert isinstance(json_result["cold_start"]["inner_operation_ns"], int)
+    assert json_result["cold_start"]["cold_start_ns"] >= json_result["cold_start"]["inner_operation_ns"]
+    assert json_result["resource_measurements"]["rss_scope"] == "subprocess_child"
+    assert json_result["resource_measurements"]["rss_protocol"] == "popen_sample_child"
+    git_history = json_result["secret_history_handling"]["git_history"]
+    assert git_history["status"] == "measured"
+    assert git_history["work_path_ignored"] is True
+    assert git_history["ignored_path_secret_absent_from_git"] is True
+    assert git_history["synthetic_tracked_history"]["deleted_secret_retained_in_history"] is True
+    assert git_history["pass"] is True
     sqlite_result = next(item for item in report["results"] if item["shape"] == "sqlite_wal")
     assert sqlite_result["guard_and_empty_filter"]["status"] == "unavailable"
     assert sqlite_result["restart_recovery"]["process_boundary"] == "subprocess"
     assert sqlite_result["cold_start"]["process_boundary"] == "subprocess"
     assert sqlite_result["cold_start"]["cold"] is True
+    assert sqlite_result["cold_start"]["cold_start_timing_scope"] == "parent_subprocess_wall"
+    assert sqlite_result["cold_start"]["inner_operation_timing_scope"] == "probe_export_after_import"
+    assert isinstance(sqlite_result["cold_start"]["inner_operation_ns"], int)
+    assert sqlite_result["cold_start"]["cold_start_ns"] >= sqlite_result["cold_start"]["inner_operation_ns"]
+    assert sqlite_result["resource_measurements"]["rss_scope"] == "subprocess_child"
+    assert sqlite_result["resource_measurements"]["rss_protocol"] == "popen_sample_child"
+    assert sqlite_result["secret_history_handling"]["git_history"]["status"] == "unavailable"
     assert "scanned_store_path" in sqlite_result["metrics_state"]
     assert sqlite_result["metrics_state"]["metrics_artifacts"] == []
 
@@ -162,11 +181,51 @@ def test_restart_and_cold_start_use_subprocess_boundary(tmp_path):
     assert restart["process_boundary"] == "subprocess"
     assert cold["process_boundary"] == "subprocess"
     assert cold["cold"] is True
+    assert cold["cold_start_timing_scope"] == "parent_subprocess_wall"
+    assert isinstance(cold["inner_operation_ns"], int)
+    assert cold["cold_start_ns"] >= cold["inner_operation_ns"]
     sqlite_restart = module._sqlite_restart_recovery(tmp_path, ledger)
     sqlite_cold = module._sqlite_cold_start(tmp_path, ledger)
     assert sqlite_restart["process_boundary"] == "subprocess"
     assert sqlite_cold["process_boundary"] == "subprocess"
     assert sqlite_cold["cold"] is True
+    assert sqlite_cold["cold_start_timing_scope"] == "parent_subprocess_wall"
+    assert isinstance(sqlite_cold["inner_operation_ns"], int)
+    assert sqlite_cold["cold_start_ns"] >= sqlite_cold["inner_operation_ns"]
+
+
+def test_rss_scopes_use_subprocess_child_protocol(tmp_path):
+    module = _load_module()
+    ledger = module.build_fixture("chain_50")
+    json_rss = module._json_resource_measurements(tmp_path, ledger)
+    sqlite_rss = module._sqlite_resource_measurements(tmp_path, ledger)
+    assert json_rss["rss_scope"] == "subprocess_child"
+    assert json_rss["rss_protocol"] == "popen_sample_child"
+    assert sqlite_rss["rss_scope"] == "subprocess_child"
+    assert sqlite_rss["rss_protocol"] == "popen_sample_child"
+    assert json_rss["pass"] is True
+    assert sqlite_rss["pass"] is True
+
+
+def test_json_secret_history_proves_git_and_ignore_path(tmp_path):
+    module = _load_module()
+    result = module._json_secret_history(tmp_path, module.build_fixture("chain_50"))
+    assert result["pass"] is True
+    git_history = result["git_history"]
+    assert git_history["status"] == "measured"
+    assert git_history["work_path_ignored"] is True
+    assert git_history["ignored_path_secret_absent_from_git"] is True
+    assert git_history["synthetic_tracked_history"]["deleted_secret_retained_in_history"] is True
+    assert git_history["pass"] is True
+
+
+def test_sqlite_secret_history_marks_git_unavailable(tmp_path):
+    module = _load_module()
+    result = module._sqlite_secret_history(tmp_path, module.build_fixture("chain_50"))
+    assert result["pass"] is True
+    assert result["live_and_backup_pass"] is True
+    assert result["git_history"]["status"] == "unavailable"
+    assert result["git_history"]["pass"] is None
 
 
 def test_json_guard_covers_if_status_match_and_mismatch(tmp_path):

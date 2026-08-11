@@ -155,7 +155,7 @@
   "results": [
     {
       "backup_restore": {
-        "backup_time_ns": 305344,
+        "backup_time_ns": 319082,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -167,8 +167,8 @@
         "config_digest_before": "3cc256440ad11ccc17242d89228802575cd7aa05704f886808340dfd6e49f490",
         "pass": true,
         "status": "measured",
-        "task_edge_digest_after": "bea1405db88901a810891711ea4bffc93b02e983874a06279e621d1247da9916",
-        "task_edge_digest_before": "bea1405db88901a810891711ea4bffc93b02e983874a06279e621d1247da9916"
+        "task_edge_digest_after": "b97a09d23b123229359b95b7f0b752c746cf47bde1a2ade44bb8b71df0959335",
+        "task_edge_digest_before": "b97a09d23b123229359b95b7f0b752c746cf47bde1a2ade44bb8b71df0959335"
       },
       "branch_diff_merge": {
         "detail": "JSON ledger has no first-class branch/diff/merge path",
@@ -189,7 +189,10 @@
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 209266,
+        "cold_start_ns": 135777109,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 244032,
+        "inner_operation_timing_scope": "probe_read_after_import",
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -269,10 +272,10 @@
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 3083351,
-        "min_ns": 1546333,
-        "p50_ns": 2284977,
-        "p95_ns": 2730703,
+        "max_ns": 3587971,
+        "min_ns": 1584803,
+        "p50_ns": 2305087,
+        "p95_ns": 3437086,
         "samples": 100
       },
       "offline_divergence": {
@@ -290,9 +293,11 @@
         "disk_bytes_before": 24699,
         "disk_growth_bytes": 240,
         "pass": true,
-        "peak_rss_kib": 44732,
-        "peak_rss_mib": 43.68,
+        "peak_rss_kib": 44700,
+        "peak_rss_mib": 43.65,
+        "rss_protocol": "popen_sample_child",
         "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
         "status": "measured",
         "stdout_bytes": 280
       },
@@ -333,14 +338,27 @@
         "status": "measured"
       },
       "secret_history_handling": {
+        "git_history": {
+          "ignore_path": ".brigade/work/",
+          "ignored_path_secret_absent_from_git": true,
+          "pass": true,
+          "status": "measured",
+          "synthetic_tracked_history": {
+            "deleted_secret_retained_in_history": true,
+            "pass": true,
+            "status": "measured",
+            "tracked_path": "synth/tracked-secret.txt"
+          },
+          "work_path_ignored": true
+        },
+        "live_and_backup_pass": true,
         "live_retains_deleted_path": false,
         "live_retains_deleted_secret": false,
         "pass": true,
         "post_delete_backup_retains_secret": false,
         "pre_delete_backup_retains_secret": true,
         "status": "measured",
-        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential",
-        "version_control_history": "absent"
+        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential"
       },
       "server_auth_tls_permissions": {
         "pass": null,
@@ -352,7 +370,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 241402,
+        "backup_time_ns": 317951,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -386,7 +404,10 @@
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 679398,
+        "cold_start_ns": 138209079,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 612877,
+        "inner_operation_timing_scope": "probe_export_after_import",
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -440,14 +461,14 @@
         "disable_telemetry_env": "1",
         "metrics_artifacts": [],
         "pass": true,
-        "scanned_store_path": "ws-sqlite-metrics-store-u6rja11o",
+        "scanned_store_path": "ws-sqlite-metrics-store-txdeu5vs",
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 3139440,
-        "min_ns": 809031,
-        "p50_ns": 868856,
-        "p95_ns": 2385262,
+        "max_ns": 3427742,
+        "min_ns": 835292,
+        "p50_ns": 923124,
+        "p95_ns": 2666022,
         "samples": 100
       },
       "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
@@ -457,8 +478,8 @@
       },
       "pass": true,
       "relative_to_json": {
-        "p50_vs_json": 0.380247153472442,
-        "p95_vs_json": 0.8734974107400182
+        "p50_vs_json": 0.40047252012613843,
+        "p95_vs_json": 0.7756634544494959
       },
       "resource_measurements": {
         "claim_exit_code": 0,
@@ -466,9 +487,11 @@
         "disk_bytes_before": 57344,
         "disk_growth_bytes": 4096,
         "pass": true,
-        "peak_rss_kib": 36404,
-        "peak_rss_mib": 35.55,
+        "peak_rss_kib": 34748,
+        "peak_rss_mib": 33.93,
+        "rss_protocol": "popen_sample_child",
         "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
         "status": "measured"
       },
       "restart_recovery": {
@@ -508,13 +531,18 @@
         "status": "measured"
       },
       "secret_history_handling": {
+        "git_history": {
+          "pass": null,
+          "reason": "sqlite characterization adapter has no native VCS; JSON ledger measures synthetic git/ignore-path history",
+          "status": "unavailable"
+        },
+        "live_and_backup_pass": true,
         "live_retains_deleted_secret": false,
         "pass": true,
         "post_delete_backup_retains_secret": false,
         "pre_delete_backup_retains_secret": true,
         "status": "measured",
-        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential",
-        "version_control_history": "absent"
+        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential"
       },
       "server_auth_tls_permissions": {
         "pass": null,
@@ -781,7 +809,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 320199,
+        "backup_time_ns": 363026,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -793,8 +821,8 @@
         "config_digest_before": "3cc256440ad11ccc17242d89228802575cd7aa05704f886808340dfd6e49f490",
         "pass": true,
         "status": "measured",
-        "task_edge_digest_after": "defc7840f6994e2b14de922180263564ddf83baa48eda70e897bb61ae16a8ca2",
-        "task_edge_digest_before": "defc7840f6994e2b14de922180263564ddf83baa48eda70e897bb61ae16a8ca2"
+        "task_edge_digest_after": "05ffbe1c85c2bd1b9882b88a123ed27b0aba0aa65c7fedbc01d1224140d09e86",
+        "task_edge_digest_before": "05ffbe1c85c2bd1b9882b88a123ed27b0aba0aa65c7fedbc01d1224140d09e86"
       },
       "branch_diff_merge": {
         "detail": "JSON ledger has no first-class branch/diff/merge path",
@@ -815,7 +843,10 @@
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 1109717,
+        "cold_start_ns": 137041355,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 968387,
+        "inner_operation_timing_scope": "probe_read_after_import",
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -895,10 +926,10 @@
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 10804373,
-        "min_ns": 5009679,
-        "p50_ns": 5842282,
-        "p95_ns": 6717176,
+        "max_ns": 10977698,
+        "min_ns": 5405521,
+        "p50_ns": 6302210,
+        "p95_ns": 7052461,
         "samples": 100
       },
       "offline_divergence": {
@@ -916,9 +947,11 @@
         "disk_bytes_before": 140737,
         "disk_growth_bytes": 240,
         "pass": true,
-        "peak_rss_kib": 45728,
-        "peak_rss_mib": 44.66,
+        "peak_rss_kib": 45660,
+        "peak_rss_mib": 44.59,
+        "rss_protocol": "popen_sample_child",
         "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
         "status": "measured",
         "stdout_bytes": 282
       },
@@ -959,14 +992,27 @@
         "status": "measured"
       },
       "secret_history_handling": {
+        "git_history": {
+          "ignore_path": ".brigade/work/",
+          "ignored_path_secret_absent_from_git": true,
+          "pass": true,
+          "status": "measured",
+          "synthetic_tracked_history": {
+            "deleted_secret_retained_in_history": true,
+            "pass": true,
+            "status": "measured",
+            "tracked_path": "synth/tracked-secret.txt"
+          },
+          "work_path_ignored": true
+        },
+        "live_and_backup_pass": true,
         "live_retains_deleted_path": false,
         "live_retains_deleted_secret": false,
         "pass": true,
         "post_delete_backup_retains_secret": false,
         "pre_delete_backup_retains_secret": true,
         "status": "measured",
-        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential",
-        "version_control_history": "absent"
+        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential"
       },
       "server_auth_tls_permissions": {
         "pass": null,
@@ -978,7 +1024,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 347862,
+        "backup_time_ns": 381918,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -1012,7 +1058,10 @@
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 2109651,
+        "cold_start_ns": 137873638,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 1933838,
+        "inner_operation_timing_scope": "probe_export_after_import",
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -1066,14 +1115,14 @@
         "disable_telemetry_env": "1",
         "metrics_artifacts": [],
         "pass": true,
-        "scanned_store_path": "ws-sqlite-metrics-store-f3xyfj0f",
+        "scanned_store_path": "ws-sqlite-metrics-store-8_yofvlf",
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 2941768,
-        "min_ns": 675664,
-        "p50_ns": 1701602,
-        "p95_ns": 2630614,
+        "max_ns": 3466039,
+        "min_ns": 710255,
+        "p50_ns": 1749225,
+        "p95_ns": 2561607,
         "samples": 100
       },
       "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
@@ -1083,8 +1132,8 @@
       },
       "pass": true,
       "relative_to_json": {
-        "p50_vs_json": 0.29125639604524395,
-        "p95_vs_json": 0.39162499240752363
+        "p50_vs_json": 0.2775573965323275,
+        "p95_vs_json": 0.3632217179222969
       },
       "resource_measurements": {
         "claim_exit_code": 0,
@@ -1092,9 +1141,11 @@
         "disk_bytes_before": 208896,
         "disk_growth_bytes": 4096,
         "pass": true,
-        "peak_rss_kib": 38156,
-        "peak_rss_mib": 37.26,
+        "peak_rss_kib": 34756,
+        "peak_rss_mib": 33.94,
+        "rss_protocol": "popen_sample_child",
         "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
         "status": "measured"
       },
       "restart_recovery": {
@@ -1134,13 +1185,18 @@
         "status": "measured"
       },
       "secret_history_handling": {
+        "git_history": {
+          "pass": null,
+          "reason": "sqlite characterization adapter has no native VCS; JSON ledger measures synthetic git/ignore-path history",
+          "status": "unavailable"
+        },
+        "live_and_backup_pass": true,
         "live_retains_deleted_secret": false,
         "pass": true,
         "post_delete_backup_retains_secret": false,
         "pre_delete_backup_retains_secret": true,
         "status": "measured",
-        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential",
-        "version_control_history": "absent"
+        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential"
       },
       "server_auth_tls_permissions": {
         "pass": null,
@@ -1407,7 +1463,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 451010,
+        "backup_time_ns": 373329,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -1419,8 +1475,8 @@
         "config_digest_before": "3cc256440ad11ccc17242d89228802575cd7aa05704f886808340dfd6e49f490",
         "pass": true,
         "status": "measured",
-        "task_edge_digest_after": "078e75eb53de7e04f5a40ee7a40fce264e05551ad7e09871de26be0b47e6cf38",
-        "task_edge_digest_before": "078e75eb53de7e04f5a40ee7a40fce264e05551ad7e09871de26be0b47e6cf38"
+        "task_edge_digest_after": "5fb638caf54d589a216eed9515880aca79d2892ccb0d26418659ad63732a7fee",
+        "task_edge_digest_before": "5fb638caf54d589a216eed9515880aca79d2892ccb0d26418659ad63732a7fee"
       },
       "branch_diff_merge": {
         "detail": "JSON ledger has no first-class branch/diff/merge path",
@@ -1441,7 +1497,10 @@
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 2970619,
+        "cold_start_ns": 142026401,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 2783718,
+        "inner_operation_timing_scope": "probe_read_after_import",
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -1521,10 +1580,10 @@
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 19285493,
-        "min_ns": 10018884,
-        "p50_ns": 11327861,
-        "p95_ns": 12080697,
+        "max_ns": 16252946,
+        "min_ns": 10304994,
+        "p50_ns": 11309089,
+        "p95_ns": 13126984,
         "samples": 100
       },
       "offline_divergence": {
@@ -1542,9 +1601,11 @@
         "disk_bytes_before": 353443,
         "disk_growth_bytes": 240,
         "pass": true,
-        "peak_rss_kib": 47492,
-        "peak_rss_mib": 46.38,
+        "peak_rss_kib": 47860,
+        "peak_rss_mib": 46.74,
+        "rss_protocol": "popen_sample_child",
         "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
         "status": "measured",
         "stdout_bytes": 279
       },
@@ -1585,14 +1646,27 @@
         "status": "measured"
       },
       "secret_history_handling": {
+        "git_history": {
+          "ignore_path": ".brigade/work/",
+          "ignored_path_secret_absent_from_git": true,
+          "pass": true,
+          "status": "measured",
+          "synthetic_tracked_history": {
+            "deleted_secret_retained_in_history": true,
+            "pass": true,
+            "status": "measured",
+            "tracked_path": "synth/tracked-secret.txt"
+          },
+          "work_path_ignored": true
+        },
+        "live_and_backup_pass": true,
         "live_retains_deleted_path": false,
         "live_retains_deleted_secret": false,
         "pass": true,
         "post_delete_backup_retains_secret": false,
         "pre_delete_backup_retains_secret": true,
         "status": "measured",
-        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential",
-        "version_control_history": "absent"
+        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential"
       },
       "server_auth_tls_permissions": {
         "pass": null,
@@ -1604,7 +1678,7 @@
     },
     {
       "backup_restore": {
-        "backup_time_ns": 1133151,
+        "backup_time_ns": 1075668,
         "branch_heads": {
           "detail": "shape has no first-class branch heads",
           "digest_sha256": null,
@@ -1638,7 +1712,10 @@
       },
       "cold_start": {
         "cold": true,
-        "cold_start_ns": 5545899,
+        "cold_start_ns": 143253217,
+        "cold_start_timing_scope": "parent_subprocess_wall",
+        "inner_operation_ns": 4832367,
+        "inner_operation_timing_scope": "probe_export_after_import",
         "pass": true,
         "process_boundary": "subprocess",
         "status": "measured",
@@ -1692,14 +1769,14 @@
         "disable_telemetry_env": "1",
         "metrics_artifacts": [],
         "pass": true,
-        "scanned_store_path": "ws-sqlite-metrics-store-lv_w5dzu",
+        "scanned_store_path": "ws-sqlite-metrics-store-gul0b686",
         "status": "measured"
       },
       "mutation_latency": {
-        "max_ns": 2676221,
-        "min_ns": 787602,
-        "p50_ns": 1827302,
-        "p95_ns": 2487992,
+        "max_ns": 2716333,
+        "min_ns": 753629,
+        "p50_ns": 1635733,
+        "p95_ns": 2459627,
         "samples": 100
       },
       "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
@@ -1709,8 +1786,8 @@
       },
       "pass": true,
       "relative_to_json": {
-        "p50_vs_json": 0.16131041862183867,
-        "p95_vs_json": 0.20594771973835616
+        "p50_vs_json": 0.14463879451297978,
+        "p95_vs_json": 0.18737182889839737
       },
       "resource_measurements": {
         "claim_exit_code": 0,
@@ -1718,9 +1795,11 @@
         "disk_bytes_before": 458752,
         "disk_growth_bytes": 0,
         "pass": true,
-        "peak_rss_kib": 42704,
-        "peak_rss_mib": 41.7,
+        "peak_rss_kib": 34752,
+        "peak_rss_mib": 33.94,
+        "rss_protocol": "popen_sample_child",
         "rss_sampling": "measured",
+        "rss_scope": "subprocess_child",
         "status": "measured"
       },
       "restart_recovery": {
@@ -1760,13 +1839,18 @@
         "status": "measured"
       },
       "secret_history_handling": {
+        "git_history": {
+          "pass": null,
+          "reason": "sqlite characterization adapter has no native VCS; JSON ledger measures synthetic git/ignore-path history",
+          "status": "unavailable"
+        },
+        "live_and_backup_pass": true,
         "live_retains_deleted_secret": false,
         "pass": true,
         "post_delete_backup_retains_secret": false,
         "pre_delete_backup_retains_secret": true,
         "status": "measured",
-        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential",
-        "version_control_history": "absent"
+        "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential"
       },
       "server_auth_tls_permissions": {
         "pass": null,
