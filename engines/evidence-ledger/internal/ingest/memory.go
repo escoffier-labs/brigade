@@ -188,6 +188,13 @@ func CompleteMemoryScan(db *sql.DB, scanID string, observed []ObservedCard, rece
 	}
 	receipt.Removed = removed
 
+	// Soft-tombstone superseded content-hash versions left live by earlier
+	// imports so completed scans leave exactly one default-live row per
+	// (source, collection, external_id) and remove their FTS bodies.
+	if _, err := softTombstoneSupersededMemoryVersions(tx, namespace, now); err != nil {
+		return err
+	}
+
 	live, err := liveMemoryExternalIDs(tx, namespace)
 	if err != nil {
 		return err
@@ -339,6 +346,57 @@ where target_item_id = ? and source_item_id != ?`, r.id, r.id); err != nil {
 		removedIDs[r.externalID] = true
 	}
 	return len(removedIDs), nil
+}
+
+// softTombstoneSupersededMemoryVersions soft-tombstones every non-latest
+// non-tombstoned memory_card row in a namespace and deletes their FTS rows.
+func softTombstoneSupersededMemoryVersions(tx *sql.Tx, namespace, now string) (int, error) {
+	rows, err := tx.Query(`
+select i.id
+from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ?
+  and i.kind = 'memory_card'
+  and i.tombstoned_at is null
+  and c.external_id = ?
+  and i.id != (
+    select i2.id from items i2
+    where i2.source_id = i.source_id
+      and i2.collection_id = i.collection_id
+      and i2.external_id = i.external_id
+      and i2.tombstoned_at is null
+    order by i2.ingest_seq desc, i2.id desc
+    limit 1
+  )`, MemorySourceKind, namespace)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var superseded []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		superseded = append(superseded, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, id := range superseded {
+		if _, err := tx.Exec(`update items set tombstoned_at = ? where id = ? and tombstoned_at is null`, now, id); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(`delete from item_fts where item_id = ?`, id); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(`update relations set target_item_id = null
+where target_item_id = ? and source_item_id != ?`, id, id); err != nil {
+			return 0, err
+		}
+	}
+	return len(superseded), nil
 }
 
 func liveMemoryExternalIDs(tx *sql.Tx, namespace string) (map[string]string, error) {

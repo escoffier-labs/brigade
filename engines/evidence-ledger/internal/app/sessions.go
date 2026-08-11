@@ -285,7 +285,7 @@ func searchSessions(db *sql.DB, query string, filters SessionFilters, limit int)
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	where := []string{"item_fts match ?", "c.kind in ('agent_session','conversation')"}
+	where := []string{"item_fts match ?", "c.kind in ('agent_session','conversation')", "i.tombstoned_at is null"}
 	params := []any{ftsQuery(query)}
 	where, params = appendSessionFilters(where, params, filters)
 	params = append(params, limit*10)

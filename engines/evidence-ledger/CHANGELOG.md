@@ -8,6 +8,19 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+### Changed
+
+- Memory projection E2 read-path hardening (#843): soft-tombstone superseded
+  content-hash versions (and drop their FTS rows) so each
+  `(source, collection, external_id)` has one default-live version; generic
+  search/explain/evidence and session search exclude tombstones and non-latest
+  rows; `doctor --archive` ignores intentional tombstones in
+  `archive_items_missing_fts`; generic `show --json` exposes qualified relation
+  targets (`target_source_kind`, `target_collection_external_id`,
+  `target_external_id`, nullable `target_item_id`) plus live/tombstone state and
+  omits quarantined `injection=pending` body/raw unless
+  `--include-untrusted-body` / `include_untrusted_body` is set.
+
 ### Added
 
 - Provenance persistence Slice 2: ingest stamps indexed `provenance.*` projections,

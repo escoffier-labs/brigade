@@ -180,7 +180,7 @@ func TestAdapterImportSearchShowExportAndIdempotency(t *testing.T) {
 	}
 	first := results[0].(map[string]any)
 	id := first["id"].(string)
-	show := runJSON(t, "show", id, "--json")
+	show := runJSON(t, "show", id, "--json", "--include-untrusted-body")
 	if show["id"] != id {
 		t.Fatalf("show id = %v, want %s", show["id"], id)
 	}

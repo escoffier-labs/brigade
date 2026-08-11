@@ -392,7 +392,7 @@ func archiveDoctorChecks(db *sql.DB) []doctorCheck {
 	checkCount("archive_orphan_relations", `select count(*) from relations r where not exists(select 1 from items i where i.id = r.source_item_id)`)
 	checkCount("archive_missing_relation_targets", `select count(*) from relations r where r.target_item_id is not null and not exists(select 1 from items i where i.id = r.target_item_id)`)
 	add("archive_unresolved_relations", unresolvedRelationCount(db) == 0, fmt.Sprintf("count=%d", unresolvedRelationCount(db)))
-	checkCount("archive_items_missing_fts", `select count(*) from items i where not exists(select 1 from item_fts f where f.item_id = i.id)`)
+	checkCount("archive_items_missing_fts", `select count(*) from items i where i.tombstoned_at is null and not exists(select 1 from item_fts f where f.item_id = i.id)`)
 	checkCount("archive_orphan_fts", `select count(*) from item_fts f where not exists(select 1 from items i where i.id = f.item_id)`)
 
 	missingScans := 0
@@ -1912,7 +1912,7 @@ func buildSearchQuery(opts SearchOpts) (string, []any) {
 	}
 	params = append(params, searchCandidateLimit(limit))
 
-	where, params := appendSearchResultFilters(opts, []string{"1=1"}, params)
+	where, params := appendSearchResultFilters(opts, []string{liveDefaultItemPredicate}, params)
 	params = append(params, limit)
 
 	// CROSS JOIN pins the candidate pool as the outer loop. A reorder through
@@ -1935,6 +1935,19 @@ order by (fc.fts_score - case when exists(select 1 from relations rr where rr.so
 limit ?`
 	return sqlText, params
 }
+
+// liveDefaultItemPredicate keeps default search/evidence on one live content
+// version per (source, collection, external_id). Tombstones and superseded
+// content-hash rows are excluded even if a stale FTS row remains.
+const liveDefaultItemPredicate = `i.tombstoned_at is null and i.id = (
+  select i2.id from items i2
+  where i2.source_id = i.source_id
+    and i2.collection_id = i.collection_id
+    and i2.external_id = i.external_id
+    and i2.tombstoned_at is null
+  order by i2.ingest_seq desc, i2.id desc
+  limit 1
+)`
 
 func appendSearchResultFilters(opts SearchOpts, where []string, params []any) ([]string, []any) {
 	if opts.Source != "" {
@@ -2037,6 +2050,7 @@ func searchExactCodeReference(db *sql.DB, opts SearchOpts) ([]SearchResult, erro
 	}
 	params := []any{reference.Schema, reference.Repository, reference.Revision.Commit, reference.FilePath, reference.QualifiedName, reference.SymbolKind, reference.ChangeKind}
 	where, params = appendSearchResultFilters(opts, where, params)
+	where = append(where, liveDefaultItemPredicate)
 	params = append(params, opts.Limit)
 	sqlText := `select i.id, s.kind, c.name, c.kind, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), code_reference.value, i.content_hash
 from items i
@@ -2175,24 +2189,26 @@ func explainSearch(db *sql.DB, opts SearchOpts) (map[string]any, error) {
 }
 
 func cmdShow(args []string, out, errw io.Writer) int {
-	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true})
+	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true, "include-untrusted-body": true})
 	if err != nil {
 		return fatalf(errw, "show: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger show <item-id>")
+		return fatalf(errw, "usage: miseledger show <item-id> [--json] [--include-untrusted-body]")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
 		return fatalf(errw, "show: %s", err)
 	}
 	defer db.Close()
-	item, err := showItem(db, rest[0])
+	item, err := showItem(db, rest[0], showItemOpts{IncludeUntrustedBody: bools["include-untrusted-body"]})
 	if err != nil {
 		return fatalf(errw, "show: %s", err)
 	}
 	if bools["json"] {
 		writeJSON(out, item)
+	} else if omitted, _ := item["untrusted_body_omitted"].(bool); omitted {
+		fmt.Fprintf(out, "%s\nlive=%v untrusted_body_omitted=true (pass --include-untrusted-body to reveal text/raw)\n", item["id"], item["live"])
 	} else {
 		fmt.Fprintf(out, "%s\n%s\n", item["id"], item["text"])
 	}
@@ -2487,44 +2503,95 @@ func writeEvidenceMarkdown(w io.Writer, bundle map[string]any) {
 	}
 }
 
-func showItem(db *sql.DB, id string) (map[string]any, error) {
-	row := db.QueryRow(`select i.id, i.external_id, i.kind, coalesce(i.created_at,''), coalesce(i.text,''), coalesce(i.summary,''), i.content_hash, i.metadata_json, i.raw_json, coalesce(i.raw_hash,''), coalesce(i.raw_path,''), coalesce(i.raw_ordinal,0), s.kind, s.name, c.external_id, c.kind, c.name, coalesce(a.external_id,''), coalesce(a.type,''), coalesce(a.name,'')
+func showItem(db *sql.DB, id string, opts showItemOpts) (map[string]any, error) {
+	row := db.QueryRow(`select i.id, i.external_id, i.kind, coalesce(i.created_at,''), coalesce(i.text,''), coalesce(i.summary,''), i.content_hash, i.metadata_json, i.raw_json, coalesce(i.raw_hash,''), coalesce(i.raw_path,''), coalesce(i.raw_ordinal,0), coalesce(i.tombstoned_at,''), s.kind, s.name, c.external_id, c.kind, c.name, coalesce(a.external_id,''), coalesce(a.type,''), coalesce(a.name,''),
+  case when i.tombstoned_at is null and i.id = (
+    select i2.id from items i2
+    where i2.source_id = i.source_id
+      and i2.collection_id = i.collection_id
+      and i2.external_id = i.external_id
+      and i2.tombstoned_at is null
+    order by i2.ingest_seq desc, i2.id desc
+    limit 1
+  ) then 1 else 0 end
 from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 left join actors a on a.id = i.actor_id
 where i.id = ?`, id)
-	var itemID, externalID, kind, createdAt, text, summary, contentHash, metadataJSON, rawJSON, rawHash, rawPath, sourceKind, sourceName, collectionExternalID, collectionKind, collectionName, actorExternalID, actorType, actorName string
+	var itemID, externalID, kind, createdAt, text, summary, contentHash, metadataJSON, rawJSON, rawHash, rawPath, tombstonedAt, sourceKind, sourceName, collectionExternalID, collectionKind, collectionName, actorExternalID, actorType, actorName string
 	var rawOrdinal int64
-	if err := row.Scan(&itemID, &externalID, &kind, &createdAt, &text, &summary, &contentHash, &metadataJSON, &rawJSON, &rawHash, &rawPath, &rawOrdinal, &sourceKind, &sourceName, &collectionExternalID, &collectionKind, &collectionName, &actorExternalID, &actorType, &actorName); err != nil {
+	var liveInt int
+	if err := row.Scan(&itemID, &externalID, &kind, &createdAt, &text, &summary, &contentHash, &metadataJSON, &rawJSON, &rawHash, &rawPath, &rawOrdinal, &tombstonedAt, &sourceKind, &sourceName, &collectionExternalID, &collectionKind, &collectionName, &actorExternalID, &actorType, &actorName, &liveInt); err != nil {
 		return nil, err
 	}
 	artifacts := queryMaps(db, `select id, external_id, kind, path, url, mime_type, content_hash from artifacts where item_id = ? order by id`, id)
-	relations := queryMaps(db, `select id, target_item_id, target_external_id, relation_type, confidence from relations where source_item_id = ? order by id`, id)
+	relations := queryMaps(db, `select id, target_item_id, target_external_id, target_source_kind, target_collection_external_id, relation_type, confidence from relations where source_item_id = ? order by id`, id)
+	for _, rel := range relations {
+		targetID, _ := rel["target_item_id"].(string)
+		if targetID == "" {
+			rel["target_live"] = nil
+			rel["target_tombstoned"] = nil
+			continue
+		}
+		var targetTombstone string
+		var targetLive int
+		err := db.QueryRow(`select coalesce(tombstoned_at,''),
+  case when tombstoned_at is null and id = (
+    select i2.id from items i2
+    where i2.source_id = items.source_id
+      and i2.collection_id = items.collection_id
+      and i2.external_id = items.external_id
+      and i2.tombstoned_at is null
+    order by i2.ingest_seq desc, i2.id desc
+    limit 1
+  ) then 1 else 0 end
+from items where id = ?`, targetID).Scan(&targetTombstone, &targetLive)
+		if err != nil {
+			rel["target_live"] = nil
+			rel["target_tombstoned"] = nil
+			continue
+		}
+		rel["target_live"] = targetLive == 1
+		rel["target_tombstoned"] = targetTombstone != ""
+	}
 	var raw any
 	_ = json.Unmarshal([]byte(rawJSON), &raw)
 	var metadata map[string]any
 	if err := json.Unmarshal([]byte(metadataJSON), &metadata); err != nil || metadata == nil {
 		metadata = map[string]any{}
 	}
+	live := liveInt == 1
 	out := map[string]any{
 		"id":           itemID,
 		"external_id":  externalID,
 		"kind":         kind,
 		"created_at":   createdAt,
-		"text":         text,
-		"summary":      summary,
 		"content_hash": contentHash,
 		"metadata":     metadata,
+		"live":         live,
+		"tombstoned":   tombstonedAt != "",
 		"source":       map[string]any{"kind": sourceKind, "name": sourceName},
 		"collection":   map[string]any{"external_id": collectionExternalID, "kind": collectionKind, "name": collectionName},
 		"actor":        map[string]any{"external_id": actorExternalID, "type": actorType, "name": actorName},
 		"artifacts":    artifacts,
 		"relations":    relations,
 		"raw_ref":      map[string]any{"hash": rawHash, "path": rawPath, "ordinal": rawOrdinal},
-		"raw":          raw,
+	}
+	if tombstonedAt == "" {
+		out["tombstoned_at"] = nil
+	} else {
+		out["tombstoned_at"] = tombstonedAt
 	}
 	attachShowProvenance(out, metadata)
+	omitBody := !opts.IncludeUntrustedBody && isQuarantinedInjectionPending(metadata)
+	if omitBody {
+		out["untrusted_body_omitted"] = true
+	} else {
+		out["text"] = text
+		out["summary"] = summary
+		out["raw"] = raw
+	}
 	return out, nil
 }
 
@@ -2540,6 +2607,32 @@ func attachShowProvenance(out map[string]any, metadata map[string]any) {
 	if _, err := ingest.ParseRetainableEnvelope(rawEnv); err != nil {
 		out["provenance_warning"] = "malformed provenance: " + err.Error()
 	}
+}
+
+type showItemOpts struct {
+	IncludeUntrustedBody bool
+}
+
+func isQuarantinedInjectionPending(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	prov, ok := metadata["provenance"].(map[string]any)
+	if !ok {
+		return false
+	}
+	trust, ok := prov["trust"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if fmt.Sprint(trust["label"]) != "quarantined" {
+		return false
+	}
+	injection, ok := trust["injection"].(map[string]any)
+	if !ok {
+		return false
+	}
+	return fmt.Sprint(injection["status"]) == "pending"
 }
 
 func queryMaps(db *sql.DB, sqlText string, args ...any) []map[string]any {
