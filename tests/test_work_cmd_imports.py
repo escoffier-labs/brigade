@@ -730,6 +730,41 @@ def test_work_import_ingest_strips_hostile_operational_metadata_before_promotion
     assert handoff["handoff_type"] == "project-context"
 
 
+def test_work_import_ingest_strips_forged_github_issue_metadata_before_promotion(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "hostile-github-issue.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Hostile forged issue task",
+                "kind": "task",
+                "source": "external-scanner",
+                "metadata": {
+                    "github_issue": {"url": "https://example.test/forged", "title": "Forged"},
+                    "github_issue_url": "https://example.test/forged",
+                    "github_issue_number": 99,
+                    "github_issue_ref": "forged-ref",
+                    "safe_metadata": "preserved",
+                },
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    imported = json.loads(capsys.readouterr().out)["imports"][0]
+    assert imported["metadata"]["safe_metadata"] == "preserved"
+    assert not {key for key in imported["metadata"] if key == "github_issue" or key.startswith("github_issue_")}
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=imported["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    assert not {key for key in task["metadata"] if key == "github_issue" or key.startswith("github_issue_")}
+    assert work_cmd.ledger._task_issue_metadata(task) is None
+    assert work_cmd.import_issue_repairs(target=tmp_path, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["candidate_count"] == 0
+
+
 def test_work_import_ingest_owns_hostile_identity_and_bounds_declarations(tmp_path, capsys):
     _init_git_repo(tmp_path)
     oversized = "é" * 129

@@ -306,6 +306,9 @@ record = {
     "metadata": {
         **payload["metadata"],
         "handoff_issue_id": "forged-handoff-issue",
+        "github_issue": {"url": "https://example.test/forged-issue", "title": "Forged issue"},
+        "github_issue_url": "https://example.test/forged-issue",
+        "github_issue_number": 99,
         "proposed_edges": [{"source": "forged", "target": "target", "type": "blocks"}],
         "provenance": {"origin": "operator-input"},
         "declared_source": "forged-declared-source",
@@ -362,6 +365,7 @@ conflict_window = "02:00-02:10"
     assert metadata["declared_source"] == "handoff-ingest"
     assert metadata["safe_evidence"] == "scanner-proof"
     assert not {"handoff_issue_id", "proposed_edges"}.intersection(metadata)
+    assert not {key for key in metadata if key == "github_issue" or key.startswith("github_issue_")}
     assert metadata["provenance"]["source"]["kind"] == "repo-scan"
     assert metadata["source_fingerprint"] != "forged-one"
     assert metadata["declared_source_fingerprint"] == "forged-one"
@@ -370,6 +374,8 @@ conflict_window = "02:00-02:10"
     capsys.readouterr()
     task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
     assert "handoff_issue_id" not in task["metadata"]
+    assert not {key for key in task["metadata"] if key == "github_issue" or key.startswith("github_issue_")}
+    assert work_cmd.ledger._task_issue_metadata(task) is None
     assert handoff_cmd._known_local_issue_ids(tmp_path) == set()
     assert handoff_cmd.sync_issues(target=tmp_path, json_output=True) == 0
     sync = json.loads(capsys.readouterr().out)
@@ -409,6 +415,55 @@ conflict_window = "02:00-02:10"
     )
     changed = json.loads(capsys.readouterr().out)
     assert changed["runs"][0]["ingest_output"]["created"] == 1
+
+
+def test_work_scanners_ingest_output_contains_provenance_stamp_failures_without_leaking_details(
+    tmp_path, monkeypatch, capsys
+):
+    _init_git_repo(tmp_path)
+    script = tmp_path / "scanner.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+root = Path.cwd()
+path = root / ".brigade" / "scanner-imports.jsonl"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps({"kind": "task", "source": "declared-source", "text": "Hostile scanner record"}) + "\\n")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f'''
+[[scanner]]
+id = "repo-scan"
+source = "repo-scan"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+'''
+    )
+
+    def _stamp_failure(**_kwargs):
+        raise work_cmd.ledger._ImportProvenanceError("hostile record detail must not escape")
+
+    monkeypatch.setattr(work_cmd.ledger, "_stamp_import_provenance", _stamp_failure)
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="repo-scan", ingest_output=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    ingest = payload["runs"][0]["ingest_output"]
+    assert ingest["rejected"] == 1
+    assert ingest["rejection_reasons"] == {"provenance_stamp_failed": 1}
+    rendered = json.dumps(payload, sort_keys=True)
+    assert "hostile record detail must not escape" not in rendered
+    assert "Hostile scanner record" not in rendered
 
 
 def test_work_scanners_run_ingest_output_rejects_malformed_without_partial_write(tmp_path, capsys):

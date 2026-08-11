@@ -1045,10 +1045,11 @@ def _scanners_run_payload(
             return payload, 2
         for scanner, run, path, records in ingest_payloads:
             scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
-            imported, skipped_records, skipped_dismissed, _rejected = ledger_mod._append_import_records(
+            imported, skipped_records, skipped_dismissed, rejected = ledger_mod._append_import_records(
                 target,
                 records,
                 provenance_source=scanner_source,
+                contain_provenance_errors=True,
                 migrate_untrusted_identities=True,
             )
             run["ingest_output"] = {
@@ -1056,6 +1057,8 @@ def _scanners_run_payload(
                 "created": len(imported),
                 "skipped": len(skipped_records),
                 "dismissed": len(skipped_dismissed),
+                "rejected": len(rejected),
+                "rejection_reasons": {"provenance_stamp_failed": len(rejected)} if rejected else {},
                 "records": len(records),
                 "created_import_ids": [str(item.get("id")) for item in imported if isinstance(item.get("id"), str)],
                 "skipped_source_fingerprints": [

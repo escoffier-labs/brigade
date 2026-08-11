@@ -197,6 +197,28 @@ def test_validate_accepts_ordinary_identity_labels():
 
 
 @pytest.mark.parametrize(
+    "revision",
+    [
+        " abc123 ",
+        "/private/revision",
+        "C:\\private\\revision",
+        "\\\\server\\share\\revision",
+        "file:///private/revision",
+        "release/../revision",
+        "é" * 129,
+    ],
+)
+def test_validate_rejects_unsafe_repository_revisions(revision):
+    env = _valid_envelope()
+    env["repository"]["revision"] = revision
+
+    errors = provenance.validate_envelope(env)
+
+    assert errors
+    assert "repository.revision must be a safe revision label" in errors
+
+
+@pytest.mark.parametrize(
     ("name", "inbound_adapter", "label", "proof_assigned_by", "proof_label", "want_valid"),
     [
         ("inbound reviewed no proof", True, "reviewed", None, None, False),

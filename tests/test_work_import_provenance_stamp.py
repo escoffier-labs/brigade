@@ -660,7 +660,7 @@ def test_batch_ingest_rejects_rooted_or_oversized_repository_revisions_from_vali
         source_producer="external.export",
         origin="external-web",
         repository_id="escoffier-labs/brigade",
-        repository_revision=revision,
+        repository_revision="abc123",
         session_id=None,
         session_harness=None,
         collection_id="external:findings",
@@ -681,7 +681,8 @@ def test_batch_ingest_rejects_rooted_or_oversized_repository_revisions_from_vali
         captured_at="2026-08-01T11:00:00+00:00",
         ingested_at="2026-08-01T12:00:00+00:00",
     )
-    assert provenance.validate_envelope(inbound) == []
+    inbound["repository"]["revision"] = revision
+    assert bool(provenance.validate_envelope(inbound)) is (revision not in {"abc123", "release/2026-08-11"})
 
     imported, skipped, dismissed, rejected = ledger._append_import_records(
         tmp_path,
@@ -701,8 +702,97 @@ def test_batch_ingest_rejects_rooted_or_oversized_repository_revisions_from_vali
     assert skipped == []
     assert dismissed == []
     assert rejected == []
-    expected = revision if revision in {"abc123", "release/2026-08-11"} else None
-    assert _envelope(imported[0])["repository"] == {"id": "escoffier-labs/brigade", "revision": expected}
+    expected = (
+        {"id": "escoffier-labs/brigade", "revision": revision}
+        if revision in {"abc123", "release/2026-08-11"}
+        else {"id": "unknown", "revision": None}
+    )
+    assert _envelope(imported[0])["repository"] == expected
+
+
+@pytest.mark.parametrize("status", ["pending", "dismissed"])
+def test_untrusted_identity_migration_preserves_legacy_decisions_across_source_normalization(
+    tmp_path: Path, status: str
+):
+    record = {
+        "text": "Legacy source-normalized import",
+        "kind": "task",
+        "source": "legacy-declared-source",
+        "metadata": {"source_item_key": "legacy-row", "source_fingerprint": "legacy-fingerprint"},
+    }
+    legacy = ledger._make_import(
+        record["text"],
+        kind=record["kind"],
+        source=record["source"],
+        metadata=record["metadata"],
+    )
+    legacy["status"] = status
+    ledger._write_imports(tmp_path, [legacy])
+
+    incoming = ledger._sanitize_untrusted_import_record(record, importer_source="learning-loop")
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+    )
+
+    assert imported == []
+    assert rejected == []
+    assert len(dismissed if status == "dismissed" else skipped) == 1
+    assert len(ledger._read_imports(tmp_path)) == 1
+
+    changed = ledger._sanitize_untrusted_import_record(
+        {**record, "text": "Changed source-normalized import"}, importer_source="learning-loop"
+    )
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [changed],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert imported[0]["metadata"]["source_fingerprint"] == ledger._untrusted_import_canonical_hash(changed)
+
+
+def test_batch_ingest_rejects_whitespace_identity_metadata_before_persistence(tmp_path: Path):
+    padded = {
+        "repository": {"id": " owner/repo ", "revision": " abc123 "},
+        "session": {"id": " session-1 ", "harness": " codex "},
+        "collection_id": " imported-collection ",
+        "source_item_key": " imported-item ",
+        "source_fingerprint": "stable-fingerprint",
+    }
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Padded local identity metadata",
+                "kind": "task",
+                "source": "repo-fleet",
+                "metadata": padded,
+            }
+        ],
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    metadata = imported[0]["metadata"]
+    assert "repository" not in metadata
+    assert "session" not in metadata
+    assert "collection_id" not in metadata
+    assert "source_item_key" not in metadata
+    env = _envelope(imported[0])
+    assert env["repository"] == {"id": "unknown", "revision": None}
+    assert env["session"] == {"id": None, "harness": None}
+    assert env["collection_id"] == "work-inbox:repo-fleet"
+    assert env["item_id"] == imported[0]["id"]
 
 
 @pytest.mark.parametrize(

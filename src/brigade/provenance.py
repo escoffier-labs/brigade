@@ -22,6 +22,7 @@ TRUST_POLICY_SCHEMA = "brigade.trust-policy.v1"
 TRUST_POLICY_VERSION = 1
 LEGACY_DISPLAY = "UNKNOWN PROVENANCE - legacy item"
 MAX_COMPACT_BYTES = 4096
+MAX_REPOSITORY_REVISION_BYTES = 256
 
 ORIGINS = frozenset({"operator-input", "workspace", "agent-session", "external-service", "external-web", "unknown"})
 MODALITIES = frozenset({"human-written", "model-generated", "tool-output", "external-web", "mixed", "unknown"})
@@ -126,6 +127,15 @@ def is_safe_identity_label(value: Any) -> bool:
     return ".." not in value.split("/")
 
 
+def is_safe_repository_revision(value: Any) -> bool:
+    """Return whether a repository revision is a bounded, non-locator label."""
+    if not isinstance(value, str) or not value or value != value.strip() or "\\" in value:
+        return False
+    if len(value.encode("utf-8")) > MAX_REPOSITORY_REVISION_BYTES or _is_absolute_locator(value):
+        return False
+    return ".." not in value.split("/")
+
+
 def validate_envelope(
     env: Any,
     *,
@@ -179,6 +189,8 @@ def validate_envelope(
         rev = repo.get("revision")
         if rev is not None and not isinstance(rev, str):
             errors.append("repository.revision must be a string or null")
+        elif rev is not None and not is_safe_repository_revision(rev):
+            errors.append("repository.revision must be a safe revision label")
 
     session = env.get("session")
     if session is None:

@@ -1161,6 +1161,7 @@ def _sanitize_untrusted_import_record(record: dict[str, Any], *, importer_source
         if key not in _UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS
         and key not in _UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS
         and not (isinstance(key, str) and key.startswith("declared_"))
+        and not (isinstance(key, str) and (key == "github_issue" or key.startswith("github_issue_")))
     }
     canonical_hash = _untrusted_import_canonical_hash(record)
     declared_source = _bound_import_identity(record.get("source"))
@@ -1191,13 +1192,12 @@ def _has_canonical_untrusted_import_identity(record: dict[str, Any]) -> bool:
     )
 
 
-def _import_content_identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
+def _import_content_identity(item: dict[str, Any]) -> tuple[str, str] | None:
     """Return the immutable-content identity used to migrate sanitized imports."""
-    source = item.get("source")
     kind = item.get("kind")
-    if not isinstance(source, str) or not source or not isinstance(kind, str) or not kind:
+    if not isinstance(kind, str) or not kind:
         return None
-    return source, kind, _untrusted_import_canonical_hash(item)
+    return kind, _untrusted_import_canonical_hash(item)
 
 
 # Central envelope stamps land under metadata.provenance after identity is fixed.
@@ -1282,6 +1282,8 @@ def _bound_import_identity(value: object, *, max_len: int = _IMPORT_IDENTITY_MAX
 
 
 def _safe_import_identity(value: object, *, max_len: int = _IMPORT_IDENTITY_MAX_LEN) -> str | None:
+    if not isinstance(value, str) or value != value.strip():
+        return None
     cleaned = _bound_import_identity(value, max_len=max_len)
     if cleaned is None or not provenance.is_safe_identity_label(cleaned):
         return None
@@ -1311,12 +1313,7 @@ def _safe_repository_id(value: object) -> str | None:
 
 def _safe_repository_revision(value: object) -> str | None:
     """Return a bounded revision label, never a platform-rooted locator."""
-    cleaned = _bound_import_identity(value)
-    if cleaned is None or "\\" in cleaned or provenance._is_absolute_locator(cleaned):
-        return None
-    if ".." in cleaned.replace("\\", "/").split("/"):
-        return None
-    return cleaned
+    return value if provenance.is_safe_repository_revision(value) else None
 
 
 def _import_repository_fields(metadata: dict[str, Any]) -> tuple[str, str | None]:
@@ -1378,6 +1375,8 @@ def _sanitize_import_identity_metadata(metadata: dict[str, Any]) -> dict[str, An
     for key in ("repository_id", "repo_id"):
         if key in sanitized and _safe_repository_id(sanitized[key]) is None:
             sanitized.pop(key)
+    if "repository_revision" in sanitized and _safe_repository_revision(sanitized["repository_revision"]) is None:
+        sanitized.pop("repository_revision")
     repository = sanitized.get("repository")
     if isinstance(repository, dict):
         repository_id = _safe_repository_id(repository.get("id"))
@@ -1408,7 +1407,10 @@ def _sanitize_import_identity_metadata(metadata: dict[str, Any]) -> dict[str, An
         for key in ("id", "harness"):
             if key in cleaned_session and _safe_import_identity(cleaned_session[key]) is None:
                 cleaned_session.pop(key)
-        sanitized["session"] = cleaned_session
+        if cleaned_session:
+            sanitized["session"] = cleaned_session
+        else:
+            sanitized.pop("session", None)
     return sanitized
 
 
@@ -1659,7 +1661,7 @@ def _append_import_records(
         if isinstance(item, dict) and item.get("status", "pending") in {"pending", "promoted"}
     }
     existing_by_source: dict[tuple[str, str, str], dict[str, Any]] = {}
-    legacy_by_content: dict[tuple[str, str, str], dict[str, Any]] = {}
+    legacy_by_content: dict[tuple[str, str], dict[str, Any]] = {}
     for item in imports:
         if not isinstance(item, dict):
             continue
