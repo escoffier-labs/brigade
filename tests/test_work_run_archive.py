@@ -314,8 +314,16 @@ def _golden_case(name: str) -> dict:
     raise KeyError(name)
 
 
-def _write_worker_stream(run_dir: Path, worker: str, events: list[dict]) -> Path:
+def _write_worker_stream(
+    run_dir: Path,
+    worker: str,
+    events: list[dict],
+    *,
+    nested_under: str | None = None,
+) -> Path:
     events_dir = run_dir / "events"
+    if nested_under is not None:
+        events_dir = events_dir / nested_under
     events_dir.mkdir(parents=True, exist_ok=True)
     path = events_dir / f"{worker}.jsonl"
     path.write_text("".join(json.dumps(event, sort_keys=True) + "\n" for event in events), encoding="utf-8")
@@ -546,3 +554,130 @@ def test_imported_scrubbed_sidecar_is_admissible_scrubbed_only(tmp_path: Path):
             run_dir / "events" / "coder.jsonl",
             consumer="run_audit",
         )
+
+
+def test_export_discovers_nested_worker_stream_and_writes_scrubbed_sidecar(tmp_path: Path):
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
+    case = _golden_case("auto_declined_with_secrets")
+    raw_path = _write_worker_stream(run_dir, "coder", [case["raw"]], nested_under="nested")
+    raw_text = raw_path.read_text(encoding="utf-8")
+    assert "Bearer " in raw_text
+    assert "/home/example-user" in raw_text
+
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+
+    # Source nested raw remains local-only / unclassified.
+    assert raw_path.is_file()
+    assert worker_events.inspect_stream_file(raw_path).status == worker_events.STATUS_UNCLASSIFIED
+
+    assert not (archive / "payload" / "events" / "nested" / "coder.jsonl").exists()
+    scrubbed_path = archive / "payload" / "events" / "nested" / "coder.scrubbed.json"
+    assert scrubbed_path.is_file()
+    blob = scrubbed_path.read_text(encoding="utf-8")
+    for snippet in (
+        "Bearer ",
+        "sk-live-EXAMPLESECRETVALUE99",
+        "/home/example-user",
+        "OPENAI_API_KEY",
+        "raw user prompt",
+    ):
+        assert snippet not in blob, snippet
+    scrubbed = json.loads(blob)
+    assert scrubbed["events"][0]["source_digest"] == case["source_digest"]
+    assert scrubbed["events"][0]["method"] == case["raw"]["method"]
+
+    entry = next(
+        item
+        for item in json.loads((archive / "work-run.json").read_text(encoding="utf-8"))["files"]
+        if item["path"] == "events/nested/coder.scrubbed.json"
+    )
+    assert entry["role"] == "artifact"
+    assert entry["media_type"] == worker_events.SCRUBBED_MEDIA_TYPE
+    assert entry["privacy_class"] == "redacted"
+    assert entry["nested_schema"] == worker_events.STREAM_SCHEMA
+
+
+def test_export_refuses_nested_unknown_method_with_secret_marker(tmp_path: Path):
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
+    _write_worker_stream(
+        run_dir,
+        "coder",
+        [
+            {
+                "jsonrpc": "2.0",
+                "method": "provider/undocumentedHook",
+                "params": {
+                    "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
+                    "cwd": "/home/example-user/project",
+                },
+            }
+        ],
+        nested_under="nested",
+    )
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.export_run(run_dir, tmp_path / "archive")
+    assert excinfo.value.category == "export-privacy"
+    message = str(excinfo.value)
+    assert len(message) <= worker_events.MAX_DIAGNOSTIC_LEN
+    assert "events/nested/coder.jsonl" in message or "nested/coder.jsonl" in message
+    assert "unknown" in message.lower() or "provider/undocumentedHook" in message
+    assert not (tmp_path / "archive").exists()
+    assert (run_dir / "events" / "nested" / "coder.jsonl").is_file()
+
+
+def test_validate_and_import_refuse_nested_raw_worker_stream_smuggling(tmp_path: Path):
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+
+    smuggled = archive / "payload" / "events" / "nested" / "coder.jsonl"
+    smuggled.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "provider/undocumentedHook",
+        "params": {
+            "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
+            "cwd": "/home/example-user/project",
+            "prompt": "private nested content",
+        },
+    }
+    smuggled.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    raw = smuggled.read_bytes()
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    manifest["files"].append(
+        {
+            "path": "events/nested/coder.jsonl",
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "byte_size": len(raw),
+            "role": "support",
+            "media_type": "application/x-ndjson",
+            "privacy_class": "public",
+        }
+    )
+    manifest["files"].sort(key=lambda row: row["path"])
+    (archive / "work-run.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(WorkRunArchiveError) as validate_exc:
+        work_run_archive.validate_archive(archive)
+    assert validate_exc.value.category == "export-privacy"
+    assert "raw worker stream" in str(validate_exc.value)
+    assert "nested" in str(validate_exc.value)
+
+    with pytest.raises(WorkRunArchiveError) as import_exc:
+        work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported-runs")
+    assert import_exc.value.category == "export-privacy"
+    assert "raw worker stream" in str(import_exc.value)
+
+
+def test_list_worker_event_streams_is_recursive_under_events(tmp_path: Path):
+    events = tmp_path / "events"
+    (events / "nested" / "deep").mkdir(parents=True)
+    (events / "lifecycle.jsonl").write_text("{}\n", encoding="utf-8")
+    (events / "coder.jsonl").write_text("{}\n", encoding="utf-8")
+    (events / "nested" / "deep" / "helper.jsonl").write_text("{}\n", encoding="utf-8")
+    found = [path.relative_to(events).as_posix() for path in worker_events.list_worker_event_streams(events)]
+    assert found == ["coder.jsonl", "nested/deep/helper.jsonl"]
+    assert worker_events.is_raw_worker_event_stream_rel("events/nested/deep/helper.jsonl")
+    assert worker_events.is_scrubbed_worker_event_stream_rel("events/nested/deep/helper.scrubbed.json")
+    assert not worker_events.is_raw_worker_event_stream_rel("events/lifecycle.jsonl")

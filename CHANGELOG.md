@@ -29,9 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `brigade runs export` / `validate-archive` enforce the #592 worker-event
-  privacy boundary: raw `events/<worker>.jsonl` streams stay local-only and are
+  privacy boundary: raw worker-like JSONL anywhere under `events/` (including
+  nested paths such as `events/nested/coder.jsonl`) stays local-only and is
   never classified as public support data. Export writes distinct scrubbed
-  sidecars (`events/<worker>.scrubbed.json` with scrubbed media type,
+  sidecars (`events/**/<worker>.scrubbed.json` with scrubbed media type,
   `role=artifact`, `privacy_class=redacted`) via the existing fail-closed
   scrubber, or refuses the export with a bounded diagnostic when any
   method/field/item is unknown or unsafely classified. Source runs remain

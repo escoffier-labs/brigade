@@ -46,12 +46,14 @@ Library entry points live in `brigade.worker_events` (`scrub_event`,
 
 ## Export / archive boundary
 
-`brigade runs export` never copies raw `events/<worker>.jsonl` into a
-`brigade.work-run` archive as public support data. On the export staging tree
-only:
+`brigade runs export` never copies raw worker-like JSONL under `events/` into a
+`brigade.work-run` archive as public support data. Discovery is recursive: any
+`events/**/*.jsonl` except the top-level lifecycle journal is a worker-stream
+candidate (including nested paths such as `events/nested/coder.jsonl`). On the
+export staging tree only:
 
 1. each raw worker stream is scrubbed with the fail-closed scrubber
-2. a distinct sidecar `events/<worker>.scrubbed.json` is written
+2. a distinct sidecar `events/**/<worker>.scrubbed.json` is written beside it
 3. the raw NDJSON is removed from the export copy
 4. the manifest classifies the sidecar as
    `role=artifact`, `privacy_class=redacted`,
@@ -60,8 +62,8 @@ only:
 
 If any method, field, or item is unknown or unsafely classified, export refuses
 with a bounded `export-privacy` diagnostic and leaves the source run unchanged.
-`validate-archive` / import also refuse raw worker streams and misclassified
-scrubbed sidecars. Local raw streams remain available under
+`validate-archive` / import also refuse nested raw worker streams and
+misclassified scrubbed sidecars. Local raw streams remain available under
 `policy=local-only` for resume/salvage; that policy is never implied by export.
 
 ## Raw capture vs scrub matrix
@@ -136,7 +138,7 @@ Golden adversarial fixtures:
 | Order, stable IDs, safe operation names, schema versions, source digests preserved | scrubbed stream document + golden stream case + export sidecar |
 | Distinct raw/scrubbed media types and artifact classes | `media_types()` / `artifact_classes()` + archive manifest classification |
 | Audit/replay reject raw unless `local-only` | `load_stream_for_consumer`, `run_audit.reject_raw_worker_stream_evidence` |
-| Export never ships raw streams as public support | `project_worker_streams_for_export`, `_classify_path`, `validate_archive` |
+| Export never ships raw streams as public support | `project_worker_streams_for_export`, recursive `list_worker_event_streams`, `_classify_path`, `validate_archive` / import |
 | Adversarial goldens for the supported transport | fixture cases for every matrix item type |
 | Legacy streams inspectable and unclassified until scrubbed | `inspect_stream_file` (source run unchanged by export) |
 
