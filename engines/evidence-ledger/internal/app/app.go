@@ -193,6 +193,10 @@ type Status struct {
 	Capability     map[string]any         `json:"capability,omitempty"`
 }
 
+// statusSourceCountSQL counts joined non-null items.source_id so SQLite can
+// satisfy the LEFT JOIN with COVERING INDEX idx_items_source_external.
+const statusSourceCountSQL = `select s.kind, count(i.source_id) from sources s left join items i on i.source_id = s.id group by s.kind order by s.kind`
+
 func collectStatus(db *sql.DB, paths Paths) (Status, error) {
 	version, err := archive.UserVersion(db)
 	if err != nil {
@@ -207,7 +211,7 @@ func collectStatus(db *sql.DB, paths Paths) (Status, error) {
 	if last.Valid {
 		st.LastImport = &last.String
 	}
-	rows, err := db.Query(`select s.kind, count(i.id) from sources s left join items i on i.source_id = s.id group by s.kind order by s.kind`)
+	rows, err := db.Query(statusSourceCountSQL)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
