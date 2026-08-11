@@ -1103,7 +1103,9 @@ class BudgetCoordinator:
         """
         if self.declaration.wall_clock_seconds is None:
             return
-        wall_only = replace(self._projection_unlocked(), declaration=replace(self.declaration, worker_dispatch_count=None))
+        wall_only = replace(
+            self._projection_unlocked(), declaration=replace(self.declaration, worker_dispatch_count=None)
+        )
         decision = evaluate_dispatch_reservation(
             wall_only,
             request_id=request_id,
