@@ -7,8 +7,9 @@ verification outcome separately from model/step completion. Budget
 *enforcement* is owned by #593; this module owns declaration and recording.
 Optional ``wall_clock_seconds`` and ``worker_dispatch_count`` are the first-slice
 enforceable ceilings. When unset, ``latency_seconds`` maps to wall-clock for
-enforcement. ``token_budget`` remains observed-only until an adapter exposes an
-enforceable reservation boundary.
+enforcement. Aggregate ``token_budget`` remains observed-only (receipt
+``tokens_used``) and is never an input-token alias. Optional ``input_tokens`` /
+``output_tokens`` declare explicit split observed caps when present.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ class VerificationBudget:
     token_budget: int | None = None
     wall_clock_seconds: int | None = None
     worker_dispatch_count: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,10 @@ class VerificationContract:
             budget["wall_clock_seconds"] = self.budget.wall_clock_seconds
         if self.budget.worker_dispatch_count is not None:
             budget["worker_dispatch_count"] = self.budget.worker_dispatch_count
+        if self.budget.input_tokens is not None:
+            budget["input_tokens"] = self.budget.input_tokens
+        if self.budget.output_tokens is not None:
+            budget["output_tokens"] = self.budget.output_tokens
         return {
             "schema": VERIFICATION_CONTRACT_SCHEMA,
             "schema_version": VERIFICATION_CONTRACT_SCHEMA_VERSION,
@@ -202,6 +209,10 @@ def validate_contract_payload(
             _positive_int(budget.get("wall_clock_seconds"), field="budget.wall_clock_seconds", errors=errors)
         if "worker_dispatch_count" in budget:
             _positive_int(budget.get("worker_dispatch_count"), field="budget.worker_dispatch_count", errors=errors)
+        if "input_tokens" in budget:
+            _positive_int(budget.get("input_tokens"), field="budget.input_tokens", errors=errors)
+        if "output_tokens" in budget:
+            _positive_int(budget.get("output_tokens"), field="budget.output_tokens", errors=errors)
 
     return errors
 
@@ -300,6 +311,8 @@ def contract_from_payload(
     token_budget = budget_raw.get("token_budget")
     wall_clock = budget_raw.get("wall_clock_seconds")
     dispatch_count = budget_raw.get("worker_dispatch_count")
+    input_tokens = budget_raw.get("input_tokens")
+    output_tokens = budget_raw.get("output_tokens")
     budget = VerificationBudget(
         latency_seconds=int(budget_raw["latency_seconds"]),
         token_budget=int(token_budget)
@@ -310,6 +323,12 @@ def contract_from_payload(
         else None,
         worker_dispatch_count=int(dispatch_count)
         if isinstance(dispatch_count, int) and not isinstance(dispatch_count, bool)
+        else None,
+        input_tokens=int(input_tokens)
+        if isinstance(input_tokens, int) and not isinstance(input_tokens, bool)
+        else None,
+        output_tokens=int(output_tokens)
+        if isinstance(output_tokens, int) and not isinstance(output_tokens, bool)
         else None,
     )
     return VerificationContract(verifier=verifier, rollback=rollback, budget=budget)
@@ -388,6 +407,10 @@ def budget_use_payload(
         "tokens_used": tokens_used,
         "exhausted": exhausted,
     }
+    if contract.budget.input_tokens is not None:
+        payload["input_tokens_budget"] = contract.budget.input_tokens
+    if contract.budget.output_tokens is not None:
+        payload["output_tokens_budget"] = contract.budget.output_tokens
     return payload
 
 

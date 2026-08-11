@@ -63,6 +63,34 @@ def test_budget_use_and_verification_separate_from_model_completion():
     assert set(verification).isdisjoint({"model_status"}) or True
 
 
+def test_optional_input_output_token_fields_parse_and_report_without_aliasing_token_budget():
+    payload = _valid_contract(
+        budget={
+            "latency_seconds": 30,
+            "token_budget": 100,
+            "input_tokens": 40,
+            "output_tokens": 60,
+            "wall_clock_seconds": 90,
+            "worker_dispatch_count": 2,
+        }
+    )
+    assert verification_contract.validate_contract_payload(payload) == []
+    contract = verification_contract.contract_from_payload(payload)
+    assert contract.budget.token_budget == 100
+    assert contract.budget.input_tokens == 40
+    assert contract.budget.output_tokens == 60
+    round_trip = contract.to_payload()["budget"]
+    assert round_trip["token_budget"] == 100
+    assert round_trip["input_tokens"] == 40
+    assert round_trip["output_tokens"] == 60
+    use = verification_contract.budget_use_payload(contract, latency_seconds_used=1.0, tokens_used=50)
+    assert use["token_budget"] == 100
+    assert use["tokens_used"] == 50
+    assert use["input_tokens_budget"] == 40
+    assert use["output_tokens_budget"] == 60
+    assert "input_tokens" not in use
+
+
 def test_runbook_plan_blocks_consequential_without_contract(tmp_path, capsys):
     runbook = tmp_path / "runbook.json"
     runbook.write_text(

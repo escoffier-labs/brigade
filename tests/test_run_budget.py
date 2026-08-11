@@ -356,6 +356,18 @@ def test_legacy_token_budget_is_aggregate_not_input_only():
     assert split.ceiling("input_tokens") == 40
     assert split.ceiling("output_tokens") == 60
 
+    bridged = run_budget.declaration_from_verification_budget(
+        {
+            "latency_seconds": 30,
+            "token_budget": 100,
+            "input_tokens": 40,
+            "output_tokens": 60,
+        }
+    )
+    assert bridged.token_budget == 100
+    assert bridged.observed_caps.get("input_tokens") == 40
+    assert bridged.observed_caps.get("output_tokens") == 60
+
     contract = verification_contract.VerificationContract(
         verifier=verification_contract.VerificationVerifier(source="command", command="true"),
         rollback=verification_contract.VerificationRollback(policy="none"),
@@ -603,16 +615,21 @@ def test_stable_reservation_identity_is_idempotent_across_retry_and_restart():
     restarted.reload(recorded)  # no dispatch.requested yet
     assert restarted.projection.used["worker_dispatch_count"] == 0
 
+    attempts = {"n": 0}
+
+    def allocate() -> int:
+        attempts["n"] += 1
+        return attempts["n"]
+
     after_restart = restarted.reserve_and_record_dispatch(
-        request_id=request_id,
         seat="coder",
-        attempt=1,
-        record_requested=lambda: 1,
+        allocate_attempt=allocate,
+        record_requested=lambda attempt: attempt,
     )
     assert after_restart == 1
     assert restarted.projection.used["worker_dispatch_count"] == 1
 
-    # Second restart sees durable requested and treats the identity as already reserved.
+    # Second restart sees durable requested and reclaims the open identity once.
     final = run_budget.BudgetCoordinator(
         declaration=declaration,
         append_event=append_event,
@@ -628,13 +645,71 @@ def test_stable_reservation_identity_is_idempotent_across_retry_and_restart():
     # Crash after durable requested must not mint a second reservation for the
     # still-open seat/attempt when reserve_and_record_dispatch is replayed.
     again = final.reserve_and_record_dispatch(
-        request_id=request_id,
         seat="coder",
-        attempt=1,
-        record_requested=lambda: (_ for _ in ()).throw(AssertionError("must not re-record")),
+        allocate_attempt=lambda: (_ for _ in ()).throw(AssertionError("must not allocate")),
+        record_requested=lambda attempt: (_ for _ in ()).throw(AssertionError("must not re-record")),
     )
     assert again == 1
     assert final.projection.used["worker_dispatch_count"] == 1
+
+
+def test_parallel_same_seat_dispatch_count_one_launches_once():
+    """Concurrent same-seat callers with count=1 launch exactly one reservation."""
+    import threading
+
+    recorded: list[dict] = []
+    lock = threading.Lock()
+    launches: list[int] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        with lock:
+            recorded.append({"event_type": event_type, "payload": dict(payload), "idempotency_key": idempotency_key})
+        return recorded[-1]
+
+    declaration = run_budget.RunBudgetDeclaration(worker_dispatch_count=1)
+    started = datetime(2026, 8, 10, 21, 0, 0, tzinfo=timezone.utc)
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=declaration,
+        append_event=append_event,
+        clock=lambda: started + timedelta(seconds=1),
+    )
+    coordinator.set_started_at(started)
+    counter = {"n": 0}
+    counter_lock = threading.Lock()
+
+    def allocate() -> int:
+        with counter_lock:
+            counter["n"] += 1
+            return counter["n"]
+
+    results: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            attempt = coordinator.reserve_and_record_dispatch(
+                seat="coder",
+                allocate_attempt=allocate,
+                record_requested=lambda attempt: attempt,
+            )
+            with lock:
+                launches.append(attempt if attempt is not None else -1)
+            results.append("ok")
+        except run_budget.BudgetPolicyError:
+            results.append("denied")
+
+    threads = [threading.Thread(target=worker), threading.Thread(target=worker)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert results.count("ok") == 1
+    assert results.count("denied") == 1
+    assert launches == [1]
+    assert coordinator.projection.used["worker_dispatch_count"] == 1
+    assert sum(1 for event in coordinator._events_cache if event.get("event_type") == "run.dispatch.requested") == 1
 
 
 def test_reserve_and_record_rolls_back_when_durable_write_fails():
@@ -652,22 +727,19 @@ def test_reserve_and_record_rolls_back_when_durable_write_fails():
         clock=lambda: started + timedelta(seconds=1),
     )
     coordinator.set_started_at(started)
-    request_id = run_budget.dispatch_reservation_request_id("coder", 1)
 
     with pytest.raises(OSError, match="disk full"):
         coordinator.reserve_and_record_dispatch(
-            request_id=request_id,
             seat="coder",
-            attempt=1,
-            record_requested=lambda: (_ for _ in ()).throw(OSError("disk full")),
+            allocate_attempt=lambda: 1,
+            record_requested=lambda attempt: (_ for _ in ()).throw(OSError("disk full")),
         )
     assert coordinator.projection.used.get("worker_dispatch_count", 0) == 0
 
     recorded_attempt = coordinator.reserve_and_record_dispatch(
-        request_id=request_id,
         seat="coder",
-        attempt=1,
-        record_requested=lambda: 1,
+        allocate_attempt=lambda: 1,
+        record_requested=lambda attempt: attempt,
     )
     assert recorded_attempt == 1
     assert coordinator.projection.used["worker_dispatch_count"] == 1

@@ -86,7 +86,7 @@ explicit command and use `source: manifest_checks` (the manifest's own checks).
 | `schema_version` | integer | `1` |
 | `verifier` | object | `{source, command?\|argv?\|manifest_id?}` with `source` in `command`, `argv`, `manifest_id`, `manifest_checks` |
 | `rollback` | object | `{policy, command?}` with `policy` in `none`, `manual`, `command`, `git-restore` |
-| `budget` | object | `{latency_seconds, token_budget?, wall_clock_seconds?, worker_dispatch_count?}` — #500 declaration; #593 enforces wall-clock and worker-dispatch ceilings before new work starts. Aggregate `token_budget` (receipt `tokens_used`) stays observed and is not reinterpreted as `input_tokens`; explicit input/output token caps use separate observed dimensions when declared. When `wall_clock_seconds` is unset, `latency_seconds` maps to the wall-clock ceiling. |
+| `budget` | object | `{latency_seconds, token_budget?, wall_clock_seconds?, worker_dispatch_count?, input_tokens?, output_tokens?}` — #500 declaration; #593 enforces wall-clock and worker-dispatch ceilings before new work starts. Aggregate `token_budget` (receipt `tokens_used`) stays observed and is not reinterpreted as `input_tokens`. Optional `input_tokens` / `output_tokens` declare explicit split observed caps. When `wall_clock_seconds` is unset, `latency_seconds` maps to the wall-clock ceiling. |
 
 **`budget_use` object**
 
@@ -94,8 +94,10 @@ explicit command and use `source: manifest_checks` (the manifest's own checks).
 | --- | --- | --- |
 | `latency_seconds_budget` | integer | Declared latency ceiling |
 | `latency_seconds_used` | number \| null | Observed wall time |
-| `token_budget` | integer \| null | Declared token ceiling when set |
-| `tokens_used` | integer \| null | Observed tokens when an adapter reports them |
+| `token_budget` | integer \| null | Declared aggregate token ceiling when set |
+| `tokens_used` | integer \| null | Observed aggregate tokens when an adapter reports them |
+| `input_tokens_budget` | integer | Declared input-token cap when set |
+| `output_tokens_budget` | integer | Declared output-token cap when set |
 | `exhausted` | boolean | Observation only; not an enforcement gate |
 
 **`subject_binding` object** (additive, manifest-selected runs)

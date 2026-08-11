@@ -336,7 +336,8 @@ def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> Ru
     existing contracts become enforceable without a template rewrite.
     ``token_budget`` stays observed-only and aggregate (receipt ``tokens_used``);
     it is never reinterpreted as ``input_tokens``. Explicit ``input_tokens`` /
-    ``output_tokens`` caps come only from those observed fields.
+    ``output_tokens`` caps bridge into ``observed_caps`` only when those fields
+    are set on the verification budget.
     """
     if not isinstance(budget, Mapping):
         return RunBudgetDeclaration()
@@ -344,6 +345,11 @@ def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> Ru
     if wall is None:
         wall = budget.get("latency_seconds")
     dispatch = budget.get("worker_dispatch_count")
+    observed: dict[str, int | None] = {}
+    for key in ("input_tokens", "output_tokens"):
+        value = budget.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            observed[key] = value
     token = budget.get("token_budget")
     token_budget = token if isinstance(token, int) and not isinstance(token, bool) and token >= 0 else None
     payload: dict[str, Any] = {
@@ -355,7 +361,7 @@ def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> Ru
                 dispatch if isinstance(dispatch, int) and not isinstance(dispatch, bool) else None
             ),
         },
-        "observed": {},
+        "observed": observed,
         "threshold_pct": DEFAULT_THRESHOLD_PCT,
     }
     if token_budget is not None:
@@ -929,6 +935,10 @@ class BudgetCoordinator:
     _events_cache: list[Any] = field(default_factory=list)
     _pending_dispatch_units: int = 0
     _reserved_request_ids: set[str] = field(default_factory=set)
+    # Identities already handed to a caller in this process for external launch.
+    # Distinct from ``_reserved_request_ids`` so restart can reclaim a durable
+    # pending identity once, while concurrent same-seat callers allocate anew.
+    _launch_claims: set[str] = field(default_factory=set)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
@@ -943,6 +953,7 @@ class BudgetCoordinator:
             self._projection = project_budget_state(self.declaration, events)
             # Journal dispatch.requested facts supersede in-process reservations.
             self._pending_dispatch_units = 0
+            self._launch_claims = set()
             reserved: set[str] = set()
             for event in events:
                 event_type = _event_type(event)
@@ -1045,36 +1056,85 @@ class BudgetCoordinator:
                 return True
         return False
 
+    def _open_pending_attempt_unlocked(self, seat: str) -> int | None:
+        """Return the oldest open requested attempt for ``seat``, if any."""
+        pending: list[int] = []
+        closed: set[int] = set()
+        for event in self._events_cache:
+            event_type = _event_type(event)
+            payload = _event_payload(event)
+            if payload.get("seat") != seat:
+                continue
+            attempt = payload.get("attempt")
+            if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+                continue
+            if event_type == "run.dispatch.requested":
+                pending.append(attempt)
+            elif event_type in {"run.dispatch.observed", "run.dispatch.completed", "run.dispatch.failed"}:
+                closed.add(attempt)
+        for attempt in pending:
+            if attempt not in closed:
+                return attempt
+        return None
+
+    def _max_attempt_unlocked(self, seat: str) -> int:
+        attempts: list[int] = []
+        for event in self._events_cache:
+            payload = _event_payload(event)
+            if payload.get("seat") != seat:
+                continue
+            attempt = payload.get("attempt")
+            if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0:
+                attempts.append(attempt)
+        return max(attempts, default=0)
+
     def reserve_and_record_dispatch(
         self,
         *,
-        request_id: str,
         seat: str,
-        attempt: int,
-        record_requested: Callable[[], int | None],
+        allocate_attempt: Callable[[], int],
+        record_requested: Callable[[int], int | None],
     ) -> int | None:
-        """Reserve then durably record ``run.dispatch.requested`` before unlock.
+        """Atomically allocate attempt, reserve, and durably record requested.
 
-        Parallel same-stage workers serialize here. A retry with the same stable
-        ``request_id`` does not double-reserve. The dispatch.requested fact is
-        written before this method returns so external transport cannot start
-        without a durable reservation/request pair. If the durable write fails,
-        the in-process reservation is rolled back so a later retry can commit.
+        Attempt allocation and reservation share one lock so parallel same-seat
+        callers cannot both claim attempt 1. A durable open pending identity is
+        reclaimed once per process (crash/retry); concurrent callers then
+        allocate a fresh attempt. The durable ``run.dispatch.requested`` fact is
+        written before unlock so external transport cannot start without it.
         """
+        if not isinstance(seat, str) or not seat:
+            raise BudgetError("seat must be a non-empty string", code="reservation_invalid")
         with self._lock:
-            if self._has_durable_dispatch_requested(seat, attempt):
-                self._reserved_request_ids.add(request_id)
-                return attempt
+            pending = self._open_pending_attempt_unlocked(seat)
+            if pending is not None:
+                pending_id = dispatch_reservation_request_id(seat, pending)
+                if pending_id not in self._launch_claims and self._has_durable_dispatch_requested(seat, pending):
+                    # Restart/recovery: reclaim the unfinished durable identity once.
+                    self._launch_claims.add(pending_id)
+                    self._reserved_request_ids.add(pending_id)
+                    return pending
+
+            attempt = allocate_attempt()
+            if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+                raise BudgetError("attempt must be a positive integer", code="reservation_invalid")
+            # Guard against a stale allocator that reuses an already-claimed id.
+            while True:
+                request_id = dispatch_reservation_request_id(seat, attempt)
+                if request_id not in self._launch_claims and not self._has_durable_dispatch_requested(seat, attempt):
+                    break
+                attempt = max(attempt, self._max_attempt_unlocked(seat)) + 1
+
+            request_id = dispatch_reservation_request_id(seat, attempt)
             decision = self._reserve_unlocked(request_id=request_id, units=1)
             try:
-                recorded_attempt = record_requested()
+                recorded_attempt = record_requested(attempt)
             except Exception:
                 if not decision.replayed:
                     self._unreserve_unlocked(request_id=request_id, units=1)
                 raise
             if recorded_attempt is None:
                 recorded_attempt = attempt
-            # Durable requested supersedes the in-process pending unit.
             if self._pending_dispatch_units > 0:
                 self._pending_dispatch_units -= 1
             self._events_cache.append(
@@ -1084,7 +1144,9 @@ class BudgetCoordinator:
                 }
             )
             self._projection = project_budget_state(self.declaration, self._events_cache)
-            self._reserved_request_ids.add(dispatch_reservation_request_id(seat, recorded_attempt))
+            recorded_id = dispatch_reservation_request_id(seat, recorded_attempt)
+            self._reserved_request_ids.add(recorded_id)
+            self._launch_claims.add(recorded_id)
             return recorded_attempt
 
     def request_cancel(

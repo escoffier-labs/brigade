@@ -59,7 +59,9 @@
         "latency_seconds": {"type": "integer", "minimum": 1},
         "token_budget": {"type": "integer", "minimum": 0},
         "wall_clock_seconds": {"type": "integer", "minimum": 1},
-        "worker_dispatch_count": {"type": "integer", "minimum": 1}
+        "worker_dispatch_count": {"type": "integer", "minimum": 1},
+        "input_tokens": {"type": "integer", "minimum": 1},
+        "output_tokens": {"type": "integer", "minimum": 1}
       }
     }
   }

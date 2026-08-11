@@ -2960,6 +2960,8 @@ def _run_payload(
     health: dict[str, object] | None = None,
     worker_failure_summary: dict[str, object] | None = None,
     transport_routing: dict[str, object] | None = None,
+    verification_contract_payload: Mapping[str, Any] | None = None,
+    run_budget_payload: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": receipt_schema.RUN_RECEIPT_SCHEMA,
@@ -3053,6 +3055,10 @@ def _run_payload(
             payload["control_socket"] = control_transport.path
     elif control_socket is not None:
         payload["control_socket"] = str(control_socket)
+    if verification_contract_payload is not None:
+        payload["verification_contract"] = dict(verification_contract_payload)
+    if run_budget_payload is not None:
+        payload["run_budget"] = dict(run_budget_payload)
     return seat_health_policy.apply_health_fields(
         payload,
         health=health,
@@ -3091,6 +3097,8 @@ def record_run_start(
     codex_transport: str | None = None,
     started_at: datetime | None = None,
     scheduler: str | None = None,
+    verification_contract_payload: Mapping[str, Any] | None = None,
+    run_budget_payload: Mapping[str, Any] | None = None,
 ) -> bool:
     """Write the minimal typed receipt needed before optional or blocking work.
 
@@ -3107,6 +3115,8 @@ def record_run_start(
     run_json_exists = run_json.is_file()
     existing_lifecycle_requested = False
     existing_authority_requested = False
+    existing_verification_contract: dict[str, Any] | None = None
+    existing_run_budget: dict[str, Any] | None = None
     if run_json_exists:
         try:
             existing = json.loads(run_json.read_text(encoding="utf-8"))
@@ -3126,6 +3136,10 @@ def record_run_start(
             existing_lifecycle_requested = True
         if existing.get(_AUTHORITY_REQUEST_FIELD) is True:
             existing_authority_requested = True
+        if isinstance(existing.get("verification_contract"), dict):
+            existing_verification_contract = dict(existing["verification_contract"])
+        if isinstance(existing.get("run_budget"), dict):
+            existing_run_budget = dict(existing["run_budget"])
     # Every new run carries both durable request fields. Existing runs enroll
     # only from their stored run.json fields, so legacy snapshot-only runs stay
     # untouched. An authority request implies lifecycle journaling even when an
@@ -3133,6 +3147,12 @@ def record_run_start(
     new_run = not run_json_exists
     lifecycle_requested = existing_lifecycle_requested or existing_authority_requested or new_run
     authority_requested = existing_authority_requested or new_run
+    contract_payload = (
+        dict(verification_contract_payload)
+        if isinstance(verification_contract_payload, Mapping)
+        else existing_verification_contract
+    )
+    budget_payload = dict(run_budget_payload) if isinstance(run_budget_payload, Mapping) else existing_run_budget
     # The first run.json write activates the lifecycle journal and publishes a
     # recovery checkpoint BEFORE the atomic run.json replacement. If that final
     # replacement fails, durable journal/checkpoint state already exists without
@@ -3165,6 +3185,8 @@ def record_run_start(
                 ),
                 lifecycle_journal_requested=True if lifecycle_requested else None,
                 run_journal_authority_requested=True if authority_requested else None,
+                verification_contract_payload=contract_payload,
+                run_budget_payload=budget_payload,
             ),
         )
     except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
@@ -3532,6 +3554,8 @@ def run(
     fail_fast: bool = True,
     scheduler: str = "waves",
     defer_artifact_collection: bool = False,
+    verification_contract_payload: Mapping[str, Any] | None = None,
+    run_budget_payload: Mapping[str, Any] | None = None,
 ) -> int:
     started_at = datetime.now(timezone.utc)
     process_registry = proc.ProcessRegistry()
@@ -3610,6 +3634,12 @@ def run(
                         kwargs["health"] = dict(existing["health"])
                     if "transport_routing" not in kwargs and isinstance(existing.get("transport_routing"), dict):
                         kwargs["transport_routing"] = dict(existing["transport_routing"])
+                    if "verification_contract_payload" not in kwargs and isinstance(
+                        existing.get("verification_contract"), dict
+                    ):
+                        kwargs["verification_contract_payload"] = dict(existing["verification_contract"])
+                    if "run_budget_payload" not in kwargs and isinstance(existing.get("run_budget"), dict):
+                        kwargs["run_budget_payload"] = dict(existing["run_budget"])
         return _run_payload(
             lock_workspace=lock_workspace,
             pre_run_snapshot=pre_run_snapshot_payload,
@@ -3710,6 +3740,8 @@ def run(
             codex_transport=transport_for_payload,
             started_at=started_at,
             scheduler=scheduler,
+            verification_contract_payload=verification_contract_payload,
+            run_budget_payload=run_budget_payload,
         )
     if code_graph is None:
         code_graph = code_graph_brief(cwd, task) if code_graph_enabled else CodeGraphBrief(attached=False)
@@ -4001,10 +4033,18 @@ def run(
         if direct_worker:
             attempts_payload["mode"] = "direct-worker"
         _write_json(output_dir / "plan-attempts.json", attempts_payload)
-        _write_json(
-            output_dir / "plan.json",
-            receipt_schema.run_plan_document(_assignment_payload(assignments)),
-        )
+        plan_doc = receipt_schema.run_plan_document(_assignment_payload(assignments))
+        contract_for_plan = verification_contract_payload
+        if contract_for_plan is None:
+            try:
+                run_raw = json.loads((output_dir / "run.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                run_raw = None
+            if isinstance(run_raw, dict) and isinstance(run_raw.get("verification_contract"), dict):
+                contract_for_plan = dict(run_raw["verification_contract"])
+        if isinstance(contract_for_plan, Mapping):
+            plan_doc["verification_contract"] = dict(contract_for_plan)
+        _write_json(output_dir / "plan.json", plan_doc)
 
     if cwd is not None and output_dir is not None:
         from . import candidate_set as candidate_set_mod
@@ -4028,10 +4068,16 @@ def run(
             plan_attempts=plan_attempts,
             allow_replan=not dry_run and not direct_worker,
         )
-        _write_json(
-            output_dir / "plan.json",
-            receipt_schema.run_plan_document(_assignment_payload(assignments)),
-        )
+        plan_doc = receipt_schema.run_plan_document(_assignment_payload(assignments))
+        try:
+            prior_plan = json.loads((output_dir / "plan.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            prior_plan = None
+        if isinstance(prior_plan, dict) and isinstance(prior_plan.get("verification_contract"), dict):
+            plan_doc["verification_contract"] = dict(prior_plan["verification_contract"])
+        elif isinstance(verification_contract_payload, Mapping):
+            plan_doc["verification_contract"] = dict(verification_contract_payload)
+        _write_json(output_dir / "plan.json", plan_doc)
         if plan_attempts is not None:
             attempts_payload = {"attempts": plan_attempts or []}
             if direct_worker:
@@ -4320,18 +4366,15 @@ def run(
 
     def dispatch_requested(agent: Agent) -> int | None:
         # Enforce wall-clock / worker-dispatch ceilings before new work starts (#593).
-        # Stable seat:attempt identity + durable requested ordering before the
-        # external transport call; retries reuse the same request id.
+        # Attempt allocation and reservation share one lock; retries reclaim an
+        # open pending identity while concurrent same-seat callers mint anew.
         if budget_coordinator is None or output_dir is None:
             return dispatch_fact("run.dispatch.requested", agent)
         try:
-            attempt = run_lifecycle.next_dispatch_attempt(output_dir, agent.name)
-            request_id = run_budget.dispatch_reservation_request_id(agent.name, attempt)
             return budget_coordinator.reserve_and_record_dispatch(
-                request_id=request_id,
                 seat=agent.name,
-                attempt=attempt,
-                record_requested=lambda: dispatch_fact("run.dispatch.requested", agent, attempt),
+                allocate_attempt=lambda: run_lifecycle.allocate_next_dispatch_attempt(output_dir, agent.name),
+                record_requested=lambda attempt: dispatch_fact("run.dispatch.requested", agent, attempt),
             )
         except run_budget.BudgetPolicyError as exc:
             if exc.exhausted:

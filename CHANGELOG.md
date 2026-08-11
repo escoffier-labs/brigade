@@ -170,6 +170,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `load_error` / `load_warnings` text for missing path-based skill selectors.
 
 ### Fixed
+- Run budget normal-run wiring (#593 / PR #864): persist declared
+  verification-contract / run_budget through start and plan receipts so the
+  coordinator enforces real wall-clock and dispatch ceilings; allocate
+  same-seat attempts inside the reservation lock so `worker_dispatch_count=1`
+  launches once; bridge optional `input_tokens` / `output_tokens` while keeping
+  aggregate `token_budget` distinct.
 - Run budget `token_budget` bridge (#593 / PR #864): preserve aggregate
   VerificationContract `token_budget` / receipt `tokens_used` semantics; do not
   map the legacy ceiling onto `observed.input_tokens`. Explicit `input_tokens` /

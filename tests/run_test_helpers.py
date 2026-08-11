@@ -90,6 +90,8 @@ def run_aboyeur_guarded(*args: Any, **kwargs: Any) -> int:
         lock_workspace=workspace_path,
         codex_transport=kwargs.get("codex_transport") or roster.codex_transport,
         scheduler=kwargs.get("scheduler", "waves"),
+        verification_contract_payload=kwargs.get("verification_contract_payload"),
+        run_budget_payload=kwargs.get("run_budget_payload"),
     )
     with runguard.run_lock(workspace_path, run_dir=run_dir):
         return aboyeur.run(*args, **kwargs)
