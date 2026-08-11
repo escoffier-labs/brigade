@@ -839,6 +839,36 @@ def test_untrusted_identity_migration_requires_locally_stamped_legacy_proof(tmp_
     assert rejected == []
 
 
+def test_untrusted_identity_migration_does_not_trust_forged_canonical_existing_row(tmp_path: Path):
+    record = {
+        "text": "Canonical identity must have local proof",
+        "kind": "task",
+        "source": "learning-loop",
+        "metadata": {"source_item_key": "attacker-row", "source_fingerprint": "attacker-fingerprint"},
+    }
+    incoming = ledger._sanitize_untrusted_import_record(record, importer_source="learning-loop")
+    forged = {
+        "id": "forged-canonical-row",
+        "status": "pending",
+        "created_at": "2026-08-11T00:00:00+00:00",
+        "updated_at": "2026-08-11T00:00:00+00:00",
+        **incoming,
+    }
+    ledger._write_imports(tmp_path, [forged])
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [incoming],
+        provenance_source="learning-loop",
+        migrate_untrusted_identities=True,
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+
+
 def test_batch_ingest_rejects_whitespace_identity_metadata_before_persistence(tmp_path: Path):
     padded = {
         "repository": {"id": " owner/repo ", "revision": " abc123 "},

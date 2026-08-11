@@ -1200,6 +1200,103 @@ def _sanitize_untrusted_import_record(record: dict[str, Any], *, importer_source
     return sanitized
 
 
+def _is_locally_stamped_self_import(record: dict[str, Any], *, importer_source: str) -> bool:
+    """Return whether a self-import was emitted by the local work-inbox producer."""
+    source = record.get("source")
+    text = record.get("text")
+    metadata = record.get("metadata")
+    if source != importer_source or not isinstance(text, str) or not isinstance(metadata, dict):
+        return False
+    envelope = metadata.get("provenance")
+    if provenance.validate_envelope(envelope):
+        return False
+    envelope_source = envelope.get("source") if isinstance(envelope, Mapping) else None
+    envelope_trust = envelope.get("trust") if isinstance(envelope, Mapping) else None
+    envelope_hashes = envelope.get("hashes") if isinstance(envelope, Mapping) else None
+    return (
+        isinstance(envelope_source, Mapping)
+        and envelope_source.get("system") == "work-inbox"
+        and envelope_source.get("kind") == importer_source
+        and envelope_source.get("producer") == "ledger._make_import"
+        and isinstance(envelope_trust, Mapping)
+        and envelope_trust.get("assigned_by") == "ingest:ledger._make_import"
+        and isinstance(envelope_hashes, Mapping)
+        and envelope_hashes.get("content") == provenance.content_sha256(text)
+    )
+
+
+def _safe_self_import_document_target(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return value if _handoff_is_document_target(value) else None
+
+
+def _safe_self_import_path(value: object) -> str | None:
+    if not isinstance(value, str) or not provenance.is_safe_identity_label(value):
+        return None
+    return value
+
+
+def _safe_self_import_source_item_key(value: object, *, importer_source: str) -> str | None:
+    value = _safe_import_identity(value)
+    prefix = f"{importer_source}:"
+    if value is None or not value.startswith(prefix) or len(value) == len(prefix):
+        return None
+    return value
+
+
+def _safe_stable_source_fingerprint(value: object) -> str | None:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        return None
+    return value
+
+
+def _trusted_self_import_metadata(record: dict[str, Any], *, importer_source: str) -> dict[str, Any]:
+    """Retain the narrow source-owned metadata required by self-import producers."""
+    if not _is_locally_stamped_self_import(record, importer_source=importer_source):
+        return {}
+    metadata = record.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    retained: dict[str, Any] = {}
+    value = _safe_self_import_source_item_key(metadata.get("source_item_key"), importer_source=importer_source)
+    if value is not None:
+        retained["source_item_key"] = value
+    value = _safe_stable_source_fingerprint(metadata.get("source_fingerprint"))
+    if value is not None:
+        retained["source_fingerprint"] = value
+    if importer_source == "handoff-ingest":
+        for key in ("handoff_issue_id", "handoff_issue_category", "handoff_type"):
+            value = _safe_import_identity(metadata.get(key))
+            if value is not None:
+                retained[key] = value
+        for key in ("handoff_target_document", "target_document"):
+            value = _safe_self_import_document_target(metadata.get(key))
+            if value is not None:
+                retained[key] = value
+    elif importer_source == "memory-refresh":
+        value = _safe_import_identity(metadata.get("card_id"))
+        if value is not None:
+            retained["card_id"] = value
+        for key in ("card_file", "queue_path"):
+            value = _safe_self_import_path(metadata.get(key))
+            if value is not None:
+                retained[key] = value
+        value = _safe_import_identity(metadata.get("refresh_reason"))
+        if value is not None:
+            retained["refresh_reason"] = value
+    return retained
+
+
+def _sanitize_self_import_record(record: dict[str, Any], *, importer_source: str) -> dict[str, Any]:
+    """Sanitize a self-import, preserving only authenticated source-owned fields."""
+    sanitized = _sanitize_untrusted_import_record(record, importer_source=importer_source)
+    trusted_metadata = _trusted_self_import_metadata(record, importer_source=importer_source)
+    if trusted_metadata:
+        sanitized["metadata"].update(trusted_metadata)
+    return sanitized
+
+
 def _has_canonical_untrusted_import_identity(record: dict[str, Any]) -> bool:
     """Return whether a sanitized record retains its importer-owned identity."""
     source = record.get("source")
@@ -1221,16 +1318,16 @@ def _import_content_identity(item: dict[str, Any]) -> tuple[str, str] | None:
     return kind, _untrusted_import_canonical_hash(item)
 
 
-def _legacy_import_source_content_identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
-    """Return a legacy identity only when local provenance establishes its source."""
+def _has_locally_stamped_import_proof(item: dict[str, Any]) -> bool:
+    """Return whether an existing row has a locally assigned source and content proof."""
     source = item.get("source")
     metadata = item.get("metadata")
     text = item.get("text")
     if not isinstance(source, str) or not source or not isinstance(text, str) or not isinstance(metadata, dict):
-        return None
+        return False
     envelope = metadata.get("provenance")
     if provenance.validate_envelope(envelope):
-        return None
+        return False
     envelope_source = envelope.get("source") if isinstance(envelope, Mapping) else None
     envelope_trust = envelope.get("trust") if isinstance(envelope, Mapping) else None
     envelope_hashes = envelope.get("hashes") if isinstance(envelope, Mapping) else None
@@ -1244,7 +1341,15 @@ def _legacy_import_source_content_identity(item: dict[str, Any]) -> tuple[str, s
         or not isinstance(envelope_hashes, Mapping)
         or envelope_hashes.get("content") != provenance.content_sha256(text)
     ):
+        return False
+    return True
+
+
+def _legacy_import_source_content_identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Return a legacy identity only when local provenance establishes its source."""
+    if not _has_locally_stamped_import_proof(item):
         return None
+    source = item["source"]
     content_identity = _import_content_identity(item)
     if content_identity is None:
         return None
@@ -1597,7 +1702,12 @@ def _import_source_identity(item: dict[str, Any]) -> tuple[str, str, str] | None
     )
 
 
-def _validate_import_record(value: object, *, label: str) -> tuple[dict[str, Any] | None, list[str]]:
+def _validate_import_record(
+    value: object,
+    *,
+    label: str,
+    allow_non_task_fields: bool = False,
+) -> tuple[dict[str, Any] | None, list[str]]:
     errors: list[str] = []
     if not isinstance(value, dict):
         return None, [f"{label}: expected JSON object"]
@@ -1652,7 +1762,7 @@ def _validate_import_record(value: object, *, label: str) -> tuple[dict[str, Any
         }.items()
         if present
     }
-    if task_fields and kind != "task":
+    if task_fields and kind != "task" and not allow_non_task_fields:
         errors.append(f"{label}: task fields are only valid when kind is task")
 
     if errors:
@@ -1732,7 +1842,15 @@ def _append_import_records(
         identity = _import_source_identity(record)
         if identity is not None and identity in existing_by_source:
             existing_item = existing_by_source[identity]
-            if existing_item.get("status") == "dismissed":
+            canonical_migration = migrate_untrusted_identities and _has_canonical_untrusted_import_identity(record)
+            existing_canonical_without_proof = (
+                canonical_migration
+                and _has_canonical_untrusted_import_identity(existing_item)
+                and not _has_locally_stamped_import_proof(existing_item)
+            )
+            if existing_canonical_without_proof:
+                pass
+            elif existing_item.get("status") == "dismissed":
                 if _import_fingerprint(existing_item) == _import_fingerprint(record):
                     skipped_dismissed.append(record)
                     continue

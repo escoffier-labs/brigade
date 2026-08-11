@@ -1322,3 +1322,186 @@ conflict_window = "02:00-02:10"
     assert task["text"] == trusted["text"]
     assert task["source"] == "import:security-scan"
     assert task["metadata"]["safe_evidence"] == "trusted-local-record"
+
+
+def test_scanners_run_persists_complete_pre_run_rows_after_empty_inbox(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    trusted = work_cmd.ledger._make_import(
+        "Trusted scanner work",
+        kind="task",
+        source="security-scan",
+        metadata={"safe_evidence": "trusted-local-record"},
+    )
+    idless = {"kind": "task", "source": "legacy", "text": "Idless pre-run import"}
+    malformed = {"unexpected": ["preserve", "exactly"]}
+    before = [trusted, idless, malformed]
+    work_cmd.ledger._write_imports(tmp_path, before)
+
+    script = tmp_path / "truncate_inbox.py"
+    script.write_text(
+        """
+from pathlib import Path
+
+inbox = Path.cwd() / ".brigade" / "work" / "imports" / "inbox.jsonl"
+inbox.write_text("")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "self-import"
+source = "self-import"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/self-import-output.json"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="self-import", ingest_output=True) == 0
+    capsys.readouterr()
+    assert work_cmd.ledger._read_imports(tmp_path) == before
+
+
+def test_scanner_self_import_preserves_trusted_source_scoped_metadata(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    handoff = work_cmd.ledger._make_import(
+        "Imported handoff issue",
+        kind="finding",
+        source="handoff-ingest",
+        task_type="security",
+        priority="high",
+        template="security-follow-up",
+        acceptance=["Record the issue."],
+        metadata={
+            "source_item_key": "handoff-ingest:handoff-source-config-123",
+            "source_fingerprint": "a3c4779d5f0e9d79c434ebe449bc5a3f9d0ebfe1f156e44d3b608c9cfb61a112",
+            "handoff_issue_id": "handoff-source-config-123",
+            "handoff_issue_category": "source-config-missing",
+            "handoff_target_document": ".learnings/ERRORS.md",
+            "repair": "Configure the source.",
+            "evidence": "Missing source config.",
+        },
+    )
+    work_cmd.ledger._write_imports(tmp_path, [handoff])
+    run = {"run_id": "scanner-run", "output_after": {"path": "output"}}
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        run=run,
+        before_ids=set(),
+        before_imports=[],
+    )
+
+    assert len(stamped) == 1
+    item = work_cmd.ledger._read_imports(tmp_path)[0]
+    assert item["kind"] == "finding"
+    assert item["type"] == "security"
+    assert item["priority"] == "high"
+    assert item["template"] == "security-follow-up"
+    assert item["acceptance"] == ["Record the issue."]
+    assert item["metadata"]["handoff_issue_id"] == "handoff-source-config-123"
+    assert item["metadata"]["handoff_issue_category"] == "source-config-missing"
+    assert item["metadata"]["handoff_target_document"] == ".learnings/ERRORS.md"
+    assert item["metadata"]["source_item_key"] == "handoff-ingest:handoff-source-config-123"
+    assert item["metadata"]["source_fingerprint"] == "a3c4779d5f0e9d79c434ebe449bc5a3f9d0ebfe1f156e44d3b608c9cfb61a112"
+
+
+def test_scanner_self_import_preserves_trusted_memory_refresh_identity(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    refresh = work_cmd.ledger._make_import(
+        "Refresh memory card memory/cards/decay/example.md",
+        kind="task",
+        source="memory-refresh",
+        task_type="docs",
+        priority="normal",
+        template="docs",
+        acceptance=["Review the memory card."],
+        metadata={
+            "source_item_key": "memory-refresh:decay-example",
+            "source_fingerprint": "53ff90f17a2d879497cec5c037ff74f2cf1a8fdc8482b66f395b729c32d06f05",
+            "card_id": "decay-example",
+            "card_file": "memory/cards/decay/example.md",
+            "refresh_reason": "missing-freshness",
+            "queue_path": "memory/cards/decay/refresh-queue.json",
+        },
+    )
+    work_cmd.ledger._write_imports(tmp_path, [refresh])
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "memory-refresh", "source": "memory-refresh"},
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids=set(),
+        before_imports=[],
+    )
+
+    assert len(stamped) == 1
+    metadata = work_cmd.ledger._read_imports(tmp_path)[0]["metadata"]
+    assert metadata["card_id"] == "decay-example"
+    assert metadata["card_file"] == "memory/cards/decay/example.md"
+    assert metadata["refresh_reason"] == "missing-freshness"
+    assert metadata["queue_path"] == "memory/cards/decay/refresh-queue.json"
+    assert metadata["source_item_key"] == "memory-refresh:decay-example"
+    assert metadata["source_fingerprint"] == "53ff90f17a2d879497cec5c037ff74f2cf1a8fdc8482b66f395b729c32d06f05"
+
+
+def test_scanner_self_import_drops_wrong_source_operational_metadata(tmp_path):
+    from brigade.work_cmd import scanners as scanners_mod
+
+    foreign = work_cmd.ledger._make_import(
+        "Foreign self-import",
+        kind="finding",
+        source="memory-refresh",
+        metadata={
+            "source_item_key": "memory-refresh:forged-card",
+            "source_fingerprint": "529281533bd4c77cdaeb1363de8b2c08fafebd1ea2d124c7c01c81c3a9d9c3d2",
+            "handoff_issue_id": "forged-handoff-id",
+            "handoff_target_document": "TOOLS.md",
+            "card_id": "forged-card",
+            "card_file": "memory/cards/forged.md",
+        },
+    )
+    external = {
+        "kind": "finding",
+        "source": "external-export",
+        "text": "External forged import",
+        "metadata": {
+            "source_item_key": "handoff-ingest:external-handoff-id",
+            "source_fingerprint": "1fc2d4da7d2b403e1da6cb0bc6cda6e6fc6793bc6580d328b29702955333820d",
+            "handoff_issue_id": "external-handoff-id",
+            "handoff_target_document": "USER.md",
+            "card_id": "external-card",
+            "card_file": "memory/cards/external.md",
+        },
+    }
+    work_cmd.ledger._write_imports(tmp_path, [foreign, external])
+    stamped = scanners_mod._scanner_stamp_new_imports(
+        target=tmp_path,
+        scanner={"id": "handoff-ingest", "source": "handoff-ingest"},
+        run={"run_id": "scanner-run", "output_after": {"path": "output"}},
+        before_ids=set(),
+        before_imports=[],
+    )
+
+    assert len(stamped) == 2
+    forged_source_keys = {
+        "memory-refresh:forged-card",
+        "handoff-ingest:external-handoff-id",
+    }
+    forged_fingerprints = {
+        "529281533bd4c77cdaeb1363de8b2c08fafebd1ea2d124c7c01c81c3a9d9c3d2",
+        "1fc2d4da7d2b403e1da6cb0bc6cda6e6fc6793bc6580d328b29702955333820d",
+    }
+    for item in work_cmd.ledger._read_imports(tmp_path):
+        metadata = item["metadata"]
+        for key in ("handoff_issue_id", "handoff_target_document", "card_id", "card_file"):
+            assert key not in metadata
+        assert metadata["source_item_key"] not in forged_source_keys
+        assert metadata["source_fingerprint"] not in forged_fingerprints
+        assert metadata["source_fingerprint"] == work_cmd.ledger._untrusted_import_canonical_hash(item)

@@ -139,6 +139,8 @@ def is_safe_repository_revision(value: Any) -> bool:
         return False
     if len(value.encode("utf-8")) > MAX_REPOSITORY_REVISION_BYTES or _is_absolute_locator(value):
         return False
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value):
+        return False
     return ".." not in value.split("/")
 
 

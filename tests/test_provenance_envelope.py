@@ -211,6 +211,7 @@ def test_validate_accepts_ordinary_identity_labels():
         "C:\\private\\revision",
         "\\\\server\\share\\revision",
         "file:///private/revision",
+        "https://example.test/revision",
         "release/../revision",
         "é" * 129,
     ],
