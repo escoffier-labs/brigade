@@ -161,9 +161,11 @@ managed gitignore block with parent-directory un-ignore rules so
 `.claude/memory-handoffs/TEMPLATE.md` can be tracked while session handoffs stay
 local.
 
-**Upgrade / idempotent rerun:** Re-run `brigade init --target <path> --harnesses claude --force`
-to replace only the managed brigade gitignore block with the current parent
-un-ignore recipe. User rules outside the brigade markers are preserved.
+**Upgrade / idempotent rerun:** Re-run `brigade init --target <path> --harnesses claude` with the
+same harness selection. Brigade replaces only the managed brigade gitignore block
+on every init; it does not overwrite existing `AGENTS.md`, `CLAUDE.md`, or other
+installed manifest files unless you pass `--force`. User rules outside the
+brigade markers are preserved.
 
 **Manual recovery** when a parent `.claude/` rule lives outside the managed block
 (or in a global excludes file Brigade cannot edit): diagnose with the exact

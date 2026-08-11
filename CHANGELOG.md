@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Quickstart commit guidance now states that `.claude/` stays local-only
   except the managed `.claude/memory-handoffs/TEMPLATE.md` Claude onboarding
   requires tracked, cross-linking the repo-local shadow recovery from #858.
-  (#860)
+  Normal `brigade init` reruns upgrade the managed gitignore block without
+  `--force`. (#860)
 
 ### Added
 - Issue #846 R2 residual work-store characterization: extend the R1 harness

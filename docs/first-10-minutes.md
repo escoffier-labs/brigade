@@ -164,7 +164,7 @@ brigade security scan --target . --fail-on none --json
 
 Review before sharing. Do not paste tokens, private hostnames, private repo names, or unredacted absolute paths into a public issue.
 
-If Claude verification reports `ready: no` with `handoff_template_shadowed`, a global `core.excludesFile` rule is hiding the managed template. Brigade does not edit global Git configuration. Fresh installs and `brigade init --force` upgrades emit parent un-ignore rules in the managed gitignore block; see [new-user-quickstart.md — Claude handoff template hidden by a global Git exclude](new-user-quickstart.md#claude-handoff-template-hidden-by-a-global-git-exclude) for platform-specific `git check-ignore` and verify-harness commands plus manual repo-local recovery.
+If Claude verification reports `ready: no` with `handoff_template_shadowed`, a global `core.excludesFile` rule is hiding the managed template. Brigade does not edit global Git configuration. Fresh installs and a normal `brigade init` rerun (without `--force`) refresh parent un-ignore rules in the managed gitignore block without overwriting existing manifest files; see [new-user-quickstart.md — Claude handoff template hidden by a global Git exclude](new-user-quickstart.md#claude-handoff-template-hidden-by-a-global-git-exclude) for platform-specific `git check-ignore` and verify-harness commands plus manual repo-local recovery.
 
 Open the Quickstart setup problem form:
 

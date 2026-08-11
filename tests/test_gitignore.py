@@ -393,3 +393,29 @@ def test_idempotent_rerun_without_force_preserves_user_rules_and_refreshes_block
     assert ".local-cache/" in gi
     assert "!.claude/" in gi
     assert gi.count(install_mod.GITIGNORE_BEGIN) == 1
+
+
+def test_non_force_rerun_upgrades_managed_block_without_overwriting_manifest_files(
+    tmp_target: Path,
+):
+    assert install_selection(tmp_target, _repo_selection()) == 0
+
+    agents = tmp_target / "AGENTS.md"
+    claude = tmp_target / "CLAUDE.md"
+    agents.write_text("# Custom AGENTS\n")
+    claude.write_text("# Custom CLAUDE\n")
+
+    gi = _read_gi(tmp_target).replace("!.claude/\n.claude/*\n!.claude/memory-handoffs/\n", "")
+    user_tail = "\n# after block\n.local-cache/\n"
+    (tmp_target / ".gitignore").write_text(gi + user_tail)
+
+    assert install_selection(tmp_target, _repo_selection()) == 0
+
+    assert agents.read_text() == "# Custom AGENTS\n"
+    assert claude.read_text() == "# Custom CLAUDE\n"
+    gi_final = _read_gi(tmp_target)
+    assert "!.claude/" in gi_final
+    assert ".claude/*" in gi_final
+    assert "!.claude/memory-handoffs/" in gi_final
+    assert ".local-cache/" in gi_final
+    assert gi_final.count(install_mod.GITIGNORE_BEGIN) == 1
