@@ -909,10 +909,28 @@ def _declared_contract(*, wall_clock_seconds: int | None = 3600, worker_dispatch
 
 class _GuardServer(_StubServer):
     started = 0
+    provider_turns = 0
 
     def start(self):
         type(self).started += 1
         raise AssertionError("AppServer.start must not run when resume budget gate denies")
+
+    def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):
+        type(self).provider_turns += 1
+        raise AssertionError("provider turn must not run when resume budget gate denies")
+
+
+def _patch_resume_denied(monkeypatch) -> None:
+    _GuardServer.started = 0
+    _GuardServer.provider_turns = 0
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _GuardServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("synthesis must not run")),
+    )
+    monkeypatch.setattr(run_resume.runguard, "run_lock", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(run_resume.runguard, "recover_stale_run", lambda *a, **k: False)
 
 
 def test_resume_refuses_expired_declared_wall_clock_before_appserver(tmp_path, monkeypatch, capsys):
@@ -928,20 +946,13 @@ def test_resume_refuses_expired_declared_wall_clock_before_appserver(tmp_path, m
     plan["verification_contract"] = meta["verification_contract"]
     (run_dir / "plan.json").write_text(json.dumps(plan))
 
-    _GuardServer.started = 0
     monkeypatch.setattr(run_resume, "_utc_now", lambda: started + timedelta(seconds=10))
-    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _GuardServer)
-    monkeypatch.setattr(
-        run_resume.agents,
-        "run_agent",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("synthesis must not run")),
-    )
-    monkeypatch.setattr(run_resume.runguard, "run_lock", lambda *a, **k: nullcontext())
-    monkeypatch.setattr(run_resume.runguard, "recover_stale_run", lambda *a, **k: False)
+    _patch_resume_denied(monkeypatch)
 
     assert run_resume.resume(run_dir) == 2
     assert "wall-clock budget exhausted" in capsys.readouterr().err
     assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
     assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
 
 
@@ -981,19 +992,93 @@ def test_resume_refuses_budget_exhausted_projection_before_appserver(tmp_path, m
         recorded_at="2026-07-03T00:00:01.000000Z",
     )
 
-    _GuardServer.started = 0
-    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _GuardServer)
-    monkeypatch.setattr(
-        run_resume.agents,
-        "run_agent",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("synthesis must not run")),
-    )
-    monkeypatch.setattr(run_resume.runguard, "run_lock", lambda *a, **k: nullcontext())
-    monkeypatch.setattr(run_resume.runguard, "recover_stale_run", lambda *a, **k: False)
+    _patch_resume_denied(monkeypatch)
 
     assert run_resume.resume(run_dir) == 2
     assert "run budget exhausted" in capsys.readouterr().err
     assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+
+
+def test_resume_refuses_corrupt_lifecycle_journal_before_appserver(tmp_path, monkeypatch, capsys):
+    """Declared resume must fail closed when exhausted prefix is followed by a corrupt tail."""
+    from datetime import datetime, timedelta, timezone
+
+    from brigade import run_journal
+
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    started = datetime(2026, 7, 3, 0, 0, 0, tzinfo=timezone.utc)
+    meta["started_at"] = started.isoformat()
+    # Non-expired wall-clock so a fail-open empty projection would otherwise allow resume.
+    meta["verification_contract"] = _declared_contract(wall_clock_seconds=3600, worker_dispatch_count=1)
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    plan = json.loads((run_dir / "plan.json").read_text())
+    plan["verification_contract"] = meta["verification_contract"]
+    (run_dir / "plan.json").write_text(json.dumps(plan))
+
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type="run.created",
+        payload={"status": "started"},
+        idempotency_key="create-1",
+        expected_previous_sequence=0,
+        recorded_at="2026-07-03T00:00:00.000000Z",
+    )
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type="run_budget.exhausted",
+        payload={
+            "dimension": "worker_dispatch_count",
+            "mode": "enforceable",
+            "declared": 1,
+            "used": 1,
+            "remaining": 0,
+            "reason_class": "exhausted",
+        },
+        idempotency_key="run_budget.exhausted:worker_dispatch_count",
+        expected_previous_sequence=1,
+        recorded_at="2026-07-03T00:00:01.000000Z",
+    )
+    # Corrupt partial tail after a valid exhausted prefix (no terminating newline).
+    with journal.open("ab") as handle:
+        handle.write(b'{"event_type":"not-a-valid-envelope"')
+
+    monkeypatch.setattr(run_resume, "_utc_now", lambda: started + timedelta(seconds=10))
+    _patch_resume_denied(monkeypatch)
+
+    assert run_resume.resume(run_dir) == 2
+    err = capsys.readouterr().err
+    assert "untrusted" in err or "incompatible" in err
+    assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+
+
+def test_resume_refuses_malformed_persisted_budget_before_appserver(tmp_path, monkeypatch, capsys):
+    """Malformed ceiling values must not silently become undeclared/unbounded."""
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    contract = _declared_contract(wall_clock_seconds=3600, worker_dispatch_count=10)
+    contract["budget"]["wall_clock_seconds"] = "not-an-int"
+    contract["budget"]["worker_dispatch_count"] = "also-bad"
+    meta["verification_contract"] = contract
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    plan = json.loads((run_dir / "plan.json").read_text())
+    plan["verification_contract"] = contract
+    (run_dir / "plan.json").write_text(json.dumps(plan))
+
+    _patch_resume_denied(monkeypatch)
+
+    assert run_resume.resume(run_dir) == 2
+    assert "incompatible" in capsys.readouterr().err
+    assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
     assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
 
 

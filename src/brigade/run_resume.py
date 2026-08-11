@@ -59,6 +59,21 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _persisted_budget_artifact(run_dir: Path, run_meta: dict) -> bool:
+    """True when run artifacts carry a persisted budget declaration object."""
+    if isinstance(run_meta.get("run_budget"), dict):
+        return True
+    contract = verification_contract.extract_contract_payload(run_meta)
+    if isinstance(contract, dict) and isinstance(contract.get("budget"), dict):
+        return True
+    plan = _load_json(run_dir, "plan.json")
+    if isinstance(plan, dict):
+        contract = verification_contract.extract_contract_payload(plan)
+        if isinstance(contract, dict) and isinstance(contract.get("budget"), dict):
+            return True
+    return False
+
+
 def _declaration_from_run_artifacts(run_dir: Path, run_meta: dict) -> run_budget.RunBudgetDeclaration:
     """Load the persisted run_budget / verification_contract declaration for resume."""
     if isinstance(run_meta.get("run_budget"), dict):
@@ -81,15 +96,40 @@ def _declaration_from_run_artifacts(run_dir: Path, run_meta: dict) -> run_budget
     return run_budget.RunBudgetDeclaration()
 
 
-def _lifecycle_events_for_budget_projection(run_dir: Path) -> list[object]:
+def _lifecycle_events_for_budget_projection(
+    run_dir: Path,
+    *,
+    require_trusted: bool,
+) -> list[object]:
+    """Load lifecycle events for budget projection.
+
+    When ``require_trusted`` is set (persisted declared budget), journal read,
+    chain, partial-tail, and compatibility failures fail closed instead of
+    degrading to an empty event list.
+    """
     journal_path = run_dir / "events" / "lifecycle.jsonl"
     if not journal_path.is_file():
         return []
     try:
         report = run_journal.read_journal_bounded(journal_path)
-    except (OSError, run_journal.RunJournalError, run_events.CanonicalizationError):
+    except (OSError, run_journal.RunJournalError, run_events.CanonicalizationError) as exc:
+        if require_trusted:
+            detail = getattr(exc, "diagnostic", None) or str(exc)
+            raise run_budget.BudgetCompatibilityError(
+                f"lifecycle journal unreadable for declared budget: {detail}",
+                code="journal_untrusted",
+            ) from exc
         return []
     if report.partial_tail is not None or report.chain_errors:
+        if require_trusted:
+            if report.partial_tail is not None:
+                reason = "partial tail"
+            else:
+                reason = "; ".join(report.chain_errors[:3]) or "chain error"
+            raise run_budget.BudgetCompatibilityError(
+                f"lifecycle journal untrusted for declared budget: {reason}",
+                code="journal_untrusted",
+            )
         return []
     return list(report.events)
 
@@ -100,15 +140,22 @@ def _resume_budget_blocked(run_dir: Path, run_meta: dict, *, now: datetime | Non
     Uses the persisted declaration, original ``started_at``, and authoritative
     lifecycle projection. Undeclared runs stay unbounded. Already exhausted or
     newly expired declared ceilings refuse before ``AppServer.start()``.
+    Persisted declarations also fail closed when the lifecycle journal cannot be
+    read and trusted or when budget fields are malformed/incompatible.
     """
+    persisted = _persisted_budget_artifact(run_dir, run_meta)
     try:
         declaration = _declaration_from_run_artifacts(run_dir, run_meta)
     except run_budget.BudgetCompatibilityError as exc:
         return f"run budget declaration is incompatible: {exc.diagnostic}"
 
     has_enforceable = declaration.wall_clock_seconds is not None or declaration.worker_dispatch_count is not None
-    events = _lifecycle_events_for_budget_projection(run_dir)
-    projection = run_budget.project_budget_state(declaration, events)
+    require_trusted = persisted or has_enforceable
+    try:
+        events = _lifecycle_events_for_budget_projection(run_dir, require_trusted=require_trusted)
+        projection = run_budget.project_budget_state(declaration, events)
+    except run_budget.BudgetCompatibilityError as exc:
+        return f"run budget lifecycle projection is untrusted: {exc.diagnostic}"
     if projection.terminal_policy == "budget_exhausted" or projection.exhausted_dimensions:
         return "run budget exhausted; resume refused"
     if not has_enforceable:

@@ -322,6 +322,45 @@ def test_verification_budget_bridge_maps_latency_to_wall_clock_tokens_observed()
     assert explicit.wall_clock_seconds == 90
 
 
+def test_verification_budget_bridge_fails_closed_on_malformed_ceiling_fields():
+    with pytest.raises(run_budget.BudgetCompatibilityError) as exc:
+        run_budget.declaration_from_verification_budget(
+            {
+                "latency_seconds": 30,
+                "wall_clock_seconds": "3600",
+                "worker_dispatch_count": 2,
+            }
+        )
+    assert "wall_clock_seconds" in exc.value.diagnostic
+
+    with pytest.raises(run_budget.BudgetCompatibilityError) as exc:
+        run_budget.declaration_from_verification_budget(
+            {
+                "latency_seconds": "forty-five",
+                "token_budget": 100,
+            }
+        )
+    assert "latency_seconds" in exc.value.diagnostic
+
+    with pytest.raises(run_budget.BudgetCompatibilityError) as exc:
+        run_budget.declaration_from_verification_budget(
+            {
+                "latency_seconds": 30,
+                "worker_dispatch_count": True,
+            }
+        )
+    assert "worker_dispatch_count" in exc.value.diagnostic
+
+    with pytest.raises(run_budget.BudgetCompatibilityError) as exc:
+        run_budget.declaration_from_verification_budget(
+            {
+                "latency_seconds": 30,
+                "token_budget": "100",
+            }
+        )
+    assert "token_budget" in exc.value.diagnostic
+
+
 def test_legacy_token_budget_is_aggregate_not_input_only():
     """token_budget=100 stays aggregate (tokens_used), never input_tokens."""
     declaration = run_budget.declaration_from_verification_budget(

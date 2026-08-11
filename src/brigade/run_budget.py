@@ -344,28 +344,55 @@ def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> Ru
     it is never reinterpreted as ``input_tokens``. Explicit ``input_tokens`` /
     ``output_tokens`` caps bridge into ``observed_caps`` only when those fields
     are set on the verification budget.
+
+    Present-but-malformed ceiling or token fields fail closed with
+    ``BudgetCompatibilityError`` rather than silently becoming undeclared.
     """
-    if not isinstance(budget, Mapping):
+    if budget is None:
         return RunBudgetDeclaration()
-    wall = budget.get("wall_clock_seconds")
-    if wall is None:
-        wall = budget.get("latency_seconds")
-    dispatch = budget.get("worker_dispatch_count")
+    if not isinstance(budget, Mapping):
+        raise BudgetCompatibilityError(
+            "verification budget must be an object",
+            code="schema_incompatible",
+        )
+
+    def _opt_pos(value: object, *, field_name: str) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise BudgetCompatibilityError(
+                _bound(f"{field_name} must be a positive integer when set"),
+                code="schema_incompatible",
+            )
+        return value
+
+    def _opt_nonneg(value: object, *, field_name: str) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise BudgetCompatibilityError(
+                _bound(f"{field_name} must be a non-negative integer when set"),
+                code="schema_incompatible",
+            )
+        return value
+
+    wall_raw = budget.get("wall_clock_seconds")
+    if wall_raw is None:
+        wall = _opt_pos(budget.get("latency_seconds"), field_name="latency_seconds")
+    else:
+        wall = _opt_pos(wall_raw, field_name="wall_clock_seconds")
+    dispatch = _opt_pos(budget.get("worker_dispatch_count"), field_name="worker_dispatch_count")
     observed: dict[str, int | None] = {}
     for key in ("input_tokens", "output_tokens"):
-        value = budget.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            observed[key] = value
-    token = budget.get("token_budget")
-    token_budget = token if isinstance(token, int) and not isinstance(token, bool) and token >= 0 else None
+        if key in budget:
+            observed[key] = _opt_pos(budget.get(key), field_name=key)
+    token_budget = _opt_nonneg(budget.get("token_budget"), field_name="token_budget")
     payload: dict[str, Any] = {
         "schema": RUN_BUDGET_SCHEMA,
         "schema_version": RUN_BUDGET_SCHEMA_VERSION,
         "ceilings": {
-            "wall_clock_seconds": wall if isinstance(wall, int) and not isinstance(wall, bool) else None,
-            "worker_dispatch_count": (
-                dispatch if isinstance(dispatch, int) and not isinstance(dispatch, bool) else None
-            ),
+            "wall_clock_seconds": wall,
+            "worker_dispatch_count": dispatch,
         },
         "observed": observed,
         "threshold_pct": DEFAULT_THRESHOLD_PCT,
