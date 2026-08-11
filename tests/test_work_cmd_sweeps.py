@@ -234,6 +234,12 @@ records = [
         "text": "Existing dismissed",
         "metadata": {"source_item_key": "same-dismissed", "source_fingerprint": "fp-dismissed"},
     },
+    {
+        "kind": "task",
+        "source": "repo-scan",
+        "text": "Existing dismissed, changed",
+        "metadata": {"source_item_key": "same-dismissed", "source_fingerprint": "fp-dismissed"},
+    },
 ]
 path = Path.cwd() / ".brigade" / "scanner-imports.jsonl"
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -260,16 +266,32 @@ conflict_window = "02:00-02:10"
 
     assert work_cmd.sweep(target=tmp_path, scanner_id="repo-scan", json_output=True) == 0
     report = json.loads(capsys.readouterr().out)
-    assert report["import_counts"] == {"created": 0, "dismissed": 1, "skipped": 1}
-    assert report["import_references"]["created_import_ids"] == []
-    assert report["import_references"]["skipped_source_fingerprints"] == ["fp-pending"]
-    assert report["import_references"]["dismissed_source_fingerprints"] == ["fp-dismissed"]
+    pending_fingerprint = work_cmd.ledger._untrusted_import_canonical_hash({"kind": "task", "text": "Existing pending"})
+    dismissed_fingerprint = work_cmd.ledger._untrusted_import_canonical_hash(
+        {"kind": "task", "text": "Existing dismissed"}
+    )
+    changed_fingerprint = work_cmd.ledger._untrusted_import_canonical_hash(
+        {"kind": "task", "text": "Existing dismissed, changed"}
+    )
+    assert report["import_counts"] == {"created": 1, "dismissed": 1, "skipped": 1}
+    assert len(report["import_references"]["created_import_ids"]) == 1
+    assert report["import_references"]["skipped_source_fingerprints"] == [pending_fingerprint]
+    assert report["import_references"]["dismissed_source_fingerprints"] == [dismissed_fingerprint]
+    assert changed_fingerprint not in report["import_references"]["skipped_source_fingerprints"]
+    assert changed_fingerprint not in report["import_references"]["dismissed_source_fingerprints"]
+    assert all(
+        not fingerprint.startswith("fp-")
+        for fingerprint in [
+            *report["import_references"]["skipped_source_fingerprints"],
+            *report["import_references"]["dismissed_source_fingerprints"],
+        ]
+    )
 
     assert work_cmd.sweep_review(target=tmp_path, sweep_id=report["sweep_id"], json_output=True) == 0
     review = json.loads(capsys.readouterr().out)
-    assert review["references"]["skipped_source_fingerprints"] == ["fp-pending"]
-    assert review["references"]["dismissed_source_fingerprints"] == ["fp-dismissed"]
-    assert any(check["name"] == "scanner_sweep_noisy_noop" and check["status"] == "warn" for check in review["checks"])
+    assert review["references"]["skipped_source_fingerprints"] == [pending_fingerprint]
+    assert review["references"]["dismissed_source_fingerprints"] == [dismissed_fingerprint]
+    assert any(check["name"] == "scanner_sweep_noisy_noop" and check["status"] != "warn" for check in review["checks"])
 
 
 def test_work_brief_and_doctor_include_scanner_sweep_health(tmp_path, monkeypatch, capsys):

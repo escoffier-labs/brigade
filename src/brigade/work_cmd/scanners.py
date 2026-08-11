@@ -145,23 +145,8 @@ def _scanner_run_receipt_path(run: dict[str, Any]) -> str | None:
 
 
 def _scanner_import_fingerprint(record: dict[str, Any], *, scanner: dict[str, Any]) -> str:
-    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-    existing = metadata.get("source_fingerprint")
-    if isinstance(existing, str) and existing.strip():
-        return existing.strip()
-    return helpers._stable_hash(
-        {
-            "scanner_id": scanner.get("id"),
-            "scanner_source": scanner.get("source"),
-            "source_item_key": ledger_mod._import_source_key(record),
-            "text": record.get("text"),
-            "kind": record.get("kind"),
-            "type": record.get("type"),
-            "priority": record.get("priority"),
-            "template": record.get("template"),
-            "acceptance": record.get("acceptance"),
-        }
-    )
+    del scanner
+    return ledger_mod._untrusted_import_canonical_hash(record)
 
 
 def _scanner_import_provenance(
@@ -196,8 +181,9 @@ def _scanner_enrich_import_records(
 ) -> list[dict[str, Any]]:
     enriched: list[dict[str, Any]] = []
     for record in records:
-        item = dict(record)
-        item["metadata"] = _scanner_import_provenance(target=target, scanner=scanner, run=run, record=record)
+        scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
+        item = ledger_mod._sanitize_untrusted_import_record(record, importer_source=scanner_source)
+        item["metadata"] = _scanner_import_provenance(target=target, scanner=scanner, run=run, record=item)
         enriched.append(item)
     return enriched
 
@@ -1057,8 +1043,14 @@ def _scanners_run_payload(
                 "runs": runs,
             }
             return payload, 2
-        for _scanner, run, path, records in ingest_payloads:
-            imported, skipped_records, skipped_dismissed, _rejected = ledger_mod._append_import_records(target, records)
+        for scanner, run, path, records in ingest_payloads:
+            scanner_source = str(scanner.get("source") or "scanner").strip() or "scanner"
+            imported, skipped_records, skipped_dismissed, _rejected = ledger_mod._append_import_records(
+                target,
+                records,
+                provenance_source=scanner_source,
+                migrate_untrusted_identities=True,
+            )
             run["ingest_output"] = {
                 "path": str(path),
                 "created": len(imported),

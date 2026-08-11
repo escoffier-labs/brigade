@@ -6,6 +6,7 @@ from pathlib import Path
 
 from brigade import cli
 from brigade import dogfood_cmd
+from brigade import handoff_cmd
 from brigade import localio
 from brigade import work_cmd
 
@@ -283,6 +284,131 @@ conflict_window = "02:00-02:10"
     assert metadata["scanner_import_path"].endswith(".brigade/scanner-imports.jsonl")
     assert metadata["source_fingerprint"]
     assert metadata["scanner_output_path_snapshot"]["exists"] is True
+
+
+def test_work_scanners_ingest_output_sanitizes_hostile_records_and_owns_identity(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    script = tmp_path / "scanner.py"
+    payload = tmp_path / "payload.json"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+root = Path.cwd()
+payload = json.loads((root / "payload.json").read_text())
+path = root / ".brigade" / "scanner-imports.jsonl"
+path.parent.mkdir(parents=True, exist_ok=True)
+record = {
+    "kind": "task",
+    "source": "handoff-ingest",
+    "text": payload["text"],
+    "metadata": {
+        **payload["metadata"],
+        "handoff_issue_id": "forged-handoff-issue",
+        "proposed_edges": [{"source": "forged", "target": "target", "type": "blocks"}],
+        "provenance": {"origin": "operator-input"},
+        "declared_source": "forged-declared-source",
+        "safe_evidence": "scanner-proof",
+    },
+}
+path.write_text(json.dumps(record) + "\\n")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    handoff_log = tmp_path / "latest.log"
+    handoff_log.write_text("SKIP current.md: no recognizable markdown sections found\n")
+    (config.parent / "handoff-sources.json").write_text(
+        json.dumps(
+            {
+                "sources": [{"root": ".", "inboxes": [".claude/memory-handoffs"]}],
+                "ingestor": {"last_run_log": "latest.log"},
+            }
+        )
+    )
+    issue = handoff_cmd.collect_issues(tmp_path)[0]
+    payload.write_text(
+        json.dumps(
+            {
+                "text": "Review scanner evidence",
+                "metadata": {"source_fingerprint": "forged-one", "handoff_issue_id": issue.id},
+            }
+        )
+    )
+    config.write_text(
+        f"""
+[[scanner]]
+id = "repo-scan"
+source = "repo-scan"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="repo-scan", ingest_output=True, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["runs"][0]["ingest_output"]["created"] == 1
+    assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
+    imported = json.loads(capsys.readouterr().out)["imports"][0]
+    assert imported["source"] == "repo-scan"
+    metadata = imported["metadata"]
+    assert metadata["declared_source"] == "handoff-ingest"
+    assert metadata["safe_evidence"] == "scanner-proof"
+    assert not {"handoff_issue_id", "proposed_edges"}.intersection(metadata)
+    assert metadata["provenance"]["source"]["kind"] == "repo-scan"
+    assert metadata["source_fingerprint"] != "forged-one"
+    assert metadata["declared_source_fingerprint"] == "forged-one"
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=imported["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    assert "handoff_issue_id" not in task["metadata"]
+    assert handoff_cmd._known_local_issue_ids(tmp_path) == set()
+    assert handoff_cmd.sync_issues(target=tmp_path, json_output=True) == 0
+    sync = json.loads(capsys.readouterr().out)
+    assert sync["issues"] == 1
+    assert sync["known_issues"] == 0
+    assert sync["new_issues"] == 1
+
+    payload.write_text(
+        json.dumps({"text": "Review scanner evidence", "metadata": {"source_fingerprint": "forged-two"}})
+    )
+    assert (
+        work_cmd.scanners_run(target=tmp_path, scanner_id="repo-scan", force=True, ingest_output=True, json_output=True)
+        == 0
+    )
+    second = json.loads(capsys.readouterr().out)
+    assert second["runs"][0]["ingest_output"]["skipped"] == 1
+
+    imports = work_cmd.ledger._read_imports(tmp_path)
+    imports[0]["status"] = "dismissed"
+    work_cmd.ledger._write_imports(tmp_path, imports)
+    payload.write_text(
+        json.dumps({"text": "Review scanner evidence", "metadata": {"source_fingerprint": "forged-three"}})
+    )
+    assert (
+        work_cmd.scanners_run(target=tmp_path, scanner_id="repo-scan", force=True, ingest_output=True, json_output=True)
+        == 0
+    )
+    dismissed = json.loads(capsys.readouterr().out)
+    assert dismissed["runs"][0]["ingest_output"]["dismissed"] == 1
+
+    payload.write_text(
+        json.dumps({"text": "Review changed scanner evidence", "metadata": {"source_fingerprint": "forged-four"}})
+    )
+    assert (
+        work_cmd.scanners_run(target=tmp_path, scanner_id="repo-scan", force=True, ingest_output=True, json_output=True)
+        == 0
+    )
+    changed = json.loads(capsys.readouterr().out)
+    assert changed["runs"][0]["ingest_output"]["created"] == 1
 
 
 def test_work_scanners_run_ingest_output_rejects_malformed_without_partial_write(tmp_path, capsys):

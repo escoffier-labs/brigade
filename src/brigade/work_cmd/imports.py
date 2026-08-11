@@ -2,99 +2,19 @@
 
 from __future__ import annotations
 import json
-import math
 import sys
 from pathlib import Path
 from typing import Any
-from .. import evidence_brief, provenance, scrub
+from .. import evidence_brief, scrub
 from ..untrusted import scan_untrusted, wrap_untrusted
 from . import constants, helpers, ledger as ledger_mod
 from . import scanners as scanners_mod
 from . import services as services_mod
 
 
-_UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS = frozenset(
-    {
-        "proposed_edges",
-        "edges",
-        "seat_class",
-        "spend_by",
-        "handoff_target_document",
-        "target_document",
-        "handoff_type",
-        "category",
-        "issue_type",
-        "handoff_category",
-        "memory_target",
-        "reason",
-    }
-)
-_UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS = (
-    "source_item_key",
-    "source_item_id",
-    "scanner_item_id",
-    "sweep_issue_id",
-    "issue_id",
-    "card_id",
-    "card_file",
-    "source_fingerprint",
-)
-_UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS = frozenset(
-    {
-        *_UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS,
-        *provenance.ENVELOPE_METADATA_RESERVED_KEYS,
-        "provenance",
-        "handoff_issue_id",
-    }
-)
-
-
-def _bound_declared_import_alias(value: object) -> str | None:
-    """Return a bounded display value for an untrusted declared identity alias."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, str):
-        return ledger_mod._bound_import_identity(value)
-    if isinstance(value, int):
-        return ledger_mod._bound_import_identity(str(value))
-    if isinstance(value, float) and math.isfinite(value):
-        return ledger_mod._bound_import_identity(str(value))
-    return None
-
-
 def _ingest_metadata(record: dict[str, Any]) -> dict[str, Any]:
     """Return untrusted JSONL metadata with importer-owned identity fields."""
-    raw_metadata = record.get("metadata")
-    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
-    stamped_metadata = {
-        key: value
-        for key, value in metadata.items()
-        if key not in _UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS
-        and key not in _UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS
-        and not (isinstance(key, str) and key.startswith("declared_"))
-    }
-
-    canonical_record = {
-        "text": record["text"],
-        "kind": record["kind"],
-        "type": record.get("type"),
-        "priority": record.get("priority"),
-        "template": record.get("template"),
-        "acceptance": record.get("acceptance"),
-    }
-    canonical_hash = helpers._stable_hash(canonical_record)
-
-    declared_source = ledger_mod._bound_import_identity(record.get("source"))
-    if declared_source is not None:
-        stamped_metadata["declared_source"] = declared_source
-    for key in _UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS:
-        declared_value = _bound_declared_import_alias(metadata.get(key))
-        if declared_value is not None:
-            stamped_metadata[f"declared_{key}"] = declared_value
-
-    stamped_metadata["source_item_key"] = f"learning-loop:{canonical_hash}"
-    stamped_metadata["source_fingerprint"] = canonical_hash
-    return stamped_metadata
+    return ledger_mod._sanitize_untrusted_import_record(record, importer_source="learning-loop")["metadata"]
 
 
 def import_add(
@@ -414,9 +334,9 @@ def import_ingest(
         return 2
 
     importer_source = "learning-loop"
-    imported_records: list[dict[str, Any]] = []
-    for record in records:
-        imported_records.append({**record, "source": importer_source, "metadata": _ingest_metadata(record)})
+    imported_records = [
+        ledger_mod._sanitize_untrusted_import_record(record, importer_source=importer_source) for record in records
+    ]
 
     imported, skipped, skipped_dismissed, rejected = ledger_mod._append_import_records(
         target,
@@ -424,6 +344,7 @@ def import_ingest(
         dry_run=dry_run,
         provenance_source=importer_source,
         contain_provenance_errors=True,
+        migrate_untrusted_identities=True,
     )
     rejection_reasons = {"provenance_stamp_failed": len(rejected)} if rejected else {}
     payload = {

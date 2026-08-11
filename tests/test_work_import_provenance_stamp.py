@@ -395,6 +395,49 @@ def test_batch_ingest_reuses_safe_fields_from_valid_inbound_envelope(tmp_path: P
     assert env["trust"]["injection"] == {"status": "clean", "count": 0, "rules": []}
 
 
+def test_batch_ingest_path_looking_reusable_identity_uses_importer_fallbacks(tmp_path: Path):
+    text = "Hostile reusable identity labels"
+    inbound = _valid_inbound_envelope(text=text)
+    inbound["repository"]["id"] = "/private/repo"
+    inbound["session"] = {"id": "C:\\private\\session", "harness": "file:///private/harness"}
+    inbound["collection_id"] = "collection/../private"
+    inbound["item_id"] = "item\\private"
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": text,
+                "kind": "finding",
+                "source": "repo-fleet",
+                "metadata": {
+                    "repo_id": "/private/repo",
+                    "session_id": "C:\\private\\session",
+                    "session_harness": "file:///private/harness",
+                    "collection_id": "collection/../private",
+                    "source_item_key": "item\\private",
+                    "provenance": inbound,
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert len(imported) == 1
+    item = imported[0]
+    env = _envelope(item)
+    assert provenance.validate_envelope(env) == []
+    assert env["repository"] == {"id": "unknown", "revision": None}
+    assert env["session"] == {"id": None, "harness": None}
+    assert env["collection_id"] == "work-inbox:repo-fleet"
+    assert env["item_id"] == item["id"]
+    serialized = str(item["metadata"])
+    assert "/private/repo" not in serialized
+    assert "C:\\private\\session" not in serialized
+    assert "file:///private/harness" not in serialized
+
+
 def test_batch_ingest_rejects_forged_loose_origin_modality(tmp_path: Path):
     imported, skipped, dismissed, _rejected = ledger._append_import_records(
         tmp_path,

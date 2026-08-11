@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -1080,6 +1081,125 @@ def _import_source_key(item: dict[str, Any]) -> str | None:
     return None
 
 
+_UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS = frozenset(
+    {
+        "proposed_edges",
+        "edges",
+        "seat_class",
+        "spend_by",
+        "handoff_target_document",
+        "target_document",
+        "handoff_type",
+        "category",
+        "issue_type",
+        "handoff_category",
+        "memory_target",
+        "reason",
+        "dispatch",
+        "dispatch_id",
+        "dispatch_status",
+        "handoff_id",
+        "handoff_issue_id",
+        "promotion",
+        "promoted_at",
+        "promoted_from",
+    }
+)
+_UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS = (
+    "source_item_key",
+    "source_item_id",
+    "scanner_item_id",
+    "sweep_issue_id",
+    "issue_id",
+    "card_id",
+    "card_file",
+    "source_fingerprint",
+)
+_UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS = frozenset(
+    {
+        *_UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS,
+        *provenance.ENVELOPE_METADATA_RESERVED_KEYS,
+        "provenance",
+    }
+)
+
+
+def _bound_declared_import_alias(value: object) -> str | None:
+    """Return a bounded display value for an untrusted declared identity alias."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        return _bound_import_identity(value)
+    if isinstance(value, int):
+        return _bound_import_identity(str(value))
+    if isinstance(value, float) and math.isfinite(value):
+        return _bound_import_identity(str(value))
+    return None
+
+
+def _untrusted_import_canonical_hash(record: dict[str, Any]) -> str:
+    """Hash immutable import content, never record-controlled metadata or source."""
+    return helpers._stable_hash(
+        {
+            "text": record["text"],
+            "kind": record["kind"],
+            "type": record.get("type"),
+            "priority": record.get("priority"),
+            "template": record.get("template"),
+            "acceptance": record.get("acceptance"),
+        }
+    )
+
+
+def _sanitize_untrusted_import_record(record: dict[str, Any], *, importer_source: str) -> dict[str, Any]:
+    """Assign source and identity to hostile JSONL records at the import boundary."""
+    raw_metadata = record.get("metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    stamped_metadata = {
+        key: value
+        for key, value in metadata.items()
+        if key not in _UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS
+        and key not in _UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS
+        and not (isinstance(key, str) and key.startswith("declared_"))
+    }
+    canonical_hash = _untrusted_import_canonical_hash(record)
+    declared_source = _bound_import_identity(record.get("source"))
+    if declared_source is not None:
+        stamped_metadata["declared_source"] = declared_source
+    for key in _UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS:
+        declared_value = _bound_declared_import_alias(metadata.get(key))
+        if declared_value is not None:
+            stamped_metadata[f"declared_{key}"] = declared_value
+    stamped_metadata["source_item_key"] = f"{importer_source}:{canonical_hash}"
+    stamped_metadata["source_fingerprint"] = canonical_hash
+    sanitized = dict(record)
+    sanitized["source"] = importer_source
+    sanitized["metadata"] = stamped_metadata
+    return sanitized
+
+
+def _has_canonical_untrusted_import_identity(record: dict[str, Any]) -> bool:
+    """Return whether a sanitized record retains its importer-owned identity."""
+    source = record.get("source")
+    metadata = record.get("metadata")
+    if not isinstance(source, str) or not source or not isinstance(metadata, dict):
+        return False
+    canonical_hash = _untrusted_import_canonical_hash(record)
+    return (
+        metadata.get("source_item_key") == f"{source}:{canonical_hash}"
+        and metadata.get("source_fingerprint") == canonical_hash
+    )
+
+
+def _import_content_identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Return the immutable-content identity used to migrate sanitized imports."""
+    source = item.get("source")
+    kind = item.get("kind")
+    if not isinstance(source, str) or not source or not isinstance(kind, str) or not kind:
+        return None
+    return source, kind, _untrusted_import_canonical_hash(item)
+
+
 # Central envelope stamps land under metadata.provenance after identity is fixed.
 # Exclude them from dedupe fingerprints so repeated imports stay idempotent.
 _IMPORT_FINGERPRINT_METADATA_SKIP = frozenset(
@@ -1161,6 +1281,13 @@ def _bound_import_identity(value: object, *, max_len: int = _IMPORT_IDENTITY_MAX
     return cleaned
 
 
+def _safe_import_identity(value: object, *, max_len: int = _IMPORT_IDENTITY_MAX_LEN) -> str | None:
+    cleaned = _bound_import_identity(value, max_len=max_len)
+    if cleaned is None or not provenance.is_safe_identity_label(cleaned):
+        return None
+    return cleaned
+
+
 def _resolve_import_provenance_source(
     record: dict[str, Any],
     provenance_source: str | None,
@@ -1172,14 +1299,11 @@ def _resolve_import_provenance_source(
 
 
 def _repository_id_is_unsafe(value: str) -> bool:
-    if provenance._is_absolute_locator(value):
-        return True
-    # Same traversal-safe policy used for repo-relative locators.
-    return ".." in value.replace("\\", "/").split("/")
+    return not provenance.is_safe_identity_label(value)
 
 
 def _safe_repository_id(value: object) -> str | None:
-    cleaned = _bound_import_identity(value)
+    cleaned = _safe_import_identity(value)
     if cleaned is None or _repository_id_is_unsafe(cleaned):
         return None
     return cleaned
@@ -1213,11 +1337,11 @@ def _import_repository_fields(metadata: dict[str, Any]) -> tuple[str, str | None
 def _import_session_fields(metadata: dict[str, Any]) -> tuple[str | None, str | None]:
     session = metadata.get("session")
     if isinstance(session, dict):
-        session_id = _bound_import_identity(session.get("id"))
-        harness = _bound_import_identity(session.get("harness"))
+        session_id = _safe_import_identity(session.get("id"))
+        harness = _safe_import_identity(session.get("harness"))
         return session_id, harness
-    session_id = _bound_import_identity(metadata.get("session_id"))
-    harness = _bound_import_identity(metadata.get("session_harness"))
+    session_id = _safe_import_identity(metadata.get("session_id"))
+    harness = _safe_import_identity(metadata.get("session_harness"))
     return session_id, harness
 
 
@@ -1246,6 +1370,46 @@ def _safe_locator_fields(
     if bounded is None:
         return "uri", f"work-import:{fallback_item_id}"
     return str(locator_kind), bounded
+
+
+def _sanitize_import_identity_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Drop locator-shaped identity hints before persisting importer metadata."""
+    sanitized = dict(metadata)
+    for key in ("repository_id", "repo_id"):
+        if key in sanitized and _safe_repository_id(sanitized[key]) is None:
+            sanitized.pop(key)
+    repository = sanitized.get("repository")
+    if isinstance(repository, dict):
+        repository_id = _safe_repository_id(repository.get("id"))
+        if repository_id is None:
+            sanitized.pop("repository", None)
+        else:
+            cleaned_repository = dict(repository)
+            cleaned_repository["id"] = repository_id
+            revision = _safe_repository_revision(cleaned_repository.get("revision"))
+            if cleaned_repository.get("revision") is not None and revision is None:
+                cleaned_repository.pop("revision", None)
+            sanitized["repository"] = cleaned_repository
+
+    for key in (
+        "session_id",
+        "session_harness",
+        "collection_id",
+        "item_id",
+        "source_item_key",
+        "source_item_id",
+        "scanner_item_id",
+    ):
+        if key in sanitized and _safe_import_identity(sanitized[key]) is None:
+            sanitized.pop(key)
+    session = sanitized.get("session")
+    if isinstance(session, dict):
+        cleaned_session = dict(session)
+        for key in ("id", "harness"):
+            if key in cleaned_session and _safe_import_identity(cleaned_session[key]) is None:
+                cleaned_session.pop(key)
+        sanitized["session"] = cleaned_session
+    return sanitized
 
 
 def _import_injection_trust(text: str) -> tuple[str, str, int, list[str]]:
@@ -1302,10 +1466,10 @@ def _stamp_import_provenance(
         revision = repo_obj.get("revision")
         repository_revision = _safe_repository_revision(revision) if repository_id != "unknown" else None
         session_obj = reusable["session"]
-        session_id = _bound_import_identity(session_obj.get("id"))
-        session_harness = _bound_import_identity(session_obj.get("harness"))
-        collection_id = _bound_import_identity(reusable["collection_id"]) or f"work-inbox:{source}"
-        envelope_item_id = _bound_import_identity(reusable["item_id"]) or item_id
+        session_id = _safe_import_identity(session_obj.get("id"))
+        session_harness = _safe_import_identity(session_obj.get("harness"))
+        collection_id = _safe_import_identity(reusable["collection_id"]) or f"work-inbox:{source}"
+        envelope_item_id = _safe_import_identity(reusable["item_id"]) or item_id
         locator_obj = reusable["locator"]
         locator_kind, locator_value = _safe_locator_fields(
             locator_kind=locator_obj.get("kind"),
@@ -1320,12 +1484,12 @@ def _stamp_import_provenance(
         repository_id, repository_revision = _import_repository_fields(metadata)
         session_id, session_harness = _import_session_fields(metadata)
 
-        collection_id = _bound_import_identity(metadata.get("collection_id"))
+        collection_id = _safe_import_identity(metadata.get("collection_id"))
         if collection_id is None:
             collection_id = f"work-inbox:{source}"
 
         envelope_item_id = _import_source_key({"metadata": metadata, "source": source}) or item_id
-        envelope_item_id = _bound_import_identity(envelope_item_id) or item_id
+        envelope_item_id = _safe_import_identity(envelope_item_id) or item_id
         locator_kind, locator_value = _safe_locator_fields(
             locator_kind=metadata.get("locator_kind"),
             locator_value=metadata.get("locator_value"),
@@ -1486,6 +1650,7 @@ def _append_import_records(
     dry_run: bool = False,
     provenance_source: str | None = None,
     contain_provenance_errors: bool = False,
+    migrate_untrusted_identities: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     imports = _read_imports(target)
     existing = {
@@ -1494,12 +1659,16 @@ def _append_import_records(
         if isinstance(item, dict) and item.get("status", "pending") in {"pending", "promoted"}
     }
     existing_by_source: dict[tuple[str, str, str], dict[str, Any]] = {}
+    legacy_by_content: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in imports:
         if not isinstance(item, dict):
             continue
         identity = _import_source_identity(item)
         if identity is not None:
             existing_by_source[identity] = item
+        content_identity = _import_content_identity(item)
+        if content_identity is not None and not _has_canonical_untrusted_import_identity(item):
+            legacy_by_content[content_identity] = item
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     skipped_dismissed: list[dict[str, Any]] = []
@@ -1519,6 +1688,15 @@ def _append_import_records(
         elif key[2] and key in existing:
             skipped.append(record)
             continue
+        elif migrate_untrusted_identities and _has_canonical_untrusted_import_identity(record):
+            existing_item = legacy_by_content.get(_import_content_identity(record))
+            if existing_item is not None:
+                if existing_item.get("status") == "dismissed":
+                    skipped_dismissed.append(record)
+                    continue
+                if existing_item.get("status") in {"pending", "promoted"}:
+                    skipped.append(record)
+                    continue
         try:
             item = _make_import(
                 str(record["text"]),
@@ -2198,6 +2376,7 @@ def _make_import(
     # are always recomputed. Inbound provenance is never authority.
     stamped_metadata = dict(metadata) if isinstance(metadata, dict) else {}
     inbound_provenance = stamped_metadata.pop("provenance", None)
+    stamped_metadata = _sanitize_import_identity_metadata(stamped_metadata)
     stamped_metadata["provenance"] = _stamp_import_provenance(
         text=text,
         source=provenance_authority,

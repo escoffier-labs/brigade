@@ -117,6 +117,15 @@ def _is_absolute_locator(value: Any) -> bool:
     return False
 
 
+def is_safe_identity_label(value: Any) -> bool:
+    """Return whether an identity label cannot be interpreted as a locator."""
+    if not isinstance(value, str) or not value or value != value.strip() or "\\" in value:
+        return False
+    if _is_absolute_locator(value):
+        return False
+    return ".." not in value.split("/")
+
+
 def validate_envelope(
     env: Any,
     *,
@@ -165,6 +174,8 @@ def validate_envelope(
         rid = repo.get("id")
         if not isinstance(rid, str) or not rid:
             errors.append("repository.id must be a non-empty string")
+        elif not is_safe_identity_label(rid):
+            errors.append("repository.id must be a safe identity label")
         rev = repo.get("revision")
         if rev is not None and not isinstance(rev, str):
             errors.append("repository.revision must be a string or null")
@@ -179,9 +190,13 @@ def validate_envelope(
         sid = session.get("id")
         if sid is not None and not isinstance(sid, str):
             errors.append("session.id must be a string or null")
+        elif sid is not None and not is_safe_identity_label(sid):
+            errors.append("session.id must be a safe identity label")
         harness = session.get("harness")
         if harness is not None and not isinstance(harness, str):
             errors.append("session.harness must be a string or null")
+        elif harness is not None and not is_safe_identity_label(harness):
+            errors.append("session.harness must be a safe identity label")
 
     for key in ("collection_id", "item_id"):
         val = env.get(key)
@@ -190,6 +205,8 @@ def validate_envelope(
                 errors.append(f"{key} must be a string")
         elif not isinstance(val, str):
             errors.append(f"{key} must be a string or null")
+        elif not is_safe_identity_label(val):
+            errors.append(f"{key} must be a safe identity label")
 
     locator = env.get("locator")
     if locator is None:

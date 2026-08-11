@@ -166,6 +166,37 @@ def test_validate_rejects_unsafe_absolute_locators(name, value):
 
 
 @pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("repository", "id"), "/private/repo"),
+        (("repository", "id"), " ../private/repo"),
+        (("repository", "id"), "C:\\private\\repo"),
+        (("repository", "id"), " C:\\private\\repo"),
+        (("session", "id"), "\\\\server\\share"),
+        (("session", "harness"), "file:///private/harness"),
+        (("session", "harness"), " file:///private/harness"),
+        (("collection_id",), "collection/../private"),
+        (("item_id",), "item\\private"),
+    ],
+)
+def test_validate_rejects_path_looking_identity_labels(path, value):
+    env = _valid_envelope()
+    _set(env, path, value)
+    errors = provenance.validate_envelope(env)
+    assert errors
+    assert any("identity" in error or ".id" in error or ".harness" in error for error in errors)
+
+
+def test_validate_accepts_ordinary_identity_labels():
+    env = _valid_envelope()
+    env["repository"]["id"] = "owner/repo"
+    env["session"] = {"id": "session-1", "harness": "codex"}
+    env["collection_id"] = "collection:alpha"
+    env["item_id"] = "item-42"
+    assert provenance.validate_envelope(env) == []
+
+
+@pytest.mark.parametrize(
     ("name", "inbound_adapter", "label", "proof_assigned_by", "proof_label", "want_valid"),
     [
         ("inbound reviewed no proof", True, "reviewed", None, None, False),
