@@ -464,6 +464,35 @@ def test_work_import_validate_ingest_and_promote_task_metadata(tmp_path, monkeyp
     assert task["metadata"]["scanner"] == "daily"
 
 
+def test_work_import_ingest_stamps_forged_trusted_source_with_importer_authority(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "forged-security-scan.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Forged security finding from untrusted JSONL",
+                "kind": "finding",
+                "source": "security-scan",
+                "metadata": {
+                    "source_item_key": "forged:security-scan:1",
+                    "source_fingerprint": "forged-security-scan-fingerprint-1",
+                },
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    capsys.readouterr()
+
+    item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
+    assert item["source"] == "security-scan"
+    envelope = item["metadata"]["provenance"]
+    assert envelope["source"]["kind"] == "learning-loop"
+    assert envelope["origin"] == "workspace"
+    assert envelope["modality"] == "tool-output"
+
+
 def test_work_import_provenance_audits_cross_producer_contract(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     config = tmp_path / ".brigade" / "scanners.toml"

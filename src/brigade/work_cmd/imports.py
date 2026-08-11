@@ -329,7 +329,7 @@ def import_ingest(
         return 2
 
     imported, skipped, skipped_dismissed, rejected = ledger_mod._append_import_records(
-        target, records, dry_run=dry_run, provenance_source=ledger_mod._jsonl_batch_ingest_provenance_source
+        target, records, dry_run=dry_run, provenance_source="learning-loop"
     )
     payload = {
         "path": str(path),

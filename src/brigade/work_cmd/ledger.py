@@ -11,7 +11,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Iterator, Mapping
 from uuid import uuid4
 from . import constants, edges as edges_mod, helpers
 from .. import provenance, runguard
@@ -1160,25 +1160,12 @@ def _bound_import_identity(value: object, *, max_len: int = _IMPORT_IDENTITY_MAX
 
 def _resolve_import_provenance_source(
     record: dict[str, Any],
-    provenance_source: str | Callable[[dict[str, Any]], str] | None,
+    provenance_source: str | None,
 ) -> str:
     record_source = str(record.get("source") or "manual").strip() or "manual"
     if provenance_source is None:
         return record_source
-    if isinstance(provenance_source, str):
-        resolved = provenance_source.strip()
-        return resolved or "learning-loop"
-    return str(provenance_source(record)).strip() or "learning-loop"
-
-
-def _jsonl_batch_ingest_provenance_source(record: dict[str, Any]) -> str:
-    """Derive provenance authority for untrusted JSONL batch ingest."""
-    claimed = str(record.get("source") or "manual").strip() or "manual"
-    if claimed == "manual":
-        return "learning-loop"
-    if claimed in constants.PROVENANCE_AUDIT_SOURCES:
-        return claimed
-    return "learning-loop"
+    return provenance_source.strip() or "learning-loop"
 
 
 def _repository_id_is_unsafe(value: str) -> bool:
@@ -1488,7 +1475,7 @@ def _append_import_records(
     records: list[dict[str, Any]],
     *,
     dry_run: bool = False,
-    provenance_source: str | Callable[[dict[str, Any]], str] | None = None,
+    provenance_source: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     imports = _read_imports(target)
     existing = {
