@@ -373,7 +373,9 @@ def import_issue_repairs(
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     records = ledger_mod._issue_repair_records(target)
-    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(
+        target, records, dry_run=dry_run
+    )
     payload = {
         "target": str(target),
         "imports_path": str(helpers._imports_path(target)),
@@ -485,7 +487,9 @@ def import_chat_sweep(
                 print(f"error: {error}", file=sys.stderr)
         return 2
 
-    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(
+        target, records, dry_run=dry_run
+    )
     output = {
         "input": str(sweep_path),
         "imports_path": str(helpers._imports_path(target)),
@@ -532,7 +536,9 @@ def import_content_guard(
     effective_scan_target = scan_target.expanduser().resolve() if scan_target is not None else target
     result = scrub.run_scan(effective_scan_target, repo_target=target, policy=policy)
     records = services_mod._content_guard_import_records(result)
-    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed, _rejected = ledger_mod._append_import_records(
+        target, records, dry_run=dry_run
+    )
     output = {
         "target": str(target),
         "scan_target": str(effective_scan_target),
