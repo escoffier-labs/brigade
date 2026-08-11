@@ -514,6 +514,34 @@ def test_dispatch_facts_pair_each_real_attempt_without_reusing_pending_identity(
     assert run_lifecycle.pending_dispatch_requests(events) == [("coder", 2)]
 
 
+def test_next_dispatch_attempt_reuses_open_pending_request(enabled, tmp_path):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+
+    _write_run_json(run_dir, "started", lock_workspace=repo)
+    _write_run_json_locked(repo, run_dir, "started", lock_workspace=repo)
+    _write_run_json_locked(repo, run_dir, "dispatching", lock_workspace=repo)
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        first = run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.requested",
+            seat="coder",
+            attempt=1,
+        )
+        assert first is not None
+        assert run_lifecycle.next_dispatch_attempt(run_dir, "coder") == 1
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=repo,
+            event_type="run.dispatch.failed",
+            seat="coder",
+            attempt=1,
+        )
+        assert run_lifecycle.next_dispatch_attempt(run_dir, "coder") == 2
+
+
 def test_artifact_collection_intermediate_appends_the_second_a(enabled, tmp_path):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)

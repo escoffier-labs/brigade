@@ -345,6 +345,39 @@ def pending_dispatch_requests(events: list[run_journal.RunEvent]) -> list[tuple[
     return pending
 
 
+def next_dispatch_attempt(run_dir: Path, seat: str) -> int:
+    """Return the stable attempt id for the next reservation of ``seat``.
+
+    Reuses an open pending ``run.dispatch.requested`` for the seat when one
+    exists so crash/retry before observed/completed/failed keeps the same
+    budget reservation identity. Otherwise allocates ``max(prior)+1``.
+    Missing or inactive journals start at attempt 1.
+    """
+    if not isinstance(seat, str) or not seat:
+        raise LifecycleJournalError(run_events._bound("dispatch fact seat must be non-empty"))
+    run_dir = Path(run_dir).expanduser().resolve()
+    journal_path = _dispatch_journal_path(run_dir)
+    if journal_path is None:
+        return 1
+    try:
+        report = run_journal.read_journal_bounded(journal_path)
+    except (OSError, run_journal.RunJournalError):
+        return 1
+    if report.partial_tail is not None or report.chain_errors:
+        raise LifecycleJournalError(run_events._bound(_CHAIN_CATEGORY))
+    for pending_seat, pending_attempt in pending_dispatch_requests(report.events):
+        if pending_seat == seat and pending_attempt is not None:
+            return pending_attempt
+    attempts: list[int] = []
+    for prior_event in report.events:
+        if prior_event.payload.get("seat") != seat:
+            continue
+        candidate = prior_event.payload.get("attempt")
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate > 0:
+            attempts.append(candidate)
+    return max(attempts, default=0) + 1
+
+
 def record_dispatch_fact(
     run_dir: Path,
     *,
@@ -908,6 +941,7 @@ __all__ = [
     "approval_idempotency_key",
     "checkpoint_event_pair",
     "is_lifecycle_journaling_enabled",
+    "next_dispatch_attempt",
     "normalize_approval_reference",
     "pending_dispatch_requests",
     "prepare_lifecycle_journal",

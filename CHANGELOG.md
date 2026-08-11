@@ -170,6 +170,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `load_error` / `load_warnings` text for missing path-based skill selectors.
 
 ### Fixed
+- Run budget dispatch reservations (#593 / PR #864): serialize parallel
+  same-stage reservations under the coordinator lock; use stable
+  `dispatch:{seat}:{attempt}` request identities with durable
+  reservation→`run.dispatch.requested` ordering and restart-safe idempotency;
+  live Ctrl-C during dispatch terminalizes as `operator-cancelled` (not
+  infrastructure-neutral). Wall-clock, usage labels, compatibility diagnostics,
+  and #594 exclusion unchanged.
 - Claude harness readiness now fails when a global `core.excludesFile` rule
   such as `.claude/` hides the managed handoff `TEMPLATE.md`.
   `operator verify-harness --harness claude` returns `ready: no` with a nonzero

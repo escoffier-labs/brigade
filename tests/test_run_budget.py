@@ -462,3 +462,177 @@ def test_schema_constants_stable():
     assert run_budget.RUN_BUDGET_SCHEMA_VERSION == 1
     assert RUN_EVENT_SCHEMA == "brigade.run_event.v1"
     assert RUN_EVENT_SCHEMA_VERSION == 1
+
+
+def test_parallel_same_stage_reservations_respect_dispatch_ceiling():
+    """Two threads observing the same used count must not both exceed the ceiling."""
+    import threading
+
+    recorded: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        with lock:
+            recorded.append((event_type, idempotency_key))
+        return {"event_type": event_type, "payload": payload, "idempotency_key": idempotency_key}
+
+    declaration = run_budget.RunBudgetDeclaration(worker_dispatch_count=1)
+    started = datetime(2026, 8, 10, 21, 0, 0, tzinfo=timezone.utc)
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=declaration,
+        append_event=append_event,
+        clock=lambda: started + timedelta(seconds=1),
+    )
+    coordinator.set_started_at(started)
+
+    results: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def worker(seat: str) -> None:
+        barrier.wait()
+        request_id = run_budget.dispatch_reservation_request_id(seat, 1)
+        try:
+            coordinator.reserve_worker_dispatch(request_id=request_id)
+            results.append(f"ok:{seat}")
+        except run_budget.BudgetPolicyError:
+            results.append(f"denied:{seat}")
+
+    threads = [threading.Thread(target=worker, args=("alpha",)), threading.Thread(target=worker, args=("beta",))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sum(1 for item in results if item.startswith("ok:")) == 1
+    assert any(item.startswith("denied:") for item in results)
+    assert coordinator.projection.used["worker_dispatch_count"] == 1
+
+
+def test_stable_reservation_identity_is_idempotent_across_retry_and_restart():
+    """Crash/retry before durable requested must not double-reserve the same dispatch."""
+    recorded: list[dict] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        recorded.append({"event_type": event_type, "payload": dict(payload), "idempotency_key": idempotency_key})
+        return recorded[-1]
+
+    declaration = run_budget.RunBudgetDeclaration(worker_dispatch_count=2)
+    started = datetime(2026, 8, 10, 21, 0, 0, tzinfo=timezone.utc)
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=declaration,
+        append_event=append_event,
+        clock=lambda: started + timedelta(seconds=1),
+    )
+    coordinator.set_started_at(started)
+
+    request_id = run_budget.dispatch_reservation_request_id("coder", 1)
+    first = coordinator.reserve_worker_dispatch(request_id=request_id)
+    assert first.allowed is True and first.replayed is False
+    assert coordinator.projection.used["worker_dispatch_count"] == 1
+
+    # In-process retry of the same stable identity must not consume another unit.
+    replay = coordinator.reserve_worker_dispatch(request_id=request_id)
+    assert replay.allowed is True and replay.replayed is True
+    assert coordinator.projection.used["worker_dispatch_count"] == 1
+
+    # Simulate crash before run.dispatch.requested: rebuild from durable events only.
+    # Pending units are lost; the same stable identity re-reserves exactly once.
+    restarted = run_budget.BudgetCoordinator(
+        declaration=declaration,
+        append_event=append_event,
+        clock=lambda: started + timedelta(seconds=2),
+    )
+    restarted.set_started_at(started)
+    restarted.reload(recorded)  # no dispatch.requested yet
+    assert restarted.projection.used["worker_dispatch_count"] == 0
+
+    after_restart = restarted.reserve_and_record_dispatch(
+        request_id=request_id,
+        seat="coder",
+        attempt=1,
+        record_requested=lambda: 1,
+    )
+    assert after_restart == 1
+    assert restarted.projection.used["worker_dispatch_count"] == 1
+
+    # Second restart sees durable requested and treats the identity as already reserved.
+    final = run_budget.BudgetCoordinator(
+        declaration=declaration,
+        append_event=append_event,
+        clock=lambda: started + timedelta(seconds=3),
+    )
+    final.set_started_at(started)
+    final.reload(list(restarted._events_cache))
+    assert final.projection.used["worker_dispatch_count"] == 1
+    replayed = final.reserve_worker_dispatch(request_id=request_id)
+    assert replayed.replayed is True
+    assert final.projection.used["worker_dispatch_count"] == 1
+
+    # Crash after durable requested must not mint a second reservation for the
+    # still-open seat/attempt when reserve_and_record_dispatch is replayed.
+    again = final.reserve_and_record_dispatch(
+        request_id=request_id,
+        seat="coder",
+        attempt=1,
+        record_requested=lambda: (_ for _ in ()).throw(AssertionError("must not re-record")),
+    )
+    assert again == 1
+    assert final.projection.used["worker_dispatch_count"] == 1
+
+
+def test_reserve_and_record_rolls_back_when_durable_write_fails():
+    recorded: list[dict] = []
+
+    def append_event(event_type: str, payload: dict, idempotency_key: str):
+        recorded.append({"event_type": event_type, "payload": dict(payload), "idempotency_key": idempotency_key})
+        return recorded[-1]
+
+    declaration = run_budget.RunBudgetDeclaration(worker_dispatch_count=1)
+    started = datetime(2026, 8, 10, 21, 0, 0, tzinfo=timezone.utc)
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=declaration,
+        append_event=append_event,
+        clock=lambda: started + timedelta(seconds=1),
+    )
+    coordinator.set_started_at(started)
+    request_id = run_budget.dispatch_reservation_request_id("coder", 1)
+
+    with pytest.raises(OSError, match="disk full"):
+        coordinator.reserve_and_record_dispatch(
+            request_id=request_id,
+            seat="coder",
+            attempt=1,
+            record_requested=lambda: (_ for _ in ()).throw(OSError("disk full")),
+        )
+    assert coordinator.projection.used.get("worker_dispatch_count", 0) == 0
+
+    recorded_attempt = coordinator.reserve_and_record_dispatch(
+        request_id=request_id,
+        seat="coder",
+        attempt=1,
+        record_requested=lambda: 1,
+    )
+    assert recorded_attempt == 1
+    assert coordinator.projection.used["worker_dispatch_count"] == 1
+
+
+def test_operator_cancelled_live_ctrl_c_kind_is_not_infrastructure():
+    assert worker_failure.run_failure_is_infrastructure_at_read_time("operator-cancelled", "dispatch") is False
+    assert (
+        outcome.run_capture_signal_value(
+            "canceled",
+            infrastructure_only=False,
+            verifier_failed=False,
+        )
+        == 0
+    )
+    # Even if a reader incorrectly set infrastructure_only, canceled is outside
+    # the #580 neutralization status set.
+    assert (
+        outcome.run_capture_signal_value(
+            "canceled",
+            infrastructure_only=True,
+            verifier_failed=False,
+        )
+        == 0
+    )

@@ -34,6 +34,7 @@ Standard library only. Brigade is zero-runtime-dependency.
 from __future__ import annotations
 
 import hashlib
+import threading
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
@@ -545,6 +546,35 @@ class ReservationDecision:
     exhausted: bool
     projection: BudgetProjection
     events: tuple[dict[str, Any], ...]  # event_type + payload + idempotency_key triples as dicts
+    replayed: bool = False
+
+
+def dispatch_reservation_request_id(seat: str, attempt: int) -> str:
+    """Stable reservation identity for one seat attempt (retry/crash safe)."""
+    if not isinstance(seat, str) or not seat:
+        raise BudgetError("seat must be a non-empty string", code="reservation_invalid")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        raise BudgetError("attempt must be a positive integer", code="reservation_invalid")
+    return f"dispatch:{seat}:{attempt}"
+
+
+def parse_dispatch_reservation_request_id(request_id: str) -> tuple[str, int] | None:
+    """Return ``(seat, attempt)`` when ``request_id`` uses the stable dispatch form."""
+    if not isinstance(request_id, str) or not request_id.startswith("dispatch:"):
+        return None
+    parts = request_id.split(":")
+    if len(parts) != 3:
+        return None
+    _, seat, attempt_raw = parts
+    if not seat:
+        return None
+    try:
+        attempt = int(attempt_raw)
+    except ValueError:
+        return None
+    if attempt < 1:
+        return None
+    return seat, attempt
 
 
 def evaluate_dispatch_reservation(
@@ -862,6 +892,11 @@ class BudgetCoordinator:
 
     Callers that hold the run lock append events through ``append_event``.
     Projection is rebuilt from the journal on ``reload`` so restarts are safe.
+
+    ``reserve_worker_dispatch`` is synchronized so parallel same-stage workers
+    cannot both observe the same used count and exceed a ceiling. Reservation
+    request ids are idempotent: a retry/crash replay of the same stable id does
+    not double-reserve.
     """
 
     declaration: RunBudgetDeclaration
@@ -871,6 +906,8 @@ class BudgetCoordinator:
     _started_at: datetime | None = None
     _events_cache: list[Any] = field(default_factory=list)
     _pending_dispatch_units: int = 0
+    _reserved_request_ids: set[str] = field(default_factory=set)
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
         self._projection = BudgetProjection(declaration=self.declaration)
@@ -879,14 +916,36 @@ class BudgetCoordinator:
         self._started_at = started_at
 
     def reload(self, events: Sequence[Any]) -> BudgetProjection:
-        self._events_cache = list(events)
-        self._projection = project_budget_state(self.declaration, events)
-        # Journal dispatch.requested facts supersede in-process reservations.
-        self._pending_dispatch_units = 0
-        return self._projection
+        with self._lock:
+            self._events_cache = list(events)
+            self._projection = project_budget_state(self.declaration, events)
+            # Journal dispatch.requested facts supersede in-process reservations.
+            self._pending_dispatch_units = 0
+            reserved: set[str] = set()
+            for event in events:
+                event_type = _event_type(event)
+                payload = _event_payload(event)
+                if event_type != "run.dispatch.requested":
+                    continue
+                seat = payload.get("seat")
+                attempt = payload.get("attempt")
+                if (
+                    isinstance(seat, str)
+                    and seat
+                    and isinstance(attempt, int)
+                    and not isinstance(attempt, bool)
+                    and attempt > 0
+                ):
+                    reserved.add(dispatch_reservation_request_id(seat, attempt))
+            self._reserved_request_ids = reserved
+            return self._projection
 
     @property
     def projection(self) -> BudgetProjection:
+        with self._lock:
+            return self._projection_unlocked()
+
+    def _projection_unlocked(self) -> BudgetProjection:
         if self._pending_dispatch_units <= 0:
             return self._projection
         used = dict(self._projection.used)
@@ -900,10 +959,29 @@ class BudgetCoordinator:
             self._events_cache.append(synthetic)
         self._projection = project_budget_state(self.declaration, self._events_cache)
 
-    def reserve_worker_dispatch(self, *, request_id: str, units: int = 1) -> ReservationDecision:
-        """Reserve enforceable dispatch units before new work starts."""
+    def _reserve_unlocked(self, *, request_id: str, units: int = 1) -> ReservationDecision:
+        if request_id in self._projection.denied_request_ids:
+            exhausted = bool(self._projection.exhausted_dimensions)
+            raise BudgetPolicyError(
+                _bound(f"run budget reservation previously denied for {request_id}"),
+                code="budget_exhausted" if exhausted else "reservation_denied",
+                dimension=next(iter(self._projection.exhausted_dimensions), "worker_dispatch_count"),
+                exhausted=exhausted,
+                request_id=request_id,
+            )
+        if request_id in self._reserved_request_ids:
+            # Idempotent replay of the same stable dispatch identity.
+            return ReservationDecision(
+                allowed=True,
+                dimension="worker_dispatch_count",
+                request_id=request_id,
+                exhausted=False,
+                projection=self._projection_unlocked(),
+                events=(),
+                replayed=True,
+            )
         decision = evaluate_dispatch_reservation(
-            self.projection,
+            self._projection_unlocked(),
             request_id=request_id,
             now=self.clock(),
             started_at=self._started_at,
@@ -922,8 +1000,70 @@ class BudgetCoordinator:
                 exhausted=decision.exhausted,
                 request_id=request_id,
             )
+        self._reserved_request_ids.add(request_id)
         self._pending_dispatch_units += units
         return decision
+
+    def reserve_worker_dispatch(self, *, request_id: str, units: int = 1) -> ReservationDecision:
+        """Reserve enforceable dispatch units before new work starts."""
+        with self._lock:
+            return self._reserve_unlocked(request_id=request_id, units=units)
+
+    def _unreserve_unlocked(self, *, request_id: str, units: int = 1) -> None:
+        self._reserved_request_ids.discard(request_id)
+        if self._pending_dispatch_units > 0:
+            self._pending_dispatch_units = max(0, self._pending_dispatch_units - units)
+
+    def _has_durable_dispatch_requested(self, seat: str, attempt: int) -> bool:
+        for event in self._events_cache:
+            if _event_type(event) != "run.dispatch.requested":
+                continue
+            payload = _event_payload(event)
+            if payload.get("seat") == seat and payload.get("attempt") == attempt:
+                return True
+        return False
+
+    def reserve_and_record_dispatch(
+        self,
+        *,
+        request_id: str,
+        seat: str,
+        attempt: int,
+        record_requested: Callable[[], int | None],
+    ) -> int | None:
+        """Reserve then durably record ``run.dispatch.requested`` before unlock.
+
+        Parallel same-stage workers serialize here. A retry with the same stable
+        ``request_id`` does not double-reserve. The dispatch.requested fact is
+        written before this method returns so external transport cannot start
+        without a durable reservation/request pair. If the durable write fails,
+        the in-process reservation is rolled back so a later retry can commit.
+        """
+        with self._lock:
+            if self._has_durable_dispatch_requested(seat, attempt):
+                self._reserved_request_ids.add(request_id)
+                return attempt
+            decision = self._reserve_unlocked(request_id=request_id, units=1)
+            try:
+                recorded_attempt = record_requested()
+            except Exception:
+                if not decision.replayed:
+                    self._unreserve_unlocked(request_id=request_id, units=1)
+                raise
+            if recorded_attempt is None:
+                recorded_attempt = attempt
+            # Durable requested supersedes the in-process pending unit.
+            if self._pending_dispatch_units > 0:
+                self._pending_dispatch_units -= 1
+            self._events_cache.append(
+                {
+                    "event_type": "run.dispatch.requested",
+                    "payload": {"seat": seat, "attempt": recorded_attempt, "detail": "requested"},
+                }
+            )
+            self._projection = project_budget_state(self.declaration, self._events_cache)
+            self._reserved_request_ids.add(dispatch_reservation_request_id(seat, recorded_attempt))
+            return recorded_attempt
 
     def request_cancel(
         self,
@@ -938,35 +1078,35 @@ class BudgetCoordinator:
 
         ``cancel_fn`` returns ``(transport_result, active_remaining)``.
         """
-        requested = build_cancel_requested_event(
-            request_id=request_id,
-            reason_class=reason_class,
-            transport_capability=transport_capability,
-            dimension=dimension,
-        )
-        self._commit([requested])
-        transport_result = "unsupported"
-        active_remaining = 0
-        if cancel_fn is not None:
-            transport_result, active_remaining = cancel_fn()
-        cancelled = build_cancelled_event(
-            request_id=request_id,
-            reason_class=reason_class,
-            transport_capability=transport_capability,
-            transport_result=transport_result,
-            active_remaining=active_remaining,
-            dimension=dimension,
-        )
-        self._commit([cancelled])
-        receipt = CancelReceipt(
-            request_id=request_id,
-            reason_class=reason_class,
-            transport_capability=transport_capability,
-            transport_result=transport_result,
-            active_remaining=active_remaining,
-            dimension=dimension,
-        )
-        return receipt
+        with self._lock:
+            requested = build_cancel_requested_event(
+                request_id=request_id,
+                reason_class=reason_class,
+                transport_capability=transport_capability,
+                dimension=dimension,
+            )
+            self._commit([requested])
+            transport_result = "unsupported"
+            active_remaining = 0
+            if cancel_fn is not None:
+                transport_result, active_remaining = cancel_fn()
+            cancelled = build_cancelled_event(
+                request_id=request_id,
+                reason_class=reason_class,
+                transport_capability=transport_capability,
+                transport_result=transport_result,
+                active_remaining=active_remaining,
+                dimension=dimension,
+            )
+            self._commit([cancelled])
+            return CancelReceipt(
+                request_id=request_id,
+                reason_class=reason_class,
+                transport_capability=transport_capability,
+                transport_result=transport_result,
+                active_remaining=active_remaining,
+                dimension=dimension,
+            )
 
     def reconcile_usage(
         self,
@@ -979,22 +1119,20 @@ class BudgetCoordinator:
         provider_used: int | None = None,
     ) -> None:
         """Record observed usage; estimated and provider values stay distinct."""
-        if dimension in ENFORCEABLE_DIMENSIONS and mode_for_dimension(dimension) == "enforceable":
-            # Wall-clock / dispatch remain coordinator-owned; still allow
-            # observed reconciliation records labeled with their mode.
-            pass
-        else:
-            # Observed dimensions are never hard-gated here.
-            _ = mode_for_dimension(dimension)
-        event = build_usage_reconciled_event(
-            dimension=dimension,
-            usage_source=usage_source,
-            used=used,
-            request_id=request_id,
-            estimated_used=estimated_used,
-            provider_used=provider_used,
-        )
-        self._commit([event])
+        with self._lock:
+            if dimension in ENFORCEABLE_DIMENSIONS and mode_for_dimension(dimension) == "enforceable":
+                pass
+            else:
+                _ = mode_for_dimension(dimension)
+            event = build_usage_reconciled_event(
+                dimension=dimension,
+                usage_source=usage_source,
+                used=used,
+                request_id=request_id,
+                estimated_used=estimated_used,
+                provider_used=provider_used,
+            )
+            self._commit([event])
 
 
 def terminal_status_for_policy(terminal_policy: str | None) -> tuple[str, str]:

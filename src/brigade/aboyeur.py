@@ -4277,15 +4277,12 @@ def run(
         if output_dir is None:
             return
         active_seat = active_seats[0] if len(active_seats) == 1 else None
-        # Operator cancellation remains outside the worker FailureClass enum
-        # (#576). Emit a durable run_budget cancel pair when the journal is
-        # active, then terminalize with the existing keyboard-interrupt kind so
-        # current receipt contracts stay stable. Policy kind operator-cancelled
-        # is used for explicit budget/policy cancel paths (#593).
+        # Live operator cancellation is a policy terminal (#593), not a worker
+        # FailureClass and not infrastructure-neutral under #580.
         if budget_coordinator is not None:
             try:
                 budget_coordinator.request_cancel(
-                    request_id=f"opcancel-{uuid4().hex[:12]}",
+                    request_id="opcancel:live-ctrl-c",
                     reason_class="operator_cancel",
                     transport_capability="process_cancel" if process_registry is not None else "none",
                     dimension="wall_clock_seconds",
@@ -4297,8 +4294,8 @@ def run(
             output_dir,
             status="canceled",
             failure_phase="dispatch",
-            failure_kind="keyboard-interrupt",
-            detail="run canceled by user",
+            failure_kind=run_budget.POLICY_KIND_OPERATOR_CANCELLED,
+            detail="run canceled by operator",
             seat=active_seat,
             active_seats=active_seats,
         )
@@ -4323,24 +4320,36 @@ def run(
 
     def dispatch_requested(agent: Agent) -> int | None:
         # Enforce wall-clock / worker-dispatch ceilings before new work starts (#593).
-        if budget_coordinator is not None:
-            request_id = f"dispatch-{agent.name}-{uuid4().hex[:10]}"
-            try:
-                budget_coordinator.reserve_worker_dispatch(request_id=request_id)
-            except run_budget.BudgetPolicyError as exc:
-                if exc.exhausted:
-                    try:
-                        budget_coordinator.request_cancel(
-                            request_id=f"budgetcancel-{uuid4().hex[:12]}",
-                            reason_class="budget_cancel",
-                            transport_capability="process_cancel" if process_registry is not None else "none",
-                            dimension=exc.dimension,
-                            cancel_fn=_budget_cancel_fn,
-                        )
-                    except (run_budget.BudgetError, run_lifecycle.LifecycleJournalError, OSError) as cancel_exc:
-                        print(f"warning: budget cancel receipt failed: {cancel_exc}", file=sys.stderr)
-                raise
-        return dispatch_fact("run.dispatch.requested", agent)
+        # Stable seat:attempt identity + durable requested ordering before the
+        # external transport call; retries reuse the same request id.
+        if budget_coordinator is None or output_dir is None:
+            return dispatch_fact("run.dispatch.requested", agent)
+        try:
+            attempt = run_lifecycle.next_dispatch_attempt(output_dir, agent.name)
+            request_id = run_budget.dispatch_reservation_request_id(agent.name, attempt)
+            return budget_coordinator.reserve_and_record_dispatch(
+                request_id=request_id,
+                seat=agent.name,
+                attempt=attempt,
+                record_requested=lambda: dispatch_fact("run.dispatch.requested", agent, attempt),
+            )
+        except run_budget.BudgetPolicyError as exc:
+            if exc.exhausted:
+                try:
+                    budget_coordinator.request_cancel(
+                        request_id=f"budgetcancel:{exc.dimension}",
+                        reason_class="budget_cancel",
+                        transport_capability="process_cancel" if process_registry is not None else "none",
+                        dimension=exc.dimension,
+                        cancel_fn=_budget_cancel_fn,
+                    )
+                except (run_budget.BudgetError, run_lifecycle.LifecycleJournalError, OSError) as cancel_exc:
+                    print(f"warning: budget cancel receipt failed: {cancel_exc}", file=sys.stderr)
+            raise
+        except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
+            # Mirror dispatch_fact fail-closed translation so enrollment gaps
+            # before the durable requested write retain the run lock.
+            raise runguard.RetainRunLockError(f"failed to record dispatch lifecycle fact: {exc}") from exc
 
     def dispatch_observed(agent: Agent, attempt: int) -> None:
         dispatch_fact("run.dispatch.observed", agent, attempt)
@@ -4450,8 +4459,8 @@ def run(
                     output_dir,
                     status="canceled",
                     failure_phase="dispatch",
-                    failure_kind="keyboard-interrupt",
-                    detail="run canceled by user",
+                    failure_kind=run_budget.POLICY_KIND_OPERATOR_CANCELLED,
+                    detail="run canceled by operator",
                     seat=active_seat,
                     active_seats=active_seats,
                 )

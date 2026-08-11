@@ -2006,8 +2006,8 @@ def test_run_stage_two_interruption_records_current_stage_seat(monkeypatch, tmp_
     assert run_meta["status_started_at"].endswith("Z")
     assert run_meta["failure"] == {
         "phase": "dispatch",
-        "kind": "keyboard-interrupt",
-        "detail": "run canceled by user",
+        "kind": "operator-cancelled",
+        "detail": "run canceled by operator",
         "seat": "reviewer",
     }
 
