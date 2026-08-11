@@ -1138,10 +1138,331 @@ def _write_registry_skill(target, skill_id, text="# skill body v1\n"):
     return skill_dir / "SKILL.md"
 
 
+def _write_harness_skill(target, skill_id, text="# harness skill\n", harness=".claude"):
+    skill_md = target / harness / "skills" / skill_id / "SKILL.md"
+    skill_md.parent.mkdir(parents=True, exist_ok=True)
+    skill_md.write_text(text)
+    return skill_md
+
+
+def _make_linked_worktree(tmp_path):
+    """Lay out a parent clone and a linked git worktree the way git does."""
+    parent = tmp_path / "clone"
+    admin = parent / ".git" / "worktrees" / "wt"
+    admin.mkdir(parents=True)
+    (admin / "commondir").write_text("../..\n")
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {admin}\n")
+    return parent, worktree
+
+
 def _sha256_of(path):
     import hashlib
 
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_capture_resolves_skill_from_linked_worktree_parent(tmp_path, capsys):
+    parent, worktree = _make_linked_worktree(tmp_path)
+    parent_skill = _write_harness_skill(parent, "brigade-work", "# parent brigade-work\n")
+    _write_verify_receipt(worktree)
+
+    assert outcome_cmd.capture(target=worktree, artifact_id="brigade-work", json_output=True) == 0
+    captured = capsys.readouterr()
+    assert "warning:" not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["record"]["content_fingerprint"] == _sha256_of(parent_skill)
+    assert "brigade-work" in outcome_cmd._known_skill_names(worktree)
+
+
+def test_capture_prefers_target_local_skill_over_linked_parent(tmp_path, capsys):
+    parent, worktree = _make_linked_worktree(tmp_path)
+    _write_harness_skill(parent, "skill-x", "# parent copy\n")
+    local_skill = _write_harness_skill(worktree, "skill-x", "# worktree local copy\n")
+    _write_verify_receipt(worktree)
+
+    assert outcome_cmd.capture(target=worktree, artifact_id="skill-x", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record"]["content_fingerprint"] == _sha256_of(local_skill)
+    assert outcome_cmd.artifact_fingerprint(worktree, "skill-x", "skill") == _sha256_of(local_skill)
+
+
+def test_capture_default_brigade_work_warns_with_install_remedy_not_self_suggestion(tmp_path, capsys):
+    _write_verify_receipt(tmp_path)
+
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="brigade-work", json_output=True) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert "content_fingerprint" not in payload["record"]
+    assert "warning:" in captured.err
+    assert "brigade-work" in captured.err
+    assert "or `brigade-work` itself" not in captured.err
+    assert "brigade skills install brigade-work" in captured.err
+
+
+def test_capture_unknown_skill_warning_sanitizes_untrusted_paths(tmp_path, capsys, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _write_verify_receipt(tmp_path)
+    leaked = str(home / ".claude" / "skills" / "secret-skill" / "SKILL.md")
+
+    assert outcome_cmd.capture(target=tmp_path, artifact_id=leaked, json_output=True) == 0
+    err = capsys.readouterr().err
+    assert "warning:" in err
+    assert str(home) not in err
+    assert "secret-skill" in err or "[redacted-path]" in err
+    assert "or `brigade-work` itself" not in err
+
+
+def test_capture_does_not_discover_skills_from_home_dirs(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    _write_harness_skill(home, "home-only-skill", "# should stay invisible\n")
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    assert "home-only-skill" not in outcome_cmd._known_skill_names(tmp_path)
+    assert outcome_cmd._artifact_content_path(tmp_path, "home-only-skill", "skill") is None
+    assert outcome_cmd._artifact_known(tmp_path, "home-only-skill", "skill") is False
+
+
+def test_capture_still_resolves_registry_and_local_harness_skills(tmp_path):
+    registry_md = _write_registry_skill(tmp_path, "registry-skill", "# registry\n")
+    local_md = _write_harness_skill(tmp_path, "local-skill", "# local\n")
+
+    assert "registry-skill" in outcome_cmd._known_skill_names(tmp_path)
+    assert "local-skill" in outcome_cmd._known_skill_names(tmp_path)
+    assert outcome_cmd._artifact_content_path(tmp_path, "registry-skill", "skill") == registry_md
+    assert outcome_cmd._artifact_content_path(tmp_path, "local-skill", "skill") == local_md
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "local-skill", "skill") == _sha256_of(local_md)
+
+
+def test_artifact_content_path_rejects_traversal_skill_ids(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside-secret" / "SKILL.md"
+    outside.parent.mkdir()
+    outside.write_text("# should not be fingerprinted\n")
+    _write_harness_skill(repo, "safe-skill", "# inside\n")
+
+    assert outcome_cmd._artifact_content_path(repo, "..", "skill") is None
+    assert outcome_cmd._artifact_content_path(repo, "../outside-secret", "skill") is None
+    assert outcome_cmd._artifact_content_path(repo, "../../outside-secret", "skill") is None
+    assert outcome_cmd.artifact_fingerprint(repo, "../outside-secret", "skill") is None
+
+
+def test_artifact_content_path_rejects_glob_metacharacter_skill_ids(tmp_path):
+    _write_harness_skill(tmp_path, "skill-a", "# a\n")
+    _write_harness_skill(tmp_path, "skill-b", "# b\n")
+
+    assert outcome_cmd._artifact_content_path(tmp_path, "*", "skill") is None
+    assert outcome_cmd._artifact_content_path(tmp_path, "skill-*", "skill") is None
+    assert outcome_cmd._artifact_content_path(tmp_path, "skill-[ab]", "skill") is None
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "*", "skill") is None
+
+
+def test_artifact_content_path_rejects_external_skill_directory_symlink(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside_dir = tmp_path / "external-skill"
+    outside_dir.mkdir()
+    (outside_dir / "SKILL.md").write_text("# external payload\n")
+    skill_link = repo / ".claude" / "skills" / "leaky-skill"
+    skill_link.parent.mkdir(parents=True)
+    skill_link.symlink_to(outside_dir)
+
+    assert "leaky-skill" not in outcome_cmd._known_skill_names(repo)
+    assert outcome_cmd._artifact_content_path(repo, "leaky-skill", "skill") is None
+    assert outcome_cmd.artifact_fingerprint(repo, "leaky-skill", "skill") is None
+
+
+def test_capture_unknown_skill_warning_sanitizes_windows_paths_on_posix(tmp_path, capsys):
+    _write_verify_receipt(tmp_path)
+    leaked = r"C:\Users\victim\.claude\skills\secret-skill\SKILL.md"
+
+    assert outcome_cmd.capture(target=tmp_path, artifact_id=leaked, json_output=True) == 0
+    err = capsys.readouterr().err
+    assert "warning:" in err
+    assert r"C:\Users" not in err
+    assert "Users\\victim" not in err
+    assert "secret-skill" in err
+    assert "Capture against the skill id `secret-skill`" in err
+
+
+def test_capture_rejects_skill_ids_with_unicode_controls_before_stdout_or_persist(tmp_path, capsys):
+    """Control-bearing skill ids must not reach stdout/stderr raw or the ledger."""
+    _write_verify_receipt(tmp_path)
+    evil_id = "skill-\x1b[31mRED\x1b[0m\nINJECT"
+
+    assert outcome_cmd.capture(target=tmp_path, artifact_id=evil_id, json_output=False) != 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "\x1b" not in captured.err
+    assert "\nINJECT" not in captured.err
+    assert "error:" in captured.err
+    assert "INJECT" in captured.err
+    assert "warning:" not in captured.err
+    assert outcome_cmd.load_records(tmp_path) == []
+
+
+def test_artifact_content_path_rejects_traversal_card_ids(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "memory" / "cards").mkdir(parents=True)
+    outside = tmp_path / "leaked.md"
+    outside.write_text("# should not be fingerprinted\n")
+    _write_card(repo, "safe-card", "# inside\n")
+
+    # From memory/cards, three parents reach tmp_path where leaked.md lives.
+    assert outcome_cmd._artifact_content_path(repo, "..", "card") is None
+    assert outcome_cmd._artifact_content_path(repo, "../../../leaked", "card") is None
+    assert outcome_cmd._artifact_content_path(repo, "../../leaked", "card") is None
+    assert outcome_cmd.artifact_fingerprint(repo, "../../../leaked", "card") is None
+    assert outside.is_file()
+
+
+def test_artifact_content_path_rejects_external_card_symlink(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    cards = repo / "memory" / "cards"
+    cards.mkdir(parents=True)
+    outside = tmp_path / "external-card.md"
+    outside.write_text("# external payload\n")
+    card_link = cards / "leaky.md"
+    card_link.symlink_to(outside)
+
+    assert "leaky" not in outcome_cmd._known_card_names(repo)
+    assert outcome_cmd._artifact_content_path(repo, "leaky", "card") is None
+    assert outcome_cmd.artifact_fingerprint(repo, "leaky", "card") is None
+
+
+def test_artifact_content_path_rejects_external_symlinked_memory_root(tmp_path):
+    """A target/memory symlink to an external tree must not trust those cards."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside_memory = tmp_path / "external-memory"
+    outside_cards = outside_memory / "cards"
+    outside_cards.mkdir(parents=True)
+    (outside_cards / "leaky.md").write_text("# external via memory symlink\n")
+    (repo / "memory").symlink_to(outside_memory)
+
+    assert "leaky" not in outcome_cmd._known_card_names(repo)
+    assert outcome_cmd._artifact_content_path(repo, "leaky", "card") is None
+    assert outcome_cmd.artifact_fingerprint(repo, "leaky", "card") is None
+
+
+def test_artifact_content_path_rejects_external_symlinked_memory_cards_root(tmp_path):
+    """A target/memory/cards symlink to an external dir must not trust those cards."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "memory").mkdir()
+    outside_cards = tmp_path / "external-cards"
+    outside_cards.mkdir()
+    (outside_cards / "leaky.md").write_text("# external via cards symlink\n")
+    (repo / "memory" / "cards").symlink_to(outside_cards)
+
+    assert "leaky" not in outcome_cmd._known_card_names(repo)
+    assert outcome_cmd._artifact_content_path(repo, "leaky", "card") is None
+    assert outcome_cmd.artifact_fingerprint(repo, "leaky", "card") is None
+
+
+def test_capture_rejects_card_ids_with_unicode_controls_before_stdout_or_persist(tmp_path, capsys):
+    """Control-bearing card ids must not reach stdout/stderr raw or the ledger."""
+    _write_verify_receipt(tmp_path)
+    evil_id = "card-\x1b[31mRED\x1b[0m\nINJECT"
+
+    assert (
+        outcome_cmd.capture(
+            target=tmp_path,
+            artifact_id=evil_id,
+            artifact_kind="card",
+            json_output=False,
+        )
+        != 0
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "\x1b" not in captured.err
+    assert "\nINJECT" not in captured.err
+    assert "error:" in captured.err
+    assert "INJECT" in captured.err
+    assert "warning:" not in captured.err
+    assert outcome_cmd.load_records(tmp_path) == []
+
+
+def test_capture_discovers_and_fingerprints_unicode_and_space_card_ids(tmp_path, capsys):
+    """Card stems may include Unicode letters and spaces; slug regex must not apply."""
+    card_id = "café notes"
+    card = _write_card(tmp_path, card_id, "# unicode space card\n")
+    _write_verify_receipt(tmp_path)
+
+    assert card_id in outcome_cmd._known_card_names(tmp_path)
+    assert outcome_cmd.artifact_fingerprint(tmp_path, card_id, "card") == _sha256_of(card)
+    assert (
+        outcome_cmd.capture(
+            target=tmp_path,
+            artifact_id=card_id,
+            artifact_kind="card",
+            json_output=True,
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert "warning:" not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["record"]["artifact_id"] == card_id
+    assert payload["record"]["content_fingerprint"] == _sha256_of(card)
+
+
+def test_capture_discovers_and_fingerprints_129_char_installed_skill(tmp_path, capsys):
+    """Slug/filesystem skill ids longer than 128 chars must stay discoverable."""
+    skill_id = "a" + ("b" * 128)
+    assert len(skill_id) == 129
+    skill_md = _write_harness_skill(tmp_path, skill_id, "# long skill body\n")
+    _write_verify_receipt(tmp_path)
+
+    assert skill_id in outcome_cmd._known_skill_names(tmp_path)
+    assert outcome_cmd.artifact_fingerprint(tmp_path, skill_id, "skill") == _sha256_of(skill_md)
+    assert outcome_cmd.capture(target=tmp_path, artifact_id=skill_id, json_output=True) == 0
+    captured = capsys.readouterr()
+    assert "warning:" not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["record"]["artifact_id"] == skill_id
+    assert payload["record"]["content_fingerprint"] == _sha256_of(skill_md)
+
+
+def test_unknown_artifact_warning_sanitizes_known_skill_labels(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        outcome_cmd,
+        "_known_skill_names",
+        lambda _target: ["clean-skill", "dirty-\x1b[32mskill\nnext"],
+    )
+    message = outcome_cmd._unknown_artifact_warning(tmp_path, "missing-skill", "skill")
+    assert "\x1b" not in message
+    assert "\nnext" not in message
+    assert "dirty-[32mskill next" in message
+
+
+def test_capture_prefers_target_registry_over_parent_harness(tmp_path):
+    parent, worktree = _make_linked_worktree(tmp_path)
+    _write_harness_skill(parent, "skill-x", "# parent harness copy\n")
+    target_registry = _write_registry_skill(worktree, "skill-x", "# target registry copy\n")
+
+    assert outcome_cmd._artifact_content_path(worktree, "skill-x", "skill") == target_registry
+    assert outcome_cmd.artifact_fingerprint(worktree, "skill-x", "skill") == _sha256_of(target_registry)
+
+
+def test_capture_resolves_parent_registry_only_skill(tmp_path, capsys):
+    parent, worktree = _make_linked_worktree(tmp_path)
+    parent_registry = _write_registry_skill(parent, "parent-reg-skill", "# parent registry only\n")
+    _write_verify_receipt(worktree)
+
+    assert "parent-reg-skill" in outcome_cmd._known_skill_names(worktree)
+    assert outcome_cmd.capture(target=worktree, artifact_id="parent-reg-skill", json_output=True) == 0
+    captured = capsys.readouterr()
+    assert "warning:" not in captured.err
+    payload = json.loads(captured.out)
+    assert payload["record"]["content_fingerprint"] == _sha256_of(parent_registry)
 
 
 def test_capture_stamps_content_fingerprint_of_registry_skill(tmp_path, capsys):
@@ -1584,6 +1905,22 @@ def test_bundle_fingerprint_changes_when_a_file_is_added(tmp_path):
     assert before != after
 
 
+def test_bundle_fingerprint_excludes_helper_symlink_escaping_skill_root(tmp_path):
+    """A helper symlink that resolves outside the skill root must not be hashed."""
+    d = _registry_skill_dir(tmp_path, "skill-x")
+    skill_md = d / "SKILL.md"
+    skill_md.write_text("# body\n")
+    outside = tmp_path / "outside-helper.sh"
+    outside.write_text("echo EXTERNAL_SECRET_v1\n")
+    (d / "helper.sh").symlink_to(outside)
+
+    fp = outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill")
+    # Exclude the escape, or refuse the fingerprint — never fold in external bytes.
+    assert fp is None or fp == _sha256_of(skill_md)
+    outside.write_text("echo EXTERNAL_SECRET_v2\n")
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill") == fp
+
+
 def test_editing_a_bundled_helper_makes_prior_records_proven_stale_in_rank(tmp_path, capsys):
     # End to end: a skill's signals were captured against a bundle whose helper has
     # since changed. Rank must drop them from the current score even though SKILL.md
@@ -1708,6 +2045,21 @@ def test_editing_an_unlinked_card_does_not_move_the_fingerprint(tmp_path):
     unrelated.write_text("# z v2\n")
     after = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
     assert before == after
+
+
+def test_linked_card_symlink_escaping_cards_root_is_not_discovered_or_fingerprinted(tmp_path):
+    """A [[linked]] card that is a symlink outside memory/cards must be ignored."""
+    a = _write_card(tmp_path, "a", "# a\nsee [[b]]\n")
+    cards = tmp_path / "memory" / "cards"
+    outside = tmp_path / "external-b.md"
+    outside.write_text("# external linked card v1\n")
+    (cards / "b.md").symlink_to(outside)
+
+    assert "b" not in outcome_cmd._known_card_names(tmp_path)
+    # Dead-link behavior: a's fingerprint stays sha256(a), never external bytes.
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "a", "card") == _sha256_of(a)
+    outside.write_text("# external linked card v2\n")
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "a", "card") == _sha256_of(a)
 
 
 def test_editing_a_linked_card_makes_prior_records_stale_in_rank(tmp_path, capsys):
