@@ -1,7 +1,9 @@
 package app
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -297,5 +299,202 @@ limit 1`, ingest.MemorySourceKind, testMemoryNamespace).Scan(&cardWithReceipt); 
 	}
 	if !foundTombstonedTarget {
 		t.Fatalf("expected qualified tombstoned/unresolved target on probe: %v", probeShow)
+	}
+}
+
+func TestE2ExportOmitsSupersededAndTombstonedBodies(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	ws := t.TempDir()
+	writeTestNamespace(t, ws, testMemoryNamespace)
+	cards := filepath.Join(ws, "memory", "cards")
+	if err := os.MkdirAll(cards, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cardID := "card-e2export-1111-4222-8333-444444444444"
+	path := filepath.Join(cards, "export.md")
+	oldUnique := "EXPORT_OLD_BODY_TOKEN_E2"
+	newUnique := "EXPORT_NEW_BODY_TOKEN_E2"
+	if err := os.WriteFile(path, []byte("---\nid: "+cardID+"\ntopic: export\n---\n\n"+oldUnique+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "crawl", "memory", ws, "--json")
+	if err := os.WriteFile(path, []byte("---\nid: "+cardID+"\ntopic: export\n---\n\n"+newUnique+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "crawl", "memory", ws, "--json")
+
+	outDir := filepath.Join(t.TempDir(), "export")
+	runJSON(t, "export", "markdown", "--out", outDir)
+	exported := readExportTree(t, outDir)
+	if strings.Contains(exported, oldUnique) {
+		t.Fatalf("markdown export leaked superseded body:\n%s", exported)
+	}
+	if !strings.Contains(exported, newUnique) {
+		t.Fatalf("markdown export missing live body:\n%s", exported)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "crawl", "memory", ws, "--json")
+	outDir2 := filepath.Join(t.TempDir(), "export2")
+	runJSON(t, "export", "markdown", "--out", outDir2)
+	exported2 := readExportTree(t, outDir2)
+	if strings.Contains(exported2, newUnique) || strings.Contains(exported2, oldUnique) {
+		t.Fatalf("completed-removal tombstone leaked into export:\n%s", exported2)
+	}
+}
+
+func TestE2SessionsAndRelatedFilterDuplicateLiveAndTombstones(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+
+	db := openTestDB(t)
+	seedPreE2DuplicateSessionArchive(t, db)
+	db.Close()
+
+	listed := runJSON(t, "sessions", "list", "--source", "codex", "--json")
+	sessions := listed["sessions"].([]any)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions list = %v", listed)
+	}
+	row := sessions[0].(map[string]any)
+	// Two distinct live external_ids (msg:e2 latest + msg:e2-peer); superseded
+	// duplicate and tombstone must not inflate the count.
+	if int(row["item_count"].(float64)) != 2 {
+		t.Fatalf("session item_count must count only latest-live versions, got %v", row)
+	}
+	preview, _ := row["preview"].(string)
+	if strings.Contains(preview, "SESSION_OLD_UNIQUE_E2") || strings.Contains(preview, "SESSION_TOMB_UNIQUE_E2") {
+		t.Fatalf("session preview leaked non-live text: %q", preview)
+	}
+	if !strings.Contains(preview, "SESSION_NEW_UNIQUE_E2") {
+		t.Fatalf("session preview missing live text: %q", preview)
+	}
+
+	searched := runJSON(t, "sessions", "search", "SESSION_OLD_UNIQUE_E2", "--source", "codex", "--json")
+	if len(searched["sessions"].([]any)) != 0 {
+		t.Fatalf("sessions search must not hit superseded duplicate live row: %v", searched)
+	}
+	tombSearch := runJSON(t, "sessions", "search", "SESSION_TOMB_UNIQUE_E2", "--source", "codex", "--json")
+	if len(tombSearch["sessions"].([]any)) != 0 {
+		t.Fatalf("sessions search must not hit tombstone: %v", tombSearch)
+	}
+	searchedNew := runJSON(t, "sessions", "search", "SESSION_NEW_UNIQUE_E2", "--source", "codex", "--json")
+	if len(searchedNew["sessions"].([]any)) != 1 {
+		t.Fatalf("sessions search missing live row: %v", searchedNew)
+	}
+	liveSession := searchedNew["sessions"].([]any)[0].(map[string]any)
+	if int(liveSession["item_count"].(float64)) != 2 {
+		t.Fatalf("search stats item_count=%v want 2", liveSession["item_count"])
+	}
+
+	db = openTestDB(t)
+	defer db.Close()
+	items, err := sessionItems(db, "session:e2-dup", "codex", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("transcript must expose only latest-live items, got %#v", items)
+	}
+	joined := ""
+	for _, item := range items {
+		joined += fmt.Sprint(item["text"]) + "\n"
+	}
+	if strings.Contains(joined, "SESSION_OLD_UNIQUE_E2") || strings.Contains(joined, "SESSION_TOMB_UNIQUE_E2") {
+		t.Fatalf("transcript leaked non-live text: %s", joined)
+	}
+	if !strings.Contains(joined, "SESSION_NEW_UNIQUE_E2") || !strings.Contains(joined, "SESSION_PEER_UNIQUE_E2") {
+		t.Fatalf("transcript missing live texts: %s", joined)
+	}
+	count, first, last, err := sessionStats(db, "collection-e2-dup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 || first == "" || last == "" {
+		t.Fatalf("sessionStats=%d %q %q", count, first, last)
+	}
+
+	// Related expansion: live root must not pull superseded/tombstoned neighbors.
+	related := relatedItems(db, "item-e2-live")
+	for _, rel := range related {
+		target := fmt.Sprint(rel["target_item_id"])
+		if target == "item-e2-old" || target == "item-e2-tomb" {
+			t.Fatalf("related expansion re-entered non-live row: %#v", related)
+		}
+	}
+	if len(related) != 1 || fmt.Sprint(related[0]["target_item_id"]) != "item-e2-peer" {
+		t.Fatalf("expected only live peer relation, got %#v", related)
+	}
+
+	outDir := filepath.Join(t.TempDir(), "export-dup")
+	if _, err := exportMarkdown(db, outDir); err != nil {
+		t.Fatal(err)
+	}
+	exported := readExportTree(t, outDir)
+	if strings.Contains(exported, "SESSION_OLD_UNIQUE_E2") || strings.Contains(exported, "SESSION_TOMB_UNIQUE_E2") {
+		t.Fatalf("export leaked duplicate/tombstone session text:\n%s", exported)
+	}
+	if !strings.Contains(exported, "SESSION_NEW_UNIQUE_E2") {
+		t.Fatalf("export missing live session text:\n%s", exported)
+	}
+}
+
+func readExportTree(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// seedPreE2DuplicateSessionArchive writes a pre-E2 shape: two non-tombstoned
+// content-hash versions for one external_id plus an intentional tombstone, with
+// FTS rows still present for the superseded/tombstoned text.
+func seedPreE2DuplicateSessionArchive(t *testing.T, db *sql.DB) {
+	t.Helper()
+	stmts := []string{
+		`insert into sources(id, kind, name, version, created_at, updated_at) values('source-e2','codex','Codex','1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		`insert into collections(id, source_id, external_id, kind, name, created_at, updated_at) values('collection-e2-dup','source-e2','session:e2-dup','agent_session','dup','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`,
+		`insert into actors(id, source_id, external_id, type, name) values('actor-e2','source-e2','actor:e2','human','Human')`,
+		`insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq, tombstoned_at)
+values('item-e2-old','source-e2','collection-e2-dup','actor-e2','msg:e2','message','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','SESSION_OLD_UNIQUE_E2','sha256:old','{}','{}',1,null)`,
+		`insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq, tombstoned_at)
+values('item-e2-live','source-e2','collection-e2-dup','actor-e2','msg:e2','message','2026-01-01T00:00:01Z','2026-01-01T00:00:01Z','SESSION_NEW_UNIQUE_E2','sha256:new','{}','{}',2,null)`,
+		`insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq, tombstoned_at)
+values('item-e2-tomb','source-e2','collection-e2-dup','actor-e2','msg:e2-tomb','message','2026-01-01T00:00:02Z','2026-01-01T00:00:02Z','SESSION_TOMB_UNIQUE_E2','sha256:tomb','{}','{}',3,'2026-01-02T00:00:00Z')`,
+		`insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, updated_at, text, content_hash, raw_json, metadata_json, ingest_seq, tombstoned_at)
+values('item-e2-peer','source-e2','collection-e2-dup','actor-e2','msg:e2-peer','message','2026-01-01T00:00:03Z','2026-01-01T00:00:03Z','SESSION_PEER_UNIQUE_E2','sha256:peer','{}','{}',4,null)`,
+		`insert into item_fts(item_id, source_kind, collection_kind, item_kind, actor_type, body) values
+('item-e2-old','codex','agent_session','message','human','SESSION_OLD_UNIQUE_E2'),
+('item-e2-live','codex','agent_session','message','human','SESSION_NEW_UNIQUE_E2'),
+('item-e2-tomb','codex','agent_session','message','human','SESSION_TOMB_UNIQUE_E2'),
+('item-e2-peer','codex','agent_session','message','human','SESSION_PEER_UNIQUE_E2')`,
+		`insert into item_metadata(item_id, key, value) values
+('item-e2-old','project','miseledger'),
+('item-e2-live','project','miseledger'),
+('item-e2-live','model','gpt-test'),
+('item-e2-tomb','project','miseledger')`,
+		`insert into relations(id, source_item_id, target_item_id, target_external_id, relation_type, confidence) values
+('rel-e2-old','item-e2-live','item-e2-old','msg:e2','derived_from',1.0),
+('rel-e2-tomb','item-e2-live','item-e2-tomb','msg:e2-tomb','derived_from',1.0),
+('rel-e2-peer','item-e2-live','item-e2-peer','msg:e2-peer','derived_from',1.0)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("seed failed on %s: %v", stmt, err)
+		}
 	}
 }

@@ -1936,7 +1936,7 @@ limit ?`
 	return sqlText, params
 }
 
-// liveDefaultItemPredicate keeps default search/evidence on one live content
+// liveDefaultItemPredicate keeps default read paths on one live content
 // version per (source, collection, external_id). Tombstones and superseded
 // content-hash rows are excluded even if a stale FTS row remains.
 const liveDefaultItemPredicate = `i.tombstoned_at is null and i.id = (
@@ -1948,6 +1948,23 @@ const liveDefaultItemPredicate = `i.tombstoned_at is null and i.id = (
   order by i2.ingest_seq desc, i2.id desc
   limit 1
 )`
+
+// liveDefaultItemPredicateFor returns the shared latest-live predicate for an
+// items-table alias other than "i" (for example "t", "fi", or "ii").
+func liveDefaultItemPredicateFor(alias string) string {
+	if alias == "" || alias == "i" {
+		return liveDefaultItemPredicate
+	}
+	return fmt.Sprintf(`%s.tombstoned_at is null and %s.id = (
+  select i2.id from items i2
+  where i2.source_id = %s.source_id
+    and i2.collection_id = %s.collection_id
+    and i2.external_id = %s.external_id
+    and i2.tombstoned_at is null
+  order by i2.ingest_seq desc, i2.id desc
+  limit 1
+)`, alias, alias, alias, alias, alias)
+}
 
 func appendSearchResultFilters(opts SearchOpts, where []string, params []any) ([]string, []any) {
 	if opts.Source != "" {
@@ -2479,15 +2496,19 @@ func listEvidenceBundles() ([]map[string]any, error) {
 }
 
 func relatedItems(db *sql.DB, itemID string) []map[string]any {
+	liveT := liveDefaultItemPredicateFor("t")
+	liveI := liveDefaultItemPredicate
 	return queryMaps(db, `select r.relation_type, r.target_external_id, coalesce(t.id,'') as target_item_id, coalesce(t.kind,'') as target_kind, coalesce(t.created_at,'') as target_created_at
 from relations r
 left join items t on t.id = r.target_item_id
 where r.source_item_id = ?
+  and (r.target_item_id is null or (`+liveT+`))
 union all
 select r.relation_type, r.target_external_id, coalesce(i.id,'') as target_item_id, coalesce(i.kind,'') as target_kind, coalesce(i.created_at,'') as target_created_at
 from relations r
 join items i on i.id = r.source_item_id
 where r.target_item_id = ?
+  and (`+liveI+`)
 order by relation_type, target_item_id, target_external_id
 limit 20`, itemID, itemID)
 }
@@ -2699,6 +2720,7 @@ from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 left join actors a on a.id = i.actor_id
+where `+liveDefaultItemPredicate+`
 order by s.kind, c.name, i.created_at, i.id`)
 	if err != nil {
 		return 0, err
