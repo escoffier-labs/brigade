@@ -170,6 +170,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `load_error` / `load_warnings` text for missing path-based skill selectors.
 
 ### Fixed
+- Run budget resume gate (#593 / PR #864): `brigade runs resume` evaluates the
+  persisted declaration, original `started_at`, and authoritative budget
+  lifecycle projection before `AppServer.start()`, refusing expired or
+  already-exhausted declared runs without provider or synthesis calls.
+  Undeclared and non-expired declared resumes keep existing recovery behavior.
 - Run budget restart reclaim (#593 / PR #864): evaluate the wall-clock ceiling
   before reclaiming a durable pending dispatch can authorize external work, so
   an expired run cannot relaunch attempt 1 after recovery.

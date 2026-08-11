@@ -874,3 +874,164 @@ def test_authority_resume_successful_synthesis_receipt_write_retains_lock(tmp_pa
         run_resume.resume(run_dir)
     lock_path = tmp_path / ".brigade" / "run.lock"
     assert lock_path.exists()
+
+
+# -- Issue #593: resume must honor declared run budgets before AppServer.start ----
+
+
+_RESUMABLE_COOK = {
+    "worker": "cook",
+    "task": "write code",
+    "ok": False,
+    "detail": "timeout",
+    "text": "part",
+    "thread_id": "t-1",
+    "status": "interrupted",
+}
+
+
+def _declared_contract(*, wall_clock_seconds: int | None = 3600, worker_dispatch_count: int | None = 10) -> dict:
+    from brigade import verification_contract
+
+    budget: dict = {"latency_seconds": wall_clock_seconds or 3600}
+    if wall_clock_seconds is not None:
+        budget["wall_clock_seconds"] = wall_clock_seconds
+    if worker_dispatch_count is not None:
+        budget["worker_dispatch_count"] = worker_dispatch_count
+    return {
+        "schema": verification_contract.VERIFICATION_CONTRACT_SCHEMA,
+        "schema_version": verification_contract.VERIFICATION_CONTRACT_SCHEMA_VERSION,
+        "verifier": {"source": "command", "command": "true"},
+        "rollback": {"policy": "none"},
+        "budget": budget,
+    }
+
+
+class _GuardServer(_StubServer):
+    started = 0
+
+    def start(self):
+        type(self).started += 1
+        raise AssertionError("AppServer.start must not run when resume budget gate denies")
+
+
+def test_resume_refuses_expired_declared_wall_clock_before_appserver(tmp_path, monkeypatch, capsys):
+    from datetime import datetime, timedelta, timezone
+
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    started = datetime(2026, 7, 3, 0, 0, 0, tzinfo=timezone.utc)
+    meta["started_at"] = started.isoformat()
+    meta["verification_contract"] = _declared_contract(wall_clock_seconds=5, worker_dispatch_count=10)
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    plan = json.loads((run_dir / "plan.json").read_text())
+    plan["verification_contract"] = meta["verification_contract"]
+    (run_dir / "plan.json").write_text(json.dumps(plan))
+
+    _GuardServer.started = 0
+    monkeypatch.setattr(run_resume, "_utc_now", lambda: started + timedelta(seconds=10))
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _GuardServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("synthesis must not run")),
+    )
+    monkeypatch.setattr(run_resume.runguard, "run_lock", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(run_resume.runguard, "recover_stale_run", lambda *a, **k: False)
+
+    assert run_resume.resume(run_dir) == 2
+    assert "wall-clock budget exhausted" in capsys.readouterr().err
+    assert _GuardServer.started == 0
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+
+
+def test_resume_refuses_budget_exhausted_projection_before_appserver(tmp_path, monkeypatch, capsys):
+    from brigade import run_journal
+
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["verification_contract"] = _declared_contract(wall_clock_seconds=3600, worker_dispatch_count=1)
+    meta["failure"] = {"phase": "dispatch", "kind": "budget-exhausted", "detail": "dispatch ceiling"}
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type="run.created",
+        payload={"status": "started"},
+        idempotency_key="create-1",
+        expected_previous_sequence=0,
+        recorded_at="2026-07-03T00:00:00.000000Z",
+    )
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type="run_budget.exhausted",
+        payload={
+            "dimension": "worker_dispatch_count",
+            "mode": "enforceable",
+            "declared": 1,
+            "used": 1,
+            "remaining": 0,
+            "reason_class": "exhausted",
+        },
+        idempotency_key="run_budget.exhausted:worker_dispatch_count",
+        expected_previous_sequence=1,
+        recorded_at="2026-07-03T00:00:01.000000Z",
+    )
+
+    _GuardServer.started = 0
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _GuardServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("synthesis must not run")),
+    )
+    monkeypatch.setattr(run_resume.runguard, "run_lock", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(run_resume.runguard, "recover_stale_run", lambda *a, **k: False)
+
+    assert run_resume.resume(run_dir) == 2
+    assert "run budget exhausted" in capsys.readouterr().err
+    assert _GuardServer.started == 0
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+
+
+def test_resume_allows_non_expired_declared_budget(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    started = datetime(2026, 7, 3, 0, 0, 0, tzinfo=timezone.utc)
+    meta["started_at"] = started.isoformat()
+    meta["verification_contract"] = _declared_contract(wall_clock_seconds=3600, worker_dispatch_count=10)
+    (run_dir / "run.json").write_text(json.dumps(meta))
+
+    monkeypatch.setattr(run_resume, "_utc_now", lambda: started + timedelta(seconds=10))
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
+    )
+    monkeypatch.setattr(run_resume.runguard, "run_lock", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(run_resume.runguard, "recover_stale_run", lambda *a, **k: False)
+
+    assert run_resume.resume(run_dir) == 0
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "ok"
+    assert (run_dir / "final.txt").read_text().strip() == "final synthesis"
+
+
+def test_resume_allows_undeclared_budget_for_backward_compatibility(tmp_path, monkeypatch):
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
+    )
+    monkeypatch.setattr(run_resume.runguard, "run_lock", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(run_resume.runguard, "recover_stale_run", lambda *a, **k: False)
+
+    assert run_resume.resume(run_dir) == 0
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "ok"

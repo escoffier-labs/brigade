@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,9 +18,13 @@ from . import (
     agents,
     codex_appserver,
     receipt_schema,
+    run_budget,
+    run_events,
+    run_journal,
     run_lifecycle,
     runguard,
     seat_health,
+    verification_contract,
     worker_events,
 )
 from .roster import Agent, Roster, _as_bool, _as_env
@@ -48,6 +53,83 @@ def _load_json(run_dir: Path, name: str) -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _declaration_from_run_artifacts(run_dir: Path, run_meta: dict) -> run_budget.RunBudgetDeclaration:
+    """Load the persisted run_budget / verification_contract declaration for resume."""
+    if isinstance(run_meta.get("run_budget"), dict):
+        nested = (
+            run_meta["run_budget"].get("declaration")
+            if isinstance(run_meta["run_budget"].get("declaration"), dict)
+            else run_meta["run_budget"]
+        )
+        return run_budget.parse_declaration(nested if isinstance(nested, dict) else None)
+
+    contract = verification_contract.extract_contract_payload(run_meta)
+    budget = contract.get("budget") if isinstance(contract, dict) else None
+    if not isinstance(budget, dict):
+        plan = _load_json(run_dir, "plan.json")
+        if isinstance(plan, dict):
+            contract = verification_contract.extract_contract_payload(plan)
+            budget = contract.get("budget") if isinstance(contract, dict) else None
+    if isinstance(budget, dict):
+        return run_budget.declaration_from_verification_budget(budget)
+    return run_budget.RunBudgetDeclaration()
+
+
+def _lifecycle_events_for_budget_projection(run_dir: Path) -> list[object]:
+    journal_path = run_dir / "events" / "lifecycle.jsonl"
+    if not journal_path.is_file():
+        return []
+    try:
+        report = run_journal.read_journal_bounded(journal_path)
+    except (OSError, run_journal.RunJournalError, run_events.CanonicalizationError):
+        return []
+    if report.partial_tail is not None or report.chain_errors:
+        return []
+    return list(report.events)
+
+
+def _resume_budget_blocked(run_dir: Path, run_meta: dict, *, now: datetime | None = None) -> str | None:
+    """Return an error when resume must not start provider work under #593.
+
+    Uses the persisted declaration, original ``started_at``, and authoritative
+    lifecycle projection. Undeclared runs stay unbounded. Already exhausted or
+    newly expired declared ceilings refuse before ``AppServer.start()``.
+    """
+    try:
+        declaration = _declaration_from_run_artifacts(run_dir, run_meta)
+    except run_budget.BudgetCompatibilityError as exc:
+        return f"run budget declaration is incompatible: {exc.diagnostic}"
+
+    has_enforceable = declaration.wall_clock_seconds is not None or declaration.worker_dispatch_count is not None
+    events = _lifecycle_events_for_budget_projection(run_dir)
+    projection = run_budget.project_budget_state(declaration, events)
+    if projection.terminal_policy == "budget_exhausted" or projection.exhausted_dimensions:
+        return "run budget exhausted; resume refused"
+    if not has_enforceable:
+        return None
+
+    started_at = aboyeur._parse_iso_datetime(run_meta.get("started_at"))
+    if declaration.wall_clock_seconds is not None:
+        if started_at is None:
+            return "run budget wall-clock ceiling requires original started_at; resume refused"
+        clock = now if now is not None else _utc_now()
+        wall_only = replace(projection, declaration=replace(declaration, worker_dispatch_count=None))
+        decision = run_budget.evaluate_dispatch_reservation(
+            wall_only,
+            request_id="resume:wall-clock-gate",
+            now=clock,
+            started_at=started_at,
+            units=1,
+        )
+        if not decision.allowed:
+            return "run wall-clock budget exhausted; resume refused"
+    return None
 
 
 def _interrupted_appserver_results(run_dir: Path) -> dict | None:
@@ -360,6 +442,11 @@ def _resume_locked(
         )
     if not resumable:
         print("error: no resumable workers in this run", file=sys.stderr)
+        return 2
+
+    budget_block = _resume_budget_blocked(run_dir, run_meta)
+    if budget_block is not None:
+        print(f"error: {budget_block}", file=sys.stderr)
         return 2
 
     read_only = bool(run_meta.get("read_only"))
