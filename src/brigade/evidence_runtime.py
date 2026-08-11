@@ -440,23 +440,52 @@ def _archive_readable_from_doctor(payload: dict[str, Any], exit_code: int) -> tu
     """Interpret MiseLedger doctor JSON for archive readability.
 
     Preflight accepts a readable archive even when memory health is unhealthy
-    (so a stale projection can be re-crawled). A failed database check or a
-    non-JSON probe is refused before delegation.
+    (so a stale projection can be re-crawled). Exit 0/1 alone is not enough:
+    absent or malformed ``checks`` and explicit archive failures refuse
+    delegation. Positive structured evidence is required (``database``,
+    ``schema``, or ``fts`` with ``ok=true``), matching the engine's success
+    path which emits schema/fts after a successful open rather than a
+    ``database: ok`` row.
     """
 
-    checks = payload.get("checks")
-    if isinstance(checks, list):
-        for row in checks:
-            if not isinstance(row, dict):
-                continue
-            if row.get("name") == "database" and row.get("ok") is False:
-                return False, str(row.get("detail") or "database check failed")
-            if row.get("name") == "paths" and row.get("ok") is False:
-                return False, str(row.get("detail") or "paths check failed")
     if exit_code not in (0, 1):
         return False, f"doctor exit {exit_code}"
-    # exit 1 with structured checks is allowed when the archive opened (memory
-    # projection health may fail while capability is still readable).
+
+    checks = payload.get("checks")
+    if "checks" not in payload:
+        return False, "absent checks: doctor JSON missing structured checks"
+    if not isinstance(checks, list):
+        return False, f"malformed checks: expected list, observed {type(checks).__name__}"
+    if not checks:
+        return False, "absent checks: doctor checks list is empty"
+
+    well_formed = 0
+    positive_archive = False
+    for row in checks:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        ok = row.get("ok")
+        if not isinstance(ok, bool):
+            continue
+        well_formed += 1
+        if name in {"database", "paths"} and ok is False:
+            return False, str(row.get("detail") or f"{name} check failed")
+        if name in {"database", "schema", "fts"} and ok is True:
+            positive_archive = True
+
+    if well_formed == 0:
+        return False, "malformed checks: no well-formed doctor check rows"
+    if not positive_archive:
+        return (
+            False,
+            "absent archive-readability evidence: need database|schema|fts ok=true",
+        )
+    # exit 1 with structured positive archive evidence is allowed when another
+    # check fails (for example memory_projection unhealthy while the archive
+    # remains readable).
     return True, None
 
 

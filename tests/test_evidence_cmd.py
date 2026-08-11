@@ -594,6 +594,34 @@ def test_memory_crawl_refuses_unreadable_archive(monkeypatch, tmp_path):
     assert not marker.exists()
 
 
+def test_memory_crawl_refuses_exit1_doctor_without_checks(monkeypatch, tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    marker = tmp_path / "invoked.txt"
+    miseledger = _write_fake_bin(
+        tmp_path,
+        "miseledger",
+        (
+            'if [ "$1" = "version" ]; then echo "miseledger 0.6.0"; exit 0; fi\n'
+            'if [ "$1" = "doctor" ] && [ "$2" = "--json" ]; then '
+            'echo \'{"ok":false,"capability":{"engine_version":"0.6.0","memory":"memory-projection.v1"}}\'; '
+            "exit 1; fi\n"
+            f'if [ "$1" = "crawl" ]; then echo invoked > "{marker}"; exit 0; fi\n'
+            "exit 1\n"
+        ),
+    )
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+
+    rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
+
+    assert rc == 1
+    assert not marker.exists()
+    last_run = evidence_cmd._read_last_run(workspace, "memory")
+    assert last_run is not None
+    assert last_run["status"] == "fail"
+    assert last_run.get("preflight") == "refused"
+
+
 def test_memory_crawl_partial_failed_not_healthy(monkeypatch, tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()

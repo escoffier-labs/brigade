@@ -322,6 +322,123 @@ def test_memory_probe_unreadable_archive(monkeypatch, tmp_path):
     assert "archive unreadable" in compat.detail
 
 
+def test_archive_readable_rejects_exit1_absent_checks():
+    # Fail-open blocker: exit 1 + capability without checks must not pass.
+    ok, detail = evidence_runtime._archive_readable_from_doctor(
+        {"ok": False, "capability": {"memory": "memory-projection.v1"}},
+        1,
+    )
+    assert ok is False
+    assert detail is not None
+    assert "absent checks" in detail
+
+
+def test_archive_readable_rejects_exit1_malformed_checks():
+    ok, detail = evidence_runtime._archive_readable_from_doctor(
+        {"ok": False, "checks": "not-a-list", "capability": {"memory": "memory-projection.v1"}},
+        1,
+    )
+    assert ok is False
+    assert detail is not None
+    assert "malformed checks" in detail
+
+    ok, detail = evidence_runtime._archive_readable_from_doctor(
+        {"ok": False, "checks": [None, "x", {"name": "database"}], "capability": {"memory": "memory-projection.v1"}},
+        1,
+    )
+    assert ok is False
+    assert detail is not None
+    assert "malformed checks" in detail or "absent archive-readability" in detail
+
+
+def test_archive_readable_rejects_explicit_failing_archive_check():
+    ok, detail = evidence_runtime._archive_readable_from_doctor(
+        {
+            "ok": False,
+            "checks": [
+                {"name": "paths", "ok": True, "detail": "/tmp/db"},
+                {"name": "database", "ok": False, "detail": "open failed"},
+            ],
+        },
+        1,
+    )
+    assert ok is False
+    assert detail is not None
+    assert "open failed" in detail or "database" in detail
+
+
+def test_archive_readable_accepts_degraded_but_readable_exit1():
+    # Legitimate degraded: archive opened (schema/fts ok) but memory_projection fails.
+    ok, detail = evidence_runtime._archive_readable_from_doctor(
+        {
+            "ok": False,
+            "capability": {"engine_version": "0.6.0", "memory": "memory-projection.v1"},
+            "checks": [
+                {"name": "paths", "ok": True, "detail": "/tmp/db"},
+                {"name": "schema", "ok": True, "detail": "version 4"},
+                {"name": "fts", "ok": True, "detail": "sqlite fts5"},
+                {
+                    "name": "memory_projection",
+                    "ok": False,
+                    "detail": "status=interrupted stale=true partial=true",
+                },
+            ],
+        },
+        1,
+    )
+    assert ok is True
+    assert detail is None
+
+
+def test_memory_probe_exit1_absent_checks_refuses_preflight(monkeypatch, tmp_path):
+    bin_dir = _make_bin(tmp_path)
+    binary = _write_script(
+        bin_dir / "miseledger",
+        (
+            'if [ "$1" = "version" ]; then echo "miseledger 0.6.0"; exit 0; fi\n'
+            'if [ "$1" = "doctor" ] && [ "$2" = "--json" ]; then '
+            'echo \'{"ok":false,"capability":{"engine_version":"0.6.0","memory":"memory-projection.v1"}}\'; '
+            "exit 1; fi\n"
+            "exit 1\n"
+        ),
+    )
+    monkeypatch.setenv("PATH", _path_with(tmp_path, bin_dir))
+
+    probe = evidence_runtime.probe_memory_projection(str(binary))
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+
+    assert probe.archive_ok is False
+    assert compat.state == "fail"
+    assert "absent checks" in compat.detail or "archive unreadable" in compat.detail
+
+
+def test_memory_probe_degraded_memory_health_still_preflight_ok(monkeypatch, tmp_path):
+    bin_dir = _make_bin(tmp_path)
+    binary = _write_script(
+        bin_dir / "miseledger",
+        (
+            'if [ "$1" = "version" ]; then echo "miseledger 0.6.0"; exit 0; fi\n'
+            'if [ "$1" = "doctor" ] && [ "$2" = "--json" ]; then '
+            'echo \'{"ok":false,"engine_version":"0.6.0",'
+            '"capability":{"engine_version":"0.6.0","memory":"memory-projection.v1"},'
+            '"checks":['
+            '{"name":"paths","ok":true,"detail":"/tmp/db"},'
+            '{"name":"schema","ok":true,"detail":"version 4"},'
+            '{"name":"fts","ok":true,"detail":"sqlite fts5"},'
+            '{"name":"memory_projection","ok":false,"detail":"stale=true"}'
+            "]}'; exit 1; fi\n"
+            "exit 1\n"
+        ),
+    )
+    monkeypatch.setenv("PATH", _path_with(tmp_path, bin_dir))
+
+    probe = evidence_runtime.probe_memory_projection(str(binary))
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+
+    assert probe.archive_ok is True
+    assert compat.state in {"ok", "warn"}
+
+
 def test_memory_probe_malformed(monkeypatch, tmp_path):
     bin_dir = _make_bin(tmp_path)
     binary = _write_script(bin_dir / "miseledger", _miseledger_memory_script(malformed=True))
