@@ -60,39 +60,89 @@ def _utc_now() -> datetime:
 
 
 def _persisted_budget_artifact(run_dir: Path, run_meta: dict) -> bool:
-    """True when run artifacts carry a persisted budget declaration object."""
-    if isinstance(run_meta.get("run_budget"), dict):
+    """True when run artifacts carry a persisted budget declaration marker."""
+    if "run_budget" in run_meta:
         return True
-    contract = verification_contract.extract_contract_payload(run_meta)
-    if isinstance(contract, dict) and isinstance(contract.get("budget"), dict):
-        return True
+    if "verification_contract" in run_meta:
+        contract = run_meta.get("verification_contract")
+        if not isinstance(contract, dict):
+            return True
+        if "budget" in contract:
+            return True
     plan = _load_json(run_dir, "plan.json")
-    if isinstance(plan, dict):
-        contract = verification_contract.extract_contract_payload(plan)
-        if isinstance(contract, dict) and isinstance(contract.get("budget"), dict):
+    if isinstance(plan, dict) and "verification_contract" in plan:
+        contract = plan.get("verification_contract")
+        if not isinstance(contract, dict):
+            return True
+        if "budget" in contract:
             return True
     return False
 
 
-def _declaration_from_run_artifacts(run_dir: Path, run_meta: dict) -> run_budget.RunBudgetDeclaration:
-    """Load the persisted run_budget / verification_contract declaration for resume."""
-    if isinstance(run_meta.get("run_budget"), dict):
-        nested = (
-            run_meta["run_budget"].get("declaration")
-            if isinstance(run_meta["run_budget"].get("declaration"), dict)
-            else run_meta["run_budget"]
+def _require_declaration_content(declaration: run_budget.RunBudgetDeclaration) -> run_budget.RunBudgetDeclaration:
+    if not run_budget.declaration_has_budget_content(declaration):
+        raise run_budget.BudgetCompatibilityError(
+            "persisted budget declaration is empty or unknown-only",
+            code="schema_incompatible",
         )
-        return run_budget.parse_declaration(nested if isinstance(nested, dict) else None)
+    return declaration
 
-    contract = verification_contract.extract_contract_payload(run_meta)
-    budget = contract.get("budget") if isinstance(contract, dict) else None
-    if not isinstance(budget, dict):
-        plan = _load_json(run_dir, "plan.json")
-        if isinstance(plan, dict):
-            contract = verification_contract.extract_contract_payload(plan)
-            budget = contract.get("budget") if isinstance(contract, dict) else None
-    if isinstance(budget, dict):
-        return run_budget.declaration_from_verification_budget(budget)
+
+def _declaration_from_run_artifacts(run_dir: Path, run_meta: dict) -> run_budget.RunBudgetDeclaration:
+    """Load the persisted run_budget / verification_contract declaration for resume.
+
+    Wrong-type markers, invalid nested declaration objects, empty/unknown-only
+    declarations, and unsupported verification-budget shapes fail closed.
+    """
+    if "run_budget" in run_meta:
+        raw_budget = run_meta.get("run_budget")
+        if not isinstance(raw_budget, dict):
+            raise run_budget.BudgetCompatibilityError(
+                "run_budget must be an object",
+                code="schema_incompatible",
+            )
+        if "declaration" in raw_budget and not isinstance(raw_budget.get("declaration"), dict):
+            raise run_budget.BudgetCompatibilityError(
+                "run_budget.declaration must be an object when set",
+                code="schema_incompatible",
+            )
+        nested = raw_budget["declaration"] if isinstance(raw_budget.get("declaration"), dict) else raw_budget
+        return _require_declaration_content(run_budget.parse_declaration(nested))
+
+    for container in (run_meta, _load_json(run_dir, "plan.json")):
+        if not isinstance(container, dict) or "verification_contract" not in container:
+            continue
+        contract = container.get("verification_contract")
+        if not isinstance(contract, dict):
+            raise run_budget.BudgetCompatibilityError(
+                "verification_contract must be an object",
+                code="schema_incompatible",
+            )
+        schema = contract.get("schema")
+        if schema is not None and schema != verification_contract.VERIFICATION_CONTRACT_SCHEMA:
+            raise run_budget.BudgetCompatibilityError(
+                f"unsupported verification_contract schema {schema!r}",
+                code="schema_incompatible",
+            )
+        version = contract.get("schema_version")
+        if version is not None and version != verification_contract.VERIFICATION_CONTRACT_SCHEMA_VERSION:
+            raise run_budget.BudgetCompatibilityError(
+                f"unsupported verification_contract schema_version {version!r}",
+                code="schema_incompatible",
+            )
+        if "budget" not in contract:
+            raise run_budget.BudgetCompatibilityError(
+                "verification_contract budget is required when contract is persisted",
+                code="schema_incompatible",
+            )
+        budget = contract.get("budget")
+        if not isinstance(budget, dict):
+            raise run_budget.BudgetCompatibilityError(
+                "verification_contract budget must be an object",
+                code="schema_incompatible",
+            )
+        return _require_declaration_content(run_budget.declaration_from_verification_budget(budget))
+
     return run_budget.RunBudgetDeclaration()
 
 
@@ -103,12 +153,17 @@ def _lifecycle_events_for_budget_projection(
 ) -> list[object]:
     """Load lifecycle events for budget projection.
 
-    When ``require_trusted`` is set (persisted declared budget), journal read,
-    chain, partial-tail, and compatibility failures fail closed instead of
-    degrading to an empty event list.
+    When ``require_trusted`` is set (persisted declared budget), missing journal,
+    journal read, chain, partial-tail, and compatibility failures fail closed
+    instead of degrading to an empty event list.
     """
     journal_path = run_dir / "events" / "lifecycle.jsonl"
     if not journal_path.is_file():
+        if require_trusted:
+            raise run_budget.BudgetCompatibilityError(
+                "lifecycle journal missing for declared budget",
+                code="journal_untrusted",
+            )
         return []
     try:
         report = run_journal.read_journal_bounded(journal_path)
@@ -157,6 +212,9 @@ def _resume_budget_blocked(run_dir: Path, run_meta: dict, *, now: datetime | Non
     except run_budget.BudgetCompatibilityError as exc:
         return f"run budget lifecycle projection is untrusted: {exc.diagnostic}"
     if projection.terminal_policy == "budget_exhausted" or projection.exhausted_dimensions:
+        return "run budget exhausted; resume refused"
+    dispatch_ceiling = declaration.worker_dispatch_count
+    if dispatch_ceiling is not None and projection.used.get("worker_dispatch_count", 0) >= dispatch_ceiling:
         return "run budget exhausted; resume refused"
     if not has_enforceable:
         return None

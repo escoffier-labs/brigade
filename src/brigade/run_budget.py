@@ -123,6 +123,20 @@ RUN_BUDGET_EVENT_TYPES = frozenset(
 
 DEFAULT_THRESHOLD_PCT = 80
 
+# VerificationBudget fields bridged into run_budget. Unknown keys (including
+# child-allocation dimensions owned by #594) fail closed rather than drop.
+VERIFICATION_BUDGET_FIELDS = frozenset(
+    {
+        "latency_seconds",
+        "token_budget",
+        "wall_clock_seconds",
+        "worker_dispatch_count",
+        "input_tokens",
+        "output_tokens",
+    }
+)
+VERIFICATION_BUDGET_META_FIELDS = frozenset({"schema", "schema_version"})
+
 # Payload allowlists mirrored into run_events.EVENT_TYPES.
 RUN_BUDGET_EVENT_PAYLOADS: dict[str, frozenset[str]] = {
     EVENT_THRESHOLD: frozenset({"dimension", "mode", "declared", "used", "remaining", "threshold_pct", "reason_class"}),
@@ -334,6 +348,15 @@ def parse_declaration(payload: Mapping[str, Any] | None) -> RunBudgetDeclaration
     )
 
 
+def declaration_has_budget_content(declaration: RunBudgetDeclaration) -> bool:
+    """True when a declaration carries at least one known budget field."""
+    if declaration.wall_clock_seconds is not None or declaration.worker_dispatch_count is not None:
+        return True
+    if declaration.token_budget is not None:
+        return True
+    return any(value is not None for value in declaration.observed_caps.values())
+
+
 def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> RunBudgetDeclaration:
     """Bridge #500 VerificationBudget into a run_budget declaration.
 
@@ -345,7 +368,8 @@ def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> Ru
     ``output_tokens`` caps bridge into ``observed_caps`` only when those fields
     are set on the verification budget.
 
-    Present-but-malformed ceiling or token fields fail closed with
+    Present-but-malformed ceiling or token fields, unknown dimensions (including
+    child-only keys), and unsupported schema/version markers fail closed with
     ``BudgetCompatibilityError`` rather than silently becoming undeclared.
     """
     if budget is None:
@@ -353,6 +377,23 @@ def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> Ru
     if not isinstance(budget, Mapping):
         raise BudgetCompatibilityError(
             "verification budget must be an object",
+            code="schema_incompatible",
+        )
+
+    unknown = set(budget.keys()) - VERIFICATION_BUDGET_FIELDS - VERIFICATION_BUDGET_META_FIELDS
+    if unknown:
+        raise BudgetCompatibilityError(
+            _bound(f"unknown verification budget dimensions: {sorted(unknown)}"),
+            code="unknown_dimension",
+        )
+    if "schema" in budget and budget.get("schema") != RUN_BUDGET_SCHEMA:
+        raise BudgetCompatibilityError(
+            _bound(f"unsupported verification budget schema {budget.get('schema')!r}"),
+            code="schema_incompatible",
+        )
+    if "schema_version" in budget and budget.get("schema_version") != RUN_BUDGET_SCHEMA_VERSION:
+        raise BudgetCompatibilityError(
+            _bound(f"unsupported verification budget schema_version {budget.get('schema_version')!r}"),
             code="schema_incompatible",
         )
 

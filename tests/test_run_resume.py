@@ -933,6 +933,23 @@ def _patch_resume_denied(monkeypatch) -> None:
     monkeypatch.setattr(run_resume.runguard, "recover_stale_run", lambda *a, **k: False)
 
 
+def _write_trusted_lifecycle_prefix(run_dir: Path) -> Path:
+    from brigade import run_journal
+
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type="run.created",
+        payload={"status": "started"},
+        idempotency_key="create-1",
+        expected_previous_sequence=0,
+        recorded_at="2026-07-03T00:00:00.000000Z",
+    )
+    return journal
+
+
 def test_resume_refuses_expired_declared_wall_clock_before_appserver(tmp_path, monkeypatch, capsys):
     from datetime import datetime, timedelta, timezone
 
@@ -945,6 +962,7 @@ def test_resume_refuses_expired_declared_wall_clock_before_appserver(tmp_path, m
     plan = json.loads((run_dir / "plan.json").read_text())
     plan["verification_contract"] = meta["verification_contract"]
     (run_dir / "plan.json").write_text(json.dumps(plan))
+    _write_trusted_lifecycle_prefix(run_dir)
 
     monkeypatch.setattr(run_resume, "_utc_now", lambda: started + timedelta(seconds=10))
     _patch_resume_denied(monkeypatch)
@@ -1082,6 +1100,152 @@ def test_resume_refuses_malformed_persisted_budget_before_appserver(tmp_path, mo
     assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
 
 
+def test_resume_refuses_missing_lifecycle_journal_for_declared_budget(tmp_path, monkeypatch, capsys):
+    """Persisted declared resume must fail closed when the lifecycle journal is absent."""
+    from datetime import datetime, timedelta, timezone
+
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    started = datetime(2026, 7, 3, 0, 0, 0, tzinfo=timezone.utc)
+    meta["started_at"] = started.isoformat()
+    meta["verification_contract"] = _declared_contract(wall_clock_seconds=3600, worker_dispatch_count=10)
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    plan = json.loads((run_dir / "plan.json").read_text())
+    plan["verification_contract"] = meta["verification_contract"]
+    (run_dir / "plan.json").write_text(json.dumps(plan))
+    assert not (run_dir / "events" / "lifecycle.jsonl").exists()
+
+    monkeypatch.setattr(run_resume, "_utc_now", lambda: started + timedelta(seconds=10))
+    _patch_resume_denied(monkeypatch)
+
+    assert run_resume.resume(run_dir) == 2
+    err = capsys.readouterr().err
+    assert "journal" in err.lower() or "untrusted" in err
+    assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+
+
+def test_resume_refuses_wrong_type_budget_shape_before_appserver(tmp_path, monkeypatch, capsys):
+    """Wrong-type / empty / invalid declaration markers must not degrade to undeclared."""
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["verification_contract"] = {
+        "schema": "brigade.verification_contract.v1",
+        "schema_version": 1,
+        "verifier": {"source": "command", "command": "true"},
+        "rollback": {"policy": "none"},
+        "budget": "not-an-object",
+    }
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    _write_trusted_lifecycle_prefix(run_dir)
+    _patch_resume_denied(monkeypatch)
+
+    assert run_resume.resume(run_dir) == 2
+    assert "incompatible" in capsys.readouterr().err
+    assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
+
+
+def test_resume_refuses_empty_persisted_run_budget_before_appserver(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["run_budget"] = {
+        "schema": "brigade.run_budget.v1",
+        "schema_version": 1,
+        "ceilings": {},
+        "observed": {},
+    }
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    _write_trusted_lifecycle_prefix(run_dir)
+    _patch_resume_denied(monkeypatch)
+
+    assert run_resume.resume(run_dir) == 2
+    assert "incompatible" in capsys.readouterr().err
+    assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
+
+
+def test_resume_refuses_projected_usage_exhaustion_without_exhausted_event(tmp_path, monkeypatch, capsys):
+    """Crash after the last allowed dispatch must refuse even without run_budget.exhausted."""
+    from datetime import datetime, timedelta, timezone
+
+    from brigade import run_journal
+
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    started = datetime(2026, 7, 3, 0, 0, 0, tzinfo=timezone.utc)
+    meta["started_at"] = started.isoformat()
+    meta["verification_contract"] = _declared_contract(wall_clock_seconds=3600, worker_dispatch_count=1)
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    plan = json.loads((run_dir / "plan.json").read_text())
+    plan["verification_contract"] = meta["verification_contract"]
+    (run_dir / "plan.json").write_text(json.dumps(plan))
+
+    journal = _write_trusted_lifecycle_prefix(run_dir)
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type="run.dispatch.requested",
+        payload={"seat": "cook", "attempt": 1, "detail": "dispatch"},
+        idempotency_key="dispatch:cook:1",
+        expected_previous_sequence=1,
+        recorded_at="2026-07-03T00:00:01.000000Z",
+    )
+
+    monkeypatch.setattr(run_resume, "_utc_now", lambda: started + timedelta(seconds=10))
+    _patch_resume_denied(monkeypatch)
+
+    assert run_resume.resume(run_dir) == 2
+    assert "budget exhausted" in capsys.readouterr().err
+    assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "failed"
+
+
+def test_resume_refuses_unknown_verification_budget_dimension_before_appserver(tmp_path, monkeypatch, capsys):
+    from datetime import datetime, timedelta, timezone
+
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    started = datetime(2026, 7, 3, 0, 0, 0, tzinfo=timezone.utc)
+    meta["started_at"] = started.isoformat()
+    contract = _declared_contract(wall_clock_seconds=3600, worker_dispatch_count=10)
+    contract["budget"]["child_worker_dispatch_count"] = 2
+    meta["verification_contract"] = contract
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    _write_trusted_lifecycle_prefix(run_dir)
+    monkeypatch.setattr(run_resume, "_utc_now", lambda: started + timedelta(seconds=10))
+    _patch_resume_denied(monkeypatch)
+
+    assert run_resume.resume(run_dir) == 2
+    assert "incompatible" in capsys.readouterr().err
+    assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
+
+
+def test_resume_refuses_unsupported_verification_budget_schema_version(tmp_path, monkeypatch, capsys):
+    from datetime import datetime, timedelta, timezone
+
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    started = datetime(2026, 7, 3, 0, 0, 0, tzinfo=timezone.utc)
+    meta["started_at"] = started.isoformat()
+    contract = _declared_contract(wall_clock_seconds=3600, worker_dispatch_count=10)
+    contract["budget"]["schema"] = "brigade.run_budget.v1"
+    contract["budget"]["schema_version"] = 99
+    meta["verification_contract"] = contract
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    _write_trusted_lifecycle_prefix(run_dir)
+    monkeypatch.setattr(run_resume, "_utc_now", lambda: started + timedelta(seconds=10))
+    _patch_resume_denied(monkeypatch)
+
+    assert run_resume.resume(run_dir) == 2
+    assert "incompatible" in capsys.readouterr().err
+    assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
+
+
 def test_resume_allows_non_expired_declared_budget(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
@@ -1091,6 +1255,7 @@ def test_resume_allows_non_expired_declared_budget(tmp_path, monkeypatch):
     meta["started_at"] = started.isoformat()
     meta["verification_contract"] = _declared_contract(wall_clock_seconds=3600, worker_dispatch_count=10)
     (run_dir / "run.json").write_text(json.dumps(meta))
+    _write_trusted_lifecycle_prefix(run_dir)
 
     monkeypatch.setattr(run_resume, "_utc_now", lambda: started + timedelta(seconds=10))
     monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
@@ -1099,7 +1264,6 @@ def test_resume_allows_non_expired_declared_budget(tmp_path, monkeypatch):
         "run_agent",
         lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
     )
-    monkeypatch.setattr(run_resume.runguard, "run_lock", lambda *a, **k: nullcontext())
     monkeypatch.setattr(run_resume.runguard, "recover_stale_run", lambda *a, **k: False)
 
     assert run_resume.resume(run_dir) == 0

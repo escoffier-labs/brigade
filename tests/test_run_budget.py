@@ -361,6 +361,27 @@ def test_verification_budget_bridge_fails_closed_on_malformed_ceiling_fields():
     assert "token_budget" in exc.value.diagnostic
 
 
+def test_verification_budget_bridge_fails_closed_on_unknown_dimension_and_schema():
+    with pytest.raises(run_budget.BudgetCompatibilityError) as exc:
+        run_budget.declaration_from_verification_budget(
+            {
+                "latency_seconds": 30,
+                "child_worker_dispatch_count": 1,
+            }
+        )
+    assert "unknown" in exc.value.diagnostic
+
+    with pytest.raises(run_budget.BudgetCompatibilityError) as exc:
+        run_budget.declaration_from_verification_budget(
+            {
+                "latency_seconds": 30,
+                "schema": "brigade.run_budget.v1",
+                "schema_version": 99,
+            }
+        )
+    assert "schema_version" in exc.value.diagnostic
+
+
 def test_legacy_token_budget_is_aggregate_not_input_only():
     """token_budget=100 stays aggregate (tokens_used), never input_tokens."""
     declaration = run_budget.declaration_from_verification_budget(
