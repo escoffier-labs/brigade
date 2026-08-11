@@ -1,4 +1,4 @@
-"""Tests for scripts/measure_work_store.py (#846 R1 characterization harness)."""
+"""Tests for scripts/measure_work_store.py (#846 R2 characterization harness)."""
 
 from __future__ import annotations
 
@@ -76,7 +76,8 @@ def test_measure_matrix_json_and_sqlite_report_shape(tmp_path):
         trials=2,
     )
     assert report["issue"] == 846
-    assert report["slice"] == "R1"
+    assert report["slice"] == "R2"
+    assert report["protocol_version"] == 2
     assert report["kind"] == "work-store-characterization"
     assert report["anonymous_metrics"] == "disabled_in_harness"
     assert {"environment", "fixtures", "results", "decision", "capability_notes"} <= set(report)
@@ -88,12 +89,153 @@ def test_measure_matrix_json_and_sqlite_report_shape(tmp_path):
         assert result["pass"] is True
         assert result["gates"]["issue_737_graph"] is True
         assert result["gates"]["issue_738_claim"] is True
+        assert result["gates"]["metrics_state"] is True
+        assert result["gates"]["secret_history_handling"] is True
+        assert result["gates"]["restore"] is True
+        # Residual cells must be observed, never hard-coded bare True gates alone.
+        assert result["metrics_state"]["status"] == "measured"
+        assert result["metrics_state"]["pass"] is True
+        assert result["metrics_state"]["anonymous_metrics_config"] == "disabled"
+        assert result["metrics_state"]["metrics_artifacts"] == []
+        assert result["secret_history_handling"]["status"] == "measured"
+        assert result["secret_history_handling"]["pass"] is True
+        assert result["secret_history_handling"]["live_retains_deleted_secret"] is False
+        assert result["secret_history_handling"]["post_delete_backup_retains_secret"] is False
+        assert result["secret_history_handling"]["pre_delete_backup_retains_secret"] is True
+        assert result["same_actor_and_retry"]["status"] == "measured"
+        assert result["same_actor_and_retry"]["pass"] is True
+        assert result["restart_recovery"]["status"] == "measured"
+        assert result["restart_recovery"]["pass"] is True
+        assert result["schema_version_policy"]["status"] == "measured"
+        assert result["schema_version_policy"]["future_version_rejected"] is False
+        assert result["backup_restore"]["status"] == "measured"
+        assert result["backup_restore"]["pass"] is True
+        assert isinstance(result["backup_restore"]["backup_time_ns"], int)
+        assert result["install_footprint"]["status"] == "measured"
+        assert result["cold_start"]["status"] == "measured"
+        assert isinstance(result["cold_start"]["cold_start_ns"], int)
+        assert result["resource_measurements"]["status"] == "measured"
+        assert result["server_auth_tls_permissions"]["status"] == "blocked"
         latency = result["mutation_latency"]
         for key in ("p50_ns", "p95_ns", "max_ns", "min_ns", "samples"):
             assert isinstance(latency[key], int)
         assert result["claim_race"]["codes"] == [0, 13]
         assert result["claim_race"]["winner_count"] == 1
         assert result["claim_race"]["exit_13_count"] == 1
+
+    json_result = next(item for item in report["results"] if item["shape"] == "json_ledger")
+    assert json_result["guard_and_empty_filter"]["status"] == "measured"
+    assert json_result["guard_and_empty_filter"]["pass"] is True
+    assert json_result["guard_and_empty_filter"]["if_actor_mismatch"]["pass"] is True
+    assert json_result["guard_and_empty_filter"]["if_status_mismatch"]["pass"] is True
+    assert json_result["guard_and_empty_filter"]["if_status_mismatch"]["guard"] == "if_status"
+    assert json_result["guard_and_empty_filter"]["if_status_match"]["pass"] is True
+    assert json_result["guard_and_empty_filter"]["empty_filter"]["pass"] is True
+    assert json_result["restart_recovery"]["process_boundary"] == "subprocess"
+    assert json_result["cold_start"]["process_boundary"] == "subprocess"
+    assert json_result["cold_start"]["cold"] is True
+    assert json_result["cold_start"]["cold_start_timing_scope"] == "parent_subprocess_wall"
+    assert json_result["cold_start"]["inner_operation_timing_scope"] == "probe_read_after_import"
+    assert isinstance(json_result["cold_start"]["inner_operation_ns"], int)
+    assert json_result["cold_start"]["cold_start_ns"] >= json_result["cold_start"]["inner_operation_ns"]
+    assert json_result["resource_measurements"]["rss_scope"] == "subprocess_child"
+    assert json_result["resource_measurements"]["rss_protocol"] == "popen_sample_child"
+    git_history = json_result["secret_history_handling"]["git_history"]
+    assert git_history["status"] == "measured"
+    assert git_history["work_path_ignored"] is True
+    assert git_history["ignored_path_secret_absent_from_git"] is True
+    assert git_history["synthetic_tracked_history"]["deleted_secret_retained_in_history"] is True
+    assert git_history["pass"] is True
+    sqlite_result = next(item for item in report["results"] if item["shape"] == "sqlite_wal")
+    assert sqlite_result["guard_and_empty_filter"]["status"] == "unavailable"
+    assert sqlite_result["restart_recovery"]["process_boundary"] == "subprocess"
+    assert sqlite_result["cold_start"]["process_boundary"] == "subprocess"
+    assert sqlite_result["cold_start"]["cold"] is True
+    assert sqlite_result["cold_start"]["cold_start_timing_scope"] == "parent_subprocess_wall"
+    assert sqlite_result["cold_start"]["inner_operation_timing_scope"] == "probe_export_after_import"
+    assert isinstance(sqlite_result["cold_start"]["inner_operation_ns"], int)
+    assert sqlite_result["cold_start"]["cold_start_ns"] >= sqlite_result["cold_start"]["inner_operation_ns"]
+    assert sqlite_result["resource_measurements"]["rss_scope"] == "subprocess_child"
+    assert sqlite_result["resource_measurements"]["rss_protocol"] == "popen_sample_child"
+    assert sqlite_result["secret_history_handling"]["git_history"]["status"] == "unavailable"
+    assert "scanned_store_path" in sqlite_result["metrics_state"]
+    assert sqlite_result["metrics_state"]["metrics_artifacts"] == []
+
+
+def test_sqlite_metrics_restores_env_and_scans_store(tmp_path, monkeypatch):
+    module = _load_module()
+    monkeypatch.delenv("DISABLE_TELEMETRY", raising=False)
+    monkeypatch.delenv("BRIGADE_ANONYMOUS_METRICS", raising=False)
+    result = module._sqlite_metrics_state(tmp_path, module.build_fixture("chain_50"))
+    assert result["pass"] is True
+    assert "DISABLE_TELEMETRY" not in __import__("os").environ
+    assert "BRIGADE_ANONYMOUS_METRICS" not in __import__("os").environ
+    assert result["scanned_store_path"].startswith("ws-sqlite-metrics-store-")
+
+
+def test_restart_and_cold_start_use_subprocess_boundary(tmp_path):
+    module = _load_module()
+    ledger = module.build_fixture("chain_50")
+    restart = module._json_restart_recovery(tmp_path, ledger)
+    cold = module._json_cold_start(tmp_path, ledger)
+    assert restart["process_boundary"] == "subprocess"
+    assert cold["process_boundary"] == "subprocess"
+    assert cold["cold"] is True
+    assert cold["cold_start_timing_scope"] == "parent_subprocess_wall"
+    assert isinstance(cold["inner_operation_ns"], int)
+    assert cold["cold_start_ns"] >= cold["inner_operation_ns"]
+    sqlite_restart = module._sqlite_restart_recovery(tmp_path, ledger)
+    sqlite_cold = module._sqlite_cold_start(tmp_path, ledger)
+    assert sqlite_restart["process_boundary"] == "subprocess"
+    assert sqlite_cold["process_boundary"] == "subprocess"
+    assert sqlite_cold["cold"] is True
+    assert sqlite_cold["cold_start_timing_scope"] == "parent_subprocess_wall"
+    assert isinstance(sqlite_cold["inner_operation_ns"], int)
+    assert sqlite_cold["cold_start_ns"] >= sqlite_cold["inner_operation_ns"]
+
+
+def test_rss_scopes_use_subprocess_child_protocol(tmp_path):
+    module = _load_module()
+    ledger = module.build_fixture("chain_50")
+    json_rss = module._json_resource_measurements(tmp_path, ledger)
+    sqlite_rss = module._sqlite_resource_measurements(tmp_path, ledger)
+    assert json_rss["rss_scope"] == "subprocess_child"
+    assert json_rss["rss_protocol"] == "popen_sample_child"
+    assert sqlite_rss["rss_scope"] == "subprocess_child"
+    assert sqlite_rss["rss_protocol"] == "popen_sample_child"
+    assert json_rss["pass"] is True
+    assert sqlite_rss["pass"] is True
+
+
+def test_json_secret_history_proves_git_and_ignore_path(tmp_path):
+    module = _load_module()
+    result = module._json_secret_history(tmp_path, module.build_fixture("chain_50"))
+    assert result["pass"] is True
+    git_history = result["git_history"]
+    assert git_history["status"] == "measured"
+    assert git_history["work_path_ignored"] is True
+    assert git_history["ignored_path_secret_absent_from_git"] is True
+    assert git_history["synthetic_tracked_history"]["deleted_secret_retained_in_history"] is True
+    assert git_history["pass"] is True
+
+
+def test_sqlite_secret_history_marks_git_unavailable(tmp_path):
+    module = _load_module()
+    result = module._sqlite_secret_history(tmp_path, module.build_fixture("chain_50"))
+    assert result["pass"] is True
+    assert result["live_and_backup_pass"] is True
+    assert result["git_history"]["status"] == "unavailable"
+    assert result["git_history"]["pass"] is None
+
+
+def test_json_guard_covers_if_status_match_and_mismatch(tmp_path):
+    module = _load_module()
+    result = module._json_guard_and_empty_filter(tmp_path, module.build_fixture("chain_50"))
+    assert result["pass"] is True
+    assert result["if_status_mismatch"]["exit_code"] == 13
+    assert result["if_status_mismatch"]["reason"] == "guard_mismatch"
+    assert result["if_status_match"]["exit_code"] == 0
+    assert result["if_status_match"]["released"] is True
 
 
 def test_measure_matrix_marks_dolt_shapes_blocked(tmp_path):
@@ -111,6 +253,9 @@ def test_measure_matrix_marks_dolt_shapes_blocked(tmp_path):
         assert result["mutation_latency"] is None
         assert result["pass"] is None
         assert result["gates"]["issue_738_claim"] is None
+        assert result["metrics_state"]["status"] == "blocked"
+        assert result["secret_history_handling"]["status"] == "blocked"
+        assert result["server_auth_tls_permissions"]["status"] == "blocked"
         assert "reason" in result
 
 
@@ -123,6 +268,7 @@ def test_decision_record_keeps_json_and_excludes_shared_service():
     assert decision["beads"] == "excluded_under_770"
     assert decision["shared_store_conformance_fixture"] == "not_approved"
     assert "portable_sync" in decision["current_need"]
+    assert decision["dolt"] == "characterization_candidate_not_banned_not_selected"
 
 
 def test_write_report_is_canonical_and_diffable(tmp_path):
@@ -162,6 +308,7 @@ def test_cli_writes_measurement_and_fixture_manifest(tmp_path):
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(output.read_text())
     assert payload["issue"] == 846
+    assert payload["slice"] == "R2"
     assert len(payload["results"]) == 3
     statuses = {item["shape"]: item["status"] for item in payload["results"]}
     assert statuses["json_ledger"] == "measured"
@@ -170,6 +317,7 @@ def test_cli_writes_measurement_and_fixture_manifest(tmp_path):
     fixture_payload = json.loads(manifest.read_text())
     assert "chain_50" in fixture_payload["fixtures"]
     assert fixture_payload["fixtures"]["chain_50"]["task_count"] == 50
+    assert fixture_payload["slice"] == "R2"
 
 
 def test_measure_matrix_rejects_nonpositive_trials(tmp_path):
@@ -189,3 +337,15 @@ def test_no_leftover_measurement_dirs(tmp_path):
     )
     leftovers = [path.name for path in tmp_path.iterdir() if path.name.startswith("brigade-work-store-measure-")]
     assert leftovers == []
+
+
+def test_json_residual_cells_reject_hardcoded_metrics_and_secrets(tmp_path):
+    """Red-to-green: metrics/secret gates must come from observed cells."""
+    module = _load_module()
+    result = module.measure_json_ledger(tmp_path, "chain_50", warmups=0, trials=1)
+    assert result["gates"]["metrics_state"] == result["metrics_state"]["pass"]
+    assert result["gates"]["secret_history_handling"] == result["secret_history_handling"]["pass"]
+    assert result["gates"]["restore"] == result["backup_restore"]["pass"]
+    assert result["metrics_state"]["status"] == "measured"
+    assert "True,  # harness disables" not in SCRIPT.read_text(encoding="utf-8")
+    assert 'secret_history_handling": True' not in SCRIPT.read_text(encoding="utf-8")

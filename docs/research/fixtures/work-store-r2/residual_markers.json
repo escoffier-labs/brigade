@@ -1,0 +1,14 @@
+{
+  "issue": 846,
+  "slice": "R2",
+  "kind": "work-store-residual-markers",
+  "protocol_version": 2,
+  "machine_neutral": true,
+  "contains_hostnames": false,
+  "synthetic_secret_marker": "synth-secret-846-r2-TOKEN-not-a-real-credential",
+  "synthetic_secret_path": "synth/paths/issue-846-r2/private-token.example",
+  "notes": [
+    "Markers only. Graph fixtures remain docs/research/fixtures/work-store-r1/.",
+    "Used by scripts/measure_work_store.py secret-history and metrics residual cells."
+  ]
+}

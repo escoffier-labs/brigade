@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Issue #846 R2 harness sendback (comment 5247390894): JSON secret-history
+  proves synthetic Git/ignore-path; SQLite marks Git history unavailable;
+  cold-start uses parent `subprocess.run` wall with distinct inner timing;
+  RSS uses one subprocess-child sampling protocol with explicit scope labels.
+- Issue #846 R2 harness sendback: SQLite metrics scans the touched store and
+  restores env overrides; restart/cold-start use a fresh subprocess probe;
+  JSON guards cover `if_status` match and mismatch.
+
 ### Added
+- Issue #846 R2 residual work-store characterization: extend the R1 harness
+  with observed same-actor/guard/empty-filter, restart, schema coercion,
+  backup/restore, install/cold-start/backup timing, resource, metrics-state,
+  and deleted-secret cells plus diffable
+  `docs/measurements/issue-846-work-store-r2.json`. Characterization only; no
+  backend, listener, or runtime dependency.
 - `brigade update --channel beta` installs the newest non-yanked
   `brigade-cli==0.27.0.devYYYYMMDD` wheel from PyPI into the existing
   user-global pipx environment, migrates prior Git-main-SHA beta state to that

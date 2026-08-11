@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Issue #846 R1 work-store characterization harness.
+"""Issue #846 work-store characterization harness (R1 baseline + R2 residuals).
 
 Measures candidate store *shapes* against synthetic, machine-neutral graph
 fixtures. This script is research-only: it does not edit production work-store
@@ -16,7 +16,12 @@ Shapes:
 Protocol defaults match the #846 scoping comment: 10 warmups and 100 measured
 trials, nearest-rank p50/p95, two-claimer barrier race requiring one success
 and one exit 13, and pass/fail gates for #737/#738 anchors where exercised.
-Latency remains descriptive (no absolute service level).
+R2 adds residual no-listener cells: same-actor rejection, guards/empty-filter,
+restart recovery, schema coercion observation, branch/config backup restore,
+install footprint, cold-start/backup timing, resource samples, and observed
+metrics-state plus deleted-secret/history checks. Latency remains descriptive
+(no absolute service level). Numbers are never fabricated: cells are
+``measured``, ``blocked``, or ``unavailable``.
 
 Standard library plus the in-repo ``brigade`` package only.
 """
@@ -24,7 +29,9 @@ Standard library plus the in-repo ``brigade`` package only.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import math
 import os
@@ -43,20 +50,30 @@ from pathlib import Path
 from typing import Any
 
 from brigade import localio
+from brigade import work_cmd
 from brigade.work_cmd import claiming as claim_mod
 from brigade.work_cmd import edges as edges_mod
 from brigade.work_cmd import helpers as work_helpers
 from brigade.work_cmd import ledger as ledger_mod
 
 ISSUE = 846
-SLICE = "R1"
+SLICE = "R2"
 KIND = "work-store-characterization"
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 TIMEBOX_NOTE = (
-    "R1 timebox: automate JSON baseline first; SQLite WAL is an optional "
-    "stdlib characterization adapter; Dolt shapes stay optional and must not "
-    "enter Brigade runtime dependencies. Server listeners require separate "
+    "R2 residual timebox: extend the R1 JSON/SQLite harness with no-listener "
+    "residual cells only. Dolt shapes stay optional characterization candidates "
+    "and must not enter Brigade runtime dependencies. Server listeners, TLS, "
+    "and permission cells that need a listener remain blocked pending separate "
     "operator approval and are never started here."
+)
+SYNTHETIC_SECRET = "synth-secret-846-r2-TOKEN-not-a-real-credential"
+SYNTHETIC_SECRET_PATH = "synth/paths/issue-846-r2/private-token.example"
+METRICS_SCAN_NAMES = (
+    "telemetry",
+    "metrics.json",
+    "anonymous-metrics",
+    "otel",
 )
 
 DEFAULT_WARMUPS = 10
@@ -195,6 +212,332 @@ def environment_metadata(root: Path) -> dict[str, Any]:
         "directory_fsync_supported": _directory_fsync_supported(root),
         "sqlite_version": sqlite3.sqlite_version,
         "dolt_on_path": bool(shutil.which("dolt")),
+    }
+
+
+def _cell_blocked(reason: str, **extra: Any) -> dict[str, Any]:
+    payload = {"status": "blocked", "reason": reason, "pass": None}
+    payload.update(extra)
+    return payload
+
+
+def _cell_unavailable(reason: str, **extra: Any) -> dict[str, Any]:
+    payload = {"status": "unavailable", "reason": reason, "pass": None}
+    payload.update(extra)
+    return payload
+
+
+def _tree_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for child in path.rglob("*"):
+        if child.is_file():
+            total += child.stat().st_size
+    return total
+
+
+def _proc_peak_rss_kib(pid: int) -> int | None:
+    status_path = Path(f"/proc/{pid}/status")
+    try:
+        lines = status_path.read_text().splitlines()
+    except OSError:
+        return None
+    peak_kib: int | None = None
+    for line in lines:
+        if line.startswith(("VmRSS:", "VmHWM:")):
+            value = int(line.split()[1])
+            peak_kib = value if peak_kib is None else max(peak_kib, value)
+    return peak_kib
+
+
+def _path_contains_marker(path: Path, marker: str) -> bool:
+    if not path.exists():
+        return False
+    if path.is_file():
+        try:
+            return marker in path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+    for child in path.rglob("*"):
+        if not child.is_file():
+            continue
+        try:
+            if marker in child.read_text(encoding="utf-8", errors="replace"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _scan_metrics_artifacts(target: Path) -> list[str]:
+    found: list[str] = []
+    if not target.exists():
+        return found
+    for child in target.rglob("*"):
+        if not child.is_file():
+            continue
+        relative = str(child.relative_to(target)).replace("\\", "/")
+        lowered = relative.casefold()
+        if any(token in lowered for token in METRICS_SCAN_NAMES):
+            found.append(relative)
+    return sorted(found)
+
+
+def _write_synthetic_backup_config(target: Path) -> Path:
+    config_path = work_helpers._backup_config_path(target)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "# synthetic characterization only\n"
+        "[destinations.nas]\n"
+        'label = "synth-nas-846-r2"\n'
+        'summary_path = ".brigade/backups/nas-summary.json"\n',
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _digest_file(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _claim_record_digest(ledger: dict[str, Any]) -> str:
+    claims = []
+    for task in ledger.get("tasks", []):
+        if not isinstance(task, dict):
+            continue
+        claim = task.get("claim")
+        if isinstance(claim, dict):
+            claims.append(
+                {
+                    "task_id": task.get("id"),
+                    "claim_id": claim.get("claim_id"),
+                    "actor": claim.get("actor"),
+                    "item_revision": claim.get("item_revision"),
+                    "status": task.get("status"),
+                    "assignee": task.get("assignee"),
+                }
+            )
+    claims.sort(key=lambda item: (str(item.get("task_id") or ""), str(item.get("claim_id") or "")))
+    payload = json.dumps(claims, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _branch_heads_digest(_target: Path) -> dict[str, Any]:
+    return {
+        "status": "unsupported",
+        "detail": "shape has no first-class branch heads",
+        "digest_sha256": None,
+    }
+
+
+@contextlib.contextmanager
+def _env_overrides(overrides: dict[str, str]) -> Any:
+    """Temporarily set process env keys; restore prior values (or absence) in finally."""
+    previous: dict[str, str] = {}
+    missing: set[str] = set()
+    for key, value in overrides.items():
+        if key in os.environ:
+            previous[key] = os.environ[key]
+        else:
+            missing.add(key)
+        os.environ[key] = value
+    try:
+        yield
+    finally:
+        for key in overrides:
+            if key in missing:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous[key]
+
+
+def _script_path() -> Path:
+    return Path(__file__).resolve()
+
+
+def _run_store_probe(
+    probe: str,
+    store: Path,
+    *,
+    task_id: str | None = None,
+    actor: str | None = None,
+    claim_id: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Run a fresh-process probe.
+
+    Returns ``(payload, subprocess_wall_ns)`` where wall time is measured in the
+    parent around ``subprocess.run`` (startup + imports + probe work).
+    """
+    argv = [sys.executable, str(_script_path()), "--probe", probe, "--store", str(store)]
+    if task_id is not None:
+        argv.extend(["--task-id", task_id])
+    if actor is not None:
+        argv.extend(["--actor", actor])
+    if claim_id is not None:
+        argv.extend(["--claim-id", claim_id])
+    start = time.perf_counter_ns()
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    wall_ns = time.perf_counter_ns() - start
+    if proc.returncode != 0:
+        raise MeasurementInputError(f"store probe {probe!r} failed (exit {proc.returncode}): {proc.stderr.strip()}")
+    line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise MeasurementInputError(f"store probe {probe!r} emitted non-JSON: {line!r}") from exc
+    if not isinstance(payload, dict):
+        raise MeasurementInputError(f"store probe {probe!r} emitted non-object JSON")
+    return payload, wall_ns
+
+
+def probe_json_read_claim(store: Path, task_id: str) -> dict[str, Any]:
+    loaded = ledger_mod._read_task_ledger(store)
+    stored = next((task for task in loaded.get("tasks", []) if task.get("id") == task_id), None)
+    if stored is None:
+        return {"ok": False, "error": "task_not_found", "task_id": task_id}
+    claim = stored.get("claim") if isinstance(stored.get("claim"), dict) else {}
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "status": stored.get("status"),
+        "assignee": stored.get("assignee"),
+        "claim_id": claim.get("claim_id"),
+        "process_boundary": "subprocess",
+    }
+
+
+def probe_json_cold_start(store: Path) -> dict[str, Any]:
+    start = time.perf_counter_ns()
+    loaded = ledger_mod._read_task_ledger(store)
+    elapsed = time.perf_counter_ns() - start
+    return {
+        "ok": True,
+        "inner_operation_ns": elapsed,
+        "task_count": len(loaded.get("tasks", [])),
+        "process_boundary": "subprocess",
+    }
+
+
+def probe_sqlite_read_claim(store: Path, task_id: str) -> dict[str, Any]:
+    exported = _sqlite_export_ledger(store)
+    stored = next((task for task in exported.get("tasks", []) if task.get("id") == task_id), None)
+    if stored is None:
+        return {"ok": False, "error": "task_not_found", "task_id": task_id}
+    claim = stored.get("claim") if isinstance(stored.get("claim"), dict) else {}
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "status": stored.get("status"),
+        "assignee": stored.get("assignee"),
+        "claim_id": claim.get("claim_id"),
+        "process_boundary": "subprocess",
+    }
+
+
+def probe_sqlite_cold_start(store: Path) -> dict[str, Any]:
+    start = time.perf_counter_ns()
+    exported = _sqlite_export_ledger(store)
+    elapsed = time.perf_counter_ns() - start
+    return {
+        "ok": True,
+        "inner_operation_ns": elapsed,
+        "task_count": len(exported.get("tasks", [])),
+        "process_boundary": "subprocess",
+    }
+
+
+def probe_sqlite_claim(store: Path, task_id: str, *, actor: str, claim_id: str) -> dict[str, Any]:
+    code, payload = _sqlite_claim(store, task_id, actor=actor, claim_id=claim_id)
+    return {
+        "ok": code == 0 and bool(payload.get("created")),
+        "exit_code": code,
+        "created": bool(payload.get("created")),
+        "process_boundary": "subprocess",
+    }
+
+
+def run_probe(
+    probe: str,
+    store: Path,
+    *,
+    task_id: str | None = None,
+    actor: str | None = None,
+    claim_id: str | None = None,
+) -> dict[str, Any]:
+    if probe == "json-read-claim":
+        if not task_id:
+            raise MeasurementInputError("--task-id is required for json-read-claim")
+        return probe_json_read_claim(store, task_id)
+    if probe == "json-cold-start":
+        return probe_json_cold_start(store)
+    if probe == "sqlite-read-claim":
+        if not task_id:
+            raise MeasurementInputError("--task-id is required for sqlite-read-claim")
+        return probe_sqlite_read_claim(store, task_id)
+    if probe == "sqlite-cold-start":
+        return probe_sqlite_cold_start(store)
+    if probe == "sqlite-claim":
+        if not task_id or not actor or not claim_id:
+            raise MeasurementInputError("--task-id/--actor/--claim-id required for sqlite-claim")
+        return probe_sqlite_claim(store, task_id, actor=actor, claim_id=claim_id)
+    raise MeasurementInputError(f"unknown probe: {probe}")
+
+
+def _git_output(cwd: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise MeasurementInputError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def _synthesize_git_secret_history(repo: Path, *, tracked_relpath: str) -> dict[str, Any]:
+    """Create synthetic commits and inspect retained deleted-secret history."""
+    if not (repo / ".git").exists():
+        _init_git_repo(repo)
+    tracked = repo / tracked_relpath
+    tracked.parent.mkdir(parents=True, exist_ok=True)
+    tracked.write_text(f"tracked probe {SYNTHETIC_SECRET}\n", encoding="utf-8")
+    _git_output(repo, "add", tracked_relpath)
+    _git_output(
+        repo,
+        "-c",
+        "user.email=synth@example.invalid",
+        "-c",
+        "user.name=Synth",
+        "commit",
+        "-m",
+        "synth secret",
+    )
+    tracked.write_text("tracked probe redacted\n", encoding="utf-8")
+    _git_output(repo, "add", tracked_relpath)
+    _git_output(
+        repo,
+        "-c",
+        "user.email=synth@example.invalid",
+        "-c",
+        "user.name=Synth",
+        "commit",
+        "-m",
+        "synth redact",
+    )
+    history = _git_output(repo, "log", "--all", "-p", "--", tracked_relpath)
+    retained = SYNTHETIC_SECRET in history
+    return {
+        "status": "measured",
+        "tracked_path": tracked_relpath,
+        "deleted_secret_retained_in_history": retained,
+        "pass": retained is True,
     }
 
 
@@ -482,6 +825,7 @@ def _json_claim_race(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
         losers = [item for item in results if item[1] == 13]
         ok = codes == [0, 13] and len(winners) == 1 and len(losers) == 1
         detail: dict[str, Any] = {
+            "status": "measured",
             "codes": codes,
             "winner_count": len(winners),
             "exit_13_count": len(losers),
@@ -524,6 +868,7 @@ def _json_export_import(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
             imported = ledger_mod._read_task_ledger(roundtrip)
             digest_after = fixture_digest(imported)
             return {
+                "status": "measured",
                 "digest_before": digest_before,
                 "digest_after": digest_after,
                 "pass": digest_before == digest_after,
@@ -551,14 +896,500 @@ def _json_crash_before_replace(root: Path, ledger: dict[str, Any]) -> dict[str, 
             tmp_path.unlink(missing_ok=True)
             after = path.read_bytes()
             return {
+                "status": "measured",
                 "mode": "before_replace",
                 "original_intact": before == after,
                 "pass": before == after,
             }
         except Exception as exc:  # noqa: BLE001 - record exact failure
-            return {"mode": "before_replace", "pass": False, "error": str(exc)}
+            return {
+                "status": "measured",
+                "mode": "before_replace",
+                "pass": False,
+                "error": str(exc),
+            }
     finally:
         shutil.rmtree(target, ignore_errors=True)
+
+
+def _json_same_actor_and_retry(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    target = _json_load_target(root, ledger, with_git=True)
+    task_id = _claim_target_id(ledger)
+    try:
+        first = ledger_mod._claim_task(target, task_id, actor="lane-a", claim_id="claim-same-1")
+        retry = ledger_mod._claim_task(target, task_id, actor="lane-a", claim_id="claim-same-1")
+        same_actor_code: int | None = None
+        same_actor_reason: str | None = None
+        try:
+            ledger_mod._claim_task(target, task_id, actor="lane-a", claim_id="claim-same-2")
+            same_actor_rejected = False
+        except claim_mod.ClaimError as exc:
+            same_actor_code = int(exc.exit_code)
+            same_actor_reason = exc.reason
+            same_actor_rejected = (
+                same_actor_code == EXIT_CLAIM_BUSY and same_actor_reason == claim_mod.REASON_ALREADY_CLAIMED
+            )
+        ok = (
+            bool(first.get("created"))
+            and retry.get("created") is False
+            and bool(retry.get("idempotent"))
+            and same_actor_rejected
+        )
+        return {
+            "status": "measured",
+            "idempotent_retry": {
+                "created_first": bool(first.get("created")),
+                "created_retry": bool(retry.get("created")),
+                "idempotent": bool(retry.get("idempotent")),
+            },
+            "same_actor_rejection": {
+                "exit_code": same_actor_code,
+                "reason": same_actor_reason,
+                "pass": same_actor_rejected,
+            },
+            "pass": ok,
+        }
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def _json_guard_and_empty_filter(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    target = _json_load_target(root, ledger, with_git=True)
+    task_id = _claim_target_id(ledger)
+    try:
+        claimed = ledger_mod._claim_task(target, task_id, actor="lane-a", claim_id="guard-claim")
+
+        def _release_task(**kwargs: Any) -> tuple[int, dict[str, Any]]:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = work_cmd.release(target=target, task=[task_id], json_output=True, **kwargs)
+            text = buf.getvalue().strip()
+            payload = json.loads(text) if text else {}
+            return rc, payload
+
+        actor_rc, actor_payload = _release_task(if_actor="other-lane")
+        status_mismatch_rc, status_mismatch_payload = _release_task(if_status="pending")
+        empty_buf = io.StringIO()
+        with contextlib.redirect_stdout(empty_buf):
+            empty_rc = work_cmd.release(target=target, actor=[""], json_output=True)
+        empty_text = empty_buf.getvalue().strip()
+        empty_payload = json.loads(empty_text) if empty_text else {}
+
+        after = ledger_mod._read_task_ledger(target)
+        stored = next(task for task in after["tasks"] if task["id"] == task_id)
+        still_held = stored.get("status") == "in_progress" and stored.get("assignee") == "lane-a"
+
+        status_match_rc, _status_match_payload = _release_task(if_actor="lane-a", if_status="in_progress")
+        after_match = ledger_mod._read_task_ledger(target)
+        released = next(task for task in after_match["tasks"] if task["id"] == task_id)
+        released_ok = released.get("status") == "pending" and not released.get("assignee")
+
+        actor_ok = actor_rc == EXIT_CLAIM_BUSY and actor_payload.get("reason") == claim_mod.REASON_GUARD_MISMATCH
+        status_mismatch_ok = (
+            status_mismatch_rc == EXIT_CLAIM_BUSY
+            and status_mismatch_payload.get("reason") == claim_mod.REASON_GUARD_MISMATCH
+            and status_mismatch_payload.get("guard") == "if_status"
+        )
+        empty_ok = empty_rc == 2 and empty_payload.get("reason") == claim_mod.REASON_EMPTY_FILTER
+        status_match_ok = status_match_rc == 0 and released_ok
+        ok = (
+            bool(claimed.get("created"))
+            and actor_ok
+            and status_mismatch_ok
+            and empty_ok
+            and still_held
+            and status_match_ok
+        )
+        return {
+            "status": "measured",
+            "if_actor_mismatch": {
+                "exit_code": actor_rc,
+                "reason": actor_payload.get("reason"),
+                "pass": actor_ok,
+            },
+            "if_status_mismatch": {
+                "exit_code": status_mismatch_rc,
+                "reason": status_mismatch_payload.get("reason"),
+                "guard": status_mismatch_payload.get("guard"),
+                "expected": status_mismatch_payload.get("expected"),
+                "pass": status_mismatch_ok,
+            },
+            "if_status_match": {
+                "exit_code": status_match_rc,
+                "released": released_ok,
+                "pass": status_match_ok,
+            },
+            "empty_filter": {
+                "exit_code": empty_rc,
+                "reason": empty_payload.get("reason"),
+                "pass": empty_ok,
+            },
+            "still_held_after_rejects": still_held,
+            "pass": ok,
+        }
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def _json_restart_recovery(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    target = _json_load_target(root, ledger, with_git=True)
+    task_id = _claim_target_id(ledger)
+    try:
+        claimed = ledger_mod._claim_task(target, task_id, actor="lane-restart", claim_id="claim-restart")
+        probe, _wall_ns = _run_store_probe("json-read-claim", target, task_id=task_id)
+        ok = (
+            bool(claimed.get("created"))
+            and probe.get("ok") is True
+            and probe.get("process_boundary") == "subprocess"
+            and probe.get("status") == "in_progress"
+            and probe.get("assignee") == "lane-restart"
+            and probe.get("claim_id") == "claim-restart"
+        )
+        return {
+            "status": "measured",
+            "process_boundary": "subprocess",
+            "claim_persisted": ok,
+            "assignee": probe.get("assignee"),
+            "claim_id": probe.get("claim_id"),
+            "pass": ok,
+        }
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def _json_schema_version_policy(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    """Observe current ledger version coercion (no production schema change)."""
+    future = _clone_ledger(ledger)
+    future["version"] = edges_mod.TASK_LEDGER_VERSION + 100
+    past = _clone_ledger(ledger)
+    past["version"] = 1
+    future_target = _json_load_target(root, future, with_git=False)
+    past_target = _json_load_target(root, past, with_git=False)
+    try:
+        future_on_disk = json.loads(work_helpers._tasks_path(future_target).read_text(encoding="utf-8"))
+        past_on_disk = json.loads(work_helpers._tasks_path(past_target).read_text(encoding="utf-8"))
+        future_loaded = ledger_mod._read_task_ledger(future_target)
+        past_loaded = ledger_mod._read_task_ledger(past_target)
+        future_version_after_read = future_loaded.get("version")
+        past_version_after_read = past_loaded.get("version")
+        future_coerced = future_version_after_read == edges_mod.TASK_LEDGER_VERSION
+        past_coerced = past_version_after_read == edges_mod.TASK_LEDGER_VERSION
+        return {
+            "status": "measured",
+            "expected_version": edges_mod.TASK_LEDGER_VERSION,
+            "future_version_written": future_on_disk.get("version"),
+            "future_version_after_read": future_version_after_read,
+            "future_version_rejected": False,
+            "future_version_coerced_on_read": future_coerced,
+            "downgrade_version_written": past_on_disk.get("version"),
+            "downgrade_version_after_read": past_version_after_read,
+            "downgrade_rejected": False,
+            "downgrade_coerced_on_read": past_coerced,
+            "observed_policy": "ensure_ledger_edges_coerces_version_to_current",
+            "pass": future_coerced and past_coerced,
+        }
+    finally:
+        shutil.rmtree(future_target, ignore_errors=True)
+        shutil.rmtree(past_target, ignore_errors=True)
+
+
+def _json_backup_restore(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    target = _json_load_target(root, ledger, with_git=True)
+    task_id = _claim_target_id(ledger)
+    backup_root = Path(tempfile.mkdtemp(prefix="ws-json-backup-", dir=root))
+    restore_root = Path(tempfile.mkdtemp(prefix="ws-json-restore-", dir=root))
+    try:
+        ledger_mod._claim_task(target, task_id, actor="lane-backup", claim_id="claim-backup")
+        config_path = _write_synthetic_backup_config(target)
+        before_tasks = fixture_digest(ledger_mod._read_task_ledger(target))
+        before_claims = _claim_record_digest(ledger_mod._read_task_ledger(target))
+        before_config = _digest_file(config_path)
+        start = time.perf_counter_ns()
+        # Preserve relative layout under .brigade for restore.
+        shutil.copytree(target / ".brigade", backup_root / ".brigade")
+        backup_ns = time.perf_counter_ns() - start
+        # Mutate live store after backup.
+        live = ledger_mod._read_task_ledger(target)
+        for task in live["tasks"]:
+            if task["id"] == task_id:
+                task["text"] = "mutated-after-backup"
+        _write_json_ledger(target, live)
+        (target / ".brigade" / "backups.toml").write_text("# mutated\n", encoding="utf-8")
+        # Restore into a fresh tree.
+        (restore_root / ".brigade").mkdir(parents=True, exist_ok=True)
+        shutil.copytree(backup_root / ".brigade", restore_root / ".brigade", dirs_exist_ok=True)
+        restored = ledger_mod._read_task_ledger(restore_root)
+        after_tasks = fixture_digest(restored)
+        after_claims = _claim_record_digest(restored)
+        after_config = _digest_file(work_helpers._backup_config_path(restore_root))
+        branch = _branch_heads_digest(restore_root)
+        ok = (
+            before_tasks == after_tasks
+            and before_claims == after_claims
+            and before_config is not None
+            and before_config == after_config
+        )
+        return {
+            "status": "measured",
+            "task_edge_digest_before": before_tasks,
+            "task_edge_digest_after": after_tasks,
+            "claim_digest_before": before_claims,
+            "claim_digest_after": after_claims,
+            "config_digest_before": before_config,
+            "config_digest_after": after_config,
+            "branch_heads": branch,
+            "backup_time_ns": backup_ns,
+            "pass": ok,
+        }
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+        shutil.rmtree(backup_root, ignore_errors=True)
+        shutil.rmtree(restore_root, ignore_errors=True)
+
+
+def _json_install_footprint(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    target = _json_load_target(root, ledger, with_git=False)
+    try:
+        work_bytes = _tree_size_bytes(work_helpers._work_root(target))
+        return {
+            "status": "measured",
+            "work_tree_bytes": work_bytes,
+            "tasks_json_bytes": work_helpers._tasks_path(target).stat().st_size,
+            "runtime_dependency_bytes": 0,
+            "note": "JSON ledger is in-tree; no extra runtime dependency install",
+            "pass": work_bytes > 0,
+        }
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def _json_cold_start(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    target = _json_load_target(root, ledger, with_git=False)
+    try:
+        probe, wall_ns = _run_store_probe("json-cold-start", target)
+        inner_ns = probe.get("inner_operation_ns")
+        ok = (
+            probe.get("ok") is True
+            and probe.get("process_boundary") == "subprocess"
+            and isinstance(wall_ns, int)
+            and wall_ns >= 0
+            and isinstance(inner_ns, int)
+            and inner_ns >= 0
+            and wall_ns >= inner_ns
+            and probe.get("task_count") == len(ledger["tasks"])
+        )
+        return {
+            "status": "measured",
+            "cold": True,
+            "process_boundary": "subprocess",
+            "cold_start_ns": wall_ns,
+            "cold_start_timing_scope": "parent_subprocess_wall",
+            "inner_operation_ns": inner_ns,
+            "inner_operation_timing_scope": "probe_read_after_import",
+            "task_count": probe.get("task_count"),
+            "pass": ok,
+        }
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def _json_resource_measurements(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    target = _json_load_target(root, ledger, with_git=True)
+    task_id = _claim_target_id(ledger)
+    before_bytes = _tree_size_bytes(work_helpers._work_root(target))
+    try:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "brigade",
+                "work",
+                "claim",
+                task_id,
+                "--actor",
+                "lane-rss",
+                "--claim-id",
+                "claim-rss",
+                "--target",
+                str(target),
+                "--json",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        peak_rss_kib: int | None = None
+        while proc.poll() is None:
+            sample = _proc_peak_rss_kib(proc.pid)
+            if sample is not None:
+                peak_rss_kib = sample if peak_rss_kib is None else max(peak_rss_kib, sample)
+            time.sleep(0.002)
+        stdout, _stderr = proc.communicate()
+        after_bytes = _tree_size_bytes(work_helpers._work_root(target))
+        rss_status = "measured" if peak_rss_kib is not None else "unavailable"
+        ok = proc.returncode == 0
+        return {
+            "status": "measured",
+            "rss_scope": "subprocess_child",
+            "rss_protocol": "popen_sample_child",
+            "claim_exit_code": proc.returncode,
+            "disk_bytes_before": before_bytes,
+            "disk_bytes_after": after_bytes,
+            "disk_growth_bytes": after_bytes - before_bytes,
+            "peak_rss_kib": peak_rss_kib,
+            "peak_rss_mib": None if peak_rss_kib is None else round(peak_rss_kib / 1024, 2),
+            "rss_sampling": rss_status,
+            "stdout_bytes": len(stdout.encode("utf-8")),
+            "pass": ok and after_bytes >= before_bytes,
+        }
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def _json_metrics_state(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    target = _json_load_target(root, ledger, with_git=True)
+    task_id = _claim_target_id(ledger)
+    env = os.environ.copy()
+    env["DISABLE_TELEMETRY"] = "1"
+    env["BRIGADE_ANONYMOUS_METRICS"] = "0"
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "brigade",
+                "work",
+                "claim",
+                task_id,
+                "--actor",
+                "lane-metrics",
+                "--claim-id",
+                "claim-metrics",
+                "--target",
+                str(target),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        artifacts = _scan_metrics_artifacts(target)
+        disabled = env.get("BRIGADE_ANONYMOUS_METRICS") == "0" and env.get("DISABLE_TELEMETRY") == "1"
+        ok = proc.returncode == 0 and disabled and artifacts == []
+        return {
+            "status": "measured",
+            "anonymous_metrics_config": "disabled",
+            "disable_telemetry_env": env.get("DISABLE_TELEMETRY"),
+            "brigade_anonymous_metrics_env": env.get("BRIGADE_ANONYMOUS_METRICS"),
+            "metrics_artifacts": artifacts,
+            "claim_exit_code": proc.returncode,
+            "pass": ok,
+        }
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def _json_secret_history(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    seeded = _clone_ledger(ledger)
+    task_id = _claim_target_id(seeded)
+    for task in seeded["tasks"]:
+        if task["id"] == task_id:
+            task["text"] = f"probe {SYNTHETIC_SECRET} path={SYNTHETIC_SECRET_PATH}"
+            break
+    target = _json_load_target(root, seeded, with_git=True)
+    backup_pre = Path(tempfile.mkdtemp(prefix="ws-secret-pre-", dir=root))
+    backup_post = Path(tempfile.mkdtemp(prefix="ws-secret-post-", dir=root))
+    try:
+        ignore_path = target / ".gitignore"
+        ignore_path.write_text(".brigade/work/\n", encoding="utf-8")
+        _git_output(target, "add", ".gitignore")
+        _git_output(
+            target,
+            "-c",
+            "user.email=synth@example.invalid",
+            "-c",
+            "user.name=Synth",
+            "commit",
+            "-m",
+            "synth ignore work path",
+        )
+        work_rel = ".brigade/work/tasks.json"
+        ignore_check = subprocess.run(
+            ["git", "check-ignore", "-v", work_rel],
+            cwd=target,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        work_path_ignored = ignore_check.returncode == 0
+        # Commit unrelated tracked content so the repo has objects while the
+        # ignored work ledger with the secret stays out of the index.
+        (target / "README.synth.md").write_text("synth characterization\n", encoding="utf-8")
+        _git_output(target, "add", "README.synth.md")
+        _git_output(
+            target,
+            "-c",
+            "user.email=synth@example.invalid",
+            "-c",
+            "user.name=Synth",
+            "commit",
+            "-m",
+            "synth tracked readme",
+        )
+        objects_blob = _git_output(target, "rev-list", "--objects", "--all")
+        # Prefer explicit grep against reachable commits.
+        rev_list = _git_output(target, "rev-list", "--all").split()
+        found_in_git = False
+        if rev_list:
+            grep2 = subprocess.run(
+                ["git", "grep", "-F", SYNTHETIC_SECRET, *rev_list],
+                cwd=target,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            found_in_git = grep2.returncode == 0 and SYNTHETIC_SECRET in grep2.stdout
+        ignored_secret_absent_from_git = (not found_in_git) and (SYNTHETIC_SECRET not in objects_blob)
+
+        shutil.copytree(target / ".brigade", backup_pre / ".brigade")
+        live = ledger_mod._read_task_ledger(target)
+        for task in live["tasks"]:
+            if task["id"] == task_id:
+                task["text"] = "probe redacted"
+        _write_json_ledger(target, live)
+        shutil.copytree(target / ".brigade", backup_post / ".brigade")
+        live_has = _path_contains_marker(work_helpers._tasks_path(target), SYNTHETIC_SECRET)
+        pre_has = _path_contains_marker(backup_pre, SYNTHETIC_SECRET)
+        post_has = _path_contains_marker(backup_post, SYNTHETIC_SECRET)
+        path_live_has = _path_contains_marker(work_helpers._tasks_path(target), SYNTHETIC_SECRET_PATH)
+        live_backup_ok = (not live_has) and (not post_has) and pre_has and (not path_live_has)
+
+        tracked_history = _synthesize_git_secret_history(target, tracked_relpath="synth/tracked-secret.txt")
+        git_history = {
+            "status": "measured",
+            "work_path_ignored": work_path_ignored,
+            "ignore_path": ".brigade/work/",
+            "ignored_path_secret_absent_from_git": ignored_secret_absent_from_git,
+            "synthetic_tracked_history": tracked_history,
+            "pass": work_path_ignored and ignored_secret_absent_from_git and bool(tracked_history.get("pass")),
+        }
+        ok = live_backup_ok and bool(git_history["pass"])
+        return {
+            "status": "measured",
+            "synthetic_secret_marker": SYNTHETIC_SECRET,
+            "live_retains_deleted_secret": live_has,
+            "pre_delete_backup_retains_secret": pre_has,
+            "post_delete_backup_retains_secret": post_has,
+            "live_retains_deleted_path": path_live_has,
+            "live_and_backup_pass": live_backup_ok,
+            "git_history": git_history,
+            "pass": ok,
+        }
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+        shutil.rmtree(backup_pre, ignore_errors=True)
+        shutil.rmtree(backup_post, ignore_errors=True)
 
 
 def measure_json_ledger(
@@ -571,17 +1402,28 @@ def measure_json_ledger(
     ledger = build_fixture(dataset)
     mutation = _json_measure_mutation(root, ledger, warmups=warmups, trials=trials)
     claim_race = _json_claim_race(root, ledger)
+    same_actor = _json_same_actor_and_retry(root, ledger)
+    guards = _json_guard_and_empty_filter(root, ledger)
+    restart = _json_restart_recovery(root, ledger)
+    schema = _json_schema_version_policy(root, ledger)
     graph = _json_graph_conformance(ledger)
     export_import = _json_export_import(root, ledger)
     crash = _json_crash_before_replace(root, ledger)
+    backup_restore = _json_backup_restore(root, ledger)
+    install_footprint = _json_install_footprint(root, ledger)
+    cold_start = _json_cold_start(root, ledger)
+    resources = _json_resource_measurements(root, ledger)
+    metrics_state = _json_metrics_state(root, ledger)
+    secret_history = _json_secret_history(root, ledger)
+    claim_738 = bool(claim_race.get("pass")) and bool(same_actor.get("pass")) and bool(guards.get("pass"))
     gates = {
         "issue_737_graph": graph["pass"],
-        "issue_738_claim": claim_race["pass"],
+        "issue_738_claim": claim_738,
         "crash_consistency": crash["pass"],
         "lossless_export": export_import["pass"],
-        "metrics_state": True,  # harness disables anonymous metrics by not enabling any
-        "secret_history_handling": True,  # JSON ledger has no retained VC history
-        "restore": export_import["pass"],
+        "metrics_state": metrics_state["pass"],
+        "secret_history_handling": secret_history["pass"],
+        "restore": backup_restore["pass"],
     }
     return {
         "shape": "json_ledger",
@@ -590,9 +1432,19 @@ def measure_json_ledger(
         "mutation_latency": mutation,
         "relative_to_json": {"p50_vs_json": 1.0, "p95_vs_json": 1.0},
         "claim_race": claim_race,
+        "same_actor_and_retry": same_actor,
+        "guard_and_empty_filter": guards,
+        "restart_recovery": restart,
+        "schema_version_policy": schema,
         "graph_conformance": graph,
         "export_import": export_import,
         "crash_consistency": crash,
+        "backup_restore": backup_restore,
+        "install_footprint": install_footprint,
+        "cold_start": cold_start,
+        "resource_measurements": resources,
+        "metrics_state": metrics_state,
+        "secret_history_handling": secret_history,
         "branch_diff_merge": {
             "status": "unsupported",
             "detail": "JSON ledger has no first-class branch/diff/merge path",
@@ -601,8 +1453,9 @@ def measure_json_ledger(
             "status": "unsupported",
             "detail": "No portable sync primitive in current JSON ledger",
         },
+        "server_auth_tls_permissions": _cell_blocked("requires network listener; pending separate operator approval"),
         "gates": gates,
-        "pass": all(gates.values()),
+        "pass": all(bool(value) for value in gates.values()),
     }
 
 
@@ -821,6 +1674,7 @@ def _sqlite_claim_race(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
         losers = [item for item in results if item[1] == 13]
         ok = codes == [0, 13] and len(winners) == 1 and len(losers) == 1
         detail: dict[str, Any] = {
+            "status": "measured",
             "codes": codes,
             "winner_count": len(winners),
             "exit_13_count": len(losers),
@@ -856,9 +1710,363 @@ def _sqlite_crash_before_commit(root: Path, ledger: dict[str, Any]) -> dict[str,
             conn.close()
         after = _sqlite_export_ledger(db_path)
         return {
+            "status": "measured",
             "mode": "before_commit",
             "original_intact": fixture_digest(before) == fixture_digest(after),
             "pass": fixture_digest(before) == fixture_digest(after),
+        }
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_same_actor_and_retry(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-same-", suffix=".db", dir=root)[1])
+    try:
+        _sqlite_load(db_path, ledger)
+        task_id = _claim_target_id(ledger)
+        code1, first = _sqlite_claim(db_path, task_id, actor="lane-a", claim_id="claim-same-1")
+        code2, retry = _sqlite_claim(db_path, task_id, actor="lane-a", claim_id="claim-same-1")
+        code3, same = _sqlite_claim(db_path, task_id, actor="lane-a", claim_id="claim-same-2")
+        same_ok = code3 == EXIT_CLAIM_BUSY and same.get("reason") == claim_mod.REASON_ALREADY_CLAIMED
+        ok = code1 == 0 and bool(first.get("created")) and code2 == 0 and not retry.get("created") and same_ok
+        return {
+            "status": "measured",
+            "idempotent_retry": {
+                "created_first": bool(first.get("created")),
+                "created_retry": bool(retry.get("created")),
+                "reason": retry.get("reason"),
+            },
+            "same_actor_rejection": {
+                "exit_code": code3,
+                "reason": same.get("reason"),
+                "pass": same_ok,
+            },
+            "pass": ok,
+        }
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_restart_recovery(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-restart-", suffix=".db", dir=root)[1])
+    try:
+        _sqlite_load(db_path, ledger)
+        task_id = _claim_target_id(ledger)
+        code, claimed = _sqlite_claim(db_path, task_id, actor="lane-restart", claim_id="claim-restart")
+        probe, _wall_ns = _run_store_probe("sqlite-read-claim", db_path, task_id=task_id)
+        ok = (
+            code == 0
+            and bool(claimed.get("created"))
+            and probe.get("ok") is True
+            and probe.get("process_boundary") == "subprocess"
+            and probe.get("status") == "in_progress"
+            and probe.get("assignee") == "lane-restart"
+            and probe.get("claim_id") == "claim-restart"
+        )
+        return {
+            "status": "measured",
+            "process_boundary": "subprocess",
+            "claim_persisted": ok,
+            "assignee": probe.get("assignee"),
+            "claim_id": probe.get("claim_id"),
+            "pass": ok,
+        }
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_cold_start(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-cold-", suffix=".db", dir=root)[1])
+    try:
+        _sqlite_load(db_path, ledger)
+        probe, wall_ns = _run_store_probe("sqlite-cold-start", db_path)
+        inner_ns = probe.get("inner_operation_ns")
+        ok = (
+            probe.get("ok") is True
+            and probe.get("process_boundary") == "subprocess"
+            and isinstance(wall_ns, int)
+            and wall_ns >= 0
+            and isinstance(inner_ns, int)
+            and inner_ns >= 0
+            and wall_ns >= inner_ns
+            and probe.get("task_count") == len(ledger["tasks"])
+        )
+        return {
+            "status": "measured",
+            "cold": True,
+            "process_boundary": "subprocess",
+            "cold_start_ns": wall_ns,
+            "cold_start_timing_scope": "parent_subprocess_wall",
+            "inner_operation_ns": inner_ns,
+            "inner_operation_timing_scope": "probe_export_after_import",
+            "task_count": probe.get("task_count"),
+            "pass": ok,
+        }
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_resource_measurements(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-rss-", suffix=".db", dir=root)[1])
+    try:
+        _sqlite_load(db_path, ledger)
+        task_id = _claim_target_id(ledger)
+        before = db_path.stat().st_size
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(_script_path()),
+                "--probe",
+                "sqlite-claim",
+                "--store",
+                str(db_path),
+                "--task-id",
+                task_id,
+                "--actor",
+                "lane-rss",
+                "--claim-id",
+                "claim-rss",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        peak_rss_kib: int | None = None
+        while proc.poll() is None:
+            sample = _proc_peak_rss_kib(proc.pid)
+            if sample is not None:
+                peak_rss_kib = sample if peak_rss_kib is None else max(peak_rss_kib, sample)
+            time.sleep(0.002)
+        stdout, _stderr = proc.communicate()
+        after = db_path.stat().st_size
+        payload: dict[str, Any] = {}
+        if stdout.strip():
+            try:
+                payload = json.loads(stdout.strip().splitlines()[-1])
+            except json.JSONDecodeError:
+                payload = {}
+        rss_status = "measured" if peak_rss_kib is not None else "unavailable"
+        ok = proc.returncode == 0 and bool(payload.get("ok"))
+        return {
+            "status": "measured",
+            "rss_scope": "subprocess_child",
+            "rss_protocol": "popen_sample_child",
+            "claim_exit_code": proc.returncode,
+            "disk_bytes_before": before,
+            "disk_bytes_after": after,
+            "disk_growth_bytes": after - before,
+            "peak_rss_kib": peak_rss_kib,
+            "peak_rss_mib": None if peak_rss_kib is None else round(peak_rss_kib / 1024, 2),
+            "rss_sampling": rss_status,
+            "pass": ok,
+        }
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            Path(str(db_path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_secret_history(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    seeded = _clone_ledger(ledger)
+    task_id = _claim_target_id(seeded)
+    for task in seeded["tasks"]:
+        if task["id"] == task_id:
+            task["text"] = f"probe {SYNTHETIC_SECRET} path={SYNTHETIC_SECRET_PATH}"
+            break
+    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-secret-", suffix=".db", dir=root)[1])
+    backup_pre = Path(tempfile.mkstemp(prefix="ws-sqlite-secret-pre-", suffix=".db", dir=root)[1])
+    backup_post = Path(tempfile.mkstemp(prefix="ws-sqlite-secret-post-", suffix=".db", dir=root)[1])
+    try:
+        _sqlite_load(db_path, seeded)
+        shutil.copy2(db_path, backup_pre)
+        # Delete secret from live payload.
+        conn = _sqlite_connect(db_path)
+        try:
+            row = conn.execute("SELECT payload FROM tasks WHERE id=?", (task_id,)).fetchone()
+            task = json.loads(row[0])
+            task["text"] = "probe redacted"
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE tasks SET payload=? WHERE id=?",
+                (json.dumps(task, sort_keys=True), task_id),
+            )
+            conn.execute("COMMIT")
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+        shutil.copy2(db_path, backup_post)
+        live_has = _path_contains_marker(db_path, SYNTHETIC_SECRET)
+        pre_has = _path_contains_marker(backup_pre, SYNTHETIC_SECRET)
+        post_has = _path_contains_marker(backup_post, SYNTHETIC_SECRET)
+        live_backup_ok = (not live_has) and (not post_has) and pre_has
+        # SQLite adapter has no native VCS; do not claim git-history coverage.
+        git_history = _cell_unavailable(
+            "sqlite characterization adapter has no native VCS; JSON ledger measures synthetic git/ignore-path history"
+        )
+        ok = live_backup_ok
+        return {
+            "status": "measured",
+            "synthetic_secret_marker": SYNTHETIC_SECRET,
+            "live_retains_deleted_secret": live_has,
+            "pre_delete_backup_retains_secret": pre_has,
+            "post_delete_backup_retains_secret": post_has,
+            "live_and_backup_pass": live_backup_ok,
+            "git_history": git_history,
+            "pass": ok,
+        }
+    finally:
+        for path in (db_path, backup_pre, backup_post):
+            for suffix in ("", "-wal", "-shm"):
+                Path(str(path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_metrics_state(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    store_dir = Path(tempfile.mkdtemp(prefix="ws-sqlite-metrics-store-", dir=root))
+    db_path = store_dir / "tasks.db"
+    overrides = {"DISABLE_TELEMETRY": "1", "BRIGADE_ANONYMOUS_METRICS": "0"}
+    try:
+        with _env_overrides(overrides):
+            _sqlite_load(db_path, ledger)
+            task_id = _claim_target_id(ledger)
+            code, _payload = _sqlite_claim(db_path, task_id, actor="lane-metrics", claim_id="claim-metrics")
+            # Scan the actual touched store directory (contains the DB + any sidecars).
+            artifacts = _scan_metrics_artifacts(store_dir)
+            disabled = os.environ.get("BRIGADE_ANONYMOUS_METRICS") == "0" and os.environ.get("DISABLE_TELEMETRY") == "1"
+            ok = code == 0 and disabled and artifacts == []
+            return {
+                "status": "measured",
+                "anonymous_metrics_config": "disabled",
+                "disable_telemetry_env": os.environ.get("DISABLE_TELEMETRY"),
+                "brigade_anonymous_metrics_env": os.environ.get("BRIGADE_ANONYMOUS_METRICS"),
+                "scanned_store_path": str(store_dir.name),
+                "metrics_artifacts": artifacts,
+                "claim_exit_code": code,
+                "pass": ok,
+            }
+    finally:
+        shutil.rmtree(store_dir, ignore_errors=True)
+
+
+def _sqlite_schema_version_policy(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    future_path = Path(tempfile.mkstemp(prefix="ws-sqlite-future-", suffix=".db", dir=root)[1])
+    past_path = Path(tempfile.mkstemp(prefix="ws-sqlite-past-", suffix=".db", dir=root)[1])
+    try:
+        future = _clone_ledger(ledger)
+        future["version"] = edges_mod.TASK_LEDGER_VERSION + 100
+        past = _clone_ledger(ledger)
+        past["version"] = 1
+        _sqlite_load(future_path, future)
+        _sqlite_load(past_path, past)
+        # Adapter stores meta.version as written; export returns stored int.
+        future_export = _sqlite_export_ledger(future_path)
+        past_export = _sqlite_export_ledger(past_path)
+        # After export, ensure_ledger_edges coerces for graph use.
+        future_coerced = future_export.get("version") == edges_mod.TASK_LEDGER_VERSION
+        past_coerced = past_export.get("version") == edges_mod.TASK_LEDGER_VERSION
+        conn = _sqlite_connect(future_path)
+        try:
+            future_meta = conn.execute("SELECT value FROM meta WHERE key='version'").fetchone()[0]
+        finally:
+            conn.close()
+        conn = _sqlite_connect(past_path)
+        try:
+            past_meta = conn.execute("SELECT value FROM meta WHERE key='version'").fetchone()[0]
+        finally:
+            conn.close()
+        return {
+            "status": "measured",
+            "expected_version": edges_mod.TASK_LEDGER_VERSION,
+            "future_version_written": int(future_meta),
+            "future_version_after_export": future_export.get("version"),
+            "future_version_rejected": False,
+            "future_version_coerced_on_export": future_coerced,
+            "downgrade_version_written": int(past_meta),
+            "downgrade_version_after_export": past_export.get("version"),
+            "downgrade_rejected": False,
+            "downgrade_coerced_on_export": past_coerced,
+            "observed_policy": "adapter_meta_preserves_written_version_export_coerces_via_ensure_ledger_edges",
+            "pass": future_coerced and past_coerced and int(future_meta) == edges_mod.TASK_LEDGER_VERSION + 100,
+        }
+    finally:
+        for path in (future_path, past_path):
+            for suffix in ("", "-wal", "-shm"):
+                Path(str(path) + suffix).unlink(missing_ok=True)
+
+
+def _sqlite_backup_restore(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-live-", suffix=".db", dir=root)[1])
+    backup_path = Path(tempfile.mkstemp(prefix="ws-sqlite-bak-", suffix=".db", dir=root)[1])
+    config_src = Path(tempfile.mkdtemp(prefix="ws-sqlite-cfg-", dir=root))
+    try:
+        _sqlite_load(db_path, ledger)
+        task_id = _claim_target_id(ledger)
+        _sqlite_claim(db_path, task_id, actor="lane-backup", claim_id="claim-backup")
+        config_path = _write_synthetic_backup_config(config_src)
+        before_ledger = _sqlite_export_ledger(db_path)
+        before_tasks = fixture_digest(before_ledger)
+        before_claims = _claim_record_digest(before_ledger)
+        before_config = _digest_file(config_path)
+        start = time.perf_counter_ns()
+        shutil.copy2(db_path, backup_path)
+        for suffix in ("-wal", "-shm"):
+            src = Path(str(db_path) + suffix)
+            if src.exists():
+                shutil.copy2(src, Path(str(backup_path) + suffix))
+        config_backup = config_src / "backups.toml.backup"
+        shutil.copy2(config_path, config_backup)
+        backup_ns = time.perf_counter_ns() - start
+        # Mutate live
+        conn = _sqlite_connect(db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("UPDATE tasks SET status=? WHERE id=?", ("done", task_id))
+            conn.execute("COMMIT")
+        finally:
+            conn.close()
+        config_path.write_text("# mutated\n", encoding="utf-8")
+        restored = _sqlite_export_ledger(backup_path)
+        after_tasks = fixture_digest(restored)
+        after_claims = _claim_record_digest(restored)
+        after_config = _digest_file(config_backup)
+        ok = (
+            before_tasks == after_tasks
+            and before_claims == after_claims
+            and before_config is not None
+            and before_config == after_config
+        )
+        return {
+            "status": "measured",
+            "task_edge_digest_before": before_tasks,
+            "task_edge_digest_after": after_tasks,
+            "claim_digest_before": before_claims,
+            "claim_digest_after": after_claims,
+            "config_digest_before": before_config,
+            "config_digest_after": after_config,
+            "branch_heads": _branch_heads_digest(config_src),
+            "backup_time_ns": backup_ns,
+            "pass": ok,
+        }
+    finally:
+        for path in (db_path, backup_path):
+            for suffix in ("", "-wal", "-shm"):
+                Path(str(path) + suffix).unlink(missing_ok=True)
+        shutil.rmtree(config_src, ignore_errors=True)
+
+
+def _sqlite_install_footprint(root: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+    db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-size-", suffix=".db", dir=root)[1])
+    try:
+        _sqlite_load(db_path, ledger)
+        size = db_path.stat().st_size
+        return {
+            "status": "measured",
+            "db_bytes": size,
+            "runtime_dependency_bytes": 0,
+            "note": "stdlib sqlite3 only; not a Brigade runtime dependency",
+            "pass": size > 0,
         }
     finally:
         for suffix in ("", "-wal", "-shm"):
@@ -876,6 +2084,13 @@ def measure_sqlite_wal(
     ledger = build_fixture(dataset)
     mutation = _sqlite_measure_mutation(root, ledger, warmups=warmups, trials=trials)
     claim_race = _sqlite_claim_race(root, ledger)
+    same_actor = _sqlite_same_actor_and_retry(root, ledger)
+    guards = _cell_unavailable(
+        "sqlite characterization adapter does not implement Brigade release "
+        "guards or empty-filter semantics; measured on json_ledger"
+    )
+    restart = _sqlite_restart_recovery(root, ledger)
+    schema = _sqlite_schema_version_policy(root, ledger)
     # Graph readiness still evaluated by Brigade resolver on exported form.
     db_path = Path(tempfile.mkstemp(prefix="ws-sqlite-graph-", suffix=".db", dir=root)[1])
     try:
@@ -883,6 +2098,7 @@ def measure_sqlite_wal(
         exported = _sqlite_export_ledger(db_path)
         graph = _json_graph_conformance(exported)
         export_import = {
+            "status": "measured",
             "digest_before": fixture_digest(ledger),
             "digest_after": fixture_digest(exported),
             "pass": fixture_digest(ledger) == fixture_digest(exported),
@@ -891,15 +2107,22 @@ def measure_sqlite_wal(
         for suffix in ("", "-wal", "-shm"):
             Path(str(db_path) + suffix).unlink(missing_ok=True)
     crash = _sqlite_crash_before_commit(root, ledger)
+    backup_restore = _sqlite_backup_restore(root, ledger)
+    install_footprint = _sqlite_install_footprint(root, ledger)
+    cold_start = _sqlite_cold_start(root, ledger)
+    resources = _sqlite_resource_measurements(root, ledger)
+    metrics_state = _sqlite_metrics_state(root, ledger)
+    secret_history = _sqlite_secret_history(root, ledger)
     baseline_stats = None if json_baseline is None else json_baseline.get("mutation_latency")
+    claim_738 = bool(claim_race.get("pass")) and bool(same_actor.get("pass"))
     gates = {
         "issue_737_graph": graph["pass"],
-        "issue_738_claim": claim_race["pass"],
+        "issue_738_claim": claim_738,
         "crash_consistency": crash["pass"],
         "lossless_export": export_import["pass"],
-        "metrics_state": True,
-        "secret_history_handling": True,  # no retained VC history in this adapter
-        "restore": export_import["pass"],
+        "metrics_state": metrics_state["pass"],
+        "secret_history_handling": secret_history["pass"],
+        "restore": backup_restore["pass"],
     }
     return {
         "shape": "sqlite_wal",
@@ -908,9 +2131,19 @@ def measure_sqlite_wal(
         "mutation_latency": mutation,
         "relative_to_json": _relative_to_json(mutation, baseline_stats),
         "claim_race": claim_race,
+        "same_actor_and_retry": same_actor,
+        "guard_and_empty_filter": guards,
+        "restart_recovery": restart,
+        "schema_version_policy": schema,
         "graph_conformance": graph,
         "export_import": export_import,
         "crash_consistency": crash,
+        "backup_restore": backup_restore,
+        "install_footprint": install_footprint,
+        "cold_start": cold_start,
+        "resource_measurements": resources,
+        "metrics_state": metrics_state,
+        "secret_history_handling": secret_history,
         "branch_diff_merge": {
             "status": "unsupported",
             "detail": "SQLite WAL adapter has no branch/diff/merge",
@@ -919,8 +2152,9 @@ def measure_sqlite_wal(
             "status": "unsupported",
             "detail": "File copy only; no merge protocol in this adapter",
         },
+        "server_auth_tls_permissions": _cell_blocked("requires network listener; pending separate operator approval"),
         "gates": gates,
-        "pass": all(gates.values()),
+        "pass": all(bool(value) for value in gates.values()),
         "note": "stdlib sqlite3 characterization only; not a Brigade runtime dependency",
     }
 
@@ -929,6 +2163,7 @@ def measure_sqlite_wal(
 
 
 def _dolt_blocked_result(shape: str, dataset: str, reason: str) -> dict[str, Any]:
+    blocked = {"pass": None, "status": "blocked"}
     return {
         "shape": shape,
         "status": "blocked",
@@ -936,12 +2171,23 @@ def _dolt_blocked_result(shape: str, dataset: str, reason: str) -> dict[str, Any
         "reason": reason,
         "mutation_latency": None,
         "relative_to_json": None,
-        "claim_race": {"pass": None, "status": "unmeasured"},
-        "graph_conformance": {"pass": None, "status": "unmeasured"},
-        "export_import": {"pass": None, "status": "unmeasured"},
-        "crash_consistency": {"pass": None, "status": "unmeasured"},
-        "branch_diff_merge": {"status": "unmeasured"},
-        "offline_divergence": {"status": "unmeasured"},
+        "claim_race": blocked,
+        "same_actor_and_retry": blocked,
+        "guard_and_empty_filter": blocked,
+        "restart_recovery": blocked,
+        "schema_version_policy": blocked,
+        "graph_conformance": blocked,
+        "export_import": blocked,
+        "crash_consistency": blocked,
+        "backup_restore": blocked,
+        "install_footprint": blocked,
+        "cold_start": blocked,
+        "resource_measurements": blocked,
+        "metrics_state": blocked,
+        "secret_history_handling": blocked,
+        "branch_diff_merge": {"status": "blocked"},
+        "offline_divergence": {"status": "blocked"},
+        "server_auth_tls_permissions": _cell_blocked("requires network listener; pending separate operator approval"),
         "gates": {
             "issue_737_graph": None,
             "issue_738_claim": None,
@@ -960,14 +2206,14 @@ def measure_dolt_shape(shape: str, dataset: str, *, dolt_bin: str | None) -> dic
         return _dolt_blocked_result(
             shape,
             dataset,
-            "R1 policy: harness must not start a network listener; "
+            "R2 policy: harness must not start a network listener; "
             "operator-owned server characterization requires separate approval",
         )
     if shape == "embedded_dolt":
         return _dolt_blocked_result(
             shape,
             dataset,
-            "No embedded Dolt boundary is checked into this repo; R1 does not build or persist a Go/Dolt dependency",
+            "No embedded Dolt boundary is checked into this repo; R2 does not build or persist a Go/Dolt dependency",
         )
     # dolt_cli_per_command
     resolved = dolt_bin or shutil.which("dolt")
@@ -978,12 +2224,12 @@ def measure_dolt_shape(shape: str, dataset: str, *, dolt_bin: str | None) -> dic
             "dolt binary not available on PATH; optional temporary CLI not supplied "
             "(--dolt-bin). Cell left unmeasured rather than fabricated",
         )
-    # A binary may be present for future optional runners; R1 still does not
+    # A binary may be present for future optional runners; R2 still does not
     # auto-run Dolt mutations without an explicit enable flag.
     return _dolt_blocked_result(
         shape,
         dataset,
-        f"dolt binary observed at {Path(resolved).name} but R1 timebox keeps "
+        f"dolt binary observed at {Path(resolved).name} but R2 timebox keeps "
         "CLI mutation runner disabled; documentation-only characterization applies",
     )
 
@@ -1114,7 +2360,7 @@ def capability_matrix_notes() -> dict[str, Any]:
         },
         "dolt_cli_per_command": {
             "portable_sync": "clone_push_pull_candidate",
-            "concurrent_same_store_claim": "unmeasured_r1",
+            "concurrent_same_store_claim": "unmeasured_r2",
             "concurrent_cross_machine_claim": "not_by_cli_alone",
             "branch_diff_merge": "native_candidate",
             "row_locks": "unsupported_select_for_update",
@@ -1150,7 +2396,7 @@ def capability_matrix_notes() -> dict[str, Any]:
                 "meet measured correctness through file or replica candidates"
             ),
             "runtime_dependency": "forbidden_unless_later_issue_approves",
-            "status": "blocked_no_listener_in_r1",
+            "status": "blocked_no_listener_in_r2",
         },
         "sources": [
             "https://www.dolthub.com/docs/sql-reference/sql-support/supported-statements/",
@@ -1167,7 +2413,7 @@ def decision_record() -> dict[str, Any]:
         "current_need": "sequential_portable_sync_plus_reviewable_branch_merge_proposals",
         "concurrent_cross_machine_claims": "not_current_requirement",
         "store_decision": "keep_machine_local_json_ledger",
-        "portable_sync": "adopt_as_follow_up_requirement_not_implemented_in_r1",
+        "portable_sync": "adopt_as_follow_up_requirement_not_implemented_in_r2",
         "sqlite": "optional_local_characterization_only_not_runtime_dependency",
         "shared_store_conformance_fixture": "not_approved",
         "shared_service_eligibility": ("only_if_later_concurrent_claim_requirement_fails_file_or_replica_candidates"),
@@ -1186,6 +2432,25 @@ def write_report(report: dict[str, Any], output: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--probe",
+        choices=(
+            "json-read-claim",
+            "json-cold-start",
+            "sqlite-read-claim",
+            "sqlite-cold-start",
+            "sqlite-claim",
+        ),
+        help="Fresh-process store probe; prints one JSON object to stdout",
+    )
+    parser.add_argument(
+        "--store",
+        type=Path,
+        help="Store path for --probe (JSON target root or SQLite DB file)",
+    )
+    parser.add_argument("--task-id", help="Task id for claim-read / claim probes")
+    parser.add_argument("--actor", default="probe-actor", help="Actor for sqlite-claim probe")
+    parser.add_argument("--claim-id", default="probe-claim", help="Claim id for sqlite-claim probe")
+    parser.add_argument(
         "--root",
         type=Path,
         default=Path(tempfile.gettempdir()),
@@ -1194,7 +2459,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        required=True,
         help="Diffable measurement JSON output path",
     )
     parser.add_argument("--warmups", type=int, default=DEFAULT_WARMUPS)
@@ -1220,6 +2484,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional temporary dolt binary path (never persisted as a dependency)",
     )
     args = parser.parse_args(argv)
+
+    if args.probe is not None:
+        if args.store is None:
+            parser.error("--store is required with --probe")
+        payload = run_probe(
+            args.probe,
+            args.store,
+            task_id=args.task_id,
+            actor=args.actor,
+            claim_id=args.claim_id,
+        )
+        print(json.dumps(payload, sort_keys=True))
+        return 0
+
+    if args.output is None:
+        parser.error("--output is required unless --probe is set")
 
     shapes = [item.strip() for item in args.shapes.split(",") if item.strip()]
     datasets = [item.strip() for item in args.datasets.split(",") if item.strip()]
