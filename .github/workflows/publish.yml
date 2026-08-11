@@ -453,6 +453,7 @@ jobs:
         if: matrix.kind == 'unix'
         env:
           BRIGADE_VERSION: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/published-artifact-acceptance.py --brigade-version "${BRIGADE_VERSION#v}" ${{ matrix.extra }}
       - name: Run Windows native acceptance (published CLI)
         if: matrix.kind == 'windows'

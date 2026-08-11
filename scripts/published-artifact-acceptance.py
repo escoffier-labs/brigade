@@ -14,17 +14,24 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import urlparse
 
 
 COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
+GITHUB_API_HOST = "api.github.com"
 PYPI_PROJECT_URL = "https://pypi.org/pypi/brigade-cli/json"
 PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
 PYPI_POLL_INTERVAL_SECONDS = 5
+USER_AGENT = "brigade-published-artifact-acceptance/1.0"
+GITHUB_RELEASE_TAG_MAX_ATTEMPTS = 6
+GITHUB_RELEASE_TAG_INITIAL_BACKOFF_SECONDS = 2.0
+GITHUB_RELEASE_TAG_MAX_BACKOFF_SECONDS = 30.0
 # agent-notify ldflags inject main.version, main.commit, and main.buildDate.
 # A bare `go build` leaves "dev" / "unknown" / "unknown"; published release
 # assets must report the exact Brigade release version, a hex git SHA (the
@@ -36,6 +43,7 @@ _BUILD_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 JsonFetcher = Callable[[str], Any]
 BytesFetcher = Callable[[str], bytes]
+GithubStatusFetcher = Callable[[str], tuple[int, Any]]
 
 
 class AcceptanceError(RuntimeError):
@@ -66,6 +74,96 @@ def fetch_pypi_json(url: str) -> Any:
 def fetch_bytes(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=60) as response:
         return response.read()
+
+
+def _github_release_tag_url(tag: str) -> str:
+    return f"https://{GITHUB_API_HOST}/repos/{REPOSITORY}/releases/tags/{tag}"
+
+
+def _is_allowed_github_api_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and parsed.netloc == GITHUB_API_HOST
+
+
+class _GithubApiRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only when the target remains on https://api.github.com."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        if not _is_allowed_github_api_url(newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _github_api_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_GithubApiRedirectHandler())
+
+
+def _github_request_headers() -> dict[str, str]:
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": USER_AGENT}
+    if token := os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _is_transient_github_http_status(status: int) -> bool:
+    return status in {403, 429}
+
+
+def _fetch_github_json_once(url: str) -> tuple[int, Any]:
+    if not _is_allowed_github_api_url(url):
+        raise AcceptanceError(f"GitHub release lookup must target https://{GITHUB_API_HOST}: {url}")
+    request = urllib.request.Request(url, headers=_github_request_headers())
+    try:
+        with _github_api_opener().open(request, timeout=30) as response:
+            if not _is_allowed_github_api_url(response.geturl()):
+                raise AcceptanceError("GitHub release lookup redirected outside api.github.com")
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            payload: Any = json.loads(body)
+        except json.JSONDecodeError:
+            payload = body
+        return exc.code, payload
+
+
+def wait_for_github_release_tag(
+    version: str,
+    *,
+    fetch: GithubStatusFetcher = _fetch_github_json_once,
+    sleep: Callable[[float], None] = time.sleep,
+    max_attempts: int = GITHUB_RELEASE_TAG_MAX_ATTEMPTS,
+    initial_backoff_seconds: float = GITHUB_RELEASE_TAG_INITIAL_BACKOFF_SECONDS,
+    max_backoff_seconds: float = GITHUB_RELEASE_TAG_MAX_BACKOFF_SECONDS,
+) -> dict[str, Any]:
+    """Confirm the Brigade release tag is visible through the GitHub API.
+
+    Uses ``GITHUB_TOKEN`` when present and retries transient 403/429 responses
+    with bounded exponential backoff so macOS runner rate/abuse blocks do not fail
+    an otherwise healthy publish.
+    """
+    tag = f"v{version}"
+    url = _github_release_tag_url(tag)
+    backoff = initial_backoff_seconds
+    detail = f"GitHub release lookup for {REPOSITORY}@{tag} failed"
+    for attempt in range(max_attempts):
+        status, payload = fetch(url)
+        if status == 200:
+            if not isinstance(payload, dict) or payload.get("tag_name") != tag:
+                raise AcceptanceError(f"GitHub release lookup did not report tag {tag!r}")
+            if payload.get("draft") is not False or payload.get("prerelease") is not False:
+                raise AcceptanceError("GitHub release must be a published non-prerelease")
+            return payload
+        if not _is_transient_github_http_status(status):
+            raise AcceptanceError(f"GitHub release lookup failed for {REPOSITORY}@{tag}: HTTP {status}")
+        detail = f"GitHub release lookup for {REPOSITORY}@{tag} returned HTTP {status}"
+        if attempt + 1 >= max_attempts:
+            break
+        sleep(min(backoff, max_backoff_seconds))
+        backoff = min(backoff * 2, max_backoff_seconds)
+    raise AcceptanceError(
+        f"GitHub release lookup for {REPOSITORY}@{tag} was not available after {max_attempts} attempts: {detail}"
+    )
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -440,7 +538,9 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
         for directory in (profile, data_home, pipx_home, pipx_bin, root / "xdg-config", root / "xdg-cache"):
             directory.mkdir(parents=True)
         _write_poison_binaries(poison_dir, marker)
+        wait_for_github_release_tag(version)
         release = verify_release_assets(version, root)
+        manifest_path = root / "release-assets" / "component-manifest-v1.json"
 
         env = os.environ.copy()
         env.update(
@@ -466,8 +566,16 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
             if version_output != f"brigade {version}":
                 raise AcceptanceError(f"installed brigade version mismatch: expected {version}, got {version_output}")
             assert_go_unavailable(env=env)
-            run_checked([managed_brigade, "setup"], runner=runner, env=env)
-            run_checked([managed_brigade, "setup", "--offline"], runner=runner, env=env)
+            run_checked(
+                [managed_brigade, "setup", "--manifest", str(manifest_path)],
+                runner=runner,
+                env=env,
+            )
+            run_checked(
+                [managed_brigade, "setup", "--offline", "--manifest", str(manifest_path)],
+                runner=runner,
+                env=env,
+            )
             report_output = run_checked([managed_brigade, "version", "--components", "--json"], runner=runner, env=env)
             try:
                 report = json.loads(report_output.stdout)
