@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,37 @@ _UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS = (
     "card_file",
     "source_fingerprint",
 )
+_UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS = frozenset(
+    {
+        *_UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS,
+        "repository",
+        "repository_id",
+        "repo_id",
+        "repository_revision",
+        "session",
+        "session_id",
+        "session_harness",
+        "collection_id",
+        "item_id",
+        "locator_kind",
+        "locator_value",
+        "captured_at",
+        "provenance",
+    }
+)
+
+
+def _bound_declared_import_alias(value: object) -> str | None:
+    """Return a bounded display value for an untrusted declared identity alias."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        return ledger_mod._bound_import_identity(value)
+    if isinstance(value, int):
+        return ledger_mod._bound_import_identity(str(value))
+    if isinstance(value, float) and math.isfinite(value):
+        return ledger_mod._bound_import_identity(str(value))
+    return None
 
 
 def _ingest_metadata(record: dict[str, Any]) -> dict[str, Any]:
@@ -48,9 +80,8 @@ def _ingest_metadata(record: dict[str, Any]) -> dict[str, Any]:
         key: value
         for key, value in metadata.items()
         if key not in _UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS
-        and key not in _UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS
+        and key not in _UNTRUSTED_IMPORT_PROVENANCE_METADATA_KEYS
         and not (isinstance(key, str) and key.startswith("declared_"))
-        and key != "provenance"
     }
 
     canonical_record = {
@@ -68,7 +99,7 @@ def _ingest_metadata(record: dict[str, Any]) -> dict[str, Any]:
     if declared_source is not None:
         stamped_metadata["declared_source"] = declared_source
     for key in _UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS:
-        declared_value = ledger_mod._bound_import_identity(metadata.get(key))
+        declared_value = _bound_declared_import_alias(metadata.get(key))
         if declared_value is not None:
             stamped_metadata[f"declared_{key}"] = declared_value
 

@@ -560,6 +560,8 @@ def test_batch_ingest_bounds_repository_identity_from_valid_inbound_envelope(
         "C:\\Users\\operator\\revision",
         "\\\\server\\share\\revision",
         "file:///var/private/revision",
+        "../revision",
+        "release/../revision",
         "é" * 129,
     ],
 )
@@ -596,6 +598,8 @@ def test_batch_ingest_rejects_rooted_or_oversized_repository_revisions_from_meta
         "C:\\Users\\operator\\revision",
         "\\\\server\\share\\revision",
         "file:///var/private/revision",
+        "../revision",
+        "release/../revision",
         "é" * 129,
     ],
 )

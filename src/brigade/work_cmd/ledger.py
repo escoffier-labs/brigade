@@ -1190,6 +1190,8 @@ def _safe_repository_revision(value: object) -> str | None:
     cleaned = _bound_import_identity(value)
     if cleaned is None or provenance._is_absolute_locator(cleaned):
         return None
+    if ".." in cleaned.replace("\\", "/").split("/"):
+        return None
     return cleaned
 
 

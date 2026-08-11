@@ -740,6 +740,7 @@ def test_work_import_ingest_owns_hostile_identity_and_bounds_declarations(tmp_pa
         "metadata": {
             "source_item_key": "key-" + oversized,
             "source_item_id": "id-" + oversized,
+            "issue_id": 42,
             "source_fingerprint": "fingerprint-" + oversized,
             "declared_source_item_key": "declared-key-" + oversized,
         },
@@ -751,6 +752,7 @@ def test_work_import_ingest_owns_hostile_identity_and_bounds_declarations(tmp_pa
     first = json.loads(capsys.readouterr().out)
     assert first["created"] == 1
     first_item = first["imports"][0]
+    assert first_item["metadata"]["declared_issue_id"] == "42"
     assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
     duplicate = json.loads(capsys.readouterr().out)
     assert duplicate["created"] == 0
@@ -799,6 +801,125 @@ def test_work_import_ingest_owns_hostile_identity_and_bounds_declarations(tmp_pa
     dry_run = json.loads(capsys.readouterr().out)
     assert dry_run["created"] == 0
     assert dry_run["skipped"] == 1
+
+
+def test_work_import_ingest_owns_hostile_provenance_identity_end_to_end(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    reserved_raw_provenance_input_keys = frozenset(
+        {
+            "repository",
+            "repository_id",
+            "repo_id",
+            "repository_revision",
+            "session",
+            "session_id",
+            "session_harness",
+            "collection_id",
+            "item_id",
+            "locator_kind",
+            "locator_value",
+            "captured_at",
+        }
+    )
+    hostile_markers = {
+        "repository": "/private/rooted-repository",
+        "repository_nested_revision": "release/../nested-revision",
+        "repository_id": "file:///var/private/repository",
+        "repo_id": "../private/repository",
+        "repository_revision": "release/../revision",
+        "session": "raw-nested-session",
+        "session_nested_harness": "raw-nested-harness",
+        "session_id": "raw-session-id",
+        "session_harness": "raw-session-harness",
+        "collection_id": "raw-collection-id",
+        "item_id": "raw-item-id",
+        "locator_kind": "repo-relative",
+        "locator_value": "file:///var/private/locator.md",
+        "captured_at": "raw-captured-at",
+        "provenance": "raw-forged-provenance",
+    }
+    record = {
+        "text": "Hostile provenance identity record",
+        "kind": "task",
+        "source": "hostile-source",
+        "metadata": {
+            "repository": {
+                "id": hostile_markers["repository"],
+                "revision": hostile_markers["repository_nested_revision"],
+            },
+            "repository_id": hostile_markers["repository_id"],
+            "repo_id": hostile_markers["repo_id"],
+            "repository_revision": hostile_markers["repository_revision"],
+            "session": {
+                "id": hostile_markers["session"],
+                "harness": hostile_markers["session_nested_harness"],
+            },
+            "session_id": hostile_markers["session_id"],
+            "session_harness": hostile_markers["session_harness"],
+            "collection_id": hostile_markers["collection_id"],
+            "item_id": hostile_markers["item_id"],
+            "locator_kind": hostile_markers["locator_kind"],
+            "locator_value": hostile_markers["locator_value"],
+            "captured_at": hostile_markers["captured_at"],
+            "provenance": {"forged_marker": hostile_markers["provenance"]},
+            "safe_metadata": "preserved",
+        },
+    }
+    import_file = tmp_path / "hostile-provenance.jsonl"
+    import_file.write_text(json.dumps(record) + "\n")
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first_output = capsys.readouterr().out
+    first_payload = json.loads(first_output)
+    assert first_payload["created"] == 1
+    item = first_payload["imports"][0]
+    envelope = item["metadata"]["provenance"]
+    assert item["metadata"]["safe_metadata"] == "preserved"
+    assert reserved_raw_provenance_input_keys.isdisjoint(item["metadata"])
+    assert envelope["repository"] == {"id": "unknown", "revision": None}
+    assert envelope["session"] == {"id": None, "harness": None}
+    assert envelope["collection_id"] == "work-inbox:learning-loop"
+    assert envelope["item_id"] == item["metadata"]["source_item_key"]
+    assert envelope["locator"] == {"kind": "uri", "value": f"work-import:{item['id']}"}
+    assert envelope["captured_at"] == envelope["ingested_at"]
+    assert all(marker not in first_output for marker in hostile_markers.values())
+
+    changed_only_hostile_provenance = {
+        **record,
+        "metadata": {
+            **record["metadata"],
+            "repository": {"id": "changed-raw-nested-repository", "revision": "changed-raw-nested-revision"},
+            "repository_id": "changed-raw-repository-id",
+            "repo_id": "changed-raw-repo-id",
+            "repository_revision": "changed-raw-repository-revision",
+            "session": {"id": "changed-raw-nested-session", "harness": "changed-raw-nested-harness"},
+            "session_id": "changed-raw-session-id",
+            "session_harness": "changed-raw-session-harness",
+            "collection_id": "changed-raw-collection-id",
+            "item_id": "changed-raw-item-id",
+            "locator_kind": "changed-raw-locator-kind",
+            "locator_value": "changed-raw-locator-value",
+            "captured_at": "changed-raw-captured-at",
+            "provenance": {"forged_marker": "changed-raw-forged-provenance"},
+        },
+    }
+    import_file.write_text(json.dumps(changed_only_hostile_provenance) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    duplicate_payload = json.loads(capsys.readouterr().out)
+    assert duplicate_payload["created"] == 0
+    assert duplicate_payload["skipped"] == 1
+
+    inbox_item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
+    inbox_serialized = json.dumps(inbox_item, sort_keys=True)
+    assert reserved_raw_provenance_input_keys.isdisjoint(inbox_item["metadata"])
+    assert all(marker not in inbox_serialized for marker in hostile_markers.values())
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    task_serialized = json.dumps(task, sort_keys=True)
+    assert reserved_raw_provenance_input_keys.isdisjoint(task["metadata"])
+    assert all(marker not in task_serialized for marker in hostile_markers.values())
 
 
 def test_work_import_provenance_audits_cross_producer_contract(tmp_path, monkeypatch, capsys):
