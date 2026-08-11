@@ -1,0 +1,882 @@
+{
+  "brigade_version": "0.26.1",
+  "profiles": {
+    "repo-claude": {
+      "description": "Minimal repo install with Claude Code bridge.",
+      "harness_compatibility": {
+        "claude": {
+          "capabilities": [
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "handoff",
+              "provenance": "observed",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/hooks"
+                }
+              ],
+              "id": "hooks",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/memory"
+                }
+              ],
+              "id": "instructions",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/mcp"
+                }
+              ],
+              "id": "mcp",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "local_probe",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "platform",
+              "provenance": "observed",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "reload",
+              "provenance": "unknown",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "session",
+              "provenance": "unknown",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/skills"
+                }
+              ],
+              "id": "skills",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/monitoring-usage"
+                }
+              ],
+              "id": "telemetry",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "verification",
+              "provenance": "observed",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/memory"
+                }
+              ],
+              "id": "workspace",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            }
+          ],
+          "contract_id": "claude-code",
+          "surface": "cli"
+        }
+      },
+      "selection": {
+        "depth": "repo",
+        "harnesses": [
+          "claude"
+        ],
+        "includes": [],
+        "owner": "claude"
+      }
+    },
+    "repo-claude-full": {
+      "description": "Repo depth with Claude and the full kit (repo-extras).",
+      "harness_compatibility": {
+        "claude": {
+          "capabilities": [
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "handoff",
+              "provenance": "observed",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/hooks"
+                }
+              ],
+              "id": "hooks",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/memory"
+                }
+              ],
+              "id": "instructions",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/mcp"
+                }
+              ],
+              "id": "mcp",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "local_probe",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "platform",
+              "provenance": "observed",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "reload",
+              "provenance": "unknown",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "session",
+              "provenance": "unknown",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/skills"
+                }
+              ],
+              "id": "skills",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/monitoring-usage"
+                }
+              ],
+              "id": "telemetry",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "verification",
+              "provenance": "observed",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/memory"
+                }
+              ],
+              "id": "workspace",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            }
+          ],
+          "contract_id": "claude-code",
+          "surface": "cli"
+        }
+      },
+      "selection": {
+        "depth": "repo",
+        "harnesses": [
+          "claude"
+        ],
+        "includes": [
+          "repo-extras"
+        ],
+        "owner": "claude"
+      }
+    },
+    "workspace-claude-codex": {
+      "description": "Full workspace with Claude and Codex bridges.",
+      "harness_compatibility": {
+        "claude": {
+          "capabilities": [
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "handoff",
+              "provenance": "observed",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/hooks"
+                }
+              ],
+              "id": "hooks",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/memory"
+                }
+              ],
+              "id": "instructions",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/mcp"
+                }
+              ],
+              "id": "mcp",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "local_probe",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "platform",
+              "provenance": "observed",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "reload",
+              "provenance": "unknown",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "session",
+              "provenance": "unknown",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/skills"
+                }
+              ],
+              "id": "skills",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/monitoring-usage"
+                }
+              ],
+              "id": "telemetry",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_claude/.brigade/work/verify-runs/20260718-044953-work-verify-8f1b1a/receipt.json"
+                }
+              ],
+              "id": "verification",
+              "provenance": "observed",
+              "tested_version": "2.1.211"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://code.claude.com/docs/en/memory"
+                }
+              ],
+              "id": "workspace",
+              "provenance": "documented",
+              "tested_version": "2.1.211"
+            }
+          ],
+          "contract_id": "claude-code",
+          "surface": "cli"
+        },
+        "codex": {
+          "capabilities": [
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_codex/.brigade/work/verify-runs/20260718-044953-work-verify-28cebe/receipt.json"
+                }
+              ],
+              "id": "handoff",
+              "provenance": "inferred",
+              "tested_version": "0.144.5"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://learn.chatgpt.com/docs/hooks"
+                }
+              ],
+              "id": "hooks",
+              "provenance": "documented",
+              "tested_version": "0.144.5"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://learn.chatgpt.com/docs/agent-configuration/agents-md"
+                }
+              ],
+              "id": "instructions",
+              "provenance": "documented",
+              "tested_version": "0.144.5"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://learn.chatgpt.com/docs/extend/mcp"
+                }
+              ],
+              "id": "mcp",
+              "provenance": "documented",
+              "tested_version": "0.144.5"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://learn.chatgpt.com/docs/codex/cli"
+                }
+              ],
+              "id": "platform",
+              "provenance": "documented",
+              "tested_version": "0.144.5"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_codex/.brigade/runs/20260718-044429-114cf3b9"
+                }
+              ],
+              "id": "reload",
+              "provenance": "unknown",
+              "tested_version": "0.144.5"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://learn.chatgpt.com/docs/codex/cli"
+                }
+              ],
+              "id": "session",
+              "provenance": "documented",
+              "tested_version": "0.144.5"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://learn.chatgpt.com/docs/skills"
+                }
+              ],
+              "id": "skills",
+              "provenance": "documented",
+              "tested_version": "0.144.5"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_codex/.brigade/runs/20260718-044429-114cf3b9"
+                }
+              ],
+              "id": "telemetry",
+              "provenance": "unknown",
+              "tested_version": "0.144.5"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "probe_receipt",
+                  "reference": "probe_codex/.brigade/work/verify-runs/20260718-044953-work-verify-28cebe/receipt.json"
+                }
+              ],
+              "id": "verification",
+              "provenance": "inferred",
+              "tested_version": "0.144.5"
+            },
+            {
+              "evidence": [
+                {
+                  "kind": "vendor_documentation",
+                  "reference": "https://learn.chatgpt.com/docs/config-file/config-reference"
+                }
+              ],
+              "id": "workspace",
+              "provenance": "documented",
+              "tested_version": "0.144.5"
+            }
+          ],
+          "contract_id": "codex-cli",
+          "surface": "cli"
+        }
+      },
+      "selection": {
+        "depth": "workspace",
+        "harnesses": [
+          "claude",
+          "codex"
+        ],
+        "includes": [],
+        "owner": "claude"
+      }
+    }
+  },
+  "renders": {
+    "repo-claude": [
+      {
+        "byte_size": 1108,
+        "dst": ".brigade/handoff-sources.example.json",
+        "rendered": false,
+        "sha256": "4d32bfa7dfa7816841aadf1c2efa6a049198c1face8bf721e6203c0333701a58"
+      },
+      {
+        "byte_size": 872,
+        "dst": ".brigade/policies/personal.json",
+        "rendered": false,
+        "sha256": "bb4e59151a0d8822ea7eeb4d11e9f77154d7748b9f87a15c714e9ebbe080b436"
+      },
+      {
+        "byte_size": 754,
+        "dst": ".brigade/policies/public-repo.json",
+        "rendered": false,
+        "sha256": "c54518f4cff1f04817f2b497e7d6bc1870699b60caf181185045541ff0af8c92"
+      },
+      {
+        "byte_size": 1424,
+        "dst": ".claude/memory-handoffs/TEMPLATE.md",
+        "rendered": true,
+        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+      },
+      {
+        "byte_size": 4847,
+        "dst": "AGENTS.md",
+        "rendered": true,
+        "sha256": "0f23a2bd6467ed7b29711d438ad3fc0042d62a9aa34c9c42a3b6fd4eac58631c"
+      },
+      {
+        "byte_size": 2216,
+        "dst": "CLAUDE.md",
+        "rendered": true,
+        "sha256": "e33b63334b7ca776b5a41b47f7d4be16303a27147dd10e61053260a4e1efe8ff"
+      },
+      {
+        "byte_size": 6331,
+        "dst": "SAFETY_RULES.md",
+        "rendered": true,
+        "sha256": "d133ba8fdb2a580d44b896aaaf744c9d1516ce8b2019fbc1aab8a3a351000bcc"
+      }
+    ],
+    "repo-claude-full": [
+      {
+        "byte_size": 1108,
+        "dst": ".brigade/handoff-sources.example.json",
+        "rendered": false,
+        "sha256": "4d32bfa7dfa7816841aadf1c2efa6a049198c1face8bf721e6203c0333701a58"
+      },
+      {
+        "byte_size": 872,
+        "dst": ".brigade/policies/personal.json",
+        "rendered": false,
+        "sha256": "bb4e59151a0d8822ea7eeb4d11e9f77154d7748b9f87a15c714e9ebbe080b436"
+      },
+      {
+        "byte_size": 754,
+        "dst": ".brigade/policies/public-repo.json",
+        "rendered": false,
+        "sha256": "c54518f4cff1f04817f2b497e7d6bc1870699b60caf181185045541ff0af8c92"
+      },
+      {
+        "byte_size": 1424,
+        "dst": ".claude/memory-handoffs/TEMPLATE.md",
+        "rendered": true,
+        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+      },
+      {
+        "byte_size": 4847,
+        "dst": "AGENTS.md",
+        "rendered": true,
+        "sha256": "0f23a2bd6467ed7b29711d438ad3fc0042d62a9aa34c9c42a3b6fd4eac58631c"
+      },
+      {
+        "byte_size": 2216,
+        "dst": "CLAUDE.md",
+        "rendered": true,
+        "sha256": "e33b63334b7ca776b5a41b47f7d4be16303a27147dd10e61053260a4e1efe8ff"
+      },
+      {
+        "byte_size": 2210,
+        "dst": "INSTALL_FOR_AGENTS.md",
+        "rendered": true,
+        "sha256": "92630c7db302eeea5993187d9a9772972f2d569284a66e1ef98ea46449f3756b"
+      },
+      {
+        "byte_size": 6331,
+        "dst": "SAFETY_RULES.md",
+        "rendered": true,
+        "sha256": "d133ba8fdb2a580d44b896aaaf744c9d1516ce8b2019fbc1aab8a3a351000bcc"
+      },
+      {
+        "byte_size": 8148,
+        "dst": "hooks/pre-push",
+        "rendered": false,
+        "sha256": "556efbc045adef273a9ff3c03bc703e35a326f95a6d90157bc6173437924bd99"
+      },
+      {
+        "byte_size": 1121,
+        "dst": "rules/acceptance-driven-work.md",
+        "rendered": true,
+        "sha256": "531a3b30619029b01ea7ffefb118638eea2fcc858ae9cfbd634e34723e9f2b9e"
+      },
+      {
+        "byte_size": 1194,
+        "dst": "rules/issue-tdd-loop.md",
+        "rendered": true,
+        "sha256": "79bb1c9ed0b14c235614193fb26e2e15aaef971a0d9c9ff89b37e7ea3d09ba8b"
+      }
+    ],
+    "workspace-claude-codex": [
+      {
+        "byte_size": 3414,
+        "dst": ".brigade/chat-memory-sweep.example.json",
+        "rendered": false,
+        "sha256": "5d29c607824c03e156eb522491903ab2aa5874f6138804d86ec20f9831b74c79"
+      },
+      {
+        "byte_size": 1108,
+        "dst": ".brigade/handoff-sources.example.json",
+        "rendered": false,
+        "sha256": "4d32bfa7dfa7816841aadf1c2efa6a049198c1face8bf721e6203c0333701a58"
+      },
+      {
+        "byte_size": 511,
+        "dst": ".brigade/memory-care.example.json",
+        "rendered": false,
+        "sha256": "bdfb973a6225b16ddf26d0e6d66947723cf3039052c36644dc9380ec501d42e7"
+      },
+      {
+        "byte_size": 872,
+        "dst": ".brigade/policies/personal.json",
+        "rendered": false,
+        "sha256": "bb4e59151a0d8822ea7eeb4d11e9f77154d7748b9f87a15c714e9ebbe080b436"
+      },
+      {
+        "byte_size": 754,
+        "dst": ".brigade/policies/public-repo.json",
+        "rendered": false,
+        "sha256": "c54518f4cff1f04817f2b497e7d6bc1870699b60caf181185045541ff0af8c92"
+      },
+      {
+        "byte_size": 1424,
+        "dst": ".claude/memory-handoffs/TEMPLATE.md",
+        "rendered": true,
+        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+      },
+      {
+        "byte_size": 1424,
+        "dst": ".codex/memory-handoffs/TEMPLATE.md",
+        "rendered": true,
+        "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
+      },
+      {
+        "byte_size": 11823,
+        "dst": "AGENTS.md",
+        "rendered": true,
+        "sha256": "87dd1344f69c9c78075fcac94c62b9f032b98ecef3c79c44d28fb2985c106253"
+      },
+      {
+        "byte_size": 3226,
+        "dst": "CLAUDE.md",
+        "rendered": true,
+        "sha256": "2ab6e4d9a8dcd24d5c063eac56439f61c29bffedbe6102f2057cde66e3b0664a"
+      },
+      {
+        "byte_size": 1578,
+        "dst": "HEARTBEAT.md",
+        "rendered": true,
+        "sha256": "3a3ff123f454c9d9eed6591d162a026b744fb555524acccf5a161599243b5833"
+      },
+      {
+        "byte_size": 735,
+        "dst": "IDENTITY.md",
+        "rendered": true,
+        "sha256": "f9d92ede54fd60564cb2b39dc776491111498f2b2f45ebbb0c5de759c6f8bd02"
+      },
+      {
+        "byte_size": 4431,
+        "dst": "INSTALL_FOR_AGENTS.md",
+        "rendered": true,
+        "sha256": "3a7e9a3aa2677f0c2d5bcff46a3e7b65414deaa3fffb397b41dd5cb015bc6d0d"
+      },
+      {
+        "byte_size": 4873,
+        "dst": "MEMORY.md",
+        "rendered": true,
+        "sha256": "d08485c9c00bb4e6d3811e71d49871a76372a8c4b960d89492cab2e2b814c2db"
+      },
+      {
+        "byte_size": 6331,
+        "dst": "SAFETY_RULES.md",
+        "rendered": true,
+        "sha256": "d133ba8fdb2a580d44b896aaaf744c9d1516ce8b2019fbc1aab8a3a351000bcc"
+      },
+      {
+        "byte_size": 5122,
+        "dst": "SOUL.md",
+        "rendered": true,
+        "sha256": "3f4509bc1f269eccfe4303ecc41204ff78cf670d480d451fa1ec0f4003c19279"
+      },
+      {
+        "byte_size": 4749,
+        "dst": "TOOLS.md",
+        "rendered": true,
+        "sha256": "53fe19ed20ad8fe8cc754f135d588ad489af559a59990b3b6b5b32d080bc7d20"
+      },
+      {
+        "byte_size": 2062,
+        "dst": "USER.md",
+        "rendered": true,
+        "sha256": "76d5b8da982a7907d78967456ce2ad6c86069e8e55578c861ed3d7aab8d1a9ae"
+      },
+      {
+        "byte_size": 8148,
+        "dst": "hooks/pre-push",
+        "rendered": false,
+        "sha256": "556efbc045adef273a9ff3c03bc703e35a326f95a6d90157bc6173437924bd99"
+      },
+      {
+        "byte_size": 5259,
+        "dst": "memory/cards/backup-restic.md",
+        "rendered": true,
+        "sha256": "0eda477da2526d337c5589f1b143c2cbe60be63ad70dfaca4194f64956c0d136"
+      },
+      {
+        "byte_size": 6264,
+        "dst": "memory/cards/chat-surface-crawlers.md",
+        "rendered": true,
+        "sha256": "6f5d6e8eda5c8d6537b05283838c21250ebb0063be239db96d36e9b1609eaec0"
+      },
+      {
+        "byte_size": 1967,
+        "dst": "memory/cards/content-safety.md",
+        "rendered": true,
+        "sha256": "094d37f8e9f9e3abf8883fbc412e18bfa4de6fdff5528a2afb5d9bfbddcecafa"
+      },
+      {
+        "byte_size": 3258,
+        "dst": "memory/cards/handoff-flow.md",
+        "rendered": true,
+        "sha256": "996140feb4a54265732c01c0b8f37e14479d4df14ecf938122b0a9901fae5ca1"
+      },
+      {
+        "byte_size": 2080,
+        "dst": "memory/cards/memory-architecture.md",
+        "rendered": true,
+        "sha256": "0fb656c0b51505fff201b47260e69aac4ce6165be9ab4c480ea5fe44f2e52908"
+      },
+      {
+        "byte_size": 3009,
+        "dst": "memory/cards/memory-care-staleness.md",
+        "rendered": true,
+        "sha256": "b9e91694892da5fe81597ac9ae19bb28467a0186d7251de7bd71d64befb31988"
+      },
+      {
+        "byte_size": 6537,
+        "dst": "memory/cards/memory-scanner.md",
+        "rendered": true,
+        "sha256": "b35f4904693402364a24831e24d0f3286180410dc5b5249ca427883a26125137"
+      },
+      {
+        "byte_size": 2772,
+        "dst": "memory/cards/multi-workspace-handoff-admin.md",
+        "rendered": true,
+        "sha256": "a0d3afbd184bacb4aeba1ba436f8382c838a407ae07b4a044cce7d715f827f29"
+      },
+      {
+        "byte_size": 3834,
+        "dst": "memory/cards/obsidian-notes.md",
+        "rendered": true,
+        "sha256": "ba1e8ce25bdfea76d981673165c7a901799bc30b5d054af47545ad0579278b3b"
+      },
+      {
+        "byte_size": 3906,
+        "dst": "memory/cards/pipeline-standups.md",
+        "rendered": true,
+        "sha256": "67ba2c28b119cd32cc24cd836248dd10be3b5d9b2f369bdfd5b3a51ba5809c61"
+      },
+      {
+        "byte_size": 4080,
+        "dst": "memory/cards/token-glace-output-compaction.md",
+        "rendered": true,
+        "sha256": "5f8898d45696a8186ab2cf756553e9d3d655ce1da46d633c5fd5c6844883a43c"
+      },
+      {
+        "byte_size": 1121,
+        "dst": "rules/acceptance-driven-work.md",
+        "rendered": true,
+        "sha256": "531a3b30619029b01ea7ffefb118638eea2fcc858ae9cfbd634e34723e9f2b9e"
+      },
+      {
+        "byte_size": 1194,
+        "dst": "rules/issue-tdd-loop.md",
+        "rendered": true,
+        "sha256": "79bb1c9ed0b14c235614193fb26e2e15aaef971a0d9c9ff89b37e7ea3d09ba8b"
+      },
+      {
+        "byte_size": 5238,
+        "dst": "scripts/backup-restic.sh",
+        "rendered": false,
+        "sha256": "b2cf1874706813d40114192884450c374589b2b26fdb819f44aedd5008166970"
+      },
+      {
+        "byte_size": 7094,
+        "dst": "skills/brigade-work/SKILL.md",
+        "rendered": true,
+        "sha256": "822ce10efce89c14964cacba6627728104f167bae0f065465bf5ff49af018261"
+      },
+      {
+        "byte_size": 5347,
+        "dst": "skills/note/SKILL.md",
+        "rendered": true,
+        "sha256": "457078ef56f4143910ba68729198285e204645d66ababc557e17b80496fe4cb1"
+      },
+      {
+        "byte_size": 2376,
+        "dst": "skills/ultra-work-scout/SKILL.md",
+        "rendered": true,
+        "sha256": "dcac8b8a66195a861cb62d563b8f18a5b868b9d070d288e75f53d026d81445b5"
+      }
+    ]
+  },
+  "schema": "brigade.template_profile_snapshot.v1"
+}

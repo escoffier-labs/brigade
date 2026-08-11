@@ -40,6 +40,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_init.add_argument("--dry-run", action="store_true", help="Show what would happen.")
     p_init.add_argument(
+        "--profile",
+        default=None,
+        help="Named bundled template profile (e.g. repo-claude). Mutually exclusive with --depth and --harnesses.",
+    )
+    p_init.add_argument(
         "--depth",
         choices=["repo", "workspace"],
         default=None,
@@ -73,8 +78,62 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 
 def dispatch(args) -> int:
+    profile = getattr(args, "profile", None)
+    depth_arg = getattr(args, "depth", None)
+    harnesses_arg = getattr(args, "harnesses", None)
+    if profile is not None:
+        if depth_arg is not None or harnesses_arg is not None:
+            print(
+                "error: --profile cannot be combined with --depth or --harnesses",
+                file=sys.stderr,
+            )
+            return 2
+        from ..template_profiles import UnknownTemplateProfile, resolve_profile
+        from ..install import install_selection
+        from ..selection import Selection, resolve_owner
+
+        try:
+            sel = resolve_profile(profile)
+        except UnknownTemplateProfile as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(f"error: template profile snapshot invalid: {exc}", file=sys.stderr)
+            return 2
+        includes: list[str] = []
+        for include in list(sel.includes) + list(args.includes):
+            if include not in includes:
+                includes.append(include)
+        if getattr(args, "full", False) and sel.depth == "repo" and "repo-extras" not in includes:
+            includes.append("repo-extras")
+        if args.owner is not None:
+            try:
+                owner = resolve_owner(sel.harnesses, override=args.owner)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+        else:
+            owner = sel.owner
+        sel = Selection(
+            depth=sel.depth,
+            harnesses=list(sel.harnesses),
+            owner=owner,
+            includes=includes,
+            surfaces=list(sel.surfaces),
+        )
+        return install_selection(
+            target=args.target,
+            selection=sel,
+            force=getattr(args, "force", False),
+            dry_run=getattr(args, "dry_run", False),
+            allow_home=getattr(args, "allow_home", False),
+            use_git_exclude=getattr(args, "git_exclude", False),
+            update_gitignore=getattr(args, "update_gitignore", True),
+            wire_skills=getattr(args, "wire_skills", True),
+        )
+
     # New v0.3.0 path: --depth/--harnesses build a Selection directly.
-    if getattr(args, "depth", None) is not None or getattr(args, "harnesses", None) is not None:
+    if depth_arg is not None or harnesses_arg is not None:
         from ..selection import Selection, KNOWN_HARNESSES, resolve_owner
         from ..install import install_selection
 
