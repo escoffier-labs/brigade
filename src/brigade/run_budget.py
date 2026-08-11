@@ -54,6 +54,21 @@ from brigade.run_events import MAX_DIAGNOSTIC_LEN, MAX_IDEMPOTENCY_KEY_LEN
 
 RUN_BUDGET_SCHEMA = "brigade.run_budget.v1"
 RUN_BUDGET_SCHEMA_VERSION = 1
+RUN_BUDGET_PROJECTION_FIELDS = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "declaration",
+        "modes",
+        "used",
+        "estimated_used",
+        "provider_used",
+        "remaining",
+        "exhausted_dimensions",
+        "terminal_policy",
+        "cancel_receipts",
+    }
+)
 
 # Run-owned policy terminal kinds (not FailureClass / not infrastructure).
 POLICY_KIND_BUDGET_EXHAUSTED = "budget-exhausted"
@@ -280,7 +295,7 @@ def parse_declaration(payload: Mapping[str, Any] | None) -> RunBudgetDeclaration
             code="schema_incompatible",
         )
     version = payload.get("schema_version", RUN_BUDGET_SCHEMA_VERSION)
-    if version != RUN_BUDGET_SCHEMA_VERSION:
+    if isinstance(version, bool) or not isinstance(version, int) or version != RUN_BUDGET_SCHEMA_VERSION:
         raise BudgetCompatibilityError(
             _bound(f"unsupported run_budget schema_version {version!r}"),
             code="schema_incompatible",
@@ -339,7 +354,7 @@ def parse_declaration(payload: Mapping[str, Any] | None) -> RunBudgetDeclaration
     else:
         token_budget = token_budget_raw
     return RunBudgetDeclaration(
-        schema_version=int(version),
+        schema_version=version,
         wall_clock_seconds=_opt_pos(ceilings.get("wall_clock_seconds"), field_name="wall_clock_seconds"),
         worker_dispatch_count=_opt_pos(ceilings.get("worker_dispatch_count"), field_name="worker_dispatch_count"),
         threshold_pct=threshold,
@@ -355,6 +370,45 @@ def declaration_has_budget_content(declaration: RunBudgetDeclaration) -> bool:
     if declaration.token_budget is not None:
         return True
     return any(value is not None for value in declaration.observed_caps.values())
+
+
+def declaration_from_persisted_artifact(payload: Mapping[str, Any]) -> RunBudgetDeclaration:
+    """Parse a persisted run_budget declaration or its projected outer envelope.
+
+    A projected envelope is authoritative state, so validate its schema and
+    closed field set before selecting its nested declaration. A direct
+    declaration remains accepted for compatibility with pre-projection runs.
+    """
+    if not isinstance(payload, Mapping):
+        raise BudgetCompatibilityError("run_budget must be an object", code="schema_incompatible")
+    if "declaration" not in payload:
+        return parse_declaration(payload)
+
+    unknown = set(payload.keys()) - RUN_BUDGET_PROJECTION_FIELDS
+    if unknown:
+        raise BudgetCompatibilityError(
+            _bound(f"unknown persisted run_budget envelope fields: {sorted(unknown)}"),
+            code="schema_incompatible",
+        )
+    schema = payload.get("schema")
+    if schema != RUN_BUDGET_SCHEMA:
+        raise BudgetCompatibilityError(
+            _bound(f"unsupported persisted run_budget schema {schema!r}"),
+            code="schema_incompatible",
+        )
+    version = payload.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int) or version != RUN_BUDGET_SCHEMA_VERSION:
+        raise BudgetCompatibilityError(
+            _bound(f"unsupported persisted run_budget schema_version {version!r}"),
+            code="schema_incompatible",
+        )
+    declaration = payload.get("declaration")
+    if not isinstance(declaration, Mapping):
+        raise BudgetCompatibilityError(
+            "run_budget.declaration must be an object when set",
+            code="schema_incompatible",
+        )
+    return parse_declaration(declaration)
 
 
 def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> RunBudgetDeclaration:
@@ -391,9 +445,12 @@ def declaration_from_verification_budget(budget: Mapping[str, Any] | None) -> Ru
             _bound(f"unsupported verification budget schema {budget.get('schema')!r}"),
             code="schema_incompatible",
         )
-    if "schema_version" in budget and budget.get("schema_version") != RUN_BUDGET_SCHEMA_VERSION:
+    version = budget.get("schema_version")
+    if "schema_version" in budget and (
+        isinstance(version, bool) or not isinstance(version, int) or version != RUN_BUDGET_SCHEMA_VERSION
+    ):
         raise BudgetCompatibilityError(
-            _bound(f"unsupported verification budget schema_version {budget.get('schema_version')!r}"),
+            _bound(f"unsupported verification budget schema_version {version!r}"),
             code="schema_incompatible",
         )
 

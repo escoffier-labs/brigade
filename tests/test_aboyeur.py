@@ -1384,6 +1384,63 @@ def test_undeclared_ordinary_run_invents_no_hard_ceiling(monkeypatch, tmp_path):
     assert calls.count("codex") >= 2
 
 
+@pytest.mark.parametrize(
+    "run_meta",
+    [
+        {"run_budget": "not-an-object"},
+        {"run_budget": {"declaration": "not-an-object"}},
+        {
+            "run_budget": {
+                "schema": "unsupported.run_budget.v2",
+                "schema_version": 1,
+                "declaration": {
+                    "schema": "brigade.run_budget.v1",
+                    "schema_version": 1,
+                    "ceilings": {"worker_dispatch_count": 1},
+                },
+            }
+        },
+        {
+            "verification_contract": {
+                "schema": "brigade.verification_contract.v1",
+                "schema_version": 1,
+                "budget": "not-an-object",
+            }
+        },
+        {"verification_contract": "not-an-object"},
+        {
+            "verification_contract": {
+                "schema": "unsupported.verification_contract.v2",
+                "schema_version": 1,
+                "budget": {"worker_dispatch_count": 1},
+            }
+        },
+        *[
+            {
+                "verification_contract": {
+                    "schema": "brigade.verification_contract.v1",
+                    "schema_version": schema_version,
+                    "budget": {"worker_dispatch_count": 1},
+                }
+            }
+            for schema_version in (99, True, 1.0)
+        ],
+    ],
+)
+def test_initial_budget_coordinator_refuses_malformed_declarations_before_dispatch(tmp_path, run_meta):
+    output_dir = tmp_path / "run"
+    output_dir.mkdir()
+    payload = {"lifecycle_journal_requested": True, **run_meta}
+    (output_dir / "run.json").write_text(json.dumps(payload))
+
+    with pytest.raises(aboyeur.run_budget.BudgetCompatibilityError):
+        aboyeur._build_budget_coordinator(
+            output_dir,
+            started_at=datetime(2026, 8, 11, tzinfo=timezone.utc),
+            append_event=lambda *_args: (_ for _ in ()).throw(AssertionError("worker dispatch")),
+        )
+
+
 def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_path):
     def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
         return agents.AgentResult(

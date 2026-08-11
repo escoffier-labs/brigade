@@ -135,7 +135,9 @@ def validate_contract_payload(
     if schema is not None and schema != VERIFICATION_CONTRACT_SCHEMA:
         errors.append(f"schema must be {VERIFICATION_CONTRACT_SCHEMA!r}")
     version = payload.get("schema_version")
-    if version is not None and version != VERIFICATION_CONTRACT_SCHEMA_VERSION:
+    if version is not None and (
+        isinstance(version, bool) or not isinstance(version, int) or version != VERIFICATION_CONTRACT_SCHEMA_VERSION
+    ):
         errors.append(f"schema_version must be {VERIFICATION_CONTRACT_SCHEMA_VERSION}")
 
     verifier = payload.get("verifier")

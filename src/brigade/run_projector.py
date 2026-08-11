@@ -60,6 +60,8 @@ PRESERVED_FIELDS: frozenset[str] = frozenset(
         "lifecycle_journal_requested",
         "run_journal_authority_requested",
         "approval_reference",
+        "verification_contract",
+        "run_budget",
         # Timing
         "started_at",
         "status_started_at",

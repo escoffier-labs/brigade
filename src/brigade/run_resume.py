@@ -101,13 +101,7 @@ def _declaration_from_run_artifacts(run_dir: Path, run_meta: dict) -> run_budget
                 "run_budget must be an object",
                 code="schema_incompatible",
             )
-        if "declaration" in raw_budget and not isinstance(raw_budget.get("declaration"), dict):
-            raise run_budget.BudgetCompatibilityError(
-                "run_budget.declaration must be an object when set",
-                code="schema_incompatible",
-            )
-        nested = raw_budget["declaration"] if isinstance(raw_budget.get("declaration"), dict) else raw_budget
-        return _require_declaration_content(run_budget.parse_declaration(nested))
+        return _require_declaration_content(run_budget.declaration_from_persisted_artifact(raw_budget))
 
     for container in (run_meta, _load_json(run_dir, "plan.json")):
         if not isinstance(container, dict) or "verification_contract" not in container:
@@ -125,7 +119,11 @@ def _declaration_from_run_artifacts(run_dir: Path, run_meta: dict) -> run_budget
                 code="schema_incompatible",
             )
         version = contract.get("schema_version")
-        if version is not None and version != verification_contract.VERIFICATION_CONTRACT_SCHEMA_VERSION:
+        if version is not None and (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version != verification_contract.VERIFICATION_CONTRACT_SCHEMA_VERSION
+        ):
             raise run_budget.BudgetCompatibilityError(
                 f"unsupported verification_contract schema_version {version!r}",
                 code="schema_incompatible",

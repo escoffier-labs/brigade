@@ -1246,6 +1246,84 @@ def test_resume_refuses_unsupported_verification_budget_schema_version(tmp_path,
     assert _GuardServer.provider_turns == 0
 
 
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_resume_refuses_non_integer_budget_schema_version_before_appserver(
+    tmp_path, monkeypatch, capsys, schema_version
+):
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["run_budget"] = {
+        "schema": "brigade.run_budget.v1",
+        "schema_version": schema_version,
+        "ceilings": {"worker_dispatch_count": 1},
+    }
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    _write_trusted_lifecycle_prefix(run_dir)
+    _patch_resume_denied(monkeypatch)
+
+    assert run_resume.resume(run_dir) == 2
+    assert "incompatible" in capsys.readouterr().err
+    assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
+
+
+@pytest.mark.parametrize(
+    "outer_budget",
+    [
+        {
+            "schema": "brigade.run_budget.v1",
+            "schema_version": 99,
+            "declaration": {
+                "schema": "brigade.run_budget.v1",
+                "schema_version": 1,
+                "ceilings": {"worker_dispatch_count": 1},
+            },
+        },
+        {
+            "schema": "brigade.run_budget.v1",
+            "schema_version": 1,
+            "declaration": {
+                "schema": "brigade.run_budget.v1",
+                "schema_version": 1,
+                "ceilings": {"worker_dispatch_count": 1},
+            },
+            "unexpected": True,
+        },
+    ],
+)
+def test_resume_refuses_incompatible_outer_run_budget_before_appserver(tmp_path, monkeypatch, capsys, outer_budget):
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["run_budget"] = outer_budget
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    _write_trusted_lifecycle_prefix(run_dir)
+    _patch_resume_denied(monkeypatch)
+
+    assert run_resume.resume(run_dir) == 2
+    assert "incompatible" in capsys.readouterr().err
+    assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
+
+
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_resume_refuses_non_integer_parent_contract_schema_version_before_appserver(
+    tmp_path, monkeypatch, capsys, schema_version
+):
+    run_dir = _write_run_dir(tmp_path, results=[dict(_RESUMABLE_COOK)])
+    meta = json.loads((run_dir / "run.json").read_text())
+    contract = _declared_contract(wall_clock_seconds=3600, worker_dispatch_count=1)
+    contract["schema_version"] = schema_version
+    meta["verification_contract"] = contract
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    _write_trusted_lifecycle_prefix(run_dir)
+    _patch_resume_denied(monkeypatch)
+
+    assert run_resume.resume(run_dir) == 2
+    assert "incompatible" in capsys.readouterr().err
+    assert _GuardServer.started == 0
+    assert _GuardServer.provider_turns == 0
+
+
 def test_resume_allows_non_expired_declared_budget(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 

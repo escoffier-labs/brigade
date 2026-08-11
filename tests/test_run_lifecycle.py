@@ -2540,6 +2540,37 @@ def test_authority_dispatch_checkpoint_is_base_stripped_and_recovers_exact_tail(
     assert repaired["projector_version"] == run_projector.PROJECTOR_VERSION
 
 
+def test_authoritative_projection_and_checkpoint_recovery_preserve_budget_declarations(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _run_dir(repo)
+    _enroll_and_authorize(repo, run_dir, monkeypatch)
+    verification_contract = {
+        "schema": "brigade.verification_contract.v1",
+        "schema_version": 1,
+        "budget": {"worker_dispatch_count": 2},
+    }
+    run_budget = {
+        "schema": "brigade.run_budget.v1",
+        "schema_version": 1,
+        "ceilings": {"worker_dispatch_count": 2},
+    }
+
+    with runguard.run_lock(repo, run_dir=run_dir):
+        payload = _apply_authority_request(run_dir, _run_payload("dispatching", lock_workspace=repo))
+        payload["verification_contract"] = verification_contract
+        payload["run_budget"] = run_budget
+        aboyeur._write_json(run_dir / "run.json", payload)
+
+    projected = json.loads((run_dir / "run.json").read_text())
+    assert projected["verification_contract"] == verification_contract
+    assert projected["run_budget"] == run_budget
+
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired["verification_contract"] == verification_contract
+    assert repaired["run_budget"] == run_budget
+
+
 def test_authoritative_dispatch_requested_recovers_exact_old_ceiling_checkpoint(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     run_dir = _run_dir(repo)

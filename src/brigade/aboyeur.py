@@ -2663,6 +2663,43 @@ def record_run_termination(
         raise runguard.RetainRunLockError(f"failed to write terminal run receipt: {exc}") from exc
 
 
+def _initial_verification_budget(container: Mapping[str, Any]) -> tuple[bool, Mapping[str, Any] | None]:
+    """Return a present, validated verification budget from an initial run artifact."""
+    if "verification_contract" not in container:
+        return False, None
+    contract = container["verification_contract"]
+    if not isinstance(contract, Mapping):
+        raise run_budget.BudgetCompatibilityError(
+            "verification_contract must be an object",
+            code="schema_incompatible",
+        )
+    schema = contract.get("schema")
+    if schema is not None and schema != verification_contract.VERIFICATION_CONTRACT_SCHEMA:
+        raise run_budget.BudgetCompatibilityError(
+            run_events._bound(f"unsupported verification_contract schema {schema!r}"),
+            code="schema_incompatible",
+        )
+    version = contract.get("schema_version")
+    if version is not None and (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != verification_contract.VERIFICATION_CONTRACT_SCHEMA_VERSION
+    ):
+        raise run_budget.BudgetCompatibilityError(
+            run_events._bound(f"unsupported verification_contract schema_version {version!r}"),
+            code="schema_incompatible",
+        )
+    if "budget" not in contract:
+        return False, None
+    budget = contract["budget"]
+    if not isinstance(budget, Mapping):
+        raise run_budget.BudgetCompatibilityError(
+            "verification_contract budget must be an object",
+            code="schema_incompatible",
+        )
+    return True, budget
+
+
 def _build_budget_coordinator(
     output_dir: Path,
     *,
@@ -2692,18 +2729,11 @@ def _build_budget_coordinator(
         return None
 
     declaration: run_budget.RunBudgetDeclaration
-    if isinstance(raw.get("run_budget"), dict):
-        # Full projected payload nests declaration; accept either shape.
-        nested = (
-            raw["run_budget"].get("declaration")
-            if isinstance(raw["run_budget"].get("declaration"), dict)
-            else raw["run_budget"]
-        )
-        declaration = run_budget.parse_declaration(nested if isinstance(nested, dict) else None)
+    if "run_budget" in raw:
+        declaration = run_budget.declaration_from_persisted_artifact(raw["run_budget"])
     else:
-        contract = verification_contract.extract_contract_payload(raw)
-        budget = contract.get("budget") if isinstance(contract, dict) else None
-        if not isinstance(budget, dict):
+        has_budget, budget = _initial_verification_budget(raw)
+        if not has_budget:
             # Also accept a sibling plan.json contract when present.
             plan_path = output_dir / "plan.json"
             try:
@@ -2711,13 +2741,8 @@ def _build_budget_coordinator(
             except (OSError, json.JSONDecodeError):
                 plan_raw = None
             if isinstance(plan_raw, dict):
-                contract = verification_contract.extract_contract_payload(plan_raw)
-                budget = contract.get("budget") if isinstance(contract, dict) else None
-        declaration = (
-            run_budget.declaration_from_verification_budget(budget)
-            if isinstance(budget, dict)
-            else run_budget.RunBudgetDeclaration()
-        )
+                has_budget, budget = _initial_verification_budget(plan_raw)
+        declaration = run_budget.declaration_from_verification_budget(budget)
 
     coordinator = run_budget.BudgetCoordinator(
         declaration=declaration,

@@ -298,6 +298,25 @@ def test_unknown_dimension_and_schema_version_fail_closed():
         )
 
 
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_schema_version_requires_a_real_integer(schema_version):
+    with pytest.raises(run_budget.BudgetCompatibilityError):
+        run_budget.parse_declaration(
+            {
+                "schema": run_budget.RUN_BUDGET_SCHEMA,
+                "schema_version": schema_version,
+                "ceilings": {},
+            }
+        )
+    with pytest.raises(run_budget.BudgetCompatibilityError):
+        run_budget.declaration_from_verification_budget(
+            {
+                "schema": run_budget.RUN_BUDGET_SCHEMA,
+                "schema_version": schema_version,
+            }
+        )
+
+
 def test_verification_budget_bridge_maps_latency_to_wall_clock_tokens_observed():
     declaration = run_budget.declaration_from_verification_budget(
         {

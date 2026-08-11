@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from brigade import runbook_cmd, verification_contract, verify_manifest
 
 
@@ -30,6 +32,13 @@ def test_contract_requires_verifier_rollback_and_budget():
     assert contract.rollback.policy == "none"
     assert contract.budget.latency_seconds == 30
     assert contract.budget.token_budget == 1000
+
+
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_contract_schema_version_requires_a_real_integer(schema_version):
+    assert verification_contract.validate_contract_payload(_valid_contract(schema_version=schema_version)) == [
+        "schema_version must be 1"
+    ]
 
 
 def test_contract_plan_view_blocks_consequential_without_contract():
