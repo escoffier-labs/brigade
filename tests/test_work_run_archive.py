@@ -681,3 +681,135 @@ def test_list_worker_event_streams_is_recursive_under_events(tmp_path: Path):
     assert worker_events.is_raw_worker_event_stream_rel("events/nested/deep/helper.jsonl")
     assert worker_events.is_scrubbed_worker_event_stream_rel("events/nested/deep/helper.scrubbed.json")
     assert not worker_events.is_raw_worker_event_stream_rel("events/lifecycle.jsonl")
+
+
+def _valid_lifecycle_line(*, run_id: str = RUN_ID) -> bytes:
+    from brigade import run_events
+
+    envelope = run_events.build_event(
+        run_id=run_id,
+        sequence=1,
+        event_type="run.created",
+        payload={"status": "started"},
+        idempotency_key="create-1",
+        recorded_at="2026-08-09T12:00:00.000000Z",
+        previous_digest=None,
+    )
+    return run_events.canonical_bytes(envelope) + b"\n"
+
+
+def _smuggle_lifecycle_worker_envelope(archive: Path) -> bytes:
+    smuggle = {
+        "jsonrpc": "2.0",
+        "method": "turn/started",
+        "params": {
+            "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
+            "prompt": "private lifecycle smuggle",
+            "cwd": "/home/example-user/project",
+        },
+    }
+    life = archive / "payload" / "events" / "lifecycle.jsonl"
+    life.parent.mkdir(parents=True, exist_ok=True)
+    raw = (json.dumps(smuggle, sort_keys=True) + "\n").encode("utf-8")
+    life.write_bytes(raw)
+    manifest = json.loads((archive / "work-run.json").read_text(encoding="utf-8"))
+    manifest["files"] = [entry for entry in manifest["files"] if entry["path"] != "events/lifecycle.jsonl"]
+    manifest["files"].append(
+        {
+            "path": "events/lifecycle.jsonl",
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "byte_size": len(raw),
+            "role": "journal",
+            "media_type": "application/x-ndjson",
+            "privacy_class": "public",
+            "nested_schema": "brigade.run_event.v1",
+            "nested_schema_version": 1,
+        }
+    )
+    manifest["files"].sort(key=lambda row: row["path"])
+    (archive / "work-run.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return raw
+
+
+def test_validate_archive_refuses_lifecycle_jsonl_worker_envelope_smuggling(tmp_path: Path):
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    raw = _smuggle_lifecycle_worker_envelope(archive)
+    assert b"Bearer sk-live-EXAMPLESECRETVALUE99" in raw
+    assert b"private lifecycle smuggle" in raw
+
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.validate_archive(archive)
+    assert excinfo.value.category == "export-privacy"
+    message = str(excinfo.value)
+    assert "lifecycle.jsonl" in message
+    assert "worker" in message.lower() or "json-rpc" in message.lower() or "notification" in message.lower()
+    assert len(message) <= worker_events.MAX_DIAGNOSTIC_LEN
+
+
+def test_import_archive_refuses_lifecycle_jsonl_worker_envelope_smuggling(tmp_path: Path):
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    _smuggle_lifecycle_worker_envelope(archive)
+
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported-runs")
+    assert excinfo.value.category == "export-privacy"
+    assert "lifecycle.jsonl" in str(excinfo.value)
+    assert not (tmp_path / "imported-runs" / RUN_ID).exists()
+
+
+def test_validate_and_import_accept_authentic_lifecycle_journal(tmp_path: Path):
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
+    life = run_dir / "events" / "lifecycle.jsonl"
+    life.parent.mkdir(parents=True, exist_ok=True)
+    life.write_bytes(_valid_lifecycle_line())
+
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    entry = next(
+        item
+        for item in json.loads((archive / "work-run.json").read_text(encoding="utf-8"))["files"]
+        if item["path"] == "events/lifecycle.jsonl"
+    )
+    assert entry["role"] == "journal"
+    assert entry["privacy_class"] == "public"
+    assert entry["nested_schema"] == "brigade.run_event.v1"
+
+    manifest = work_run_archive.validate_archive(archive)
+    assert any(item["path"] == "events/lifecycle.jsonl" for item in manifest["files"])
+
+    imported = work_run_archive.import_archive(archive, runs_dir=tmp_path / "imported-runs")
+    imported_life = Path(imported["run_dir"]) / "events" / "lifecycle.jsonl"
+    assert imported_life.is_file()
+    assert b'"schema":"brigade.run_event.v1"' in imported_life.read_bytes()
+    assert b"Bearer " not in imported_life.read_bytes()
+
+
+def test_export_refuses_source_lifecycle_worker_envelope(tmp_path: Path):
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
+    life = run_dir / "events" / "lifecycle.jsonl"
+    life.parent.mkdir(parents=True, exist_ok=True)
+    life.write_text(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "item/completed",
+                "params": {
+                    "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
+                    "prompt": "source lifecycle smuggle",
+                },
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(WorkRunArchiveError) as excinfo:
+        work_run_archive.export_run(run_dir, tmp_path / "archive")
+    assert excinfo.value.category == "export-privacy"
+    assert "lifecycle.jsonl" in str(excinfo.value)
+    assert not (tmp_path / "archive").exists()
+    assert life.is_file()

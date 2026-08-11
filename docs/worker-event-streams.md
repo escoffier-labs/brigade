@@ -62,8 +62,10 @@ export staging tree only:
 
 If any method, field, or item is unknown or unsafely classified, export refuses
 with a bounded `export-privacy` diagnostic and leaves the source run unchanged.
-`validate-archive` / import also refuse nested raw worker streams and
-misclassified scrubbed sidecars. Local raw streams remain available under
+`validate-archive` / import also refuse nested raw worker streams,
+misclassified scrubbed sidecars, and reserved `events/lifecycle.jsonl` files
+that carry raw JSON-RPC worker envelopes instead of authenticated
+`brigade.run_event.v1` journal records. Local raw streams remain available under
 `policy=local-only` for resume/salvage; that policy is never implied by export.
 
 ## Raw capture vs scrub matrix
