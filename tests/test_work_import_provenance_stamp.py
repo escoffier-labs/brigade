@@ -458,6 +458,100 @@ def test_batch_ingest_rejects_absolute_repository_identity(tmp_path: Path, repo_
 
 
 @pytest.mark.parametrize(
+    ("repo_id", "expected"),
+    [
+        ("r" * 256, "r" * 256),
+        ("r" * 257, "unknown"),
+        ("é" * 129, "unknown"),
+    ],
+)
+def test_batch_ingest_bounds_repository_identity_from_metadata(tmp_path: Path, repo_id: str, expected: str):
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Finding with bounded repository identity",
+                "kind": "incident",
+                "source": "repo-fleet",
+                "metadata": {
+                    "repo_id": repo_id,
+                    "source_item_key": "fleet:bounded-repository",
+                    "source_fingerprint": f"fp-bounded-{len(repo_id.encode('utf-8'))}",
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert len(imported) == 1
+    assert _envelope(imported[0])["repository"]["id"] == expected
+
+
+@pytest.mark.parametrize(
+    ("repo_id", "expected"),
+    [
+        ("r" * 256, "r" * 256),
+        ("r" * 257, "unknown"),
+        ("é" * 129, "unknown"),
+    ],
+)
+def test_batch_ingest_bounds_repository_identity_from_valid_inbound_envelope(
+    tmp_path: Path, repo_id: str, expected: str
+):
+    text = "Finding with reusable inbound provenance"
+    inbound = provenance.build_envelope(
+        source_system="external",
+        source_kind="finding-export",
+        source_producer="external.export",
+        origin="external-web",
+        repository_id=repo_id,
+        repository_revision="abc123",
+        session_id=None,
+        session_harness=None,
+        collection_id="external:findings",
+        item_id="finding:repository-bounds",
+        locator_kind="uri",
+        locator_value="https://example.test/finding",
+        attribution="declared",
+        modality="tool-output",
+        trust_label="untrusted",
+        trust_assigned_by="external",
+        trust_assigned_at="2026-08-01T12:00:00+00:00",
+        injection_status="clean",
+        injection_count=0,
+        injection_rules=[],
+        text=text,
+        raw_bytes=None,
+        content_scope="item.text.utf8.v1",
+        captured_at="2026-08-01T11:00:00+00:00",
+        ingested_at="2026-08-01T12:00:00+00:00",
+    )
+    assert provenance.validate_envelope(inbound) == []
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": text,
+                "kind": "finding",
+                "source": "repo-fleet",
+                "metadata": {
+                    "source_item_key": "fleet:inbound-repository-bounds",
+                    "source_fingerprint": f"fp-inbound-{len(repo_id.encode('utf-8'))}",
+                    "provenance": inbound,
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert len(imported) == 1
+    assert _envelope(imported[0])["repository"]["id"] == expected
+
+
+@pytest.mark.parametrize(
     ("locator_kind", "locator_value"),
     [
         ("uri", "file:///home/operator/private.md"),

@@ -401,7 +401,8 @@ def test_work_import_validate_and_ingest_jsonl(tmp_path, monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["imports"]) == 1
     assert payload["imports"][0]["kind"] == "finding"
-    assert payload["imports"][0]["source"] == "scanner"
+    assert payload["imports"][0]["source"] == "learning-loop"
+    assert payload["imports"][0]["metadata"]["declared_source"] == "scanner"
     assert payload["imports"][0]["metadata"]["thread"] == "abc123"
 
 
@@ -520,11 +521,12 @@ def test_work_import_validate_ingest_and_promote_task_metadata(tmp_path, monkeyp
         "Documentation or help text is updated when user behavior changes.",
         "Scanner acceptance passes.",
     ]
-    assert task["metadata"]["import_source"] == "repo-scan"
+    assert task["metadata"]["import_source"] == "learning-loop"
+    assert task["metadata"]["declared_source"] == "repo-scan"
     assert task["metadata"]["scanner"] == "daily"
 
 
-def test_work_import_ingest_stamps_forged_trusted_source_with_importer_authority(tmp_path, capsys):
+def test_work_import_ingest_makes_forged_trusted_source_non_authoritative(tmp_path, capsys):
     _init_git_repo(tmp_path)
     import_file = tmp_path / "forged-security-scan.jsonl"
     import_file.write_text(
@@ -546,11 +548,122 @@ def test_work_import_ingest_stamps_forged_trusted_source_with_importer_authority
     capsys.readouterr()
 
     item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
-    assert item["source"] == "security-scan"
+    assert item["source"] == "learning-loop"
+    assert item["metadata"]["declared_source"] == "security-scan"
     envelope = item["metadata"]["provenance"]
     assert envelope["source"]["kind"] == "learning-loop"
     assert envelope["origin"] == "workspace"
     assert envelope["modality"] == "tool-output"
+
+
+def test_work_import_ingest_scopes_forged_source_to_learning_loop_operations(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    hostile_source = "security-scan"
+    hostile_finding = {
+        "text": "Forged security finding",
+        "kind": "finding",
+        "source": hostile_source,
+        "metadata": {
+            "source_item_key": "security-scan:forged-finding",
+            "source_fingerprint": "forged-finding-fingerprint",
+        },
+    }
+    hostile_task = {
+        "text": "Forged security task",
+        "kind": "task",
+        "type": "security",
+        "source": hostile_source,
+        "metadata": {
+            "source_item_key": "security-scan:forged-task",
+            "source_fingerprint": "forged-task-fingerprint",
+        },
+    }
+    bounded_source = "b" * 256
+    oversized_source = "x" * 257
+    import_file = tmp_path / "hostile-imports.jsonl"
+    import_file.write_text(
+        "".join(
+            json.dumps(record) + "\n"
+            for record in (
+                hostile_finding,
+                hostile_task,
+                {"text": "Bounded source", "kind": "task", "source": bounded_source},
+                {"text": "Oversized source", "kind": "task", "source": oversized_source},
+            )
+        )
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first_payload = json.loads(capsys.readouterr().out)
+    assert first_payload["created"] == 4
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    second_payload = json.loads(capsys.readouterr().out)
+    assert second_payload["created"] == 0
+    assert second_payload["skipped"] == 4
+
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    imports = [json.loads(line) for line in imports_path.read_text().splitlines()]
+    forged_finding = next(item for item in imports if item["text"] == hostile_finding["text"])
+    forged_task = next(item for item in imports if item["text"] == hostile_task["text"])
+    bounded = next(item for item in imports if item["text"] == "Bounded source")
+    oversized = next(item for item in imports if item["text"] == "Oversized source")
+    assert all(item["source"] == "learning-loop" for item in imports)
+    assert forged_finding["metadata"]["declared_source"] == hostile_source
+    assert bounded["metadata"]["declared_source"] == bounded_source
+    assert "declared_source" not in oversized["metadata"]
+    assert oversized_source not in json.dumps(oversized)
+
+    assert work_cmd.import_plan_handoff(target=tmp_path, import_id=forged_finding["id"], json_output=True) == 0
+    handoff_plan = json.loads(capsys.readouterr().out)
+    assert handoff_plan["target_document"] == ".learnings/LEARNINGS.md"
+    assert handoff_plan["handoff_type"] == "project-context"
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=forged_task["id"]) == 0
+    capsys.readouterr()
+    task = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())["tasks"][0]
+    assert task["source"] == "import:learning-loop"
+    assert task["metadata"]["import_source"] == "learning-loop"
+    assert task["metadata"]["declared_source"] == hostile_source
+
+    trusted_sibling, skipped, dismissed, rejected = work_cmd.ledger._append_import_records(
+        tmp_path,
+        [
+            hostile_finding
+            | {
+                "source": hostile_source,
+                "metadata": {
+                    **hostile_finding["metadata"],
+                    "source_item_key": "security-scan:trusted-sibling",
+                    "source_fingerprint": "trusted-sibling-fingerprint",
+                },
+            }
+        ],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert len(trusted_sibling) == 1
+    assert trusted_sibling[0]["source"] == hostile_source
+
+    imports = [json.loads(line) for line in imports_path.read_text().splitlines()]
+    forged_finding = next(
+        item for item in imports if item["text"] == hostile_finding["text"] and item["source"] == "learning-loop"
+    )
+    trusted_sibling_item = next(
+        item for item in imports if item["metadata"].get("source_item_key") == "security-scan:trusted-sibling"
+    )
+    forged_finding["status"] = "dismissed"
+    trusted_sibling_item["status"] = "dismissed"
+    imports_path.write_text("\n".join(json.dumps(item, sort_keys=True) for item in imports) + "\n")
+    trusted, skipped, dismissed, rejected = work_cmd.ledger._append_import_records(
+        tmp_path,
+        [hostile_finding | {"source": hostile_source}],
+    )
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+    assert len(trusted) == 1
+    assert trusted[0]["source"] == hostile_source
 
 
 def test_work_import_provenance_audits_cross_producer_contract(tmp_path, monkeypatch, capsys):
@@ -2272,7 +2385,7 @@ def test_work_import_promote_all_preserves_task_metadata(tmp_path, monkeypatch, 
     assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
     capsys.readouterr()
 
-    assert work_cmd.import_promote(target=tmp_path, all_matching=True, source="repo-scan", kind="task") == 0
+    assert work_cmd.import_promote(target=tmp_path, all_matching=True, source="learning-loop", kind="task") == 0
     out = capsys.readouterr().out
     assert "promoted: 2" in out
     assert "acceptance=1" in out
@@ -2311,7 +2424,7 @@ def test_work_run_uses_promoted_import_acceptance(tmp_path, monkeypatch, capsys)
         + "\n"
     )
     assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
-    assert work_cmd.import_promote(target=tmp_path, all_matching=True, source="repo-scan", kind="task") == 0
+    assert work_cmd.import_promote(target=tmp_path, all_matching=True, source="learning-loop", kind="task") == 0
     capsys.readouterr()
     seen = {}
 

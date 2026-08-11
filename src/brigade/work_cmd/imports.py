@@ -328,11 +328,22 @@ def import_ingest(
                 print(f"- {error}", file=sys.stderr)
         return 2
 
+    importer_source = "learning-loop"
+    imported_records: list[dict[str, Any]] = []
+    for record in records:
+        metadata = record.get("metadata")
+        stamped_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        declared_source = ledger_mod._bound_import_identity(record.get("source"))
+        stamped_metadata.pop("declared_source", None)
+        if declared_source is not None:
+            stamped_metadata["declared_source"] = declared_source
+        imported_records.append({**record, "source": importer_source, "metadata": stamped_metadata})
+
     imported, skipped, skipped_dismissed, rejected = ledger_mod._append_import_records(
         target,
-        records,
+        imported_records,
         dry_run=dry_run,
-        provenance_source="learning-loop",
+        provenance_source=importer_source,
         contain_provenance_errors=True,
     )
     rejection_reasons = {"provenance_stamp_failed": len(rejected)} if rejected else {}

@@ -1179,10 +1179,8 @@ def _repository_id_is_unsafe(value: str) -> bool:
 
 
 def _safe_repository_id(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip()
-    if not cleaned or _repository_id_is_unsafe(cleaned):
+    cleaned = _bound_import_identity(value)
+    if cleaned is None or _repository_id_is_unsafe(cleaned):
         return None
     return cleaned
 
