@@ -1,6 +1,7 @@
 # Worker event streams: field classification and scrubbed projections
 
-Status: implemented for issue #592 (first slice).
+Status: implemented for issue #592 (classification/scrubbing + export/archive
+boundary).
 
 ## Boundary
 
@@ -38,8 +39,30 @@ Legacy on-disk NDJSON remains locally inspectable and is marked
 
 Library entry points live in `brigade.worker_events` (`scrub_event`,
 `scrub_stream_file`, `inspect_stream_file`, `load_stream_for_consumer`,
-`require_consumer_policy`). `brigade.run_audit.reject_raw_worker_stream_evidence`
-is the audit/replay gate.
+`require_consumer_policy`, `project_worker_streams_for_export`,
+`assert_export_tree_has_no_raw_worker_streams`).
+`brigade.run_audit.reject_raw_worker_stream_evidence` is the audit/replay gate.
+`brigade.work_run_archive.export_run` is the portable archive gate.
+
+## Export / archive boundary
+
+`brigade runs export` never copies raw `events/<worker>.jsonl` into a
+`brigade.work-run` archive as public support data. On the export staging tree
+only:
+
+1. each raw worker stream is scrubbed with the fail-closed scrubber
+2. a distinct sidecar `events/<worker>.scrubbed.json` is written
+3. the raw NDJSON is removed from the export copy
+4. the manifest classifies the sidecar as
+   `role=artifact`, `privacy_class=redacted`,
+   `media_type=<scrubbed media type>`,
+   `nested_schema=brigade.worker_event_stream_scrubbed.v1`
+
+If any method, field, or item is unknown or unsafely classified, export refuses
+with a bounded `export-privacy` diagnostic and leaves the source run unchanged.
+`validate-archive` / import also refuse raw worker streams and misclassified
+scrubbed sidecars. Local raw streams remain available under
+`policy=local-only` for resume/salvage; that policy is never implied by export.
 
 ## Raw capture vs scrub matrix
 
@@ -80,52 +103,19 @@ scrub/export matrix for known Codex app-server notification shapes.
 | `item/completed` | same as started, plus `completedAtMs` | same as started |
 | `item/commandExecution/requestApproval#auto-declined` | `threadId`, `turnId`, `itemId`, `availableDecisions` | `command`, `cwd`, `reason`, headers, cookies, env, credentials, prompts, grant roots |
 
-Only the classified approval auto-decline method above is accepted by the
-scrubber. Other `*#auto-declined` bases fail closed. Unknown methods or fields
-likewise fail scrubbing with a bounded diagnostic and stay rejected from
-scrub/export.
+Only the recorded approval auto-decline method above is accepted. Other
+`*#auto-declined` bases fail closed.
 
-### Turn fields
-
-| Field | Class |
-| --- | --- |
-| `id` | public_metadata |
-| `status` | public_metadata |
-| `items` | public_metadata (each element via item-type matrix) |
-| `error` | prohibited |
+Delta methods (`item/*/delta`, …) are never recorded by Brigade and are
+intentionally absent. Unknown methods or fields fail scrubbing with a bounded
+diagnostic.
 
 ### Item types
 
 Every supported item type keeps `id` and `type` as public metadata. Content
-fields are private or prohibited. Closed per-type key set:
-
-| Item type | Public fields | Stripped fields |
-| --- | --- | --- |
-| `userMessage` | `id`, `type`, `clientId` | `content` |
-| `agentMessage` | `id`, `type`, `phase` | `text` |
-| `plan` | `id`, `type` | `text` |
-| `reasoning` | `id`, `type` | `summary`, `content` |
-| `commandExecution` | `id`, `type`, `status`, `exitCode`, `durationMs` | `command`, `cwd`, `commandActions`, `aggregatedOutput` |
-| `fileChange` | `id`, `type`, `status` | `changes` |
-| `mcpToolCall` | `id`, `type`, `server`, `tool`, `status`, `pluginId` | `arguments`, `appContext`, `result`, `error`, `mcpAppResourceUri` |
-| `dynamicToolCall` | `id`, `type`, `tool`, `status`, `success`, `durationMs` | `arguments`, `contentItems` |
-| `collabToolCall` | `id`, `type`, `tool`, `status`, `senderThreadId`, `receiverThreadId`, `newThreadId`, `agentStatus` | `prompt` |
-| `webSearch` | `id`, `type` | `query`, `action` |
-| `imageView` | `id`, `type` | `path` |
-| `enteredReviewMode` | `id`, `type` | `review` |
-| `exitedReviewMode` | `id`, `type` | `review` |
-| `contextCompaction` | `id`, `type` | _(none)_ |
-
-### Global secret keys
-
-These keys are secret wherever they appear under `params` (including nested
-objects that would otherwise be public): `authorization`, `Authorization`,
-`cookie`, `Cookie`, `cookies`, `set-cookie`, `Set-Cookie`, `credentials`,
-`apiKey`, `api_key`, `token`, `accessToken`, `refreshToken`, `password`,
-`secret`, `env`, `environment`, `headers`.
-
-Absolute home paths travel in `cwd` / `path` / `grantRoot` and are classified
-`private_content`. Provider error bodies are `prohibited`.
+fields (`text`, `content`, `command`, `cwd`, `changes`, `arguments`, `result`,
+`query`, `path`, `review`, `prompt`, …) are private or prohibited. See
+`classification_matrix()["item_types"]` for the closed per-type key set.
 
 ## Schemas
 
@@ -135,23 +125,23 @@ Absolute home paths travel in `cwd` / `path` / `grantRoot` and are classified
 Golden adversarial fixtures:
 `src/brigade/fixtures/worker-events-appserver.v1.golden.json`.
 
-## Acceptance mapping (#592 first slice)
+## Acceptance mapping (#592)
 
 | Criterion | Enforcement |
 | --- | --- |
 | Documented scrub matrix covers known Codex app-server methods/item types | this document + `classification_matrix()` |
 | Raw capture is open-ended for non-delta methods; matrix is not a recorder allowlist | docs + recorder-to-matrix contract test |
 | Unknown types/fields fail closed with bounded diagnostics | `WorkerEventError` / `MAX_DIAGNOSTIC_LEN` |
-| Credentials, headers, cookies, env, prompts, private content, home paths, provider error bodies absent | scrub omit + `scrubbed_projection_omits_sensitive_material` + adversarial goldens |
-| Order, stable IDs, safe operation names, schema versions, source digests preserved | scrubbed stream document + golden stream case |
-| Distinct raw/scrubbed media types and artifact classes | `media_types()` / `artifact_classes()` |
+| Credentials, headers, cookies, env, prompts, private content, home paths, provider error bodies absent | scrub omit + `scrubbed_projection_omits_sensitive_material` + adversarial goldens + archive export regressions |
+| Order, stable IDs, safe operation names, schema versions, source digests preserved | scrubbed stream document + golden stream case + export sidecar |
+| Distinct raw/scrubbed media types and artifact classes | `media_types()` / `artifact_classes()` + archive manifest classification |
 | Audit/replay reject raw unless `local-only` | `load_stream_for_consumer`, `run_audit.reject_raw_worker_stream_evidence` |
+| Export never ships raw streams as public support | `project_worker_streams_for_export`, `_classify_path`, `validate_archive` |
 | Adversarial goldens for the supported transport | fixture cases for every matrix item type |
-| Legacy streams inspectable and unclassified until scrubbed | `inspect_stream_file` |
+| Legacy streams inspectable and unclassified until scrubbed | `inspect_stream_file` (source run unchanged by export) |
 
-## Non-goals (first slice)
+## Non-goals
 
-- Legacy backfill of historical streams
-- Export/archive wiring for scrubbed sidecars
+- Legacy backfill of historical streams into scrubbed sidecars on disk
 - Treating redaction as a substitute for access control
 - Replacing the ProvenanceEnvelope trust contract (#498)
