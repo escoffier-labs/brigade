@@ -32,12 +32,9 @@ htmlcov/
 Thumbs.db
 
 # claude / agent local state (side-harness only; brigade block below
-# handles the handoff path with TEMPLATE.md kept tracked)
+# handles claude/codex/hermes handoff paths with TEMPLATE.md kept tracked)
 .brigade/
-.claude/
-.codex/
 .opencode/
-.hermes/
 .openclaw/
 .mcp/
 .solo-mise/
@@ -86,16 +83,25 @@ Thumbs.db
 # Re-running `brigade init` replaces only the content between markers.
 
 # claude: handoffs are session-local and may contain private context.
+!.claude/
+.claude/*
+!.claude/memory-handoffs/
 .claude/memory-handoffs/*
 !.claude/memory-handoffs/TEMPLATE.md
 !.claude/memory-handoffs/.gitkeep
 
 # codex: handoffs are session-local and may contain private context.
+!.codex/
+.codex/*
+!.codex/memory-handoffs/
 .codex/memory-handoffs/*
 !.codex/memory-handoffs/TEMPLATE.md
 !.codex/memory-handoffs/.gitkeep
 
 # hermes: handoffs are session-local and may contain private context.
+!.hermes/
+.hermes/*
+!.hermes/memory-handoffs/
 .hermes/memory-handoffs/*
 !.hermes/memory-handoffs/TEMPLATE.md
 !.hermes/memory-handoffs/.gitkeep

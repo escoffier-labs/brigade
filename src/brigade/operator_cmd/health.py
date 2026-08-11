@@ -260,7 +260,7 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
         ],
         "tracked_vs_generated": [
             "Track reviewed cross-harness source docs under tools/.",
-            "Generated harness projections and handoff inboxes under .claude/, .codex/, .opencode/, .antigravity/, .pi/, .cursor/, .aider/, .goose/, .continue/, .copilot/, .qwen/, .kimi/, .adal/, .openhands/, .grok/, .amp/, .crush/, .hermes/, .openclaw/, .mcp/, and scripts/ are local ignored state.",
+            "Generated harness projections and session handoff files under .claude/, .codex/, .opencode/, .antigravity/, .pi/, .cursor/, .aider/, .goose/, .continue/, .copilot/, .qwen/, .kimi/, .adal/, .openhands/, .grok/, .amp/, .crush/, .hermes/, .openclaw/, .mcp/, and scripts/ stay local; each selected writer inbox's managed TEMPLATE.md is deliberately un-ignored so the handoff format travels with the repo.",
             "Run brigade operator sync-tools --target . after changing tracked tool sources.",
         ],
     }

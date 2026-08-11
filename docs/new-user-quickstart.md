@@ -105,19 +105,22 @@ If the target is a git repo, commit repo-shareable source files only. Keep gener
 
 If the target is an operator workspace outside a git repo, treat the same split as a portability rule: durable memory and reviewed rules may be worth backing up or syncing, while `.brigade/` and harness projections are host-local state.
 
-Usually safe to commit:
+Usually safe to commit after review:
 
 - `AGENTS.md`
 - `MEMORY.md` and reviewed memory cards if this repo owns memory
 - `rules/`
 - `tools/`
 - public docs
+- the managed handoff template for each selected writer harness — for Claude Code, `.claude/memory-handoffs/TEMPLATE.md` (required for Claude onboarding; `verify-harness` fails readiness when a global exclude hides it); for other writers, the matching `<inbox>/TEMPLATE.md`
+
+Handoff inboxes stay local except each inbox's managed `TEMPLATE.md`, which Brigade deliberately un-ignores so the handoff format travels with the repository. Session handoff files in those folders stay ignored. A `?? .claude/` or `?? .codex/` in `git status` is usually just that template file.
 
 Usually local-only:
 
 - `.brigade/`
-- `.codex/`
-- `.claude/`
+- `.codex/` (except `.codex/memory-handoffs/TEMPLATE.md` when Codex is selected)
+- `.claude/` (except `.claude/memory-handoffs/TEMPLATE.md` when Claude Code is selected)
 - `.opencode/`
 - `.antigravity/`
 - `.pi/`
@@ -151,11 +154,33 @@ brigade security scan --target ./my-repo --fail-on none --json
 
 If Claude verification reports `ready: no` with `handoff_template_shadowed`, a
 global `core.excludesFile` rule such as `.claude/` is hiding the managed
-handoff template. Brigade does not edit global Git configuration. Diagnose with
-the exact recovery command from verify-harness or quickstart `next_commands`:
+handoff template. Brigade does not edit global Git configuration.
+
+**Fresh install:** `brigade init` (or `brigade operator quickstart`) writes the
+managed gitignore block with parent-directory un-ignore rules so
+`.claude/memory-handoffs/TEMPLATE.md` can be tracked while session handoffs stay
+local.
+
+**Upgrade / idempotent rerun:** Re-run `brigade init --target <path> --harnesses claude` with the
+same harness selection. Brigade replaces only the managed brigade gitignore block
+on every init; it does not overwrite existing `AGENTS.md`, `CLAUDE.md`, or other
+installed manifest files unless you pass `--force`. User rules outside the
+brigade markers are preserved.
+
+**Manual recovery** when a parent `.claude/` rule lives outside the managed block
+(or in a global excludes file Brigade cannot edit): diagnose with the exact
+recovery command from verify-harness or quickstart `next_commands`:
+
+Linux, macOS, or Git Bash:
 
 ```bash
 git check-ignore -v .claude/memory-handoffs/TEMPLATE.md
+```
+
+Windows PowerShell (native paths; WSL optional):
+
+```powershell
+git check-ignore -v .\.claude\memory-handoffs\TEMPLATE.md
 ```
 
 Then add narrow repo-local un-ignore rules to the target `.gitignore` (keep them
@@ -169,11 +194,19 @@ outside the managed Brigade block so re-init does not drop them):
 !.claude/memory-handoffs/TEMPLATE.md
 ```
 
-Re-run `git check-ignore -v .claude/memory-handoffs/TEMPLATE.md` until it no
-longer reports the template as ignored, then:
+Re-run the `git check-ignore` command above until it no longer reports the
+template as ignored by a parent `.claude/` rule, then:
+
+Linux, macOS, or Git Bash:
 
 ```bash
 brigade operator verify-harness --target ./my-repo --harness claude
+```
+
+Windows PowerShell:
+
+```powershell
+brigade operator verify-harness --target .\my-repo --harness claude
 ```
 
 Codex-only onboarding keeps its warning-only contract: a shadowed Codex

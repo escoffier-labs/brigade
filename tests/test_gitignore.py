@@ -220,6 +220,9 @@ def test_gitignore_block_includes_claude_section_when_selected():
 
     sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     block = build_gitignore_block(sel)
+    assert "!.claude/" in block
+    assert ".claude/*" in block
+    assert "!.claude/memory-handoffs/" in block
     assert ".claude/memory-handoffs/*" in block
     assert "!.claude/memory-handoffs/TEMPLATE.md" in block
     assert ".brigade/dogfood.toml" in block
@@ -238,6 +241,9 @@ def test_gitignore_block_includes_codex_section_when_selected():
 
     sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
     block = build_gitignore_block(sel)
+    assert "!.codex/" in block
+    assert ".codex/*" in block
+    assert "!.codex/memory-handoffs/" in block
     assert ".claude/memory-handoffs/*" in block
     assert ".codex/memory-handoffs/*" in block
     assert "!.codex/memory-handoffs/TEMPLATE.md" in block
@@ -248,6 +254,9 @@ def test_gitignore_block_includes_hermes_section_when_selected():
 
     sel = Selection(depth="repo", harnesses=["hermes"], owner="hermes", includes=[])
     block = build_gitignore_block(sel)
+    assert "!.hermes/" in block
+    assert ".hermes/*" in block
+    assert "!.hermes/memory-handoffs/" in block
     assert ".hermes/memory-handoffs/*" in block
     assert "!.hermes/memory-handoffs/TEMPLATE.md" in block
     assert "!.hermes/memory-handoffs/.gitkeep" in block
@@ -299,3 +308,114 @@ def test_install_writes_gitignore_block(tmp_path):
     assert ".brigade/dogfood.toml" in gi
     assert ".brigade/runs/" in gi
     assert ".brigade/work/" in gi
+
+
+def test_claude_handoff_template_stages_without_force_when_parent_claude_ignored(
+    tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert _git(repo, "init").returncode == 0
+
+    # Parent `.claude/` ignore (brigade source-repo side-harness class or global excludesFile).
+    (repo / ".gitignore").write_text(".claude/\n")
+
+    rc = install_selection(repo, _repo_selection())
+    assert rc == 0
+
+    template = repo / ".claude" / "memory-handoffs" / "TEMPLATE.md"
+    assert template.is_file()
+
+    check_template = _git(repo, "check-ignore", ".claude/memory-handoffs/TEMPLATE.md")
+    assert check_template.returncode == 1, check_template.stdout + check_template.stderr
+
+    session_note = repo / ".claude" / "memory-handoffs" / "2026-08-10-session.md"
+    session_note.write_text("# note\n")
+    settings = repo / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{}\n")
+
+    assert _git(repo, "check-ignore", ".claude/memory-handoffs/2026-08-10-session.md").returncode == 0
+    assert _git(repo, "check-ignore", ".claude/settings.json").returncode == 0
+
+    add = _git(repo, "add", ".claude/memory-handoffs/TEMPLATE.md")
+    assert add.returncode == 0, add.stderr
+
+    status = _git(repo, "status", "--porcelain", ".claude/memory-handoffs/TEMPLATE.md")
+    assert status.stdout.strip() == "A  .claude/memory-handoffs/TEMPLATE.md"
+
+
+def test_upgrade_legacy_inbox_only_block_to_parent_unignore_on_rerun(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert _git(repo, "init").returncode == 0
+
+    legacy_block = "\n".join(
+        [
+            install_mod.GITIGNORE_BEGIN,
+            "# claude: handoffs are session-local and may contain private context.",
+            ".claude/memory-handoffs/*",
+            "!.claude/memory-handoffs/TEMPLATE.md",
+            "!.claude/memory-handoffs/.gitkeep",
+            install_mod.GITIGNORE_END,
+            "",
+        ]
+    )
+    (repo / ".gitignore").write_text("# user rules\n*.log\n\n" + legacy_block)
+
+    rc = install_selection(repo, _repo_selection(), force=True)
+    assert rc == 0
+
+    gi = _read_gi(repo)
+    assert "# user rules" in gi
+    assert "!.claude/" in gi
+    assert ".claude/*" in gi
+    assert "!.claude/memory-handoffs/" in gi
+    assert gi.count(install_mod.GITIGNORE_BEGIN) == 1
+
+    template = repo / ".claude" / "memory-handoffs" / "TEMPLATE.md"
+    assert template.is_file()
+    add = _git(repo, "add", ".claude/memory-handoffs/TEMPLATE.md")
+    assert add.returncode == 0, add.stderr
+
+
+def test_idempotent_rerun_without_force_preserves_user_rules_and_refreshes_block(
+    tmp_target: Path,
+):
+    rc = install_selection(tmp_target, _repo_selection())
+    assert rc == 0
+    user_tail = "\n# after block\n.local-cache/\n"
+    (tmp_target / ".gitignore").write_text(_read_gi(tmp_target) + user_tail)
+
+    rc = install_selection(tmp_target, _repo_selection())
+    assert rc == 0
+    gi = _read_gi(tmp_target)
+    assert ".local-cache/" in gi
+    assert "!.claude/" in gi
+    assert gi.count(install_mod.GITIGNORE_BEGIN) == 1
+
+
+def test_non_force_rerun_upgrades_managed_block_without_overwriting_manifest_files(
+    tmp_target: Path,
+):
+    assert install_selection(tmp_target, _repo_selection()) == 0
+
+    agents = tmp_target / "AGENTS.md"
+    claude = tmp_target / "CLAUDE.md"
+    agents.write_text("# Custom AGENTS\n")
+    claude.write_text("# Custom CLAUDE\n")
+
+    gi = _read_gi(tmp_target).replace("!.claude/\n.claude/*\n!.claude/memory-handoffs/\n", "")
+    user_tail = "\n# after block\n.local-cache/\n"
+    (tmp_target / ".gitignore").write_text(gi + user_tail)
+
+    assert install_selection(tmp_target, _repo_selection()) == 0
+
+    assert agents.read_text() == "# Custom AGENTS\n"
+    assert claude.read_text() == "# Custom CLAUDE\n"
+    gi_final = _read_gi(tmp_target)
+    assert "!.claude/" in gi_final
+    assert ".claude/*" in gi_final
+    assert "!.claude/memory-handoffs/" in gi_final
+    assert ".local-cache/" in gi_final
+    assert gi_final.count(install_mod.GITIGNORE_BEGIN) == 1
