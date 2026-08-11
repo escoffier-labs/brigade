@@ -1666,6 +1666,88 @@ def _handoff_type(item: dict[str, Any], target_document: str) -> str:
     return "project-context"
 
 
+# Closed canonical provenance envelope shape for handoff privacy walks.
+# Only these keys (and nested closed sets) may bypass private-field detection.
+_PROVENANCE_ENVELOPE_KEYS = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "source",
+        "origin",
+        "repository",
+        "session",
+        "collection_id",
+        "item_id",
+        "locator",
+        "attribution",
+        "modality",
+        "trust",
+        "hashes",
+        "captured_at",
+        "ingested_at",
+    }
+)
+_PROVENANCE_SOURCE_KEYS = frozenset({"system", "kind", "producer"})
+_PROVENANCE_REPOSITORY_KEYS = frozenset({"id", "revision"})
+_PROVENANCE_SESSION_KEYS = frozenset({"id", "harness"})
+_PROVENANCE_LOCATOR_KEYS = frozenset({"kind", "value"})
+_PROVENANCE_TRUST_KEYS = frozenset({"label", "assigned_by", "assigned_at", "trust_policy", "injection"})
+_PROVENANCE_TRUST_POLICY_KEYS = frozenset({"schema", "schema_version"})
+_PROVENANCE_INJECTION_KEYS = frozenset({"status", "count", "rules"})
+_PROVENANCE_HASHES_KEYS = frozenset(
+    {"content_algorithm", "content_scope", "content", "raw_algorithm", "raw_scope", "raw"}
+)
+
+
+def _handoff_private_fields_in_validated_provenance(
+    envelope: dict[str, Any],
+    *,
+    path: tuple[str, ...],
+) -> list[str]:
+    """Walk a validated envelope; only closed canonical fields are exempt."""
+
+    def walk(node: object, *, allowed: frozenset[str] | None, node_path: tuple[str, ...]) -> list[str]:
+        found: list[str] = []
+        if isinstance(node, dict):
+            for key, item in node.items():
+                key_text = str(key)
+                child_path = (*node_path, key_text)
+                if allowed is not None and key_text not in allowed:
+                    # Non-canonical extras never inherit the envelope exemption.
+                    found.append(".".join(child_path))
+                    found.extend(_handoff_private_fields(item, path=child_path))
+                    continue
+                child_allowed: frozenset[str] | None
+                if key_text == "source":
+                    child_allowed = _PROVENANCE_SOURCE_KEYS
+                elif key_text == "repository":
+                    child_allowed = _PROVENANCE_REPOSITORY_KEYS
+                elif key_text == "session":
+                    child_allowed = _PROVENANCE_SESSION_KEYS
+                elif key_text == "locator":
+                    child_allowed = _PROVENANCE_LOCATOR_KEYS
+                elif key_text == "trust":
+                    child_allowed = _PROVENANCE_TRUST_KEYS
+                elif key_text == "trust_policy":
+                    child_allowed = _PROVENANCE_TRUST_POLICY_KEYS
+                elif key_text == "injection":
+                    child_allowed = _PROVENANCE_INJECTION_KEYS
+                elif key_text == "hashes":
+                    child_allowed = _PROVENANCE_HASHES_KEYS
+                else:
+                    child_allowed = None
+                if isinstance(item, (dict, list)) and child_allowed is not None:
+                    found.extend(walk(item, allowed=child_allowed, node_path=child_path))
+                elif isinstance(item, (dict, list)) and allowed is None:
+                    found.extend(_handoff_private_fields(item, path=child_path))
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                found.extend(walk(item, allowed=None, node_path=(*node_path, str(index))))
+        return found
+
+    return walk(envelope, allowed=_PROVENANCE_ENVELOPE_KEYS, node_path=path)
+
+
 def _handoff_private_fields(value: object, *, path: tuple[str, ...] = ()) -> list[str]:
     found: list[str] = []
     if isinstance(value, dict):
@@ -1674,15 +1756,15 @@ def _handoff_private_fields(value: object, *, path: tuple[str, ...] = ()) -> lis
             normalized = key_text.strip().casefold()
             is_top_text = not path and normalized == "text"
             # Envelope schema fields include hashes.raw / raw_* digests (often null).
-            # Those are integrity metadata, not private chat bodies. Require a
-            # valid envelope before skipping recursion so schema-only spoofs
-            # with nested raw_text cannot bypass the handoff privacy gate.
+            # Only closed canonical fields of a validated envelope are exempt; extra
+            # keys such as raw_text/secret/path remain subject to detection.
             if (
                 normalized == "provenance"
                 and isinstance(item, dict)
                 and item.get("schema") == provenance.SCHEMA
                 and not provenance.validate_envelope(item)
             ):
+                found.extend(_handoff_private_fields_in_validated_provenance(item, path=(*path, key_text)))
                 continue
             if not is_top_text and (normalized in constants.RAW_CHAT_FIELDS or normalized.startswith("raw_")):
                 found.append(".".join((*path, key_text)))

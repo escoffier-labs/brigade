@@ -284,3 +284,29 @@ def test_spoofed_invalid_envelope_nested_raw_fields_are_flagged():
     private = ledger._handoff_private_fields(item)
     assert "metadata.provenance.nested.raw_messages" in private
     assert "metadata.provenance.nested.payload.raw_text" in private
+
+
+@pytest.mark.parametrize("extra_key", ["raw_text", "secret", "path"])
+def test_valid_envelope_with_extra_private_keys_is_not_fully_exempt(extra_key: str):
+    item = ledger._make_import(
+        "Durable preference",
+        kind="preference",
+        source="chat-memory-sweep",
+        metadata={"source_item_key": "chat:pref:extras", "source_fingerprint": "fp-extras"},
+    )
+    env = dict(_envelope(item))
+    assert provenance.validate_envelope(env) == []
+    assert env["hashes"]["raw"] is None
+
+    # Red: fully valid envelope plus an extra private-looking key currently
+    # accepted by validate_envelope must not skip private-field detection.
+    env[extra_key] = "PRIVATE CHAT TRANSCRIPT" if extra_key == "raw_text" else f"leaked-{extra_key}"
+    assert provenance.validate_envelope(env) == []
+    item["metadata"]["provenance"] = env
+
+    private = ledger._handoff_private_fields(item)
+    assert f"metadata.provenance.{extra_key}" in private
+    # Green: canonical hashes.raw=null remains legitimate and is not flagged.
+    assert "metadata.provenance.hashes.raw" not in private
+    assert "metadata.provenance.hashes.raw_algorithm" not in private
+    assert "metadata.provenance.hashes.raw_scope" not in private
