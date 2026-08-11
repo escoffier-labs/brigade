@@ -1,12 +1,15 @@
 """Worker event stream field classification and fail-closed scrubbed projections.
 
 Implements the privacy boundary for Codex app-server worker streams recorded
-under ``events/<worker>.jsonl`` (issue #592, first slice).
+under ``events/<worker>.jsonl`` (issue #592).
 
 Raw streams stay local. Scrubbed projections keep only public metadata, stable
 IDs, safe operation names, schema versions, and source digests. Unknown event
 types or fields fail closed with bounded diagnostics. Legacy raw streams remain
 inspectable locally but are marked unclassified until successfully scrubbed.
+Portable ``brigade.work-run`` export replaces raw streams with scrubbed
+sidecars (or refuses the export) rather than classifying raw NDJSON as public
+support data.
 
 Standard library only. Brigade is zero-runtime-dependency.
 """
@@ -15,9 +18,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator, Mapping
 
 TRANSPORT = "codex-app-server"
@@ -993,16 +997,167 @@ def _file_is_scrubbed_document(path: Path) -> bool:
 
 
 def list_worker_event_streams(events_dir: Path) -> list[Path]:
-    """Return worker event JSONL paths under an events directory (excludes lifecycle)."""
+    """Return worker event JSONL paths under an events directory (excludes lifecycle).
+
+    Discovery is recursive: any ``*.jsonl`` beneath ``events/`` is a worker-stream
+    candidate except the top-level lifecycle journal ``events/lifecycle.jsonl``.
+    Nested paths such as ``events/nested/coder.jsonl`` must not fall through to
+    public support classification on export.
+    """
     events_dir = Path(events_dir)
     if not events_dir.is_dir():
         return []
     out: list[Path] = []
-    for path in sorted(events_dir.glob("*.jsonl")):
-        if path.name == "lifecycle.jsonl":
+    for path in sorted(events_dir.rglob("*.jsonl")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            rel = path.relative_to(events_dir).as_posix()
+        except ValueError:
+            continue
+        if rel == "lifecycle.jsonl":
             continue
         out.append(path)
     return out
+
+
+def _events_relative_posix(rel: str) -> PurePosixPath | None:
+    pure = PurePosixPath(rel)
+    if not pure.parts or pure.parts[0] != "events":
+        return None
+    if pure.is_absolute() or ".." in pure.parts or "\\" in rel:
+        return None
+    return pure
+
+
+def is_raw_worker_event_stream_rel(rel: str) -> bool:
+    """True for ``events/**/*.jsonl`` excluding the lifecycle journal."""
+    pure = _events_relative_posix(rel)
+    if pure is None:
+        return False
+    if rel == "events/lifecycle.jsonl":
+        return False
+    return pure.name.endswith(".jsonl")
+
+
+def is_scrubbed_worker_event_stream_rel(rel: str) -> bool:
+    """True for ``events/**/<worker>.scrubbed.json`` export/sidecar projections."""
+    pure = _events_relative_posix(rel)
+    if pure is None:
+        return False
+    return pure.name.endswith(".scrubbed.json")
+
+
+def scrubbed_sidecar_path_for_raw(raw_path: Path) -> Path:
+    """Map ``events/**/<worker>.jsonl`` to ``events/**/<worker>.scrubbed.json``."""
+    raw_path = Path(raw_path)
+    if raw_path.suffix != ".jsonl":
+        raise WorkerEventError(
+            _bound(f"raw worker stream path must end with .jsonl: {raw_path.name}"),
+            category="export-privacy",
+        )
+    return raw_path.with_name(f"{raw_path.stem}.scrubbed.json")
+
+
+def _worker_stream_label(run_dir: Path, path: Path) -> str:
+    """Return a bounded relative label for diagnostics (prefer events/...)."""
+    try:
+        return path.relative_to(run_dir).as_posix()
+    except ValueError:
+        try:
+            return path.relative_to(run_dir / "events").as_posix()
+        except ValueError:
+            return path.name
+
+
+def project_worker_streams_for_export(run_dir: Path) -> list[Path]:
+    """Replace raw worker streams with scrubbed projections on an export copy.
+
+    Call only on a staging/export tree. The local source run keeps raw NDJSON
+    unclassified for ``policy=local-only`` salvage. Unknown methods/fields or
+    unsafely classified content fail closed with a bounded diagnostic.
+    Nested worker-like JSONL under ``events/`` is included.
+    """
+    run_dir = Path(run_dir)
+    events_dir = run_dir / "events"
+    written: list[Path] = []
+    for raw_path in list_worker_event_streams(events_dir):
+        label = _worker_stream_label(run_dir, raw_path)
+        if raw_path.is_symlink() or not raw_path.is_file():
+            raise WorkerEventError(
+                _bound(f"raw worker stream is not a regular file: {label}"),
+                category="export-privacy",
+            )
+        try:
+            doc = scrub_stream_file(raw_path)
+        except WorkerEventError as exc:
+            raise WorkerEventError(
+                _bound(f"export refuses raw worker stream {label}: {exc.diagnostic}"),
+                category="export-privacy",
+            ) from exc
+        validation_errors = _scrubbed_stream_document_validation_errors(doc)
+        if validation_errors:
+            raise WorkerEventError(
+                _bound(f"export scrubbed projection invalid for {label}: {validation_errors[0]}"),
+                category="export-privacy",
+            )
+        for index, event in enumerate(doc.get("events") or []):
+            if not isinstance(event, Mapping):
+                raise WorkerEventError(
+                    _bound(f"export scrubbed event {index} is not an object"),
+                    category="export-privacy",
+                )
+            leaks = scrubbed_projection_omits_sensitive_material(event)
+            if leaks:
+                raise WorkerEventError(
+                    _bound(f"export scrubbed projection retains sensitive material: {leaks[0]}"),
+                    category="export-privacy",
+                )
+        sidecar = scrubbed_sidecar_path_for_raw(raw_path)
+        if sidecar.exists() and (sidecar.is_symlink() or not sidecar.is_file()):
+            raise WorkerEventError(
+                _bound(f"scrubbed sidecar path is not a replaceable file: {sidecar.name}"),
+                category="export-privacy",
+            )
+        sidecar.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(sidecar, 0o600)
+        raw_path.unlink()
+        written.append(sidecar)
+    assert_export_tree_has_no_raw_worker_streams(run_dir)
+    return written
+
+
+def assert_export_tree_has_no_raw_worker_streams(root: Path) -> None:
+    """Fail closed if a raw/unclassified worker stream remains under an export tree."""
+    root = Path(root)
+    events_dir = root / "events"
+    for path in list_worker_event_streams(events_dir):
+        label = _worker_stream_label(root, path)
+        raise WorkerEventError(
+            _bound(
+                f"raw worker stream crossed an export boundary: {label} "
+                f"(artifact_class={UNCLASSIFIED_ARTIFACT_CLASS}; policy={POLICY_LOCAL_ONLY} only)"
+            ),
+            category="export-privacy",
+        )
+    if not events_dir.is_dir():
+        return
+    for path in sorted(events_dir.rglob("*.scrubbed.json")):
+        label = _worker_stream_label(root, path)
+        if path.is_symlink() or not path.is_file():
+            raise WorkerEventError(
+                _bound(f"scrubbed worker stream is not a regular file: {label}"),
+                category="export-privacy",
+            )
+        info = inspect_stream_file(path)
+        if info.status != STATUS_SCRUBBED or info.artifact_class != SCRUBBED_ARTIFACT_CLASS:
+            detail = info.diagnostic or f"status={info.status}"
+            raise WorkerEventError(
+                _bound(f"export scrubbed sidecar is not admissible: {label}: {detail}"),
+                category="export-privacy",
+            )
+        # Portable consumers must accept the sidecar under scrubbed-only policy.
+        load_stream_for_consumer(path, consumer="export", policy=POLICY_SCRUBBED_ONLY)
 
 
 def assert_audit_rejects_raw_streams(
@@ -1134,19 +1289,24 @@ __all__ = [
     "WorkerEventError",
     "WorkerEventPolicyError",
     "assert_audit_rejects_raw_streams",
+    "assert_export_tree_has_no_raw_worker_streams",
     "artifact_classes",
     "canonical_event_bytes",
     "classification_matrix",
     "inspect_stream_file",
+    "is_raw_worker_event_stream_rel",
+    "is_scrubbed_worker_event_stream_rel",
     "list_worker_event_streams",
     "load_stream_for_consumer",
     "media_types",
+    "project_worker_streams_for_export",
     "require_consumer_policy",
     "scrub_event",
     "scrub_stream_file",
     "scrub_stream_lines",
     "scrub_stream_text",
     "scrubbed_projection_omits_sensitive_material",
+    "scrubbed_sidecar_path_for_raw",
     "source_digest_for_event",
     "source_digest_for_stream_bytes",
     "validate_scrubbed_event",

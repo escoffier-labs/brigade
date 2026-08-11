@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--force`. (#860)
 
 ### Added
+- `brigade runs export` / `validate-archive` enforce the #592 worker-event
+  privacy boundary: raw worker-like JSONL anywhere under `events/` (including
+  nested paths such as `events/nested/coder.jsonl`) stays local-only and is
+  never classified as public support data. Export writes distinct scrubbed
+  sidecars (`events/**/<worker>.scrubbed.json` with scrubbed media type,
+  `role=artifact`, `privacy_class=redacted`) via the existing fail-closed
+  scrubber, or refuses the export with a bounded diagnostic when any
+  method/field/item is unknown or unsafely classified. The reserved
+  `events/lifecycle.jsonl` journal exemption authenticates
+  `brigade.run_event.v1` records and rejects raw JSON-RPC worker envelopes.
+  Source runs remain unclassified until scrubbed; audit/replay still require
+  `policy=local-only` for raw salvage.
 - Issue #846 R2 residual work-store characterization: extend the R1 harness
   with observed same-actor/guard/empty-filter, restart, schema coercion,
   backup/restore, install/cold-start/backup timing, resource, metrics-state,

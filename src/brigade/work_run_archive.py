@@ -17,7 +17,7 @@ import stat
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from . import __version__, localio, receipt_schema, run_checkpoint
+from . import __version__, localio, receipt_schema, run_checkpoint, run_journal, worker_events
 
 WORK_RUN_ARCHIVE_SCHEMA = "brigade.work-run"
 WORK_RUN_ARCHIVE_SCHEMA_VERSION = 1
@@ -106,6 +106,101 @@ class WorkRunArchiveError(ValueError):
     def __init__(self, message: str, *, category: str = "schema") -> None:
         super().__init__(message)
         self.category = category
+
+
+def _bound_privacy(message: str) -> str:
+    text = str(message)
+    if len(text) <= worker_events.MAX_DIAGNOSTIC_LEN:
+        return text
+    return text[: worker_events.MAX_DIAGNOSTIC_LEN - 3] + "..."
+
+
+def _looks_like_worker_notification_envelope(obj: Mapping[str, Any]) -> bool:
+    """True for JSON-RPC worker envelopes that must not use the lifecycle journal path."""
+    if obj.get("schema") == receipt_schema.RUN_EVENT_SCHEMA:
+        return False
+    method = obj.get("method")
+    if not isinstance(method, str) or not method:
+        return False
+    return "jsonrpc" in obj or isinstance(obj.get("params"), Mapping)
+
+
+def assert_lifecycle_journal_authentic(payload_root: Path) -> None:
+    """Authenticate ``events/lifecycle.jsonl`` before treating it as a public journal.
+
+    The reserved top-level lifecycle filename is excluded from worker-stream
+    discovery. Without shape authentication, a digest-valid archive can smuggle
+    raw JSON-RPC worker notifications (with secrets/prompts) as ``role=journal``.
+    Missing journals are allowed. Present journals must parse as the allowed
+    ``brigade.run_event.v1`` chain (or be empty); worker envelopes fail closed.
+    """
+    path = payload_root / "events" / "lifecycle.jsonl"
+    if not path.exists():
+        return
+    if path.is_symlink() or not path.is_file():
+        raise WorkRunArchiveError(
+            "events/lifecycle.jsonl is not a regular file",
+            category="export-privacy",
+        )
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise WorkRunArchiveError(
+            _bound_privacy(f"events/lifecycle.jsonl is unreadable: {exc}"),
+            category="export-privacy",
+        ) from exc
+
+    for line_no, line in enumerate(raw_text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise WorkRunArchiveError(
+                _bound_privacy(f"events/lifecycle.jsonl line {line_no} is not valid JSON: {exc}"),
+                category="export-privacy",
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise WorkRunArchiveError(
+                _bound_privacy(f"events/lifecycle.jsonl line {line_no} must be a JSON object"),
+                category="export-privacy",
+            )
+        if _looks_like_worker_notification_envelope(parsed):
+            raise WorkRunArchiveError(
+                _bound_privacy(
+                    "events/lifecycle.jsonl carries a worker notification envelope; "
+                    "reserved journal path rejects raw JSON-RPC worker streams"
+                ),
+                category="export-privacy",
+            )
+
+    try:
+        report = run_journal.read_journal_bounded(path)
+    except run_journal.RunJournalError as exc:
+        raise WorkRunArchiveError(
+            _bound_privacy(f"events/lifecycle.jsonl failed lifecycle authentication: {exc}"),
+            category="export-privacy",
+        ) from exc
+    if report.chain_errors:
+        raise WorkRunArchiveError(
+            _bound_privacy("events/lifecycle.jsonl failed lifecycle authentication: " + report.chain_errors[0]),
+            category="export-privacy",
+        )
+    if report.partial_tail:
+        raise WorkRunArchiveError(
+            "events/lifecycle.jsonl has a partial trailing record",
+            category="export-privacy",
+        )
+
+
+def _assert_export_privacy_tree(payload_root: Path) -> None:
+    """Run checkpoint, worker-stream, and lifecycle export-privacy gates."""
+    run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(payload_root)
+    try:
+        worker_events.assert_export_tree_has_no_raw_worker_streams(payload_root)
+    except worker_events.WorkerEventError as exc:
+        raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
+    assert_lifecycle_journal_authentic(payload_root)
 
 
 def schema_artifact_relative_path() -> str:
@@ -215,7 +310,7 @@ def validate_archive(archive_dir: Path) -> dict[str, Any]:
     if not payload_root.is_dir() or payload_root.is_symlink():
         raise WorkRunArchiveError(f"missing payload directory: {WORK_RUN_PAYLOAD_DIR}", category="io")
 
-    run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(payload_root)
+    _assert_export_privacy_tree(payload_root)
 
     declared = {entry["path"]: entry for entry in manifest["files"]}
     on_disk = _collect_payload_files(payload_root)
@@ -249,6 +344,32 @@ def validate_archive(archive_dir: Path) -> dict[str, Any]:
                     f"checkpoint body crossed an export boundary: {rel}",
                     category="export-privacy",
                 )
+        if worker_events.is_scrubbed_worker_event_stream_rel(rel):
+            if entry.get("media_type") != worker_events.SCRUBBED_MEDIA_TYPE:
+                raise WorkRunArchiveError(
+                    f"scrubbed worker stream media_type mismatch: {rel}",
+                    category="export-privacy",
+                )
+            if entry.get("privacy_class") != "redacted":
+                raise WorkRunArchiveError(
+                    f"scrubbed worker stream privacy_class must be redacted: {rel}",
+                    category="export-privacy",
+                )
+            if entry.get("role") != "artifact":
+                raise WorkRunArchiveError(
+                    f"scrubbed worker stream role must be artifact: {rel}",
+                    category="export-privacy",
+                )
+            if entry.get("nested_schema") != worker_events.STREAM_SCHEMA:
+                raise WorkRunArchiveError(
+                    f"scrubbed worker stream nested_schema mismatch: {rel}",
+                    category="export-privacy",
+                )
+        if worker_events.is_raw_worker_event_stream_rel(rel):
+            raise WorkRunArchiveError(
+                f"raw worker stream crossed an export boundary: {rel}",
+                category="export-privacy",
+            )
 
     run_json = payload_root / "run.json"
     if not run_json.is_file():
@@ -268,7 +389,7 @@ def build_manifest_for_payload(
     payload_root = payload_root.expanduser().resolve()
     if not payload_root.is_dir():
         raise WorkRunArchiveError(f"payload directory not found: {payload_root}", category="io")
-    run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(payload_root)
+    _assert_export_privacy_tree(payload_root)
 
     files: list[dict[str, Any]] = []
     for rel in _collect_payload_files(payload_root):
@@ -306,7 +427,8 @@ def export_run(
     """Export a run directory into a versioned ``brigade.work-run`` archive.
 
     The source run directory is left unchanged. Private recovery-checkpoint
-    bodies are stripped on the export copy only (#636).
+    bodies are stripped on the export copy only (#636). Raw worker event
+    streams are replaced with scrubbed sidecars or refused (#592).
     """
     run_dir = _normalize_user_path(run_dir)
     dest_input = destination.expanduser()
@@ -339,7 +461,11 @@ def export_run(
                 if temp_path.is_file() and not temp_path.is_symlink():
                     temp_path.unlink()
         run_checkpoint.strip_checkpoint_bodies_for_export(payload_root)
-        run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(payload_root)
+        try:
+            worker_events.project_worker_streams_for_export(payload_root)
+        except worker_events.WorkerEventError as exc:
+            raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
+        _assert_export_privacy_tree(payload_root)
 
         run_id = run_dir.name
         if not _RUN_ID_RE.fullmatch(run_id):
@@ -413,7 +539,7 @@ def import_archive(
         )
     try:
         _copy_run_tree_refuse_special(archive_dir / WORK_RUN_PAYLOAD_DIR, staging)
-        run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(staging)
+        _assert_export_privacy_tree(staging)
         # Re-check digests against the validated manifest after the copy.
         for entry in manifest["files"]:
             rel = str(entry["path"])
@@ -582,6 +708,15 @@ def _classify_path(rel: str, raw: bytes) -> tuple[str, str, str]:
         return "receipt", _MEDIA_JSON, "public"
     if rel == "events/lifecycle.jsonl":
         return "journal", _MEDIA_JSONL, "public"
+    if worker_events.is_raw_worker_event_stream_rel(rel):
+        # Raw streams are local-only. Export must project them first; classify
+        # never treats them as public support data.
+        raise WorkRunArchiveError(
+            f"raw worker stream crossed an export boundary: {rel}",
+            category="export-privacy",
+        )
+    if worker_events.is_scrubbed_worker_event_stream_rel(rel):
+        return "artifact", worker_events.SCRUBBED_MEDIA_TYPE, "redacted"
     if rel.startswith(f"events/{run_checkpoint.CHECKPOINT_DIR_NAME}/") and rel.endswith(".json"):
         privacy = "private"
         try:
@@ -618,6 +753,22 @@ def _nested_schema_for(rel: str, raw: bytes) -> tuple[str | None, int | None]:
             if type(version) is int and version >= 1:
                 schema_version = version
         return schema_name, schema_version
+    if worker_events.is_scrubbed_worker_event_stream_rel(rel):
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return worker_events.STREAM_SCHEMA, worker_events.STREAM_SCHEMA_VERSION
+        if isinstance(parsed, dict):
+            nested = parsed.get("schema")
+            version = parsed.get("schema_version")
+            nested_schema = worker_events.STREAM_SCHEMA
+            nested_version = worker_events.STREAM_SCHEMA_VERSION
+            if isinstance(nested, str) and nested:
+                nested_schema = nested
+            if type(version) is int and version >= 1:
+                nested_version = version
+            return nested_schema, nested_version
+        return worker_events.STREAM_SCHEMA, worker_events.STREAM_SCHEMA_VERSION
     if rel.endswith(".json"):
         try:
             parsed = json.loads(raw.decode("utf-8"))
@@ -626,9 +777,9 @@ def _nested_schema_for(rel: str, raw: bytes) -> tuple[str | None, int | None]:
         if isinstance(parsed, dict):
             nested = parsed.get("schema")
             version = parsed.get("schema_version")
-            nested_schema = nested if isinstance(nested, str) and nested else None
-            nested_version = version if type(version) is int and version >= 1 else None
-            return nested_schema, nested_version
+            json_schema = nested if isinstance(nested, str) and nested else None
+            json_version = version if type(version) is int and version >= 1 else None
+            return json_schema, json_version
     if rel == "events/lifecycle.jsonl":
         return receipt_schema.RUN_EVENT_SCHEMA, receipt_schema.RUN_EVENT_SCHEMA_VERSION
     return None, None
@@ -763,6 +914,9 @@ def export_cli(
         print(f"error: {exc.category}: {exc}", file=sys.stderr)
         return 2 if exc.category in {"io", "compatibility"} else 1
     except run_checkpoint.CheckpointError as exc:
+        print(f"error: export-privacy: {exc}", file=sys.stderr)
+        return 1
+    except worker_events.WorkerEventError as exc:
         print(f"error: export-privacy: {exc}", file=sys.stderr)
         return 1
     if json_output:

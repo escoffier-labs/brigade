@@ -759,6 +759,8 @@ not infer import acceptance from the artifact filename alone.
     roster.json
     ...
     events/lifecycle.jsonl
+    events/<worker>.scrubbed.json            # scrubbed worker streams (#592)
+    events/**/<worker>.scrubbed.json         # nested worker streams also scrubbed
     events/recovery-checkpoints/<sha256>.json   # artifact references only
 ```
 
@@ -801,6 +803,8 @@ not infer import acceptance from the artifact filename alone.
 | Nested receipt unknown keys | **Ignore** (receipt-family additive evolution) |
 | Symlinks / special files | **Refuse** |
 | Recovery-checkpoint bodies | **Strip** to closed artifact references on export (#636); validate refuses bodies |
+| Raw worker event streams (`events/**/*.jsonl` except authenticated lifecycle) | **Refuse** as portable public support; export replaces with scrubbed sidecars (`events/**/<worker>.scrubbed.json`, `privacy_class=redacted`) or fails closed (#592); nested smuggling paths are rejected |
+| Reserved `events/lifecycle.jsonl` | **Authenticate** as `brigade.run_event.v1` chain (or empty); reject raw JSON-RPC worker envelopes disguised as the journal (#592) |
 | Resume after import | **Not supported** in v1 (`resume_supported: false`); import is inspection/audit oriented |
 | Digest mismatch | **Refuse** |
 
