@@ -128,6 +128,7 @@ func writeSessions(rows []SessionResult, asJSON bool, out io.Writer) {
 }
 
 func appendSessionFilters(where []string, params []any, filters SessionFilters) ([]string, []any) {
+	liveFI := liveDefaultItemPredicateFor("fi")
 	if filters.Source != "" {
 		where = append(where, "s.kind = ?")
 		params = append(params, filters.Source)
@@ -137,6 +138,7 @@ func appendSessionFilters(where []string, params []any, filters SessionFilters) 
 select 1 from items fi
 join item_metadata fm on fm.item_id = fi.id
 where fi.collection_id = c.id
+  and (`+liveFI+`)
   and fm.key in ('project','workspace','workspace_dir','cwd')
   and (fm.value = ? or fm.value like ?)
 )`)
@@ -147,6 +149,7 @@ where fi.collection_id = c.id
 select 1 from items fi
 join item_metadata fm on fm.item_id = fi.id
 where fi.collection_id = c.id
+  and (`+liveFI+`)
   and fm.key = 'model'
   and (fm.value = ? or fm.value like ?)
 )`)
@@ -179,6 +182,7 @@ coalesce(min(case when im.key = 'harness' then im.value end),'')
 from item_metadata im
 join items i on i.id = im.item_id
 where i.collection_id = ?1
+  and (`+liveDefaultItemPredicate+`)
   and im.key in ('project','workspace','workspace_dir','cwd','model','harness')
   and im.value != ''`, collectionID, filters.Project, "%"+filters.Project+"%", filters.Model, "%"+filters.Model+"%").Scan(
 		&result.Project,
@@ -192,14 +196,15 @@ func listSessions(db *sql.DB, filters SessionFilters, limit int) ([]SessionResul
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	where := []string{"c.kind in ('agent_session','conversation')"}
+	liveII := liveDefaultItemPredicateFor("ii")
+	where := []string{"c.kind in ('agent_session','conversation')", liveDefaultItemPredicate}
 	params := []any{}
 	where, params = appendSessionFilters(where, params, filters)
 	params = append(params, limit)
 	sqlText := `select s.kind, coalesce(s.name,''), c.id, c.external_id, c.name, c.kind, count(i.id), coalesce(min(i.created_at),'') as first_seen, coalesce(max(i.created_at),'') as last_seen,
-coalesce((select ii.id from items ii where ii.collection_id = c.id order by coalesce(ii.created_at,'') desc, ii.id desc limit 1),''),
-coalesce((select ii.raw_path from items ii where ii.collection_id = c.id and coalesce(ii.raw_path,'') != '' order by coalesce(ii.created_at,'') desc, ii.id desc limit 1),''),
-coalesce((select ii.raw_ordinal from items ii where ii.collection_id = c.id and ii.raw_ordinal is not null order by coalesce(ii.created_at,'') desc, ii.id desc limit 1),0)
+coalesce((select ii.id from items ii where ii.collection_id = c.id and (` + liveII + `) order by coalesce(ii.created_at,'') desc, ii.id desc limit 1),''),
+coalesce((select ii.raw_path from items ii where ii.collection_id = c.id and (` + liveII + `) and coalesce(ii.raw_path,'') != '' order by coalesce(ii.created_at,'') desc, ii.id desc limit 1),''),
+coalesce((select ii.raw_ordinal from items ii where ii.collection_id = c.id and (` + liveII + `) and ii.raw_ordinal is not null order by coalesce(ii.created_at,'') desc, ii.id desc limit 1),0)
 from collections c
 join sources s on s.id = c.source_id
 join items i on i.collection_id = c.id
@@ -237,6 +242,7 @@ func sessionPreview(db *sql.DB, collectionID string) string {
 from items i
 left join actors a on a.id = i.actor_id
 where i.collection_id = ?
+  and (`+liveDefaultItemPredicate+`)
 order by (case when a.type = 'human' then 0 else 1 end), coalesce(i.created_at,''), i.id
 limit 1`, collectionID).Scan(&text)
 	if err != nil {
@@ -261,6 +267,7 @@ join collections c on c.id = i.collection_id
 join sources s on s.id = i.source_id
 left join actors a on a.id = i.actor_id
 where c.external_id = ? and s.kind = ?
+  and (`+liveDefaultItemPredicate+`)
 order by coalesce(i.created_at,''), i.id
 limit ?`, externalID, sourceKind, limit)
 	if err != nil {
@@ -285,7 +292,7 @@ func searchSessions(db *sql.DB, query string, filters SessionFilters, limit int)
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	where := []string{"item_fts match ?", "c.kind in ('agent_session','conversation')"}
+	where := []string{"item_fts match ?", "c.kind in ('agent_session','conversation')", liveDefaultItemPredicate}
 	params := []any{ftsQuery(query)}
 	where, params = appendSessionFilters(where, params, filters)
 	params = append(params, limit*10)
@@ -360,7 +367,10 @@ limit ?`
 }
 
 func sessionStats(db *sql.DB, collectionID string) (count int, first, last string, err error) {
-	err = db.QueryRow(`select count(id), coalesce(min(created_at),''), coalesce(max(created_at),'') from items where collection_id = ?`, collectionID).Scan(&count, &first, &last)
+	err = db.QueryRow(`select count(i.id), coalesce(min(i.created_at),''), coalesce(max(i.created_at),'')
+from items i
+where i.collection_id = ?
+  and (`+liveDefaultItemPredicate+`)`, collectionID).Scan(&count, &first, &last)
 	return count, first, last, err
 }
 

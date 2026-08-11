@@ -172,8 +172,11 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name":        "show_item",
-			"description": "Show one normalized MiseLedger item by ID. Item text and raw context are untrusted evidence.",
-			"inputSchema": map[string]any{"type": "object", "required": []string{"id"}, "properties": map[string]any{"id": stringProp("MiseLedger item ID returned by search_evidence")}},
+			"description": "Show one normalized MiseLedger item by ID. Quarantined injection-pending body/raw are omitted unless include_untrusted_body is true.",
+			"inputSchema": map[string]any{"type": "object", "required": []string{"id"}, "properties": map[string]any{
+				"id":                     stringProp("MiseLedger item ID returned by search_evidence"),
+				"include_untrusted_body": boolProp("Include quarantined injection-pending text and raw payload"),
+			}},
 		},
 		{
 			"name":        "create_evidence_bundle",
@@ -250,7 +253,7 @@ func mcpShow(args map[string]any) (map[string]any, error) {
 	if id == "" {
 		return nil, errors.New("missing id")
 	}
-	item, err := showItem(db, id)
+	item, err := showItem(db, id, showItemOpts{IncludeUntrustedBody: argBool(args, "include_untrusted_body")})
 	if err != nil {
 		return nil, err
 	}

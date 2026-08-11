@@ -932,6 +932,7 @@ order by i.ingest_seq desc, i.id desc`, ingest.MemorySourceKind, testMemoryNames
 
 	// Restore byte-identical v1: known-content early return must refresh the
 	// ingest stamp so v1 becomes live again without minting a duplicate row/event.
+	// E2 soft-tombstones the superseded v2 so exactly one live version remains.
 	if err := os.WriteFile(path, []byte(v1Body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -942,17 +943,28 @@ order by i.ingest_seq desc, i.id desc`, ingest.MemorySourceKind, testMemoryNames
 
 	db = openTestDB(t)
 	defer db.Close()
-	var versionCount int
+	var liveCount, totalCount int
 	if err := db.QueryRow(`
 select count(*) from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
-		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&versionCount); err != nil {
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&liveCount); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount != 2 {
-		t.Fatalf("expected exactly two content versions, got %d", versionCount)
+	if liveCount != 1 {
+		t.Fatalf("expected exactly one live content version after restore, got %d", liveCount)
+	}
+	if err := db.QueryRow(`
+select count(*) from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ?`,
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&totalCount); err != nil {
+		t.Fatal(err)
+	}
+	if totalCount != 2 {
+		t.Fatalf("expected two content-addressed versions retained, got %d", totalCount)
 	}
 	var liveID, liveHash, liveStamp string
 	if err := db.QueryRow(`
@@ -1128,8 +1140,8 @@ order by i.ingest_seq desc, i.id desc`, ingest.MemorySourceKind, testMemoryNames
 	}
 	db.Close()
 
-	// Non-rebuild edit: content-addressed import creates a second item id while
-	// the prior version stays untombstoned (same external id still observed).
+	// Non-rebuild edit: content-addressed import creates a second item id and
+	// E2 soft-tombstones the prior version so default search sees one live row.
 	// Drop the unresolved outbound relation on v2.
 	if err := os.WriteFile(cardPath, []byte("---\nid: "+cardID+"\ntopic: edit\n---\n\n# Edited body\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1141,17 +1153,28 @@ order by i.ingest_seq desc, i.id desc`, ingest.MemorySourceKind, testMemoryNames
 
 	db = openTestDB(t)
 	defer db.Close()
-	var versionCount int
+	var liveCount, totalCount int
 	if err := db.QueryRow(`
 select count(*) from items i
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 where s.kind = ? and c.external_id = ? and i.external_id = ? and i.tombstoned_at is null`,
-		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&versionCount); err != nil {
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&liveCount); err != nil {
 		t.Fatal(err)
 	}
-	if versionCount < 2 {
-		t.Fatalf("expected prior+latest content-addressed versions, got %d", versionCount)
+	if liveCount != 1 {
+		t.Fatalf("expected exactly one live content-addressed version, got %d", liveCount)
+	}
+	if err := db.QueryRow(`
+select count(*) from items i
+join sources s on s.id = i.source_id
+join collections c on c.id = i.collection_id
+where s.kind = ? and c.external_id = ? and i.external_id = ?`,
+		ingest.MemorySourceKind, testMemoryNamespace, cardID).Scan(&totalCount); err != nil {
+		t.Fatal(err)
+	}
+	if totalCount < 2 {
+		t.Fatalf("expected prior+latest content-addressed versions retained, got %d", totalCount)
 	}
 	var v2ID, v2Hash, v2Updated string
 	if err := db.QueryRow(`
