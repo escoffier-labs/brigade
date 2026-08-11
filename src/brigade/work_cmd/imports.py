@@ -81,7 +81,6 @@ def _ingest_metadata(record: dict[str, Any]) -> dict[str, Any]:
         "priority": record.get("priority"),
         "template": record.get("template"),
         "acceptance": record.get("acceptance"),
-        "metadata": stamped_metadata,
     }
     canonical_hash = helpers._stable_hash(canonical_record)
 

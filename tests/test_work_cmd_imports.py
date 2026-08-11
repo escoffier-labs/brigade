@@ -1078,6 +1078,51 @@ def test_work_import_ingest_owns_hostile_provenance_identity_end_to_end(tmp_path
     assert dismissed_payload["dismissed"] == 1
 
 
+def test_work_import_ingest_metadata_changes_do_not_resurface_dismissed_record(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    record = {
+        "text": "Review scanner evidence retention",
+        "kind": "finding",
+        "source": "hostile-scanner",
+        "metadata": {
+            "scanner_run_id": "run-one",
+            "safe_metadata": {"evidence": "initial"},
+        },
+    }
+    import_file = tmp_path / "metadata-only-change.jsonl"
+    import_file.write_text(json.dumps(record) + "\n")
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["created"] == 1
+    item = first["imports"][0]
+    assert item["metadata"]["scanner_run_id"] == "run-one"
+    assert item["metadata"]["safe_metadata"] == {"evidence": "initial"}
+
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=item["id"], reason="not actionable") == 0
+    capsys.readouterr()
+
+    metadata_only_change = {
+        **record,
+        "metadata": {
+            "scanner_run_id": "run-two",
+            "safe_metadata": {"evidence": "updated"},
+        },
+    }
+    import_file.write_text(json.dumps(metadata_only_change) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    dismissed = json.loads(capsys.readouterr().out)
+    assert dismissed["created"] == 0
+    assert dismissed["dismissed"] == 1
+
+    content_change = {**metadata_only_change, "text": "Review updated scanner evidence retention"}
+    import_file.write_text(json.dumps(content_change) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    changed = json.loads(capsys.readouterr().out)
+    assert changed["created"] == 1
+    assert changed["dismissed"] == 0
+
+
 def test_work_import_provenance_audits_cross_producer_contract(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     config = tmp_path / ".brigade" / "scanners.toml"
