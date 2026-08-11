@@ -230,6 +230,7 @@ def test_stamped_envelope_is_not_treated_as_private_chat_fields():
         },
     )
     assert _envelope(item)["hashes"]["raw"] is None
+    assert provenance.validate_envelope(_envelope(item)) == []
     assert ledger._handoff_private_fields(item) == []
 
 
@@ -243,3 +244,43 @@ def test_raw_chat_metadata_still_blocked_alongside_envelope():
     private = ledger._handoff_private_fields(item)
     assert "metadata.raw_text" in private
     assert all(not field.startswith("metadata.provenance") for field in private)
+
+
+def test_spoofed_schema_only_provenance_with_raw_text_is_not_exempt():
+    item = {
+        "id": "20260811-000000-preference-spoof-aaaaaa",
+        "kind": "preference",
+        "source": "chat-memory-sweep",
+        "text": "Looks durable",
+        "status": "pending",
+        "metadata": {
+            "provenance": {
+                "schema": provenance.SCHEMA,
+                "raw_text": "PRIVATE CHAT TRANSCRIPT",
+            }
+        },
+    }
+    assert provenance.validate_envelope(item["metadata"]["provenance"])
+    private = ledger._handoff_private_fields(item)
+    assert "metadata.provenance.raw_text" in private
+
+
+def test_spoofed_invalid_envelope_nested_raw_fields_are_flagged():
+    item = {
+        "id": "20260811-000000-preference-spoof-bbbbbb",
+        "kind": "preference",
+        "source": "chat-memory-sweep",
+        "text": "Looks durable",
+        "status": "pending",
+        "metadata": {
+            "provenance": {
+                "schema": provenance.SCHEMA,
+                "schema_version": 1,
+                "nested": {"raw_messages": ["PRIVATE THREAD"], "payload": {"raw_text": "secret chat"}},
+            }
+        },
+    }
+    assert provenance.validate_envelope(item["metadata"]["provenance"])
+    private = ledger._handoff_private_fields(item)
+    assert "metadata.provenance.nested.raw_messages" in private
+    assert "metadata.provenance.nested.payload.raw_text" in private

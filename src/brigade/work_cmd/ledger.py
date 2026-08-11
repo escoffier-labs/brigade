@@ -1674,8 +1674,15 @@ def _handoff_private_fields(value: object, *, path: tuple[str, ...] = ()) -> lis
             normalized = key_text.strip().casefold()
             is_top_text = not path and normalized == "text"
             # Envelope schema fields include hashes.raw / raw_* digests (often null).
-            # Those are integrity metadata, not private chat bodies.
-            if normalized == "provenance" and isinstance(item, dict) and item.get("schema") == provenance.SCHEMA:
+            # Those are integrity metadata, not private chat bodies. Require a
+            # valid envelope before skipping recursion so schema-only spoofs
+            # with nested raw_text cannot bypass the handoff privacy gate.
+            if (
+                normalized == "provenance"
+                and isinstance(item, dict)
+                and item.get("schema") == provenance.SCHEMA
+                and not provenance.validate_envelope(item)
+            ):
                 continue
             if not is_top_text and (normalized in constants.RAW_CHAT_FIELDS or normalized.startswith("raw_")):
                 found.append(".".join((*path, key_text)))
