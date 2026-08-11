@@ -3,6 +3,7 @@ package ingest
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/escoffier-labs/miseledger/internal/archive"
@@ -413,5 +414,169 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	}
 	if result.Malformed != 1 || result.Updated != 0 {
 		t.Fatalf("result = %+v, want matching-but-invalid treated as malformed", result)
+	}
+}
+
+func TestBackfillConcurrentInferredEventsAreIdempotent(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-06-03T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('src1','legacy-source','Legacy','1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('col1','src1','legacy:collection','agent_session','legacy','{}',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	text := "concurrent backfill body"
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"item-concurrent", "src1", "col1", "legacy:item:concurrent", "message", now, now, text, "", "sha256:"+hashString(text+"\n"), `{}`, "sha256:"+hashString("raw"), "legacy.jsonl", 1, `{}`); err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			for attempt := 0; attempt < 32; attempt++ {
+				_, err = BackfillProvenance(db, 10, "")
+				if err == nil || !strings.Contains(err.Error(), "SQLITE_BUSY") {
+					break
+				}
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent backfill error: %v", err)
+		}
+	}
+	var events int
+	if err := db.QueryRow(`select count(*) from provenance_events where item_id = 'item-concurrent'`).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 {
+		t.Fatalf("provenance_events = %d, want 1 idempotent inferred event", events)
+	}
+	var trust string
+	if err := db.QueryRow(`select json_extract(metadata_json, '$.provenance.trust.label') from items where id = 'item-concurrent'`).Scan(&trust); err != nil {
+		t.Fatal(err)
+	}
+	if trust != "unknown" {
+		t.Fatalf("trust label = %q, want unknown", trust)
+	}
+}
+
+func TestAppendProvenanceEventStableIDIsIdempotent(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-06-03T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('src1','legacy-source','Legacy','1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('col1','src1','legacy:collection','agent_session','legacy','{}',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, metadata_json)
+values('item-stable','src1','col1','legacy:item:stable','message',?,?,'text','','sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','{}','{}')`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("d", 64)
+	for i := 0; i < 3; i++ {
+		if err := AppendProvenanceEvent(tx, "item-stable", "", "unknown", digest, "item.text.utf8.v1", "ingest:ingest.BackfillProvenance", map[string]any{"n": i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var events int
+	if err := db.QueryRow(`select count(*) from provenance_events where item_id = 'item-stable'`).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 {
+		t.Fatalf("events = %d, want 1 from INSERT OR IGNORE stable id", events)
+	}
+}
+
+func TestBackfillRepairsStaleContentDigestWhenEnvelopeHashNull(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-06-03T00:00:00Z"
+	if _, err := db.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values('src1','legacy-source','Legacy','1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name, metadata_json, created_at, updated_at) values('col1','src1','legacy:collection','agent_session','legacy','{}',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	text := "null content digest with stale projection"
+	env := validHistoricalEnvelope("reviewed", nil)
+	meta, _ := json.Marshal(map[string]any{"provenance": env})
+	if _, err := db.Exec(`insert into items(id, source_id, collection_id, external_id, kind, created_at, updated_at, text, summary, content_hash, raw_json, raw_hash, raw_path, raw_ordinal, metadata_json)
+values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"item-stale-digest", "src1", "col1", "legacy:item:stale", "message", now, now, text, "", "sha256:"+hashString(text+"\n"), `{}`, "sha256:"+hashString("raw"), "legacy.jsonl", 1, string(meta)); err != nil {
+		t.Fatal(err)
+	}
+	// Seed complete-looking projections including a stale content digest.
+	for _, pair := range [][2]string{
+		{MetaKeyProvenanceOrigin, "external-service"},
+		{MetaKeyProvenanceModality, "tool-output"},
+		{MetaKeyProvenanceTrustLabel, "reviewed"},
+		{MetaKeyProvenanceContentScope, "item.text.utf8.v1"},
+		{MetaKeyProvenanceContentDigest, strings.Repeat("c", 64)},
+	} {
+		if _, err := db.Exec(`insert into item_metadata(item_id, key, value) values(?,?,?)`, "item-stale-digest", pair[0], pair[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := BackfillProvenance(db, 10, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Updated != 1 {
+		t.Fatalf("result = %+v, want updated=1 to clear stale digest", result)
+	}
+	var digestCount int
+	if err := db.QueryRow(`select count(*) from item_metadata where item_id = ? and key = ?`, "item-stale-digest", MetaKeyProvenanceContentDigest).Scan(&digestCount); err != nil {
+		t.Fatal(err)
+	}
+	if digestCount != 0 {
+		t.Fatalf("stale provenance.content_digest still present (count=%d)", digestCount)
+	}
+	var trust string
+	if err := db.QueryRow(`select json_extract(metadata_json, '$.provenance.trust.label') from items where id = 'item-stale-digest'`).Scan(&trust); err != nil {
+		t.Fatal(err)
+	}
+	if trust != "reviewed" {
+		t.Fatalf("trust reset to %q, want preserved reviewed", trust)
 	}
 }

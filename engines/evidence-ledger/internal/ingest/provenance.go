@@ -107,6 +107,8 @@ func replaceProvenanceProjections(tx *sql.Tx, itemID string, env provenance.Enve
 }
 
 // AppendProvenanceEvent inserts one immutable provenance_events row.
+// Event IDs are stable across wall-clock time so concurrent inferred backfills
+// that race on the same transition collapse via INSERT OR IGNORE.
 func AppendProvenanceEvent(tx *sql.Tx, itemID string, fromLabel, toLabel, contentHash, contentScope, operatorCommand string, evidence map[string]any) error {
 	if evidence == nil {
 		evidence = map[string]any{}
@@ -132,8 +134,8 @@ func AppendProvenanceEvent(tx *sql.Tx, itemID string, fromLabel, toLabel, conten
 	if err != nil {
 		return err
 	}
-	eventID := stableID("provenance-event", itemID, at, fromLabel, toLabel, contentHash, operatorCommand)
-	_, err = tx.Exec(`insert into provenance_events(id, item_id, at, from_label, to_label, envelope_content_hash, content_scope, operator_command, evidence_json, event_json)
+	eventID := stableID("provenance-event", itemID, fromLabel, toLabel, contentHash, contentScope, operatorCommand)
+	_, err = tx.Exec(`insert or ignore into provenance_events(id, item_id, at, from_label, to_label, envelope_content_hash, content_scope, operator_command, evidence_json, event_json)
 values(?,?,?,?,?,?,?,?,?,?)`,
 		eventID, itemID, at, nullIfEmpty(fromLabel), toLabel, nullIfEmpty(contentHash), nullIfEmpty(contentScope), nullIfEmpty(operatorCommand), string(evidenceRaw), string(raw))
 	return err
@@ -275,6 +277,17 @@ limit ?`, afterID, batchSize)
 }
 
 func backfillOneItem(tx *sql.Tx, itemID, text, metadataJSON, rawHash, rawPath, sourceID, collectionID, externalID string) (outcome backfillOutcome, events int, evidence *BackfillItemEvidence, err error) {
+	// Re-read inside the write transaction so concurrent backfills observe the
+	// latest provenance state rather than a stale pre-tx snapshot.
+	var liveMetadataJSON, liveText string
+	if err := tx.QueryRow(`select metadata_json, coalesce(text,'') from items where id = ?`, itemID).Scan(&liveMetadataJSON, &liveText); err != nil {
+		return backfillSkipped, 0, nil, err
+	}
+	if liveText != "" {
+		text = liveText
+	}
+	metadataJSON = liveMetadataJSON
+
 	meta := map[string]any{}
 	if strings.TrimSpace(metadataJSON) != "" {
 		if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
@@ -307,8 +320,41 @@ func backfillOneItem(tx *sql.Tx, itemID, text, metadataJSON, rawHash, rawPath, s
 	if err != nil {
 		return backfillSkipped, 0, nil, err
 	}
-	if _, err := tx.Exec(`update items set metadata_json = ? where id = ?`, string(updated), itemID); err != nil {
+	// Conditional write: only stamp inferred provenance when still absent.
+	res, err := tx.Exec(`update items set metadata_json = ? where id = ? and json_extract(metadata_json, '$.provenance') is null`, string(updated), itemID)
+	if err != nil {
 		return backfillSkipped, 0, nil, err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		// Another writer filled provenance between our read and conditional
+		// update. Re-read once and take the retain/repair path without looping.
+		var refreshed string
+		if err := tx.QueryRow(`select metadata_json from items where id = ?`, itemID).Scan(&refreshed); err != nil {
+			return backfillSkipped, 0, nil, err
+		}
+		meta = map[string]any{}
+		if err := json.Unmarshal([]byte(refreshed), &meta); err != nil {
+			meta = map[string]any{}
+		}
+		rawEnv, ok := meta["provenance"]
+		if !ok || rawEnv == nil {
+			return backfillSkipped, 0, nil, nil
+		}
+		env, parseErr := parseRetainableEnvelope(rawEnv)
+		if parseErr != nil {
+			return backfillMalformed, 0, &BackfillItemEvidence{
+				ItemID: itemID,
+				Reason: "malformed provenance: " + parseErr.Error(),
+			}, nil
+		}
+		if projectionsComplete(tx, itemID, env) {
+			return backfillSkipped, 0, nil, nil
+		}
+		if err := replaceProvenanceProjections(tx, itemID, env); err != nil {
+			return backfillSkipped, 0, nil, err
+		}
+		return backfillUpdated, 0, nil, nil
 	}
 	if err := replaceProvenanceProjections(tx, itemID, env); err != nil {
 		return backfillSkipped, 0, nil, err
@@ -436,6 +482,12 @@ func projectionsComplete(tx *sql.Tx, itemID string, env provenance.Envelope) boo
 	}
 	if env.Hashes.Content != nil {
 		want[MetaKeyProvenanceContentDigest] = *env.Hashes.Content
+	} else {
+		// Null envelope content digest must not leave a stale projected digest.
+		var stale int
+		if err := tx.QueryRow(`select count(*) from item_metadata where item_id = ? and key = ?`, itemID, MetaKeyProvenanceContentDigest).Scan(&stale); err != nil || stale != 0 {
+			return false
+		}
 	}
 	for key, value := range want {
 		if value == "" {
